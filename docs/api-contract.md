@@ -1,0 +1,518 @@
+# Witself API Contract
+
+Status: draft. This document defines the initial public HTTP API contract for
+managed Witself Cloud, self-hosted `witself-server`, and local development
+server mode.
+
+## Decision
+
+The backend API is a public product contract. The `witself` CLI, MCP adapter,
+managed Witself Cloud, self-hosted deployments, and local development server
+mode should use the same API semantics where practical.
+
+The first API version should use a stable `/v1` base path:
+
+```text
+https://api.witself.com/v1
+https://witself.internal.example.com/v1
+http://127.0.0.1:8080/v1
+```
+
+Breaking HTTP contract changes require a new version path. Non-breaking fields
+may be added to JSON objects when clients can safely ignore unknown fields.
+
+Unlike Witpass, whose API guards the confidentiality of secret material,
+Witself's API guards the integrity and authenticity of identity data. The
+contract decisions below reflect that flip: there is no reveal ceremony and no
+encrypted-only export, but every cross-agent and destructive identity mutation
+is attributed, audited, and reversible by default.
+
+## Transport Requirements
+
+- Production managed and self-hosted endpoints must require TLS.
+- Local development may use `http://127.0.0.1` or `http://localhost`.
+- Requests and responses should use `application/json` unless an endpoint is
+  explicitly for binary export or download.
+- Raw tokens, `sensitive` fact values, `sensitive` memory content, message
+  bodies and payloads, embedding vectors, raw payment details, wallet
+  credentials, and provider secrets must not appear in URLs, query strings,
+  access logs, server logs, audit records, or ordinary error responses.
+- Request bodies that carry memory content, fact values, or message bodies must
+  be redacted before logging.
+
+## Authentication
+
+CLI remote mode should pass the token loaded from `--token-file`,
+`WITSELF_TOKEN_FILE`, `WITSELF_TOKEN`, or stored profile auth as a bearer token:
+
+```http
+Authorization: Bearer <token>
+```
+
+The token resolves server-side to a principal:
+
+- Agent token bound to one realm and one named agent.
+- Operator token bound to an account and one or more realm roles.
+- Admin/service token for tightly controlled internal or deployment use.
+
+The authenticated principal, not a caller-supplied agent name, determines the
+acting agent identity. This is load-bearing for cross-agent access and
+messaging: the actor on every operation and the `from` on every message are
+derived server-side from the token. Caller-supplied agent or group targets are
+authorization inputs, resolved against policy or operator role, never a way to
+assume another agent's identity.
+
+V0 agent tokens are durable by default. They do not expire unless an operator
+sets `ttl` or `expires_at`. Disabled agents and revoked tokens must fail
+authentication immediately.
+
+Human operator login for managed endpoints should be performed through
+CLI-initiated browser or device-code flows. The API should expose auth-session
+or bootstrap endpoints only as needed to support those flows; it should not
+accept raw account passwords from CLI JSON payloads. Self-hosted first-operator
+setup should use a one-time bootstrap token or equivalent deployment-owned
+mechanism. The operator auth model is tracked in
+[operator-auth.md](operator-auth.md).
+
+## Response Envelope
+
+API responses should use the same envelope as CLI `--json` output:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "ok": true,
+  "data": {},
+  "warnings": []
+}
+```
+
+Error responses should use the same structured error object and error codes
+defined in [json-contracts.md](json-contracts.md).
+
+HTTP status codes should align with the structured error:
+
+| HTTP | Error code | Meaning |
+|---:|---|---|
+| `400` | `usage_error` | Invalid request shape, flags, or query parameters. |
+| `401` | `auth_failed` | Missing, invalid, expired, or revoked token. |
+| `403` | `access_denied` | Authenticated principal lacks permission, or no policy allows the cross-agent access. |
+| `404` | `not_found` | Resource not found or not visible to the caller. |
+| `409` | `conflict` | Already exists, stale version, or state conflict. |
+| `422` | `usage_error` | Valid JSON with semantically invalid input. |
+| `429` | `rate_limited` | Transient service-protection or throttle limit; `retryable: true`. |
+| `429` | `limit_exceeded` | Plan, quota, or hard usage cap; `retryable: false`. |
+| `500` | `internal_error` | Unexpected server failure. |
+| `503` | `backend_unavailable` | Backend dependency unavailable. |
+| `501` | `unsupported_operation` | Current backend does not support the operation. |
+
+Because two codes share HTTP `429` (and CLI exit `7`), clients must distinguish
+conditions by `error.code` and the `retryable` flag, not by status or exit code
+alone:
+
+- `rate_limited` is a transient service-protection throttle. It is
+  `retryable: true`; clients should back off and retry, honoring
+  `details.retry_after` (seconds) and the `Retry-After` header when present.
+- `limit_exceeded` is a plan/quota hard cap. It is `retryable: false`; retrying
+  will not succeed until an operator raises the plan or the usage window resets.
+
+This matches the overage behaviors in [billing-and-limits.md](billing-and-limits.md):
+`throttle` surfaces as `rate_limited`, `block` surfaces as `limit_exceeded`.
+
+The `access_denied` code covers both ordinary scope failures and cross-agent
+policy denials. A policy denial should include non-sensitive decision context in
+`details`, such as the requested permission, scope, and target owner, so callers
+and `policy test` agree on why access was refused. Denial context must not
+include memory content, fact values, or message bodies. The policy engine is
+tracked in [access-policy.md](access-policy.md).
+
+## Capability Discovery
+
+Every backend should expose its supported features:
+
+```text
+GET /v1/capabilities
+```
+
+Clients should call this during setup, `witself capabilities`, and before
+service-administration operations whose availability differs by backend.
+`witself setup` should use the default managed Witself Cloud endpoint unless the
+caller supplies `--endpoint`, `WITSELF_ENDPOINT`, or a stored profile endpoint.
+Local setup bypasses the remote API and is selected explicitly with `--local`.
+
+Capability results should include:
+
+- Backend kind: `managed`, `self-hosted`, or `local`.
+- Server version and API version.
+- Supported feature flags.
+- Unsupported feature reasons.
+- Effective limits when available.
+- Active embedding provider, model, and vector dimensionality, plus whether
+  semantic recall is currently degraded to keyword/tag/time ranking.
+- Authenticated principal and realm context when authenticated.
+
+Examples of feature flags:
+
+- `memories`
+- `facts`
+- `semantic_recall`
+- `policies`
+- `groups`
+- `messaging`
+- `export`
+- `audit`
+- `mcp`
+- `operator_auth_browser`
+- `operator_auth_device_code`
+- `self_hosted_bootstrap`
+- `billing`
+- `payments`
+- `crypto_payments`
+- `support`
+- `attachments`
+- `terraform_outputs`
+- `field_level_encryption`
+
+The `semantic_recall` flag is a nested object reporting the active embedding
+provider, model, vector dimensionality, and whether recall is degraded. `read`,
+`get`, and `list` remain available even when the embedding provider is
+unavailable, while `recall` degrades deterministically to keyword/tag/kind/time
+ranking and the capabilities response marks `semantic_recall` as degraded rather
+than failing. The embedding-provider boundary is tracked in
+[memory-model.md](memory-model.md).
+
+Self-hosted and local deployments should return deterministic
+`unsupported_operation` errors for unsupported commands. They should also include
+capability metadata so humans and agents know what to do next.
+
+V0 may expose command, route, and JSON shapes before every managed-service
+feature is live. Billing, payment, crypto payment, support, and broader
+managed-account operations should be governed by capability discovery and must
+fail deterministically when unsupported.
+
+## Idempotency
+
+Mutating `POST` endpoints should accept an `Idempotency-Key` header when a
+client might retry after a timeout or network failure.
+
+```http
+Idempotency-Key: 7a3fe2b5-f2d8-4a19-9d95-6f6f7b8b8e8a
+```
+
+Idempotency is required for operations that create durable or external effects:
+
+- Account creation.
+- Realm creation.
+- Agent creation.
+- Token creation or rotation.
+- Memory add, adjust, forget, restore, and delete.
+- Fact set, primary promotion, and delete.
+- Policy create and delete.
+- Group create, member add/remove, and delete.
+- Message send and acknowledgement.
+- Identity export and import jobs.
+- Hosted payment or crypto checkout sessions.
+- Support ticket creation and comments.
+
+Idempotency records must not store memory content, fact values, message
+bodies/payloads, embedding vectors, raw tokens, payment details, or provider
+secrets.
+
+`witself setup` should combine API idempotency with name-based ensure semantics:
+account, realm, and agent creation can safely select existing visible resources
+when names match. Token create and rotate operations remain sensitive. Setup
+must not silently reuse or rotate an existing token; callers must choose
+`--reuse-existing-token` or `--rotate-existing-tokens`. If no token choice is
+provided when one is required, the API-facing operation should fail with
+`conflict` and a stable detail such as `reason: "token_choice_required"`.
+
+Message send is idempotent by `Idempotency-Key`: a retried send with the same
+key returns the original `msg_…` rather than fanning out a duplicate to the
+recipient mailbox. Messaging delivery semantics are tracked in
+[inter-agent-messaging.md](inter-agent-messaging.md).
+
+## Dry Runs
+
+Mutating endpoints that support CLI `--dry-run` should accept either a request
+body field or query parameter named `dry_run`.
+
+Preferred JSON request shape:
+
+```json
+{
+  "dry_run": true,
+  "reason": "operator recovery",
+  "request": {}
+}
+```
+
+Dry runs should validate:
+
+- Request shape.
+- Authentication and authorization, including cross-agent policy evaluation.
+- Resource existence.
+- Conflicts and stale-version checks.
+- Quotas and rate limits.
+- Provider prerequisites, including embedding-provider availability for writes
+  that would compute a vector.
+- Planned side effects, including which prior primary fact a promotion would
+  demote and which records a forget would tombstone.
+
+Dry runs must not persist state, generate tokens, compute or store embedding
+vectors, create hosted provider sessions, charge payment methods, send or
+deliver messages, or send customer/support notifications.
+
+`dry_run` is expected on the integrity-impacting identity mutations called out in
+[requirements.md](requirements.md): memory forget/restore/delete, cross-agent
+curate/forget, fact delete, primary promotion, policy delete, group member
+removal, and group deletion. The canonical dry run for a pure access decision is
+`POST /v1/policies:test`, which evaluates whether a subject/permission/target
+would be allowed without touching any record.
+
+## Pagination And Filtering
+
+List endpoints should use cursor pagination:
+
+```text
+GET /v1/memories?limit=100&cursor=...
+```
+
+Rules:
+
+- `limit` should have a safe default and a documented maximum.
+- `cursor` is opaque.
+- Responses use `items` and `next_cursor`.
+- Filter names should match CLI concepts where practical, such as `owner_agent`,
+  `owner_group`, `kind`, `tag`, `source`, `name`, `prefix`, `primary`,
+  `sensitive`, `state`, `since`, and `until`.
+- `sensitive` memory content and `sensitive` fact values must be redacted in
+  list and scan responses by default. List endpoints return metadata and
+  non-sensitive values; an authorized single-record read returns the value
+  (there is no reveal ceremony).
+- Embedding vectors must never be returned by list endpoints.
+
+Recall is a query operation, not a list traversal, so it uses a `POST`
+colon-action route rather than `GET` filters (see
+[Action And Colon Routes](#action-and-colon-routes)). Recall responses are
+ranked and may include per-item score context, but they follow the same
+cursoring and redaction rules as list endpoints.
+
+## Versioning And Schema Generation
+
+The first implementation should generate OpenAPI from the same route and schema
+definitions used by the Go server, or generate both from one source of truth.
+
+Requirements:
+
+- Publish an OpenAPI document with each release once the API exists.
+- Validate API examples in CI.
+- Keep CLI, MCP, and API JSON structs aligned.
+- Treat `schema_version` (`witself.v0`) as the machine-readable response
+  contract version.
+- Treat `/v1` as the HTTP route contract version.
+
+The shared resource shapes are tracked in [json-contracts.md](json-contracts.md).
+
+## Route Catalog
+
+Route style decision: use resource-oriented `/v1` routes with plural resources
+and explicit colon action subroutes for mutating or workflow operations. The
+canonical route style is tracked in [api-routes.md](api-routes.md).
+
+Initial route groups:
+
+| Route group | Purpose |
+|---|---|
+| `/v1/version` | Server version and build metadata. |
+| `/v1/health/live` | Liveness probe. No auth, no sensitive config. |
+| `/v1/health/ready` | Readiness probe. No sensitive config. |
+| `/v1/health/startup` | Startup probe. No auth, no sensitive config. |
+| `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
+| `/v1/capabilities` | Backend feature discovery, limits, and embedding-provider state. |
+| `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
+| `/v1/bootstrap` | One-time self-hosted first-operator bootstrap. |
+| `/v1/account` | Customer account and human operator/admin management. |
+| `/v1/realms` | Realm lifecycle and membership. |
+| `/v1/agents` | Named agent lifecycle and policy summary. |
+| `/v1/tokens` | Token create, list, revoke, and rotate. |
+| `/v1/memories` | Memory add, read, list, scan, recall, adjust, forget, restore, and delete. |
+| `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
+| `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
+| `/v1/groups` | Security group lifecycle and membership. |
+| `/v1/messages` | Inter-agent message send, list, read, and acknowledgement. |
+| `/v1/audit` | Audit event list and show. |
+| `/v1/billing` | Plans, usage, limits, subscription, payment methods, hosted provider sessions, invoices, and crypto payment flows. |
+| `/v1/support` | Support tickets and comments. |
+| `/v1/exports` | Identity, realm, and account export jobs. |
+| `/v1/imports` | Identity, realm, and account import jobs. |
+
+Exact route names can evolve during implementation, but they should preserve the
+style in [api-routes.md](api-routes.md) and remain recognizable in the OpenAPI
+document.
+
+Operational endpoints such as `GET /metrics` are server operations endpoints,
+not versioned product API routes. `/metrics` should be served from the dedicated
+metrics listener, default `:9090`, expose Prometheus text-format output, and
+follow the privacy and low-cardinality label rules in
+[observability-and-operations.md](observability-and-operations.md).
+
+Health endpoints should be served from the dedicated health listener, default
+`:8081`, even though their paths use the `/v1/health/*` route shape. The public
+API listener, default `:8080`, should not be the default target for Kubernetes
+probes.
+
+Billing usage and limit endpoints should expose plan-tier usage rather than raw
+per-call billing in v0. Backends should return deterministic `rate_limited` or
+`limit_exceeded` errors when a plan or service-protection limit throttles or
+blocks an operation. The Witself metered dimensions (active agents, stored
+memories and facts, recalls/reads, writes, embedding operations, vector storage,
+cross-agent accesses, groups, and messages) are defined in
+[billing-and-limits.md](billing-and-limits.md).
+
+Export endpoints produce structured, round-trippable identity data. Unlike
+Witpass, plaintext identity export is a first-class v0 feature, not a forbidden
+one: an export may include memory content, fact values, `primary` flags,
+`sensitive` markers, links, and edit history. Exports of `sensitive` records
+require an audit `reason` and emit a warning. Export/import is tracked in
+[backup-and-recovery.md](backup-and-recovery.md).
+
+## Action And Colon Routes
+
+Do not put memory content, fact values, or message bodies in path or query
+parameters. Mutating and workflow operations use explicit colon-action subroutes
+and always use `POST`, never `GET`.
+
+Allowed:
+
+```http
+POST /v1/memories:recall
+```
+
+With request body:
+
+```json
+{
+  "query": "what did we decide about the migration",
+  "kind": "episodic",
+  "tags": ["migration"],
+  "limit": 20
+}
+```
+
+Avoid:
+
+```text
+/v1/memories/recall?query=what+did+we+decide
+```
+
+Witself has no reveal route and no TOTP code route. The only normal API
+responses that may include a freshly returned secret value are token create and
+token rotate, which return the raw token exactly once. Fact and memory reads
+return ordinary identity data under normal authorization; reading a `sensitive`
+record is an ordinary authorized read, not a reveal ceremony.
+
+Initial colon-action routes:
+
+```http
+POST /v1/memories:recall
+POST /v1/memories/{memory_id}:forget
+POST /v1/memories/{memory_id}:restore
+POST /v1/facts/{fact_id}:primary
+POST /v1/policies:test
+POST /v1/messages/{message_id}:ack
+POST /v1/tokens/{token_id}:rotate
+```
+
+Notes on specific actions:
+
+- `:recall` is a query against the caller's accessible memories. It is a `POST`
+  because the query and filters travel in the body and because cross-agent
+  recall is metered and policy-gated. Recall over another agent's or group's
+  memories requires a policy granting `read` on that target.
+- `:forget` is the default destructive path: a soft delete (tombstone),
+  reversible within the retention window. `:restore` reverses it within that
+  window. Hard delete is the explicit, guarded `DELETE /v1/memories/{memory_id}`
+  and requires confirmation plus, for cross-agent or operator deletes, an audit
+  `reason`.
+- `:primary` is an atomic promotion that demotes any prior primary of the same
+  logical fact kind for the same owner. At most one primary per logical kind per
+  owner. See [facts-model.md](facts-model.md).
+- `:test` evaluates a subject/permission/target/scope against current policy and
+  returns the deciding policy id or a deny reason. It never mutates state and is
+  the canonical access-decision dry run.
+- `:ack` records per-recipient read/acknowledgement state for a delivered
+  message; the acknowledging agent is derived from the token.
+- `:rotate` issues a replacement token and returns the raw value once; the prior
+  token is revoked immediately or after an explicit grace period.
+
+Cross-agent and operator mutations through these routes (`contribute`, `curate`,
+and `forget` against another agent's or group's records) require an audit
+`reason` in the request body, support `dry_run`, and are fully attributed in
+audit, for example "memory `mem_…` of agent A was pruned by agent B under policy
+`pol_…`". The verb model and guardrails are tracked in
+[access-policy.md](access-policy.md).
+
+## Cross-Agent And Group Targeting
+
+Cross-agent and group-scoped operations carry their target in the request body
+or path, never in a way that lets a caller assume another identity:
+
+- The acting agent is always the token-bound agent. The body never names the
+  actor.
+- A cross-agent read, contribute, curate, or forget names the target owner
+  (`owner_agent` or `owner_group`) and is evaluated against policy with a
+  default-deny stance. Absence of a matching `allow` policy yields
+  `access_denied`.
+- Group-scoped writes target `owner_group`; the same guardrails as cross-agent
+  writes apply (audit `reason`, `dry_run`, soft-delete by default).
+- Group membership is managed through nested member routes —
+  `GET /v1/groups/{group_id}/members`, `POST /v1/groups/{group_id}/members`, and
+  `DELETE /v1/groups/{group_id}/members/{principal}` — not colon actions; the
+  canonical route shapes are tracked in [api-routes.md](api-routes.md).
+- Operators may target any owner within their realm (operator override),
+  audited the same way as agent actions and subject to the same `reason`
+  requirements on destructive and cross-agent operations.
+
+Identity references (`witself://…`) used in memory `links[]` or request bodies
+are validated at write time and re-checked at resolve time; cross-agent and
+cross-group references resolve only when policy permits. Reference parsing and
+resolution are tracked in [json-contracts.md](json-contracts.md).
+
+## Managed, Self-Hosted, And Local Behavior
+
+Managed Witself Cloud should support the full commercial command surface as the
+product matures.
+
+Self-hosted deployments should support the core memory, fact, recall, policy,
+group, messaging, audit, reference, and export/import contracts. Billing, hosted
+payment flows, Witself support workflows, and internal admin workflows may be
+disabled unless configured by the operator. The embedding provider is
+deployment-owned; a self-hosted operator may run `local-dev`, `voyage`, or
+`openai`, and the capabilities response reports the active provider and whether
+recall is degraded.
+
+Local development mode should support enough API behavior to exercise the CLI,
+MCP adapter, JSON contracts, and integration tests. It uses the `local-dev`
+embedding provider so semantic recall can be exercised offline, and reports
+`backend.kind: "local"` in capabilities.
+
+## Related Docs
+
+- [requirements.md](requirements.md)
+- [v0-scope.md](v0-scope.md)
+- [cli-command-surface.md](cli-command-surface.md)
+- [api-routes.md](api-routes.md)
+- [json-contracts.md](json-contracts.md)
+- [memory-model.md](memory-model.md)
+- [facts-model.md](facts-model.md)
+- [access-policy.md](access-policy.md)
+- [security-groups.md](security-groups.md)
+- [inter-agent-messaging.md](inter-agent-messaging.md)
+- [backend-architecture.md](backend-architecture.md)
+- [self-hosting.md](self-hosting.md)
+- [server-command-surface.md](server-command-surface.md)
+- [operator-auth.md](operator-auth.md)
+- [observability-and-operations.md](observability-and-operations.md)
+- [threat-model.md](threat-model.md)
+- [billing-and-limits.md](billing-and-limits.md)
+- [backup-and-recovery.md](backup-and-recovery.md)

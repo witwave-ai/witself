@@ -1,0 +1,499 @@
+# Witself Helm Chart
+
+Status: draft. This document describes the first self-hosting deployment
+artifact for Witself.
+
+## Decision
+
+Witself should go straight to Helm for the first self-hosted deployment
+artifact.
+
+The Helm chart is the production-shaped self-hosting path. Docker Compose can
+remain a future developer convenience, but it should not be the initial
+self-hosting artifact or the production deployment story.
+
+Terraform should handle cloud infrastructure. Helm should handle the Kubernetes
+application deployment onto that infrastructure.
+
+Witself reuses the Witpass platform spine for deployment. The chart skeleton
+(Deployment, Service, ServiceAccount, ConfigMap, Ingress, NetworkPolicy,
+migration Job, monitors, autoscaling, disruption budget) is intentionally the
+same. The payload differs: there is no KMS pillar, the chart adds an embedding
+provider, and Postgres is required to carry the pgvector extension.
+
+## Chart Identity
+
+- Chart path: `charts/witself`
+- Chart name: `witself`
+- Public OCI package: `ghcr.io/witwave-ai/charts/witself`
+- Primary image: `ghcr.io/witwave-ai/images/witself-server`
+- Primary process: `witself-server`
+
+Expected install shape:
+
+```sh
+helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+  --version 0.1.0 \
+  --namespace witself \
+  --create-namespace \
+  --values ./witself-values.yaml
+```
+
+## Chart Goals
+
+- Deploy `witself-server` for self-hosted Witself.
+- Keep production dependencies explicit and operator-owned.
+- Avoid storing raw credentials in chart defaults or recommended values files.
+- Support deployment-native identity and secret references.
+- Make migrations controlled and reviewable.
+- Make embedding-provider configuration explicit and capability-gated.
+- Render Kubernetes resources that security teams can inspect.
+- Stay portable across Kubernetes distributions where practical.
+
+## Production Defaults
+
+Production chart defaults should assume:
+
+- External Postgres with the pgvector extension available.
+- An external embedding provider (`voyage` by default, or `openai`).
+- Optional external object/blob storage for exports, attachments, and backups.
+- TLS termination through ingress, gateway, or load balancer.
+- Non-root container execution where practical.
+- Liveness, readiness, and startup probes.
+- Dedicated API, health, and metrics container ports.
+- Prometheus-compatible metrics enabled by default unless explicitly disabled.
+- Structured logs with redaction.
+- Resource requests and limits.
+- Pod disruption budget where practical.
+- Optional horizontal pod autoscaling.
+- Pod and container security contexts.
+
+The chart should not install a production database by default. A bundled
+Postgres dependency may be considered later for development-only profiles, but
+it must be clearly labeled as non-production and must still provide pgvector for
+semantic recall to function.
+
+The chart should not bundle a production embedding provider. The `local-dev`
+embedding provider exists for tests and demos only and is not a production
+default; see [memory-model.md](memory-model.md).
+
+## Postgres With pgvector
+
+Witself's system of record is Postgres, and semantic recall depends on the
+pgvector extension. This is a hard self-hosting prerequisite, not a managed-only
+detail.
+
+- The external Postgres reached through the chart must have the `vector`
+  extension (pgvector) installed and enabled in the target database.
+- Migrations are server-owned (Goose) and include the `CREATE EXTENSION IF NOT
+  EXISTS vector` step, but the database role used by `witself-server` must be
+  permitted to create or use the extension. Some managed Postgres offerings
+  require enabling pgvector out of band before migrations run.
+- The chart surfaces a readable prerequisite check: the migration Job fails
+  deterministically if pgvector is unavailable, rather than silently degrading.
+- If pgvector is present but the embedding provider is unavailable, recall
+  degrades to keyword/tag/kind/time ranking and the capabilities contract
+  reports the degraded state; vector columns remain intact. See
+  [storage.md](storage.md).
+
+The chart does not manage the pgvector extension lifecycle itself. Extension
+installation and database provisioning belong to Terraform or the operator; the
+chart only consumes the connection reference. See
+[terraform-infrastructure.md](terraform-infrastructure.md).
+
+## Kubernetes Resources
+
+Initial templates should include:
+
+- `Deployment` for `witself-server`.
+- `Service`.
+- `ServiceAccount`.
+- `ConfigMap` for non-secret server config.
+- Optional `Ingress`.
+- Optional `NetworkPolicy`.
+- Optional `PodDisruptionBudget`.
+- Optional `HorizontalPodAutoscaler`.
+- Optional dedicated health `Service` for cluster-internal diagnostics.
+- Optional dedicated metrics `Service`.
+- Optional Prometheus Operator `ServiceMonitor`.
+- Optional Prometheus Operator `PodMonitor`.
+- Optional migration `Job`.
+- Optional test hook or notes for health checks.
+
+The chart should not create broad RBAC permissions unless a concrete feature
+requires them. `witself-server` enforces realm, agent, policy, group, and
+messaging authorization at the application layer below every frontend; it does
+not delegate cross-agent access decisions to Kubernetes RBAC. Cluster RBAC for
+the workload should remain minimal: the running pod needs no Kubernetes API
+access for ordinary identity, policy, group, or messaging operations.
+
+Service account annotations should support cloud-native identity systems such as
+IRSA, Workload Identity, or equivalent mechanisms, primarily so the workload can
+reach Postgres, the embedding provider, and object/blob storage without static
+credentials.
+
+## Network Policy
+
+Witself's network surface is shaped by identity reads, cross-agent access,
+policy evaluation, group operations, and inter-agent messaging. All of that
+traffic is in-cluster application traffic on the API port; the chart's default
+`NetworkPolicy` should reflect that.
+
+Default-deny posture, opened only where required:
+
+- Ingress to the API port (`api`) from ingress controllers, gateways, or
+  in-cluster clients that carry agent or operator tokens. Inter-agent messaging
+  is server-mediated: agents do not talk to each other directly, so the policy
+  needs no agent-to-agent allowances.
+- Ingress to the metrics port (`metrics`) only from the monitoring namespace or
+  Prometheus scrapers.
+- Ingress to the health port (`health`) only from the kubelet and cluster-
+  internal diagnostics; never from public ingress.
+- Egress to Postgres (pgvector) for the system of record.
+- Egress to the configured embedding provider endpoint (for example the
+  `voyage` or `openai` API) for embedding operations. `local-dev` requires no
+  egress.
+- Egress to object/blob storage when exports, attachments, or backups are
+  enabled.
+- Egress to the billing/payment provider when managed billing is enabled
+  (optional for self-hosted; see [billing-and-limits.md](billing-and-limits.md)).
+
+Because the embedding provider is the one new outbound dependency relative to a
+pure Witpass deployment, the chart should make embedding-provider egress an
+explicit, reviewable allow rule rather than a blanket egress permit. Operators
+who run the `local-dev` provider can keep embedding egress closed entirely.
+
+## Secrets And Config
+
+Values files must not require raw secrets.
+
+The chart should support existing secret references such as:
+
+```yaml
+database:
+  existingSecret:
+    name: witself-database
+    urlKey: database-url
+
+embeddings:
+  provider: voyage
+  model: voyage-3
+  existingSecret:
+    name: witself-embeddings
+    apiKeyKey: api-key
+```
+
+Recommended values should prefer:
+
+- Existing Kubernetes Secrets.
+- Secret Store CSI driver.
+- External Secrets Operator.
+- Cloud workload identity.
+- Mounted secret files for credentials that should not be environment
+  variables.
+
+The chart must not place database passwords, embedding-provider API keys,
+object-store credentials, raw agent tokens, bootstrap tokens, raw payment
+details, wallet credentials, or provider secrets into default `values.yaml`.
+
+The embedding-provider API key is referenced exclusively through an existing
+Secret. It is never a plaintext value in the chart, never a CLI flag, and never
+logged. When the active provider is `local-dev`, no API key is required and the
+embeddings Secret reference can be omitted.
+
+## Embedding Provider
+
+Semantic recall is the core Witself differentiator, so the embedding provider is
+a first-class, capability-gated deployment dependency, mirroring how Witpass
+abstracted KMS. The provider selection is plumbed through config and an existing
+Secret, not hard-coded.
+
+Chart behavior:
+
+- Select the provider with `embeddings.provider` (`voyage` default, `openai`, or
+  `local-dev`), mapped to `WITSELF_EMBEDDINGS_PROVIDER`.
+- Select the model with `embeddings.model`, mapped to
+  `WITSELF_EMBEDDINGS_MODEL`.
+- Supply the provider API key only through `embeddings.existingSecret`
+  (`name` plus `apiKeyKey`), injected as an environment variable from the
+  referenced Secret.
+- Treat the provider as optional at runtime: if it is unreachable, the server
+  degrades recall to keyword/tag/kind/time and reports the degraded state
+  through `/v1/capabilities`. The chart must not crash-loop the pod solely
+  because the embedding provider is unavailable.
+- Vector dimensionality follows the active model and is reported through the
+  capabilities contract; re-embedding after a model change is an explicit,
+  audited maintenance operation and is never a chart upgrade side effect. See
+  [memory-model.md](memory-model.md).
+
+The chart must never write the embedding API key into a ConfigMap, log line,
+metric label, annotation, or rendered manifest.
+
+## Migrations
+
+Migrations should be explicit and operator-controlled.
+
+Initial chart behavior:
+
+- Include a migration `Job` template.
+- Do not run destructive or backward migrations automatically.
+- Support a controlled install/upgrade path where operators can run:
+  `witself-server migrate status` and `witself-server migrate up`.
+- Require `--yes` or equivalent explicit confirmation for destructive migration
+  paths when supported by the server command.
+- Treat Goose migrations as the server-owned migration mechanism, including the
+  pgvector extension and vector-column setup.
+- Acquire a database advisory lock so concurrent server replicas do not race the
+  migration step.
+
+The chart may support opt-in install or upgrade hooks later, but production
+guidance should prefer an explicit migration job before rolling the server. See
+[server-command-surface.md](server-command-surface.md).
+
+## Values Shape
+
+Illustrative values:
+
+```yaml
+image:
+  repository: ghcr.io/witwave-ai/images/witself-server
+  tag: v0.1.0
+  pullPolicy: IfNotPresent
+
+server:
+  listen: ":8080"
+  publicUrl: "https://witself.example.com"
+  logLevel: info
+
+health:
+  listen: ":8081"
+  port: 8081
+  service:
+    enabled: false
+    annotations: {}
+
+metrics:
+  enabled: true
+  listen: ":9090"
+  path: /metrics
+  port: 9090
+  service:
+    enabled: true
+    annotations: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  podMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+probes:
+  liveness:
+    enabled: true
+    path: /v1/health/live
+    port: health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /v1/health/ready
+    port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  startup:
+    enabled: true
+    path: /v1/health/startup
+    port: health
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 30
+
+database:
+  existingSecret:
+    name: witself-database
+    urlKey: database-url
+
+embeddings:
+  provider: voyage
+  model: voyage-3
+  existingSecret:
+    name: witself-embeddings
+    apiKeyKey: api-key
+
+audit:
+  retentionDays: 365
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  hosts: []
+
+networkPolicy:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+podSecurityContext:
+  runAsNonRoot: true
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+migrations:
+  enabled: false
+  command: ["witself-server", "migrate", "up"]
+```
+
+This values shape is illustrative. Exact names can change during
+implementation, but the safety posture should not. Note the absence of any KMS
+block: Witself keeps ordinary data-at-rest encryption at the storage layer and
+does not treat key management as a deployment pillar. Optional field-level
+encryption of `sensitive` facts is a capability, not a chart default; see
+[storage.md](storage.md).
+
+## Observability And Operational Support
+
+The chart should make the normal Kubernetes operating path boring and
+inspectable.
+
+Required chart behavior:
+
+- Configure `livenessProbe`, `readinessProbe`, and `startupProbe` against the
+  documented health endpoints on the dedicated health port.
+- Configure separate named container ports for `api`, `health`, and `metrics`.
+- Avoid exposing the health port through public ingress by default.
+- Expose `/metrics` only through the dedicated metrics port.
+- Render a dedicated metrics service only when metrics are enabled and metrics
+  service values request it.
+- Support Prometheus Operator `ServiceMonitor` and `PodMonitor` resources when
+  those CRDs are installed and the corresponding values are enabled.
+- Keep metrics enabled by default for server deployments unless the operator
+  opts out.
+- Allow metrics enablement, listen address, port, path, annotations, labels,
+  scrape interval, scrape timeout, relabelings, and metric relabelings to be
+  configured.
+- Surface `WITSELF_METRICS_ENABLED` through the metrics values so enablement is
+  consistent across config, environment, CLI, and Helm.
+- Provide resource requests and memory limits by default.
+- Support optional HPA configuration.
+- Support optional PDB configuration.
+- Support configurable pod security context, container security context,
+  node selectors, tolerations, affinity, and topology spread constraints.
+- Support graceful shutdown settings such as termination grace period when the
+  server needs them, so in-flight messaging and recall requests drain cleanly.
+
+The scraped metric set includes memory operations, recall and embedding
+operations, fact operations, policy decisions (allow/deny), cross-agent
+accesses, group operations, message send/deliver/read, authentication, token
+lifecycle, audit events, usage metering, limit decisions, storage, vector
+storage, migrations, and HTTP latency. See
+[observability-and-operations.md](observability-and-operations.md).
+
+Health responses, metrics, logs, chart annotations, and rendered manifests must
+not contain memory content, fact values, message bodies or payloads, embedding
+vectors, raw tokens, database URLs, embedding-provider API keys, or other
+sensitive configuration values.
+
+## Terraform Handoff
+
+Terraform modules under `infra/terraform` should provision the cloud substrate
+and output the references the Helm chart needs.
+
+Expected handoff data:
+
+- Namespace.
+- Service account annotations for workload identity.
+- Database connection secret name and key (Postgres with pgvector enabled).
+- Embedding-provider selection and the Secret name/key holding its API key.
+- Object/blob storage bucket or container for exports, attachments, and backups.
+- Ingress host or public URL.
+- Secret Store CSI or External Secrets references when used.
+
+Terraform should not generate Helm values files containing raw credentials. It
+should create or reference deployment-native secrets, then pass only secret
+names, keys, IDs, and non-sensitive configuration into Helm. Terraform is also
+responsible for ensuring pgvector is available in the provisioned database
+before the migration Job runs. See
+[terraform-infrastructure.md](terraform-infrastructure.md).
+
+## CI And Release Checks
+
+Required checks once the chart exists:
+
+- `helm lint charts/witself`.
+- `helm template` with default values.
+- `helm template` with representative production values.
+- Kubernetes schema validation for rendered manifests.
+- Secret scanning of chart defaults and examples.
+- Check that rendered resources do not include raw secret values, including the
+  embedding-provider API key.
+- Check that liveness, readiness, startup, and metrics paths render correctly.
+- Check ServiceMonitor and PodMonitor enabled and disabled render paths.
+- Check the NetworkPolicy renders embedding-provider egress only when a non
+  `local-dev` provider is selected.
+- Package and publish the chart to
+  `ghcr.io/witwave-ai/charts/witself`.
+- Sign or provenance-attest the chart package.
+- Smoke test `helm show chart` against the published OCI chart.
+
+See [release-and-build.md](release-and-build.md).
+
+## Non-Goals
+
+- Do not make Docker Compose the initial self-hosting artifact.
+- Do not make Helm provision cloud infrastructure that belongs in Terraform.
+- Do not bundle a production database by default, and do not ship a Postgres
+  without pgvector.
+- Do not bundle or default to the `local-dev` embedding provider in production.
+- Do not hide production prerequisites behind managed-service assumptions.
+- Do not require Witself-managed billing or support integrations for self-hosted
+  chart installs.
+
+## Related Docs
+
+- [self-hosting.md](self-hosting.md)
+- [backend-architecture.md](backend-architecture.md)
+- [server-command-surface.md](server-command-surface.md)
+- [api-contract.md](api-contract.md)
+- [storage.md](storage.md)
+- [memory-model.md](memory-model.md)
+- [access-policy.md](access-policy.md)
+- [security-groups.md](security-groups.md)
+- [inter-agent-messaging.md](inter-agent-messaging.md)
+- [observability-and-operations.md](observability-and-operations.md)
+- [terraform-infrastructure.md](terraform-infrastructure.md)
+- [billing-and-limits.md](billing-and-limits.md)
+- [release-and-build.md](release-and-build.md)
+- [requirements.md](requirements.md)
+- [implementation-plan.md](implementation-plan.md)
+- [threat-model.md](threat-model.md)

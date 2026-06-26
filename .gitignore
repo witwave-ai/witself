@@ -1,0 +1,22 @@
+# macOS / OS
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*~
+.idea/
+.vscode/
+
+# Go (implementation to come — see docs/scaffold-readiness.md)
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local env / credentials (never commit)
+.env
+*.local
+*.tfvars
+*.token
