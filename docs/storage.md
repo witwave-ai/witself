@@ -1,17 +1,20 @@
 # Witself Storage
 
 Status: draft. Decision: production Witself starts with Postgres (with the
-pgvector extension) as the system of record, an external embedding-provider
-abstraction (`voyage` default), an object/blob adapter added on demand, and
-Goose for database migrations. KMS is optional and demoted; there is no
-KMS-as-pillar and no `storage-and-kms.md`.
+pgvector extension) as the system of record for both planes, an external
+embedding-provider abstraction (`voyage` default), an object/blob adapter added
+on demand, Goose for database migrations, and a provider-shaped KMS abstraction
+(AWS KMS first) that backs the SEALED plane. Storage is two-tier: the OPEN plane
+(memories + facts) is ordinary data-at-rest; the SEALED plane (secrets + TOTP)
+is KMS-backed envelope encryption. KMS is **required when the sealed plane is
+enabled** and is not a dependency for an open-plane-only deployment.
 
 ## Decision
 
 Production storage should start with Postgres as the system of record, with the
 `pgvector` extension enabled for memory embeddings.
 
-Postgres should initially store:
+Postgres holds both planes. OPEN-plane state:
 
 - Account, realm, and agent metadata.
 - Token hashes and token metadata.
@@ -28,12 +31,29 @@ Postgres should initially store:
 - Idempotency records.
 - Capability and backend configuration metadata when needed.
 
-Unlike Witpass, memory content and fact values are ordinary identity data. They
-are protected by data-at-rest encryption, but there is no requirement to keep
-them out of queryable columns and no encrypted-blob-only storage rule. Witself
-protects the *integrity and authenticity* of identity data, not the
-*confidentiality* of secret material; see [Data-At-Rest Note](#data-at-rest-note)
-and [threat-model.md](threat-model.md).
+SEALED-plane state (present only when the sealed plane is enabled):
+
+- Secret metadata (template, label, owner, timestamps) and non-sensitive fields
+  such as usernames, URLs, issuers, and labels as ordinary queryable values.
+- Encrypted sensitive field blobs (envelope-encrypted; never plaintext columns).
+- Encrypted TOTP seed material (envelope-encrypted high-value sealed material).
+- Secret grants and TOTP enrollments.
+- Per-realm KEK wrapping state (`realm_keys`) and per-secret/field DEK state
+  (`secret_deks`); see [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage).
+
+The two planes have opposite storage postures and must coexist coherently:
+
+- **OPEN plane.** Memory content and fact values are ordinary identity data.
+  They are protected by data-at-rest encryption, but there is no requirement to
+  keep them out of queryable columns and no encrypted-blob-only storage rule.
+  Witself protects the *integrity and authenticity* of identity data here.
+- **SEALED plane.** Secret values and TOTP seeds are confidentiality-critical.
+  They are stored only as KMS-backed envelope ciphertext (CMK → per-realm KEK →
+  per-secret/field DEK), are reveal-gated, and are **never embedded, never
+  returned by semantic recall, never in the self-digest, and never in a
+  plaintext export**. See [Data-At-Rest Note](#data-at-rest-note),
+  [encryption-model.md](encryption-model.md), and
+  [threat-model.md](threat-model.md).
 
 Object/blob storage should be added when the data shape actually requires it,
 not as a default dependency for every memory or fact. Good object/blob
@@ -95,6 +115,35 @@ source of truth.
 - `usage_counters`, `idempotency_records`, `capabilities`/config — operational
   state shared with the platform spine.
 
+Sealed-plane tables (present only when the sealed plane is enabled; the storage
+view of the domain objects in [data-model.md](data-model.md) and
+[secret-model.md](secret-model.md)):
+
+- `secrets` — `sec_…` id, realm, owner (agent or group), template
+  (`login`/`api-key`/`ssh-key`/`certificate`/`env`/`generic`), label, state
+  (`active`/`archived`), timestamps. Witpass's `shared` secrets are now
+  group-owned, so `owner_kind ∈ {agent, group}` matches memories and facts.
+- `secret_fields` — `fld_…` id, secret, field name, sensitivity. Non-sensitive
+  field values are ordinary columns; sensitive field values are stored only as
+  envelope ciphertext (DEK id, AEAD algorithm, nonce, ciphertext) — never as a
+  plaintext column.
+- `secret_grants` — `grt_…` id, secret, grantee (agent or group), granted
+  scopes, granting actor, timestamps. The sealed-plane cross-agent/operator
+  access path; see [authorization-and-roles.md](authorization-and-roles.md).
+- `totp_enrollments` — `totp_…` id, owning secret/account, issuer, label, and
+  the envelope-encrypted seed material (DEK id, AEAD algorithm, nonce,
+  ciphertext). Seeds are high-value sealed material; see [totp-2fa.md](totp-2fa.md).
+- `realm_keys` — `kek_…` id, realm, KMS provider, CMK key id, wrapped per-realm
+  KEK ciphertext, rotation generation, timestamps. One active KEK generation per
+  realm; see [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage)
+  and [key-hierarchy.md](key-hierarchy.md).
+- `secret_deks` — `dek_…` id, realm, owning secret/field, wrapping `kek_…`, AEAD
+  algorithm, wrapped DEK ciphertext, generation. Per-secret/field data keys are
+  wrapped by the realm KEK, never stored unwrapped.
+- `attachments` — `att_…` id, owning secret, envelope-encrypted blob reference
+  (object/blob when oversized); see
+  [secret-size-and-attachments.md](secret-size-and-attachments.md).
+
 Ownership and uniqueness rules:
 
 - Default ownership is the creating agent. Group-scoped memories and facts use
@@ -139,7 +188,8 @@ stored state, not a cache that can be silently lost.
   vector column and its index. Vector index type and parameters (for example an
   approximate index) are tuned per [memory-model.md](memory-model.md).
 - The embedding **provider is external** and behind a provider abstraction that
-  mirrors how Witpass abstracted KMS: `voyage` (default), `openai`, and
+  mirrors the KMS abstraction in [KMS Posture](#kms-posture): `voyage`
+  (default), `openai`, and
   `local-dev`. Provider and model are selected with
   `WITSELF_EMBEDDINGS_PROVIDER` and `WITSELF_EMBEDDINGS_MODEL` and reported by
   the capabilities contract.
@@ -163,6 +213,96 @@ recall without re-embedding (vectors are optional to back up; see
 vectors are recomputable, a model migration — or a restore without vectors — can
 rebuild them from content. Vector storage size is a metered dimension; see
 [billing-and-limits.md](billing-and-limits.md).
+
+## KMS Posture
+
+The sealed plane is backed by a key-management service. KMS is a **required
+dependency when the sealed plane is enabled** and is not required for an
+open-plane-only deployment — an account that only uses memories and facts never
+needs a KMS provider configured. This is the two-tier posture: the open plane
+relies on ordinary data-at-rest encryption (managed RDS/disk), while the sealed
+plane relies on KMS envelope encryption.
+
+The KMS boundary is provider-shaped from day one, mirroring how the embedding
+provider is abstracted. Initial provider names:
+
+- `aws-kms`
+- `gcp-kms`
+- `azure-key-vault`
+- `local-dev`
+
+`local-dev` exists for tests, demos, and `witself-server serve --dev`. It is not
+a production KMS provider.
+
+Managed Witself Cloud uses AWS KMS first, alongside AWS RDS for Postgres (with
+`pgvector`) and S3; see [First Cloud Target](#first-cloud-target). Self-hosted
+deployments that enable the sealed plane select a provider through server
+configuration:
+
+```text
+WITSELF_KMS_PROVIDER=aws-kms
+WITSELF_KMS_KEY_ID=arn:aws:kms:...
+```
+
+Provider-specific credentials should come from workload identity, cloud
+identity, mounted secret files, or deployment-native secret managers. They must
+not be committed to config files, Terraform examples, Helm values, or the public
+repository. Managed cloud must not expose raw KMS credentials to the
+application; the server uses deployment identity and tightly scoped IAM
+permissions.
+
+Readiness gates differ per plane. `pgvector` is a hard gate for the open plane
+(semantic recall) and the embedding provider is degradable. KMS readiness gates
+**only the sealed plane**: when the sealed plane is enabled, the server must be
+able to reach the configured KMS provider and unwrap the active per-realm KEK
+before serving secret reveal, TOTP code, or value-returning reference
+resolution. Open-plane reads never gate on KMS availability. The capability
+contract reports `client_side_decrypt` and `server_side_decrypt` availability;
+see [key-hierarchy.md](key-hierarchy.md).
+
+## Sealed-Plane Encryption Storage
+
+Postgres may store encrypted secret blobs for the sealed plane, but it must
+never store plaintext secret values or TOTP seeds as ordinary columns.
+
+Rules:
+
+- Sensitive field values are envelope-encrypted before storage.
+- TOTP seeds are envelope-encrypted before storage.
+- Token values are hashed, not stored raw. Base64 is serialization only, not
+  encryption.
+- Non-sensitive fields such as usernames, URLs, issuers, and labels may be
+  stored as ordinary queryable values.
+- Audit records must never store secret values, TOTP seeds, generated TOTP
+  codes, raw tokens, passphrases, plaintext private keys, payment credentials,
+  or wallet credentials; see [audit-retention.md](audit-retention.md).
+
+The envelope is a CMK → per-realm KEK → per-secret/field DEK hierarchy. The
+relational shape that holds it is two tables:
+
+- `realm_keys` — the per-realm KEK (`kek_…`), wrapped by the KMS CMK
+  identified by `WITSELF_KMS_KEY_ID`. The KEK ciphertext, the KMS provider and
+  CMK id, and the rotation generation live here; the unwrapped KEK exists only
+  in memory after a KMS unwrap.
+- `secret_deks` — the per-secret/per-field DEK (`dek_…`), wrapped by the active
+  realm KEK. Sensitive field and TOTP-seed ciphertext records the wrapping
+  `dek_…`, the AEAD algorithm (`XCHACHA20_POLY1305` or `AES_256_GCM`), and the
+  nonce.
+
+Decrypt is hybrid behind one capability switch: `client_side_decrypt` (the
+client holds key material and the server returns wrapped material) is the
+default where the client can hold keys; `server_side_decrypt` lets token-only
+pods perform the unwrap server-side, expanding the trusted computing base and
+recorded on the reveal/code audit event. The exact envelope format and rotation
+design are tracked by [encryption-model.md](encryption-model.md) and
+[key-hierarchy.md](key-hierarchy.md); the schema is in
+[data-model.md](data-model.md).
+
+Sealed-plane carve-outs hold at the storage layer: secret values and TOTP seeds
+are **never embedded** (no `pgvector` row), **never returned by semantic
+recall**, **never in the self-digest**, **never ingested** from
+CLAUDE.md/AGENTS.md, and **never written to a plaintext export**. Secret backup
+is encrypted-only; see [Backup And Restore Implications](#backup-and-restore-implications).
 
 ## Migration Tool
 
@@ -205,8 +345,10 @@ Object/blob storage is an on-demand adapter, not a per-record dependency.
 - Self-hosted deployments may run without object/blob storage until they need
   large exports or attachments; the capability contract reports availability.
 
-Identity export and import (the inverse of Witpass's encrypted-only stance) use
-this adapter for large artifacts; see
+Open-plane identity export and import use this adapter for large plaintext
+artifacts. Oversized sealed-plane attachments use the same adapter but stay
+envelope-encrypted (the encrypted-blob path), never plaintext; see
+[secret-size-and-attachments.md](secret-size-and-attachments.md) and
 [backup-and-recovery.md](backup-and-recovery.md).
 
 ## First Cloud Target
@@ -232,28 +374,41 @@ self-hosted Terraform. GCP and Azure remain planned follow-up targets; see
 
 ## Data-At-Rest Note
 
-Decision: Witself does not treat encryption as a product pillar. It is identity
-data, protected for integrity and authenticity, not a secret vault.
+Decision: encryption is two-tier, matched to the plane. The open plane uses
+ordinary data-at-rest protection for identity data; the sealed plane uses a KMS
+envelope for secret material.
 
-Posture:
+Open-plane posture:
 
 - Use ordinary data-at-rest encryption (managed RDS/disk, or self-host-owned
-  disk encryption). There is no KMS/envelope/client-side-decrypt pillar, no
-  reveal ceremony, and no end-to-end secret model.
-- KMS is **optional and demoted**, not a core dependency. An operator may wire a
-  KMS provider for optional field-level encryption, but the product does not
-  require one and does not gate identity reads on KMS availability.
-- Optional field-level encryption for `sensitive` facts is a capability an
-  operator can enable, not the default behavior. When enabled, it wraps only
-  those specific values; everything else stays ordinary queryable data.
-- `sensitive` is a PII/redaction display flag, not an encryption boundary. There
-  is no value-size split between sensitive and non-sensitive values.
+  disk encryption) for memories and facts. There is no reveal ceremony for
+  identity data and no encrypted-blob-only rule; the open plane protects
+  integrity and authenticity, not confidentiality.
+- For memories and facts, `sensitive` is a PII/redaction display flag, not an
+  encryption boundary. There is no value-size split between sensitive and
+  non-sensitive identity values. A credential does not belong in a sensitive
+  fact; it belongs in the sealed plane as a secret; see
+  [facts-model.md](facts-model.md) and [secret-model.md](secret-model.md).
 - Token values are hashed, not stored raw. Base64 is serialization only, not
   encryption.
 
-The authorization and audit scaffolding that Witpass kept in its encryption
-model is reused by [access-policy.md](access-policy.md); Witself has no
-`encryption-model.md`.
+Sealed-plane posture:
+
+- When the sealed plane is enabled, secret values and TOTP seeds are
+  KMS-envelope-encrypted (CMK → per-realm KEK → per-secret/field DEK) and stored
+  only as ciphertext, with a reveal ceremony gating value-returning operations.
+  KMS is required for this plane; see [KMS Posture](#kms-posture),
+  [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage), and
+  [encryption-model.md](encryption-model.md).
+- Losing KMS key material makes the affected realm's secret values and TOTP
+  seeds unrecoverable (crypto-shred). This blast radius is confined to the
+  sealed plane: it does **not** affect memories, facts, policies, groups, or
+  messages.
+
+The cross-agent authorization and audit scaffolding for the open plane lives in
+[access-policy.md](access-policy.md); the sealed-plane confidentiality model
+lives in [encryption-model.md](encryption-model.md) and
+[key-hierarchy.md](key-hierarchy.md).
 
 ## Backup And Restore Implications
 
@@ -268,13 +423,20 @@ can then be restored either from backed-up vectors or by re-embedding:
 - Migration version.
 - Embedding-provider and model identity (so restored vectors are interpreted
   consistently).
-- Server configuration needed to reconnect to storage and the embedding
-  provider.
-- Optional KMS key identity and rotation metadata only when field-level
-  encryption of `sensitive` facts is enabled.
+- Server configuration needed to reconnect to storage, the embedding provider,
+  and (when the sealed plane is enabled) KMS.
+- KMS key identity and rotation metadata when the sealed plane is enabled, so
+  the encrypted secret backup can be unwrapped.
 
-Backups must not include raw tokens, raw database or object-store credentials,
-embedding-provider credentials, payment provider secrets, or wallet credentials.
+Open-plane identity (memories + facts) is plaintext-exportable; that stays the
+headline backup/restore feature. The sealed plane is **never in the plaintext
+export** — secret backup is encrypted-only (envelope ciphertext plus KMS key
+identity, never plaintext), and `witself export` excludes secret values and TOTP
+seeds; see [backup-and-recovery.md](backup-and-recovery.md).
+
+Backups must not include raw tokens, raw database, object-store, or KMS
+credentials, embedding-provider credentials, payment provider secrets, wallet
+credentials, or plaintext secret material or TOTP seeds.
 
 Recovery characteristics specific to Witself:
 
@@ -283,12 +445,11 @@ Recovery characteristics specific to Witself:
   restored by re-embedding from memory content.
 - Because vectors are recomputable from content, a deliberate embedding-model
   change can also rebuild them as an explicit, audited operation.
-- Losing optional KMS key material (when field-level encryption is enabled)
-  affects only the wrapped `sensitive` fact values, not memories, non-sensitive
-  facts, policies, groups, or messages. This narrow blast radius is the
-  intentional contrast with Witpass, where losing KMS material can make secrets
-  unrecoverable. This must be documented for managed and self-hosted
-  deployments.
+- Losing KMS key material (when the sealed plane is enabled) makes the affected
+  realm's secret values and TOTP seeds unrecoverable — crypto-shred — but does
+  not affect memories, facts, policies, groups, or messages. The open plane is
+  recoverable from the Postgres backup independent of KMS. This split blast
+  radius must be documented for managed and self-hosted deployments.
 
 The backup, export, and recovery policy is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
@@ -297,8 +458,15 @@ The backup, export, and recovery policy is tracked in
 
 - [requirements.md](requirements.md)
 - [backend-architecture.md](backend-architecture.md)
+- [data-model.md](data-model.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)

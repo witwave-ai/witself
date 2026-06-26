@@ -15,10 +15,11 @@ the first pricing model feel like nickel-and-dime metering.
 
 The first v0 release does not need live payment collection or full subscription
 management. Billing, payment, crypto payment, and invoice commands may be
-contract-shaped and capability-gated while the core realm, agent, memory, fact,
-policy, group, message, and audit product matures. (Witpass gated the same
-apparatus while its secret/TOTP product matured; Witself reuses the apparatus and
-swaps the metered payload for identity.)
+contract-shaped and capability-gated while the core product matures across both
+planes — the open plane (realm, agent, memory, fact, policy, group, message, and
+audit) and the sealed plane (secret and TOTP). The metered payload spans identity
+usage and credential usage; the sealed-plane dimensions count events only and
+never carry secret or seed values.
 
 ## Billing Model
 
@@ -44,8 +45,21 @@ Plans should define soft and hard limits for:
 - Cross-agent accesses.
 - Security groups.
 - Messages sent and delivered.
+- Stored secrets (sealed plane).
+- Secret reads, including reveal events and reference resolution (sealed plane).
+- TOTP code generation (sealed plane).
+- Runtime injection through `witself run` (sealed plane).
+- Total encrypted storage size for envelope-encrypted secret material (sealed
+  plane).
 - General managed-service API request volume.
 - Audit retention and stored audit volume.
+
+The five sealed-plane dimensions meter the credential plane only. They never
+count toward, and are never derived from, the open-plane recall, embedding, or
+digest paths: secrets and TOTP seeds are never embedded, recalled, placed in the
+self-digest, or plaintext-exported, and their values surface only through the
+reveal-gated paths (see [secret-model.md](secret-model.md) and
+[encryption-model.md](encryption-model.md)).
 
 Managed v0 should default to 365 days of audit retention. Longer retention can
 be plan-based later, and self-hosted operators can configure retention according
@@ -68,15 +82,27 @@ Witself should meter these dimensions internally in v0:
 | `security_group` | Group count, policy-evaluation surface. |
 | `message_sent` | Outbound mailbox load and abuse control. |
 | `message_delivered` | Fan-out delivery load (group fan-out multiplies this). |
-| `storage_byte` | General data-at-rest footprint and backup size. |
+| `storage_byte` | General open-plane data-at-rest footprint and backup size. |
+| `stored_secret` | Sealed-plane inventory size and storage footprint. |
+| `secret_read` | Sealed-plane sensitive access risk and service load (reveal + reference resolution). |
+| `totp_code` | Sealed-plane sensitive login assistance and service load. |
+| `runtime_injection` | Sealed-plane secret use without printing, service load. |
+| `encrypted_storage_byte` | Sealed-plane envelope-encrypted storage cost and backup size. |
 | `api_request` | General API burden and abuse control. |
 | `audit_event` | Audit retention size and compliance cost. |
 
 Recalls, embedding operations, cross-agent accesses, and messages must be metered
 even if v0 pricing stays tiered. They create real backend load and
-security-relevant usage signals. (This is the integrity-and-authenticity analogue
-of the way Witpass insisted on metering secret reads, TOTP generation, and
-runtime injection regardless of plan shape.)
+security-relevant usage signals — the integrity-and-authenticity signals of the
+open plane.
+
+On the sealed plane, secret reads, TOTP code generation, and runtime injection
+must likewise be metered even when v0 pricing stays tiered. They create real
+backend load and are the confidentiality-relevant usage signals of the
+credential plane. Metering counts the event; it never records secret or seed
+values, and it does not cause secrets to be embedded, recalled, or placed in the
+self-digest (see [secret-model.md](secret-model.md) and
+[audit-retention.md](audit-retention.md)).
 
 Notes on a few dimensions:
 
@@ -91,9 +117,24 @@ Notes on a few dimensions:
 - `message_delivered` can exceed `message_sent` because a message addressed to a
   security group fans out to current group members (see
   [inter-agent-messaging.md](inter-agent-messaging.md)).
-- `storage_byte` is the rename of the Witpass `encrypted_storage_byte` dimension.
-  Witself drops the KMS/envelope pillar, so the dimension measures ordinary
-  data-at-rest footprint, not encrypted-only storage (see [storage.md](storage.md)).
+- `storage_byte` measures ordinary open-plane data-at-rest footprint (memories,
+  facts, and the rest of the open plane on RDS/disk), not envelope-encrypted
+  secret material (see [storage.md](storage.md)).
+- `encrypted_storage_byte` is the sealed-plane companion to `storage_byte`. It
+  measures the envelope-encrypted secret bytes (ciphertext, wrapped DEKs, and
+  attachments) governed by the CMK→per-realm KEK→per-secret/field DEK hierarchy.
+  It is metered separately because the sealed plane is a distinct storage and
+  KMS cost driver (see [encryption-model.md](encryption-model.md),
+  [key-hierarchy.md](key-hierarchy.md), and
+  [secret-size-and-attachments.md](secret-size-and-attachments.md)).
+- `secret_read` increments on the reveal-gated value-returning paths only —
+  `witself secret reveal` and value-returning reference resolution — never on
+  plain metadata listing. `totp_code` increments on `witself totp code`, and
+  `runtime_injection` increments when a secret is injected into a child process
+  by `witself run` without being printed. None of these dimensions cause secret
+  values to be embedded, recalled, placed in the self-digest, or
+  plaintext-exported (see [secret-model.md](secret-model.md) and
+  [totp-2fa.md](totp-2fa.md)).
 
 ## Canonical Dimension Names
 
@@ -106,11 +147,13 @@ usage dimension. They are reused verbatim as:
   [observability-and-operations.md](observability-and-operations.md)).
 
 Whether a dimension is a point-in-time cap (`active_agent`, `stored_memory`,
-`stored_fact`, `security_group`, `vector_storage_byte`, `storage_byte`) or a rate
-(`memory_recall`, `memory_write`, `embedding_operation`, `crossagent_access`,
-`message_sent`, `message_delivered`, `api_request`, `audit_event`) is conveyed by
-the limit object's fields (`max`/`used` for caps; `unit`, `included`,
-`soft_limit`, `hard_limit` for rates), not by the key name. Using one key across
+`stored_fact`, `security_group`, `vector_storage_byte`, `storage_byte`,
+`stored_secret`, `encrypted_storage_byte`) or a rate (`memory_recall`,
+`memory_write`, `embedding_operation`, `crossagent_access`, `message_sent`,
+`message_delivered`, `secret_read`, `totp_code`, `runtime_injection`,
+`api_request`, `audit_event`) is conveyed by the limit object's fields
+(`max`/`used` for caps; `unit`, `included`, `soft_limit`, `hard_limit` for
+rates), not by the key name. Using one key across
 all three surfaces lets a client join capability limits, usage items, and metrics
 directly. Field shapes are pinned in [json-contracts.md](json-contracts.md).
 
@@ -140,6 +183,11 @@ Recommended defaults:
 | Cross-agent accesses | `throttle` or `warn`; block only for abuse or hard caps. |
 | Security groups | `block` for hard cap, `warn` near cap. |
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
+| Stored secrets | `block` for hard cap, `warn` near cap. |
+| Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |
+| TOTP code generation | `throttle` or `warn`; block only for abuse or hard caps. |
+| Runtime injection | `throttle` or `warn`; block only for abuse or hard caps. |
+| Encrypted storage size | `warn` near cap, `block` at hard cap. |
 | API requests | `throttle`. |
 | Audit retention | `warn` and require plan/config change before retention loss. |
 
@@ -251,7 +299,10 @@ The exact plan names, prices, included quantities, and overage policy are still
 business decisions. V0 should preserve pricing flexibility while collecting
 enough usage data to make those decisions responsibly. The embedding-operation
 and vector-storage dimensions in particular carry real provider cost and should
-be observed before fixed inclusions are set.
+be observed before fixed inclusions are set. On the sealed plane, `secret_read`,
+`totp_code`, and `encrypted_storage_byte` carry real KMS and envelope-storage
+cost and should be observed on the same basis (see
+[key-hierarchy.md](key-hierarchy.md)).
 
 ## Related Docs
 
@@ -262,6 +313,11 @@ be observed before fixed inclusions are set.
 - [api-contract.md](api-contract.md)
 - [memory-model.md](memory-model.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
 - [storage.md](storage.md)
 - [self-hosting.md](self-hosting.md)
 - [implementation-plan.md](implementation-plan.md)

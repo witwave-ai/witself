@@ -9,8 +9,14 @@ recalled semantically, a fact is a named, single-valued attribute addressed by
 name and resolved exactly. `fact get email` returns the one true value, every
 time, with no ranking and no embedding provider involved.
 
-Facts are one of the two first-class identity payload types in Witself. This
-document pins their shape, lookup rules, the `primary` flag and its promotion
+Facts are one of the two first-class identity payload types in Witself, and they
+live entirely in the **open plane** alongside [memories](memory-model.md):
+plaintext at rest, recallable, and plaintext-exportable. They are not the sealed
+plane. A true credential — a password, API key, token, or TOTP seed — belongs in
+the sealed plane as a [secret](secret-model.md), never as a fact. See
+[Sensitivity and Redaction](#sensitivity-and-redaction) for the boundary.
+
+This document pins their shape, lookup rules, the `primary` flag and its promotion
 semantics, sensitivity/redaction posture, and v0 size and count limits. JSON
 shapes are normative in [json-contracts.md](json-contracts.md); cross-agent
 access is governed by [access-policy.md](access-policy.md).
@@ -191,9 +197,21 @@ The `primary` flag marks the canonical, identity-defining value of a fact's
 
 ## Sensitivity and Redaction
 
-Facts are **ordinary readable identity data**. Witself is an identity store, not
-a secret vault, so there is no reveal ceremony, no separate sensitive value-size
-budget, and no value-redaction state machine.
+Facts are **ordinary readable identity data** in the open plane. The `sensitive`
+flag provides **lightweight redaction**, not the sealed plane's reveal ceremony:
+there is no reveal ceremony, no separate sensitive value-size budget, and no
+value-redaction state machine. A `sensitive` fact is still plaintext at rest,
+still recallable, and still in the plaintext export — it is merely masked in
+bulk output to avoid shoulder-surfing.
+
+This is deliberately distinct from a [secret](secret-model.md). If you need a
+credential — a password, API key, SSH key, certificate, or TOTP seed — store it
+as a secret in the sealed plane, **not** as a sensitive fact. Secrets are
+KMS-backed envelope-encrypted, reveal-gated, and never embedded, never returned
+by semantic recall, never in the self-digest, and never in the plaintext export
+(see [secret-model.md](secret-model.md)). The `sensitive` flag is a display/PII
+guard for identity attributes that happen to be personal; it is not a
+confidentiality boundary and must not be used as a substitute for a secret.
 
 - Non-sensitive facts are returned in full in `show`/`get`/`list` by default.
 - Facts marked `sensitive` have their `value` redacted in `list`/`scan` output
@@ -288,6 +306,7 @@ The memory side of this split is documented in
 
 - [requirements.md](requirements.md)
 - [memory-model.md](memory-model.md)
+- [secret-model.md](secret-model.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [json-contracts.md](json-contracts.md)

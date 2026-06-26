@@ -15,6 +15,8 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/agents`
 - `/v1/memories`
 - `/v1/facts`
+- `/v1/secrets`
+- `/v1/totp`
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
@@ -38,6 +40,10 @@ POST /v1/memories:recall
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
 POST /v1/facts/{fact_id}:primary
+POST /v1/secrets/{secret_id}:reveal
+POST /v1/secrets/{secret_id}:rotate
+POST /v1/secrets/{secret_id}:grant
+POST /v1/totp/{secret_id}:code
 POST /v1/policies:test
 POST /v1/messages/{message_id}:ack
 POST /v1/tokens/{token_id}:rotate
@@ -45,10 +51,16 @@ POST /v1/tokens/{token_id}:rotate
 
 Sensitive/action routes must use `POST`, never `GET`.
 
-Unlike Witpass, Witself has no `:reveal` action and no `/v1/totp` resource.
-Witself's headline action verbs protect the integrity and authenticity of
-identity data (`:recall`, `:forget`, `:restore`, `:primary`, `:test`, `:ack`),
-not the confidentiality of secret material.
+Witself's action verbs span both planes. The open-plane verbs (`:recall`,
+`:forget`, `:restore`, `:primary`, `:test`, `:ack`) protect the integrity and
+authenticity of identity data. The sealed-plane verbs (`:reveal`, `:rotate`,
+`:grant`, `:revoke`, `:archive`, `:restore`, plus `/v1/totp/{secret_id}:code`)
+protect the confidentiality of secret material and are the only routes that
+return plaintext secret values — and only through the explicit, audited reveal
+ceremony described in [secret-model.md](secret-model.md). Sealed-plane material
+is never embedded, never returned by semantic recall, never in the self-digest,
+and never in the plaintext export; see the carve-outs in
+[requirements.md](requirements.md).
 
 ## Route Style Rules
 
@@ -57,10 +69,12 @@ not the confidentiality of secret material.
 - Use nested routes when ownership matters.
 - Use action suffixes for non-CRUD workflows.
 - Keep memory content, fact values, message bodies and payloads, embedding
-  vectors, raw tokens, audit reasons, payment credentials, and wallet
+  vectors, secret values, field values, TOTP seeds, TOTP codes, generated
+  passwords, raw tokens, audit reasons, payment credentials, and wallet
   credentials out of URL paths and query strings.
 - Use request bodies for sensitive inputs such as recall queries, memory and
-  fact content, audit reasons, policy definitions, message bodies, token
+  fact content, secret field names, TOTP enrollment material, password
+  generation policy, audit reasons, policy definitions, message bodies, token
   rotation options, and payment workflow inputs.
 - Generate OpenAPI from Go route/schema definitions or from one equivalent
   source of truth.
@@ -144,6 +158,33 @@ POST /v1/agents/{agent_id}/facts
 GET  /v1/groups/{group_id}/facts
 POST /v1/groups/{group_id}/facts
 
+# Sealed plane: secrets + TOTP. Reveal-gated; never embedded, recalled,
+# in the self-digest, or in the plaintext export.
+GET  /v1/secrets             # metadata only; ?all_agents=true is operator/admin-only
+POST /v1/secrets
+GET  /v1/secrets/{secret_id} # metadata only; values require :reveal
+PATCH /v1/secrets/{secret_id}
+POST /v1/secrets/{secret_id}:reveal
+POST /v1/secrets/{secret_id}:rotate
+POST /v1/secrets/{secret_id}:copy
+POST /v1/secrets/{secret_id}:archive
+POST /v1/secrets/{secret_id}:restore
+DELETE /v1/secrets/{secret_id}
+POST /v1/secrets/{secret_id}:grant
+POST /v1/secrets/{secret_id}:revoke
+
+GET  /v1/agents/{agent_id}/secrets
+POST /v1/agents/{agent_id}/secrets
+GET  /v1/groups/{group_id}/secrets
+POST /v1/groups/{group_id}/secrets
+
+POST /v1/totp/{secret_id}:enroll
+GET  /v1/totp/{secret_id}    # enrollment metadata only; seed requires :reveal
+POST /v1/totp/{secret_id}:code
+DELETE /v1/totp/{secret_id}
+
+POST /v1/password:generate
+
 POST /v1/sessions:start
 POST /v1/sessions:end
 
@@ -207,8 +248,9 @@ remain stable.
 `/metrics` is intentionally outside `/v1` because it is an operational
 Prometheus scrape endpoint, not a product API resource. It should be served on
 the dedicated metrics listener, default `:9090`, and must not expose memory
-content, fact values, message bodies or payloads, embedding vectors, raw paths,
-query strings, user input, or high-cardinality customer metadata.
+content, fact values, message bodies or payloads, embedding vectors, secret
+values, field values, TOTP seeds or codes, raw paths, query strings, user
+input, or high-cardinality customer metadata.
 
 Health routes should be served on the dedicated health listener, default
 `:8081`, even though their paths use the `/v1/health/*` shape.
@@ -254,6 +296,42 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   the request body; sender forgery is structurally impossible.
 - `POST /v1/tokens/{token_id}:rotate` issues a replacement token. The raw token
   value is returned once.
+- `POST /v1/secrets/{secret_id}:reveal` is the explicit, audited value-returning
+  op (`witself secret reveal`). It runs the reveal ceremony, requires the
+  `secret:reveal` scope, and is audited as `secret.reveal`. The field selector
+  and audit reason travel in the request body, never the path. The response is
+  either the client-decryptable envelope or, for token-only pods, the
+  server-mediated plaintext behind the `server_side_decrypt` capability — see
+  [key-hierarchy.md](key-hierarchy.md) for the two shapes; the chosen path is
+  recorded on the audit event. This route is disabled by the MCP
+  `--no-value-tools` switch. It has no `GET` equivalent: secret values are never
+  reachable by a plain read.
+- `POST /v1/secrets/{secret_id}:rotate` replaces secret field values (or
+  re-generates them) and re-wraps the per-secret/field DEK, audited as
+  `secret.updated`/`key.rotated` as applicable. It does not return plaintext;
+  callers reveal separately.
+- `POST /v1/secrets/{secret_id}:archive` is the reversible soft-retire path and
+  `POST /v1/secrets/{secret_id}:restore` reverses it within the retention
+  window; `DELETE /v1/secrets/{secret_id}` is the guarded hard delete that
+  crypto-shreds the DEK. They are audited as `secret.archived`/`secret.restored`/
+  `secret.deleted`.
+- `POST /v1/secrets/{secret_id}:grant` and `POST /v1/secrets/{secret_id}:revoke`
+  manage cross-agent and group access to a sealed secret (`secret:grant` scope),
+  audited as `secret.grant`/`secret.revoke`. Sealed-plane access is governed by
+  grants plus realm roles in
+  [authorization-and-roles.md](authorization-and-roles.md), not by the open
+  cross-agent read/curate/forget policy engine; secrets are not subject to those
+  verbs. The grantee, target, and audit reason travel in the body.
+- `POST /v1/totp/{secret_id}:code` returns a current TOTP code for an enrolled
+  secret (`totp:code` scope), audited as `totp.code`. The seed itself is
+  high-value sealed material revealed only through `:reveal`; the code is a
+  short-lived value-returning op disabled by `--no-value-tools`. See
+  [totp-2fa.md](totp-2fa.md).
+- `POST /v1/password:generate` returns a generated password under a requested
+  policy (length, character classes, passphrase mode). The policy travels in the
+  body and the generated value in the response only; it is never persisted by
+  this route and never placed in a URL. Storing it as a secret is a separate
+  `POST /v1/secrets` call.
 
 Cross-agent and operator-override mutations over `:forget`, `DELETE`, and the
 `curate`-style `PATCH` routes require an audit reason in the request body and
@@ -382,6 +460,29 @@ GET  /v1/groups/{group_id}/facts
 POST /v1/groups/{group_id}/facts
 ```
 
+Sealed-plane secrets use the same ownership model — every secret is owned by an
+agent or a group, the same `owner ∈ {agent, group}` rule that governs memories
+and facts (there is no separate "shared" scope):
+
+```text
+GET  /v1/agents/{agent_id}/secrets
+POST /v1/agents/{agent_id}/secrets
+GET  /v1/groups/{group_id}/secrets
+POST /v1/groups/{group_id}/secrets
+```
+
+These nested routes are the HTTP surface for operator and group targeting. The
+CLI `--owner-agent <agent>` flag targets `/v1/agents/{agent_id}/secrets` (and
+the agent-scoped `:reveal`/`:grant`/etc. via the bare `/v1/secrets/{secret_id}`
+once the secret is resolved), and `--group <name>` targets
+`/v1/groups/{group_id}/secrets` for group-owned secrets. They mirror the secret
+reference forms `witself://agent/<agent>/secret/<path>/<field>` and
+`witself://group/<group>/secret/<path>/<field>`; the bare
+`witself://secret/<path>/<field>` resolves against the caller's own agent. Using
+`--owner-agent` is an operator/admin or policy-granted action; resolving or
+revealing another agent's or a group's secret requires a grant (`secret:grant`
+issued via `:grant`) or a realm role, never the open cross-agent read policy.
+
 Group membership is managed through nested member routes:
 
 ```text
@@ -398,9 +499,12 @@ evaluates it.
 
 ## Export And Import Routes
 
-Identity export and import are first-class Witself resources, in deliberate
-contrast to Witpass, which forbids plaintext export. The routes back
-`witself export` and `witself import`:
+Identity export and import are first-class Witself resources: the open plane
+(memories and facts) exports as plaintext, the headline durable-state feature.
+The sealed plane is carved out — `POST /v1/exports` never includes secret values
+or TOTP seeds; secret backup is encrypted-only (envelope plus KMS key identity)
+behind an explicit, separate, audited flag, and is never part of the plaintext
+identity export. The routes back `witself export` and `witself import`:
 
 - `POST /v1/exports` starts a structured/plaintext identity export (memories
   with edit history, facts with primary and sensitive flags, and, for
@@ -425,6 +529,11 @@ contrast to Witpass, which forbids plaintext export. The routes back
 - [mcp-tools.md](mcp-tools.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)

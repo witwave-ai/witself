@@ -43,6 +43,10 @@ non-trivial task. It is **cheap by design**: it never requires the embedding
 provider, so it works even when semantic recall is degraded (see
 [memory-model.md](memory-model.md#recall-degradation)).
 
+The digest is **open-plane only.** It is built from primary facts and salient
+memories; sealed-plane material — secrets and TOTP seeds — is **never** part of
+it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
+
 ### Shape
 
 `witself self show` (MCP `witself.self.show`, API `GET /v1/self`) returns:
@@ -114,6 +118,36 @@ embedding provider** — the digest must hold up when embeddings are degraded. T
 exact scoring formula is defined once, canonically, in
 [memory-model.md](memory-model.md); this doc only consumes it. `self show` is
 that selection rendered into a bounded, session-start shape.
+
+## The Sealed-Plane Carve-Out
+
+Hydration, teaching, and the file bridge are **open-plane only.** Witself's
+sealed plane — secrets and TOTP seeds — is **never** surfaced through any of the
+mechanisms in this doc. Concretely:
+
+- **Not in the self-digest.** `self show` (and `witself.self.show` / `GET /v1/self`)
+  draws only on primary facts and salient memories. No secret value, secret field,
+  reference target, or TOTP seed is ever selected into the digest, the `index`
+  summary, or the `elided_hint`.
+- **Not in `digest emit`.** The outbound file bridge renders the same open-plane
+  selection to Markdown. It **never** writes a secret or seed into CLAUDE.md /
+  AGENTS.md / GEMINI.md. You do not put secrets in the files the harness
+  auto-loads; doing so would leak plaintext into an unencrypted, version-controlled
+  surface — the opposite of the sealed plane's contract.
+- **Not from `ingest`.** The inbound file bridge composes only the fact-create and
+  memory-create paths. It never creates secrets or TOTP enrollments from file
+  content. A credential found in a CLAUDE.md/AGENTS.md file is **not** ingested as a
+  secret; promoting a credential into the sealed plane is an explicit
+  `witself secret create` / `witself totp enroll`, never a side effect of hydration.
+
+This is the hydration-layer face of the cross-cutting sealed-plane invariant:
+secrets and TOTP seeds are never embedded, never returned by semantic recall,
+never in the self-digest, and never ingested or plaintext-exported. Sealed-plane
+values are reachable only through the explicit, audited **reveal** path
+(`witself secret reveal` / `witself totp code`). For the full secret data model
+and that reveal ceremony, see [secret-model.md](secret-model.md); for the recall /
+embeddings half of the same invariant, see
+[memory-model.md](memory-model.md#recall-and-embeddings).
 
 ## The Teaching Layer
 
@@ -227,6 +261,11 @@ Rules:
 The point: file-load harnesses get Witself-backed identity for free, and the
 generated block is unambiguously distinguishable from hand-authored notes.
 
+The emitted fragment is **open-plane only.** It contains primary facts and
+salient memories; it never contains a secret value, secret field, or TOTP seed
+(see [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)). Sealed-plane
+material stays out of CLAUDE.md/AGENTS.md entirely.
+
 ## Ingest (the inbound file bridge)
 
 `witself ingest <PATH ...> [--source-label L] [--dry-run] [--json]` parses
@@ -244,6 +283,12 @@ Parser rules:
 - **prose paragraphs → memories.** Free-form paragraphs and non-kv bullets become
   memories (verbatim; `infer=false`, matching `remember`). Dedup/supersede on
   write applies (see [memory-model.md](memory-model.md)).
+- **never secrets.** Ingest only ever creates facts and memories. A credential in
+  a file is **not** promoted into the sealed plane — there is no secret-create or
+  TOTP-enroll path through ingest (see
+  [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)). Move a credential
+  into the sealed plane explicitly with `witself secret create` /
+  `witself totp enroll`.
 - **provenance tag.** Every imported record is tagged
   `source=import:<file>` (overridable with `--source-label`). This keeps
   imported records distinguishable from `self`-authored ones, so the digest and
@@ -291,6 +336,9 @@ read-only matrix.
 - [memory-model.md](memory-model.md) — memory shape, recall, salience scoring,
   dedup/supersede, the `source` provenance field.
 - [facts-model.md](facts-model.md) — deterministic name→value facts and upsert.
+- [secret-model.md](secret-model.md) — the sealed plane (secrets, TOTP seeds) that
+  hydration, `digest emit`, and `ingest` deliberately exclude; the reveal path is
+  the only way sealed-plane values are surfaced.
 - [mcp-tools.md](mcp-tools.md) — the pinned server `instructions` string,
   trigger-laden tool descriptions, and the read-only matrix.
 - [cli-command-surface.md](cli-command-surface.md) — `self show`, `remember`,

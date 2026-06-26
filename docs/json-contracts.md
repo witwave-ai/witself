@@ -11,19 +11,26 @@ development responses before implementation.
   aligned.
 - Make cross-agent and destructive identity mutations explicit and easy to
   audit.
-- Keep identity data readable by default while redacting `sensitive` facts and
-  `sensitive`-flagged memory content in list/scan responses.
+- Keep open-plane identity data readable by default while redacting `sensitive`
+  facts and `sensitive`-flagged memory content in list/scan responses.
+- Make sealed-plane (secret / TOTP) reveal responses explicit and easy to audit,
+  and keep sealed material redacted everywhere else.
 - Prevent memory content, fact values, message bodies/payloads, embedding
-  vectors, and raw tokens from appearing in errors, logs, or audit records.
+  vectors, secret values, TOTP seeds, TOTP codes, and raw tokens from appearing
+  in errors, logs, or audit records.
 - Keep managed-service and self-hosted responses aligned while leaving room for
   a local mock/development backend.
 
-Unlike Witpass, Witself protects the *integrity and authenticity* of identity
-data rather than the *confidentiality* of secret material. There is no reveal
-ceremony: an authorized read of a single record returns its value directly.
-Only `sensitive` facts and `sensitive`-flagged memory content are redacted in
-list/scan output, and that redaction is a PII/display posture, not an
-encryption boundary.
+Witself spans two planes. The **open plane** (memories + facts) protects the
+*integrity and authenticity* of identity data: there is no reveal ceremony, an
+authorized read of a single record returns its value directly, and the only
+`sensitive` facts and `sensitive`-flagged memory content are redacted in
+list/scan output as a PII/display posture, not an encryption boundary. The
+**sealed plane** (secrets + TOTP) protects the *confidentiality* of secret
+material: values are KMS-backed envelope-encrypted, redacted by default, and
+returned only through the explicit, audited reveal / TOTP-code ceremony (see the
+[Sealed-Plane Shapes](#sealed-plane-shapes)). Sealed material is never embedded,
+recalled, in the self-digest, or plaintext-exported.
 
 Once implementation starts, exact JSON Schemas should be generated from the Go
 contract structs used by the shared core. This keeps CLI, MCP, managed API,
@@ -78,8 +85,9 @@ Rules:
   `retryable: false`.
 - `rate_limited` responses should include `details.retry_after` in seconds when
   a wait is known; the HTTP API should also send a `Retry-After` header.
-- Memory content, fact values, message bodies/payloads, embedding vectors, and
-  raw tokens must never appear in `error.message` or `error.details`.
+- Memory content, fact values, message bodies/payloads, embedding vectors, raw
+  tokens, secret values, TOTP seeds, TOTP codes, and wrapped key material must
+  never appear in `error.message` or `error.details`.
 
 ## Error Codes
 
@@ -91,7 +99,7 @@ JSON error codes should align with CLI exit-code categories.
 | `usage_error` | 2 | Invalid command, flag, input, or request shape. |
 | `access_denied` | 3 | Authenticated principal lacks permission, or no policy allows the cross-agent access. |
 | `auth_failed` | 4 | Authentication or local unlock failed. |
-| `not_found` | 5 | Memory, fact, policy, group, message, agent, realm, token, or event not found. |
+| `not_found` | 5 | Memory, fact, policy, group, message, secret, field, grant, agent, realm, token, or event not found. |
 | `conflict` | 6 | Already exists, stale version, fact name/primary collision, or other conflict. |
 | `backend_unavailable` | 7 | Backend or network unavailable. |
 | `rate_limited` | 7 | Transient service-protection or throttle limit; `retryable: true`, honor `retry_after`. |
@@ -146,7 +154,9 @@ when practical, so callers can reconcile a result against `policy test` (see
 Identifiers:
 
 - IDs are strings with stable prefixes: `realm_`, `agent_`, `opr_`, `mem_`,
-  `fact_`, `grp_`, `pol_`, `msg_`, `tok_`, `aud_`.
+  `fact_`, `grp_`, `pol_`, `msg_`, `tok_`, `aud_`, and the sealed-plane prefixes
+  `acct_`, `sec_`, `fld_`, `grt_`, `totp_`, `kek_`, `dek_`, `att_`, `usg_`, and
+  `idem_`.
 - Names are user-visible strings.
 - Local-file mode may generate stable local IDs, but callers should not parse ID
   internals.
@@ -342,6 +352,20 @@ Used by `witself capabilities` and `/v1/capabilities`.
       "supported": false,
       "reason": "not_enabled"
     },
+    "secrets": {
+      "supported": true
+    },
+    "totp": {
+      "supported": true
+    },
+    "client_side_decrypt": {
+      "supported": false,
+      "reason": "byok_post_v0"
+    },
+    "server_side_decrypt": {
+      "supported": true,
+      "kms_provider": "aws-kms"
+    },
     "billing": {
       "supported": false,
       "reason": "not_configured"
@@ -375,6 +399,18 @@ Used by `witself capabilities` and `/v1/capabilities`.
       "soft_limit": 800,
       "hard_limit": 1000,
       "overage_behavior": "throttle"
+    },
+    "stored_secret": {
+      "max": 10000,
+      "used": 482
+    },
+    "secret_read": {
+      "unit": "minute",
+      "included": 1000,
+      "used": 18,
+      "soft_limit": 800,
+      "hard_limit": 1000,
+      "overage_behavior": "throttle"
     }
   }
 }
@@ -390,6 +426,21 @@ Rules:
   tracked in [memory-model.md](memory-model.md).
 - `field_level_encryption` reflects optional encryption of `sensitive` fact
   values; it is a capability, not the default (see [storage.md](storage.md)).
+- `secrets` and `totp` advertise the **sealed plane** (secrets, TOTP). It is a
+  defined v0 slice that may be staged after the open-plane core; an
+  open-plane-only deployment reports `supported: false` with a stable `reason`
+  (see [v0-scope.md](v0-scope.md)).
+- `client_side_decrypt` and `server_side_decrypt` advertise the two sealed-plane
+  custody modes (see [key-hierarchy.md](key-hierarchy.md)). Clients use them to
+  pick the [Secret Reveal Result](#secret-reveal-result) shape they receive
+  rather than probing. Per the v0 crypto subset, remote backends advertise
+  `client_side_decrypt: false` and `server_side_decrypt: true`; client-held
+  decrypt over the wire (BYOK) is post-v0. `server_side_decrypt` carries the
+  active `kms_provider` (`aws-kms` | `gcp-kms` | `azure-key-vault` | `local-dev`)
+  so callers can see which root key custody is in force.
+- Capability responses never include secret values, TOTP seeds, TOTP codes,
+  passphrases, private keys, key material, or wrapped key blobs. The sealed plane
+  is never embedded, recalled, in the self-digest, or plaintext-exported.
 - `limits` keys use the canonical metered-dimension names from
   [billing-and-limits.md](billing-and-limits.md) (e.g. `active_agent`,
   `stored_memory`, `memory_recall`), so they join directly to
@@ -1589,3 +1640,324 @@ Rules:
 - References used in memory `links[]` are validated at write time and re-checked
   at resolve time. Dangling references resolve with `resolved: false` and a
   `not_found`-style reason; they are reported, not silently dropped.
+
+## Sealed-Plane Shapes
+
+The shapes below cover the **sealed plane** (secrets and TOTP), the
+confidentiality counterpart to the open plane's memories and facts. Unlike the
+open plane, sealed material is KMS-backed envelope-encrypted, reveal-gated, and
+**never embedded, never returned by semantic recall, never in the self-digest,
+and never plaintext-exported or ingested** from CLAUDE.md/AGENTS.md. The only
+value-returning paths are the audited reveal / TOTP-code ceremonies. The data
+model and lifecycle live in [secret-model.md](secret-model.md) and
+[totp-2fa.md](totp-2fa.md); the crypto envelope and custody modes live in
+[encryption-model.md](encryption-model.md) and
+[key-hierarchy.md](key-hierarchy.md).
+
+### Secret Summary
+
+Used by `secret list` and `secret scan`. Sensitive field values are never
+included here; this is redacted, inventory-only metadata.
+
+```json
+{
+  "id": "sec_123",
+  "name": "github/builder",
+  "description": "GitHub login for browser-agent",
+  "template": "login",
+  "owner": {
+    "kind": "agent",
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent"
+  },
+  "realm_id": "realm_123",
+  "field_count": 3,
+  "sensitive_field_count": 1,
+  "tags": ["github"],
+  "archived": false,
+  "created_at": "2026-06-26T18:00:00Z",
+  "updated_at": "2026-06-26T18:00:00Z"
+}
+```
+
+Rules:
+
+- `owner.kind` is `agent` or `group`, matching the unified owner model; a
+  group-owned secret uses the [group owner](#common-types) shape. There is no
+  separate `shared` scope.
+- `template` is one of `login`, `api-key`, `ssh-key`, `certificate`, `env`, or
+  `generic`.
+- Summaries carry only inventory metadata. Field values, TOTP seeds, and
+  ciphertext never appear in list/scan output.
+
+### Secret Detail
+
+Used by `secret show`. Sensitive fields are **redacted by default**: a show is
+not a reveal. Returning a sensitive value requires the explicit, audited reveal
+ceremony ([Secret Reveal Result](#secret-reveal-result)).
+
+```json
+{
+  "id": "sec_123",
+  "name": "github/builder",
+  "description": "GitHub login for browser-agent",
+  "template": "login",
+  "owner": {
+    "kind": "agent",
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent"
+  },
+  "realm_id": "realm_123",
+  "fields": [
+    {
+      "name": "username",
+      "sensitive": false,
+      "value": "agent-amy",
+      "value_encoding": "plain",
+      "redacted": false
+    },
+    {
+      "name": "password",
+      "sensitive": true,
+      "value": null,
+      "value_encoding": null,
+      "redacted": true,
+      "value_ref": "witself://secret/github/builder/password"
+    }
+  ],
+  "tags": ["github"],
+  "archived": false,
+  "created_at": "2026-06-26T18:00:00Z",
+  "updated_at": "2026-06-26T18:00:00Z"
+}
+```
+
+Rules:
+
+- Sensitive fields are redacted by default (`value: null`, `redacted: true`).
+  This redaction is an encryption boundary, not the open plane's PII/display
+  posture: the value is ciphertext at rest and is only returned through reveal.
+- Redacted sensitive fields should carry a `value_ref` (a
+  `witself://secret/...` reference) when a stable reference is available, so
+  callers can reveal or inject without copying plaintext.
+- Non-sensitive fields may include `value`. Binary-safe values use
+  `value_encoding: "base64"`.
+- A field may have its own stable id (`fld_` prefix); callers should not parse ID
+  internals.
+
+### Secret Reveal Result
+
+Used only by explicit reveal operations (`secret reveal`,
+`POST /v1/secrets/{secret_id}:reveal`). This is the sealed plane's audited
+value-returning ceremony; the open plane has no equivalent. The shape is
+selected by backend/realm capability ([Capability Result](#capability-result),
+[key-hierarchy.md](key-hierarchy.md)): `server_side_decrypt` returns the
+decrypted value; `client_side_decrypt` returns ciphertext plus the envelope and
+key-unwrap material so the client decrypts locally — no plaintext crosses the
+wire.
+
+Server-mediated shape (`server_side_decrypt`, e.g. managed token-only pods — the
+v0 over-the-wire path):
+
+```json
+{
+  "secret": {
+    "id": "sec_123",
+    "name": "github/builder"
+  },
+  "field": {
+    "name": "password",
+    "sensitive": true,
+    "value": "generated-password",
+    "value_encoding": "plain"
+  },
+  "decrypt_mode": "server_side",
+  "audit_event_id": "aud_123",
+  "expires_at": null
+}
+```
+
+Client-held shape (`client_side_decrypt`, BYOK over the wire): **post-v0** —
+remote v0 backends advertise `client_side_decrypt: false` and do not emit this
+shape (see [key-hierarchy.md](key-hierarchy.md) V0 crypto subset). No plaintext
+`value`; the client unwraps the DEK and AEAD-opens the ciphertext per the
+[key-hierarchy.md](key-hierarchy.md) client-held step list.
+
+```json
+{
+  "secret": {
+    "id": "sec_123",
+    "name": "github/builder"
+  },
+  "field": {
+    "name": "password",
+    "sensitive": true,
+    "value": null,
+    "value_encoding": null
+  },
+  "decrypt_mode": "client_side",
+  "envelope": {
+    "ciphertext": "<base64>",
+    "nonce": "<base64>",
+    "aead_algorithm": "XCHACHA20_POLY1305",
+    "dek_id": "dek_123",
+    "dek_version": 1,
+    "kms_provider": "aws-kms",
+    "aad_context": {
+      "realm_id": "realm_123",
+      "secret_id": "sec_123",
+      "field": "password",
+      "owner_kind": "agent",
+      "domain": "secret-field"
+    }
+  },
+  "key_material": {
+    "kek_id": "kek_123",
+    "wrapped_dek": "<base64>",
+    "wrapped_kek": "<base64>",
+    "kms_provider": "aws-kms",
+    "kms_key_ref": "arn:aws:kms:...",
+    "encryption_context": {
+      "realm_id": "realm_123",
+      "purpose": "realm-kek",
+      "kek_id": "kek_123",
+      "key_version": 1
+    }
+  },
+  "audit_event_id": "aud_123",
+  "expires_at": null
+}
+```
+
+Rules:
+
+- Reveal responses are the only secret responses that contain a sensitive value,
+  and only in the `server_side` shape; the `client_side` shape carries
+  ciphertext and wrapped key material, never plaintext.
+- `decrypt_mode` (`server_side` | `client_side`) tells the client which shape it
+  received and must match the advertised capability.
+- `aead_algorithm` is `XCHACHA20_POLY1305` or `AES_256_GCM`. The canonical
+  `wrapped_dek` and its current wrapping-KEK pointer live on the `secret_deks`
+  row; the envelope references the DEK by `dek_id` and records the **frozen**
+  `dek_version` (see [key-hierarchy.md](key-hierarchy.md)). `key_material` MAY be
+  returned inline (as above) or fetched once via a key-material endpoint keyed by
+  `kek_id` and cached.
+- `aad_context` is reconstructed strictly from stored envelope fields and binds
+  ciphertext to its logical slot (`realm_id`, `secret_id`, field, `owner_kind`,
+  `domain`); the `encryption_context` binds the KMS KEK unwrap to
+  `realm_id` + purpose + `kek_id`/`key_version`.
+- Reveals include `audit_event_id` when audit is available and `expires_at` when
+  the reveal carries a TTL or lease. The server-mediated path emits
+  `secret.reveal` with the `server_side_decrypt` flag (see
+  [audit-retention.md](audit-retention.md)).
+
+### TOTP Code Result
+
+Used by `totp code` and `POST /v1/totp/{secret_id}:code`. An explicit,
+audited sealed-plane value-returning op. The TOTP seed (`totp-seed`) is
+high-value sealed material and is **never** returned by `totp code`.
+
+```json
+{
+  "secret": {
+    "id": "sec_123",
+    "name": "github/builder"
+  },
+  "totp_id": "totp_123",
+  "code": "123456",
+  "digits": 6,
+  "period_seconds": 30,
+  "remaining_seconds": 18,
+  "expires_at": "2026-06-26T18:00:30Z",
+  "decrypt_mode": "server_side",
+  "audit_event_id": "aud_124"
+}
+```
+
+Rules:
+
+- `totp code` returns the current generated code only; the underlying seed is
+  never returned here and is never embedded, recalled, in the self-digest, or
+  plaintext-exported. The seed is revealed only through the more privileged
+  `totp:enroll` path (see [totp-2fa.md](totp-2fa.md)).
+- `decrypt_mode` mirrors the [Secret Reveal Result](#secret-reveal-result)
+  custody modes; the server-mediated path emits `totp.code` with the
+  `server_side_decrypt` flag.
+
+### Password Generate Result
+
+Used by `password generate` and `POST /v1/password:generate`. Generation does not
+touch the sealed store unless the caller also writes the value into a secret.
+
+```json
+{
+  "values": [
+    {
+      "kind": "password",
+      "value": "generated-password",
+      "length": 32
+    }
+  ]
+}
+```
+
+Rules:
+
+- When multiple values are requested, return all generated values in `values`.
+- Generated values are sensitive output: they must not appear in errors, logs,
+  or audit records. Persisting a generated value into a secret follows the normal
+  sealed-plane write path.
+
+### Secret Grant
+
+Used by `secret grant`/`secret revoke` and grant list/show. A grant is the
+explicit, audited, optionally field-scoped and optionally expiring authorization
+that lets a named agent or group access a secret it does not own. Grants are
+authorization checks, not separate crypto boundaries.
+
+```json
+{
+  "id": "grt_123",
+  "realm_id": "realm_123",
+  "secret": {
+    "id": "sec_123",
+    "name": "github/builder"
+  },
+  "owner": {
+    "kind": "agent",
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent"
+  },
+  "grantee": {
+    "kind": "agent",
+    "agent_id": "agent_456",
+    "agent_name": "archivist"
+  },
+  "permissions": ["secret:show", "secret:reveal", "totp:code"],
+  "fields": ["password"],
+  "created_by": {
+    "kind": "operator",
+    "id": "opr_123",
+    "name": "scott"
+  },
+  "reason": "CI runner needs the deploy token",
+  "expires_at": "2026-07-26T18:00:00Z",
+  "created_at": "2026-06-26T18:00:00Z",
+  "updated_at": "2026-06-26T18:00:00Z"
+}
+```
+
+Rules:
+
+- `grantee.kind` is `agent` or `group`. Cross-owner access is **never** a
+  default; it exists only through a grant or a realm role (see
+  [authorization-and-roles.md](authorization-and-roles.md)). Secrets are not
+  subject to the open-plane cross-agent read/curate/forget verbs in
+  [Policy](#policy).
+- `permissions` is a subset of the sealed-plane scopes (`secret:show`,
+  `secret:reveal`, `secret:update`, `totp:code`).
+- `fields` optionally narrows the grant to specific fields; absent or `null`
+  means the whole secret.
+- `expires_at: null` means the grant does not expire. Grant and revoke emit
+  `secret.grant` / `secret.revoke` audit events and carry the `reason` on the
+  audit record.

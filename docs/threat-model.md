@@ -3,25 +3,43 @@
 Status: draft. This document captures the initial security model before
 implementation. It should be reviewed before the first backend release and
 updated whenever the storage, policy, token, embedding-provider, messaging,
-MCP, or deployment model changes.
+encryption/KMS, MCP, or deployment model changes.
 
-Where Witpass, the sibling credential vault, protects the *confidentiality* of
-secret material, Witself protects the *integrity and authenticity* of identity
-data, plus the *confidentiality of PII* it holds. The asset framing, attacker
-goals, and headline risks below are deliberately the inverse of Witpass: the
-adversary's primary aim is not to read a secret but to corrupt, forge, or
-silently erase an agent's self.
+Witself is one product with two planes, and this threat model is deliberately
+**dual posture**. The **open plane** (memories + facts) is identity data: the
+adversary's aim there is not to read a value but to corrupt, forge, or silently
+erase an agent's self, so the open-plane posture centers on *integrity and
+authenticity*, plus the *confidentiality of PII* the open plane holds. The
+**sealed plane** (secrets + TOTP) is credential material: the adversary's aim
+there is to read or exfiltrate a value, so the sealed-plane posture centers on
+*confidentiality* — envelope encryption, reveal-gating, and containing
+KMS/role/tenant blast radius. The two postures are opposite-facing but coexist
+in one asset list, one attacker model, and one set of controls below. The split
+is the master decision; see [requirements.md](requirements.md),
+[encryption-model.md](encryption-model.md), and
+[key-hierarchy.md](key-hierarchy.md).
+
+Sealed-plane invariant (stated wherever secrets appear in this doc): secret
+values and TOTP seeds are **never embedded, never returned by semantic recall,
+never in the self-digest, never plaintext-exported, and never ingested** from
+CLAUDE.md/AGENTS.md, and are released only through the audited, reveal-gated
+sealed-plane operations.
 
 ## Security Goal
 
-Witself stores the self of AI agents and the humans who operate them:
-**memories**, **facts**, cross-agent **policy**, security **groups**, and
-inter-agent **messages**. It should let agents record, recall, and exchange
-identity data so that what an agent reads back is what an authorized writer
-actually wrote, attributed to who actually wrote it, and still present unless an
-authorized actor removed it.
+Witself stores the self of AI agents and the humans who operate them across two
+planes. The **open plane** holds **memories**, **facts**, cross-agent
+**policy**, security **groups**, and inter-agent **messages**. The **sealed
+plane** holds **secrets** (passwords, API keys, private keys, env values) and
+**TOTP** enrollments. It should let agents record, recall, and exchange identity
+data so that what an agent reads back is what an authorized writer actually
+wrote, attributed to who actually wrote it, and still present unless an
+authorized actor removed it — and it should let agents *use* credentials without
+those credentials landing in prompt context, memory, logs, exports, or ordinary
+config.
 
-The product's first duty is to keep identity data trustworthy:
+The product's first duty for the open plane is to keep identity data
+trustworthy:
 
 - A memory or fact reads back exactly as an authorized writer left it
   (integrity).
@@ -32,6 +50,24 @@ The product's first duty is to keep identity data trustworthy:
 - PII carried in memories and facts (the `sensitive` marker) is redacted by
   default, least-privilege read, and never leaked to logs, metrics, audit, or
   the embedding provider beyond what recall requires (PII confidentiality).
+
+The product's first duty for the sealed plane is to keep credential material
+secret:
+
+- Secret field values and TOTP seeds are stored only as ciphertext under
+  envelope encryption (`CMK → per-realm KEK → per-secret/field DEK`) and are
+  never an ordinary database column (confidentiality at rest; see
+  [encryption-model.md](encryption-model.md),
+  [key-hierarchy.md](key-hierarchy.md)).
+- Plaintext is released only through the explicit, audited, reveal-gated
+  operations `witself secret reveal` and `witself totp code` — never by recall,
+  digest, plaintext export, ingest, or a generic decrypt endpoint (reveal
+  discipline / sealed-plane carve-out).
+- The set of components that ever hold sealed plaintext (the trusted computing
+  base) stays minimal: client-side decrypt is the default; server-side decrypt
+  is a narrow, capability-gated, audited exception (TCB containment).
+- Loss of KMS key material crypto-shreds sealed secret values only; it must not
+  affect the open plane (containment of crypto-shred).
 
 The product should assume attackers will try to:
 
@@ -47,12 +83,24 @@ The product should assume attackers will try to:
   logs, audit, metrics, support bundles, or the embedding provider.
 - Misconfigure policy or group membership so default-deny silently becomes
   default-allow.
+- Steal stored sealed-plane secret values, TOTP seeds, or generated TOTP codes
+  from storage, snapshots, logs, audit, metrics, support tickets, config,
+  Terraform state, Helm values, CI artifacts, or crash dumps.
+- Trick an agent into revealing an unrelated secret, or abuse a token, grant, or
+  realm role to reveal another agent's or group's secret.
+- Compromise KMS, the deployment KMS role, or the `server_side_decrypt` path to
+  unwrap reachable per-realm KEKs and read sealed material across tenants.
+- Abuse the reveal/TOTP-code operations at volume, or smuggle sealed plaintext
+  out through a non-reveal channel (recall, digest, export, ingest).
 - Compromise self-hosted deployment configuration.
 - Abuse managed-service billing, support, or account flows.
 
 ## Assets
 
-High-value assets, ordered by Witself's threat framing:
+High-value assets span both planes. Open-plane assets are valued for integrity
+and authenticity; sealed-plane assets are valued for confidentiality.
+
+Open-plane (identity) high-value assets:
 
 - **Memory and fact integrity** — the content, kind, tags, salience, links,
   `primary` flags, and versioned edit history of every memory and fact. The
@@ -66,15 +114,36 @@ High-value assets, ordered by Witself's threat framing:
 - **Identity availability** — memories and facts staying present and
   recallable; tombstones being reversible within the retention window; the
   embedding index supporting semantic recall.
-- **PII confidentiality** — values of `sensitive` memories and facts (the only
-  confidentiality asset of note), plus PII that may sit in non-marked content.
+- **PII confidentiality** — values of `sensitive` memories and facts, plus PII
+  that may sit in non-marked content. (The open plane's only confidentiality
+  asset; sealed-plane confidentiality is covered below.)
+
+Sealed-plane (credential) high-value assets:
+
+- **Sealed secret field values** — passwords, API keys, private keys, recovery
+  codes, database URLs, access tokens, and other secret-template fields. Stored
+  only as ciphertext; plaintext exists only transiently during an authorized
+  reveal or runtime injection.
+- **TOTP seeds and recovery material** — the high-value sealed root material
+  behind every generated code; protected far more strongly than a code itself.
+- **Generated TOTP codes** — short-lived but exfiltration-worthy during their
+  validity window.
+- **Encryption keys and key material** — per-realm KEKs (`kek_...`),
+  per-secret/field DEKs (`dek_...`), the CMK and KMS credentials/grants, and
+  any self-hosted/BYOK local realm passphrase. Compromise of these breaks
+  sealed-plane confidentiality at scale.
 
 Sensitive supporting assets:
 
 - Raw agent and operator tokens.
 - Cross-agent **policy** objects and **security-group** membership — the
-  authorization graph. Corrupting these is equivalent to corrupting access
-  control.
+  open-plane authorization graph. Corrupting these is equivalent to corrupting
+  access control.
+- Sealed-plane **secret grants** (`grt_...`) and **realm roles** — the
+  sealed-plane authorization graph. The sealed plane has no Policy engine;
+  cross-agent and group-owned secret reach is grants + realm roles only (see
+  [authorization-and-roles.md](authorization-and-roles.md)). Over-broadening a
+  grant or role is a credential-access escalation.
 - Audit records (the integrity ledger for identity changes).
 - Embedding vectors and the embedding-provider request stream (a data-egress
   channel; see [Embedding-Provider Risks](#embedding-provider-risks)).
@@ -82,16 +151,23 @@ Sensitive supporting assets:
 
 Important non-secret assets:
 
-- Realm, agent, memory, fact, group, and message metadata.
+- Realm, account, agent, memory, fact, group, and message metadata.
 - Ordinary readable facts and non-`sensitive` memory content. These are
   identity data, not secrets, but their integrity still matters.
+- Secret *metadata* — names, paths, templates, field names, issuer/account
+  labels, and non-secret fields such as usernames and URLs. Sealed-plane
+  metadata is not encrypted like field values but is still sensitive and must
+  not leak into logs, metrics labels, or audit content.
 - Usage, billing, and support-ticket metadata.
 - Terraform and Helm configuration that reveals infrastructure shape.
 
-Identity data is not a secret payload, but its integrity and authenticity are
-the product. Non-`sensitive` content is freely readable to authorized callers;
-its protection is against forgery, poisoning, and silent deletion, not against
-disclosure.
+The two planes have opposite default disclosure stances. Open-plane identity
+data is not a secret payload: non-`sensitive` content is freely readable to
+authorized callers, and its protection is against forgery, poisoning, and silent
+deletion, not disclosure. Sealed-plane secret values are the opposite —
+default-confidential, redacted everywhere, and released only through the
+reveal-gated ceremony — and they are never embedded, recalled, digested,
+plaintext-exported, or ingested.
 
 ## Principals
 
@@ -122,9 +198,21 @@ Trust boundaries:
 - `witself` CLI to managed or self-hosted `witself-server`.
 - MCP client to `witself mcp serve`.
 - `witself-server` to storage adapters (Postgres with pgvector, object/blob).
+- `witself-server` to the KMS or key-management provider (`aws-kms`, `gcp-kms`,
+  `azure-key-vault`, `local-dev`) — present only when the sealed plane is
+  enabled; the boundary that unwraps per-realm KEKs and thus gates all
+  sealed-plane confidentiality.
+- Client (CLI / local `mcp serve` / `witself run`) to its held or derived key
+  material for client-side decrypt — the default sealed-plane decrypt boundary,
+  where plaintext appears in the trusted client runtime and not on the server.
+- `witself-server` to a managed token-only ephemeral pod over the
+  `server_side_decrypt` path — the structural exception where sealed plaintext
+  appears transiently inside `witself-server` and its KMS-capable deployment IAM
+  identity (see [encryption-model.md](encryption-model.md),
+  [key-hierarchy.md](key-hierarchy.md)).
 - `witself-server` to the embedding provider (`voyage`, `openai`,
   `local-dev`) — a network egress boundary that carries memory content out of
-  the realm.
+  the realm. Sealed-plane material never crosses this boundary (carve-out).
 - One named agent to another named agent, through cross-agent policy,
   group-scoped shared records, and identity references (`witself://`).
 - One named agent to another, through **inter-agent messaging** — message
@@ -141,8 +229,13 @@ re-derived from the token and never trusted from input, (b) PII is not
 accidentally serialized into logs, audit events, support bundles, CI artifacts,
 Helm values, Terraform state examples, metrics, or model-visible AI output, and
 (c) cross-agent and message-driven writes are attributed and policy-checked
-below the frontend. The agent-to-agent and embedding-provider boundaries are
-new relative to Witpass and carry the highest-novelty risk.
+below the frontend, and (d) sealed plaintext crosses the fewest boundaries
+possible — never the embedding-provider, export, digest, or ingest boundaries,
+and across the KMS/server-side-decrypt boundary only under an audited,
+capability-gated reveal. The agent-to-agent, embedding-provider, and
+server-side-decrypt boundaries carry the highest-novelty risk: the first two are
+identity-integrity and PII-egress boundaries, the last is a sealed-plane
+confidentiality boundary that transiently expands the plaintext TCB.
 
 ## Attacker Model
 
@@ -165,6 +258,20 @@ Witself should consider:
   misconfiguration).
 - An agent abusing `forget`/`delete` (its own or, under policy, a peer's) to
   destroy identity — denial of self.
+- An agent or peer with access to one secret attempting to reach another agent's
+  or group's secret, or escalating a narrow grant (one field) into broad
+  sealed-plane access.
+- A prompt-injected agent coaxed into revealing an unrelated secret or TOTP
+  code, or into overusing reveal/code because the tools are easy to call.
+- An attacker trying to exfiltrate sealed plaintext through a non-reveal
+  channel — semantic recall, the self-digest, plaintext export, or
+  CLAUDE.md/AGENTS.md ingest — bypassing the reveal ceremony.
+- A compromised `witself-server`, deployment KMS role, or `server_side_decrypt`
+  path unwrapping any reachable per-realm KEK; under the v0 single-CMK +
+  single-deployment-role model this is a tenant-wide blast radius (see
+  [key-hierarchy.md](key-hierarchy.md)).
+- An attacker with a database snapshot or object-storage bucket holding
+  sealed-plane ciphertext, attempting offline decryption without KMS access.
 - A malicious or buggy MCP client.
 - A network attacker between CLI and backend.
 - A fake or malicious login page attempting to trick an operator during setup.
@@ -172,9 +279,10 @@ Witself should consider:
 - A compromised database snapshot or object-storage bucket holding PII.
 - A compromised or malicious **embedding provider**, or interception of the
   embedding request stream, exfiltrating memory content.
-- A support operator with excessive access to identity data.
-- A self-hosted operator misconfiguring Helm, Terraform, IAM, network policy,
-  or the embedding-provider credential.
+- A support operator with excessive access to identity data or to sealed
+  material.
+- A self-hosted operator misconfiguring Helm, Terraform, IAM, KMS, network
+  policy, or the embedding-provider credential.
 - A CI or release pipeline attempting to publish artifacts containing PII or
   identity content.
 
@@ -184,6 +292,14 @@ minimize cross-agent and message-driven write scope, make destructive actions
 soft and reversible by default, attribute every mutation, and surface
 poisoning-relevant provenance (`source`, contributing agent, deciding policy,
 edit history) so corruption is detectable and recoverable.
+
+Symmetrically, Witself cannot fully protect a sealed secret after it is
+intentionally revealed to an agent, process, browser, or human. For the sealed
+plane the system should minimize reveal scope, prefer runtime injection
+(`witself run`) and reference resolution over printing values, keep plaintext
+out of every persistent channel, audit every reveal/code/server-side-decrypt
+event, and contain the blast radius of a KMS/role compromise so it does not
+extend to the open plane.
 
 ## Core Assumptions
 
@@ -206,7 +322,24 @@ edit history) so corruption is detectable and recoverable.
 - Memory content, fact values, and message bodies/payloads are ordinary
   identity data, not encrypted secrets; only `sensitive` records are redacted
   by default, and field-level encryption of `sensitive` facts is an optional
-  capability, not the security boundary.
+  capability, not the security boundary. A credential belongs in the sealed
+  plane (a secret), not a sensitive fact (see [facts-model.md](facts-model.md)).
+- Sealed-plane secret values and TOTP seeds are encrypted at rest under
+  envelope encryption and are never ordinary database columns; Base64 is only a
+  binary-safe encoding, not a security boundary.
+- KMS is a required dependency only when the sealed plane is enabled; an
+  open-plane-only deployment does not need it. Loss of KMS key material may make
+  some or all sealed secret values unrecoverable (crypto-shred) and affects the
+  sealed plane only — never the open plane (see
+  [encryption-model.md](encryption-model.md),
+  [backup-and-recovery.md](backup-and-recovery.md)).
+- Client-side decrypt is the default for clients that can hold key material;
+  server-side decrypt is a narrow, capability-advertised, policy-gated, audited
+  exception (the everyday path only for managed token-only pods), and is always
+  distinguishable in API/CLI/MCP/audit from client-side decrypt.
+- Sealed-plane plaintext is released only by the reveal-gated operations and is
+  never embedded, recalled, placed in the self-digest, plaintext-exported, or
+  ingested.
 - Identity data sent to the embedding provider for recall leaves the realm's
   storage boundary; provider choice and data egress are an explicit, capability
   -gated decision.
@@ -244,11 +377,34 @@ Required controls:
   ack state, rate limits on send and delivery, and audited send/deliver/read.
   Receiving runtimes must treat message bodies/payloads as untrusted input.
 - Redaction by default for `sensitive` memories and facts in list/scan output;
-  an authorized read of a single record returns the value, with no
-  secret-style reveal ceremony.
+  an authorized read of a single open-plane record returns the value, with no
+  secret-style reveal ceremony (the reveal ceremony is sealed-plane only).
+- Envelope encryption for all sealed-plane field values and TOTP seeds
+  (`CMK → per-realm KEK → per-secret/field DEK`, `XCHACHA20_POLY1305` or
+  `AES_256_GCM`), with plaintext never written to an ordinary column (see
+  [encryption-model.md](encryption-model.md), [key-hierarchy.md](key-hierarchy.md)).
+- Reveal-gated value release for the sealed plane: `secret:reveal` /
+  `totp:code` are the only value-returning operations, each audited
+  (`secret.reveal`, `totp.code`), with no generic decrypt endpoint; the
+  `server_side_decrypt` flag distinguishes server-mediated reveals.
+- Sealed-plane carve-out enforced at the data layer: secret values and TOTP
+  seeds are never embedded, recalled, placed in the self-digest,
+  plaintext-exported, or ingested (see [memory-model.md](memory-model.md),
+  [context-hydration.md](context-hydration.md)).
+- Per-agent secret isolation with cross-agent/group reach only through explicit
+  grants (`secret:grant`) and realm roles — no open-plane Policy engine governs
+  secrets (see [authorization-and-roles.md](authorization-and-roles.md),
+  [access-policy.md](access-policy.md)).
+- Minimal sealed-plane TCB: client-side decrypt default; server-side decrypt
+  narrow, capability-gated, audited, and reserved for managed token-only pods
+  and explicitly enabled workflows.
+- Encrypted-only sealed-plane backup (envelope + KMS key identity, never
+  plaintext); sealed material excluded from the plaintext identity export and
+  from any digest/ingest path (see [backup-and-recovery.md](backup-and-recovery.md)).
 - Audit records that never contain memory content, fact values, message bodies
-  or payloads, embedding vectors, raw tokens, or raw payment details; the same
-  rule applies to errors, logs, and JSON responses.
+  or payloads, embedding vectors, sealed secret values, TOTP seeds, generated
+  TOTP codes, key material/passphrases, raw tokens, or raw payment details; the
+  same rule applies to errors, logs, and JSON responses.
 - Embedding-provider egress controls: capability-gated provider/model
   selection, the ability to run `local-dev` or disable semantic recall, and a
   documented degradation path to keyword/tag/time recall (see
@@ -258,37 +414,70 @@ Required controls:
 - Strict config/log redaction for server, CLI, Helm, Terraform, and CI.
 - Strict metrics, dashboard, and alert redaction with low-cardinality
   route-template labels that do not include raw paths, query strings, user
-  input, memory/fact content, fact names, message bodies, embedding vectors, or
-  provider credentials.
+  input, memory/fact content, fact names, message bodies, embedding vectors,
+  secret/field names or paths, TOTP issuer labels, key identifiers, or provider
+  credentials.
 - CLI-initiated operator auth that avoids raw password collection and supports
   device-code fallback for headless environments.
 
-## Identity-Data Posture
+## Two-Plane Security Posture
 
-Witself does not use a hybrid encryption pillar. Its posture centers on
-integrity, attribution, and reversibility rather than confidentiality of a
-secret payload:
+Witself runs a two-tier posture, one per plane. The open plane centers on
+integrity, attribution, and reversibility; the sealed plane centers on
+confidentiality through envelope encryption and reveal-gating. The encryption
+pillar is real but scoped to the sealed plane — it is not a property of identity
+data.
+
+Open-plane (identity) posture:
 
 - Identity data is stored with ordinary data-at-rest protection (RDS/disk
-  encryption). KMS is optional and demoted, not a core dependency (see
-  [storage.md](storage.md)).
+  encryption), semantically indexed, recallable, and plaintext-exportable. It
+  has no envelope encryption, no reveal ceremony, and no KMS dependency (see
+  [storage.md](storage.md), [encryption-model.md](encryption-model.md)).
 - Optional field-level encryption of `sensitive` fact values is a capability,
   not the default and not the authorization boundary.
 - The trust guarantees are: authenticated, attributed writes; default-deny
   cross-agent authorization; reversible-by-default destruction; and a complete,
   redacted audit trail of who changed what under which policy.
 
+Sealed-plane (credential) posture:
+
+- Secret field values and TOTP seeds are stored only as ciphertext under the
+  `CMK → per-realm KEK → per-secret/field DEK` envelope; the wrapping keys live
+  behind KMS (or a local key-management boundary for self-hosted/BYOK). KMS is
+  a required dependency when the sealed plane is enabled (see
+  [encryption-model.md](encryption-model.md),
+  [key-hierarchy.md](key-hierarchy.md)).
+- Client-side decrypt is the structurally enforced default where a client can
+  hold key material; the managed token-only ephemeral pod runs reveal/TOTP over
+  the capability-gated `server_side_decrypt` path, which transiently puts
+  plaintext and the DEK inside `witself-server` plus its KMS-capable deployment
+  IAM identity.
+- Under the v0 single-CMK + single-deployment-role model, a compromised
+  server/role can unwrap any reachable per-realm KEK — a **tenant-wide blast
+  radius**. Per-realm *cryptographic* isolation against that role
+  (least-privilege per-realm KMS grants or per-realm CMKs) is deferred; v0
+  isolation against ordinary co-tenants is authorization + `realm_id` query
+  scoping. This is the load-bearing residual sealed-plane risk; see
+  [key-hierarchy.md](key-hierarchy.md).
+- Loss of KMS key material crypto-shreds sealed secret values only, never the
+  open plane; there is no v0 managed break-glass plaintext decrypt path.
+
 Open posture details that need implementation design:
 
 - Tamper-evidence for audit and edit history (for example append-only or hash
-  -chained records) so that integrity claims survive a compromised database
-  snapshot.
+  -chained records) so that open-plane integrity claims survive a compromised
+  database snapshot.
 - Whether group-scoped shared records need a distinct integrity/attribution
   treatment from single-agent records.
 - Re-embedding and re-index behavior on embedding-provider/model change, and
   how degraded recall is surfaced.
 - Whether self-hosted and managed deployments share identical or configurable
   field-level-encryption and audit-integrity options.
+- Whether to promote per-realm cryptographic isolation (per-realm KMS grants or
+  CMKs) from deferred to required, given the expanded TCB of server-side
+  decrypt and the tenant-wide blast radius (tracked in
+  [key-hierarchy.md](key-hierarchy.md)).
 
 ## AI-Specific Risks
 
@@ -324,9 +513,22 @@ write. The highest-severity risks are AI-specific:
 - **Provider data egress.** Memory content is sent to an external embedding
   provider during recall/write; an agent or operator may not realize identity
   content leaves the realm (see
-  [Embedding-Provider Risks](#embedding-provider-risks)).
+  [Embedding-Provider Risks](#embedding-provider-risks)). Sealed-plane material
+  never takes this path.
 - **Identity confusion.** An agent confuses its own identity, a peer's, or a
   group's, writing to or reading from the wrong owner.
+- **Coaxed secret reveal.** Prompt injection drives an agent to reveal an
+  unrelated secret or TOTP code, or to call reveal/code repeatedly because the
+  tools are easy to invoke. Sealed-plane only; mitigated by reveal-gating,
+  per-agent isolation, grant scoping, audit, and `--no-value-tools`.
+- **Secret leakage into model-visible context.** Tool output, transcripts, or
+  model logs capture a revealed secret value or TOTP seed. Mitigated by
+  preferring `witself run`/reference resolution over printing, masking injected
+  values, and keeping plaintext out of every persistent channel.
+- **Carve-out evasion.** An injected instruction tries to move sealed material
+  into a readable channel — "store this API key as a memory", "export it",
+  "put it in the digest". Structurally blocked: secrets are never embedded,
+  recalled, digested, plaintext-exported, or ingested.
 
 Mitigations:
 
@@ -342,24 +544,31 @@ Mitigations:
   `--dry-run`, and confirmation on destructive/cross-agent actions.
 - `policy test` to verify access decisions before relying on them.
 - Local-first MCP default and `mcp serve --read-only` for inspection-only
-  deployments. (No reveal-style or `--no-value-tools` framing — Witself has no
-  reveal ceremony.)
+  deployments. `mcp serve --no-value-tools` disables the value-returning
+  sealed-plane tools (`secret.reveal`, `totp.code`, value-returning
+  `reference.resolve`); the open plane has no reveal and is unaffected by it.
+- Reveal-gating for the sealed plane: `secret reveal` / `totp code` are the
+  only value-returning operations, each audited; prefer `witself run` and
+  reference resolution over printing secrets.
 - Capability-gated embedding provider with `local-dev` and recall-disable
   options; degradation to keyword/tag/time recall is deterministic and
-  surfaced.
-- `sensitive` redaction by default in inventory/scan; `sensitive` export warns,
-  requires `--reason`, and is least-privilege.
-- Per-agent tokens, default isolation, rate limits on messaging, and an
-  operator-visible, redacted audit trail.
+  surfaced. Sealed material is never embedded or recalled.
+- `sensitive` redaction by default in inventory/scan; `sensitive` open-plane
+  export warns, requires `--reason`, and is least-privilege; sealed secret
+  values are excluded from the plaintext export entirely.
+- Per-agent tokens, default isolation, rate limits on messaging and on
+  reveal/code, and an operator-visible, redacted audit trail.
 
 See [inter-agent-messaging.md](inter-agent-messaging.md),
 [memory-model.md](memory-model.md), and [access-policy.md](access-policy.md) for
-the detailed surface-level controls.
+the detailed open-plane surface controls, and
+[secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md), and
+[encryption-model.md](encryption-model.md) for the sealed-plane ones.
 
 ## Embedding-Provider Risks
 
-Semantic recall is core to Witself and introduces a data-egress boundary that
-has no Witpass analogue:
+Semantic recall is core to the open plane and introduces a data-egress boundary
+that the sealed plane never touches (secrets are never embedded or recalled):
 
 - Memory content (and optionally tags/kind) is sent to an embedding provider at
   write time and at recall time. With `voyage` or `openai`, that content leaves
@@ -412,6 +621,45 @@ Mitigations:
 - Operator override is audited like any agent action and subject to the same
   `--reason` requirements on destructive/cross-agent actions.
 
+## Sealed-Plane Confidentiality Risks
+
+The sealed plane (secrets + TOTP) carries confidentiality risks the open plane
+does not. These are the inverse of the embedding/poisoning risks above:
+
+- **Reveal abuse.** The audited reveal/code operations are the legitimate
+  plaintext channel; an attacker (or coaxed agent) overuses them, or uses a
+  grant beyond its intent. Mitigated by `secret:reveal`/`totp:code` gating,
+  per-field grant narrowing, realm-role scoping, rate limits, and audit.
+- **KMS / deployment-role compromise.** Whoever can call KMS as the deployment
+  identity can unwrap reachable per-realm KEKs. Under v0's single-CMK +
+  single-role model this is a tenant-wide blast radius; per-realm cryptographic
+  isolation is deferred (see [key-hierarchy.md](key-hierarchy.md)).
+- **Server-side-decrypt TCB expansion.** For managed token-only pods the server
+  transiently holds the DEK and plaintext. The control is to keep that path
+  narrow, capability-gated, audited (`server_side_decrypt` flag), and never
+  persisting/logging plaintext — not to pretend the server never sees it.
+- **Tenant blast radius.** Sealed material is isolated against ordinary
+  co-tenants by authorization + `realm_id` query scoping, not by per-tenant
+  cryptography in v0; a backend bug or compromised role crosses that line.
+- **Offline ciphertext theft.** A stolen database snapshot or object-storage
+  bucket yields only ciphertext; it is useless without KMS access, which is the
+  point of the envelope.
+- **Crypto-shred.** Loss of KMS key material renders sealed secret values
+  permanently unrecoverable. This is contained to the sealed plane and never
+  affects open-plane memories/facts (see
+  [backup-and-recovery.md](backup-and-recovery.md)).
+- **Carve-out leakage.** Any path that would embed, recall, digest,
+  plaintext-export, or ingest a secret value defeats the whole model; the
+  carve-out is enforced at the data layer, not by convention (see
+  [memory-model.md](memory-model.md),
+  [context-hydration.md](context-hydration.md)).
+
+Mitigations are summarized in [Required Controls](#required-controls) and
+detailed in [encryption-model.md](encryption-model.md),
+[key-hierarchy.md](key-hierarchy.md), [secret-model.md](secret-model.md),
+[totp-2fa.md](totp-2fa.md), and
+[authorization-and-roles.md](authorization-and-roles.md).
+
 ## Self-Hosted Risks
 
 Self-hosted deployments add infrastructure risks:
@@ -422,11 +670,15 @@ Self-hosted deployments add infrastructure risks:
 - Public ingress without TLS, exposing the identity API and the provider egress
   path.
 - Weak database/backup controls over Postgres holding memories, facts, and
-  PII, plus pgvector embeddings.
+  PII, plus pgvector embeddings, and over sealed-plane ciphertext in `secrets`,
+  `secret_fields`, `totp_enrollments`, `secret_deks`, and `realm_keys`.
+- Misconfigured KMS keys, over-broad KMS grants, or a KMS key/grant deletion
+  that crypto-shreds sealed secret values.
 - Logs shipped to third-party systems without redaction, leaking PII or
   identity content.
 - Metrics or alert labels that leak memory/fact content, fact names, message
-  bodies, customer metadata, or arbitrary user input.
+  bodies, secret/field names or paths, key identifiers, customer metadata, or
+  arbitrary user input.
 - Misdirected embedding egress (wrong provider endpoint) sending identity
   content to an unintended destination.
 
@@ -434,7 +686,8 @@ Mitigations:
 
 - Terraform state and secret policy.
 - Helm values that reference existing Kubernetes Secrets instead of embedding
-  raw database, provider, or token credentials.
+  raw database, provider, token, or KMS credentials; least-privilege KMS
+  grants/workload identity for the sealed plane when enabled.
 - Workload identity support.
 - NetworkPolicy templates, including egress controls toward the embedding
   provider.
@@ -442,8 +695,10 @@ Mitigations:
 - Prometheus metrics that use route templates and low-cardinality labels with
   no identity content.
 - Production self-host support only after migrations, backups (including vector
-  data), re-index guidance, and operational guidance are real (see
-  [self-hosting.md](self-hosting.md), [helm-chart.md](helm-chart.md),
+  data and encrypted sealed-plane material), re-index guidance, KMS
+  provisioning and key-rotation guidance for the sealed plane, and operational
+  guidance are real (see [self-hosting.md](self-hosting.md),
+  [helm-chart.md](helm-chart.md),
   [terraform-infrastructure.md](terraform-infrastructure.md), and
   [self-host-support.md](self-host-support.md)).
 
@@ -459,12 +714,18 @@ Initial non-goals:
 - Detecting whether authorized-but-false content is *true* — Witself protects
   integrity (it reads back as written, attributed) and provenance, not factual
   accuracy of what an authorized writer chose to store.
-- Encrypting all identity data as a secret payload; Witself is an identity store
-  with PII-aware redaction, not a secrets vault. (Contrast Witpass, which
-  encrypts secret values and forbids plaintext export; Witself embraces
-  plaintext identity export.)
-- Replacing cloud-provider IAM, database backup, embedding-provider security, or
-  Kubernetes security responsibilities in self-hosted deployments.
+- Encrypting *open-plane* identity data as a secret payload; the open plane is
+  an identity store with PII-aware redaction and embraces plaintext identity
+  export. Only the sealed plane (secrets + TOTP) is envelope-encrypted and
+  forbidden from plaintext export — the two planes keep opposite disclosure
+  stances by design.
+- Protecting a sealed secret after an authorized actor reveals it and copies it
+  elsewhere; the control is minimizing reveal scope and preferring runtime
+  injection, not pursuing the secret after release.
+- A v0 managed break-glass plaintext-decrypt path, or recovery of sealed secret
+  values after KMS key material is lost (crypto-shred).
+- Replacing cloud-provider IAM, KMS, database backup, embedding-provider
+  security, or Kubernetes security responsibilities in self-hosted deployments.
 - Preventing identity-content egress to a third-party embedding provider an
   operator deliberately selects; the control is provider choice and
   `local-dev`/disable, not interception of an enabled provider.
@@ -485,6 +746,14 @@ Revisit this threat model when:
 - The token model changes, or actor/sender derivation is altered.
 - Soft-delete, retention-window, or hard-delete behavior changes.
 - Identity export/import behavior or `sensitive` handling changes.
+- Server-side decrypt behavior, the capability switch, or the client/server
+  decrypt split changes.
+- The key hierarchy, KMS provider model, per-realm KEK/DEK scheme, or
+  per-realm cryptographic-isolation stance changes.
+- Secret grants, realm roles, or the sealed-plane authorization model change.
+- New 2FA modalities (SMS, email, push, passkeys, hardware keys) are added.
+- The sealed-plane carve-out (embed/recall/digest/export/ingest exclusions) is
+  modified in any direction.
 - Payment or crypto payment providers are integrated.
 - The Helm chart or Terraform modules become production-supported.
 - The internal support/admin (or AI support/admin) path is designed.
@@ -495,8 +764,16 @@ Revisit this threat model when:
 - [api-contract.md](api-contract.md)
 - [observability-and-operations.md](observability-and-operations.md)
 - [access-policy.md](access-policy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [data-model.md](data-model.md)
+- [context-hydration.md](context-hydration.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [storage.md](storage.md)

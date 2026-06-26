@@ -26,9 +26,12 @@ secrets, networking, migrations, and upgrade policy.
 Terraform should live alongside that chart for operators who want Witself to
 provision the cloud substrate. Terraform owns Kubernetes, the Postgres database
 (with the pgvector extension), object/blob storage, workload identity,
-networking, and the outputs the Helm chart consumes. Unlike Witpass, Witself's
-Terraform does not provision a KMS key boundary as a core dependency; KMS is
-optional and demoted (see [storage.md](storage.md)).
+networking, and the outputs the Helm chart consumes. Witself runs two planes:
+the **open plane** (memories + facts) and the **sealed plane** (secrets + TOTP).
+For deployments that enable the sealed plane, Terraform also provisions a KMS key
+boundary for envelope encryption; for an open-plane-only deployment that boundary
+is not required (see [storage.md](storage.md) and
+[key-hierarchy.md](key-hierarchy.md)).
 
 ## Support Levels
 
@@ -38,11 +41,13 @@ Initial support should be explicit:
 |---|---|
 | Local development | Runs on a laptop or CI using the local development adapter with the `local-dev` embedding provider. Community or best-effort only. Not production. |
 | Self-host preview | Runs `witself-server` with production-shaped config, Postgres with pgvector, and a configured embedding provider. Best-effort issue triage, no SLA. |
-| Production self-hosted | Paid or contracted support only after documented deployment, migrations, backups (including vector data), observability, disaster recovery, and upgrade path exist. |
+| Production self-hosted | Paid or contracted support only after documented deployment, migrations, backups (including vector data, and — for the sealed plane — KMS key identity and rotation metadata), observability, disaster recovery, and upgrade path exist. |
 
 Witself should not claim production self-host support until migrations,
 backup/restore, disaster recovery, observability, embedding re-index guidance,
-and operational guidance are real.
+and operational guidance are real. Deployments that enable the sealed plane also
+need KMS key rotation and crypto-shred posture documented before claiming
+production support.
 
 Managed Witself Cloud remains the default supported product. The self-hosted
 support model is tracked in [self-host-support.md](self-host-support.md).
@@ -57,9 +62,14 @@ flowchart LR
   Core --> Policy["Policy engine"]
   Core --> Audit["Audit sink"]
   Core --> Store["Postgres + pgvector"]
-  Core --> Embed["Embedding provider"]
+  Core --> Embed["Embedding provider (open plane)"]
   Core --> Blob["Object/blob storage"]
+  Core -. "sealed plane only" .-> KMS["KMS-compatible key boundary"]
 ```
+
+The embedding provider serves the open plane (memories + facts). The KMS key
+boundary serves the **sealed plane** (secrets + TOTP) and is wired only when that
+plane is enabled; an open-plane-only deployment omits it.
 
 The public API contract should be the same for managed and self-hosted
 deployments. Operators point the CLI at their deployment with `--endpoint` or
@@ -75,7 +85,10 @@ which managed-service features are available, disabled, or replaced by
 operator-owned integrations. The capabilities contract also reports the active
 embedding provider, the embedding model, the vector dimensionality, and whether
 semantic recall is degraded (see
-[Embedding Provider](#embedding-provider)).
+[Embedding Provider](#embedding-provider)). When the sealed plane is enabled it
+additionally reports the active KMS provider and the `client_side_decrypt` /
+`server_side_decrypt` reveal modes the deployment supports (see
+[key-hierarchy.md](key-hierarchy.md)).
 
 ## Required Components
 
@@ -99,13 +112,18 @@ A production self-hosted deployment will likely require:
 - Kubernetes liveness, readiness, and startup probes.
 - Backup and restore process, including embedding vectors.
 - Database migration process via `witself-server migrate`.
+- **KMS-compatible key management — required only when the sealed plane is
+  enabled.** The sealed plane (secrets + TOTP) uses KMS-backed envelope
+  encryption (CMK → per-realm KEK → per-secret/field DEK). An open-plane-only
+  deployment does not need it. See [Sealed Plane (KMS)](#sealed-plane-kms).
 
-KMS is **not** a required component. Witself protects identity data for
-integrity and authenticity, not as a secret vault, so ordinary data-at-rest
-encryption (managed RDS/disk or operator-owned disk encryption) is the baseline.
-Optional field-level encryption of `sensitive` facts is a capability an operator
-may enable, not a core dependency. This is the deliberate contrast with Witpass,
-where a KMS-compatible key boundary was a first-class self-hosting component.
+For the **open plane** (memories + facts), KMS is **not** required. Witself
+protects identity data for integrity and authenticity, not as a secret vault, so
+ordinary data-at-rest encryption (managed RDS/disk or operator-owned disk
+encryption) is the baseline. Optional field-level redaction of `sensitive` facts
+is a capability an operator may enable, not a core dependency. A credential
+belongs in the sealed plane as a secret, not as a sensitive fact (see
+[storage.md](storage.md)).
 
 The exact cloud provider should not be hard-coded into the application. The
 first Terraform targets should be AWS, GCP, and Azure, with AWS implemented
@@ -127,6 +145,9 @@ WITSELF_EMBEDDINGS_MODEL=voyage-3
 WITSELF_EMBEDDINGS_API_KEY_FILE=/run/secrets/witself-embeddings-key
 WITSELF_OBJECT_STORE_PROVIDER=s3
 WITSELF_OBJECT_STORE_BUCKET=witself-prod
+# Sealed plane only (omit when the sealed plane is disabled):
+WITSELF_KMS_PROVIDER=aws-kms
+WITSELF_KMS_KEY_ID=arn:aws:kms:...
 WITSELF_AUDIT_RETENTION=365d
 WITSELF_METRICS_ENABLED=true
 WITSELF_METRICS_LISTEN=:9090
@@ -135,10 +156,10 @@ WITSELF_LOG_LEVEL=info
 ```
 
 Config files should be allowed for non-secret settings. Raw tokens, database
-passwords, embedding-provider API keys, object-store credentials, and any
-provider secrets should come from secret files, environment variables supplied
-by the runtime, or cloud identity, not checked-in config. Server config
-validation should redact sensitive fields in errors.
+passwords, embedding-provider API keys, object-store credentials, KMS
+credentials, and any provider secrets should come from secret files, environment
+variables supplied by the runtime, or cloud identity, not checked-in config.
+Server config validation should redact sensitive fields in errors.
 
 Notes on the embedding configuration:
 
@@ -150,9 +171,22 @@ Notes on the embedding configuration:
   does not ship a usable embedding key for self-hosted deployments.
 - `local-dev` is for tests, demos, and `witself-server serve --dev`. It is a
   deterministic or low-cost local embedder and is not a production provider.
-- There is no KMS configuration block, no envelope-encryption key id, and no
-  reveal/passphrase configuration. These Witpass concepts do not exist in
-  Witself.
+
+Notes on the KMS configuration (sealed plane only):
+
+- `WITSELF_KMS_PROVIDER` selects `aws-kms`, `gcp-kms`, `azure-key-vault`, or
+  `local-dev`. `WITSELF_KMS_KEY_ID` identifies the Customer Master Key (for
+  example an `arn:aws:kms:...` ARN) that wraps the per-realm KEK.
+- These keys are present **only when the sealed plane is enabled**. An
+  open-plane-only deployment omits the KMS block entirely; memories and facts
+  never touch KMS.
+- `local-dev` KMS exists for tests, demos, and `witself-server serve --dev`
+  only; it is not a production provider.
+- The full envelope-encryption design (CMK → per-realm KEK → per-secret/field
+  DEK, AEAD algorithms, and the hybrid `client_side_decrypt` /
+  `server_side_decrypt` reveal modes) is tracked in
+  [encryption-model.md](encryption-model.md) and
+  [key-hierarchy.md](key-hierarchy.md).
 
 ## Embedding Provider
 
@@ -180,9 +214,53 @@ Self-hosted embedding posture:
   re-embedding when the provider/model identity is unchanged (see
   [backup-and-recovery.md](backup-and-recovery.md)).
 
-The embedding-provider abstraction in Witself plays the role that the KMS
-abstraction played in Witpass: a swappable, capability-gated provider boundary.
-The storage and provider decisions are tracked in [storage.md](storage.md).
+The embedding-provider abstraction is a swappable, capability-gated provider
+boundary for the open plane, mirroring the KMS provider boundary for the sealed
+plane. The storage and provider decisions are tracked in
+[storage.md](storage.md).
+
+## Sealed Plane (KMS)
+
+The sealed plane (secrets + TOTP) is the confidentiality counterpart to the open
+plane. When an operator enables it, self-hosted deployments must honor the same
+secret, reveal, and TOTP contracts as managed Witself Cloud — `witself secret`,
+`witself secret reveal`, `witself totp code`, and value-returning reference
+resolution behave identically; only the backing KMS provider changes.
+
+Self-hosted sealed-plane posture:
+
+- KMS is a **first-class dependency when the sealed plane is enabled** and a hard
+  readiness gate for that plane. The server must be able to reach the configured
+  KMS and unwrap the per-realm KEK before it reports the sealed plane ready. An
+  open-plane-only deployment never gates on KMS. See [storage.md](storage.md).
+- Secret and field values are protected by KMS-backed envelope encryption: a
+  Customer Master Key (`WITSELF_KMS_KEY_ID`) wraps a per-realm KEK (`kek_…`,
+  stored in `realm_keys`), which wraps per-secret/field DEKs (`dek_…`, stored in
+  `secret_deks`). Plaintext values are never written to ordinary columns. The
+  hierarchy is tracked in [key-hierarchy.md](key-hierarchy.md).
+- Reveal is hybrid behind one capability switch. `client_side_decrypt` returns
+  the envelope for clients that hold key material; `server_side_decrypt` lets
+  token-only pods receive a server-mediated plaintext value. The capabilities
+  contract advertises which modes the deployment supports, and reveals/codes
+  carry the `server_side_decrypt` flag in the audit record (see
+  [audit-retention.md](audit-retention.md)).
+- `witself secret reveal` and `witself totp code` are the explicit, audited,
+  value-returning operations with the reveal ceremony. MCP exposure can be
+  narrowed with `--no-value-tools`; the operations are gated by the
+  `secret:reveal` and `totp:code` scopes (see
+  [authorization-and-roles.md](authorization-and-roles.md)).
+- Sealed-plane carve-outs hold in every self-hosted deployment: secret values
+  and TOTP seeds are **never embedded, never returned by semantic recall, never
+  in the self-digest, never ingested from CLAUDE.md/AGENTS.md, and never in the
+  plaintext export**. Secret backup is encrypted-only (envelope plus KMS key
+  identity), never plaintext (see [backup-and-recovery.md](backup-and-recovery.md)).
+- Changing or rotating the KMS key is an explicit, audited maintenance
+  operation. Losing KMS key material makes the affected realm's secret values
+  and TOTP seeds unrecoverable — crypto-shred — but does **not** affect the open
+  plane (memories, facts, policies, groups, messages survive intact). KMS
+  rotation and key identity are tracked in
+  [self-host-support.md](self-host-support.md) and
+  [backup-and-recovery.md](backup-and-recovery.md).
 
 ## Bootstrap Flow
 
@@ -199,8 +277,9 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself \
 The chart should expose an explicit migration Job path for production upgrades.
 Operators should be able to inspect migration status and run migrations before
 rolling the server deployment. The chart configures external Postgres (with
-pgvector), the embedding provider, and object/blob storage through values that
-reference existing Kubernetes Secrets rather than inlining raw secrets.
+pgvector), the embedding provider, object/blob storage, and — when the sealed
+plane is enabled — the KMS provider, through values that reference existing
+Kubernetes Secrets rather than inlining raw secrets.
 
 After the backend endpoint is ready, the same customer/operator CLI should
 bootstrap the operator context, realm, named agents, and token files:
@@ -266,7 +345,10 @@ Self-hosted deployments may differ from managed Witself Cloud:
 The shared contracts that must remain consistent across managed and self-hosted
 deployments are the memory, fact, policy, group, message, audit, and export
 contracts, plus the agent token, identity reference, and JSON response shapes.
-Agent-facing behavior should not change because the backend is self-hosted.
+When the sealed plane is enabled, the secret, reveal, TOTP, grant, and
+value-returning reference contracts must remain consistent too — only the backing
+KMS provider changes. Agent-facing behavior should not change because the backend
+is self-hosted.
 
 The CLI should surface unsupported managed-only features through
 `witself capabilities` and `unsupported_operation` errors instead of vague
@@ -281,14 +363,21 @@ tracked in [billing-and-limits.md](billing-and-limits.md).
 ## Security Requirements
 
 Self-hosted deployments must preserve the core safety rules. Witself's threat
-framing is integrity and authenticity of identity data, so the rules emphasize
-attribution, default-deny cross-agent access, and untrusted message input rather
-than secret confidentiality:
+framing is dual: integrity and authenticity for the open plane (identity data),
+and confidentiality for the sealed plane (secrets + TOTP). The open-plane rules
+emphasize attribution, default-deny cross-agent access, and untrusted message
+input; the sealed-plane rules emphasize that secret material never leaks:
 
 - No memory content, fact values, message bodies or payloads, embedding vectors,
   raw tokens, database URLs, embedding-provider credentials, object-store
-  credentials, or provider secrets in logs, audit records, analytics, support
-  data, or errors.
+  credentials, KMS credentials, or provider secrets in logs, audit records,
+  analytics, support data, or errors.
+- When the sealed plane is enabled: no plaintext secret values in ordinary
+  database columns, and no secret values, TOTP seeds, generated TOTP codes,
+  plaintext private keys, or wrapped-key material in logs, audit records,
+  analytics, support data, or errors. Secret values and TOTP seeds are never
+  embedded, recalled, placed in the self-digest, ingested, or included in the
+  plaintext export.
 - Token hashes, not raw token values, should be stored server-side.
 - Sender identity on messages and the actor on every operation are derived
   server-side from the authenticated token, never from input. Sender forgery
@@ -303,15 +392,17 @@ than secret confidentiality:
 - Cross-agent deletes are soft/tombstoned by default and reversible within the
   retention window; hard delete is a further-guarded, audited step.
 - Mutating, cross-agent, and export actions should be audited with full
-  attribution. The audit model and retention default (365 days) are tracked in
-  [audit-retention.md](audit-retention.md).
-- Health and readiness endpoints must not leak configuration or identity
-  material.
+  attribution. When the sealed plane is enabled, secret reveal, TOTP code,
+  grant/revoke, and KEK rotation are audited too, with the `server_side_decrypt`
+  flag recorded on reveals and codes. The audit model and retention default (365
+  days) are tracked in [audit-retention.md](audit-retention.md).
+- Health and readiness endpoints must not leak configuration, identity material,
+  or secret material.
 - Metrics, dashboards, alert labels, and scrape metadata must not leak memory
   content, fact values, message bodies, embedding vectors, fact names treated as
-  sensitive, raw paths, query strings, arbitrary user input, payment
-  identifiers, or provider credentials. Low-cardinality route-template labels
-  only.
+  sensitive, secret names or field names, TOTP seeds or codes, raw paths, query
+  strings, arbitrary user input, payment identifiers, or provider credentials.
+  Low-cardinality route-template labels only.
 - Server config validation should redact sensitive fields in errors.
 
 The threat model is tracked in [threat-model.md](threat-model.md) and the
@@ -325,17 +416,23 @@ semantic recall can be exercised offline without a paid provider. It stores the
 serialized identity store at rest with ordinary data-at-rest protection, writes
 store files atomically, and keeps tokens out of config files by default.
 
+When the sealed plane is exercised locally it uses the `local-dev` KMS provider,
+which is for tests and demos only and is not a production key boundary.
+
 Local development mode is not production self-hosting. Production self-hosting
 needs production Postgres with pgvector, a real embedding provider, migrations,
-backups (including vector data), and operational monitoring. The local mock
-backend is tracked as development scaffolding behind the same backend interface
-in [backend-architecture.md](backend-architecture.md).
+backups (including vector data), operational monitoring, and — for the sealed
+plane — a real KMS provider and key rotation. The local mock backend is tracked
+as development scaffolding behind the same backend interface in
+[backend-architecture.md](backend-architecture.md).
 
 ## Open Decisions
 
 - Exact Terraform module boundaries after the AWS-first implementation.
 - Default embedding model per provider for self-hosted deployments, and the
   re-index workflow for an operator-initiated embedding-model change.
+- KEK rotation cadence and the operator runbook for a KMS CMK rotation when the
+  sealed plane is enabled.
 
 ## Related Docs
 
@@ -346,6 +443,11 @@ in [backend-architecture.md](backend-architecture.md).
 - [api-routes.md](api-routes.md)
 - [observability-and-operations.md](observability-and-operations.md)
 - [storage.md](storage.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
 - [memory-model.md](memory-model.md)
 - [access-policy.md](access-policy.md)
 - [cloud-targets.md](cloud-targets.md)

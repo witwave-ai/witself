@@ -4,25 +4,40 @@ Status: pre-implementation draft. Last reviewed 2026-06-26.
 
 ## Product Summary
 
-Witself is an agent self/identity store. It gives AI agents (and the humans who
-operate them) a safe, auditable CLI, MCP, and API surface to manage their own
-**memories** and **facts**, to access other agents' memories and facts under
-declarative **policy**, to organize agents into **security groups**, and to
-exchange durable **messages** with other agents.
+Witself is the agent durable-state platform. It gives AI agents (and the humans
+who operate them) a safe, auditable CLI, MCP, and API surface across two planes:
 
-Witself is the sibling of Witpass. Witpass is an agent credential vault and
-authenticator (secrets). Witself reuses the entire Witpass platform spine — one
-core domain service behind thin CLI/MCP/API adapters, the same tenancy and token
-model, the same managed/self-hosted/local deployment shape, the same
-observability, release, and billing apparatus — but swaps the secret payload for
-self-identity. Where Witpass protects the *confidentiality* of secret material,
-Witself protects the *integrity and authenticity* of identity data.
+- **Open plane** (memories + facts): plaintext at rest, semantically indexed,
+  recallable, cross-agent readable/curatable under declarative **policy**,
+  organized into **security groups**, exchanged as durable **messages**, and
+  plaintext-exportable. This is the identity store and the headline feature.
+- **Sealed plane** (secrets + TOTP): KMS-backed envelope-encrypted credential
+  material — passwords, API keys, SSH/TLS keys, TOTP seeds, recovery codes — that
+  is reveal-gated and **never embedded, recalled, in the self-digest, ingested, or
+  plaintext-exported**. This is the credential vault and authenticator, folded in
+  from Witpass.
+
+Witself absorbs the former Witpass product. There is now ONE product, ONE CLI
+(`witself`), one backend, and one account/realm/agent/token model spanning both
+planes. The open plane protects the *integrity and authenticity* of identity
+data; the sealed plane protects the *confidentiality* of credential material. The
+two planes share the platform spine — one core domain service behind thin
+CLI/MCP/API adapters, the same tenancy and token model, the same
+managed/self-hosted/local deployment shape, the same authorization, audit,
+observability, release, and billing apparatus — and differ only in their
+data-at-rest posture and value-handling ceremony.
+
+The sealed-plane carve-out is a load-bearing invariant repeated throughout this
+spec: secret and TOTP-seed material is never embedded, never returned by semantic
+recall, never present in the self-digest or `digest emit`, never ingested from
+`CLAUDE.md`/`AGENTS.md`, and never written to a plaintext export. See
+[Sealed-Plane Invariants](#sealed-plane-invariants).
 
 The managed cloud backend is the default product path. Witself expects to store
-memories, facts, policies, groups, and messages remotely in the cloud when
-offered as a service, while keeping the backend API code public and self-hostable
-for operators who want to run Witself in their own cloud, network, or compliance
-boundary.
+memories, facts, policies, groups, messages, and envelope-encrypted secrets
+remotely in the cloud when offered as a service, while keeping the backend API
+code public and self-hostable for operators who want to run Witself in their own
+cloud, network, or compliance boundary.
 
 The local backend may start as development scaffolding, but it should graduate
 into a real backend adapter behind the same service boundary used by the managed
@@ -37,13 +52,24 @@ not the production model.
 - Binaries: `witself` (CLI and `witself mcp serve`) and `witself-server` (backend
   API). There is no `server` subcommand on the main CLI.
 - Environment prefix: `WITSELF_` (for example `WITSELF_TOKEN_FILE`,
-  `WITSELF_ENDPOINT`, `WITSELF_METRICS_ENABLED`).
-- JSON schema version string: `witself.v0`.
+  `WITSELF_ENDPOINT`, `WITSELF_METRICS_ENABLED`). The sealed plane adds
+  `WITSELF_KMS_PROVIDER`, `WITSELF_KMS_KEY_ID`, and `WITSELF_PASSPHRASE_FILE` (the
+  local-dev passphrase that wraps the local KEK/DEK; see
+  [Encryption (Two-Tier)](#encryption-two-tier)).
+- JSON schema version string: `witself.v0` (the rename of the former
+  `witpass.v0`).
+- Raw agent-token prefix: `witself_at_` (the rename of the former `wp_at_`).
 - Reference URI scheme: `witself://` (never `ws://`, which collides with the
-  WebSocket scheme). Reference forms are pinned in
-  [Identity References](#identity-references).
-- ID prefixes: `realm_`, `agent_`, `mem_`, `fact_`, `grp_`, `pol_`, `msg_`,
-  `thr_`, `tok_`, `aud_`, `opr_`.
+  WebSocket scheme). Open-plane reference forms are pinned in
+  [Identity References](#identity-references); sealed-plane secret reference forms
+  are pinned in [Secret References](#secret-references). The former Witpass `wp://`
+  scheme is fully retired.
+- ID prefixes: `acct_`, `realm_`, `agent_`, `opr_`, `tok_`, `mem_`, `fact_`,
+  `grp_`, `pol_`, `msg_`, `thr_`, `aud_`, and the sealed-plane prefixes `sec_`
+  (secret), `fld_` (secret field), `grt_` (secret grant), `totp_` (TOTP
+  enrollment), `kek_` (per-realm key-encryption key), `dek_` (per-secret/field
+  data-encryption key), `att_` (attachment), `usg_` (usage counter), and `idem_`
+  (idempotency record).
 
 ## Core Goals
 
@@ -60,6 +86,11 @@ not the production model.
   memories and facts.
 - Let agents exchange durable messages with other agents and groups through a
   mailbox/queue model with delivery, ordering, and acknowledgement.
+- Let agents create, store, reveal, and inject their own sealed-plane secrets
+  (passwords, API keys, SSH/TLS keys, recovery codes, env vars, connection
+  strings) under envelope encryption, and act as their own TOTP authenticator —
+  with secret material never embedded, recalled, in the self-digest, ingested, or
+  plaintext-exported.
 - Let humans use the same product from a clear, safe CLI, with or without AI
   assistance, and with no privileged AI-only path.
 - Make first-class structured/plaintext identity export and round-trippable
@@ -88,8 +119,13 @@ not the production model.
 
 ## V0 Scope
 
-Decision: v0 should be a usable cloud-shaped slice. It should prove the CLI, MCP
-stdio, the backend API boundary, a local development adapter, the agent token
+Decision: v0 ships in two sequenced slices on one platform. The **open-plane core
+ships first**; the **sealed credential plane is a defined v0 slice that may be
+staged after the core**. Both are in v0 scope; the sequencing exists so the
+identity store can prove itself without blocking on KMS.
+
+Open-plane core (ships first). A usable cloud-shaped slice that proves the CLI,
+MCP stdio, the backend API boundary, a local development adapter, the agent token
 lifecycle, the memory model with semantic recall, the facts model with primary
 promotion, agent self-managed memory and context hydration (the always-loaded
 self-digest, quick-add capture, session bootstrap, memory consolidation, the
@@ -98,7 +134,19 @@ to call Witself), the cross-agent access policy engine, security groups, full
 inter-agent messaging, identity export/import, audit events, Prometheus metrics,
 Kubernetes health probes, the Postgres storage path with pgvector, public images,
 a Helm chart skeleton, a Terraform AWS skeleton, CI, linting, and release
-automation.
+automation. The open plane has **no KMS dependency**: pgvector is a hard readiness
+gate, and the embedding provider is degradable.
+
+Sealed credential plane (a defined v0 slice, may stage after the core). The
+secret data model and lifecycle, secret references, TOTP/2FA, password generation,
+runtime injection (`witself run`), two-tier envelope encryption (CMK → per-realm
+KEK → per-secret/field DEK), the reveal ceremony, secret grants and realm roles,
+and the sealed-plane carve-outs. This slice adds a **KMS dependency** that is a
+readiness gate only when the sealed plane is enabled (see
+[Encryption (Two-Tier)](#encryption-two-tier) and
+[Sealed-Plane Invariants](#sealed-plane-invariants)). An open-plane-only
+deployment requires no KMS. The crypto subset for v0 is tracked in
+[key-hierarchy.md](key-hierarchy.md).
 
 Billing, support, payment, crypto payment, and broader managed-account operations
 may appear as command, API, and JSON contract shapes in v0, but they can be
@@ -115,17 +163,23 @@ The v0 decision is tracked in [v0-scope.md](v0-scope.md).
 ### Principal Model
 
 The primary principal model is per agent. Each agent has its own identity,
-permissions, audit trail, and default ownership rules for the memories and facts
-it creates.
+permissions, audit trail, and default ownership rules for the memories, facts, and
+secrets it creates.
 
 By default, a named agent can only read, adjust, forget, or delete the memories
-and facts it created. One agent cannot list, read, recall, contribute to, curate,
-or forget another agent's memories or facts unless an operator grants access or a
-policy permits it. Cross-agent access is governed by policy, not default-shared.
+and facts it created, and can only show, reveal, update, or delete the secrets it
+created (and generate TOTP codes for its own enrollments). One agent cannot list,
+read, recall, contribute to, curate, or forget another agent's memories or facts
+unless an operator grants access or a policy permits it, and cannot show, reveal,
+or use another agent's secrets unless a secret grant or realm role permits it.
+Open-plane cross-agent access is governed by policy; sealed-plane cross-agent
+access is governed by grants plus realm roles. Neither is default-shared.
 
-Agent-created memories and facts default to the creating agent's ownership inside
-the realm. Group-scoped memories and facts are owned by a security group and are
-an explicit choice, not the default.
+Agent-created memories, facts, and secrets default to the creating agent's
+ownership inside the realm. Group-scoped memories, facts, and secrets are owned by
+a security group and are an explicit choice (`--group`), not the default. There is
+no separate "shared" scope: `owner_kind ∈ {agent, group}` uniformly (see
+[Ownership Unification](#ownership-unification)).
 
 Operators can manage the full lifecycle of named agents inside a realm. Required
 lifecycle operations include creating, renaming, copying, disabling, enabling,
@@ -149,10 +203,11 @@ token or operator credential has explicit permission.
 ### Realm Model
 
 A realm is the operator-owned container for a group of named agents. It is the
-scope that holds agents, agent-owned and group-owned memories and facts, security
-groups, policies, messages, grants, audit records, and billing or usage limits.
-The realm is the rename of the Witpass "vault" and is the top-level managed object
-in Witself.
+scope that holds agents, agent-owned and group-owned memories, facts, and secrets,
+security groups, policies, messages, secret grants, the per-realm KEK (in
+`realm_keys`), audit records, and billing or usage limits. The realm is the rename
+of the Witpass "vault" and is the top-level managed object in Witself; the former
+per-vault KEK is now the per-realm KEK (see [Key Hierarchy](#key-hierarchy)).
 
 In the managed service, billing attaches at the account level and usage rolls up
 by realm: plans, usage limits, agent caps, stored-memory and stored-fact limits,
@@ -397,6 +452,12 @@ Storage and degradation:
   unranked or empty results without surfacing the degraded state.
 - Re-embedding on provider/model change is an explicit, audited maintenance
   operation, not an automatic side effect.
+
+Sealed-plane carve-out (#4): the embedding and recall path is **open-plane only**.
+Secret field values and TOTP seeds are never embedded and are never returned by
+semantic recall, `self show`, or any ranking path. There is no vector
+representation of sealed material. See
+[Sealed-Plane Invariants](#sealed-plane-invariants).
 
 ### Memory Self-Management and Hydration
 
@@ -725,6 +786,15 @@ Export posture:
 - Identity references (`witself://…`) are preserved on export and re-resolved on
   import; dangling references are reported, not silently dropped.
 
+Sealed-plane carve-out (#2): `witself export` excludes the sealed plane. Secret
+field values and TOTP seeds are **never** present in the plaintext export, the
+self-digest, `digest emit`, or `ingest`. Secret backup is a separate,
+encrypted-only path (envelope ciphertext + KMS key identity, never plaintext)
+behind an explicit, audited flag, covered in
+[backup-and-recovery.md](backup-and-recovery.md). A secret reference may appear in
+a memory or fact, but it resolves to plaintext only through the reveal ceremony,
+never through export.
+
 Import posture:
 
 - Import is idempotent by stable id where ids are preserved, and supports a
@@ -760,6 +830,343 @@ Reference rules:
   resolve time.
 - `witself reference parse` and `witself reference resolve` (CLI and MCP) expose
   reference handling deterministically.
+- Sealed-plane secret references are a separate, value-gated family with their own
+  forms and resolution rules; see [Secret References](#secret-references). Open
+  identity references never resolve secret material, and secret references never
+  resolve open-plane memories or facts.
+
+### Sealed-Plane Invariants
+
+Decision: the sealed plane (secrets + TOTP seeds) is governed by a small set of
+non-negotiable carve-outs that hold everywhere in this spec. These are the
+consolidation invariants from folding Witpass into Witself. Anything touching
+secret material must honor all of them.
+
+- **Never embedded, never recalled.** Secret field values and TOTP seeds are never
+  embedded and are never returned by semantic recall. The embedding/recall path is
+  open-plane only. (Carve-out #4; see
+  [Memory Recall and Embeddings](#memory-recall-and-embeddings).)
+- **Never in the digest, never ingested.** Secrets and TOTP seeds are never in the
+  self-digest (`self show`), never rendered by `digest emit`, and never created by
+  `ingest` from `CLAUDE.md`/`AGENTS.md`/`GEMINI.md`. Credentials in those files are
+  ignored, not absorbed. (Carve-out #4; see
+  [context-hydration.md](context-hydration.md).)
+- **Never plaintext-exported.** `witself export` excludes the sealed plane.
+  Identity (memory + fact) plaintext export stays the headline feature; secret
+  backup is encrypted-only (envelope ciphertext + KMS key identity, never
+  plaintext) behind an explicit, audited, separate flag. The self-digest, `digest
+  emit`, and `ingest` never carry secrets. (Carve-out #2; see
+  [Backup, Export, And Recovery](#backup-export-and-recovery) and
+  [backup-and-recovery.md](backup-and-recovery.md).)
+- **Reveal-gated values.** Secret field values and TOTP codes are returned only by
+  the explicit, audited value-returning operations (`witself secret reveal`,
+  `witself totp code`, and value-returning `reference resolve`) under the reveal
+  ceremony. The "no reveal ceremony / data is plainly readable" stance applies to
+  the OPEN plane only; memories and facts have no reveal, secrets do. (Carve-out
+  #3; see [Reveal and Value-Returning Operations](#reveal-and-value-returning-operations).)
+- **Confidentiality dual posture.** The threat model protects both the integrity
+  and authenticity of open-plane identity and the confidentiality of sealed-plane
+  credentials. Both planes' assets, attackers, and controls are in scope. (Carve-out
+  #5; see [threat-model.md](threat-model.md).)
+
+### Secret Model
+
+A secret is sealed-plane credential material owned by an agent (or, in the group
+case, by a security group). It is the sealed-plane sibling of the open-plane
+memory and fact payloads. The secret model is tracked in
+[secret-model.md](secret-model.md) and its data shapes in
+[data-model.md](data-model.md).
+
+Witself is a general-purpose credential vault. The data model is field-based, not
+fixed columns such as `username`/`password`. Supported credential material
+includes usernames and passwords, API keys, access/refresh tokens, recovery codes,
+TOTP seeds and 2FA metadata, OAuth client IDs and secrets, SSH private keys, TLS
+private keys and certificates, signing keys, environment variables, service
+account credentials, database URLs and connection strings, login URLs and account
+metadata, and arbitrary structured fields.
+
+A secret has:
+
+- A stable `id` with the `sec_` prefix, an owning agent (or owning group), and the
+  enclosing realm. Owner is `agent` or `group` — there is no separate "shared"
+  scope; the former Witpass vault-shared secret is a **group-owned** secret (see
+  [Ownership Unification](#ownership-unification)).
+- A stable name or path, unique within the owning agent (or owning group).
+- A required human-readable description.
+- An optional template: `login`, `api-key`, `ssh-key`, `certificate`, `env`, or
+  `generic`. Templates suggest conventional field names and validation; they are
+  usability conventions, not storage columns. Every secret may carry arbitrary
+  named fields.
+- A flat set of named **fields** (`fld_` prefix), each with a `sensitive` marker.
+  Non-sensitive fields (for example `username`, `url`, `issuer`) display in `secret
+  show`. Sensitive fields (for example `password`, `api-key`, `private-key`,
+  `totp-seed`, `recovery-code`) are redacted by default and returned only through
+  the reveal ceremony.
+- Tags, access grants (`grt_` prefix), timestamps, and version/audit history.
+
+Only `name` and `description` are required; all credential fields are optional and
+context-dependent. Sensitive field values are stored as **envelope ciphertext**
+under the per-secret/field DEK — never as plaintext database columns, never
+base64-as-security (see [Encryption (Two-Tier)](#encryption-two-tier)). Plaintext
+secret material never enters ordinary databases, logs, audit records, analytics,
+or errors.
+
+Default v0 size limits (tracked in
+[secret-size-and-attachments.md](secret-size-and-attachments.md)):
+
+- Maximum sensitive field value size: 64 KiB before encoding.
+- Maximum non-sensitive field value size: 16 KiB.
+- Maximum total inline secret payload: 256 KiB before storage overhead.
+- Maximum field count per secret: 100.
+- Maximum secret name length: 255 characters.
+- Maximum description length: 4 KiB.
+
+Attachments (`att_` prefix) are not required for the first sealed-plane slice.
+When added, attachments use encrypted object/blob storage rather than large
+ordinary database columns.
+
+### Secret Lifecycle
+
+Secrets support a complete, audited lifecycle. Every value-bearing step honors the
+[Sealed-Plane Invariants](#sealed-plane-invariants).
+
+- `create` — create a secret. The creating agent is the owner unless an authorized
+  caller targets a group via `--group`.
+- `show` — redacted details: metadata and non-sensitive fields, sensitive fields
+  masked. This is the ordinary read; it is not a reveal.
+- `reveal` — return one sensitive field's plaintext under the reveal ceremony.
+  Explicit, audited, value-returning (see
+  [Reveal and Value-Returning Operations](#reveal-and-value-returning-operations)).
+- `update` — edit fields and description; keeps version/history.
+- `rename` — rename within the owning agent (or group).
+- `copy` — copy within an agent, to another agent, or to group-owned scope when
+  allowed. Copying sensitive values requires confirmation and an audit `--reason`.
+- `archive` / `restore` — soft archive and restore.
+- `delete` — permanent delete when allowed; guarded, audited, confirmation
+  required.
+- `grant` / `revoke` — grant or revoke another agent's or group's access to a
+  secret (see [Secret Authorization & Roles](#secret-authorization--roles)).
+- `list` / `scan` — enumerate secrets with metadata and filters; `scan` is the
+  realm-wide redacted inventory for operators, sensitive values never returned.
+
+Mutations keep enough version/history for audit, conflict detection, and safe
+operator recovery. Sensitive historical values stay protected by the same reveal
+rules as current values. Broad delete/copy operations that touch sensitive values
+require confirmation and an audit `--reason`.
+
+### Secret References
+
+Witself supports stable sealed-plane references so scripts, config files, MCP
+tools, and `witself run` can point at a secret field without embedding plaintext.
+The scheme is `witself://` (the rename of the former Witpass `wp://`), kept
+distinct from open-plane identity references by the `secret` segment.
+
+Reference forms (the final path component is the field; URL-encode if needed):
+
+- Current authenticated agent (or a granted view):
+  `witself://secret/<secret-path>/<field>`
+- A specific owning agent (operator/admin, or granted):
+  `witself://agent/<agent>/secret/<secret-path>/<field>`
+- Group-owned secret (the rename of Witpass `wp://shared/…`):
+  `witself://group/<group>/secret/<secret-path>/<field>`
+
+Examples:
+
+- `witself://secret/github/builder/password`
+- `witself://agent/browser-agent/secret/github/builder/password`
+- `witself://group/platform/secret/org-readonly-token/token`
+
+Reference rules:
+
+- References resolve only through explicit value-returning paths — `secret reveal`,
+  `totp code`, `witself run`, or an authorized MCP `reference.resolve` — and
+  resolution is audited as a secret read.
+- Resolution enforces the same authorization as a direct reveal: a cross-agent or
+  group reference resolves only when a grant or realm role permits it.
+- References never let a caller cross agent boundaries without permission, and the
+  `--no-value-tools` MCP mode disables value-returning resolution (see
+  [MCP Boundary](#mcp-boundary)).
+
+### TOTP and 2FA
+
+Witself acts as the authenticator application for agents. It stores TOTP setup
+material and returns a current one-time code at login time. The TOTP model is
+tracked in [totp-2fa.md](totp-2fa.md).
+
+Model and flow:
+
+- A TOTP enrollment has a stable `id` with the `totp_` prefix and belongs to a
+  secret (or stands alone as sealed material). Metadata includes issuer, account
+  label, algorithm, digit count, and period.
+- Enrollment accepts an `otpauth://` URL, a manual Base32 seed, a seed file, or a
+  QR-code image when image parsing is available.
+- `totp code` returns the current generated code through the authorized CLI/MCP
+  flow. The normal agent-facing surface returns **codes, not seeds**.
+- The TOTP seed is high-value sealed material: it is envelope-encrypted, never
+  embedded, never recalled, never in the digest, and never plaintext-exported.
+  Seed import, setup, backup, reveal, or export requires the more privileged
+  `totp:enroll` path; ordinary login use needs only `totp:code`.
+- `totp show` returns redacted enrollment metadata (no seed); `totp delete`
+  removes an enrollment.
+
+External-approval 2FA (SMS, email, push, passkey, hardware key) is post-v0; see
+[post-v0-roadmap.md](post-v0-roadmap.md). V0 makes the TOTP authenticator role
+work well inside Witself.
+
+### Password Generation
+
+Witself includes built-in password generation for agent signup and rotation
+workflows. The generator supports length, character classes, special-character
+inclusion, ambiguous-character avoidance, human-readable passphrase-style
+generation, and machine-readable JSON output for unattended use.
+
+- Surface: `witself password generate` (CLI) and `witself.password.generate` (MCP,
+  where policy allows).
+- Generated material is offered for storage as a sealed secret field; the
+  generator does not write a plaintext value into the open plane.
+
+### Runtime Injection (`witself run`)
+
+`witself run` resolves sealed-plane secret references and injects the resolved
+values into a child process's environment or arguments without printing plaintext.
+
+- It resolves `witself://secret/…` references the same way `secret reveal` does,
+  subject to the same authorization, grants, and audit.
+- Injected values are passed to the child process only; they are never written to
+  logs, audit records, or the open plane. Runtime injection is a value-returning,
+  reveal-gated operation and is metered as `runtime_injection`.
+- `--no-value-tools` MCP mode and `--read-only` posture both disable
+  value-returning resolution; runtime injection is a CLI-side capability.
+
+### Encryption (Two-Tier)
+
+Decision: Witself runs a **two-tier** data-at-rest model, one tier per plane. This
+is the encryption reconciliation from the consolidation (carve-out #1).
+
+- **Open plane** uses ordinary data-at-rest protection (managed RDS/disk
+  encryption, or self-host-owned disk encryption). Memory content, fact values,
+  and embedding vectors are ordinary identity data. There is no KMS dependency, no
+  envelope, and no reveal for the open plane. Optional field-level encryption of
+  `sensitive` facts remains a capability, not a pillar (see
+  [Data-At-Rest Note](#data-at-rest-note)).
+- **Sealed plane** uses KMS-backed envelope encryption: a root CMK wraps a
+  per-realm KEK (`kek_`), which wraps a per-secret/field DEK (`dek_`). Field
+  ciphertext uses an AEAD (`XCHACHA20_POLY1305` or `AES_256_GCM`). Plaintext
+  secret material never lands in ordinary database columns.
+- **Hybrid custody behind one capability switch.** `client_side_decrypt` is the
+  default where the client (CLI, local MCP runtime, local agent) can hold or derive
+  key material; the server returns ciphertext + envelope metadata and the client
+  unwraps. `server_side_decrypt` is the capability-gated path for managed
+  token-only ephemeral pods that hold only a bearer token and cannot reach KMS — on
+  that path the server transiently sees the DEK and plaintext, advertised honestly
+  via the capability flag and flagged on the reveal/code audit event. The trade-off
+  is analyzed in [key-hierarchy.md](key-hierarchy.md) and
+  [encryption-model.md](encryption-model.md).
+- **KMS as a conditional dependency.** KMS providers are `aws-kms`, `gcp-kms`,
+  `azure-key-vault`, and `local-dev` (the local-dev provider wraps the same
+  KEK/DEK structure with a `WITSELF_PASSPHRASE_FILE`-derived key, for tests and
+  `witself-server serve --dev` only). KMS is required and a readiness gate **only
+  when the sealed plane is enabled**; an open-plane-only deployment requires no
+  KMS. pgvector remains a hard gate for the open plane regardless.
+- **Crypto-shred posture.** Loss of the CMK/KMS access renders sealed secret
+  values unrecoverable (crypto-shred). This does **not** affect the open plane,
+  whose plaintext identity data is recoverable from ordinary backups and export.
+
+The encryption model is tracked in [encryption-model.md](encryption-model.md), the
+key custody analysis in [key-hierarchy.md](key-hierarchy.md), and the storage and
+KMS provider configuration in [storage.md](storage.md).
+
+### Key Hierarchy
+
+Decision: the sealed plane uses a three-level key hierarchy, scoping who can call
+unwrap and bounding per-realm blast radius.
+
+```
+CMK (KMS Customer Master Key)
+  └─ wraps ─> per-realm KEK (kek_...)            one per realm, in realm_keys
+       └─ wraps ─> per-secret/field DEK (dek_...)  wrapped_dek in secret_deks
+```
+
+- **Root CMK.** A KMS Customer Master Key under the `WITSELF_KMS_PROVIDER`
+  abstraction (`aws-kms` via an ARN in `WITSELF_KMS_KEY_ID` for managed v0; the
+  other providers for self-hosting/BYOK; `local-dev` for dev). In managed mode the
+  CMK lives in Witself's KMS; in self-hosted/BYOK mode it lives in the operator's
+  own KMS.
+- **Per-realm KEK** (`kek_` prefix). A 256-bit symmetric KEK generated per realm
+  and stored wrapped in `realm_keys` (the rename of the Witpass per-vault KEK in
+  `vault_keys`). Per-realm KEKs give per-tenant cryptographic separation and bound
+  the blast radius of a compromised DEK.
+- **Per-secret/field DEK** (`dek_` prefix). The DEK that the AEAD uses on field
+  ciphertext, stored wrapped in `secret_deks`. V0 ships per-secret DEKs;
+  per-field DEKs are opt-in/deferred.
+
+`key.rotated` (KEK rotation) is an audited maintenance event. The full custody
+analysis, v0 crypto subset, and BYOK/per-realm-CMK deferrals are in
+[key-hierarchy.md](key-hierarchy.md).
+
+### Reveal and Value-Returning Operations
+
+Decision: the sealed plane has an explicit, audited reveal ceremony; the open
+plane does not. This is carve-out #3.
+
+- The value-returning operations are `witself secret reveal` (one sensitive field),
+  `witself totp code` (a current code), value-returning `reference resolve`, and
+  `witself run` injection. Each is explicit, audited, and metered (`secret_read`,
+  `totp_code`, `runtime_injection`).
+- The reveal ceremony requires the `secret:reveal` (or `totp:code`) scope, honors
+  grants and realm roles, records a `secret.reveal` / `totp.code` audit event, and
+  carries the `server_side_decrypt` flag on that event when the server-mediated
+  path was used.
+- The open plane has **no reveal**. `memory read` and `fact get` return values
+  through an ordinary authorized read; `sensitive` memories/facts use lightweight
+  display redaction, not encryption and not a reveal. The "data is plainly
+  readable" statements in [memory-model.md](memory-model.md) and
+  [facts-model.md](facts-model.md) are scoped to the open plane. A credential
+  belongs in the sealed plane (a secret), not in a `sensitive` fact.
+
+### Secret Authorization & Roles
+
+Decision: sealed-plane access composes with the same authorization layer as the
+open plane, adding secret/TOTP scopes, secret grants, and realm roles. The full
+role/scope model and resolution algorithm are tracked in
+[authorization-and-roles.md](authorization-and-roles.md).
+
+- **Secret scopes** (added to the scope set; see
+  [Authorization and Scopes](#authorization-and-scopes)): `secret:create`,
+  `secret:show`, `secret:reveal`, `secret:update`, `secret:delete`,
+  `secret:grant`, `totp:enroll`, `totp:code`.
+- **Grants** (`grt_` prefix) extend a specific secret to another agent or group
+  with a bounded permission. Cross-agent/operator secret access uses **grants +
+  realm roles**, not the open-plane cross-agent read/curate/forget verbs; secrets
+  are not subject to the open cross-agent policy engine (see
+  [access-policy.md](access-policy.md)).
+- **Realm roles** (the rename of Witpass vault roles): `realm:admin`,
+  `realm:operator`, `realm:auditor`, `realm:member`. The elevated roles bundle both
+  open-plane scopes (memory/fact/policy/group/message) and sealed-plane scopes
+  (secret/totp + grants) per
+  [authorization-and-roles.md](authorization-and-roles.md). Account roles
+  (`account_owner`/`account_admin`/`account_billing`/`account_member`) are
+  unchanged.
+- The **default agent token bundle** grants own-data access across both planes:
+  memory create/read/update/forget, fact create/read/update/delete/primary, secret
+  create/show/reveal/update/delete, totp enroll/code, and message send/read — over
+  the agent's OWN data only. It excludes `secret:grant`, the `-others` cross-agent
+  scopes, `group:manage`, `policy:manage`, `agent:manage`, `token:manage`,
+  `audit:read`, `realm:admin`, and all `account:*`/`billing:*`/`support:*`.
+
+### Ownership Unification
+
+Decision: all three data types — memory, fact, and secret — are owned by an
+**agent** or a **group**. `owner_kind ∈ {agent, group}` is uniform across the open
+and sealed planes.
+
+- The former Witpass `owner_kind ∈ {agent, shared}` is retired. A Witpass
+  vault-shared secret becomes a **group-owned** secret. There is no separate
+  "shared" scope.
+- CLI: the former Witpass `--shared` becomes `--group <name>`; the former
+  `wp://shared/…` becomes `witself://group/<group>/secret/…`.
+- Group-owned secrets use the same `sec_`/`fld_` shapes with a group owner and
+  follow the same grant and realm-role rules as agent-owned secrets.
 
 ### Public Backend And Self-Hosting
 
@@ -914,10 +1321,17 @@ Backup and recovery posture:
   model.
 - Managed cloud recovery restores customer identity data and service availability.
 
-Because export is plaintext by default, exports of `sensitive` records are
-warned-on, require an audit `--reason`, and are least-privilege authorized;
+Because export is plaintext by default, exports of `sensitive` open-plane records
+are warned-on, require an audit `--reason`, and are least-privilege authorized;
 operators may restrict exports to non-sensitive records. Recovery and export are
 audited.
+
+Sealed plane (carve-out #2): the sealed plane is excluded from the plaintext
+export entirely. Secret backup is encrypted-only — envelope ciphertext plus the
+KMS key identity and rotation metadata, never plaintext — and is the only path
+that backs up secret material. Loss of the CMK/KMS access crypto-shreds secret
+values but does not affect the recoverable plaintext open plane. The dual backup
+posture is carried in [backup-and-recovery.md](backup-and-recovery.md).
 
 The backup, export, and recovery model is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
@@ -1013,7 +1427,9 @@ Billing posture:
   provider, no wallet custody), support tickets, CLI-first service admin, and
   capability-gating with `unsupported_operation`.
 
-V0 metered dimensions (replacing the Witpass secret/TOTP dimensions):
+V0 metered dimensions span both planes:
+
+Open plane:
 
 - Active named agents.
 - Stored memories.
@@ -1026,12 +1442,23 @@ V0 metered dimensions (replacing the Witpass secret/TOTP dimensions):
 - Cross-agent accesses.
 - Security groups.
 - Messages sent and delivered.
+
+Sealed plane:
+
+- Stored secrets (`stored_secret`).
+- Secret reads (`secret_read`, covering reveal and reference resolution).
+- TOTP code generation (`totp_code`).
+- Runtime injection (`runtime_injection`, via `witself run`).
+- Encrypted storage size (`encrypted_storage_byte`).
+
+Platform:
+
 - Audit retention and stored audit volume.
 - General managed-service API request volume.
 
-Recalls, embedding operations, cross-agent accesses, and messages should be
-metered even when pricing remains tiered because they represent real service load
-and security-relevant use.
+Recalls, embedding operations, cross-agent accesses, messages, secret reads, TOTP
+code generation, and runtime injection should be metered even when pricing remains
+tiered because they represent real service load and security-relevant use.
 
 The billing and limits model is tracked in
 [billing-and-limits.md](billing-and-limits.md).
@@ -1046,8 +1473,11 @@ Default permissions:
 - Agent tokens can add, adjust, read, recall, list, forget, restore, and delete
   memories, and set, get, list, and delete facts, only for identity data owned by
   that agent.
+- Agent tokens can create, show, reveal, update, and delete secrets and enroll
+  TOTP / generate TOTP codes, only for sealed-plane material owned by that agent.
 - Agent tokens cannot read, contribute to, curate, or forget another agent's
-  identity data unless a policy grants it.
+  identity data unless a policy grants it, and cannot show, reveal, or use another
+  agent's secrets unless a secret grant or realm role permits it.
 - Agent tokens cannot manage other agents, manage realm membership, manage
   billing, inspect realm-wide inventory, manage policies, manage groups, or manage
   tokens unless explicitly granted.
@@ -1055,7 +1485,9 @@ Default permissions:
   (operator override).
 - Cross-agent actions require an explicit policy or operator/admin permission.
 
-Permissions are expressed as scopes (replacing the Witpass secret/TOTP scopes):
+Permissions are expressed as scopes spanning both planes:
+
+Open-plane scopes:
 
 - `memory:create`
 - `memory:read`
@@ -1075,6 +1507,20 @@ Permissions are expressed as scopes (replacing the Witpass secret/TOTP scopes):
 - `group:member`
 - `message:send`
 - `message:read`
+
+Sealed-plane scopes:
+
+- `secret:create`
+- `secret:show`
+- `secret:reveal`
+- `secret:update`
+- `secret:delete`
+- `secret:grant`
+- `totp:enroll`
+- `totp:code`
+
+Platform/admin scopes:
+
 - `agent:manage`
 - `token:manage`
 - `audit:read`
@@ -1086,12 +1532,17 @@ Permissions are expressed as scopes (replacing the Witpass secret/TOTP scopes):
 - `support:manage`
 - `realm:admin`
 
-`memory:read-others` and `memory:manage-others` are the ONLY cross-agent scopes,
-and each spans both memories and facts; there are no `fact:read-others` or
-`fact:manage-others` scopes.
+`memory:read-others` and `memory:manage-others` are the ONLY open-plane
+cross-agent scopes, and each spans both memories and facts; there are no
+`fact:read-others` or `fact:manage-others` scopes. Sealed-plane cross-agent access
+is mediated by `secret:grant` plus realm roles, not by the open-plane cross-agent
+scopes (see [Secret Authorization & Roles](#secret-authorization--roles)).
 
 Scopes should be constrainable by realm, owning agent, owning group, memory kind
-or tag, or fact name where practical. There are no `secret:*` or `totp:*` scopes.
+or tag, fact name, or secret name/field where practical. Realm roles
+(`realm:admin`/`realm:operator`/`realm:auditor`/`realm:member`) bundle these scopes
+across both planes; the full bundles and resolution algorithm are in
+[authorization-and-roles.md](authorization-and-roles.md).
 
 ### Agent Authentication
 
@@ -1175,13 +1626,17 @@ Requirements:
   message.
 - CLI and MCP should share request/response structs or an equivalent generated
   contract to prevent drift.
-- Memory content, fact values, message bodies/payloads, and raw tokens must not
-  appear in errors. `sensitive` memory content and `sensitive` fact values are
-  redacted in list/scan output by default; an authorized read of a single record
-  returns the value (there is no reveal ceremony).
+- Memory content, fact values, message bodies/payloads, raw tokens, and plaintext
+  secret/TOTP-seed material must not appear in errors. `sensitive` memory content
+  and `sensitive` fact values are redacted in list/scan output by default; an
+  authorized read of a single open-plane record returns the value (there is no
+  open-plane reveal ceremony). Sealed-plane secret field values and TOTP codes are
+  returned only by the explicit reveal ceremony (`secret reveal`, `totp code`); see
+  [Reveal and Value-Returning Operations](#reveal-and-value-returning-operations).
 
-The CLI noun surface (replacing the Witpass `secret`/`totp`/`password`/`run`
-nouns):
+The CLI noun surface spans both planes:
+
+Open plane:
 
 - `memory` (`add`/`adjust`/`read`/`recall`/`list`/`forget`/`restore`/`delete`/
   `consolidate`).
@@ -1195,25 +1650,46 @@ nouns):
 - `policy` (`create`/`list`/`show`/`delete`/`test`).
 - `group` (`create`/`list`/`show`/`add-member`/`remove-member`/`delete`).
 - `message` (`send`/`list`/`read`/`ack`).
-- Inherited: `version`, `capabilities`, `whoami`, `auth`, `setup`, `account`,
-  `realm`, `agent`, `token`, `audit`, `billing`, `support`, `export`, `import`,
-  `reference`, `mcp`, `config`, `completion`.
-- Dropped: `secret`, `totp`, `password`, `run`.
 
-The MCP tool catalog (replacing `witpass.secret.*`/`witpass.totp.*`):
+Sealed plane:
+
+- `secret` (`create`/`show`/`list`/`scan`/`reveal`/`update`/`rename`/`copy`/
+  `archive`/`restore`/`delete`/`grant`/`revoke`). `--group <name>` targets a
+  group-owned secret; `--owner-agent <name>` targets a specific agent's secret for
+  operator use.
+- `totp` (`enroll`/`code`/`show`/`delete`).
+- `password generate` (built-in password/passphrase generator).
+- `run` (resolve `witself://secret/…` references and inject values into a child
+  process; see [Runtime Injection](#runtime-injection-witself-run)).
+
+Inherited: `version`, `capabilities`, `whoami`, `auth`, `setup`, `account`,
+`realm`, `agent`, `token`, `audit`, `billing`, `support`, `export`, `import`,
+`reference`, `mcp`, `config`, `completion`.
+
+The MCP tool catalog spans both planes:
 
 - `witself.version`, `witself.whoami`, `witself.capabilities`.
 - `witself.memory.add/adjust/read/recall/list/forget/consolidate`.
 - `witself.fact.set/get/list/delete`.
 - `witself.remember` (auto-routing quick-add).
-- `witself.self.show` (the always-loaded self-digest).
+- `witself.self.show` (the always-loaded self-digest; never includes secrets).
 - `witself.session.start/end` (multi-session bootstrap).
-- `witself.digest.emit` (ingest is CLI-first; an MCP `ingest` tool is optional).
+- `witself.digest.emit` (ingest is CLI-first; an MCP `ingest` tool is optional;
+  neither carries secrets).
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
 - `witself.group.list/show`.
 - `witself.message.send/list/read`.
-- `witself.reference.parse/resolve`.
+- `witself.secret.create/list/show/reveal/update` (sealed plane).
+- `witself.totp.enroll/code/show` (sealed plane).
+- `witself.password.generate` (sealed plane).
+- `witself.reference.parse/resolve` (value-returning resolution of both open
+  identity and sealed secret references; gated by `--no-value-tools`).
 - Operator candidates: `witself.agent.list/show`, `witself.audit.list/show`.
+
+Value-returning sealed-plane tools (`secret.reveal`, `totp.code`, and
+value-returning `reference.resolve`) are policy-gated and disabled by
+`--no-value-tools`; mutating tools are excluded in `--read-only` mode (see
+[MCP Boundary](#mcp-boundary)).
 
 Detailed JSON shapes are tracked in [json-contracts.md](json-contracts.md). The
 CLI command surface is tracked in
@@ -1262,15 +1738,22 @@ Defaults:
 - Agent-token MCP sessions should act only as the token-bound agent.
 - Operator-token MCP sessions may bind to or inspect agents only when explicitly
   permitted.
-- A `--read-only` MCP mode should exist for inspection-only deployments.
+- A `--read-only` MCP mode should exist for inspection-only deployments; it
+  disables all mutating tools across both planes.
+- A `--no-value-tools` MCP mode should exist for the sealed plane; it disables the
+  value-returning tools (`witself.secret.reveal`, `witself.totp.code`, and
+  value-returning `witself.reference.resolve`) while leaving redacted/metadata
+  tools available. `--no-value-tools` and `--read-only` are independent switches.
 
 MCP should expose agent-useful actions such as memory add/adjust/read/recall/list/
 forget, fact set/get/list/delete, policy test, group list/show, message
-send/list/read, and reference parse/resolve. High-risk admin actions such as realm
-deletion, broad agent lifecycle operations, policy mutation, and token management
-should be operator-only and may be excluded from MCP v0 even if they exist in the
-CLI. There is no reveal-style tool framing and no `--no-value-tools` mode, because
-there is no reveal ceremony.
+send/list/read, reference parse/resolve, secret create/list/show/reveal/update,
+totp enroll/code/show, and password generate. High-risk admin actions such as
+realm deletion, broad agent lifecycle operations, policy mutation, secret grant,
+and token management should be operator-only and may be excluded from MCP v0 even
+if they exist in the CLI. Sealed-plane reveal tools carry an explicit reveal
+framing and are gated by `--no-value-tools`; the self-digest and `digest emit`
+never carry secret material.
 
 ### Audit and Identity Handling
 
@@ -1289,6 +1772,11 @@ including:
 - Group create, delete, member add/remove, and group-owned record changes.
 - Message send, deliver, read, and ack.
 - Identity export and import.
+- Secret create, update, rename, copy, archive, restore, delete, reveal, grant,
+  and revoke (the `server_side_decrypt` flag is recorded on reveal).
+- TOTP enroll, code generation, seed reveal, and delete (the `server_side_decrypt`
+  flag is recorded on code generation).
+- Per-realm KEK rotation (`key.rotated`).
 - Agent lifecycle operations.
 - Token create, rotate, revoke, and failed token use.
 - Operator/admin override actions.
@@ -1300,10 +1788,13 @@ including:
 - Support ticket create, comment, close, and diagnostic-bundle actions.
 
 Audit records must not contain memory content, fact values, message bodies or
-payloads, embedding vectors, raw tokens, or raw payment details. Error messages,
-logs, and JSON responses must follow the same rule. Audit may include
-non-sensitive context such as record ids, owner agent/group, kinds, tags, fact
-names, policy ids, message ids, recipient, and decision outcome.
+payloads, embedding vectors, raw tokens, raw payment details, or any sealed-plane
+plaintext (secret field values, TOTP seeds, generated TOTP codes, or DEK/KEK key
+material). Error messages, logs, and JSON responses must follow the same rule.
+Audit may include non-sensitive context such as record ids (including `sec_`,
+`fld_`, `grt_`, `totp_`, `kek_`), owner agent/group, kinds, tags, fact and secret
+names, field names, policy and grant ids, message ids, recipient, the
+`server_side_decrypt` flag, and decision outcome.
 
 Audit records for billing and payment actions may include non-sensitive context
 such as account ID, realm ID, invoice ID, subscription ID, payment provider,
@@ -1346,6 +1837,21 @@ reconciliation, and customer exports. Initial event names include:
 - `message.acked`
 - `identity.exported`
 - `identity.imported`
+- `secret.created`
+- `secret.updated`
+- `secret.renamed`
+- `secret.copied`
+- `secret.archived`
+- `secret.restored`
+- `secret.deleted`
+- `secret.reveal` (carries the `server_side_decrypt` flag)
+- `secret.grant`
+- `secret.revoke`
+- `totp.enrolled`
+- `totp.code` (carries the `server_side_decrypt` flag)
+- `totp.seed_revealed`
+- `totp.deleted`
+- `key.rotated` (per-realm KEK rotation)
 - `billing.subscription.created`
 - `billing.subscription.updated`
 - `billing.subscription.canceled`
@@ -1414,9 +1920,11 @@ Local bootstrap decision:
 
 Witself should design the managed cloud backend as the default hosted product
 backend. When Witself is offered as a service, memories, facts, embedding vectors,
-policies, security groups, messages, agent metadata, grants, audit records, and
-usage counters are expected to be stored remotely in Witself-operated cloud
-infrastructure.
+policies, security groups, messages, agent metadata, envelope-encrypted secrets
+and TOTP enrollments, the per-realm KEK and wrapped DEKs, secret grants, audit
+records, and usage counters are expected to be stored remotely in Witself-operated
+cloud infrastructure. The CMK lives in the managed KMS; plaintext secret material
+is never stored.
 
 Managed backend requirements:
 
@@ -1482,14 +1990,27 @@ API contract requirements:
 - Use the shared JSON response envelope `{schema_version, ok, data, warnings}` and
   the error-code-to-HTTP-to-exit-code table.
 - Authenticate remote calls with bearer tokens loaded by the CLI or MCP adapter.
-- Expose `/v1/capabilities` for backend feature discovery.
+- Expose `/v1/capabilities` for backend feature discovery, including the active
+  embedding provider/model and, when the sealed plane is enabled, the KMS provider
+  and the decrypt-custody capability flags `client_side_decrypt` /
+  `server_side_decrypt` (see [Encryption (Two-Tier)](#encryption-two-tier)).
 - Use resource-oriented `/v1` REST-ish routes with plural resources, including
-  `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and `/v1/messages`.
+  the open-plane `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and
+  `/v1/messages`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
 - Use colon action subroutes for sensitive or workflow operations, such as
   `/v1/memories:recall` (a query over the collection),
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
   `/v1/memories:consolidate`, `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
   `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
+- Use the sealed-plane action subroutes
+  `/v1/secrets/{secret_id}:reveal` (returns one sensitive field; carries the
+  `client_side_decrypt` ciphertext-and-envelope shape or the `server_side_decrypt`
+  plaintext shape per the active capability),
+  `/v1/secrets/{secret_id}:rotate`, `/v1/secrets/{secret_id}:archive`,
+  `/v1/secrets/{secret_id}:restore`, `/v1/secrets/{secret_id}:grant`,
+  `/v1/secrets/{secret_id}:revoke`, `/v1/totp/{totp_id}:code` (returns a current
+  code), and `/v1/password:generate` (password/passphrase generation). All use
+  `POST`, never `GET`.
 - Expose the self-management and hydration routes: `POST /v1/remember` (the
   convenience action that the core routes to a fact or memory), `GET /v1/self` (the
   self-digest; `?format=` renders the `digest emit` fragment), and
@@ -1667,41 +2188,63 @@ but ordinary CI should default to read-only repository permissions.
 
 ### Data-At-Rest Note
 
-Decision: Witself does not treat encryption as a product pillar. It is identity
-data, protected for integrity and authenticity, not a secret vault.
+Decision: Witself runs a two-tier data-at-rest model (see
+[Encryption (Two-Tier)](#encryption-two-tier)). This note covers the **open
+plane**; the sealed plane is the encryption-pillar plane.
 
-Posture:
+Open-plane posture:
 
-- Use ordinary data-at-rest encryption (managed RDS/disk, or self-host-owned disk
-  encryption). There is no KMS/envelope/client-side-decrypt pillar, no reveal
-  ceremony, and no end-to-end secret model.
-- KMS is **optional and demoted**, not a core dependency. There is no
-  `storage-and-kms.md`; storage decisions live in [storage.md](storage.md). There
-  is no `encryption-model.md`; its authorization and audit scaffolding is reused by
-  [access-policy.md](access-policy.md).
-- Optional field-level encryption for `sensitive` facts is a capability that an
-  operator can enable, not the default behavior.
-- `sensitive` is a PII/redaction display flag, not an encryption boundary. There is
-  no value-size split between sensitive and non-sensitive values.
+- The open plane (memories, facts, embedding vectors) is identity data protected
+  for integrity and authenticity, not a secret vault. Use ordinary data-at-rest
+  encryption (managed RDS/disk, or self-host-owned disk encryption). The open plane
+  has no KMS/envelope/client-side-decrypt pillar, no reveal ceremony, and no
+  end-to-end secret model.
+- Optional field-level encryption for `sensitive` facts is a capability an operator
+  can enable, not the default behavior. `sensitive` is a PII/redaction display
+  flag, not an encryption boundary; there is no value-size split between sensitive
+  and non-sensitive open-plane values.
+
+Sealed-plane posture:
+
+- The sealed plane (secrets, TOTP seeds) IS the encryption pillar: KMS-backed
+  envelope encryption (CMK → per-realm KEK → per-secret/field DEK) with the reveal
+  ceremony. KMS is a required dependency and readiness gate **only when the sealed
+  plane is enabled**; an open-plane-only deployment needs no KMS. The model is
+  tracked in [encryption-model.md](encryption-model.md) and
+  [key-hierarchy.md](key-hierarchy.md), with KMS provider config and the
+  `realm_keys`/`secret_deks` tables in [storage.md](storage.md).
 
 This is tracked in [storage.md](storage.md).
 
 ### Production Storage
 
 Decision: use Postgres with pgvector first, an embedding-provider abstraction
-(`voyage` default), object/blob storage where the data shape needs it, and Goose
-for database migrations. KMS is optional and demoted.
+(`voyage` default), a KMS-provider abstraction for the sealed plane, object/blob
+storage where the data shape needs it, and Goose for database migrations.
 
 Storage posture:
 
 - Postgres with the pgvector extension is the production system of record. Identity
-  records and their embedding vectors live in Postgres.
+  records and their embedding vectors live in Postgres; sealed-plane envelope
+  ciphertext, the `realm_keys` (wrapped per-realm KEK), and `secret_deks` (wrapped
+  per-secret/field DEK) live in Postgres too.
 - Object/blob storage is for large exports, diagnostic bundles, support
-  attachments, backup artifacts, and future import/export jobs.
+  attachments, encrypted secret attachments, backup artifacts, and future
+  import/export jobs.
 - Memory content and fact values are ordinary identity data protected by
   data-at-rest encryption; there is no requirement to keep them out of database
-  columns (unlike Witpass secrets). Optional field-level encryption of `sensitive`
-  facts may wrap those specific values when enabled.
+  columns. Optional field-level encryption of `sensitive` facts may wrap those
+  specific values when enabled.
+- Sealed-plane secret field values and TOTP seeds are stored only as envelope
+  ciphertext; plaintext secret material never becomes an ordinary database column.
+
+KMS posture (sealed plane only):
+
+- KMS providers are `aws-kms` (managed v0 first), `gcp-kms`, `azure-key-vault`, and
+  `local-dev`. The provider is selected by `WITSELF_KMS_PROVIDER` and the key by
+  `WITSELF_KMS_KEY_ID`. KMS is required and a readiness gate only when the sealed
+  plane is enabled; pgvector remains a hard gate for the open plane regardless. The
+  KMS provider config and key tables are detailed in [storage.md](storage.md).
 
 Embedding posture:
 
@@ -1788,8 +2331,30 @@ The memory model and semantic recall are tracked in
 
 The facts model is tracked in [facts-model.md](facts-model.md).
 
-The cross-agent access policy engine is tracked in
-[access-policy.md](access-policy.md).
+The sealed-plane secret model and lifecycle are tracked in
+[secret-model.md](secret-model.md). The TOTP/2FA authenticator is tracked in
+[totp-2fa.md](totp-2fa.md). Secret field size limits and attachments are tracked in
+[secret-size-and-attachments.md](secret-size-and-attachments.md).
+
+The full data model for both planes (realm/account/operator/agent/token tables;
+open-plane memories with the pgvector embedding column, facts, policies,
+security_groups, group_members, messages, audit, usage; and sealed-plane secrets,
+secret_fields, secret_grants, totp_enrollments, realm_keys, secret_deks,
+attachments) is tracked in [data-model.md](data-model.md).
+
+The sealed-plane confidentiality and envelope-encryption model is tracked in
+[encryption-model.md](encryption-model.md), and the CMK → per-realm KEK → DEK key
+hierarchy in [key-hierarchy.md](key-hierarchy.md).
+
+The role/scope model spanning both planes (open-plane memory/fact/policy/group/
+message scopes plus sealed-plane secret/totp scopes, secret grants, and realm
+roles) is tracked in [authorization-and-roles.md](authorization-and-roles.md).
+
+The cross-agent access policy engine governs the OPEN plane and is tracked in
+[access-policy.md](access-policy.md). Sealed-plane cross-agent/operator access uses
+grants plus realm roles per
+[authorization-and-roles.md](authorization-and-roles.md), not the open cross-agent
+read/curate/forget verbs.
 
 Security groups are tracked in [security-groups.md](security-groups.md).
 

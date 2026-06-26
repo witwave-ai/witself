@@ -52,11 +52,18 @@ two layers:
 - Operator scopes carried by the authenticated operator principal, expressed as
   the same scope strings used elsewhere in Witself (for example `realm:admin`,
   `agent:manage`, `token:manage`, `policy:manage`, `group:manage`,
-  `audit:read`, `account:manage`, `billing:manage`). The scope list is defined
-  in [requirements.md](requirements.md).
+  `audit:read`, `account:manage`, `billing:manage`). The role/scope model,
+  realm roles, scope bundles, and resolution algorithm span both the open plane
+  (memories and facts) and the sealed plane (secrets and TOTP) and are defined
+  in [authorization-and-roles.md](authorization-and-roles.md), summarized in
+  [requirements.md](requirements.md).
 - The declarative cross-agent access policy engine, which governs how any
   principal — agent or operator — reads, contributes to, curates, or forgets
-  identity data that another agent or security group owns.
+  identity data that another agent or security group owns. This engine is the
+  open-plane cross-agent authority, defined in
+  [access-policy.md](access-policy.md); sealed-plane access uses secret grants
+  and realm roles in
+  [authorization-and-roles.md](authorization-and-roles.md) instead.
 
 ### Operator override
 
@@ -148,6 +155,7 @@ self-hosted production security model.
 - [requirements.md](requirements.md)
 - [cli-command-surface.md](cli-command-surface.md)
 - [api-contract.md](api-contract.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [token-lifecycle.md](token-lifecycle.md)

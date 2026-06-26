@@ -3,6 +3,37 @@
 Status: draft. Decision: v0 is a usable cloud-shaped slice, not only a local
 mock and not yet the full commercial managed service.
 
+## Sequencing
+
+Decision: v0 ships in two sequenced slices on one platform. The **open-plane core
+(memory/fact/identity) ships first**; the **sealed credential plane
+(secrets/TOTP/encryption/KMS/reveal) is a defined v0 slice that may be staged
+after the core**. Both are in v0 scope; the sequencing exists so the identity
+store can prove itself without blocking on KMS. This mirrors
+[requirements.md](requirements.md#v0-scope).
+
+- **Open-plane core (ships first).** The CLI, MCP stdio, the backend API
+  boundary, the local development adapter, the agent token lifecycle, the memory
+  model with semantic recall, the facts model with primary promotion, agent
+  self-managed memory and context hydration, the cross-agent access policy
+  engine, security groups, full inter-agent messaging, identity export/import,
+  audit, metrics, health probes, and the delivery scaffolding below. The open
+  plane has **no KMS dependency**: pgvector is a **hard readiness gate**, and the
+  embedding provider is degradable.
+- **Sealed credential plane (a defined v0 slice, may stage after the core).** The
+  secret data model and lifecycle, secret references, TOTP/2FA, password
+  generation, runtime injection (`witself run`), two-tier envelope encryption
+  (CMK → per-realm KEK → per-secret/field DEK), the reveal ceremony, secret
+  grants and realm roles, and the sealed-plane carve-outs. This slice adds a
+  **KMS dependency** that is a readiness gate **only when the sealed plane is
+  enabled**; an open-plane-only deployment requires no KMS, and pgvector stays a
+  hard gate for the open plane regardless. Sealed-plane carve-out: secrets and
+  TOTP seeds are never embedded, recalled, in the self-digest, or
+  plaintext-exported, and are reachable only through the audited reveal ceremony.
+  See [secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md),
+  [encryption-model.md](encryption-model.md), and
+  [key-hierarchy.md](key-hierarchy.md).
+
 ## Decision
 
 V0 should prove the end-to-end product boundary:
@@ -106,6 +137,30 @@ Core user-facing capabilities:
 - `witself mcp serve` over stdio, exposing the self-management tools and the
   pinned server-instructions teaching protocol.
 
+Sealed credential-plane capabilities (the defined v0 slice that may stage after
+the open-plane core; secrets and TOTP seeds are never embedded, recalled, in the
+self-digest, or plaintext-exported, and values are reachable only through the
+audited reveal ceremony):
+
+- `secret create/show/list/scan/reveal/update/rename/copy/archive/restore/delete`
+  for the caller's own secrets, with `--group` for group-owned secrets and
+  `--owner-agent` for operator-targeted access. `secret reveal` is the explicit,
+  audited value-returning op with the reveal ceremony.
+- `secret grant/revoke` to delegate sealed-plane access through secret grants,
+  composed with realm roles (sealed-plane cross-agent access is governed by
+  grants plus realm roles, not the open-plane cross-agent policy engine).
+- `totp enroll/code/show/delete`, where the TOTP seed is high-value sealed
+  material and `totp code` is a value-returning, audited op distinct from
+  `totp enroll`.
+- `password generate`, offering generated material for storage as a sealed secret
+  field without writing a plaintext value into the open plane.
+- `witself run` to resolve sealed-plane secret references and inject resolved
+  values into a child process environment, never into logs, audit records, or the
+  open plane.
+- `witself mcp serve --no-value-tools` to disable the value-returning sealed-plane
+  tools (`secret.reveal`, `totp.code`, value-returning `reference.resolve`),
+  separate from `--read-only` which disables mutations.
+
 Core backend capabilities:
 
 - Shared Go core below CLI, MCP, API, and local development adapters.
@@ -123,12 +178,26 @@ Core backend capabilities:
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
   `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
   `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
+- Sealed credential-plane route groups for the sealed-plane slice:
+  `/v1/secrets` (with `:reveal`, `:rotate`, `:archive`, `:restore`, `:grant`,
+  `:revoke`), `/v1/totp` (with `:code`), and `/v1/password:generate`, all behind
+  the capability flags `client_side_decrypt` / `server_side_decrypt` and the KMS
+  readiness gate that applies only when the sealed plane is enabled.
 - Prometheus metrics for HTTP traffic, auth, token operations, memory
   operations, recall and embedding operations, fact operations, policy
   decisions, cross-agent accesses, group operations, messaging, audit events,
-  usage, limits, storage, vector storage, and migrations.
+  usage, limits, storage, vector storage, and migrations. When the sealed plane
+  is enabled, secret, reveal, TOTP, and KMS metric families
+  (`witself_secret_reveals_total`, `witself_totp_*`,
+  `witself_kms_operations_total`) and the sealed-plane metered dimensions
+  (`stored_secret`, `secret_read`, `totp_code`, `runtime_injection`,
+  `encrypted_storage_byte`) are added.
 - Local development adapter behind the same backend interface.
-- Postgres storage adapter with pgvector and Goose migrations.
+- Postgres storage adapter with pgvector and Goose migrations; the open plane's
+  pgvector path is a hard readiness gate with no KMS dependency. When the sealed
+  plane is enabled, the schema gains `realm_keys` and `secret_deks` and a KMS
+  provider binding (`aws-kms`, `gcp-kms`, `azure-key-vault`, `local-dev`) becomes
+  a readiness gate for that slice only.
 - Embedding-provider abstraction with `voyage` as default and `openai` and
   `local-dev` selectable through `WITSELF_EMBEDDINGS_PROVIDER` /
   `WITSELF_EMBEDDINGS_MODEL`.
@@ -141,7 +210,11 @@ Core backend capabilities:
   consolidation, session start/end, ingest import of memories and facts,
   optional digest emit, cross-agent read/contribute/curate/forget, policy
   decisions, group changes, message send/deliver/read, identity export/import,
-  operator actions, limits, and billing/support stubs when invoked.
+  operator actions, limits, and billing/support stubs when invoked. When the
+  sealed plane is enabled, secret create/update/rename/copy/archive/restore/
+  delete, `secret.reveal`, secret grant/revoke, `totp.enrolled`/`totp.code`/
+  seed-revealed/deleted, and `key.rotated` (KEK) events are emitted, with a
+  `server_side_decrypt` flag recorded on reveal and code.
 - A deterministic, human-readable `echo` string on every mutation result,
   dedup/supersede on write that returns the existing id with a
   `memory_duplicate`/`memory_merged` warning, and a first-class `source`
@@ -200,7 +273,9 @@ V0 does not include:
 - Automatic re-embedding on provider/model change (re-embedding is an explicit,
   audited maintenance operation).
 - Field-level encryption of `sensitive` facts as a default (it remains an
-  optional capability).
+  optional open-plane capability). `sensitive` facts use lightweight redaction,
+  not the sealed-plane reveal ceremony; a credential belongs in the sealed plane
+  as a secret, not in a `sensitive` fact.
 - Production support promises for arbitrary self-hosted installations before
   hardening docs, backup guidance, upgrade guidance, and support contracts are
   ready.
@@ -251,16 +326,39 @@ V0 is credible when:
 - Unsupported billing, payment, crypto payment, support, and self-hosted
   production operations fail deterministically with capability details.
 
+When the sealed credential-plane slice ships, it is additionally credible when:
+
+- An open-plane-only deployment passes readiness with **no KMS** configured;
+  enabling the sealed plane makes KMS a readiness gate while pgvector stays a hard
+  gate for the open plane.
+- `secret reveal` and `totp code` are the only value-returning sealed-plane ops,
+  each emits an audited event with the `server_side_decrypt` flag, and
+  `--no-value-tools` disables them in MCP while `--read-only` disables mutations.
+- Secrets and TOTP seeds never appear in embeddings, `memory recall`, `self show`,
+  `digest emit`, `ingest`, or `witself export`; `witself export` excludes the
+  sealed plane and secret backup is encrypted-only (envelope plus KMS key
+  identity, never plaintext).
+- Loss of KMS access renders sealed secret values unrecoverable (crypto-shred)
+  without affecting the open plane.
+
 ## Related Docs
 
 - [requirements.md](requirements.md)
 - [implementation-plan.md](implementation-plan.md)
 - [cli-command-surface.md](cli-command-surface.md)
 - [api-contract.md](api-contract.md)
+- [data-model.md](data-model.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [context-hydration.md](context-hydration.md)
 - [access-policy.md](access-policy.md)
+- [storage.md](storage.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [observability-and-operations.md](observability-and-operations.md)

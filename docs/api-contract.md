@@ -21,11 +21,15 @@ http://127.0.0.1:8080/v1
 Breaking HTTP contract changes require a new version path. Non-breaking fields
 may be added to JSON objects when clients can safely ignore unknown fields.
 
-Unlike Witpass, whose API guards the confidentiality of secret material,
-Witself's API guards the integrity and authenticity of identity data. The
-contract decisions below reflect that flip: there is no reveal ceremony and no
-encrypted-only export, but every cross-agent and destructive identity mutation
-is attributed, audited, and reversible by default.
+Witself's API spans two planes. For the open plane (memories and facts) it
+guards the integrity and authenticity of identity data: there is no reveal
+ceremony and no encrypted-only export, but every cross-agent and destructive
+identity mutation is attributed, audited, and reversible by default. For the
+sealed plane (secrets and TOTP) it guards confidentiality the way the former
+Witpass API did: KMS-backed envelope encryption, reveal-gated value access, and
+encrypted-only secret backup, with secret material never embedded, recalled, in
+the self-digest, or in the plaintext identity export. The contract decisions
+below apply the posture appropriate to each plane.
 
 ## Transport Requirements
 
@@ -35,8 +39,10 @@ is attributed, audited, and reversible by default.
   explicitly for binary export or download.
 - Raw tokens, `sensitive` fact values, `sensitive` memory content, message
   bodies and payloads, embedding vectors, raw payment details, wallet
-  credentials, and provider secrets must not appear in URLs, query strings,
-  access logs, server logs, audit records, or ordinary error responses.
+  credentials, provider secrets, and all sealed-plane material — secret field
+  values, TOTP seeds, generated TOTP codes, generated passwords, and DEK/KEK key
+  material — must not appear in URLs, query strings, access logs, server logs,
+  audit records, or ordinary error responses.
 - Request bodies that carry memory content, fact values, or message bodies must
   be redacted before logging.
 
@@ -174,6 +180,38 @@ Examples of feature flags:
 - `attachments`
 - `terraform_outputs`
 - `field_level_encryption`
+- `secrets`
+- `totp`
+- `password_generate`
+- `runtime_injection`
+- `client_side_decrypt`
+- `server_side_decrypt`
+
+The `secrets`, `totp`, `password_generate`, and `runtime_injection` flags report
+whether the sealed plane — the KMS-backed credential side of Witself, distinct
+from the open plane of memories and facts — is enabled on this backend. The open
+plane (memories, facts, recall, digest) does not require KMS and stays available
+even when the sealed plane is disabled; the sealed plane requires a configured
+KMS provider, so these flags are off on an open-plane-only deployment. The
+sealed plane carries hard carve-outs: secret and TOTP material is never embedded,
+never returned by semantic recall, never in the self-digest, never in the
+plaintext identity export, and never ingested from `CLAUDE.md`/`AGENTS.md`. The
+sealed-plane model is tracked in [secret-model.md](secret-model.md) and
+[totp-2fa.md](totp-2fa.md).
+
+`client_side_decrypt` and `server_side_decrypt` must be advertised honestly per
+backend and realm and select the reveal/TOTP response shape (see
+[key-hierarchy.md](key-hierarchy.md) and [json-contracts.md](json-contracts.md)).
+A managed token-only backend MUST advertise `server_side_decrypt: true` and
+returns a decrypted `field.value` plus `value_encoding`; a client-side-decrypt
+backend returns ciphertext plus envelope metadata and the key-unwrap material,
+with no plaintext. Clients use capability discovery to know which path applies
+before a reveal. When the sealed plane is enabled, the `secrets`/`totp` flags are
+nested objects that also report the active `kms_provider` (`aws-kms`, `gcp-kms`,
+`azure-key-vault`, or `local-dev`) and the per-realm key state, so callers know
+which decrypt path and KMS dependency are in effect. The CMK→per-realm KEK→
+per-secret/field DEK hierarchy is tracked in [key-hierarchy.md](key-hierarchy.md)
+and [encryption-model.md](encryption-model.md).
 
 The `semantic_recall` flag is a nested object reporting the active embedding
 provider, model, vector dimensionality, and whether recall is degraded. `read`,
@@ -215,13 +253,16 @@ Idempotency is required for operations that create durable or external effects:
 - Policy create and delete.
 - Group create, member add/remove, and delete.
 - Message send and acknowledgement.
+- Secret create, update, rename, copy, archive, restore, delete, grant, and
+  revoke.
+- TOTP enrollment and deletion.
 - Identity export and import jobs.
 - Hosted payment or crypto checkout sessions.
 - Support ticket creation and comments.
 
 Idempotency records must not store memory content, fact values, message
-bodies/payloads, embedding vectors, raw tokens, payment details, or provider
-secrets.
+bodies/payloads, embedding vectors, raw tokens, payment details, provider
+secrets, secret field values, TOTP seeds, generated codes, or key material.
 
 `witself setup` should combine API idempotency with name-based ensure semantics:
 account, realm, and agent creation can safely select existing visible resources
@@ -289,12 +330,17 @@ Rules:
 - Responses use `items` and `next_cursor`.
 - Filter names should match CLI concepts where practical, such as `owner_agent`,
   `owner_group`, `kind`, `tag`, `source`, `name`, `prefix`, `primary`,
-  `sensitive`, `state`, `since`, and `until`.
+  `sensitive`, `state`, `template`, `since`, and `until`.
 - `sensitive` memory content and `sensitive` fact values must be redacted in
   list and scan responses by default. List endpoints return metadata and
   non-sensitive values; an authorized single-record read returns the value
-  (there is no reveal ceremony).
+  (there is no reveal ceremony for the open plane).
 - Embedding vectors must never be returned by list endpoints.
+- Sealed-plane secret field values, TOTP seeds, and generated codes are never
+  returned by any list, scan, or single-record `GET`. Secret and TOTP list/show
+  responses carry only metadata (name, template, owner, fields present, rotation
+  and grant state); the value is returned only by the explicit, audited
+  `:reveal`/`:code` colon actions below.
 
 Recall is a query operation, not a list traversal, so it uses a `POST`
 colon-action route rather than `GET` filters (see
@@ -348,6 +394,9 @@ Initial route groups:
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
 | `/v1/messages` | Inter-agent message send, list, read, and acknowledgement. |
+| `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
+| `/v1/totp` | Sealed-plane TOTP enrollment, metadata, code generation, and deletion. |
+| `/v1/password` | Stateless password generation (`:generate`). |
 | `/v1/audit` | Audit event list and show. |
 | `/v1/billing` | Plans, usage, limits, subscription, payment methods, hosted provider sessions, invoices, and crypto payment flows. |
 | `/v1/support` | Support tickets and comments. |
@@ -374,8 +423,9 @@ per-call billing in v0. Backends should return deterministic `rate_limited` or
 `limit_exceeded` errors when a plan or service-protection limit throttles or
 blocks an operation. The Witself metered dimensions (active agents, stored
 memories and facts, recalls/reads, writes, embedding operations, vector storage,
-cross-agent accesses, groups, and messages) are defined in
-[billing-and-limits.md](billing-and-limits.md).
+cross-agent accesses, groups, and messages, plus the sealed-plane dimensions
+stored secrets, secret reads, TOTP codes, runtime injections, and encrypted
+storage bytes) are defined in [billing-and-limits.md](billing-and-limits.md).
 
 Export endpoints produce structured, round-trippable identity data. Unlike
 Witpass, plaintext identity export is a first-class v0 feature, not a forbidden
@@ -413,11 +463,18 @@ Avoid:
 /v1/memories/recall?query=what+did+we+decide
 ```
 
-Witself has no reveal route and no TOTP code route. The only normal API
-responses that may include a freshly returned secret value are token create and
-token rotate, which return the raw token exactly once. Fact and memory reads
-return ordinary identity data under normal authorization; reading a `sensitive`
-record is an ordinary authorized read, not a reveal ceremony.
+The open plane has no reveal route. Fact and memory reads return ordinary
+identity data under normal authorization; reading a `sensitive` record is an
+ordinary authorized read, not a reveal ceremony, and `sensitive` facts use
+lightweight redaction rather than the sealed-plane reveal ceremony.
+
+The sealed plane is the exception: `POST /v1/secrets/{secret_id}:reveal` and
+`POST /v1/totp/{secret_id}:code` are the explicit, audited, reveal-gated
+value-returning operations, and `POST /v1/password:generate` returns a freshly
+generated password once. These are the only sealed-plane routes that emit
+plaintext; secret and TOTP material is never embedded, recalled, in the
+self-digest, or in the plaintext identity export. Token create and token rotate
+remain the open-plane routes that return a raw token exactly once.
 
 Initial colon-action routes:
 
@@ -433,6 +490,14 @@ POST /v1/sessions:end
 POST /v1/policies:test
 POST /v1/messages/{message_id}:ack
 POST /v1/tokens/{token_id}:rotate
+POST /v1/secrets/{secret_id}:reveal
+POST /v1/secrets/{secret_id}:rotate
+POST /v1/secrets/{secret_id}:archive
+POST /v1/secrets/{secret_id}:restore
+POST /v1/secrets/{secret_id}:grant
+POST /v1/secrets/{secret_id}:revoke
+POST /v1/totp/{secret_id}:code
+POST /v1/password:generate
 ```
 
 Notes on specific actions:
@@ -472,8 +537,56 @@ Notes on specific actions:
   the canonical access-decision dry run.
 - `:ack` records per-recipient read/acknowledgement state for a delivered
   message; the acknowledging agent is derived from the token.
-- `:rotate` issues a replacement token and returns the raw value once; the prior
-  token is revoked immediately or after an explicit grace period.
+- `:rotate` (on `/v1/tokens`) issues a replacement token and returns the raw
+  value once; the prior token is revoked immediately or after an explicit grace
+  period.
+- `:reveal` (on `/v1/secrets`) is the sealed plane's explicit, audited,
+  reveal-gated value path. It is a `POST` because the requested `field` and audit
+  `reason` travel in the body and because the returned plaintext or unwrap
+  material must never appear in a URL. It requires `secret:reveal`, is metered as
+  `secret_read`, and is audited as `secret.reveal`. Its response shape is
+  selected by capability discovery:
+  - When the backend advertises `server_side_decrypt: true` (managed token-only
+    pods), the server unwraps the DEK against the per-realm KEK in KMS and
+    returns a decrypted `field.value` plus `value_encoding`; the audit record
+    carries the `server_side_decrypt` flag.
+  - When the backend advertises `client_side_decrypt: true`, the response
+    returns ciphertext, AEAD/envelope metadata, and the wrapped key material with
+    no plaintext; the client unwraps locally.
+
+  The two shapes are defined in [json-contracts.md](json-contracts.md) and the
+  key hierarchy in [key-hierarchy.md](key-hierarchy.md). Revealed values are
+  never embedded, recalled, placed in the self-digest, or written to the
+  plaintext export.
+- `:code` (on `/v1/totp`) returns a current TOTP code (and the seconds
+  remaining) for an enrolled secret. It requires `totp:code`, is metered as
+  `totp_code`, and is audited as `totp.code`. Like `:reveal`, the generated code
+  and the underlying seed are sealed material: never logged, embedded, recalled,
+  in the digest, or in the plaintext export. The seed itself is high-value sealed
+  material revealed only through its own audited path. See
+  [totp-2fa.md](totp-2fa.md).
+- `:rotate` (on `/v1/secrets`) writes a new secret version (new per-secret/field
+  DEK), keeping prior versions per retention; it requires `secret:update` and is
+  audited as `secret.updated`. `:archive` and `:restore` are the soft-delete pair
+  for secrets, mirroring memory `:forget`/`:restore`; archive is reversible within
+  the retention window and `DELETE /v1/secrets/{secret_id}` is the explicit,
+  guarded hard delete (crypto-shred). They require `secret:update`/`secret:delete`
+  and are audited as `secret.archived`/`secret.restored`/`secret.deleted`.
+- `:grant` and `:revoke` (on `/v1/secrets`) manage cross-agent and operator
+  access to a sealed-plane secret. Unlike the open plane — where cross-agent
+  read/curate/forget is governed by the [access-policy.md](access-policy.md)
+  identity policy engine — secret cross-agent and operator access is governed by
+  explicit grants plus realm roles, tracked in
+  [authorization-and-roles.md](authorization-and-roles.md). `:grant` names the
+  target `owner_agent` or `owner_group` and the granted scope; both require
+  `secret:grant`, support `dry_run`, carry an audit `reason`, and are audited as
+  `secret.grant`/`secret.revoke`. Secrets are not subject to the open cross-agent
+  read/curate/forget verbs.
+- `:generate` (on `/v1/password`) is a stateless generator: it returns a freshly
+  generated password once and creates no resource. It is a `POST` because the
+  generated value must never appear in a URL; the returned value is sealed
+  material (never logged, embedded, recalled, in the digest, or in the plaintext
+  export). See [secret-model.md](secret-model.md).
 
 Cross-agent and operator mutations through these routes (`contribute`, `curate`,
 and `forget` against another agent's or group's records) require an audit
@@ -519,7 +632,12 @@ payment flows, Witself support workflows, and internal admin workflows may be
 disabled unless configured by the operator. The embedding provider is
 deployment-owned; a self-hosted operator may run `local-dev`, `voyage`, or
 `openai`, and the capabilities response reports the active provider and whether
-recall is degraded.
+recall is degraded. The sealed plane (secrets, TOTP, password generation,
+runtime injection) is optional and requires a configured KMS provider; when no
+KMS provider is configured the `secrets`/`totp` capabilities are off and the
+sealed-plane routes return deterministic `unsupported_operation`. Enabling the
+sealed plane gates readiness on the KMS provider, while pgvector remains the hard
+gate for the open plane.
 
 Local development mode should support enough API behavior to exercise the CLI,
 MCP adapter, JSON contracts, and integration tests. It uses the `local-dev`
@@ -535,6 +653,13 @@ embedding provider so semantic recall can be exercised offline, and reports
 - [json-contracts.md](json-contracts.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
+- [data-model.md](data-model.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)

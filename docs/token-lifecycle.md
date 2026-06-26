@@ -10,13 +10,18 @@ or process may disappear and come back, but the named Witself agent identity
 should keep working as long as its mounted token file is valid and the agent has
 not been disabled or deleted.
 
-The token is the agent's identity. Unlike Witpass, where a token guards access
-to secret material whose confidentiality is the whole point, a Witself token
-asserts *who an agent is* so that cross-agent access, group membership, and
-inter-agent messaging can be attributed correctly. The threat the token defends
-shifts from confidentiality to integrity and authenticity: a stolen or spoofable
-token is an identity-forgery and memory-poisoning risk, not a secret-disclosure
-risk.
+The token is the agent's identity, and in the consolidated product that identity
+spans **both planes**: the open plane (memories + facts) and the sealed plane
+(secrets + TOTP). A Witself token asserts *who an agent is* so that cross-agent
+access, group membership, inter-agent messaging, and the agent's own sealed
+credential material can be attributed and gated correctly. The threats it defends
+are therefore dual: in the open plane a stolen or spoofable token is an
+identity-forgery and memory-poisoning risk (integrity/authenticity); in the
+sealed plane it is also a credential-disclosure risk (confidentiality), because
+the same token authorizes the audited `secret reveal` and `totp code` ceremonies
+over the agent's own sealed data. The scope set the token carries is what keeps
+those planes distinct (see [Scopes](#scopes) and
+[authorization-and-roles.md](authorization-and-roles.md)).
 
 Default v0 posture:
 
@@ -60,6 +65,12 @@ v0 token files should contain only the raw token text:
 ```text
 witself_at_...
 ```
+
+Raw agent tokens carry the `witself_at_` prefix (consolidated from the former
+Witpass `wp_at_`). The prefix is a stable, greppable marker for the secret-leak
+scanners and repo-safety checks — a `witself_at_` string in a commit, log, or
+export is treated as a leaked credential. The raw value is returned only once at
+create or rotate; server-side storage keeps only the `token_hash` and metadata.
 
 No JSON wrapper is required for v0 agent runtime use. Metadata is available
 through `witself token list`, `witself token show`, or equivalent API results.
@@ -152,33 +163,101 @@ Reasoning:
 
 ## Scopes
 
-Agent tokens carry scopes that gate the identity surface. There are no
-`secret:*` or `totp:*` scopes. The v0 scope set is defined in
-[requirements.md](requirements.md); tokens express these dimensions:
+Agent tokens carry scopes that gate access across both planes. The canonical
+scope vocabulary, the role→scope expansion, and the deterministic resolution
+algorithm (`token_scopes ∩ ownership ∩ grants` for the sealed plane / Policy for
+the open plane) live in [authorization-and-roles.md](authorization-and-roles.md);
+the v0 scope dimensions are listed in [requirements.md](requirements.md). This
+section states what a token *carries* and how it is constrained.
 
-- Own-identity memory and fact lifecycle: `memory:create`, `memory:read`,
-  `memory:update`, `memory:forget`, `fact:create`, `fact:read`, `fact:update`,
-  `fact:delete`, `fact:primary`.
-- Cross-agent access: `memory:read-others` (read and semantic recall over
-  another agent's memories/facts) and `memory:manage-others` (curate and forget
-  across agents). Both are policy-gated; the scope is necessary but not
+Tokens express these dimensions:
+
+- Own-identity memory and fact lifecycle (open plane): `memory:create`,
+  `memory:read`, `memory:update`, `memory:forget`, `fact:create`, `fact:read`,
+  `fact:update`, `fact:delete`, `fact:primary`.
+- Own sealed credential lifecycle (sealed plane): `secret:create`,
+  `secret:show`, `secret:reveal`, `secret:update`, `secret:delete`,
+  `totp:enroll`, `totp:code`. These gate the agent's own secrets and TOTP
+  enrollments; `secret:reveal` and `totp:code` are the only scopes that return
+  sealed plaintext, always through the audited reveal/code ceremony. `secret:show`
+  is metadata-only and never returns field values.
+- Cross-agent open-plane access: `memory:read-others` (read and semantic recall
+  over another agent's memories/facts) and `memory:manage-others` (curate and
+  forget across agents). Both are Policy-gated; the scope is necessary but not
   sufficient, because [access-policy.md](access-policy.md) must also grant the
   action against the specific target.
+- Cross-agent / group-owned sealed access: `secret:grant` writes and revokes the
+  per-secret grants that confer cross-agent or group-owned reach. There is no
+  Policy engine on the sealed plane; cross-agent secret access is grants plus
+  realm roles only ([authorization-and-roles.md](authorization-and-roles.md)).
 - Group membership and management: `group:member` (act as a group member for
-  group-scoped memories/facts), `group:read`, and `group:manage`.
+  group-owned memories/facts/secrets), `group:read`, and `group:manage`.
 - Messaging: `message:send` and `message:read`.
 - Policy and audit visibility: `policy:read`, `policy:manage`, `audit:read`.
 - Operator/admin surfaces: `agent:manage`, `token:manage`, `realm:admin`, and
   the account/billing/support scopes, normally carried by operator tokens rather
   than agent tokens.
 
+### Default Agent Token Bundle
+
+Agent tokens issue with the **consolidated default agent bundle** — own-data
+lifecycle across both planes, and nothing cross-agent or operator-class:
+
+```
+{
+  memory:create, memory:read, memory:update, memory:forget,
+  fact:create, fact:read, fact:update, fact:delete, fact:primary,
+  secret:create, secret:show, secret:reveal, secret:update, secret:delete,
+  totp:enroll, totp:code,
+  message:send, message:read
+}
+```
+
+The bundle is over **OWN data only** (`owner_kind='agent'` and
+`owner_agent_id = this agent`, plus group-owned data the agent is a current
+member of for the open-plane verbs). It deliberately **excludes** `secret:grant`,
+the cross-agent umbrellas `memory:read-others`/`memory:manage-others`,
+`group:manage`, `policy:manage`, `agent:manage`, `token:manage`, `audit:read`,
+`realm:admin`, and the `account:*`/`billing:*`/`support:*` scopes. An agent
+therefore cannot self-grant, cannot reach another agent's data, cannot author
+Policy, cannot manage agents/tokens/realms, and cannot see realm-wide inventory
+(`--all-agents` is operator-only).
+
+The sealed-plane scopes in the default bundle apply to the agent's own secrets
+only. Even with `secret:reveal`, sealed values remain carved out of every
+ambient path: secrets and TOTP seeds are **never embedded, never returned by
+semantic recall, never in the self-digest, and never plaintext-exported**,
+regardless of any scope or grant (see
+[secret-model.md](secret-model.md), [encryption-model.md](encryption-model.md),
+[backup-and-recovery.md](backup-and-recovery.md)). `secret:reveal` only
+authorizes the explicit, audited per-value ceremony.
+
+### Operator And Service Tokens (Subset Of Issuer)
+
+Operator tokens and unattended **service** tokens are minted through
+`token:manage` and are **subset-constrained**: a minted token's `scopes[]` MUST
+be a subset of the issuing operator's effective scopes
+(`account_role_bundle ∪ realm_role_bundle`, hard-clamped by the issuer's tenant).
+Token minting can never escalate — it can only carve a narrower credential out of
+the issuer's authority. A `service` token additionally has no human OAuth
+identity and no `realm_members` row, so its authority is purely its
+`token_scopes` plus tenant scoping
+([authorization-and-roles.md](authorization-and-roles.md) Principals And
+Principal Kinds).
+
 Scope rules:
 
+- A token cannot exceed the permissions of the principal that issued it; minted
+  operator/service token scopes are a subset of the issuer's effective scopes.
 - Scopes should be constrainable by realm, owning agent, owning group, memory
-  kind or tag, or fact name where practical.
-- A token cannot exceed the permissions of the principal that issued it.
-- `memory:read-others` and `memory:manage-others` never bypass policy; they only
-  make a token *eligible* to be granted cross-agent access by a policy.
+  kind or tag, fact name, or — for the sealed plane — secret name and field name
+  where practical. In v0 these resource constraints are carried structurally
+  (tenant binding, `secret_grants` rows, explicit targeting), not as custom scope
+  strings ([authorization-and-roles.md](authorization-and-roles.md) Role→Scope
+  Expansion And Custom Scopes).
+- `memory:read-others` and `memory:manage-others` never bypass Policy, and
+  `secret:reveal`/`secret:grant` never bypass ownership/grants; they only make a
+  token *eligible* for the gated action, which still requires the object check.
 - A token's scopes are recorded in token metadata and are reported by
   `witself whoami` and `witself token show`.
 
@@ -273,7 +352,8 @@ Token metadata should include:
 - Disabled/blocked reason when inherited from agent state.
 
 Token metadata must not include raw token values. It also must not include
-memory content, fact values, message bodies or payloads, or embedding vectors.
+memory content, fact values, message bodies or payloads, embedding vectors, or
+any sealed material (secret field values, TOTP seeds or codes).
 
 ## Auditing
 
@@ -305,9 +385,12 @@ without a migration path.
 ## Related Docs
 
 - [requirements.md](requirements.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [server-command-surface.md](server-command-surface.md)
 - [api-contract.md](api-contract.md)
 - [access-policy.md](access-policy.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [memory-model.md](memory-model.md)

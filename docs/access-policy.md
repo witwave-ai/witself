@@ -29,6 +29,23 @@ it is **memory-poisoning, unauthorized curation or forgetting, and cross-agent
 write abuse**. The full threat model is tracked in
 [threat-model.md](threat-model.md).
 
+## Plane Boundary: Open Plane Only
+
+This declarative cross-agent Policy engine governs the **open plane** only —
+memories and facts. It does **not** govern the **sealed plane** (secrets and
+TOTP). Cross-agent and operator access to sealed-plane material is authorized by
+secret **grants** plus **realm roles**, not by a Policy object — see
+[authorization-and-roles.md](authorization-and-roles.md).
+
+The four open-plane verbs do not apply to the sealed plane: secrets are **not**
+subject to `read`, `contribute`, `curate`, or `forget`. There is no semantic
+recall, no cross-agent "read", and no tombstone/forget verb for a secret reached
+through Policy. A secret is never embedded, recalled, placed in the self-digest,
+or plaintext-exported; cross-agent sealed access is **reveal-gated** through a
+grant and audited as a `secret.reveal`/`secret.grant`, not a `crossagent.*`
+event. Accordingly, the `scope` of a Policy is `memories`, `facts`, or both, and
+never a secret; a `secret`-scoped Policy is invalid.
+
 ## Policy Object
 
 A Policy is a first-class object in the realm. Its shape is pinned in
@@ -299,6 +316,7 @@ end-to-end secret boundary inherited from Witpass.
 ## Related Docs
 
 - [requirements.md](requirements.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
 - [security-groups.md](security-groups.md)

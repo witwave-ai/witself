@@ -11,12 +11,18 @@ first implementation slice.
 
 Witself reuses the Witpass platform spine — one core domain service behind thin
 CLI/MCP/API adapters, the same tenancy and token model, the same
-observability/release/billing apparatus — but swaps the secret payload for
-self-identity. The scaffold therefore mirrors the Witpass repository shape, with
-the realm/agent/memory/fact/policy/group/message domain replacing the
-vault/agent/secret domain, a pgvector + embeddings-provider package added for
-semantic recall, a dedicated policy-engine package added for cross-agent access,
-and the crypto package demoted to token hashing and transport only.
+observability/release/billing apparatus — and now carries **both planes** in one
+product: the **open plane** (memories + facts) and the **sealed plane** (secrets
++ TOTP). The scaffold therefore mirrors the Witpass repository shape, with the
+realm/agent/memory/fact/policy/group/message domain joined by the
+secret/TOTP/grant domain, a pgvector + embeddings-provider package added for
+semantic recall, a dedicated policy-engine package added for cross-agent
+identity access, and the crypto + KMS-provider packages re-added for the
+sealed-plane envelope (CMK → per-realm KEK → per-secret/field DEK; see
+[key-hierarchy.md](key-hierarchy.md) and [encryption-model.md](encryption-model.md)).
+The sealed plane is reveal-gated and is never embedded, never recalled, never in
+the self-digest, and never plaintext-exported; KMS is a required dependency only
+when the sealed plane is enabled.
 
 The initial scaffold should create:
 
@@ -24,8 +30,9 @@ The initial scaffold should create:
 - `cmd/witself`.
 - `cmd/witself-server`.
 - Internal package layout for shared core, CLI adapter, MCP adapter, API
-  adapter, storage adapters, embeddings/pgvector, policy engine, audit,
-  observability, token-hashing/transport crypto, and JSON contracts.
+  adapter, storage adapters, embeddings/pgvector, policy engine, sealed-plane
+  envelope crypto, KMS provider abstraction, audit, observability, and JSON
+  contracts.
 - `.gitignore`.
 - `.github/workflows/ci.yml`.
 - `.github/workflows/release.yml`.
@@ -60,16 +67,17 @@ boundaries are frozen:
 ```text
 cmd/witself/                  # CLI, including mcp serve
 cmd/witself-server/           # Backend API server (serve, migrate, serve --dev)
-internal/core/                # Domain service and use cases (memory/fact/policy/group/message)
+internal/core/                # Domain service and use cases (memory/fact/policy/group/message + secret/totp/grant)
 internal/api/                 # HTTP handlers and request/response adapters
 internal/mcp/                 # MCP stdio adapter over the core service
 internal/auth/                # Token validation and principal (realm+agent) resolution
 internal/policy/              # Policy engine: default-deny evaluation, verbs, policy test
-internal/embeddings/          # Embedding-provider abstraction (voyage/openai/local-dev)
-internal/recall/              # Semantic recall: hybrid ranking and degradation
+internal/embeddings/          # Open plane: embedding-provider abstraction (voyage/openai/local-dev)
+internal/recall/              # Open plane: semantic recall: hybrid ranking and degradation
 internal/audit/               # Audit event generation and sinks
 internal/observability/       # Metrics, logs, request IDs, and health probes
-internal/crypto/              # Token hashing and transport only (no envelope/KMS pillar)
+internal/crypto/              # Sealed plane: envelope (CMK->per-realm KEK->DEK), AEAD, reveal; plus token hashing/transport
+internal/kms/                 # Sealed plane: KMS-provider abstraction (aws-kms/gcp-kms/azure-key-vault/local-dev)
 internal/store/               # Storage interfaces
 internal/store/local/         # Local development adapter (file-backed, local-dev embedder)
 internal/store/postgres/      # Production relational adapter, including pgvector
@@ -84,15 +92,18 @@ Notes on the domain-specific packages:
 - `internal/policy/` is a first-class package, not a thin grant table. It owns
   the evaluable Policy objects (subject × permission × target × scope), the
   default-deny stance, the escalating verbs (`read`, `contribute`, `curate`,
-  `forget`), and the `policy test` decision path. It reuses the authorization and
-  audit scaffolding that Witpass kept in its encryption-model package; Witself
-  has no encryption-model package. Tracked in
+  `forget`), and the `policy test` decision path. It governs the **open plane
+  only** — cross-agent identity access to memories/facts. Sealed-plane secret
+  access is not a policy verb; it uses grants plus realm roles (see
+  [authorization-and-roles.md](authorization-and-roles.md)). Tracked in
   [access-policy.md](access-policy.md).
-- `internal/embeddings/` is the embedding-provider abstraction, the structural
-  mirror of how Witpass abstracted KMS. It carries the `voyage` (default),
-  `openai`, and `local-dev` providers behind a capability boundary and reports
-  active provider, model, and vector dimensionality. Tracked in
-  [memory-model.md](memory-model.md) and [storage.md](storage.md).
+- `internal/embeddings/` is the open-plane embedding-provider abstraction,
+  structurally parallel to the sealed-plane `internal/kms/` provider abstraction.
+  It carries the `voyage` (default), `openai`, and `local-dev` providers behind a
+  capability boundary and reports active provider, model, and vector
+  dimensionality. **Sealed-plane carve-out:** secret values and TOTP seeds are
+  never embedded. Tracked in [memory-model.md](memory-model.md) and
+  [storage.md](storage.md).
 - `internal/recall/` owns semantic-by-default recall: vector similarity blended
   with keyword, tag, kind, and time filters, hybrid ranking, and deterministic
   degradation to keyword/tag/time when the provider is unavailable.
@@ -100,10 +111,22 @@ Notes on the domain-specific packages:
   and their embedding vectors live in Postgres; migrations run through
   `witself-server migrate` (Goose, advisory lock). Tracked in
   [storage.md](storage.md).
-- `internal/crypto/` is demoted to token hashing and transport concerns only.
-  There is no envelope handling, no KMS-as-pillar, and no reveal machinery.
-  Optional field-level encryption of `sensitive` facts is a capability, not a
-  core dependency; see [storage.md](storage.md).
+- `internal/crypto/` owns the sealed-plane envelope: the CMK → per-realm KEK →
+  per-secret/field DEK hierarchy, AEAD seal/open (`XCHACHA20_POLY1305`,
+  `AES_256_GCM`), AAD binding, DEK wrap/unwrap, and the reveal machinery for
+  `secret reveal` / `totp code`, alongside its existing token hashing and
+  transport concerns. The envelope is the sealed plane's confidentiality
+  boundary; the open plane (memories/facts) uses ordinary data-at-rest, not this
+  package. Tracked in [encryption-model.md](encryption-model.md) and
+  [key-hierarchy.md](key-hierarchy.md).
+- `internal/kms/` is the KMS-provider abstraction that roots the envelope: the
+  `aws-kms`, `gcp-kms`, `azure-key-vault`, and `local-dev` providers behind a
+  capability boundary, supporting client-side and server-side decrypt. It is
+  required only when the sealed plane is enabled (an open-plane-only deployment
+  runs without KMS) and is the sealed-plane structural parallel of
+  `internal/embeddings/`. KMS loss crypto-shreds secret values without affecting
+  the open plane. Tracked in [key-hierarchy.md](key-hierarchy.md) and
+  [storage.md](storage.md).
 
 ## CI And Release Workflows
 
@@ -160,7 +183,18 @@ Notes on the domain-specific packages:
 Frozen enough for scaffolding:
 
 - Product name and public repo posture.
-- Realm/agent/memory/fact/policy/group/message model.
+- Realm/agent model spanning two planes: the open plane
+  (memory/fact/policy/group/message) and the sealed plane
+  (secret/TOTP/grant). Ownership is unified — `owner_kind ∈ {agent, group}`
+  across memories, facts, and secrets.
+- The two-plane Postgres data model is frozen for the first Goose migration,
+  including the sealed-plane `secrets`, `secret_fields`, `secret_grants`,
+  `totp_enrollments`, `realm_keys`, and `secret_deks` tables and their envelope
+  columns (CMK → per-realm KEK → per-secret/field DEK). See
+  [data-model.md](data-model.md).
+- Sealed-plane invariants: secret values and TOTP seeds are reveal-gated and are
+  never embedded, never recalled, never in the self-digest, and never
+  plaintext-exported. KMS is required only when the sealed plane is enabled.
 - Semantic-by-default recall with an embedding-provider abstraction.
 - Cross-agent access via an evaluable default-deny policy engine.
 - Security groups as policy subjects and targets, with group-scoped records.
@@ -173,6 +207,8 @@ Frozen enough for scaffolding:
 - Backend API and route style (`/v1`, plural resources, colon actions).
 - Prometheus metrics, Kubernetes health probes, and structured server logs.
 - Postgres with pgvector as the first production storage path; AWS first.
+  `pgvector` is a hard gate for the open plane; AWS KMS is the first production
+  key path for the sealed plane (see [storage.md](storage.md)).
 - Helm under `charts/*`.
 - Terraform under `infra/terraform`.
 - Strong CI and release action from the beginning.
@@ -183,6 +219,7 @@ Still expected to evolve during implementation:
 - Exact Go package names.
 - Exact policy-evaluation and recall-ranking structs.
 - Exact embedding-provider interface and vector dimensionality handling.
+- Exact cryptographic envelope structs and KMS-provider interface.
 - Exact OpenAPI generation approach.
 - Exact Helm values schema.
 - Exact Terraform variables and outputs.
@@ -197,5 +234,9 @@ Still expected to evolve during implementation:
 - [backend-architecture.md](backend-architecture.md)
 - [memory-model.md](memory-model.md)
 - [access-policy.md](access-policy.md)
+- [data-model.md](data-model.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [storage.md](storage.md)
 - [observability-and-operations.md](observability-and-operations.md)

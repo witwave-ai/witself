@@ -3,6 +3,11 @@
 Status: draft. These docs define Witself before implementation. Last reviewed
 2026-06-26.
 
+Witself is the agent durable-state platform: one open plane (memories + facts,
+plaintext at rest, recallable, in the self-digest, plaintext-exportable) and one
+sealed plane (secrets + TOTP, envelope-encrypted, reveal-gated, never embedded,
+recalled, in the digest, or plaintext-exported).
+
 ## Product And Architecture
 
 - [requirements.md](requirements.md): product requirements, terminology,
@@ -14,11 +19,25 @@ Status: draft. These docs define Witself before implementation. Last reviewed
   history, semantic recall, and the embedding-provider abstraction.
 - [facts-model.md](facts-model.md): name→value facts, deterministic lookup,
   primary promotion, and sensitivity/redaction posture.
+- [secret-model.md](secret-model.md): the sealed-plane secret data model and
+  lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
+  templates, references, password generation, runtime injection, and the
+  carve-outs (secrets are never embedded, recalled, in the digest, or
+  plaintext-exported; reveal-gated).
+- [totp-2fa.md](totp-2fa.md): the sealed-plane TOTP authenticator
+  (enroll/code/show/delete), otpauth/Base32/QR handling, the seed as high-value
+  sealed material, and `totp:enroll` vs `totp:code`.
+- [secret-size-and-attachments.md](secret-size-and-attachments.md): secret field
+  size limits and attachment handling for the sealed plane.
 - [context-hydration.md](context-hydration.md): the always-loaded self-digest,
   the agent teaching layer, the two-way CLAUDE.md/AGENTS.md file bridge, and the
   session bootstrap protocol.
 - [access-policy.md](access-policy.md): the default-deny cross-agent policy
   engine, permission verbs, guardrails, and `policy test` evaluation.
+- [authorization-and-roles.md](authorization-and-roles.md): the role/scope model,
+  account and realm roles, scope bundles, and the resolution algorithm spanning
+  the open plane (memory/fact/policy/group/message) and the sealed plane
+  (secret/totp + grants).
 - [security-groups.md](security-groups.md): named agent groups as policy
   subjects and targets, membership, and group-owned shared identity data.
 - [inter-agent-messaging.md](inter-agent-messaging.md): the durable mailbox
@@ -42,8 +61,19 @@ Status: draft. These docs define Witself before implementation. Last reviewed
   authentication, capabilities, idempotency, pagination, and route groups.
 - [api-routes.md](api-routes.md): resource-oriented `/v1` route style and
   sensitive action route conventions.
+- [data-model.md](data-model.md): the full relational data model across both
+  planes — realm/account/operator/agent/token tables, open-plane tables
+  (memories with the pgvector embedding column, facts, policies, groups,
+  messages, audit, usage), and sealed-plane tables (secrets, secret_fields,
+  secret_grants, totp_enrollments, realm_keys, secret_deks, attachments).
 - [storage.md](storage.md): Postgres-with-pgvector storage, object/blob usage,
-  the embedding-provider boundary, optional/demoted KMS, and Goose migrations.
+  the embedding-provider boundary, KMS plus realm_keys and secret_deks for the
+  sealed plane, and Goose migrations.
+- [encryption-model.md](encryption-model.md): the sealed-plane confidentiality
+  model — envelope encryption, per-realm KEK, hybrid client-side/server-side
+  decrypt, and the reveal posture (scoped to the sealed plane only).
+- [key-hierarchy.md](key-hierarchy.md): the CMK → per-realm KEK → per-secret/field
+  DEK key hierarchy, KMS providers, rotation, and the crypto-shred posture.
 - [cloud-targets.md](cloud-targets.md): AWS-first managed cloud and
   self-hosted Terraform target decision.
 - [token-lifecycle.md](token-lifecycle.md): durable v0 agent token behavior,
@@ -93,3 +123,9 @@ Status: draft. These docs define Witself before implementation. Last reviewed
 - [competitive-analysis.md](competitive-analysis.md): product patterns from
   agent-memory systems, knowledge stores, identity/profile services, and
   MCP-adjacent tools.
+
+## Decisions
+
+- [decisions/0001-consolidate-witpass-into-witself.md](decisions/0001-consolidate-witpass-into-witself.md):
+  consolidating the Witpass secrets product into Witself as the sealed plane —
+  the two-plane model, naming/ownership unification, and the five reconciliations.

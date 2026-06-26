@@ -14,6 +14,22 @@ contract before implementation.
 - Identity recall should be semantic by default: `memory recall` is an
   embedding-backed similarity search blended with keyword, tag, kind, and time
   filters, while `memory read` and `fact get` stay deterministic.
+- Witself spans two planes: the open plane (memories + facts) is plainly
+  readable identity data; the sealed plane (secrets + TOTP) is reveal-gated,
+  envelope-encrypted credential material. Secret-revealing actions
+  (`secret reveal`, `totp code`) are explicit, audited, and never satisfied by
+  ordinary list/show output. Sealed-plane values are never embedded, recalled,
+  placed in the self-digest, or included in plaintext export; the sealed plane
+  is described in [secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md),
+  [encryption-model.md](encryption-model.md), and
+  [key-hierarchy.md](key-hierarchy.md).
+- Operators should be able to scan and manage all agent-owned and group-owned
+  secrets in a realm from the same CLI, without revealing sensitive values.
+- Secret values should be accepted from files or stdin whenever possible, not
+  only from flags. The canonical secret primitive is named fields, each marked
+  sensitive or non-sensitive; only secret `name` and `description` are required.
+- Secret references and runtime injection (`witself run`) should provide an
+  alternative to printing sealed-plane values directly to stdout.
 - Cross-agent access is default-deny and policy-driven; integrity-impacting
   actions (`memory forget`/`restore`/`delete`, cross-agent `curate`/`forget`,
   `fact delete`, `--primary` promotion) are explicit and auditable.
@@ -108,10 +124,18 @@ By default, human output should be readable and cautious:
   content preview; `sensitive` memory content is redacted in list/recall output
   by default.
 - `memory read` returns one memory's content for an authorized read; there is no
-  reveal ceremony.
+  reveal ceremony. The "no reveal ceremony / plainly readable" posture applies to
+  the open plane (memories and facts) only; sealed-plane secrets are reveal-gated.
 - `fact list` returns fact names and values; `sensitive` fact values are
   redacted in list/scan output by default.
 - `fact get NAME` returns the one deterministic value for an authorized read.
+- `secret list`, `secret scan`, and `secret show` never reveal sensitive field
+  values; `secret show` may display non-sensitive fields such as `url` or
+  `username`. Sealed-plane values are only returned by the explicit, audited
+  `secret reveal NAME FIELD` and `totp code` commands (the reveal ceremony).
+  Unlike a `sensitive` fact, which is merely redacted in summaries and readable
+  on a direct authorized `fact get`, a secret field is never readable without a
+  reveal.
 - `whoami` and profile views surface `primary` facts first as identity anchors.
 - Mutating commands summarize what changed. Every mutation returns a
   deterministic, human-readable `echo` line (such as
@@ -158,7 +182,7 @@ Rules:
 | `2` | Usage error. |
 | `3` | Access denied by policy or permissions. |
 | `4` | Authentication or unlock failure. |
-| `5` | Memory, fact, policy, group, message, agent, profile, or realm not found. |
+| `5` | Memory, fact, secret, TOTP enrollment, policy, group, message, agent, profile, or realm not found. |
 | `6` | Conflict, such as already exists or stale version. |
 | `7` | Backend unavailable, network failure, rate limit, or hard usage cap. Distinguish retryable cases (`backend_unavailable`, `rate_limited`) from the non-retryable hard cap (`limit_exceeded`) via `error.code`/`retryable` in `--json`. |
 | `8` | Store integrity or corruption failure. |
@@ -185,6 +209,10 @@ witself
   ingest
   bootstrap-instructions
   fact set|get|list|delete
+  password generate
+  secret create|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
+  run
+  totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
   message send|list|read|ack
@@ -1726,6 +1754,497 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. Required for cross-agent or group-owned deletes. |
 
+## `witself password generate`
+
+Generate a password or passphrase. This is a sealed-plane utility used most often
+to populate a sensitive secret field (see `secret create --generate-sensitive`),
+but it also works standalone. Generated values are returned to the caller and are
+not stored unless written into a secret.
+
+```sh
+witself password generate
+witself password generate --length 40 --no-ambiguous
+witself password generate --words 5
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--length N` | Password length. Default: `32`. |
+| `--lower` | Include lowercase letters. Default: true. |
+| `--upper` | Include uppercase letters. Default: true. |
+| `--digits` | Include digits. Default: true. |
+| `--symbols` | Include symbols. Default: true. |
+| `--no-lower` | Disable lowercase letters. |
+| `--no-upper` | Disable uppercase letters. |
+| `--no-digits` | Disable digits. |
+| `--no-symbols` | Disable symbols. |
+| `--no-ambiguous` | Avoid ambiguous characters such as `O`, `0`, `I`, `l`, and `1`. |
+| `--words N` | Generate a human-readable passphrase with N words instead of a random-character password. |
+| `--separator TEXT` | Separator for passphrase mode. Default: `-`. |
+| `--count N` | Generate N values. Default: `1`. |
+
+## `witself secret`
+
+Manage stored secrets: the sealed plane of Witself. A secret can be a login, API
+key, token, private key, certificate bundle, connection string, or arbitrary
+structured secret. Secrets are envelope-encrypted (CMK → per-realm KEK →
+per-secret/field DEK); the encryption and key model are tracked in
+[encryption-model.md](encryption-model.md) and
+[key-hierarchy.md](key-hierarchy.md), and the secret data model and lifecycle in
+[secret-model.md](secret-model.md).
+
+Secrets are modeled as flat named fields. Each field is marked sensitive or
+non-sensitive. Secret templates (`login`, `api-key`, `ssh-key`, `certificate`,
+`env`, `generic`) define useful conventions, but they do not limit the fields a
+secret may contain. Field size limits and attachments are tracked in
+[secret-size-and-attachments.md](secret-size-and-attachments.md).
+
+Sealed-plane carve-outs: secret values are never embedded, never returned by
+semantic recall, never placed in the self-digest, and never included in the
+plaintext export; secret backup is encrypted-only. Sensitive field values are
+only returned by the explicit, audited `secret reveal` ceremony.
+
+Secret targeting rules:
+
+- Default target: the current token-bound agent.
+- `--owner-agent NAME_OR_ID`: operator/admin only, targets a specific owning
+  agent.
+- `--group NAME_OR_ID`: targets a group-owned secret (the unified replacement for
+  the former vault-shared scope). Operator/admin or `group:manage`.
+- `--owner-agent` and `--group` are mutually exclusive.
+- Cross-agent secret access is governed by grants and realm roles in
+  [authorization-and-roles.md](authorization-and-roles.md), not by the open-plane
+  cross-agent identity policy engine; secrets are not subject to the open
+  cross-agent read/curate/forget verbs.
+
+Operator/admin multi-agent examples:
+
+```sh
+witself secret scan --all-agents
+witself secret show github/builder --owner-agent browser-agent
+witself secret update github/builder --owner-agent browser-agent --field url=https://github.com/login
+witself secret grant github/builder --owner-agent browser-agent --agent release-agent --read --reveal password
+witself totp code github/builder --owner-agent browser-agent --reason "operator recovery"
+```
+
+### `witself secret create NAME`
+
+Create a secret. `NAME` must be unique for the owning agent (or group) inside the
+current realm. Different agents may use the same `NAME`.
+
+```sh
+witself secret create github/builder \
+  --description "GitHub login for browser-agent" \
+  --template login \
+  --field username=builder@example.com \
+  --field url=https://github.com/login \
+  --generate-sensitive password
+
+witself secret create stripe/test \
+  --description "Stripe test API key" \
+  --template api-key \
+  --sensitive-stdin api-key
+
+witself secret create deploy/tls \
+  --description "TLS certificate bundle for deploy agent" \
+  --template certificate \
+  --field-file cert=./tls.crt \
+  --sensitive-file private-key=./tls.key
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--description TEXT` | Required human-readable description. Prompts in interactive mode if omitted. |
+| `--template TEMPLATE` | Optional field convention, such as `login`, `api-key`, `ssh-key`, `certificate`, `env`, or `generic`. Default: `generic`. |
+| `--field KEY=VALUE` | Add a non-sensitive named field from a flag. Repeatable. |
+| `--field-file KEY=PATH` | Add a non-sensitive field from a file. Repeatable. |
+| `--field-stdin KEY` | Read one non-sensitive field from stdin. |
+| `--sensitive KEY=VALUE` | Add a sensitive named field from a flag. Least safe. Repeatable. |
+| `--sensitive-file KEY=PATH` | Add a sensitive field from a file. Repeatable. |
+| `--sensitive-stdin KEY` | Read one sensitive field from stdin. |
+| `--generate-sensitive KEY` | Generate a password and store it in a named sensitive field. Common value for login templates: `password`. |
+| `--generate-length N` | Length used with `--generate-sensitive`. Default: `32`. |
+| `--generate-words N` | Generate a passphrase into the sensitive field instead of a random-character password. |
+| `--generate-no-ambiguous` | Avoid ambiguous characters in generated values. |
+| `--tag TAG` | Add a tag. Repeatable. |
+| `--owner-agent NAME_OR_ID` | Operator/admin only: create the secret for a specific owning agent. |
+| `--group NAME_OR_ID` | Create the secret as group-owned (collective). Operator/admin or `group:manage`. |
+
+### `witself secret show NAME`
+
+Show non-sensitive fields and redacted sensitive fields for a secret. This never
+reveals sensitive values; use `secret reveal` for that.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: show a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Show a group-owned secret. |
+| `--show-tags` | Include tags. |
+| `--show-access` | Include access grants. |
+| `--version VERSION` | Show a historical version when supported. |
+
+### `witself secret list`
+
+List secrets visible to the current principal. Sensitive values are never
+included.
+
+```sh
+witself secret list
+witself secret list --all-agents
+witself secret list --owner-agent builder-agent
+witself secret list --group shared-context
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--template TEMPLATE` | Filter by template. |
+| `--tag TAG` | Filter by tag. Repeatable. |
+| `--prefix TEXT` | Filter by name prefix. |
+| `--owner-agent NAME_OR_ID` | Filter by the agent that owns the secret. |
+| `--group NAME_OR_ID` | Filter by group-owned secrets. |
+| `--all-agents` | Operator/admin only: include secrets owned by every agent in the realm. |
+| `--include-group` | Operator/admin only: include group-owned secrets alongside agent-owned results. |
+| `--limit N` | Maximum number of rows. |
+| `--include-archived` | Include archived secrets when allowed. Maps to MCP `include_archived` and the JSON `archived` field. |
+| `--include-disabled` | Include secrets whose owning agent is disabled, when allowed. |
+
+### `witself secret scan`
+
+Scan visible secrets and produce a redacted inventory. Operator/admin callers can
+scan across all agents in the realm without revealing sensitive values.
+
+```sh
+witself secret scan
+witself secret scan --all-agents
+witself secret scan --owner-agent builder-agent
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--all-agents` | Operator/admin only: scan secrets owned by every agent in the realm. |
+| `--owner-agent NAME_OR_ID` | Scan secrets owned by one agent. |
+| `--group NAME_OR_ID` | Operator/admin only: scan group-owned secrets. |
+| `--include-group` | Operator/admin only: include group-owned secrets alongside agent-owned results. |
+| `--template TEMPLATE` | Filter by template. |
+| `--tag TAG` | Filter by tag. Repeatable. |
+| `--prefix TEXT` | Filter by name prefix. |
+| `--field FIELD` | Include only secrets with this field name. Repeatable. |
+| `--show-sensitive-counts` | Include counts of sensitive fields, but not values. |
+| `--show-access` | Include access-grant summary. |
+| `--limit N` | Maximum number of rows. |
+
+### `witself secret reveal NAME FIELD`
+
+Reveal one sensitive field. This is the explicit, audited reveal ceremony of the
+sealed plane; it is the only path (alongside `totp code` and `run`) that returns a
+sensitive value. Every reveal emits a `secret.reveal` audit event. Hybrid
+client-side / server-side decrypt is governed by the realm's
+`client_side_decrypt` / `server_side_decrypt` capability per
+[key-hierarchy.md](key-hierarchy.md); a server-mediated decrypt is flagged in the
+audit record.
+
+```sh
+witself secret reveal github/builder password
+witself secret reveal github/builder password --json
+witself secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: reveal a secret field owned by a specific agent. |
+| `--group NAME_OR_ID` | Operator/admin or `group:manage`: reveal a field from a group-owned secret. |
+| `--version VERSION` | Reveal a historical version when supported. |
+| `--reason TEXT` | Audit reason for the reveal. |
+| `--ttl DURATION` | Request a short-lived reveal lease when supported. |
+
+### `witself secret update NAME`
+
+Update fields on an existing secret.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: update a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Update a group-owned secret. |
+| `--template TEMPLATE` | Change the secret template. |
+| `--description TEXT` | Change the secret description. |
+| `--field KEY=VALUE` | Set a non-sensitive field from a flag. Repeatable. |
+| `--field-file KEY=PATH` | Set a non-sensitive field from a file. Repeatable. |
+| `--field-stdin KEY` | Read one non-sensitive field from stdin. |
+| `--sensitive KEY=VALUE` | Set a sensitive field from a flag. Least safe. Repeatable. |
+| `--sensitive-file KEY=PATH` | Set a sensitive field from a file. Repeatable. |
+| `--sensitive-stdin KEY` | Read one sensitive field from stdin. |
+| `--generate-sensitive KEY` | Generate a password and store it in a named sensitive field. |
+| `--generate-length N` | Length used with `--generate-sensitive`. |
+| `--generate-words N` | Generate a passphrase into the sensitive field instead of a random-character password. |
+| `--generate-no-ambiguous` | Avoid ambiguous characters in generated values. |
+| `--remove-field KEY` | Remove a secret field. Repeatable. |
+| `--tag TAG` | Add tag. Repeatable. |
+| `--remove-tag TAG` | Remove tag. Repeatable. |
+| `--reason TEXT` | Audit reason for the update. |
+
+### `witself secret rename NAME NEW_NAME`
+
+Rename a secret within the same owner. `NEW_NAME` must be unique for that owner
+inside the current realm.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: rename a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Rename a group-owned secret. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself secret copy NAME NEW_NAME`
+
+Copy a secret. By default this copies non-sensitive fields and structure only;
+copying sensitive values must be explicit.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: copy a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Copy a group-owned source secret. |
+| `--to-agent NAME_OR_ID` | Copy into another agent's ownership. Operator/admin only. |
+| `--to-group NAME_OR_ID` | Copy into a group's ownership. Operator/admin or `group:manage`. |
+| `--include-sensitive` | Include sensitive field values. Requires confirmation and audit reason. |
+| `--dry-run` | Show copy plan, destination ownership, and sensitive-field inclusion without copying values. |
+| `--yes` | Skip confirmation when allowed. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself secret archive NAME`
+
+Archive a secret without permanently deleting it.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: archive a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Archive a group-owned secret. |
+| `--dry-run` | Show archive impact without archiving the secret. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself secret restore NAME`
+
+Restore an archived secret when supported.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: restore a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Restore a group-owned secret. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself secret delete NAME`
+
+Permanently delete a secret when allowed. Prefer `secret archive` for normal
+removal.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: delete a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Delete a group-owned secret. |
+| `--permanent` | Permanently delete when allowed. |
+| `--dry-run` | Show deletion impact, blockers, and affected grants without deleting the secret. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason for deletion. |
+
+### `witself secret grant NAME`
+
+Grant an agent access to a secret. Secret access is grant-based and composes with
+realm roles per [authorization-and-roles.md](authorization-and-roles.md); it does
+not use the open-plane cross-agent policy engine.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: grant access to a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Operator/admin or `group:manage`: grant access to a group-owned secret. |
+| `--agent NAME_OR_ID` | Agent receiving access. Required. |
+| `--read` | Allow redacted show/list access. |
+| `--reveal FIELD` | Allow reveal of a specific field. Repeatable. |
+| `--totp` | Allow TOTP code generation for this secret. |
+| `--write` | Allow updates. |
+| `--expires-at TIMESTAMP` | Expiration time for the grant. |
+| `--dry-run` | Show planned access grant without changing permissions. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself secret revoke NAME`
+
+Revoke an agent's access to a secret.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: revoke access from a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Operator/admin or `group:manage`: revoke access from a group-owned secret. |
+| `--agent NAME_OR_ID` | Agent losing access. Required. |
+| `--field FIELD` | Revoke reveal access for one field. Repeatable. |
+| `--all` | Revoke all access for the agent. |
+| `--dry-run` | Show planned access revocation without changing permissions. |
+| `--reason TEXT` | Audit reason. |
+
+## Secret References
+
+Secret references identify a secret field without embedding the plaintext value.
+They are intended for config files, scripts, MCP tool inputs, and runtime
+injection, and are distinct from the open-plane `witself://` identity references
+(memories/facts) described under [`witself reference`](#witself-reference).
+
+Reference forms (the unified ownership model is agent or group; the former
+`shared` scope is now a group):
+
+```text
+witself://secret/<secret-path>/<field>
+witself://agent/<agent>/secret/<secret-path>/<field>
+witself://group/<group>/secret/<secret-path>/<field>
+```
+
+Examples:
+
+```text
+witself://secret/github/builder/password
+witself://agent/browser-agent/secret/github/builder/password
+witself://group/shared-context/secret/github/org-readonly-token/token
+```
+
+Secret references should resolve only through explicit, value-returning commands
+such as `secret reveal`, `totp code`, `run`, or the value-returning MCP
+`reference.resolve` tool (disabled by `mcp serve --no-value-tools`). Merely
+printing or listing a secret should not resolve references, and the sealed-plane
+carve-outs apply: a secret reference is never embedded, recalled, placed in the
+self-digest, or plaintext-exported.
+
+## `witself run`
+
+Run a subprocess with selected secret references resolved only for that process
+lifetime. This is the safer path when an agent or human needs credentials for a
+CLI tool, test suite, deploy script, or MCP server without printing the values.
+It is a sealed-plane, value-returning command and is audited.
+
+```sh
+witself run --env GITHUB_TOKEN=witself://secret/github/builder/token -- gh repo view
+witself run --env-file .env.witself -- npm test
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--env KEY=REF` | Set an environment variable from a Witself secret reference. Repeatable. |
+| `--env-file PATH` | Read environment assignments containing Witself secret references. |
+| `--mask-output` | Mask injected secret values in stdout/stderr when possible. Default: true. |
+| `--no-mask-output` | Disable output masking. |
+| `--owner-agent NAME_OR_ID` | Operator/admin only: resolve unqualified references as a specific owning agent. |
+| `--reason TEXT` | Audit reason for resolving references. |
+
+## `witself totp`
+
+Make Witself the authenticator application for accounts that use TOTP 2FA. A TOTP
+enrollment stores its seed as high-value sealed material in the same plane as
+secrets: the seed is never embedded, recalled, placed in the self-digest, or
+plaintext-exported, and is revealed only through the guarded `totp show
+--reveal-seed` path. The TOTP model is tracked in [totp-2fa.md](totp-2fa.md);
+`totp:enroll` and `totp:code` are distinct scopes.
+
+### `witself totp enroll NAME`
+
+Enroll TOTP setup material into an existing or new secret.
+
+```sh
+witself totp enroll github/builder --otpauth 'otpauth://totp/...'
+witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+witself totp enroll github/builder --qr ./github-2fa.png
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: enroll TOTP on a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Enroll TOTP on a group-owned secret. |
+| `--otpauth URL` | Enroll from an `otpauth://` URL. |
+| `--secret VALUE` | Base32 TOTP setup secret. Least safe. |
+| `--secret-file PATH` | Read Base32 TOTP setup secret from a file. |
+| `--qr PATH` | Parse TOTP setup material from a QR-code image. |
+| `--description TEXT` | Required when `--create-secret` creates a new secret. |
+| `--issuer TEXT` | Issuer name. |
+| `--account TEXT` | Account label. |
+| `--digits N` | Number of TOTP digits. Default: `6`. |
+| `--period SECONDS` | TOTP period. Default: `30`. |
+| `--algorithm SHA1|SHA256|SHA512` | TOTP HMAC algorithm. Default: `SHA1`. |
+| `--create-secret` | Create the secret if it does not exist. |
+
+### `witself totp code NAME`
+
+Generate the current TOTP code for a secret. This is a value-returning,
+reveal-gated sealed-plane command: it requires `totp:code`, emits a `totp.code`
+audit event, and is disabled by `mcp serve --no-value-tools`.
+
+```sh
+witself totp code github/builder
+witself totp code github/builder --json
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: generate a code for a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Generate a code for a group-owned secret. |
+| `--at TIMESTAMP` | Generate code for a specific time. Testing and recovery only. |
+| `--remaining` | Include seconds remaining in the current period. |
+| `--reason TEXT` | Audit reason for code generation. |
+
+### `witself totp show NAME`
+
+Show TOTP metadata without revealing the seed.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: show TOTP metadata for a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Show TOTP metadata for a group-owned secret. |
+| `--reveal-seed` | Reveal the underlying TOTP seed. Admin/operator path only; emits a `totp.seed_revealed` audit event. |
+| `--reason TEXT` | Audit reason when revealing seed. |
+
+### `witself totp delete NAME`
+
+Remove TOTP setup material from a secret.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--owner-agent NAME_OR_ID` | Operator/admin only: remove TOTP from a secret owned by a specific agent. |
+| `--group NAME_OR_ID` | Remove TOTP from a group-owned secret. |
+| `--dry-run` | Show removal impact without deleting TOTP setup material. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason. |
+
 ## `witself policy`
 
 Manage cross-agent access policies. Authorization for cross-agent identity
@@ -2430,8 +2949,12 @@ The default MCP posture should be local-first. Stdio is the first target.
 Network transports are a later, explicit deployment mode and must be
 authenticated, scoped, and documented as higher risk. MCP tools respect the same
 authorization checks as CLI commands, and agent-token MCP sessions act only as
-the token-bound agent. There is no reveal-style tool framing and no
-`--no-value-tools` mode, because there is no reveal ceremony.
+the token-bound agent. Open-plane tools (memories/facts) have no reveal ceremony;
+sealed-plane tools (`secret.reveal`, `totp.code`, and value-returning
+`reference.resolve`) do, and any tool that returns a secret value or one-time code
+may place that value in model-visible context. `--no-value-tools` disables those
+value-returning sealed-plane tools while leaving open-plane and metadata tools
+available; `--read-only` separately disables mutating tools.
 
 On connect, the server returns its `instructions` field carrying the canonical
 standing protocol that teaches the agent to call Witself: load `self.show` and
@@ -2452,6 +2975,7 @@ Flags:
 | `--listen ADDRESS` | Listen address for HTTP transport. |
 | `--auth-token-file PATH` | Token file for HTTP transport auth. |
 | `--read-only` | Serve without create/update/forget/delete tools (inspection-only). |
+| `--no-value-tools` | Disable sealed-plane MCP tools that return a sensitive value or one-time code (`secret.reveal`, `totp.code`, value-returning `reference.resolve`). |
 | `--agent NAME_OR_ID` | Operator/admin only: bind the server to one agent principal. Agent tokens are already bound by identity. |
 
 ### `witself mcp tools`
@@ -2559,6 +3083,14 @@ is tracked in [v0-scope.md](v0-scope.md).
 - `witself bootstrap-instructions`
 - `witself fact set`
 - `witself fact get`
+- `witself password generate`
+- `witself secret create`
+- `witself secret list`
+- `witself secret show`
+- `witself secret reveal`
+- `witself run`
+- `witself totp enroll`
+- `witself totp code`
 - `witself policy create`
 - `witself policy test`
 - `witself group create`
@@ -2575,4 +3107,10 @@ before managed APIs are ready, using the `local-dev` embedding provider so
 semantic recall can be validated offline. It is not a production milestone. This
 slice is enough to validate human use, semantic recall, deterministic facts,
 default-deny policy, security groups, inter-agent messaging, identity references,
-and round-trippable export/import while the managed backend takes shape.
+and round-trippable export/import while the managed backend takes shape. The
+open-plane (memory/fact/identity) core ships first; the sealed credential plane
+(`password generate`, `secret`, `run`, `totp`) is a defined v0 slice that
+validates generated passwords, reveal-gated secrets, runtime injection, and
+authenticator-style 2FA, and may be staged after the open-plane core. Sealed-plane
+commands also exercise the envelope/KMS dependency, which is required only when
+the sealed plane is enabled.

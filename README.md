@@ -2,21 +2,32 @@
 
 Status: pre-implementation draft.
 
-Witself is an agent self/identity store. It is being designed to let AI agents
-and human operators manage their own memories and facts, access other agents'
-memories and facts under declarative policy, organize agents into security
-groups, and exchange durable messages with other agents — all through a safe,
-auditable CLI, MCP, and API surface.
+Witself is the agent durable-state platform. It is being designed to let AI
+agents and human operators manage their own state across two planes: an **open
+plane** of memories and facts, and a **sealed plane** of secrets and TOTP
+authenticators. Agents manage their own state, access other agents' state under
+declarative policy and grants, organize into security groups, and exchange
+durable messages — all through a safe, auditable CLI, MCP, and API surface.
 
-Witself is the sibling of Witpass. Witpass is an agent credential vault and
-authenticator (secrets). Witself reuses the entire Witpass platform spine — one
-core domain service behind thin CLI/MCP/API adapters, the same tenancy and token
-model, the same deployment shape, and the same observability, release, and
-billing apparatus — but swaps the secret payload for self-identity. Where Witpass
-protects the *confidentiality* of secret material, Witself protects the
-*integrity and authenticity* of identity data.
+The two planes share one platform spine — one core domain service behind thin
+CLI/MCP/API adapters, the same account/realm/agent tenancy and token model, the
+same deployment shape, and the same authorization, audit, observability, release,
+and billing apparatus — but take deliberately opposite postures on the payload:
 
-The product goal is a CLI-first self/identity service for agents:
+- The **open plane** (memories, facts) protects the *integrity and authenticity*
+  of identity data: plaintext at rest, semantically indexed and recallable,
+  cross-agent readable under policy, in the self-digest, and plaintext-exportable.
+- The **sealed plane** (secrets, TOTP) protects the *confidentiality* of
+  credential material: KMS-backed envelope encryption (CMK → per-realm KEK →
+  per-secret/field DEK) and reveal-gated access. Sealed-plane values are never
+  embedded, never returned by semantic recall, never in the self-digest, and
+  never plaintext-exported. They surface only through explicit, audited reveal.
+
+Witself consolidates the former Witpass credential vault and authenticator into
+the sealed plane: one product, one `witself` CLI, one backend, one account and
+agent model.
+
+The product goal is a CLI-first agent durable-state service spanning both planes:
 
 - Named agents inside an operator-managed realm.
 - Memories: free-form self-content with versioned edit history and a soft
@@ -25,6 +36,11 @@ The product goal is a CLI-first self/identity service for agents:
   keyword, tag, kind, and time filters.
 - Facts: deterministic name→value identity cards, with a `primary` flag for
   identity anchors.
+- A sealed credential plane: secrets and TOTP authenticators under KMS-backed
+  envelope encryption (CMK → per-realm KEK → per-secret/field DEK), with explicit,
+  audited, reveal-gated access and cross-agent grants. Sealed-plane values are
+  never embedded, never returned by semantic recall, never in the self-digest, and
+  never plaintext-exported.
 - Cross-agent access governed by evaluable, default-deny policy.
 - Security groups that act as both policy subjects and policy targets and can own
   group-scoped shared memories and facts.
@@ -53,10 +69,17 @@ contracts are clear.
 ## Docs
 
 - [Requirements](docs/requirements.md)
+- [Data Model](docs/data-model.md)
 - [Context Hydration](docs/context-hydration.md)
 - [V0 Scope](docs/v0-scope.md)
 - [Memory Model](docs/memory-model.md)
 - [Facts Model](docs/facts-model.md)
+- [Secret Model](docs/secret-model.md)
+- [TOTP 2FA](docs/totp-2fa.md)
+- [Secret Size And Attachments](docs/secret-size-and-attachments.md)
+- [Encryption Model](docs/encryption-model.md)
+- [Key Hierarchy](docs/key-hierarchy.md)
+- [Authorization And Roles](docs/authorization-and-roles.md)
 - [Access Policy](docs/access-policy.md)
 - [Security Groups](docs/security-groups.md)
 - [Inter-Agent Messaging](docs/inter-agent-messaging.md)

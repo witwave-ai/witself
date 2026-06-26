@@ -6,12 +6,22 @@ human and agent tasks. They are meant to expose CLI gaps before implementation.
 The commands are examples of intended behavior. They should become smoke tests
 or docs tests after the CLI exists.
 
-Where Witpass walkthroughs centered on creating, revealing, and injecting
-secrets, these center on the Witself payload: adding and recalling memories,
+Witself is one product with two data planes. These walkthroughs cover both. The
+**open plane** is the Witself identity payload: adding and recalling memories,
 setting and reading facts, granting cross-agent access through policy, organizing
 agents into security groups, exchanging messages, and exporting/importing an
-agent's self. The platform spine (install, auth, setup, token files, MCP,
-self-host, local dev) is reused unchanged.
+agent's self. The **sealed plane** is agent credential material: creating and
+revealing secrets, enrolling TOTP and generating codes, generating passwords, and
+injecting secret references into a subprocess at runtime. The platform spine
+(install, auth, setup, token files, MCP, self-host, local dev) is shared by both
+planes.
+
+The sealed-plane carve-outs hold in every script that touches a secret: secret
+values and TOTP seeds are never embedded, never recalled, never in the
+self-digest, never ingested, and never plaintext-exported. Plaintext leaves the
+sealed plane only through the explicit, audited value-returning operations
+(`secret reveal`, `totp code`, value-returning reference resolution, and
+`witself run`). See [secret-model.md](secret-model.md).
 
 ## 1. Install The CLI
 
@@ -172,6 +182,7 @@ export WITSELF_REALM=prod
 
 witself whoami --json
 witself memory list --json
+witself secret list --json
 ```
 
 Local file example for development:
@@ -567,7 +578,264 @@ Expected behavior:
 - Import is idempotent by stable id where ids are preserved, supports
   rename/remap, is audited, and supports `--dry-run`.
 
-## 11. MCP Stdio For An Agent Runtime
+## 11. Agent Creates And Reveals A Sealed Secret
+
+The sealed plane is where credential material lives. Where a fact is plainly
+readable and a memory is recalled semantically, a secret is enveloped at rest and
+crosses into plaintext only through the audited reveal ceremony. See
+[secret-model.md](secret-model.md).
+
+Create a login secret, generating the password into a sensitive field so the
+value is enveloped immediately and never printed:
+
+```sh
+export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
+export WITSELF_REALM=prod
+
+witself secret create github/builder \
+  --description "GitHub login created by archivist" \
+  --template login \
+  --field username=archivist@example.com \
+  --field url=https://github.com/login \
+  --generate-sensitive password \
+  --generate-length 40 \
+  --generate-no-ambiguous \
+  --tag signup \
+  --tag github \
+  --json
+```
+
+Store a token read from stdin so the plaintext never lands in shell history or a
+flag value:
+
+```sh
+printf '%s' "$GITHUB_PAT" | witself secret create github/pat \
+  --description "GitHub personal access token for archivist" \
+  --template api-key \
+  --field url=https://github.com/settings/tokens \
+  --sensitive-stdin api-key \
+  --json
+```
+
+Show the secret — sensitive fields are redacted, returning a resolvable
+`value_ref` instead of plaintext:
+
+```sh
+witself secret show github/builder --show-tags --show-access --json
+```
+
+Reveal exactly one sensitive field only when the value is actually needed (the
+reveal ceremony; audited as `secret.reveal`, metered as `secret_read`):
+
+```sh
+witself secret reveal github/builder password --reason "fill signup form"
+witself secret reveal github/builder password --json
+```
+
+Expected behavior:
+
+- `secret show`/`secret list`/`secret scan` never return sensitive values; they
+  return metadata plus `value_ref` placeholders.
+- `secret reveal` returns exactly one named field, requires `secret:reveal` (own
+  secret) or a matching grant/realm role, and is always audited; the plaintext is
+  never written to the audit row, logs, metrics, or errors.
+- Client-side decrypt is the default; managed token-only pods use the
+  capability-gated `server_side_decrypt` path, flagged in the reveal audit record.
+  See [key-hierarchy.md](key-hierarchy.md).
+- Sealed-plane carve-out: secret values are never embedded, never recalled, never
+  in the self-digest, never ingested, and never plaintext-exported. The agent does
+  not need to keep credentials in prompt memory or project files.
+
+## 12. Agent Enrolls TOTP And Generates A Code
+
+Witself can act as the authenticator app. The TOTP seed is high-value sealed
+material colocated with a secret; it is never returned by the ordinary agent
+surface. `totp:enroll` (the privileged seed path) and `totp:code` (ordinary login
+use) are distinct scopes. See [totp-2fa.md](totp-2fa.md).
+
+Enroll TOTP when the service shows an authenticator setup URL or QR code:
+
+```sh
+witself totp enroll github/builder \
+  --otpauth "$GITHUB_OTPAUTH_URL" \
+  --issuer GitHub \
+  --account archivist@example.com \
+  --json
+
+witself totp enroll github/builder --qr ./github-2fa.png --json
+```
+
+Generate a current login code (audited `totp.code`, metered `totp_code`):
+
+```sh
+witself totp code github/builder --remaining --json
+```
+
+Read the non-sensitive TOTP metadata without touching the seed:
+
+```sh
+witself totp show github/builder --json
+```
+
+Expected behavior:
+
+- `totp code` returns the current generated code only; it never returns the seed
+  and the code is never persisted or audited.
+- The seed is returned only through the guarded, audited
+  `totp show --reveal-seed` break-glass path under `totp:enroll`.
+- Sealed-plane carve-out: the TOTP seed is never embedded, recalled, placed in the
+  self-digest, ingested, or plaintext-exported.
+
+## 13. Generate A Password Without Storing It
+
+`witself password generate` produces credentials with consumer-grade controls and
+does not persist them. Generated values appear only in the command's output, never
+in logs, audit rows, or errors.
+
+```sh
+witself password generate --length 40 --no-ambiguous --json
+witself password generate --words 5 --json
+```
+
+A common flow is generate then create/update a sensitive field in one authorized
+step so the value is enveloped immediately rather than round-tripping through the
+shell (the `--generate-sensitive` form in section 11 does exactly this).
+
+Expected behavior:
+
+- The generator runs without writing any sealed-plane record.
+- Where policy allows, the same generator is exposed via MCP as
+  `witself.password.generate`.
+- Generated values follow the same redaction rules as revealed secrets.
+
+## 14. Inject Secret References Into A Subprocess With `witself run`
+
+`witself run` resolves `witself://secret/...` references and injects plaintext
+into a child process's environment without printing it to stdout, so an agent uses
+a credential without ever surfacing it in context, memory, or logs. Each injected
+reference is authorized exactly like a reveal and is audited (`secret.reveal`) and
+metered (`secret_read` plus `runtime_injection`).
+
+Inject a single reference for one command (output masking is on by default):
+
+```sh
+witself run \
+  --env GITHUB_TOKEN=witself://secret/github/pat/api-key \
+  --mask-output \
+  -- gh auth status
+```
+
+Use an env file of Witself references — the file is safe to commit because it
+holds references, not plaintext:
+
+```sh
+cat > .env.witself <<'EOF'
+GITHUB_TOKEN=witself://secret/github/pat/api-key
+EOF
+
+witself run --env-file .env.witself -- npm test
+```
+
+Expected behavior:
+
+- Plaintext exists only in the spawned child's environment; it is never written to
+  Witself logs, audit metadata, or the parent's stdout.
+- References that cannot be authorized fail the run deterministically before the
+  child starts.
+- A secret reference is itself safe to store in config and logs because it
+  resolves to plaintext only through value-returning operations like `run`.
+
+## 15. Operator Scans Secrets And Grants Access To Another Agent Or Group
+
+Sealed-plane cross-agent access is grant-based and composes with realm roles; it
+does **not** use the open-plane cross-agent policy engine from section 7. See
+[authorization-and-roles.md](authorization-and-roles.md).
+
+Scan the realm-wide redacted inventory as an operator (no sensitive values are
+ever revealed):
+
+```sh
+witself secret scan \
+  --all-agents \
+  --include-group \
+  --show-sensitive-counts \
+  --show-access \
+  --json
+```
+
+Preview a grant, then grant `coordinator` redacted read, reveal of one field, and
+TOTP code generation on `archivist`'s secret (cross-agent grants require an audit
+reason):
+
+```sh
+witself secret grant github/builder \
+  --owner-agent archivist \
+  --agent coordinator \
+  --read \
+  --reveal password \
+  --totp \
+  --expires-at 2026-09-30T00:00:00Z \
+  --reason "coordinator needs GitHub login for release" \
+  --dry-run \
+  --json
+
+witself secret grant github/builder \
+  --owner-agent archivist \
+  --agent coordinator \
+  --read \
+  --reveal password \
+  --totp \
+  --reason "coordinator needs GitHub login for release" \
+  --json
+```
+
+Grant a group access to a group-owned secret so every member resolves it under
+group authorization (the unified ownership model — the former `shared` scope is
+now a group):
+
+```sh
+witself secret create github/org-readonly-token \
+  --group analysts \
+  --description "Org read-only token shared by the analysts group" \
+  --template api-key \
+  --sensitive-stdin token \
+  --json
+
+witself secret grant github/org-readonly-token \
+  --group analysts \
+  --agent coordinator \
+  --read \
+  --reveal token \
+  --reason "coordinator consumes the shared org token" \
+  --json
+```
+
+Now `coordinator` can reveal the granted field and resolve the group reference:
+
+```sh
+export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
+
+witself secret reveal github/builder password \
+  --owner-agent archivist \
+  --reason "release run"
+
+witself run \
+  --env ORG_TOKEN=witself://group/analysts/secret/github/org-readonly-token/token \
+  -- ./release.sh
+```
+
+Expected behavior:
+
+- `secret scan --all-agents` requires operator/admin permission and never reveals
+  sensitive values.
+- Cross-agent reveal, grant, copy-with-sensitive, and destructive actions require
+  an audit `--reason`, and grant/revoke support `--dry-run`.
+- A grant can be field-scoped (`--reveal FIELD`), can include TOTP (`--totp`), and
+  can expire (`--expires-at`); revoking is `secret revoke … --field`/`--all`.
+- Group-owned secrets replace the old vault-shared concept: ownership is
+  `agent | group` across memories, facts, and secrets alike.
+
+## 16. MCP Stdio For An Agent Runtime
 
 Example MCP server configuration:
 
@@ -586,14 +854,15 @@ Example MCP server configuration:
 }
 ```
 
-Inspection-only MCP:
+Inspection-only MCP with sealed-plane value tools disabled (no reveal, no TOTP
+codes, no value-returning reference resolution):
 
 ```json
 {
   "mcpServers": {
     "witself-readonly": {
       "command": "witself",
-      "args": ["mcp", "serve", "--read-only"],
+      "args": ["mcp", "serve", "--read-only", "--no-value-tools"],
       "env": {
         "WITSELF_TOKEN_FILE": "/run/secrets/witself-agent-token"
       }
@@ -607,12 +876,19 @@ Expected behavior:
 - MCP stdio is the v0 transport.
 - MCP uses the token-bound identity and the same authorization as the CLI.
 - `--read-only` restricts the session to inspection (recall/read/list, fact get,
-  policy test, group show, message read) for safer agent contexts.
-- The MCP catalog covers memory add/adjust/read/recall/list/forget, fact
-  set/get/list/delete, policy test, group list/show, message send/list/read, and
-  reference parse/resolve; high-risk admin actions are operator-only.
+  secret show/list/scan, totp show, policy test, group show, message read) and
+  disables all mutations for safer agent contexts.
+- `--no-value-tools` disables the sealed-plane value-returning tools
+  (`witself.secret.reveal`, `witself.totp.code`, and value-returning
+  `witself.reference.resolve`) while leaving metadata reads available.
+- The MCP catalog covers the open plane (memory add/adjust/read/recall/list/forget,
+  fact set/get/list/delete, policy test, group list/show, message send/list/read,
+  reference parse/resolve) and the sealed plane (secret
+  create/list/show/reveal/update, totp enroll/code/show, password generate);
+  secrets are never placed in the self-digest and high-risk admin actions are
+  operator-only.
 
-## 12. Self-Hosted Bootstrap
+## 17. Self-Hosted Bootstrap
 
 Install with Helm:
 
@@ -677,8 +953,12 @@ Expected behavior:
 - The self-hosted backend needs Postgres with pgvector and a configured
   embedding provider (`voyage`, `openai`, or `local-dev`); `witself
   capabilities` reports the active provider and whether recall is degraded.
+- When the sealed plane is enabled, a configured KMS provider
+  (`WITSELF_KMS_PROVIDER` / `WITSELF_KMS_KEY_ID`) is a required dependency and
+  gates readiness; the open plane does not depend on KMS. See
+  [self-hosting.md](self-hosting.md) and [key-hierarchy.md](key-hierarchy.md).
 
-## 13. Local Development Mode
+## 18. Local Development Mode
 
 Initialize a local development realm and store. Local mode uses the `local-dev`
 embedding provider so semantic recall can be exercised offline:
@@ -717,6 +997,10 @@ Expected behavior:
   paid provider.
 - Local behavior still uses the shared core, JSON, policy, audit, and storage
   interfaces.
+- Sealed-plane work in local mode uses the `local-dev` KMS provider
+  (`WITSELF_KMS_PROVIDER=local-dev`) so secret create/reveal and TOTP can be
+  exercised offline; it is development-only and not a production key path. See
+  [encryption-model.md](encryption-model.md).
 
 ## Gaps Found By The Scripts
 
@@ -746,6 +1030,24 @@ spec:
   sessions show` command so the CLI owns browser handoff without a dashboard.
 - Token-file conflicts must remain explicit; setup should not overwrite token
   files during reruns unless token rotation was chosen.
+- `secret reveal` and `totp code` must be the only value-returning sealed-plane
+  ops besides `witself run` and the value-returning MCP `reference.resolve`, each
+  requiring `secret:reveal`/`totp:code` (or a grant/realm role), an audit
+  `--reason` for cross-agent use, and a `secret.reveal`/`totp.code` audit event.
+- `secret create` needs flag/file/stdin field inputs (`--field`, `--field-file`,
+  `--sensitive-stdin`, `--generate-sensitive`) so plaintext never has to pass
+  through a shell flag, and `--group`/`--owner-agent` for ownership and operator
+  targeting.
+- `secret grant` needs field-scoped reveal (`--reveal FIELD`), `--totp`,
+  `--expires-at`, `--dry-run`, and a required `--reason`, composing with realm
+  roles rather than the open-plane cross-agent policy engine.
+- `mcp serve` needs `--no-value-tools` (distinct from `--read-only`) to disable
+  reveal/`totp code`/value-returning reference resolution while leaving
+  sealed-plane metadata reads available.
+- The sealed-plane carve-outs must hold across every command: secret values and
+  TOTP seeds are never embedded, recalled, in the self-digest, ingested, or
+  plaintext-exported, and KMS is a required dependency only when the sealed plane
+  is enabled.
 
 ## Related Docs
 
@@ -754,6 +1056,12 @@ spec:
 - [v0-scope.md](v0-scope.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [secret-size-and-attachments.md](secret-size-and-attachments.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
@@ -763,4 +1071,5 @@ spec:
 - [mcp-tools.md](mcp-tools.md)
 - [self-hosting.md](self-hosting.md)
 - [observability-and-operations.md](observability-and-operations.md)
+- [data-model.md](data-model.md)
 - [json-contracts.md](json-contracts.md)

@@ -12,6 +12,7 @@ AWS is first for:
 - Managed Witself Cloud infrastructure.
 - The first self-hosted Terraform module and stack.
 - The first production Postgres-with-pgvector integration.
+- The first production KMS integration for the sealed plane.
 - The first production-shaped Helm values example.
 - The first CI or smoke environment that exercises cloud-shaped infrastructure.
 
@@ -25,6 +26,9 @@ full implementations should follow AWS.
 - It gives one concrete cloud to harden before multiplying provider behavior.
 - It lines up with the first production storage path: managed Postgres with the
   pgvector extension for memory embeddings.
+- It lines up with the AWS KMS decision for the sealed plane: AWS KMS is the
+  first key-management provider, with `gcp-kms` and `azure-key-vault` planned
+  (see [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md)).
 - It still leaves the public repo structured for GCP and Azure from the start.
 
 ## Terraform Priority
@@ -43,8 +47,16 @@ The AWS module should support:
 - EKS or integration with an existing EKS cluster.
 - RDS/Aurora PostgreSQL with the pgvector extension available for memory
   embeddings.
+- AWS KMS for the sealed plane (secrets and TOTP): the customer master key
+  backing the `CMK → per-realm KEK → per-secret/field DEK` envelope hierarchy.
+  KMS is required only when the sealed plane is enabled; an open-plane-only
+  deployment (memories and facts) does not need it (see
+  [encryption-model.md](encryption-model.md), [key-hierarchy.md](key-hierarchy.md)).
 - S3 for object/blob storage (identity exports, diagnostic bundles, support
-  attachments, backups) when needed.
+  attachments, backups, and encrypted-only secret backups) when needed.
+  Plaintext identity exports use S3; sealed-plane secret values are never
+  written in plaintext — secret backup is encrypted-only (envelope plus KMS
+  key identity).
 - IAM roles for service accounts.
 - Networking and security group prerequisites.
 - Optional managed Prometheus or platform monitoring integration points.
@@ -59,6 +71,29 @@ pgvector (see [storage.md](storage.md)). The provisioned RDS/Aurora PostgreSQL
 must be a version and configuration that can create and use the `vector`
 extension, and the module should surface this as an explicit prerequisite rather
 than an implicit assumption.
+
+## KMS Requirement for the Sealed Plane
+
+The sealed plane (secrets and TOTP) is protected by KMS-backed envelope
+encryption: a customer master key (CMK) wraps a per-realm KEK, which wraps a
+per-secret/field DEK (see [key-hierarchy.md](key-hierarchy.md)). The AWS target
+provisions AWS KMS as the first key-management provider; `gcp-kms` and
+`azure-key-vault` are planned and follow AWS.
+
+- KMS is a hard dependency only when the sealed plane is enabled. An
+  open-plane-only deployment (memories and facts) requires Postgres-with-pgvector
+  but not KMS. Readiness gates on KMS only when the sealed plane is enabled;
+  pgvector stays a hard gate for the open plane.
+- The AWS module surfaces the KMS provider, key id, and IAM grants as explicit
+  prerequisites (`witself-server` reads `WITSELF_KMS_PROVIDER` and
+  `WITSELF_KMS_KEY_ID`; see [storage.md](storage.md)).
+- KMS-loss is unrecoverable for sealed values by design (crypto-shred): without
+  the CMK, secret and TOTP values cannot be decrypted. This does not affect the
+  open plane, whose data is plaintext at rest in Postgres.
+- Sealed-plane carve-outs hold regardless of cloud target: secret and TOTP
+  values are never embedded, never returned by semantic recall, never in the
+  self-digest, and never written to plaintext export. Only the explicit,
+  reveal-gated, audited operations return sealed values.
 
 ## Embedding Provider Is Not Cloud Substrate
 
@@ -88,19 +123,23 @@ Shared contracts should stay provider-neutral:
 - API contracts.
 - JSON contracts.
 - Memory, fact, policy, group, and message model.
+- Secret, TOTP, grant, and capability model (sealed plane).
 - Embedding-provider interface.
+- KMS provider interface.
 - Object/blob storage interface.
 - Helm chart values shape.
 - Observability and health probe semantics.
 - Terraform stack conventions.
 
-Provider-specific behavior should live behind storage, object/blob, identity, and
-Terraform boundaries.
+Provider-specific behavior should live behind storage, KMS, object/blob,
+identity, and Terraform boundaries.
 
 ## Related Docs
 
 - [requirements.md](requirements.md)
 - [storage.md](storage.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
 - [terraform-infrastructure.md](terraform-infrastructure.md)
 - [self-hosting.md](self-hosting.md)
 - [helm-chart.md](helm-chart.md)

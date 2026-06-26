@@ -79,6 +79,15 @@ Audit records must never include:
 - Message bodies or structured message payloads.
 - Embedding vectors or any derived vector data.
 - Raw agent or operator tokens, or token-file contents.
+- Sealed-plane material: secret field values, TOTP seeds, or generated TOTP
+  codes. These are never embedded, recalled, in the self-digest, or
+  plaintext-exported, and they are equally never written to the audit log — a
+  `secret.reveal` or `totp.code` record proves the reveal happened, never the
+  value revealed. See [secret-model.md](secret-model.md) and
+  [totp-2fa.md](totp-2fa.md).
+- Key material of any layer: CMK, per-realm KEK, or per-secret/field DEK
+  (wrapped or unwrapped). A `key.rotated` record carries key ids and the KMS
+  key identity only. See [key-hierarchy.md](key-hierarchy.md).
 
 Audit records may include non-sensitive context such as:
 
@@ -200,6 +209,50 @@ deciding policy id.
   `source=import:<file>` provenance, never the value)
 - `self.digest.emitted` (optional; records the requested format and byte budget of a
   `digest emit`, never the rendered identity content)
+
+### Sealed Plane: Secrets
+
+Sealed-plane events attribute mutation and, critically, *reveal* of secret
+material — the confidentiality question Witpass audit existed to answer, now one
+family within the integrity log. Every record names the owning agent or group
+and the enclosing realm; none ever carries a field value (see
+[Audit Content Rules](#audit-content-rules)). See
+[secret-model.md](secret-model.md) and [encryption-model.md](encryption-model.md).
+
+- `secret.created`
+- `secret.updated` (records the changed-field set and new version, never values)
+- `secret.renamed`
+- `secret.copied`
+- `secret.archived`
+- `secret.restored`
+- `secret.deleted` (hard delete; guarded, requires reason)
+- `secret.reveal` (the explicit, audited reveal ceremony for a single field;
+  records the secret id, field id, and result, never the plaintext. Carries the
+  `server_side_decrypt` flag — `true` when the server transiently unwrapped the
+  DEK and returned plaintext over TLS for a token-only pod, `false` for the
+  client-held-key decrypt path. See [key-hierarchy.md](key-hierarchy.md).)
+- `secret.grant` (a grant to another agent or group; records grantee and scope)
+- `secret.revoke` (requires reason)
+
+### Sealed Plane: TOTP
+
+TOTP enrollments are sealed-plane material colocated with a secret; the seed is
+high-value and never leaves the envelope except through the audited reveal path.
+See [totp-2fa.md](totp-2fa.md).
+
+- `totp.enrolled`
+- `totp.code` (generates a current code; the value-returning operation gated by
+  `totp:code`. Records the secret id and result, never the code or seed; carries
+  the `server_side_decrypt` flag with the same meaning as `secret.reveal`.)
+- `totp.seed_revealed` (reveals the Base32 seed/otpauth URI for re-enrollment;
+  the high-value reveal, gated by `totp:code`, never recording the seed itself)
+- `totp.deleted`
+
+### Sealed Plane: Key Management
+
+- `key.rotated` (per-realm KEK rotation; re-wraps the affected DEKs without
+  touching plaintext secrets, records key ids and KMS key identity only, never
+  key material. See [key-hierarchy.md](key-hierarchy.md).)
 
 ### Authentication, Agent, and Token Lifecycle
 
@@ -326,6 +379,10 @@ and general API volume) is defined in
 
 - [requirements.md](requirements.md)
 - [access-policy.md](access-policy.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [billing-and-limits.md](billing-and-limits.md)
 - [threat-model.md](threat-model.md)

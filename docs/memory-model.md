@@ -78,8 +78,13 @@ truth.
 Notes:
 
 - Memory `content` is never an ordinary readable column for unauthorized callers,
-  but it is not encrypted-as-product. Witself protects identity **integrity and
-  authenticity**, not secret confidentiality; there is no reveal ceremony. See
+  but it is not encrypted-as-product. In the **open plane** (memories + facts)
+  Witself protects identity **integrity and authenticity**, not secret
+  confidentiality; authorized callers read identity content plainly and there is
+  **no reveal ceremony**. This posture is scoped to the open plane: the **sealed
+  plane** (secrets, TOTP) is the opposite — values are envelope-encrypted at rest
+  and returned only through an explicit, audited reveal, never read plainly. See
+  [secret-model.md](secret-model.md) for the sealed counterpart and
   [threat-model.md](threat-model.md).
 - Embedding vectors are storage-internal and are not part of the public memory
   shape. They are never returned in API responses, logs, audit, or export. See
@@ -206,6 +211,13 @@ MCP equivalents in [mcp-tools.md](mcp-tools.md).
 
 Recall is the core differentiator. It is semantic by default and capability-aware.
 
+Recall and embeddings are an **open-plane** capability only. Sealed-plane material
+— secrets and TOTP seeds — is **never embedded, never returned by semantic recall,
+and never ingested** from CLAUDE.md/AGENTS.md/GEMINI.md. Secret values are
+envelope-encrypted at rest and reachable only through the explicit, audited reveal
+path; they have no embedding vector and never appear in `recall`, `read`, or `list`
+results here. See [secret-model.md](secret-model.md) and [totp-2fa.md](totp-2fa.md).
+
 ### Recall Inputs
 
 `memory recall <query>` accepts:
@@ -275,6 +287,13 @@ at session start. The full digest shape, byte cap, emit format, and teaching
 protocol are canonical in [context-hydration.md](context-hydration.md); this
 section pins the one piece that belongs to the memory model — how the **salient
 memory set** is selected.
+
+The digest is an **open-plane** view. Sealed-plane material is **never in the
+self-digest**: secrets and TOTP seeds are not selected, summarized, or emitted by
+`digest emit`, and are never ingested into it. The digest never carries secret
+values or references that would resolve to one. See
+[context-hydration.md](context-hydration.md) and
+[secret-model.md](secret-model.md).
 
 ### Salient Memory Selection
 

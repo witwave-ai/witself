@@ -13,12 +13,19 @@ implementation.
   policy-gated, and auditable.
 - Make message send and read explicit, scoped, and auditable, with the sender
   always derived from the token.
+- Make sealed-plane secret reveal and TOTP code generation explicit, scoped,
+  reveal-gated, and auditable.
 
-Unlike Witpass, Witself has no secret reveal ceremony and no one-time code
-generation: facts and memories are ordinary readable identity data, redacted
-only when marked `sensitive`. There is therefore no `--no-value-tools` mode and
-no reveal-style tool framing. The risk boundary that matters here is the
-**integrity and authenticity** of identity data, not value confidentiality.
+Witself spans **two planes**. The **open plane** (memories + facts) is ordinary
+readable identity data, redacted only when marked `sensitive`, returned in clear
+on an authorized single-record read with no reveal ceremony; its risk boundary is
+the **integrity and authenticity** of identity data. The **sealed plane**
+(secrets + TOTP) is reveal-gated value confidentiality: secret values and TOTP
+seeds are never returned by list/show, never embedded, never returned by semantic
+recall, never in the self-digest, and never plaintext-exported — they leave the
+boundary only through the explicit, audited reveal/code/value-resolve tools. The
+two postures coexist; the `sensitive` redaction of the open plane is distinct from
+the reveal gating of the sealed plane.
 
 The JSON shapes used by MCP tool results are defined in
 [json-contracts.md](json-contracts.md). The matching CLI surface is defined in
@@ -82,18 +89,36 @@ Read-only mode:
 - `witself mcp serve --read-only` disables mutating tools.
 - In read-only mode, `witself.memory.add/adjust/forget`, `witself.fact.set/
   delete`, `witself.message.send`, `witself.remember`, `witself.session.end`,
-  and `witself.memory.consolidate` are unavailable. Read, recall, list,
-  get, show, parse, resolve, `policy.test`, `witself.self.show`,
-  `witself.session.start`, and `witself.digest.emit` remain available subject to
-  policy.
+  `witself.memory.consolidate`, `witself.secret.create/update`, and
+  `witself.totp.enroll` are unavailable. Read, recall, list, get, show, parse,
+  resolve, `policy.test`, `witself.self.show`, `witself.session.start`,
+  `witself.digest.emit`, `witself.password.generate`, and the sealed-plane read
+  tools (`witself.secret.list/show`) remain available subject to policy.
 - Cross-agent reads and recalls remain policy-gated even in read-only mode: a
   read tool that targets another agent still requires a matching `read` policy
   (see [access-policy.md](access-policy.md)).
+- Sealed-plane `witself.secret.reveal`, `witself.totp.code`, and value-returning
+  `witself.reference.resolve` are non-mutating but high risk. They are reveal-gated
+  regardless of read-only mode: policy may still disable them even when read-only
+  mode would otherwise expose read tools, and `--no-value-tools` disables them
+  outright (see below).
 
-There is no `--no-value-tools` mode. Witself does not split tools by value
-sensitivity because there is no reveal operation; `sensitive` facts and memory
-content are redacted in list/scan output and returned in clear only on an
-authorized single-record read.
+No-value-tools mode:
+
+- `witself mcp serve --no-value-tools` disables the tools that can return sealed
+  values or generated one-time codes: `witself.secret.reveal`, `witself.totp.code`,
+  and value-returning `witself.reference.resolve` (a sealed `witself://secret/...`
+  reference). This mode is **distinct from `--read-only`**: `--read-only` disables
+  mutations, while `--no-value-tools` closes the sealed-plane value egress while
+  leaving mutations and open-plane reads intact. The two flags compose.
+- This split applies only to the **sealed plane**. The open plane has no reveal
+  operation: `sensitive` facts and memory content are redacted in list/scan output
+  and returned in clear on an authorized single-record read, and are unaffected by
+  `--no-value-tools`.
+
+TOTP QR-code image parsing should remain CLI-only for v0. MCP TOTP enrollment
+should use `otpauth_url`, manual setup secret input, or a seed file path when the
+server policy allows file access.
 
 ## Targeting Model
 
@@ -124,6 +149,12 @@ Cross-agent and group-targeted **mutations** (contribute, curate, forget)
 carry the same guardrails as the CLI: they require a `reason`, support
 `dry_run`, and are fully attributed in audit under the deciding policy (see
 [access-policy.md](access-policy.md)).
+
+Sealed-plane secret and TOTP tools use the same `owner_kind`
+(`current`/`agent`/`group`) target model: a group-owned secret targets a security
+group through `owner_group`. Sealed cross-agent or group targeting is authorized by
+secret grants and realm roles rather than open-plane policies (see
+[authorization-and-roles.md](authorization-and-roles.md)).
 
 ## Tool Result Contract
 
@@ -192,6 +223,25 @@ Tool names should use the `witself.` prefix:
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
+Sealed-plane tools (secrets + TOTP):
+
+- `witself.password.generate`
+- `witself.secret.create`
+- `witself.secret.list`
+- `witself.secret.show`
+- `witself.secret.reveal`
+- `witself.secret.update`
+- `witself.totp.enroll`
+- `witself.totp.code`
+- `witself.totp.show`
+
+Sealed-plane secret values and TOTP seeds are never embedded, never returned by
+`witself.memory.recall`, never in `witself.self.show` / `witself.digest.emit`, and
+never plaintext-exported; they leave the boundary only through the reveal-gated
+value tools (`witself.secret.reveal`, `witself.totp.code`, value-returning
+`witself.reference.resolve`). See [secret-model.md](secret-model.md) and
+[totp-2fa.md](totp-2fa.md).
+
 Operator/admin candidate tools:
 
 - `witself.policy.list`
@@ -237,7 +287,16 @@ as MCP tools.
 | `witself.message.list` | yes | yes | Lists the session's mailbox; requires `message:read`. |
 | `witself.message.read` | yes | yes | Reads and acks a message; requires `message:read`. |
 | `witself.reference.parse` | yes | yes | Validates reference syntax only. |
-| `witself.reference.resolve` | yes | yes | Resolves under the same authz as a direct read. |
+| `witself.reference.resolve` | yes | yes | Open-plane refs resolve under the same authz as a direct read; a sealed `witself://secret/...` ref is reveal-gated (policy) and disabled by `--no-value-tools`. |
+| `witself.password.generate` | yes | yes | Generates a value but does not store it; not a sealed read. |
+| `witself.secret.create` | yes | no | Requires `secret:create`; sealed-plane mutation. |
+| `witself.secret.list` | yes | yes | Sealed summaries only; never returns values. |
+| `witself.secret.show` | yes | yes | Non-sensitive + redacted sensitive fields; never returns values. |
+| `witself.secret.reveal` | policy | policy | Reveal-gated: requires `secret:reveal` and audit; disabled by `--no-value-tools`. |
+| `witself.secret.update` | yes | no | Requires `secret:update`; sealed-plane mutation. |
+| `witself.totp.enroll` | yes | no | Requires `totp:enroll`; sealed-plane mutation. |
+| `witself.totp.code` | policy | policy | Reveal-gated: requires `totp:code` and audit; returns a generated code; disabled by `--no-value-tools`. |
+| `witself.totp.show` | yes | yes | TOTP metadata only; does not reveal the seed. |
 | `witself.policy.list` | operator | yes | Operator/admin only. |
 | `witself.policy.show` | operator | yes | Operator/admin only. |
 | `witself.agent.list` | operator | yes | Operator/admin only. |
@@ -248,6 +307,13 @@ as MCP tools.
 Cross-agent and group-targeted access is allowed only when a matching policy
 permits it, or when an operator/admin session has realm permission. Absence of a
 matching `allow` policy is deny (see [access-policy.md](access-policy.md)).
+
+In the matrix, `policy` means the sealed-plane value tool can be exposed only when
+the session policy allows the specific reveal-gated operation (`secret:reveal`,
+`totp:code`); these tools are additionally closed by `--no-value-tools`. Sealed
+cross-agent/operator access uses grants plus realm roles
+(see [authorization-and-roles.md](authorization-and-roles.md)), not the open-plane
+cross-agent read/curate/forget verbs.
 
 ## Tool Definitions
 
@@ -1044,8 +1110,297 @@ Input:
 
 Output data uses the fact detail or memory detail shape from
 [json-contracts.md](json-contracts.md), depending on the reference kind.
-`sensitive` values follow the same redaction posture as a direct read: returned
-in clear on an authorized single-record resolve, with no reveal ceremony.
+
+For an **open-plane** reference (`witself://.../memory/...` or
+`witself://.../fact/...`), `sensitive` values follow the same redaction posture as
+a direct read: returned in clear on an authorized single-record resolve, with no
+reveal ceremony. For a **sealed-plane** reference
+(`witself://secret/<path>/<field>` and its `agent`/`group` forms), resolving a
+sensitive field is a reveal-gated value operation: it requires `secret:reveal`, is
+audited like `witself.secret.reveal`, returns the Secret Reveal Result shape, and
+is disabled by `--no-value-tools`. A sealed reference is never embedded, recalled,
+in the self-digest, or plaintext-exported. See
+[secret-model.md](secret-model.md).
+
+## Sealed-Plane Tools
+
+These tools cover the sealed plane (secrets + TOTP). Secret values and TOTP seeds
+are never returned by `list`/`show`, never embedded, never returned by semantic
+recall, never in the self-digest, and never plaintext-exported; they leave the
+boundary only through the reveal-gated `reveal`/`code`/value-resolve operations,
+which require explicit scopes and are audited (see
+[secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md),
+[encryption-model.md](encryption-model.md)).
+
+### `witself.password.generate`
+
+Generate a password or passphrase without storing it. Not a sealed read — it
+returns a fresh value, not the value of any stored secret — so it stays available
+in read-only mode and is unaffected by `--no-value-tools`.
+
+Input:
+
+```json
+{
+  "length": 32,
+  "lower": true,
+  "upper": true,
+  "digits": true,
+  "symbols": true,
+  "no_ambiguous": false,
+  "words": null,
+  "separator": "-",
+  "count": 1
+}
+```
+
+Output data uses the password generate result from
+[json-contracts.md](json-contracts.md).
+
+### `witself.secret.create`
+
+Create a secret owned by the current agent, by a specified agent, or by a security
+group when a grant or operator/admin permission allows. Requires `secret:create`;
+sealed-plane mutation, unavailable in read-only mode.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "description": "GitHub login for browser-agent",
+  "template": "login",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "fields": [
+    {
+      "name": "username",
+      "value": "agent-amy",
+      "sensitive": false,
+      "value_encoding": "plain"
+    }
+  ],
+  "generate_sensitive": [
+    {
+      "name": "password",
+      "length": 32,
+      "no_ambiguous": true
+    }
+  ],
+  "tags": ["github"],
+  "reason": null
+}
+```
+
+Output data returns secret detail with sensitive fields redacted (it never echoes
+the stored value). `template` is one of `login|api-key|ssh-key|certificate|env|
+generic`. Field values are sealed at rest under the per-realm KEK / per-field DEK
+envelope (see [key-hierarchy.md](key-hierarchy.md)).
+
+### `witself.secret.list`
+
+List secrets visible to the current session. Returns sealed summaries only and
+never returns field values.
+
+Input:
+
+```json
+{
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "all_agents": false,
+  "include_groups": false,
+  "template": null,
+  "tag": [],
+  "prefix": null,
+  "limit": 100,
+  "cursor": null,
+  "include_archived": false
+}
+```
+
+Output data:
+
+```json
+{
+  "items": [],
+  "next_cursor": null
+}
+```
+
+Each item uses the secret summary shape from
+[json-contracts.md](json-contracts.md).
+
+### `witself.secret.show`
+
+Show non-sensitive fields and redacted sensitive fields. Never returns sealed
+values; use `witself.secret.reveal` for a single field under the reveal ceremony.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "version": null,
+  "show_tags": true,
+  "show_access": false
+}
+```
+
+Output data uses the secret detail shape from
+[json-contracts.md](json-contracts.md).
+
+### `witself.secret.reveal`
+
+Reveal one sensitive field. This is the explicit, audited, reveal-gated value
+operation. Requires `secret:reveal`; non-mutating but high risk, so it is policy
+exposable and is disabled by `--no-value-tools`. The revealed value is never
+embedded, recalled, in the self-digest, or plaintext-exported.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "field": "password",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "version": null,
+  "ttl": null,
+  "reason": "agent login"
+}
+```
+
+Output data uses the secret reveal result from
+[json-contracts.md](json-contracts.md), in either the client-held or
+server-mediated shape per the hybrid decrypt model (see
+[key-hierarchy.md](key-hierarchy.md)). Audited as `secret.reveal`, with the
+`server_side_decrypt` flag recorded when the server performed the decrypt.
+
+### `witself.secret.update`
+
+Update a secret's description, template, fields, tags, or sensitive fields.
+Requires `secret:update`; sealed-plane mutation, unavailable in read-only mode.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "description": null,
+  "template": null,
+  "set_fields": [],
+  "set_sensitive_fields": [],
+  "generate_sensitive": [],
+  "remove_fields": [],
+  "add_tags": [],
+  "remove_tags": [],
+  "reason": null
+}
+```
+
+Output data uses the mutation result shape from
+[json-contracts.md](json-contracts.md). The `echo` never contains a sealed value.
+
+### `witself.totp.enroll`
+
+Enroll TOTP setup material into a secret. The seed is high-value sealed material:
+it is sealed at rest, never returned by `show`, never embedded or recalled, and
+never plaintext-exported. Requires `totp:enroll`; sealed-plane mutation,
+unavailable in read-only mode.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "otpauth_url": "otpauth://totp/...",
+  "secret": null,
+  "issuer": "GitHub",
+  "account": "agent-amy",
+  "digits": 6,
+  "period_seconds": 30,
+  "algorithm": "SHA1",
+  "create_secret": false,
+  "description": null,
+  "reason": null
+}
+```
+
+Output data uses the mutation result shape from
+[json-contracts.md](json-contracts.md). QR-code image parsing is CLI-only for v0;
+MCP enrollment uses `otpauth_url`, manual `secret` input, or a server-policy-
+allowed seed file path.
+
+### `witself.totp.code`
+
+Generate the current TOTP code for a secret. This is a reveal-gated value
+operation: requires `totp:code`; non-mutating but high risk, so it is policy
+exposable and disabled by `--no-value-tools`. The generated code and the seed are
+never embedded, recalled, in the self-digest, or plaintext-exported.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null,
+  "at": null,
+  "include_remaining": true,
+  "reason": "agent login"
+}
+```
+
+Output data uses the TOTP code result from
+[json-contracts.md](json-contracts.md). Audited as `totp.code`, with the
+`server_side_decrypt` flag recorded when the seed was decrypted server-side.
+
+### `witself.totp.show`
+
+Show TOTP metadata without revealing the seed. Read-only and unaffected by
+`--no-value-tools` because it never returns the seed or a code.
+
+Input:
+
+```json
+{
+  "name": "github/builder",
+  "owner_kind": "current",
+  "owner_agent": null,
+  "owner_group": null
+}
+```
+
+Output data:
+
+```json
+{
+  "secret": {
+    "id": "sec_123",
+    "name": "github/builder"
+  },
+  "issuer": "GitHub",
+  "account": "agent-amy",
+  "digits": 6,
+  "period_seconds": 30,
+  "algorithm": "SHA1",
+  "seed_redacted": true
+}
+```
 
 ## Operator/Admin Candidate Tools
 

@@ -3,12 +3,21 @@
 Status: draft. This document describes the intended vulnerability reporting,
 security response, and supported-surface policy before implementation.
 
-Witself stores agent self/identity data (memories, facts, policies, security
-groups, and inter-agent messages). Where Witpass protects the *confidentiality*
-of secret material, Witself protects the *integrity and authenticity* of
-identity data. The vulnerability classes that matter most to Witself follow from
-that flip; see [Out Of Scope](#out-of-scope) and
-[threat-model.md](threat-model.md).
+Witself spans two planes. The OPEN plane stores agent self/identity data
+(memories, facts, policies, security groups, and inter-agent messages) and is
+protected for its *integrity and authenticity*. The SEALED plane stores secret
+material (secrets and TOTP enrollments) and is protected for its
+*confidentiality*. Both postures are in scope, and the vulnerability classes
+that matter most to Witself follow from that split; see
+[Out Of Scope](#out-of-scope) and [threat-model.md](threat-model.md).
+
+The sealed plane is held to its consolidation invariants: secret values and
+TOTP seeds are never embedded, never returned by semantic recall, never in the
+self-digest, never in a plaintext export, and never ingested from
+`CLAUDE.md`/`AGENTS.md`. They are only ever returned through the reveal-gated,
+audited value paths; see [secret-model.md](secret-model.md),
+[encryption-model.md](encryption-model.md), and
+[key-hierarchy.md](key-hierarchy.md).
 
 ## Reporting Vulnerabilities
 
@@ -27,16 +36,21 @@ Reports should include:
 - Version, commit, or deployment mode if known.
 - Steps to reproduce.
 - Impact assessment.
-- Whether the issue affects integrity or authenticity of identity data, for
-  example cross-agent access bypass, policy misevaluation, security-group
-  escalation, forged message senders, or memory poisoning.
+- Whether the issue affects integrity or authenticity of open-plane identity
+  data, for example cross-agent access bypass, policy misevaluation,
+  security-group escalation, forged message senders, or memory poisoning.
+- Whether the issue affects confidentiality of sealed-plane secret material, for
+  example secret-value leakage, a reveal or authorization bypass, KMS or key
+  mishandling, or unintended server-side decryption.
 - Whether memory content, fact values, message bodies or payloads, PII,
-  embedding vectors, raw agent/operator tokens, payment data, or other customer
-  data may have been exposed, altered, or destroyed.
+  embedding vectors, secret values, TOTP seeds, generated TOTP codes, raw
+  agent/operator tokens, payment data, or other customer data may have been
+  exposed, altered, or destroyed.
 
 Do not include real third-party credentials, payment details, wallet private
-keys, production customer data, or live identity content (real memories, facts,
-or PII) in a report unless a dedicated secure intake path exists.
+keys, production customer data, live identity content (real memories, facts, or
+PII), or live secret material (secret values, TOTP seeds, or generated TOTP
+codes) in a report unless a dedicated secure intake path exists.
 
 ## Expected Response
 
@@ -51,6 +65,12 @@ Integrity-impacting reports are prioritized: a confirmed cross-agent access
 bypass, policy evaluation flaw, security-group escalation, message-sender
 forgery, or memory-poisoning vector is treated as high severity by default
 because it can corrupt or destroy identity data rather than merely expose it.
+
+Confidentiality-impacting reports against the sealed plane are likewise treated
+as high severity by default: a confirmed secret-value leak, reveal or
+authorization bypass, KMS or key-handling flaw, or unintended server-side
+decrypt can expose secret material that the envelope encryption and reveal
+ceremony are meant to keep sealed.
 
 These targets may change once Witself has a formal security operations process.
 
@@ -68,14 +88,23 @@ Security support applies to:
 
 Development-only local mock mode is security-relevant, but it is not the
 production security model. Issues in local mode should be reported when they can
-affect production code paths, leak local identity data, weaken developer safety,
-weaken authorization or policy evaluation, or create unsafe defaults.
+affect production code paths, leak local identity data or local secret material,
+weaken developer safety, weaken authorization or policy evaluation, or create
+unsafe defaults.
 
 The embedding-provider abstraction (`voyage`, `openai`, `local-dev`) is a
 configurable production dependency. Issues that let identity content leak to or
 through an embedding provider, or that let a degraded provider silently weaken
 authorization or recall correctness, are in scope; see
 [memory-model.md](memory-model.md).
+
+The KMS-provider abstraction (`aws-kms`, `gcp-kms`, `azure-key-vault`,
+`local-dev`) is the sealed plane's required dependency when that plane is
+enabled. Issues that let secret material be decrypted, exported, or logged in
+plaintext outside the reveal path, that mishandle the CMK / per-realm KEK /
+per-secret-or-field DEK envelope, or that cause unintended server-side decrypt,
+are in scope; see [key-hierarchy.md](key-hierarchy.md) and
+[encryption-model.md](encryption-model.md).
 
 ## Sensitive Data Handling
 
@@ -86,28 +115,41 @@ include:
 - Fact values, including `sensitive` facts and PII.
 - Message subjects, bodies, or structured payloads.
 - Embedding vectors.
+- Secret values.
+- TOTP seeds.
+- Generated TOTP codes.
 - Raw agent/operator tokens.
 - Self-hosted database URLs or storage credentials.
 - Embedding-provider credentials.
+- KMS-provider credentials, key identifiers, or wrapped key material.
 - Raw payment details.
 - Wallet seed phrases, private keys, or raw wallet credentials.
 - Provider credentials.
 
-If a report requires evidence involving identity content or other sensitive
-material, the report should use redacted values or test identity data created
-only for reproduction.
+If a report requires evidence involving identity content, secret material, or
+other sensitive data, the report should use redacted values or test identity
+data and test credentials created only for reproduction.
 
-Note the domain difference from Witpass: there is no reveal ceremony, TOTP
-seed, generated TOTP code, or local vault passphrase to leak. The protected
-payload is identity data and PII, and the headline risk is its corruption or
-unauthorized mutation, not only its exposure.
+The two planes carry different headline risks. For the open plane (memories,
+facts, PII) the risk is corruption or unauthorized mutation as much as
+exposure. For the sealed plane (secrets, TOTP) the risk is exposure of values
+that should only ever leave through the reveal-gated, audited path: secret
+values, TOTP seeds, and generated TOTP codes are never embedded, recalled, put
+in the self-digest, or plaintext-exported, so any appearance of them outside a
+reveal is itself a finding.
 
 ## In-Scope Vulnerability Classes
 
 The following classes are explicitly in scope and are the kinds of issues
-Witself most wants reported. They follow the integrity-and-authenticity threat
-framing in [threat-model.md](threat-model.md) and the authorization model in
-[access-policy.md](access-policy.md).
+Witself most wants reported. The open-plane classes follow the
+integrity-and-authenticity threat framing in
+[threat-model.md](threat-model.md) and the authorization model in
+[access-policy.md](access-policy.md). The sealed-plane classes follow the
+confidentiality threat framing in [threat-model.md](threat-model.md), the
+authorization model in
+[authorization-and-roles.md](authorization-and-roles.md), and the encryption
+model in [encryption-model.md](encryption-model.md) and
+[key-hierarchy.md](key-hierarchy.md).
 
 Cross-agent access bypass:
 
@@ -168,9 +210,67 @@ Memory poisoning:
 - Poisoning import/restore or group-shared identity data so trusted recall
   returns falsified facts or memories.
 
+The remaining classes protect the *confidentiality* of the sealed plane
+(secrets and TOTP enrollments).
+
+Secret leakage:
+
+- Any path that exposes a secret value, TOTP seed, or generated TOTP code
+  outside the reveal-gated, audited value paths (`secret reveal`, `totp code`,
+  value-returning `reference resolve`).
+- Secret material appearing in logs, traces, crash dumps, metrics, the audit
+  log, error messages, or API responses that should carry only ciphertext or
+  metadata.
+- Secret values or TOTP seeds being embedded, returned by semantic recall,
+  placed in the self-digest, included in a plaintext export, or ingested from
+  `CLAUDE.md`/`AGENTS.md` — all of which the sealed plane prohibits; see
+  [secret-model.md](secret-model.md).
+- A plaintext export, digest emit, or ingest that includes the sealed plane
+  rather than restricting secret backup to encrypted-only blobs; see
+  [backup-and-recovery.md](backup-and-recovery.md).
+
+Reveal / authorization bypass:
+
+- Returning a secret value or TOTP code without the `secret:reveal` /
+  `totp:code` scope, the reveal ceremony, or audit attribution.
+- Secret references (`witself://secret/...`, `witself://agent/<agent>/secret/...`,
+  `witself://group/<group>/secret/...`) resolving to a value without
+  re-checking authorization, ownership, or an active grant at resolve time.
+- A grant being honored beyond its bound owner agent or group, after revocation,
+  or with broader scope than `secret:grant` issued; or a realm role
+  (`realm:operator`, `realm:auditor`) reaching secret values it should not.
+- Scope-constraint bypass where a scope limited by realm, owning agent, group,
+  or secret path is not actually enforced on a value-returning path.
+
+KMS / key handling:
+
+- Mishandling of the CMK → per-realm KEK → per-secret-or-field DEK envelope:
+  reused, predictable, cross-realm, or cross-secret DEKs, or a missing AEAD
+  integrity check (`XCHACHA20_POLY1305`, `AES_256_GCM`); see
+  [key-hierarchy.md](key-hierarchy.md).
+- DEKs, KEKs, or KMS credentials persisted, cached, logged, or exported in
+  plaintext, or key material crossing a realm boundary.
+- KEK rotation that leaves prior DEKs decryptable when they should be retired,
+  or that breaks the crypto-shred property on KMS-key destruction.
+- KMS-provider misconfiguration (`aws-kms`, `gcp-kms`, `azure-key-vault`,
+  `local-dev`) that silently weakens or disables envelope encryption rather
+  than failing closed.
+
+Server-side decrypt:
+
+- The `server_side_decrypt` capability decrypting secret material when
+  `client_side_decrypt` was the contracted posture, or expanding the trusted
+  computing base beyond what the capability switch authorizes; see
+  [encryption-model.md](encryption-model.md).
+- Plaintext secret values lingering server-side after a server-mediated reveal,
+  in memory, temp storage, or response buffers, beyond the reveal that
+  authorized them.
+- A reveal flowing through server-side decrypt without the `server_side_decrypt`
+  flag being set on the audit event; see [audit-retention.md](audit-retention.md).
+
 In all cases, the strongest reports demonstrate a concrete authorization,
-integrity, or authenticity violation against a supported surface, not a
-theoretical one.
+integrity, authenticity, or confidentiality violation against a supported
+surface, not a theoretical one.
 
 ## Disclosure Policy
 
@@ -182,6 +282,10 @@ Before public disclosure, Witself maintainers should:
 - Assess identity-data impact: whether memories, facts, policies, groups,
   messages, or audit records may have been read, altered, destroyed, or
   misattributed, and whether affected realms must re-verify identity state.
+- Assess secret-confidentiality impact: whether secret values or TOTP seeds may
+  have been exposed, and whether affected realms must rotate exposed secrets,
+  re-enroll TOTP, or rotate the per-realm KEK; see
+  [key-hierarchy.md](key-hierarchy.md).
 - Patch or mitigate the issue.
 - Publish fixed releases or operational mitigations.
 - Update docs when user action is required.
@@ -214,6 +318,11 @@ membership, messaging, or identity integrity, release notes should also state
 whether operators should audit recent cross-agent activity, review policy and
 group state, or restore affected memories or facts.
 
+When a vulnerability affected secret confidentiality, reveal authorization, key
+handling, or server-side decrypt, release notes should also state whether
+operators should rotate exposed secrets, re-enroll TOTP, rotate the per-realm
+KEK, review reveal and grant audit records, or change KMS configuration.
+
 ## Out Of Scope
 
 The following are generally out of scope unless they reveal a concrete Witself
@@ -233,15 +342,27 @@ security issue:
   input to the receiving agent by design; see
   [inter-agent-messaging.md](inter-agent-messaging.md).
 - Plaintext identity export performed by an authorized caller, since first-class
-  plaintext export is an intended Witself feature, not a leak; see
-  [backup-and-recovery.md](backup-and-recovery.md).
+  plaintext export of the open plane is an intended Witself feature, not a leak;
+  see [backup-and-recovery.md](backup-and-recovery.md). This carve-out does not
+  extend to the sealed plane: a plaintext export that included secret values
+  would itself be a finding.
+- Attacks requiring already-authorized access to a secret value after it has
+  been intentionally revealed and exported outside Witself, since Witself no
+  longer controls material a caller chose to take out of the sealed plane.
 
 ## Related Docs
 
 - [threat-model.md](threat-model.md)
 - [access-policy.md](access-policy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [audit-retention.md](audit-retention.md)
+- [backup-and-recovery.md](backup-and-recovery.md)
 - [governance-and-support.md](governance-and-support.md)
 - [release-and-build.md](release-and-build.md)
 - [self-hosting.md](self-hosting.md)

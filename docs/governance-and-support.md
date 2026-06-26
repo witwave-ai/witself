@@ -11,13 +11,20 @@ authorization and policy logic, audit model, embedding-provider abstraction,
 Helm chart, Terraform modules, and release definitions unless a clear security
 or operational reason requires a split.
 
-Public code is part of the trust model. It lets users, customers, and security
-reviewers inspect how Witself stores, authorizes, audits, embeds, recalls, and
-serves identity material — memories, facts, policies, groups, and messages.
+Public code is part of the trust model across both planes. It lets users,
+customers, and security reviewers inspect how Witself stores, authorizes,
+audits, embeds, recalls, and serves open-plane identity material — memories,
+facts, policies, groups, and messages — and how it encrypts, key-manages, and
+reveal-gates sealed-plane credential material — secrets and TOTP enrollments.
 
-Where the sibling product Witpass uses public code to prove the
-*confidentiality* handling of secret material, Witself uses it to prove the
-*integrity and authenticity* handling of identity data.
+Witself proves two postures at once: the *integrity and authenticity* handling
+of open-plane identity data, and the *confidentiality* handling of sealed-plane
+secret material. The sealed plane is inspectable precisely so reviewers can
+confirm the carve-outs hold — that secret values are never embedded, never
+returned by semantic recall, never in the self-digest, and never in the
+plaintext export, and that values surface only through the audited reveal
+ceremony. See [encryption-model.md](encryption-model.md),
+[key-hierarchy.md](key-hierarchy.md), and [secret-model.md](secret-model.md).
 
 ## License Decision
 
@@ -106,6 +113,11 @@ Self-hosted operators remain responsible for:
   embedding vectors.
 - Embedding-provider configuration and credentials (`voyage`, `openai`, or
   `local-dev`).
+- KMS provider configuration, key access, and key rotation for the sealed plane
+  (`aws-kms`, `gcp-kms`, `azure-key-vault`, or `local-dev`), when the sealed
+  plane is enabled. KMS loss makes secret values unrecoverable (crypto-shred)
+  and does not affect the open plane; see [key-hierarchy.md](key-hierarchy.md)
+  and [backup-and-recovery.md](backup-and-recovery.md).
 - Object/blob storage for exports, attachments, and backups.
 - Network ingress and TLS.
 - Backups and disaster recovery, including vector data needed to restore
@@ -113,14 +125,24 @@ Self-hosted operators remain responsible for:
 - Terraform state protection.
 - Helm values and Kubernetes Secret management for agent token delivery.
 
-Optional field-level encryption of `sensitive` facts is a capability, not a
-core dependency; operators who enable it also own the associated key material.
+Optional field-level encryption of `sensitive` facts is an open-plane capability,
+not a core dependency; operators who enable it also own the associated key
+material. This is distinct from the sealed plane: secrets and TOTP seeds are
+always envelope-encrypted under KMS (CMK to per-realm KEK to per-secret/field
+DEK) whenever the sealed plane is enabled — that is mandatory, not optional. A
+credential belongs in the sealed plane as a secret, not as a `sensitive` fact;
+see [secret-model.md](secret-model.md) and [facts-model.md](facts-model.md).
 
 ## Feature Boundary
 
 Managed Witself Cloud and self-hosted deployments should share the same core
-memory, fact, policy, group, message, agent, token, audit, and reference
-contracts.
+contracts across both planes: the open-plane memory, fact, policy, group, and
+message contracts, and the sealed-plane secret, TOTP, reveal, grant, and
+runtime-injection contracts, along with the shared agent, token, audit, and
+reference contracts. The sealed plane is a defined v0 slice that may be staged
+after the open-plane core; where it is enabled it ships the same contracts in
+both deployment modes. See [secret-model.md](secret-model.md) and
+[totp-2fa.md](totp-2fa.md).
 
 Some managed-service features may be disabled, replaced, or unsupported in
 self-hosted deployments:
@@ -152,22 +174,34 @@ The public repository must not contain:
 - Kubeconfigs.
 - Database passwords.
 - Embedding-provider API keys or credentials.
+- KMS credentials, KMS configuration secrets, or local-dev passphrase files
+  (`WITSELF_PASSPHRASE_FILE`).
+- Sealed-plane key material — CMK, per-realm KEK, or per-secret/field DEK
+  material — and any unwrapped DEKs.
+- Raw secret values, plaintext secret fixtures, or plaintext reveal output.
+- TOTP seeds (otpauth URIs or Base32 seeds) and TOTP QR images.
 - Optional field-level fact-encryption key material (when that capability is
   used).
-- Raw Witself tokens.
+- Raw Witself tokens (the `witself_at_` raw prefix).
 - Payment provider credentials.
 - Wallet credentials.
 - Customer data.
-- Real memory, fact, message, policy, or group fixtures derived from customer or
-  production data.
+- Real memory, fact, message, policy, group, or secret fixtures derived from
+  customer or production data.
 - Production identity exports.
+- Encrypted secret backups containing real envelope blobs or KMS key identity.
 - Production support exports and diagnostic bundles.
 
 The repository should include `.gitignore`, secret scanning, and CI checks that
-make these mistakes harder. Test fixtures must be synthetic; because identity
-export is plaintext by default (see
-[backup-and-recovery.md](backup-and-recovery.md)), exported fixtures are
-especially easy to commit by accident and must be screened.
+make these mistakes harder. Test fixtures must be synthetic. Two kinds of
+material are especially easy to commit by accident and must be screened:
+open-plane identity export, which is plaintext by default (see
+[backup-and-recovery.md](backup-and-recovery.md)); and sealed-plane material —
+note that raw secret values, TOTP seeds, and DEKs never appear in any export at
+all (secret backup is encrypted-only, and the plaintext export excludes the
+sealed plane), so any such plaintext in the repo is necessarily a mistake. See
+[encryption-model.md](encryption-model.md) and
+[secret-model.md](secret-model.md).
 
 ## Package And Artifact Ownership
 
@@ -185,8 +219,8 @@ Release ownership and signing credentials must be tightly controlled.
 
 Vulnerability reporting is private. Report suspected vulnerabilities to
 security@witwave.ai rather than through public issues or pull requests, and do
-not include real tokens, memory content, fact values, message bodies, or
-customer data in the report. The disclosure process and threat framing are
+not include real tokens, memory content, fact values, message bodies, secret
+values, TOTP seeds, key material, or customer data in the report. The disclosure process and threat framing are
 tracked in [security-policy.md](security-policy.md) and
 [threat-model.md](threat-model.md).
 
@@ -197,6 +231,11 @@ tracked in [security-policy.md](security-policy.md) and
 - [self-hosting.md](self-hosting.md)
 - [self-host-support.md](self-host-support.md)
 - [access-policy.md](access-policy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [api-contract.md](api-contract.md)
 - [release-and-build.md](release-and-build.md)

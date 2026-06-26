@@ -25,14 +25,25 @@ V0 should stay focused on the core agent self/identity store:
   memories and facts.
 - Inter-agent messaging in full: durable mailbox, delivery, ordering, and
   acknowledgement.
-- First-class structured/plaintext identity export and round-trippable import.
+- First-class structured/plaintext identity export and round-trippable import of
+  the open plane (memories and facts); secrets are never in the plaintext export.
+- The sealed credential plane as a defined v0 slice that may be staged after the
+  open-plane core: secret CRUD with redaction and explicit reveal, password
+  generation, authenticator-app TOTP enrollment and code generation, runtime
+  secret references and injection, per-realm KEK envelope encryption, and secret
+  grants/realm roles (see [secret-model.md](secret-model.md),
+  [totp-2fa.md](totp-2fa.md), [encryption-model.md](encryption-model.md), and
+  [key-hierarchy.md](key-hierarchy.md)).
 - Audit events.
 - JSON, API, and MCP contracts.
 - Public images, Helm charts under `charts/*`, Terraform, CI, linting, and
   release automation.
 
 The features below should be documented now and revisited after v0 hardening.
-They are also previewed in [requirements.md](requirements.md).
+They are also previewed in [requirements.md](requirements.md). Items that touch
+the sealed credential plane preserve the sealed-plane carve-outs: secret values
+and TOTP seeds are never embedded, recalled, placed in the self-digest, or
+included in any plaintext export, and they remain reveal-gated.
 
 ## Deferred Recall And Memory Intelligence
 
@@ -121,6 +132,60 @@ diagnostics, and metering for stored attachment bytes. Because message content
 is untrusted input to the receiving agent, attachment handling also needs an
 explicit injection and memory-poisoning review before promotion.
 
+## Deferred Sealed-Plane 2FA Modalities
+
+These extend the sealed credential plane. V0 ships authenticator-app style TOTP
+first (see [totp-2fa.md](totp-2fa.md)). All of the modalities below keep the
+sealed-plane carve-outs: any seed or credential material they introduce is
+KMS-backed sealed material, is never embedded, recalled, placed in the
+self-digest, or plaintext-exported, and is reveal-gated.
+
+### SMS And Email-Code 2FA
+
+SMS and email-code capture are post-v0. They require integrations with inboxes,
+phone-number providers, anti-abuse controls, privacy rules, retry behavior,
+delivery failure handling, and support boundaries.
+
+V0 solves authenticator-app style TOTP first
+(see [totp-2fa.md](totp-2fa.md)).
+
+### Push Approvals
+
+Push approval flows are post-v0. They need a device/app approval channel,
+human-in-the-loop policy, timeout behavior, audit semantics, and a clear answer
+for unattended agents. Because an approval can gate a `secret reveal` or `totp
+code`, the reveal ceremony and its audit attribution must compose with the
+approval channel rather than bypass it.
+
+### Passkeys
+
+Passkey support is post-v0. It needs a WebAuthn/passkey agent story, origin and
+browser binding decisions, recovery behavior, and a clear security model for
+agents using credentials that are normally tied to a user device. Any stored
+passkey material is sealed-plane material under the per-realm KEK envelope
+(see [key-hierarchy.md](key-hierarchy.md)).
+
+### Hardware Security Keys
+
+Hardware security key support is post-v0. It requires physical device access,
+handoff rules, unattended-agent policy, operator approval flows, and clear
+deployment constraints for containers and Kubernetes workloads.
+
+## Deferred Agent Login Helpers
+
+### Browser-Session Handoff
+
+Browser-session handoff is post-v0. It could eventually help agents complete
+browser logins without exposing credentials broadly, but it changes the trust
+model around browser automation, session cookies, server-side decrypt, runtime
+injection, and support diagnostics.
+
+V0 provides secrets, TOTP codes, secret references, and runtime injection through
+`witself run` (see [secret-model.md](secret-model.md) and
+[cli-command-surface.md](cli-command-surface.md)). It does not try to own the
+browser session lifecycle. Any handoff must keep secret values reveal-gated and
+out of recall, the self-digest, and any plaintext export.
+
 ## Deferred Admin And Access Surfaces
 
 ### Web Dashboard
@@ -207,7 +272,52 @@ default (see [storage.md](storage.md)).
 Promoting it to a managed default reintroduces key-management operations, a
 backup/restore key-availability requirement, and recovery edge cases. It must be
 designed without resurrecting a secret-style reveal ceremony; `sensitive`
-remains a PII/redaction flag, not an encryption boundary.
+remains a PII/redaction flag, not an encryption boundary. A credential belongs
+in the sealed plane (a secret), not in a `sensitive` fact
+(see [facts-model.md](facts-model.md) and [secret-model.md](secret-model.md)).
+
+### Client-Held / BYOK Decrypt Over The Wire
+
+True client-held decrypt over the wire — where a client (or the operator's own
+KMS) unwraps the per-secret/field DEK so a remote backend returns only
+ciphertext — is post-v0. This applies only to the sealed plane. V0 remote
+backends (managed and self-hosted) are server-mediated and advertise
+`client_side_decrypt: false` on the sealed plane; local-dev mode decrypts with a
+local passphrase-derived key. The envelope and capability seams for this already
+exist (see the V0 crypto subset in [key-hierarchy.md](key-hierarchy.md) and
+[encryption-model.md](encryption-model.md)).
+
+Promotion changes how `secret reveal` and `totp code` return values, so the
+reveal ceremony, audit attribution, and the `server_side_decrypt` flag on
+reveal/code events must stay coherent across both decrypt modes. The open plane
+is unaffected: memories and facts are ordinary data-at-rest and do not flow
+through the envelope.
+
+### Per-Realm Cryptographic Isolation
+
+Cryptographic isolation between realms against a compromised backend deployment
+role (least-privilege per-realm KMS grants or per-realm CMKs) is post-v0. V0
+isolates tenants by authorization and `realm_id` query scoping, accepting a
+tenant-wide blast radius under a single CMK plus a single deployment role
+(see [encryption-model.md](encryption-model.md) and [storage.md](storage.md)).
+Each realm already has its own KEK; promotion tightens the grant boundary around
+those KEKs rather than introducing a new key tier.
+
+### Plaintext Secret Export As Break-Glass
+
+Plaintext export of sealed-plane secrets is post-v0 and should be treated as a
+high-risk break-glass feature if it is ever built. It is explicitly distinct from
+the v0 plaintext identity export, which covers only the open plane (memories and
+facts) and never includes secrets (see
+[backup-and-recovery.md](backup-and-recovery.md)). V0 secret backup is
+encrypted-only (envelope plus KMS key identity, never plaintext).
+
+Any future plaintext secret export must require deliberate operator
+authorization, strong confirmation, an audited reason, clear warnings,
+least-privilege controls, redaction rules, and separate documentation from the
+normal encrypted backup and restore flows. It must not be reachable through
+`witself export`, digest emit, ingest, or the self-digest, all of which remain
+sealed-plane-free.
 
 ## Deferred Commercial Surfaces
 
@@ -225,14 +335,18 @@ without a Witself-specific token (see [billing-and-limits.md](billing-and-limits
 
 A post-v0 feature should move into an active release plan only when it has:
 
-- A written threat-model update, framed around integrity and authenticity of
-  identity data (memory-poisoning, unauthorized curation/forgetting, cross-agent
-  write abuse, sender spoofing) rather than secret confidentiality.
+- A written threat-model update. For open-plane features this is framed around
+  integrity and authenticity of identity data (memory-poisoning, unauthorized
+  curation/forgetting, cross-agent write abuse, sender spoofing); for
+  sealed-plane features it is framed around secret confidentiality (leakage,
+  KMS/role compromise, reveal abuse, server-side-decrypt TCB expansion, and
+  tenant blast radius).
 - Clear principal, permission, and policy behavior, including how it interacts
   with the default-deny cross-agent policy engine.
 - CLI, API, MCP, and JSON contract changes where applicable.
 - Audit events that avoid memory content, fact values, message bodies/payloads,
-  embedding vectors, raw tokens, and high-risk payment data.
+  embedding vectors, secret values, TOTP seeds, raw tokens, and high-risk payment
+  data.
 - Capability flags and deterministic `unsupported_operation` behavior.
 - Managed and self-hosted support boundaries.
 - Migration, backup, and recovery impact notes, including embedding-vector
@@ -247,6 +361,11 @@ A post-v0 feature should move into an active release plan only when it has:
 - [threat-model.md](threat-model.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)

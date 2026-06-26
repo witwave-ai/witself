@@ -24,14 +24,20 @@ The initial operational surface should include:
 - Helm values for probes, metrics, ServiceMonitor, PodMonitor, resources,
   autoscaling, disruption budgets, security context, and network policy.
 
-Witself's telemetry posture follows the same spine as Witpass, but the payload
-it observes is self-identity, not secrets. Where Witpass instrumented secret
-reads, reveals, and TOTP codes, Witself instruments memory operations, semantic
-recall, embedding calls, fact operations, policy decisions, cross-agent access,
-groups, and inter-agent messaging. The privacy rules tighten accordingly: the
-threat focus is the **integrity and authenticity** of identity data, so metrics
-and logs must never carry memory content, fact values, message bodies, or
-embedding vectors.
+Witself's telemetry spans both planes. The **open plane** (memories and facts)
+is instrumented for memory operations, semantic recall, embedding calls, fact
+operations, policy decisions, cross-agent access, groups, and inter-agent
+messaging; its threat focus is the **integrity and authenticity** of identity
+data. The **sealed plane** (secrets and TOTP) is instrumented for secret
+operations, reveals, TOTP codes, and KMS calls; its threat focus is the
+**confidentiality** of credential material. The privacy rules tighten across
+both: metrics and logs must never carry memory content, fact values, message
+bodies, or embedding vectors, and must never carry secret values, TOTP seeds,
+generated TOTP codes, KMS key material, or private keys. The sealed plane keeps
+its carve-outs everywhere, including telemetry — secret material is never
+embedded, recalled, placed in the self-digest, or plaintext-exported, and is
+revealed only through the audited reveal ceremony (see
+[secret-model.md](secret-model.md) and [encryption-model.md](encryption-model.md)).
 
 ## Listener Model
 
@@ -62,9 +68,10 @@ development profile.
 ## Health Probes
 
 Health endpoints must never expose memory content, fact values, message bodies
-or payloads, embedding vectors, raw tokens, database URLs, embedding-provider
-credentials, object-store credentials, raw payment details, wallet credentials,
-or provider secrets.
+or payloads, embedding vectors, secret values, TOTP seeds, generated TOTP codes,
+raw tokens, database URLs, embedding-provider credentials, object-store
+credentials, KMS credentials or key material, private keys, passphrases, raw
+payment details, wallet credentials, or provider secrets.
 
 Health probes should be served from the dedicated health listener, default
 `:8081`. The Helm chart should wire Kubernetes probes directly to this port.
@@ -74,12 +81,12 @@ Probe semantics:
 | Endpoint | Purpose | Dependency checks |
 |---|---|---|
 | `/v1/health/live` | Process is alive and should not be restarted. | Minimal process-local checks only. |
-| `/v1/health/ready` | Server can safely receive traffic. | Storage, migrations, and read-only maintenance state. |
+| `/v1/health/ready` | Server can safely receive traffic. | Storage, migrations, KMS reachability when the sealed plane is enabled, and read-only maintenance state. |
 | `/v1/health/startup` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
 
-Liveness should be conservative. A transient database, object-store, or
-embedding-provider failure should normally make readiness fail, not force
-Kubernetes to restart a healthy process.
+Liveness should be conservative. A transient database, object-store,
+embedding-provider, or KMS failure should normally make readiness fail, not
+force Kubernetes to restart a healthy process.
 
 Readiness should fail when:
 
@@ -87,6 +94,10 @@ Readiness should fail when:
 - Required migrations are missing or incompatible.
 - The pgvector extension required for semantic recall is unavailable when vector
   storage is required.
+- Required KMS operations cannot complete when the sealed plane is enabled.
+  KMS is a hard readiness gate only for sealed-plane deployments; an
+  open-plane-only deployment does not depend on KMS (see
+  [storage.md](storage.md) and [key-hierarchy.md](key-hierarchy.md)).
 - The server is intentionally in a mode that should not accept ordinary
   traffic.
 - The server is draining or shutting down.
@@ -100,8 +111,9 @@ surfaced through metrics and the capability contract, and should not by itself
 fail readiness unless the deployment explicitly requires semantic recall.
 
 Startup should cover slow boot paths such as config validation, first database
-connection, migration status checks, pgvector availability, and
-embedding-provider client initialization.
+connection, migration status checks, pgvector availability,
+embedding-provider client initialization, and KMS provider client
+initialization when the sealed plane is enabled.
 
 ## Prometheus Metrics
 
@@ -126,6 +138,11 @@ Initial metric families should include:
 | `witself_http_in_flight_requests` | In-flight HTTP requests. |
 | `witself_auth_attempts_total` | Authentication attempts by principal kind, result, and reason class. |
 | `witself_token_operations_total` | Token create, rotate, revoke, and verification operations. |
+| `witself_secret_operations_total` | Sealed-plane secret operations by operation (`create`, `show`, `update`, `rename`, `copy`, `archive`, `restore`, `delete`, `grant`, `revoke`), owner kind, and result. The `show` operation returns metadata only and never a value; reveals are counted separately. |
+| `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
+| `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
+| `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
+| `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
 | `witself_memory_operations_total` | Memory operations by operation (`add`, `adjust`, `read`, `list`, `forget`, `restore`, `delete`), owner kind, and result. |
 | `witself_memory_recalls_total` | Recall requests by mode (`semantic`, `degraded`), owner kind, and result. |
 | `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and owner kind. |
@@ -162,17 +179,26 @@ Initial metric families should include:
 | `witself_migration_pending` | Pending migration count when known. |
 
 Metric names can evolve during implementation, but the coverage categories
-should remain. There are deliberately no secret, reveal, TOTP, password, or
-runtime-injection metric families: those Witpass-only payloads do not exist in
-Witself.
+should remain. The sealed-plane families (`witself_secret_operations_total`,
+`witself_secret_reveals_total`, `witself_totp_operations_total`,
+`witself_kms_operations_total`, and `witself_kms_operation_duration_seconds`)
+count events and never carry payload: no secret value, field value, TOTP seed,
+generated code, or key material ever appears in a metric or its labels. They
+are present only when the sealed plane is enabled. The `server_side_decrypt`
+label on the reveal and TOTP families records which decrypt path served the
+value — `true` for token-only pods where the server mediates decryption,
+`false` for client-held decryption — per the hybrid model in
+[key-hierarchy.md](key-hierarchy.md).
 
 ## Label And Privacy Rules
 
 Metrics are operational metadata, not an escape hatch around the security
-model. They must never expose identity material or high-cardinality customer
-metadata. Because Witself protects integrity and authenticity of identity data,
-the content of memories, facts, and messages is as off-limits in telemetry as
-secret values were in Witpass.
+model. They must never expose identity material, secret material, or
+high-cardinality customer metadata. Witself protects the integrity and
+authenticity of open-plane identity data and the confidentiality of
+sealed-plane credential data, so the content of memories, facts, and messages
+and the values of secrets and TOTP material are equally off-limits in
+telemetry.
 
 Forbidden metric labels and values include:
 
@@ -180,6 +206,10 @@ Forbidden metric labels and values include:
   tags, descriptions, sources, links, or arbitrary user input.
 - Message subjects, message bodies, or structured message payloads.
 - Embedding vectors or any vector component.
+- Secret names, secret field names, field values, secret tags, descriptions,
+  URLs, or account labels.
+- TOTP seeds, generated TOTP codes, or recovery codes.
+- KMS key material, data keys, ciphertext blobs, private keys, or passphrases.
 - Token IDs, raw tokens, or token prefixes.
 - Email addresses, customer names, support ticket text, invoice IDs, payment
   method IDs, wallet addresses, database URLs, embedding-provider credentials,
@@ -196,7 +226,9 @@ Allowed labels should be low cardinality and pre-normalized, such as:
 - `route` as a route template, such as `/v1/memories/{memory_id}:recall`.
 - `method`.
 - `status_class`, such as `2xx`, `4xx`, or `5xx`.
-- `operation`, such as `add`, `adjust`, `recall`, `set`, `forget`, or `delete`.
+- `operation`, such as `add`, `adjust`, `recall`, `set`, `forget`, `delete`,
+  and the sealed-plane operations `create`, `show`, `reveal`, `rename`, `copy`,
+  `archive`, `restore`, `grant`, `revoke`, `enroll`, and `code`.
 - `result`, such as `success`, `error`, `denied`, `rate_limited`, or
   `unsupported`.
 - `decision`, such as `allow` or `deny`, for policy evaluations.
@@ -214,24 +246,40 @@ Allowed labels should be low cardinality and pre-normalized, such as:
 - `elided`, `true` or `false`, for self-digest renders.
 - `stage`, such as `sent`, `delivered`, or `read`, for messaging.
 - `principal_kind`, such as `agent`, `operator`, `admin`, or `service`.
-- `owner_kind`, such as `self`, `other_agent`, or `group`.
+- `owner_kind`. On open-plane access metrics it records the access perspective
+  as `self`, `other_agent`, or `group`. On sealed-plane metrics (and anywhere
+  it records data ownership rather than access perspective) it records the
+  owning principal kind as exactly `agent` or `group` — the unified ownership
+  model for memories, facts, and secrets. In every case it must never carry an
+  agent name, group name, or realm id.
 - `recipient_kind`, such as `agent` or `group`.
 - `embedding_provider`, such as `voyage`, `openai`, or `local_dev`.
 - `backend_kind`, such as `managed`, `self_hosted`, or `local`.
 - `store_backend`, `object_store_provider`.
+- `kms_provider`, the KMS provider family for sealed-plane operations, such as
+  `aws_kms`, `gcp_kms`, `azure_key_vault`, or `local_dev`. It must never carry a
+  key id, key ARN, endpoint URL, or key material.
+- `server_side_decrypt`, `true` or `false`, recording which decrypt path served
+  a reveal or TOTP code: `true` when the server mediates decryption for a
+  token-only pod, `false` for client-held decryption. It never carries a key,
+  a value, or any plaintext.
 - `reason_class`, a small normalized set such as `unavailable`, `timeout`,
   `rejected`, or `rate_limited`, for embedding and degrade events.
 - `limit_dimension`, using the canonical metered-dimension names from
   [billing-and-limits.md](billing-and-limits.md): `active_agent`,
   `stored_memory`, `stored_fact`, `memory_recall`, `memory_write`,
   `embedding_operation`, `vector_storage_byte`, `crossagent_access`,
-  `security_group`, `message_sent`, `message_delivered`, `audit_event`, or
-  `api_request`.
+  `security_group`, `message_sent`, `message_delivered`, `audit_event`,
+  `api_request`, and the sealed-plane dimensions `stored_secret`,
+  `secret_read`, `totp_code`, `runtime_injection`, or
+  `encrypted_storage_byte`.
 
 The `owner_kind` label is the load-bearing dimension for distinguishing
-self-access from cross-agent and group access. It must be normalized to exactly
-`self`, `other_agent`, or `group`; it must never carry an agent name, group
-name, or realm id.
+self-access from cross-agent and group access on the open plane, and for
+distinguishing agent-owned from group-owned data across both planes. It must be
+normalized to exactly `self`, `other_agent`, or `group` when recording access
+perspective, or to exactly `agent` or `group` when recording data ownership; it
+must never carry an agent name, group name, or realm id.
 
 The `embedding_provider` label identifies the provider family only. It must
 never carry the model name as free text, an API key, an endpoint URL, or any
@@ -258,20 +306,26 @@ Expected log fields:
 - Owner kind (`self`, `other_agent`, or `group`) for identity operations.
 - Permission verb and decision for policy-gated operations.
 - Embedding provider and recall mode for recall operations.
+- KMS provider, KMS operation, and the `server_side_decrypt` flag for
+  sealed-plane reveal, TOTP code, and key operations.
 - Backend kind.
 - Stable error code when an operation fails.
 
 Logs may carry non-sensitive correlation context such as record ids
-(`mem_…`, `fact_…`, `grp_…`, `pol_…`, `msg_…`), memory kind, recipient kind,
-policy id, and decision outcome. They must follow the same redaction rules as
-API errors, CLI output, audit events, and support data.
+(`mem_…`, `fact_…`, `grp_…`, `pol_…`, `msg_…`, and the sealed-plane ids
+`sec_…`, `fld_…`, `grt_…`, `totp_…`, `kek_…`, `dek_…`, `att_…`), memory kind,
+recipient kind, policy id, and decision outcome. They must follow the same
+redaction rules as API errors, CLI output, audit events, and support data.
 
 Forbidden log fields mirror the audit and metric rules: no memory content, no
-fact values, no message bodies or payloads, no embedding vectors, no raw tokens,
-no PII (email addresses, customer names, wallet addresses, raw payment details),
-no database URLs, no provider credentials, and no raw request paths, query
-strings, request bodies, or arbitrary user input. Sensitive request bodies and
-`sensitive`-marked records must be redacted before logging.
+fact values, no message bodies or payloads, no embedding vectors, no secret
+values, no secret or field names that carry user data, no TOTP seeds or
+generated codes, no KMS key material or data keys, no private keys or
+passphrases, no raw tokens, no PII (email addresses, customer names, wallet
+addresses, raw payment details), no database URLs, no provider credentials, and
+no raw request paths, query strings, request bodies, or arbitrary user input.
+Sensitive request bodies and `sensitive`-marked records must be redacted before
+logging. Sealed-plane values are never logged at all, even at debug level.
 
 ## Helm Chart Integration
 
@@ -373,6 +427,11 @@ Initial alert candidates:
 - Embedding provider failure rate above a baseline.
 - Sustained recall degrade-to-lexical events (semantic recall unavailable).
 - Storage operation failures.
+- KMS operation failures (sealed plane).
+- Secret reveal spikes (possible credential-exfiltration signal).
+- TOTP code generation spikes.
+- Server-side-decrypt reveal rate above a baseline (token-only pods serving
+  values; expands the decrypt trust boundary).
 - Cross-agent access denials above a baseline (possible policy or abuse signal).
 - Cross-agent curate/forget spikes (possible memory-poisoning or write abuse).
 - Message send or delivery failure rate above a baseline.
@@ -381,8 +440,9 @@ Initial alert candidates:
 - Token authentication failures above a baseline.
 
 Alerting rules should avoid customer-specific labels and must not include memory
-content, fact values, message bodies, embedding vectors, fact names, raw paths,
-user input, or payment details.
+content, fact values, message bodies, embedding vectors, fact names, secret
+names, field names, TOTP material, KMS key material, raw paths, user input, or
+payment details.
 
 ## CI And Release Checks
 
@@ -390,9 +450,17 @@ Required checks once the server and chart exist:
 
 - Unit tests for metric registration and label normalization.
 - Tests proving raw paths and user input do not become metric labels.
-- Tests proving `owner_kind` only ever takes `self`, `other_agent`, or `group`.
+- Tests proving `owner_kind` only ever takes `self`, `other_agent`, or `group`
+  for access-perspective metrics, and only `agent` or `group` for
+  data-ownership metrics, and never an agent name, group name, or realm id.
+- Tests proving `server_side_decrypt` only ever takes `true` or `false`.
 - Tests proving memory content, fact values, message bodies, and embedding
   vectors never appear in metrics, logs, or health responses.
+- Tests proving secret values, secret/field names, TOTP seeds, generated TOTP
+  codes, KMS key material, data keys, and private keys never appear in metrics,
+  logs, or health responses.
+- Tests proving the `kms_provider` label carries only the provider family and
+  never a key id, ARN, endpoint, or key material.
 - Tests proving the `embedding_provider` label carries only the provider family
   and never a model name, endpoint, or credential.
 - Health endpoint tests for live, ready, and startup behavior.
@@ -417,6 +485,11 @@ Required checks once the server and chart exist:
 - [server-command-surface.md](server-command-surface.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [secret-model.md](secret-model.md)
+- [totp-2fa.md](totp-2fa.md)
+- [encryption-model.md](encryption-model.md)
+- [key-hierarchy.md](key-hierarchy.md)
+- [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
