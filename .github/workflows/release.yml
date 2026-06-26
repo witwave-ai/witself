@@ -1,0 +1,252 @@
+# Witself release.
+#
+# Triggers on v* tags for real releases, and on workflow_dispatch for a dry-run
+# (snapshot) path that builds and smoke-tests artifacts without publishing. The
+# release tool is GoReleaser.
+#
+# Default permissions are read-only. Only the publishing jobs request elevated
+# permissions (packages: write for GHCR, contents: write for GitHub Releases,
+# id-token: write for keyless signing and provenance). The Homebrew tap
+# (witwave-ai/homebrew-tap) is verified before the formula is published.
+#
+# See docs/scaffold-readiness.md (CI And Release Workflows) and
+# docs/release-and-build.md (Release Action). External tooling (cosign, syft,
+# goreleaser) arrives with the real implementation; this workflow wires the
+# stages and gates so release mechanics are visible from day one.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and smoke-test artifacts without publishing a release."
+        type: boolean
+        default: true
+
+# Minimal read-only default permissions; publishing jobs opt in to more.
+permissions:
+  contents: read
+
+# Never run two releases for the same ref concurrently, and do not cancel an
+# in-flight release (publishing must not be interrupted mid-stream).
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.26.x"
+  HOMEBREW_TAP_REPO: "witwave-ai/homebrew-tap"
+
+jobs:
+  # A real release publishes; workflow_dispatch defaults to a dry run. This
+  # single decision drives the publishing gates below.
+  config:
+    name: Resolve release mode
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.mode.outputs.publish }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+    steps:
+      - name: Determine mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          publish=false
+          if [ "${EVENT_NAME}" = "push" ]; then
+            case "${REF}" in
+              refs/tags/v*) publish=true ;;
+            esac
+          fi
+          if [ "${publish}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Builds archives, checksums, SBOMs and provenance for every target platform.
+  # On a dry run GoReleaser runs in snapshot mode and nothing is published.
+  build:
+    name: Build artifacts
+    needs: config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # keyless signing and provenance for built artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Verify Go toolchain from go.mod
+        run: |
+          set -euo pipefail
+          if [ -f go.mod ]; then
+            go version
+            go mod verify
+          else
+            echo "No go.mod yet; skipping toolchain verification (skeleton)."
+          fi
+
+      - name: Build release archives, checksums, SBOMs and provenance
+        run: |
+          set -euo pipefail
+          echo "Building release archives for macOS and Linux (amd64, arm64)."
+          echo "Generating SHA256 checksums."
+          echo "Generating SBOMs for archives."
+          echo "Generating build provenance / attestations."
+          echo "dry_run=${{ needs.config.outputs.dry_run }}"
+          # GoReleaser drives this once cmd/witself and cmd/witself-server exist:
+          #   goreleaser release --snapshot --clean   # dry run
+          #   goreleaser release --clean              # real release
+
+  # Signs archives and checksum manifests. Requires id-token for keyless cosign.
+  sign:
+    name: Sign archives and checksums
+    needs:
+      - config
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sign release archives and checksum manifest
+        run: |
+          set -euo pipefail
+          echo "Signing release archives and the checksum manifest (keyless cosign)."
+
+  # Verifies that the public Homebrew tap exists before any formula publish.
+  verify-homebrew-tap:
+    name: Verify homebrew-tap repository
+    needs: config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify ${{ env.HOMEBREW_TAP_REPO }} exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${HOMEBREW_TAP_REPO}"
+          if gh repo view "${repo}" > /dev/null 2>&1; then
+            echo "Homebrew tap repository ${repo} exists."
+          else
+            echo "::error::Homebrew tap repository ${repo} was not found."
+            echo "Create the public repository ${repo} (or configure an org-level"
+            echo "release token permitted to create public repositories) before"
+            echo "publishing the formula."
+            exit 1
+          fi
+
+  # Smoke-tests built artifacts before anything is published.
+  smoke-test:
+    name: Smoke test artifacts
+    needs:
+      - config
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Smoke test built artifacts
+        run: |
+          set -euo pipefail
+          echo "Smoke testing archives, the curl installer, and image entrypoints."
+          echo "  witself version"
+          echo "  witself-server version (once the server exists)"
+
+  # ---- Publishing jobs: gated on a real tag release and granted write scopes ----
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - config
+      - sign
+      - smoke-test
+      - verify-homebrew-tap
+    if: needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub Release
+      id-token: write # provenance attestation
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish GitHub Release assets
+        run: |
+          set -euo pipefail
+          echo "Publishing archives, checksums, signatures, SBOMs and provenance"
+          echo "as public GitHub Release assets for ${{ github.ref_name }}."
+
+  publish-images:
+    name: Publish GHCR images
+    needs:
+      - config
+      - sign
+      - smoke-test
+    if: needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io/witwave-ai/images/*
+      id-token: write # sign images and attach provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build, push and sign public images
+        run: |
+          set -euo pipefail
+          echo "Building and pushing public images for linux/amd64 and linux/arm64:"
+          echo "  ghcr.io/witwave-ai/images/witself"
+          echo "  ghcr.io/witwave-ai/images/witself-server (once the server exists)"
+          echo "Signing images and attaching SBOMs and provenance."
+
+  publish-homebrew:
+    name: Publish Homebrew formula
+    needs:
+      - config
+      - publish-release
+      - verify-homebrew-tap
+    if: needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Update Homebrew formula
+        run: |
+          set -euo pipefail
+          echo "Updating Formula/witself.rb in ${HOMEBREW_TAP_REPO} for"
+          echo "${{ github.ref_name }} (brew install witwave-ai/tap/witself)."

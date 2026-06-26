@@ -1,0 +1,47 @@
+witself-server has been deployed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Image:        {{ include "witself.image" . }}
+Replicas:     {{ if .Values.autoscaling.enabled }}autoscaled {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
+Sealed plane: {{ if .Values.sealedPlane.enabled }}ENABLED (KMS provider: {{ .Values.kms.provider }}){{ else }}disabled (secrets + TOTP not served){{ end }}
+Embeddings:   {{ .Values.embeddings.provider }} / {{ .Values.embeddings.model }}{{ if eq .Values.embeddings.provider "local-dev" }} (local-dev: not for production){{ end }}
+
+Ports (named): api={{ .Values.ports.api }}  health={{ .Values.ports.health }}  metrics={{ .Values.ports.metrics }}
+
+Prerequisites (operator-owned, NOT installed by this chart):
+  * External Postgres reachable via Secret "{{ .Values.database.existingSecret.name }}" (key "{{ .Values.database.existingSecret.urlKey }}"),
+    with the pgvector "vector" extension available in the target database.
+{{- if eq (include "witself.embeddingsExternal" .) "true" }}
+  * Embedding-provider API key via Secret "{{ .Values.embeddings.existingSecret.name }}" (key "{{ .Values.embeddings.existingSecret.apiKeyKey }}").
+{{- end }}
+{{- if eq (include "witself.kmsExternal" .) "true" }}
+  * KMS credentials via Secret "{{ .Values.kms.existingSecret.name }}" (envFrom) or cloud workload identity.
+    KMS key identifier: {{ .Values.kms.keyRef | default "<set kms.keyRef>" }}
+{{- end }}
+
+Migrations (run BEFORE relying on a fresh/upgraded server):
+{{- if .Values.migrations.enabled }}
+  The migration Job "{{ include "witself.fullname" . }}-migrate" is enabled and runs:
+    {{ join " " .Values.migrations.command }}
+  Check status:
+    kubectl -n {{ .Release.Namespace }} logs job/{{ include "witself.fullname" . }}-migrate
+{{- else }}
+  The migration Job is disabled (migrations.enabled=false). Run migrations explicitly, e.g.:
+    kubectl -n {{ .Release.Namespace }} run witself-migrate --rm -it --restart=Never \
+      --image={{ include "witself.image" . }} -- migrate status
+{{- end }}
+
+Reach the API:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "witself.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Then: curl http://127.0.0.1:{{ .Values.service.port }}/v1/capabilities
+{{- end }}
+
+The health ({{ .Values.ports.health }}) and metrics ({{ .Values.ports.metrics }}) ports are never exposed via public ingress.
+{{- if not .Values.sealedPlane.enabled }}
+
+NOTE: sealedPlane.enabled=false — no KMS is required and secrets/TOTP are not served.
+{{- end }}

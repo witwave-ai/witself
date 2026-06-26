@@ -1,0 +1,23 @@
+# Self-hosted AWS stack — example variables.
+#
+# Copy to terraform.tfvars (which is gitignored) and edit. NEVER commit a real
+# terraform.tfvars. This file holds NO credentials, account IDs, passwords, or
+# key material — only non-sensitive configuration. Credentials reach the cluster
+# through deployment-native mechanisms (IRSA, existing Secrets, secret managers),
+# never through Terraform variables. See infra/terraform/README.md.
+
+name   = "witself"
+region = "us-east-1"
+
+# Sealed plane (secrets + TOTP). Leave false for an open-plane-only deployment
+# (memories + facts), which needs no KMS. Set true to provision a CMK envelope
+# root, or supply existing_kms_key_arn to bring your own key (BYOK).
+sealed_plane_enabled = false
+# existing_kms_key_arn = "arn:aws:kms:us-east-1:000000000000:key/EXAMPLE"
+
+# Optional public hostname for Route 53 / ACM wiring. Empty disables it.
+# public_hostname = "witself.example.com"
+
+tags = {
+  environment = "self-hosted"
+}

@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "witself.fullname" . }}
+  labels:
+    {{- include "witself.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "witself.selectorLabels" . | nindent 4 }}
+  ports:
+    # API only. The health and metrics ports are exposed through dedicated,
+    # opt-in Services so they are never bundled with public API exposure.
+    - name: api
+      port: {{ .Values.service.port }}
+      targetPort: api
+      protocol: TCP
+{{- if .Values.health.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "witself.fullname" . }}-health
+  labels:
+    {{- include "witself.labels" . | nindent 4 }}
+    app.kubernetes.io/component: health
+  {{- with .Values.health.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Cluster-internal diagnostics only; do not expose through ingress.
+  type: ClusterIP
+  selector:
+    {{- include "witself.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: health
+      port: {{ .Values.ports.health }}
+      targetPort: health
+      protocol: TCP
+{{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "witself.fullname" . }}-metrics
+  labels:
+    {{- include "witself.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "witself.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

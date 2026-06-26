@@ -18,5 +18,22 @@ coverage.*
 # Local env / credentials (never commit)
 .env
 *.local
-*.tfvars
 *.token
+
+# Terraform — never commit state, lockfiles for state, crash logs, or real vars
+# (see infra/terraform/README.md and docs/terraform-infrastructure.md)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+.terraformrc
+terraform.rc

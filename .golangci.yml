@@ -1,0 +1,89 @@
+# golangci-lint configuration for Witself (schema v2).
+#
+# Kept intentionally modest for the skeleton: the standard correctness linters
+# plus light style enforcement. Tighten as real implementation lands. Tool
+# version is pinned in CI, not here (see docs/release-and-build.md).
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+    - revive
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment is noisy and not worth chasing in the skeleton.
+        - fieldalignment
+    staticcheck:
+      checks:
+        - all
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    misspell:
+      locale: US
+    revive:
+      # Light touch: only a handful of broadly-useful rules.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unreachable-code
+        - name: var-declaration
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Tests may skip error checks and exported-doc requirements.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+      # Generated code (protobuf, mocks, OpenAPI) is not our style problem.
+      - path: (.+)\.gen\.go
+        linters:
+          - revive
+          - staticcheck
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/witwave-ai/witself
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

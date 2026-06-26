@@ -1,0 +1,158 @@
+# GoReleaser configuration for Witself.
+#
+# Builds the two public binaries (witself, witself-server) from this single
+# stdlib-only module, archives + checksums + SBOMs them, publishes two GHCR
+# images, and updates the witwave-ai/homebrew-tap formula. Version is derived
+# from git tags. See docs/release-and-build.md.
+version: 2
+
+project_name: witself
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: witself
+    main: ./cmd/witself
+    binary: witself
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+  - id: witself-server
+    main: ./cmd/witself-server
+    binary: witself-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids:
+      - witself
+      - witself-server
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - id: archive
+    artifacts: archive
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - "^Merge "
+
+dockers_v2:
+  - id: witself
+    ids:
+      - witself
+    images:
+      - "ghcr.io/witwave-ai/images/witself"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    dockerfile: images/witself/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.source: "https://github.com/witwave-ai/witself"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "BUSL-1.1"
+
+  - id: witself-server
+    ids:
+      - witself-server
+    images:
+      - "ghcr.io/witwave-ai/images/witself-server"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    dockerfile: images/witself-server/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.source: "https://github.com/witwave-ai/witself"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "BUSL-1.1"
+
+homebrew_casks:
+  - name: witself
+    ids:
+      - default
+    binaries:
+      - witself
+    repository:
+      owner: witwave-ai
+      name: homebrew-tap
+      branch: main
+    directory: Casks
+    homepage: "https://github.com/witwave-ai/witself"
+    description: "Witself CLI: portable agent identity across the open and sealed planes."
+    commit_author:
+      name: witwave-bot
+      email: bot@witwave.ai
+
+release:
+  github:
+    owner: witwave-ai
+    name: witself
+  draft: false
+  prerelease: auto
