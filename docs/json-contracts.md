@@ -1508,28 +1508,29 @@ Used by `audit list` and `audit show`.
 ```json
 {
   "id": "aud_123",
-  "action": "crossagent.forgotten",
+  "action": "secret.reveal",
   "actor": {
     "kind": "agent",
-    "id": "agent_123",
-    "name": "browser-agent"
+    "id": "agent_456",
+    "name": "archivist"
   },
   "target": {
-    "kind": "memory",
-    "id": "mem_777",
-    "name": null
+    "kind": "secret",
+    "id": "sec_123",
+    "name": "github/builder"
   },
   "owner": {
     "kind": "agent",
-    "agent_id": "agent_456",
-    "agent_name": "archivist"
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent"
   },
-  "policy_id": "pol_888",
-  "reason": "pruning stale staging notes",
+  "policy_id": null,
+  "grant_id": "grt_123",
+  "reason": "CI runner needs the deploy token",
   "timestamp": "2026-06-26T18:00:00Z",
   "metadata": {
-    "kind": "episodic",
-    "tags": ["staging"]
+    "field": "password",
+    "server_side_decrypt": true
   }
 }
 ```
@@ -1546,7 +1547,11 @@ Rules:
   `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
   `group.created`, `group.member_added`, `group.member_removed`,
   `message.sent`, `message.delivered`, `message.read`, `message.acked`,
-  `identity.exported`, and `identity.imported`.
+  `identity.exported`, `identity.imported`, and the sealed-plane events
+  `secret.created`, `secret.updated`, `secret.renamed`, `secret.copied`,
+  `secret.archived`, `secret.restored`, `secret.deleted`, `secret.reveal`,
+  `secret.grant`, `secret.revoke`, `totp.enrolled`, `totp.code`,
+  `totp.seed_revealed`, `totp.deleted`, and `key.rotated`.
 - Cross-agent and group-owned mutation events include `owner`, the deciding
   `policy_id`, and the audit `reason` so each action is fully attributed (for
   example "memory mem_777 of agent archivist was pruned by agent browser-agent

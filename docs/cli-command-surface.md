@@ -2176,6 +2176,7 @@ Enroll TOTP setup material into an existing or new secret.
 ```sh
 witself totp enroll github/builder --otpauth 'otpauth://totp/...'
 witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+witself totp enroll github/builder --secret-file ./github-seed.txt
 witself totp enroll github/builder --qr ./github-2fa.png
 ```
 
@@ -2187,7 +2188,7 @@ Flags:
 | `--group NAME_OR_ID` | Enroll TOTP on a group-owned secret. |
 | `--otpauth URL` | Enroll from an `otpauth://` URL. |
 | `--secret VALUE` | Base32 TOTP setup secret. Least safe. |
-| `--secret-file PATH` | Read Base32 TOTP setup secret from a file. |
+| `--secret-file PATH` | Read the Base32 seed from a file; preferred over `--secret` to keep the seed off argv. |
 | `--qr PATH` | Parse TOTP setup material from a QR-code image. |
 | `--description TEXT` | Required when `--create-secret` creates a new secret. |
 | `--issuer TEXT` | Issuer name. |

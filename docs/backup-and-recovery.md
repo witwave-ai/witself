@@ -265,6 +265,18 @@ separate path, not the identity export. Sealed material is never embedded, never
 recalled, never in the self-digest, and never ingested either. See
 [key-hierarchy.md](key-hierarchy.md).
 
+**Future sealed plaintext export (post-v0).** A plaintext secret/TOTP export is
+not part of v0 and is tracked as a post-v0 candidate in
+[post-v0-roadmap.md](post-v0-roadmap.md). This note records the constraints so
+they are not lost if the feature is later built: any future plaintext sealed
+export must be designed as a separate high-risk feature, distinct from the open
+plane's first-class identity export, with explicit operator action and strong
+confirmation, an audit `--reason`, least-privilege authorization, an optional
+break-glass framing, redaction controls for support and diagnostics, and its own
+design doc separate from this normal backup/export guidance. It would route
+through the audited reveal ceremony, not `witself export`. See
+[secret-model.md](secret-model.md) and [threat-model.md](threat-model.md).
+
 Export rules:
 
 - `witself export` emits a structured, human-readable, plaintext export of an

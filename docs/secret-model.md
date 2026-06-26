@@ -108,6 +108,31 @@ Templates are usability conventions, not storage columns. One secret may have
 `username`/`password`/`url`; another only a sensitive `api_key`; another `cert`,
 `private-key`, and `chain`.
 
+### Example secret kinds (non-normative)
+
+Witself is a general-purpose sealed store: the `generic` template plus arbitrary
+named fields hold **any** credential kind, so this catalog is illustrative for
+discoverability, **not** a closed list. The data model hard-codes no narrow set
+of secret shapes; the kinds below are simply the ones agents and operators reach
+for most:
+
+- Passwords and logins.
+- API keys.
+- Access tokens and refresh tokens.
+- Recovery codes.
+- OAuth client ids and client secrets.
+- SSH private keys.
+- TLS private keys and certificates.
+- Signing keys.
+- Environment variables.
+- Service-account credentials.
+- Database URLs and connection strings.
+- TOTP seeds (sealed; see [Relationship to TOTP](#relationship-to-totp) and
+  [totp-2fa.md](totp-2fa.md)).
+
+Any kind not listed here is stored the same way: a `generic` secret with the
+arbitrary named, per-field-sensitivity fields described above.
+
 ## Fields and Sensitivity
 
 A field is a named value with a per-field `sensitive` marker. Sensitivity is set

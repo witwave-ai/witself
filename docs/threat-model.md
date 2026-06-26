@@ -147,7 +147,9 @@ Sensitive supporting assets:
 - Audit records (the integrity ledger for identity changes).
 - Embedding vectors and the embedding-provider request stream (a data-egress
   channel; see [Embedding-Provider Risks](#embedding-provider-risks)).
-- Payment-provider tokens and billing metadata (managed service).
+- Payment-provider tokens and billing metadata (managed service), plus wallet
+  credentials, wallet private keys, and raw payment data where crypto/wallet
+  payment flows apply (see [security-policy.md](security-policy.md)).
 
 Important non-secret assets:
 
@@ -521,6 +523,10 @@ write. The highest-severity risks are AI-specific:
   unrelated secret or TOTP code, or to call reveal/code repeatedly because the
   tools are easy to invoke. Sealed-plane only; mitigated by reveal-gating,
   per-agent isolation, grant scoping, audit, and `--no-value-tools`.
+- **Account-hygiene drift.** An agent provisions accounts or stores credentials
+  with weak or policy-violating metadata (predictable passwords, missing
+  rotation, off-policy fields). Sealed-plane only; mitigated by
+  password-generation criteria and policy governance.
 - **Secret leakage into model-visible context.** Tool output, transcripts, or
   model logs capture a revealed secret value or TOTP seed. Mitigated by
   preferring `witself run`/reference resolution over printing, masking injected
