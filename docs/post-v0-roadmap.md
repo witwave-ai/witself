@@ -331,6 +331,101 @@ messaging, CLI use, or MCP use.
 Traditional payment methods and provider-mediated crypto payment rails can exist
 without a Witself-specific token (see [billing-and-limits.md](billing-and-limits.md)).
 
+## Identity-Tied Feature Candidates
+
+These are the RECOMMENDED tier from the agent-identity research: post-v0
+candidates that lean directly on Witself's self/identity store rather than on
+generic IAM or memory features. They are grouped into three tiers — a cheap
+foundation, a flagship whitespace where Witself does what no IdP or memory
+product does, and a relationship layer that bridges the IAM world into the
+self-store. Each builds on existing Witself concepts and is gated by the
+[promotion criteria](#promotion-criteria) below (threat-model update,
+permissions/scopes, audit events, CLI/MCP/API contracts, capability flags, and
+tests).
+
+### Foundation Tier
+
+Cheap, table-stakes substrate that the rest render from.
+
+#### Typed Identity-Profile Schema
+
+A validated identity-profile layer over facts (stable-id, display-name, owner,
+sponsor, issuer/publisher, type/blueprint, model, lifecycle-state, and
+classification attrs) that matches the de-facto enterprise/Agent-Card
+vocabulary. Identity/self-centric because it names who the agent *is* as
+structured, queryable identity rather than loose facts. Fit is high and effort
+is small. Builds on [facts-model.md](facts-model.md) and the `primary` flag.
+
+#### Stable Self-ID + Keypair (Self-Sovereign Root)
+
+A durable Witself identifier the agent can prove control of, with optional
+DID / SPIFFE / passport renderings; crypto signing lives in the harness/tooling,
+never the LLM. Identity/self-centric because it gives the self a self-sovereign,
+verifiable root rather than a backend-assigned handle. Effort is medium. Builds
+on the agent/token model and is the enabler for signed cards, `/whois`, and
+attestations.
+
+### Flagship Whitespace Tier
+
+Where Witself does what no IdP or memory product does.
+
+#### Graduated Disclosure (Policy-Gated Self-Views)
+
+Serve a minimal public self/card versus an authenticated "extended" self,
+decided by the requester's group and the default-deny policy engine.
+Identity/self-centric because the self decides how much of itself to reveal to
+whom. Effort is medium with high differentiation. Builds on
+[access-policy.md](access-policy.md) and [security-groups.md](security-groups.md).
+
+#### Values / Constitution Store With Hard Constraints
+
+An ordered list of principles with an explicit priority hierarchy plus a
+non-overridable hard-constraints set, recallable and enforceable; guardrails-as-
+policy fuse with the access-policy engine. Identity/self-centric because values
+and constraints are the durable core of who the agent is, not transient memory.
+Effort is medium. Builds on [access-policy.md](access-policy.md) and memory edit
+history (see [memory-model.md](memory-model.md)).
+
+#### Persona / Self-Concept Block
+
+A structured persona object (self-summary, traits, context-scoped voice/tone,
+and expertise) as first-class identity. Identity/self-centric because it is the
+agent's own self-concept rather than data about the world. Fit is high and
+effort is small. Builds on the facts/memory model and export/import (see
+[facts-model.md](facts-model.md) and [memory-model.md](memory-model.md)).
+
+### Relationship-Layer Tier
+
+Bridges the IAM world into the self-store.
+
+#### Principal Binding & Delegation Graph
+
+Owner principal, sponsor with escalation, delegator(s), an ordered delegation
+chain, authority scope, and validity window; Witself holds the binding metadata
+and audit linkage — not bearer secrets — so policy can condition on delegation
+state. Identity/self-centric because it records *whose* authority the self acts
+under as part of the self-store. Effort is medium. Builds on
+[access-policy.md](access-policy.md),
+[authorization-and-roles.md](authorization-and-roles.md), and the audit ledger.
+
+#### /whois Challenge-Response + Agent Passport
+
+A self-issued passport plus a challenge-response so a peer can verify identity
+and permissions before trusting a message; rides inter-agent messaging.
+Identity/self-centric because it lets one self prove who it is to another.
+Effort is medium. Builds on the stable self-ID/keypair and
+[inter-agent-messaging.md](inter-agent-messaging.md).
+
+### Wider Backlog
+
+A further set of candidates was surfaced (capability/skill manifest, signed
+Agent-Card projection, per-counterparty trust ledger, vouch/attestation store,
+consent grants as enforced data, verifiable forgetting/crypto-shredding,
+bitemporal facts, typed entity graph, and C2PA content-provenance) and is
+tracked as a backlog to prioritize later. Lightweight provenance is already
+seeded in v0 via the `source` field on memories/facts (see
+[data-model.md](data-model.md) and [memory-model.md](memory-model.md)).
+
 ## Promotion Criteria
 
 A post-v0 feature should move into an active release plan only when it has:
