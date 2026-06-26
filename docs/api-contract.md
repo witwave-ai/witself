@@ -155,6 +155,8 @@ Examples of feature flags:
 
 - `memories`
 - `facts`
+- `self_digest`
+- `consolidate`
 - `semantic_recall`
 - `policies`
 - `groups`
@@ -178,7 +180,10 @@ provider, model, vector dimensionality, and whether recall is degraded. `read`,
 `get`, and `list` remain available even when the embedding provider is
 unavailable, while `recall` degrades deterministically to keyword/tag/kind/time
 ranking and the capabilities response marks `semantic_recall` as degraded rather
-than failing. The embedding-provider boundary is tracked in
+than failing. The `self_digest` flag (`GET /v1/self`) is always available on any
+backend that supports memories and facts: the digest blends salience and recency
+deterministically and never calls the embedding provider, so it stays usable even
+when `semantic_recall` is degraded. The embedding-provider boundary is tracked in
 [memory-model.md](memory-model.md).
 
 Self-hosted and local deployments should return deterministic
@@ -329,13 +334,16 @@ Initial route groups:
 | `/v1/health/startup` | Startup probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery, limits, and embedding-provider state. |
+| `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
+| `/v1/remember` | Convenience capture action; the core auto-routes the input to a fact or a memory. |
+| `/v1/sessions` | Multi-session bootstrap: hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
 | `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
 | `/v1/bootstrap` | One-time self-hosted first-operator bootstrap. |
 | `/v1/account` | Customer account and human operator/admin management. |
 | `/v1/realms` | Realm lifecycle and membership. |
 | `/v1/agents` | Named agent lifecycle and policy summary. |
 | `/v1/tokens` | Token create, list, revoke, and rotate. |
-| `/v1/memories` | Memory add, read, list, scan, recall, adjust, forget, restore, and delete. |
+| `/v1/memories` | Memory add, read, list, scan, recall, consolidate, adjust, forget, restore, and delete. |
 | `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
@@ -414,10 +422,14 @@ record is an ordinary authorized read, not a reveal ceremony.
 Initial colon-action routes:
 
 ```http
+POST /v1/remember
 POST /v1/memories:recall
+POST /v1/memories:consolidate
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
 POST /v1/facts/{fact_id}:primary
+POST /v1/sessions:start
+POST /v1/sessions:end
 POST /v1/policies:test
 POST /v1/messages/{message_id}:ack
 POST /v1/tokens/{token_id}:rotate
@@ -425,10 +437,28 @@ POST /v1/tokens/{token_id}:rotate
 
 Notes on specific actions:
 
+- `POST /v1/remember` is the tested primary capture path. It is a `POST` because
+  the captured text travels in the body and must never appear in a URL. The core
+  auto-routes: a clear name-to-value assertion upserts a fact (idempotent by
+  name), anything else adds a memory with dedup/supersede. It creates no new
+  resource kind — it composes the existing fact and memory create paths — and
+  returns the created or merged resource plus its `kind` and the deterministic
+  `echo`.
 - `:recall` is a query against the caller's accessible memories. It is a `POST`
   because the query and filters travel in the body and because cross-agent
   recall is metered and policy-gated. Recall over another agent's or group's
   memories requires a policy granting `read` on that target.
+- `:consolidate` is the guarded garbage-collection verb (`witself memory
+  consolidate`). It merges near-duplicate memories, supersedes stale ones, and
+  surfaces — never auto-resolves — conflicting facts, trimming the digest index.
+  It defaults to `dry_run: true`, requires `memory:update` (plus `memory:forget`
+  for supersede), is audited as `memory.consolidated`, respects `source`
+  provenance so it never silently overwrites human- or import-authored records,
+  and is excluded in `--read-only` MCP mode.
+- `:start` and `:end` are the multi-session bootstrap pair. `:start` hydrates
+  identity, open goals, and last progress in one round-trip and mutates no state;
+  `:end` persists a progress memory (kind `session`) and updates open goals, so
+  it is `POST` with a body and is audited as `session.started` / `session.ended`.
 - `:forget` is the default destructive path: a soft delete (tombstone),
   reversible within the retention window. `:restore` reverses it within that
   window. Hard delete is the explicit, guarded `DELETE /v1/memories/{memory_id}`

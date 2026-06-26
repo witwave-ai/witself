@@ -14,6 +14,9 @@ Status: draft. These docs define Witself before implementation. Last reviewed
   history, semantic recall, and the embedding-provider abstraction.
 - [facts-model.md](facts-model.md): name→value facts, deterministic lookup,
   primary promotion, and sensitivity/redaction posture.
+- [context-hydration.md](context-hydration.md): the always-loaded self-digest,
+  the agent teaching layer, the two-way CLAUDE.md/AGENTS.md file bridge, and the
+  session bootstrap protocol.
 - [access-policy.md](access-policy.md): the default-deny cross-agent policy
   engine, permission verbs, guardrails, and `policy test` evaluation.
 - [security-groups.md](security-groups.md): named agent groups as policy

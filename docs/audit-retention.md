@@ -133,6 +133,17 @@ exports.
 - `memory.forgotten` (soft delete / tombstone; reversible window)
 - `memory.restored`
 - `memory.deleted` (hard delete; guarded, requires reason)
+- `memory.consolidated` (GC verb; records counts of merged/superseded memories and
+  surfaced conflicts, plus the resolved-against `source` provenance, never content)
+
+The `remember` quick-add does not emit its own event; it routes to `memory.added`,
+`fact.set`/`fact.created`, or `fact.updated` depending on what the core resolves it to.
+
+### Session
+
+- `session.started` (records identity hydration; no content beyond ids and counts)
+- `session.ended` (records the persisted progress memory id of `kind=session` and
+  open-goal count; never the summary text)
 
 ### Fact
 
@@ -183,6 +194,12 @@ deciding policy id.
 - `identity.exported` (records scope and whether `sensitive` records were
   included; requires reason when sensitive)
 - `identity.imported`
+- `memory.imported` (per memory created via `ingest`; records the `source=import:<file>`
+  provenance and source label, never the imported prose)
+- `fact.imported` (per fact upserted via `ingest`; records `name`/namespace and the
+  `source=import:<file>` provenance, never the value)
+- `self.digest.emitted` (optional; records the requested format and byte budget of a
+  `digest emit`, never the rendered identity content)
 
 ### Authentication, Agent, and Token Lifecycle
 

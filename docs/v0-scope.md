@@ -16,6 +16,12 @@ V0 should prove the end-to-end product boundary:
   agent's own memories.
 - The CLI can set, get, list, and delete an agent's own facts, and promote a
   fact to primary.
+- An agent can self-manage its memory and hydrate its context: a quick-add
+  `remember` that auto-routes to a fact or memory, an always-loaded
+  `self show` self-digest, `session start`/`session end` bootstrap and
+  flush-before-long-ops, `memory consolidate` garbage collection, a two-way
+  `digest emit`/`ingest` file bridge with CLAUDE.md/AGENTS.md, and
+  `bootstrap-instructions` to install the teaching stanza.
 - `memory recall` performs semantic-by-default similarity search over the
   caller's accessible memories, blended with keyword, tag, kind, and time
   filters.
@@ -27,7 +33,9 @@ V0 should prove the end-to-end product boundary:
   with sender identity derived from the token.
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
-- `witself mcp serve` can expose the safe v0 MCP stdio tool surface.
+- `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
+  the self-management tools, and teach the always-loaded recall-before-act /
+  write-after-learn protocol through its server `instructions` field.
 - `witself-server serve --dev` can exercise the same core through HTTP.
 - `witself-server` exposes Prometheus metrics, structured logs, and Kubernetes
   health probes.
@@ -68,6 +76,25 @@ Core user-facing capabilities:
   memories, with soft-delete-by-default forget and a guarded hard delete.
 - Fact set/get/list/delete with `--primary` promotion that demotes the prior
   primary of the same logical kind.
+- `remember` quick-add that auto-routes a clear name/value assertion to a fact
+  upsert and anything else to a verbatim memory add, sharing the same
+  validation, limits, dedup, and echo as the precise verbs.
+- `self show` bounded session-start digest of primary facts, top-N salient
+  memories, and a one-line kinds/tags/counts index, hard-capped with an
+  `elided` signal instead of silent truncation, and never requiring the
+  embedding provider.
+- `session start`/`session end` for multi-session bootstrap: start hydrates
+  identity, open goals, and last progress in one round-trip; end persists a
+  `session` progress memory and updates open goals.
+- `memory consolidate` to merge near-duplicate memories, supersede stale ones,
+  surface conflicting facts, and trim the digest/index, dry-run by default and
+  respecting provenance.
+- `digest emit` and `ingest` for the two-way CLAUDE.md/AGENTS.md file bridge:
+  emit renders the self-digest as a provenance-stamped fragment; ingest parses
+  kv lines to fact upserts and prose to memories, tagged `import:<file>` with
+  dedup.
+- `bootstrap-instructions` to print the paste-able teaching stanza, with
+  `witself setup --write-agents-md` to install it into the project AGENTS.md.
 - Policy create/list/show/delete/test under default deny.
 - Group create/list/show/add-member/remove-member/delete, including
   group-scoped shared memories and facts.
@@ -76,7 +103,8 @@ Core user-facing capabilities:
 - Identity reference parsing and resolution.
 - `witself export` and `witself import` for round-trippable structured
   identity data.
-- `witself mcp serve` over stdio.
+- `witself mcp serve` over stdio, exposing the self-management tools and the
+  pinned server-instructions teaching protocol.
 
 Core backend capabilities:
 
@@ -87,6 +115,10 @@ Core backend capabilities:
 - Initial `/v1/realms`, `/v1/agents`, `/v1/tokens`, `/v1/memories`,
   `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/messages`, and `/v1/audit`
   route groups.
+- Self-management routes including `/v1/remember`, `/v1/self`,
+  `/v1/sessions:start`, `/v1/sessions:end`, and `/v1/memories:consolidate`,
+  with `digest emit` rendering from `GET /v1/self?format=` and `ingest`
+  composing the existing fact/memory create paths.
 - Colon action subroutes including `/v1/memories:recall`,
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
   `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
@@ -106,9 +138,15 @@ Core backend capabilities:
   stores most data in Postgres.
 - Declarative policy engine with default deny and a `policy test` decision path.
 - Audit events for auth, token lifecycle, memory and fact changes, recall,
-  cross-agent read/contribute/curate/forget, policy decisions, group changes,
-  message send/deliver/read, identity export/import, operator actions, limits,
-  and billing/support stubs when invoked.
+  consolidation, session start/end, ingest import of memories and facts,
+  optional digest emit, cross-agent read/contribute/curate/forget, policy
+  decisions, group changes, message send/deliver/read, identity export/import,
+  operator actions, limits, and billing/support stubs when invoked.
+- A deterministic, human-readable `echo` string on every mutation result,
+  dedup/supersede on write that returns the existing id with a
+  `memory_duplicate`/`memory_merged` warning, and a first-class `source`
+  provenance field on memory and fact records (`self`, `agent:<name>`,
+  `operator`, `import:<file>`).
 - Managed v0 audit retention default of 365 days.
 - Default per-memory content and per-fact size limits with reasonable v0 caps.
 
@@ -192,6 +230,13 @@ V0 is credible when:
   in list/scan output across CLI, MCP, API, logs, errors, and audit records;
   an authorized read of a single record returns the value with no reveal
   ceremony.
+- `remember` auto-routes a name/value assertion to a fact upsert and free text
+  to a memory add; `self show` returns a bounded digest that sets `elided` when
+  capped and works without the embedding provider; `session start`/`end`
+  round-trips identity and open goals; `memory consolidate` is dry-run by
+  default and never silently overwrites human- or import-authored records;
+  `digest emit`/`ingest` round-trip with CLAUDE.md/AGENTS.md fragments; and
+  `--read-only` MCP mode excludes the mutating self-management tools.
 - `witself export` produces structured, round-trippable identity data and
   `witself import` restores it, preserving primary flags, sensitive markers,
   links, and edit history.
@@ -214,6 +259,7 @@ V0 is credible when:
 - [api-contract.md](api-contract.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
+- [context-hydration.md](context-hydration.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)

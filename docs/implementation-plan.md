@@ -254,6 +254,92 @@ Exit criteria:
   errors.
 - The recall and embedding model matches [memory-model.md](memory-model.md).
 
+## Milestone 3.5: Agent Self-Management And Hydration
+
+Goal: make Witself reliable for the agent that owns it. Witself is a service the
+agent must be *taught* to call, unlike CLAUDE.md/AGENTS.md which the harness
+auto-loads. This milestone lands the self-management surface — quick capture, an
+always-loaded self-digest, multi-session bootstrap, consolidation, the file
+bridge, and the teaching layer — directly on top of the core memory/fact CRUD
+(M1) and recall (M3) it composes, before cross-agent policy (M4).
+
+These verbs add no new resources: they route to the existing fact and memory
+create/update/recall paths. The work is convergence and teaching, not a new
+store.
+
+Deliverables:
+
+- `witself remember "<text>" [--scope] [--sensitive] [--reason]` and
+  `witself.remember`/`POST /v1/remember`: a single auto-routing capture path —
+  a clear name→value assertion upserts a fact (idempotent by name), anything
+  else adds a verbatim memory with dedup/supersede. Tested primary capture path,
+  not a thin alias; never bypasses validation/limits.
+- `witself self show` / `witself.self.show` / `GET /v1/self`: the bounded,
+  always-loaded self-digest — primary facts first, then top-N salient memories
+  (blended salience + recency), then a one-line index of kinds/tags/counts.
+  Cheap; never requires the embedding provider; hard byte/line cap with
+  `elided=true` pointing to `memory.recall` rather than silent truncation.
+- `witself session start/end` / `witself.session.start`/`.end` /
+  `POST /v1/sessions:start`,`:end`: start hydrates identity + open goals + last
+  progress in one round-trip; end persists a progress memory (kind `session`)
+  and updates open goals. Pairs with assume-interruption / flush-before-long-ops.
+- `witself memory consolidate [--dry-run]` / `witself.memory.consolidate` /
+  `POST /v1/memories:consolidate`: merges near-duplicate memories, supersedes
+  stale ones, surfaces (does not auto-pick) conflicting facts, trims the
+  digest/index. Dry-run defaults true; guarded; respects provenance and never
+  silently overwrites human-/import-authored records.
+- `witself digest emit --format claude-md|agents-md|markdown` and
+  `witself ingest <PATH ...>` (the two-way file bridge): `emit` renders the
+  self-digest as a CLAUDE.md/AGENTS.md fragment with witself-generated
+  provenance comments; `ingest` parses CLAUDE.md/AGENTS.md/GEMINI.md — kv-shaped
+  lines to facts (upsert), prose to memories — tagged `source=import:<file>`,
+  with dedup/upsert to prevent re-import duplication. Ingest composes the
+  existing fact/memory create paths; no new resource.
+- Salient-memory selection per [memory-model.md](memory-model.md): top-N by a
+  deterministic blended salience + recency score (with pinned kinds like
+  `profile`/`session`), excluding archived/forgotten, never calling the
+  embedding provider.
+- Cross-cutting contract changes: a deterministic human-readable `echo` string on
+  every mutation result; dedup/supersede on `memory.add` (and `remember`→memory)
+  surfacing a `memory_duplicate`/`memory_merged` warning with the existing
+  `mem_` id instead of silently creating near-dups; a first-class `source`
+  provenance field on Memory and Fact records (`self`, `agent:<name>`,
+  `operator`, `import:<file>`).
+- The teaching layer (three reinforcing surfaces saying the same thing): the MCP
+  server `instructions` field returned on connect (the canonical standing
+  protocol pinned in [context-hydration.md](context-hydration.md) and
+  [mcp-tools.md](mcp-tools.md)); per-tool descriptions rewritten with explicit
+  when-to-call trigger lists; and `witself bootstrap-instructions
+  [--format agents-md|claude-md|text]` plus `witself setup --write-agents-md`
+  to ship the paste-able teaching stanza into a project AGENTS.md.
+- Audit events: `memory.consolidated`, `session.started`, `session.ended`,
+  `memory.imported`, `fact.imported`, and optional `self.digest.emitted`.
+  `remember` routes to existing `memory.added`/`fact.created`/`fact.updated`.
+- Scopes reuse: `self show`/`session start`/`digest emit` need
+  `memory:read` + `fact:read`; `remember`/`session end`/`ingest` need
+  `memory:create`/`fact:create`; `consolidate` needs `memory:update`
+  (+ `memory:forget` for supersede). `--read-only` MCP mode excludes the
+  mutating verbs (`remember`, `session.end`, `consolidate`, `ingest`) while
+  `self.show`, `session.start`, `recall`, and `digest.emit` remain.
+
+Exit criteria:
+
+- `witself remember` auto-routes a name→value assertion to an upserted fact and
+  free-form text to a deduped memory, returning a deterministic `echo` and
+  `duplicate_of` when merged.
+- `witself self show` returns a digest under its byte cap without the embedding
+  provider, sets `elided=true` when capped, and points to `memory.recall`.
+- A session can be started and ended across process restarts so resuming is one
+  call, not a list+recall crawl.
+- `memory consolidate --dry-run` reports merges/supersessions/conflicts without
+  mutating, and a non-dry run never overwrites human-/import-authored records.
+- `digest emit` then `ingest` of the emitted file round-trips without creating
+  duplicates, and imported records carry `source=import:<file>`.
+- The MCP server advertises the standing protocol via `instructions`, and
+  `bootstrap-instructions` prints the matching paste-able stanza.
+- The surface matches [context-hydration.md](context-hydration.md),
+  [memory-model.md](memory-model.md), and [facts-model.md](facts-model.md).
+
 ## Milestone 4: Cross-Agent Policy Engine
 
 Goal: replace ad-hoc grants with an evaluable, default-deny policy engine that
@@ -591,6 +677,13 @@ Exit criteria:
 - Semantic recall (M3) lands before the policy engine (M4) so cross-agent recall
   has something real to authorize, but recall must degrade deterministically so
   the rest of the build does not depend on a live embedding provider.
+- Agent self-management and hydration (M3.5) lands right after core memory/fact
+  CRUD (M1) and recall (M3), before cross-agent policy (M4): it adds no new
+  resources and only composes those paths, but Witself is a service the agent
+  must be taught to call, so the always-loaded self-digest, quick-capture
+  `remember`, session bootstrap, consolidation, file bridge, and the teaching
+  layer are what make the core product reliable for a single agent before
+  cross-agent sharing is introduced.
 - The policy engine (M4) precedes security groups (M5) and messaging (M6)
   because both depend on default-deny cross-agent evaluation; a message can
   never substitute for a policy.
@@ -606,6 +699,7 @@ Exit criteria:
 ## Related Docs
 
 - [requirements.md](requirements.md)
+- [context-hydration.md](context-hydration.md)
 - [v0-scope.md](v0-scope.md)
 - [scaffold-readiness.md](scaffold-readiness.md)
 - [cli-command-surface.md](cli-command-surface.md)

@@ -25,6 +25,29 @@ The JSON shapes used by MCP tool results are defined in
 [cli-command-surface.md](cli-command-surface.md). The master requirements live
 in [requirements.md](requirements.md).
 
+## Server Instructions (Teaching Layer)
+
+Unlike a harness-loaded `CLAUDE.md`/`AGENTS.md`, Witself is a service the agent
+must be **taught** to call. The MCP server therefore returns a canonical
+`instructions` string on connect (emitted by `witself mcp serve`). This is the
+**primary teaching surface**: it is auto-returned to the client during the MCP
+handshake and stands as the always-loaded protocol for every session. It is
+reinforced by the trigger-laden tool descriptions below and by the paste-able
+bootstrap stanza, but the server `instructions` string is the canonical copy.
+
+The exact string is pinned **verbatim** here and in
+[context-hydration.md](context-hydration.md); the two copies must stay
+byte-identical, and code must not paraphrase it:
+
+```text
+You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. Memory work is not a substitute for doing the task.
+```
+
+It is modeled on Anthropic's memory-tool protocol and Letta's block protocol:
+short, standing, and behavioral rather than a feature list. See
+[context-hydration.md](context-hydration.md) for the full teaching-layer
+treatment and the `bootstrap-instructions` stanza.
+
 ## Transport And Session Model
 
 Initial transport:
@@ -58,8 +81,10 @@ Read-only mode:
 
 - `witself mcp serve --read-only` disables mutating tools.
 - In read-only mode, `witself.memory.add/adjust/forget`, `witself.fact.set/
-  delete`, and `witself.message.send` are unavailable. Read, recall, list,
-  get, show, parse, resolve, and `policy.test` remain available subject to
+  delete`, `witself.message.send`, `witself.remember`, `witself.session.end`,
+  and `witself.memory.consolidate` are unavailable. Read, recall, list,
+  get, show, parse, resolve, `policy.test`, `witself.self.show`,
+  `witself.session.start`, and `witself.digest.emit` remain available subject to
   policy.
 - Cross-agent reads and recalls remain policy-gated even in read-only mode: a
   read tool that targets another agent still requires a matching `read` policy
@@ -113,6 +138,22 @@ Every tool should return the same response envelope used by CLI `--json`:
 }
 ```
 
+Every **mutation** result must include a deterministic, human-readable `echo`
+string in `data` so the model can self-verify and chain on the outcome (the
+greppable-return lesson). The `echo` states exactly what changed, for example
+`"Remembered fact display-name=Atlas"`, `"Added mem_123 (kind=profile,
+salience=0.6)"`, or `"Merged into mem_120 (duplicate)"`. The `echo` is the same
+line the CLI prints; it never contains `sensitive` values.
+
+Writes are deduplicated. `witself.memory.add` (and `witself.remember` when it
+routes to a memory) check for near-duplicates before creating a record; on a hit
+they return the existing `mem_` id and a `memory_duplicate` warning — or
+`memory_merged` when the write was folded into the existing memory — in
+`warnings[]` instead of silently creating a near-duplicate. `witself.fact.set`
+(and `witself.remember` when it routes to a fact) is upsert by name, so it
+updates in place rather than warning. The warning codes are defined in
+[json-contracts.md](json-contracts.md).
+
 Tool errors use the error envelope from [json-contracts.md](json-contracts.md).
 Tool results must never contain memory content, fact values, message bodies or
 payloads, embedding vectors, or raw tokens in error or warning fields; that rule
@@ -126,12 +167,18 @@ Tool names should use the `witself.` prefix:
 - `witself.version`
 - `witself.whoami`
 - `witself.capabilities`
+- `witself.self.show`
+- `witself.remember`
+- `witself.session.start`
+- `witself.session.end`
 - `witself.memory.add`
 - `witself.memory.adjust`
 - `witself.memory.read`
 - `witself.memory.recall`
 - `witself.memory.list`
+- `witself.memory.consolidate`
 - `witself.memory.forget`
+- `witself.digest.emit`
 - `witself.fact.set`
 - `witself.fact.get`
 - `witself.fact.list`
@@ -167,12 +214,18 @@ as MCP tools.
 | `witself.version` | yes | yes | No auth-sensitive data. |
 | `witself.whoami` | yes | yes | Shows effective principal, scopes, and primary facts. |
 | `witself.capabilities` | yes | yes | Shows backend kind, embedding provider, and supported features. |
+| `witself.self.show` | yes | yes | Bounded session-start digest; never calls the embedding provider; sets `elided` when capped. |
+| `witself.remember` | yes | no | Quick-add; auto-routes to a fact or memory; requires `memory:create`/`fact:create`. |
+| `witself.session.start` | yes | yes | One round-trip hydrate of identity, open goals, and last progress; requires `memory:read`/`fact:read`. |
+| `witself.session.end` | yes | no | Persists a `session` progress memory and updates open goals; requires `memory:create`. |
 | `witself.memory.add` | yes | no | Requires `memory:create`; `contribute` policy for cross-agent. |
 | `witself.memory.adjust` | yes | no | Requires `memory:update`; `curate` policy for cross-agent. |
 | `witself.memory.read` | yes | yes | Cross-agent read requires `read` policy. |
 | `witself.memory.recall` | yes | yes | Semantic by default; cross-agent recall requires `read` policy. |
 | `witself.memory.list` | yes | yes | Redacts `sensitive` content; cross-agent/scan is policy/operator gated. |
+| `witself.memory.consolidate` | yes | no | GC verb; `dry_run` defaults true; requires `memory:update` (+`memory:forget` for supersede); audited; respects provenance. |
 | `witself.memory.forget` | yes | no | Soft delete; cross-agent requires `forget` policy, `reason`. |
+| `witself.digest.emit` | yes | yes | Renders the self-digest as a `CLAUDE.md`/`AGENTS.md` fragment; requires `memory:read`/`fact:read`. |
 | `witself.fact.set` | yes | no | Requires `fact:create`/`fact:update`; `--primary` requires `fact:primary`. |
 | `witself.fact.get` | yes | yes | Returns the one true value by name; cross-agent requires `read` policy. |
 | `witself.fact.list` | yes | yes | Redacts `sensitive` values; cross-agent/scan is policy/operator gated. |
@@ -258,12 +311,163 @@ unavailable, the result reports that semantic recall is degraded to
 keyword/tag/kind/time ranking (see
 [memory-model.md](memory-model.md)).
 
+### `witself.self.show`
+
+Return the bounded, always-loadable self-digest: primary facts first, then the
+top-N salient memories (blended salience + recency), then a one-line index of
+kinds, tags, and counts. This is the MCP analogue of an auto-loaded `CLAUDE.md`
+head. It is cheap and **never** requires the embedding provider, so it works even
+when semantic recall is degraded.
+
+**Call this at the start of a non-trivial task and whenever the user references
+the past**, then use `witself.memory.recall` to reach anything not in the digest.
+
+Input:
+
+```json
+{
+  "include_facts": true,
+  "include_salient": true,
+  "salient_limit": 10,
+  "max_bytes": null
+}
+```
+
+Output data:
+
+```json
+{
+  "identity": {},
+  "primary_facts": [],
+  "salient_memories": [
+    { "id": "mem_120", "snippet": "", "kind": "profile", "salience": 0.6 }
+  ],
+  "index": { "kinds": [], "tags": [], "counts": {} },
+  "elided": false
+}
+```
+
+The digest has a hard cap (default ~8 KiB / ~200 lines, configurable). When the
+cap is hit the result sets `elided` to `true` and points the caller to
+`witself.memory.recall`; it never silently truncates. Salient-memory selection
+is defined in [memory-model.md](memory-model.md); the digest shape and cap are
+pinned in [context-hydration.md](context-hydration.md).
+
+### `witself.remember`
+
+Quick-add capture path. `remember` **auto-routes**: a clear name→value assertion
+(for example `"package manager is pnpm"`, `"display name is Atlas"`) upserts a
+fact (idempotent by name); anything else adds a memory (stored verbatim, with
+dedup/supersede). It never bypasses validation or limits. This is the tested
+primary capture path, not a thin alias — `witself.fact.set` and
+`witself.memory.add` remain for explicit control.
+
+**Call this when you** 1) learn a durable fact about yourself or the user,
+2) are asked to remember something, 3) discover reusable context, or 4) need to
+flush state before a long operation. If something you previously stored is wrong,
+prefer `witself.memory.adjust`/`witself.memory.forget` over remembering a
+contradicting record.
+
+Input:
+
+```json
+{
+  "text": "Prefers terse status updates over long reports.",
+  "scope": "self",
+  "sensitive": false,
+  "reason": null
+}
+```
+
+Output data:
+
+```json
+{
+  "kind": "memory",
+  "id": "mem_123",
+  "echo": "Added mem_123 (kind=profile, salience=0.6)",
+  "duplicate_of": null
+}
+```
+
+`kind` reports whether the write routed to a `fact` or a `memory`. When a memory
+write hits a near-duplicate, `duplicate_of` names the existing `mem_` id and the
+envelope carries a `memory_duplicate`/`memory_merged` warning. `remember` emits
+no audit event of its own; it routes to the existing `memory.added` /
+`fact.created` / `fact.updated` events.
+
+### `witself.session.start`
+
+Hydrate identity, open goals, and last progress in one round-trip so resuming a
+multi-session task is a single call rather than a list-plus-recall crawl. Read
+only; available in read-only mode.
+
+**Call this at the start of a session** that continues prior work.
+
+Input:
+
+```json
+{}
+```
+
+Output data:
+
+```json
+{
+  "identity": {},
+  "open_goals": [],
+  "last_progress": null
+}
+```
+
+Audited as `session.started`. See [context-hydration.md](context-hydration.md).
+
+### `witself.session.end`
+
+Persist a progress memory (kind `session`) and update the open-goal list so the
+next session can resume cleanly. Pairs with the assume-interruption /
+flush-before-long-operations habit. Requires `memory:create`; unavailable in
+read-only mode.
+
+**Call this before a long operation or when wrapping up**, so context survives a
+clear.
+
+Input:
+
+```json
+{
+  "summary": "Wired the digest cap; recall fallback still open.",
+  "open_goals": ["finish recall fallback", "document echo contract"]
+}
+```
+
+Output data:
+
+```json
+{
+  "saved": true,
+  "progress_memory_id": "mem_140",
+  "echo": "Saved session progress mem_140 (2 open goals)"
+}
+```
+
+Audited as `session.ended`.
+
 ### `witself.memory.add`
 
 Create a memory owned by the current agent, by a specified agent, or by a
 security group when policy or operator/admin permission allows. Cross-agent and
 group adds are `contribute` actions and record the contributing agent in
 `source`.
+
+**Call this when you** 1) learn a durable fact about yourself or the user,
+2) are asked to remember something, 3) discover reusable context worth keeping,
+or 4) find an existing memory wrong or outdated (prefer `adjust`/`forget` over
+adding a contradicting record). Prefer `witself.remember` for quick capture;
+reach for `add` when you need explicit control over `kind`, `tags`, or
+`salience`. Writes are deduplicated: a near-duplicate returns the existing
+`mem_` id with a `memory_duplicate`/`memory_merged` warning rather than a new
+record.
 
 Input:
 
@@ -292,6 +496,9 @@ Edit a memory's content, kind, tags, source, salience, links, or `sensitive`
 marker. Adjust appends a new version to edit history; prior versions are
 retained. Cross-agent or group adjust is a `curate` action and requires a
 `reason`.
+
+**Call this when** a memory is wrong or outdated: update it in place rather than
+adding a contradicting record.
 
 Input:
 
@@ -348,6 +555,11 @@ Semantic-by-default recall over the caller's accessible memories. Performs vecto
 similarity search blended with keyword, tag, kind, and time filters and hybrid
 ranking (similarity, lexical match, tag/kind match, recency, salience). Cross-
 agent or group recall requires a `read` policy.
+
+**Call this at the start of a non-trivial task and whenever the user references
+the past** — before acting on anything you may have learned before. Pair it with
+`witself.self.show`, which loads primary facts and the salient set cheaply;
+`recall` is how you reach the rest.
 
 Input:
 
@@ -409,11 +621,48 @@ Output data:
 Each item uses the memory summary shape from
 [json-contracts.md](json-contracts.md).
 
+### `witself.memory.consolidate`
+
+The garbage-collection verb. Merges near-duplicate memories, supersedes stale
+ones, **surfaces** (does not auto-pick) conflicting facts, and trims the
+digest/index. It respects provenance — it never silently overwrites human-,
+operator-, or import-authored records, surfacing such conflicts instead. Guarded
+and audited (`memory.consolidated`); requires `memory:update` (plus
+`memory:forget` for supersede); unavailable in read-only mode.
+
+**Call this when memory feels noisy or after a large session.** `dry_run`
+defaults to `true`, so the first call previews the plan without mutating.
+
+Input:
+
+```json
+{
+  "dry_run": true,
+  "scope": null,
+  "reason": null
+}
+```
+
+Output data:
+
+```json
+{
+  "merged": [],
+  "superseded": [],
+  "conflicts": [],
+  "trimmed_index": {},
+  "echo": "Consolidation preview: 3 merge, 1 supersede, 2 conflicts surfaced"
+}
+```
+
 ### `witself.memory.forget`
 
 Soft-delete (tombstone) a memory. Reversible within the retention window. This is
 the default destructive path; hard delete and restore are CLI-first in v0.
 Cross-agent or group forget requires a `forget` policy and a `reason`.
+
+**Call this when** a memory is no longer true or relevant: forget it rather than
+leaving a contradicting record in place.
 
 Input:
 
@@ -432,11 +681,52 @@ Output data uses the mutation result shape from
 [json-contracts.md](json-contracts.md), including the tombstone state and the
 restore window.
 
+### `witself.digest.emit`
+
+Render the self-digest as a `CLAUDE.md`/`AGENTS.md`/`markdown` fragment carrying
+provenance HTML comments (witself-generated plus timestamp), so file-load
+harnesses get Witself-backed identity for free. Read only (it renders from the
+same source as `witself.self.show`); available in read-only mode. Requires
+`memory:read`/`fact:read`. The companion `ingest` direction is CLI-first in v0;
+this MCP tool covers the outbound (emit) direction only.
+
+**Call this when** you need to seed or refresh a project's `CLAUDE.md`/`AGENTS.md`
+from Witself identity.
+
+Input:
+
+```json
+{
+  "format": "claude-md",
+  "max_bytes": null
+}
+```
+
+Output data:
+
+```json
+{
+  "content": ""
+}
+```
+
+`format` is one of `claude-md|agents-md|markdown`. Emit format, provenance
+comments, and the ingest parser rules are pinned in
+[context-hydration.md](context-hydration.md). Optionally audited as
+`self.digest.emitted`.
+
 ### `witself.fact.set`
 
 Create or update a fact by name (upsert within the owner). Setting `primary`
 atomically demotes any prior primary of the same logical kind. Cross-agent or
 group set is a `contribute`/`curate` action and requires a `reason`.
+
+**Call this when you** learn or are asked to record a stable name→value
+assertion about yourself or the user (a preference, identifier, or configuration
+like `package-manager=pnpm`). Because it is upsert by name, setting a fact that
+already exists updates it in place — no contradicting duplicate. Prefer
+`witself.remember` for quick capture; it auto-routes a clear name→value
+assertion to `fact.set`.
 
 Input:
 

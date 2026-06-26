@@ -49,8 +49,11 @@ A fact has:
 - `format`: an optional type hint such as `string`, `email`, `url`, `date`, or
   `number`, used for validation and display. `format` is advisory; unknown
   formats are allowed and treated as `string`.
-- `source`: provenance for the fact, such as `self`, an agent name (for a
-  cross-agent contribution), a `msg_…` id, or an import batch id.
+- `source`: provenance for the fact, one of `self` (the owning agent authored
+  it), `agent:<name>` (a cross-agent contribution), `operator`, or
+  `import:<file>` (ingested from a file). Lets the digest and
+  [consolidate](memory-model.md) distinguish human-, agent-, and import-authored
+  records and never silently overwrite them.
 - `created_at`, `updated_at`: timestamps.
 - Versioned edit history (see [Edit History](#edit-history)).
 
@@ -110,6 +113,12 @@ fuzzy-matching step.
   owner). Optional flags set `--primary`, `--sensitive`, `--format`, and
   `--source`. Setting `NAME` when it already exists updates `value` and the
   named fields and appends to edit history; it never creates a duplicate.
+- `remember` auto-routes to `fact set`: a clear `name`→`value` assertion (for
+  example "package manager is pnpm" or "email = a@b.example") upserts a fact
+  idempotently by `name`, while free-form text adds a
+  [memory](memory-model.md) instead. `remember` is convenience capture over the
+  same upsert path; `fact set` remains the explicit-control verb. See
+  [context-hydration.md](context-hydration.md).
 - `fact list` enumerates the caller's facts with metadata and filters (by
   `name` prefix/namespace, `primary`, `sensitive`, `format`, `source`), with
   cursor pagination. `sensitive` values are redacted in list output by default.
@@ -117,6 +126,14 @@ fuzzy-matching step.
   unless `--yes`, supports `--dry-run`, and is audited (`fact.deleted`). Deleting
   a `primary` fact does not auto-promote another fact; promotion is always
   explicit.
+- `ingest` upserts `name`→`value` lines parsed from CLAUDE.md/AGENTS.md-style
+  files as facts, tagging each with `source=import:<file>`. Upsert by `name`
+  prevents re-import from creating duplicates. See
+  [context-hydration.md](context-hydration.md).
+- `memory consolidate` SURFACES conflicting facts (for example two imports that
+  disagree on the same `name`); it never auto-picks a winner and never silently
+  overwrites a `self`-, `operator`-, or `import`-authored value. Conflicts are
+  reported for explicit resolution. See [memory-model.md](memory-model.md).
 
 Cross-agent and group-owned facts follow the same surface with an explicit
 owner. Reading another owner's fact requires a `read` policy; contributing,

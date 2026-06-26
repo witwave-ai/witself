@@ -83,6 +83,9 @@ GET  /v1/version
 GET  /v1/whoami
 GET  /v1/capabilities
 
+GET  /v1/self                # the always-loaded self-digest; ?format= renders an emit fragment
+POST /v1/remember            # convenience capture; core routes to a fact or a memory
+
 POST /v1/auth/sessions
 GET  /v1/auth/sessions/{session_id}
 POST /v1/auth/sessions/{session_id}:complete
@@ -119,6 +122,7 @@ POST /v1/memories
 GET  /v1/memories/{memory_id}
 PATCH /v1/memories/{memory_id}
 POST /v1/memories:recall
+POST /v1/memories:consolidate
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
 DELETE /v1/memories/{memory_id}
@@ -139,6 +143,9 @@ GET  /v1/agents/{agent_id}/facts
 POST /v1/agents/{agent_id}/facts
 GET  /v1/groups/{group_id}/facts
 POST /v1/groups/{group_id}/facts
+
+POST /v1/sessions:start
+POST /v1/sessions:end
 
 GET  /v1/policies
 POST /v1/policies
@@ -224,6 +231,13 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   metered as a cross-agent access. When the embedding provider is unavailable,
   recall degrades to keyword/tag/kind/time ranking and the response surfaces the
   degraded state through `warnings`.
+- `POST /v1/memories:consolidate` is the guarded garbage-collection verb
+  (`witself memory consolidate`). It merges near-duplicate memories, supersedes
+  stale ones, surfaces (never auto-resolves) conflicting facts, and trims the
+  digest index. It defaults to `dry_run=true`, is audited as
+  `memory.consolidated`, respects `source` provenance so human-/import-authored
+  records are never silently overwritten, and is excluded in `--read-only` MCP
+  mode.
 - `POST /v1/memories/{memory_id}:forget` is the soft-delete (tombstone) path. It
   is reversible within the retention window. `DELETE /v1/memories/{memory_id}`
   is the guarded hard delete.
@@ -256,6 +270,50 @@ Some CLI commands map onto these routes without a dedicated path:
   `GET /v1/whoami`, but `witself auth status` and `witself auth logout` are
   local-only client operations over cached credentials and have no server
   route.
+
+## Self-Management And Hydration Routes
+
+These routes back the agent self-managed memory and hydration surface; see
+[context-hydration.md](context-hydration.md). Every mutating route returns the
+deterministic `echo` string and any `warnings[]` (e.g. `memory_duplicate`)
+described in [api-contract.md](api-contract.md).
+
+```text
+GET  /v1/self                # ?format=claude-md|agents-md|markdown for digest emit
+POST /v1/remember
+POST /v1/sessions:start
+POST /v1/sessions:end
+POST /v1/memories:consolidate
+```
+
+- `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
+  facts first, then top-N salient memories, then a one-line index of
+  kinds/tags/counts. It is cheap, never requires the embedding provider, and is
+  hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
+  `:recall` rather than silently truncating. Query parameters select what to
+  include (facts, salient memories, salient limit, byte cap). Passing `?format=`
+  renders the digest as a CLAUDE.md/AGENTS.md/Markdown fragment with witself
+  provenance comments — this is the HTTP surface for `witself digest emit`; no
+  separate emit resource exists.
+- `POST /v1/remember` is the convenience capture path (`witself remember`). It
+  auto-routes: a clear name→value assertion upserts a fact, anything else adds a
+  verbatim memory with dedup/supersede. It never bypasses validation or limits,
+  composes the same create paths as `POST /v1/facts` and `POST /v1/memories`, and
+  returns the created/updated resource plus a `kind` discriminator (and
+  `duplicate_of` when merged). It emits no event of its own; it routes to the
+  existing `fact.created`/`fact.updated`/`memory.added` events.
+- `POST /v1/sessions:start` hydrates identity, open goals, and last progress in
+  one round-trip (`witself session start`), audited as `session.started`.
+- `POST /v1/sessions:end` persists a progress memory (kind `session`) and updates
+  open goals (`witself session end`); the summary and open goals travel in the
+  request body, audited as `session.ended`.
+
+`witself ingest` has no dedicated route: it composes the existing
+`POST /v1/facts` (kv-shaped lines → upserted facts) and `POST /v1/memories`
+(prose → memories) create paths, tagging records `source=import:<file>` with
+dedup/upsert, and is audited as `fact.imported` / `memory.imported`.
+`witself bootstrap-instructions` is a local client operation that prints the
+paste-able teaching stanza and has no server route.
 
 ## Account Routes
 
@@ -360,6 +418,7 @@ contrast to Witpass, which forbids plaintext export. The routes back
 
 - [api-contract.md](api-contract.md)
 - [requirements.md](requirements.md)
+- [context-hydration.md](context-hydration.md)
 - [v0-scope.md](v0-scope.md)
 - [json-contracts.md](json-contracts.md)
 - [cli-command-surface.md](cli-command-surface.md)

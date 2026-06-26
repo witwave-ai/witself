@@ -91,7 +91,10 @@ not the production model.
 Decision: v0 should be a usable cloud-shaped slice. It should prove the CLI, MCP
 stdio, the backend API boundary, a local development adapter, the agent token
 lifecycle, the memory model with semantic recall, the facts model with primary
-promotion, the cross-agent access policy engine, security groups, full
+promotion, agent self-managed memory and context hydration (the always-loaded
+self-digest, quick-add capture, session bootstrap, memory consolidation, the
+two-way CLAUDE.md/AGENTS.md file bridge, and the teaching layer that gets agents
+to call Witself), the cross-agent access policy engine, security groups, full
 inter-agent messaging, identity export/import, audit events, Prometheus metrics,
 Kubernetes health probes, the Postgres storage path with pgvector, public images,
 a Helm chart skeleton, a Terraform AWS skeleton, CI, linting, and release
@@ -300,8 +303,12 @@ A memory has:
   `note`. Kind is a label used for filtering and ranking, not a fixed storage
   column with a closed enum. Unknown kinds are allowed.
 - `tags[]`: an array of short string tags for filtering.
-- `source`: provenance for the memory, such as `self`, an agent name, a message
-  id, or an import batch id.
+- `source`: first-class provenance/authorship for the memory. Canonical values are
+  `self` (the owning agent authored it), `agent:<name>` (a cross-agent
+  contribution), `operator`, and `import:<file>` (ingested from a file). Makes
+  human-, agent-, and import-authored records distinguishable so the self-digest
+  and `memory consolidate` can prioritize and never silently overwrite human or
+  imported intent.
 - `salience`: an importance/weight hint (numeric) used in recall ranking.
 - `links[]`: references to other memories or facts, expressed as `witself://`
   references (see [Identity References](#identity-references)).
@@ -391,6 +398,99 @@ Storage and degradation:
 - Re-embedding on provider/model change is an explicit, audited maintenance
   operation, not an automatic side effect.
 
+### Memory Self-Management and Hydration
+
+Decision: agent self-managed memory and context hydration are **in v0**. Witself is
+a *service* the agent must be taught to call, unlike `CLAUDE.md`/`AGENTS.md`, which
+a harness auto-loads. Without an always-loaded self-digest, a teaching layer, a
+file bridge, and a few convergent capture/maintenance primitives, the core product
+is unreliable for the agents it exists to serve. The canonical bridge and teaching
+doc is [context-hydration.md](context-hydration.md).
+
+Hydration and self-management verbs (each a thin, tested path over the existing
+memory/fact core — never a bypass of validation, limits, scopes, or audit):
+
+- `remember` — the dead-simple quick-add. It **auto-routes**: a clear name→value
+  assertion upserts a fact (idempotent by name); anything else adds a verbatim
+  memory with dedup/supersede. It is the tested primary capture path, not a thin
+  alias to be left to rot; `fact set` and `memory add` remain for explicit control.
+- `self show` — the always-loaded self-digest: primary facts first, then top-N
+  salient memories, then a one-line index of kinds/tags/counts. It is the MCP
+  analogue of an auto-loaded `CLAUDE.md` head: cheap, never requiring the embedding
+  provider, and hard-capped (default ~8 KiB / ~200 lines, configurable). When
+  capped it sets `elided=true` and points to `memory recall` rather than silently
+  truncating.
+- `session start` / `session end` — multi-session bootstrap. `start` hydrates
+  identity, open goals, and last progress in one round-trip; `end` persists a
+  progress memory (kind `session`) and updates open goals. Resuming is one call,
+  not a list-then-recall crawl.
+- `memory consolidate` — the garbage-collection verb. It merges near-duplicate
+  memories, supersedes stale ones, **surfaces** (does not auto-pick) conflicting
+  facts, and trims the digest/index. It is guarded (`--dry-run` defaults true),
+  audited, excluded in `--read-only` MCP mode, and respects provenance — it never
+  silently overwrites human- or import-authored records.
+- `digest emit` / `ingest` — the two-way file bridge. `emit` renders the
+  self-digest as a `CLAUDE.md`/`AGENTS.md` fragment with provenance comments so
+  file-load harnesses get Witself-backed identity for free. `ingest` parses
+  `CLAUDE.md`/`AGENTS.md`/`GEMINI.md`: name→value lines become facts (upsert),
+  prose paragraphs become memories, everything tagged `source=import:<file>`, with
+  dedup/upsert preventing re-import duplication. This makes Witself a good citizen
+  of the `AGENTS.md` ecosystem, not a competitor to it.
+- `bootstrap-instructions` — prints the paste-able teaching stanza; `witself setup
+  --write-agents-md` installs it into the project `AGENTS.md`.
+
+Teaching layer (three reinforcing surfaces that all say the same thing, because a
+service the agent forgets to call is worthless):
+
+1. **MCP server `instructions` field** — returned on connect by `witself mcp
+   serve`. This is the canonical standing protocol (pinned verbatim in
+   [mcp-tools.md](mcp-tools.md) and [context-hydration.md](context-hydration.md)):
+   call `self show` and `memory recall` before acting; `remember` after learning a
+   durable fact, preference, decision, or reusable context; `adjust`/`forget`
+   rather than adding a contradicting memory; and flush state with `session end` /
+   `remember` before long operations, assuming context may be cleared at any moment.
+2. **Tool descriptions as instruction** — every memory/fact/self tool's prose
+   embeds an explicit when-to-call trigger list (recall/`self show` at task start
+   and whenever the past is referenced; `remember` on learning/being asked/finding
+   reusable context/finding a record wrong; `adjust`/`forget` instead of
+   contradicting; `consolidate` when memory feels noisy). Signatures stay tiny so
+   the trigger text dominates.
+3. **Bootstrap stanza** — a paste-able `AGENTS.md`/`CLAUDE.md` block (emitted by
+   `bootstrap-instructions`) carrying the same recall-before-act,
+   write-after-learn, consolidate-when-noisy heuristics, so the habit installs
+   whether the agent is taught via MCP or via the file ecosystem.
+
+Cross-cutting contract changes that make these verbs self-verifiable and safe:
+
+- **Echo on every mutation.** The mutation result gains a deterministic,
+  human-readable `echo` string (for example, `Remembered fact display-name=Atlas`
+  or `Added mem_123 (kind=profile, salience=0.6)`) so the model can self-verify and
+  chain operations.
+- **Dedup/supersede on write.** `memory add` (and `remember` when it routes to a
+  memory) checks for near-duplicates; on a hit it returns the existing `mem_` id
+  plus a `memory_duplicate`/`memory_merged` warning in `warnings[]` and a
+  `duplicate_of` reference instead of silently creating a near-duplicate. `fact set`
+  is already upsert.
+- **Provenance/authorship as first-class.** The memory and fact `source` field (see
+  [Memory Model](#memory-model) and [Facts Model](#facts-model)) carries
+  `self`/`agent:<name>`/`operator`/`import:<file>` so the digest and consolidate can
+  prioritize and never silently overwrite human intent. This is the lightweight v0
+  seed of the post-v0 provenance-and-lineage feature.
+
+Salient-digest selection: the salient set for `self show` is the top-N memories by
+a blended score of salience and recency (favoring pinned kinds such as `profile`
+and `session`), excluding archived/forgotten records. It is deterministic and never
+calls the embedding provider, so the digest works even when embeddings are degraded.
+The selection rule is defined once in [memory-model.md](memory-model.md).
+
+Scopes and read-only: these verbs reuse the existing scopes (no new scope). `self
+show`/`session start`/`digest emit` need `memory:read` + `fact:read`;
+`remember`/`session end`/`ingest` need `memory:create`/`fact:create`;
+`consolidate` needs `memory:update` (plus `memory:forget` for supersede).
+`--read-only` MCP mode excludes the mutating verbs (`remember`, `session end`,
+`consolidate`, `ingest`) while keeping `self show`, `session start`, `recall`, and
+`digest emit`.
+
 ### Facts Model
 
 A fact is a name→value pair: the canonical, queryable identity card for an agent.
@@ -413,7 +513,10 @@ A fact has:
   list/scan/show output.
 - `format`: an optional type hint such as `string`, `email`, `url`, `date`, or
   `number`, used for validation and display.
-- `source`: provenance.
+- `source`: first-class provenance/authorship, sharing the memory `source`
+  vocabulary: `self`, `agent:<name>`, `operator`, and `import:<file>`. Lets the
+  digest and `memory consolidate` prioritize and avoid overwriting human- or
+  import-authored facts.
 - Timestamps: `created_at`, `updated_at`.
 - Versioned edit history (same shape as memory edit history).
 
@@ -1080,8 +1183,15 @@ Requirements:
 The CLI noun surface (replacing the Witpass `secret`/`totp`/`password`/`run`
 nouns):
 
-- `memory` (`add`/`adjust`/`read`/`recall`/`list`/`forget`/`restore`/`delete`).
+- `memory` (`add`/`adjust`/`read`/`recall`/`list`/`forget`/`restore`/`delete`/
+  `consolidate`).
 - `fact` (`set`/`get`/`list`/`delete`, with `--primary`).
+- `remember` (the auto-routing quick-add over `fact set`/`memory add`).
+- `self` (`show`, the always-loaded self-digest).
+- `session` (`start`/`end`, multi-session bootstrap).
+- `digest` (`emit`, the self-digest rendered as a `CLAUDE.md`/`AGENTS.md` fragment).
+- `ingest` (parse `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` into facts and memories).
+- `bootstrap-instructions` (print the paste-able teaching stanza).
 - `policy` (`create`/`list`/`show`/`delete`/`test`).
 - `group` (`create`/`list`/`show`/`add-member`/`remove-member`/`delete`).
 - `message` (`send`/`list`/`read`/`ack`).
@@ -1093,8 +1203,12 @@ nouns):
 The MCP tool catalog (replacing `witpass.secret.*`/`witpass.totp.*`):
 
 - `witself.version`, `witself.whoami`, `witself.capabilities`.
-- `witself.memory.add/adjust/read/recall/list/forget`.
+- `witself.memory.add/adjust/read/recall/list/forget/consolidate`.
 - `witself.fact.set/get/list/delete`.
+- `witself.remember` (auto-routing quick-add).
+- `witself.self.show` (the always-loaded self-digest).
+- `witself.session.start/end` (multi-session bootstrap).
+- `witself.digest.emit` (ingest is CLI-first; an MCP `ingest` tool is optional).
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
 - `witself.group.list/show`.
 - `witself.message.send/list/read`.
@@ -1165,6 +1279,9 @@ including:
 
 - Authentication success and failure.
 - Memory add, adjust, read, recall, forget, restore, and delete.
+- Memory consolidation, session start/end, and file ingest of memories and facts.
+  (`remember` needs no event of its own; it routes to `memory.added` /
+  `fact.created` / `fact.updated`.)
 - Fact set, get (of `sensitive` facts), delete, and primary promotion.
 - Cross-agent read, contribute, curate, and forget actions, attributed to the
   acting agent and the deciding policy.
@@ -1204,7 +1321,13 @@ reconciliation, and customer exports. Initial event names include:
 - `memory.forgotten`
 - `memory.restored`
 - `memory.deleted`
+- `memory.consolidated`
+- `memory.imported`
+- `session.started`
+- `session.ended`
 - `fact.set`
+- `fact.imported`
+- `self.digest.emitted` (optional)
 - `fact.primary_changed`
 - `fact.deleted`
 - `policy.created`
@@ -1365,8 +1488,14 @@ API contract requirements:
 - Use colon action subroutes for sensitive or workflow operations, such as
   `/v1/memories:recall` (a query over the collection),
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
-  `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
+  `/v1/memories:consolidate`, `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
   `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
+- Expose the self-management and hydration routes: `POST /v1/remember` (the
+  convenience action that the core routes to a fact or memory), `GET /v1/self` (the
+  self-digest; `?format=` renders the `digest emit` fragment), and
+  `POST /v1/sessions:start` / `POST /v1/sessions:end`. `ingest` composes the
+  existing `POST /v1/facts` and `POST /v1/memories` create paths (with dedup) rather
+  than introducing a new resource.
 - Use `POST`, never `GET`, for sensitive/action routes.
 - Support idempotency keys for retryable mutating operations.
 - Support `dry_run` on mutating operations where practical.

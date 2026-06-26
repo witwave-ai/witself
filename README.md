@@ -32,6 +32,9 @@ The product goal is a CLI-first self/identity service for agents:
 - First-class structured/plaintext identity export and round-trippable import.
 - Identity references such as `witself://fact/email` and
   `witself://agent/archivist/memory/mem_...`.
+- Agent self-managed memory and hydration: an always-loaded self-digest, recall
+  before acting, and a `remember` quick-add — plus being a good CLAUDE.md/AGENTS.md
+  citizen via two-way `digest emit` / `ingest`.
 - MCP compatibility for agent runtimes.
 - Managed Witself Cloud by default.
 - Public backend code and first-class self-hosting for operators who want to run
@@ -50,6 +53,7 @@ contracts are clear.
 ## Docs
 
 - [Requirements](docs/requirements.md)
+- [Context Hydration](docs/context-hydration.md)
 - [V0 Scope](docs/v0-scope.md)
 - [Memory Model](docs/memory-model.md)
 - [Facts Model](docs/facts-model.md)

@@ -50,10 +50,15 @@ truth.
   not a fixed column with a closed enum. Unknown kinds are accepted. Default
   `note`.
 - `tags[]`: short string tags for filtering and ranking.
-- `source`: provenance. Examples: `self`, an agent name (for a cross-agent
-  `contribute`), a message id (`msg_…`) for message-driven writes, or an import
-  batch id. Cross-agent and message-driven writes always record their true
-  origin here; see [access-policy.md](access-policy.md) and
+- `source`: provenance / authorship, first-class. Canonical values: `self` (the
+  owning agent authored it), `agent:<name>` (a cross-agent `contribute`),
+  `operator` (a human operator), and `import:<file>` (ingested from a
+  CLAUDE.md/AGENTS.md/GEMINI.md file). A message id (`msg_…`) may also appear for
+  message-driven writes. Cross-agent, operator, and import writes always record
+  their true origin here, so the digest and [Consolidation](#consolidation) can
+  prioritize human-/agent-/import-authored records and never silently overwrite
+  them; see [Provenance and Authorship](#provenance-and-authorship),
+  [access-policy.md](access-policy.md) and
   [inter-agent-messaging.md](inter-agent-messaging.md).
 - `salience`: a numeric importance/weight hint used in recall ranking. Range
   `0.0`–`1.0`, default `0.5`. Higher is more important.
@@ -110,6 +115,18 @@ MCP equivalents in [mcp-tools.md](mcp-tools.md).
   embedding, and recall over it degrades until it is embedded.
 - Validates size limits (see [Size Limits](#size-limits)) and `links[]`
   references before persisting.
+- Checks for near-duplicates before persisting. On a hit, `add` does **not**
+  silently create a near-duplicate: it returns the existing `mem_` id and a
+  `memory_duplicate` (or `memory_merged`) entry in `warnings[]` so the caller can
+  reuse or `adjust` the existing record. Larger-scale duplicate collapse and
+  supersede is the job of [Consolidation](#consolidation); `fact set` is already
+  upsert and never near-dups (see [facts-model.md](facts-model.md)).
+- The convenience `remember` verb auto-routes to `add` for anything that is not a
+  clear name→value assertion (those upsert a fact instead). A routed `remember`
+  takes this same `add` path — same validation, limits, dedup/supersede, and
+  `memory.added` audit; it is not a silent bypass. See
+  [context-hydration.md](context-hydration.md) and
+  [cli-command-surface.md](cli-command-surface.md).
 - Audited as `memory.added`.
 
 ### adjust
@@ -251,6 +268,77 @@ WITSELF_EMBEDDINGS_MODEL=voyage-3         # provider-specific model id
   audit, or included in export. See
   [observability-and-operations.md](observability-and-operations.md).
 
+## Self Digest / Hydration
+
+The self digest is the bounded, always-loadable view of an agent's identity used
+at session start. The full digest shape, byte cap, emit format, and teaching
+protocol are canonical in [context-hydration.md](context-hydration.md); this
+section pins the one piece that belongs to the memory model — how the **salient
+memory set** is selected.
+
+### Salient Memory Selection
+
+The salient set surfaced in the digest is the top-N memories by a **blended score
+of salience and recency**, with pinned kinds (such as `profile` and `session`)
+boosted, and `forgotten`/`deleted` records excluded.
+
+- **Deterministic.** Selection uses stored `salience`, `created_at`/
+  `last_accessed_at`, and `kind` only. It **never calls the embedding provider**,
+  so the digest works unchanged when semantic recall is degraded (see
+  [Storage and Degradation](#storage-and-degradation)). This is the same
+  recency/salience input recall uses, minus the similarity signal.
+- **Bounded.** `N` is the `salient_limit` (default `10`) and the digest enforces a
+  hard byte cap on top of it. When either bound trims the set, the digest sets an
+  explicit `elided` flag and points the caller at `memory recall` — it is never a
+  silent truncation. Byte cap and elision semantics live in
+  [context-hydration.md](context-hydration.md).
+- **Provenance-aware.** Source (`self`/`agent:<name>`/`operator`/`import:<file>`)
+  is carried through so the digest can prioritize human-/agent-authored content;
+  see [Provenance and Authorship](#provenance-and-authorship).
+
+## Consolidation
+
+Consolidation is the memory garbage-collection pass — the fix for the append-only
+store's #1 failure mode (unbounded near-duplicate drift). It is the `memory
+consolidate` verb; CLI/MCP/API surfaces are pinned in
+[cli-command-surface.md](cli-command-surface.md) and
+[mcp-tools.md](mcp-tools.md).
+
+- **What it does.** Over the caller's accessible memories (optionally scoped),
+  consolidation: **merges** near-duplicate memories, **supersedes** stale ones
+  (via the existing `forget`/`adjust` lifecycle, never a side-channel), and
+  **surfaces** conflicting facts rather than auto-picking a winner. It also trims
+  the digest/index. Merge and supersede flow through the standard lifecycle so
+  edit history and reversibility are preserved.
+- **Provenance-respecting.** Consolidation never silently overwrites human- or
+  import-authored records (`source` = `operator` / `import:<file>` / `agent:<name>`);
+  such conflicts are surfaced for a human/agent decision, not resolved
+  automatically. See [Provenance and Authorship](#provenance-and-authorship).
+- **Guarded.** `--dry-run` defaults to true, the destructive run requires the
+  same `--reason`/confirmation guards as other mutating memory verbs, and the
+  result reports `merged[]`, `superseded[]`, `conflicts[]`, and the trimmed index.
+- **Read-only exclusion.** Consolidation is mutating and is **excluded in
+  `--read-only` MCP mode** (alongside the other write verbs); `self show`,
+  `session start`, `recall`, and `digest emit` remain available.
+- **Audited** as `memory.consolidated`; see
+  [audit-retention.md](audit-retention.md).
+
+## Provenance and Authorship
+
+The `source` field (see [Memory Shape](#memory-shape)) makes authorship
+first-class so that human-, agent-, and import-authored records are
+distinguishable from the owning agent's own writes.
+
+- Canonical values: `self` (the owning agent), `agent:<name>` (a cross-agent
+  `contribute`), `operator` (a human operator), and `import:<file>` (ingested
+  from a CLAUDE.md/AGENTS.md/GEMINI.md file).
+- The digest's [Salient Memory Selection](#salient-memory-selection) and
+  [Consolidation](#consolidation) read `source` to prioritize authored content
+  and to refuse silent overwrites of human/agent/import intent.
+- This is the lightweight v0 seed of the post-v0 provenance and lineage identity
+  feature. Facts carry the same `source` field; see
+  [facts-model.md](facts-model.md).
+
 ## References
 
 Memories participate in the `witself://` reference scheme so `links[]`, scripts,
@@ -301,7 +389,8 @@ V0 defaults (refined before implementation):
   cross-agent accesses. See [billing-and-limits.md](billing-and-limits.md).
 - Audit event names for memories: `memory.added`, `memory.adjusted`,
   `memory.recalled`, `memory.forgotten`, `memory.restored`, `memory.deleted`,
-  plus `crossagent.read` / `crossagent.contributed` / `crossagent.curated` /
+  `memory.consolidated` (see [Consolidation](#consolidation)), plus
+  `crossagent.read` / `crossagent.contributed` / `crossagent.curated` /
   `crossagent.forgotten` for cross-agent actions. Audit content rules and
   retention are in [audit-retention.md](audit-retention.md).
 - Audit and logs record ids, owner, kind, tags, source, decision outcome, and
@@ -310,6 +399,7 @@ V0 defaults (refined before implementation):
 ## Related Docs
 
 - [requirements.md](requirements.md)
+- [context-hydration.md](context-hydration.md)
 - [facts-model.md](facts-model.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)

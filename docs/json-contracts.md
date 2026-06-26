@@ -68,7 +68,9 @@ Rules:
 - Failed responses use `error`.
 - `warnings` is optional, but should be an array when present. Recall responses
   use `warnings` to surface degraded semantic recall (see
-  [Recall Result](#recall-result)).
+  [Recall Result](#recall-result)). Write paths use `warnings` to surface
+  dedup/supersede outcomes with the `memory_duplicate` and `memory_merged` codes
+  (see [Mutation Result](#mutation-result) and [Remember Result](#remember-result)).
 - `retryable` indicates whether retrying the identical request may later
   succeed. Transient codes (`backend_unavailable`, `rate_limited`) are
   `retryable: true`; hard conditions (`limit_exceeded`, `access_denied`,
@@ -439,6 +441,11 @@ Rules:
   tombstoned) and is restorable within the retention window.
 - `kind` is a convention-driven label (for example `episodic`, `semantic`,
   `profile`, `note`); unknown kinds are allowed.
+- `source` records authorship/provenance. Values are `self` (the owning agent
+  authored it), `agent:<name>` (a cross-agent contribution), `operator`, and
+  `import:<file>` (ingested from a CLAUDE.md/AGENTS.md/GEMINI.md file). The
+  self-digest and `memory consolidate` use `source` to prioritize and to avoid
+  silently overwriting human- or import-authored records.
 
 The memory model and lifecycle are tracked in
 [memory-model.md](memory-model.md).
@@ -579,6 +586,221 @@ Rules:
   `read` on the target and is metered as a cross-agent access (see
   [Policy](#policy)).
 
+## Remember Result
+
+Used by `remember` and `/v1/remember`. `remember` auto-routes a quick capture to
+either a fact upsert (a clear name→value assertion) or a verbatim memory add, and
+returns which one happened. See [context-hydration.md](context-hydration.md).
+
+```json
+{
+  "kind": "fact",
+  "id": "fact_123",
+  "echo": "Remembered fact display-name=Atlas",
+  "duplicate_of": null
+}
+```
+
+When the capture routes to a memory that matched a near-duplicate:
+
+```json
+{
+  "kind": "memory",
+  "id": "mem_120",
+  "echo": "Merged into mem_120 (duplicate)",
+  "duplicate_of": "mem_120"
+}
+```
+
+Rules:
+
+- `kind` is `fact` (the text was a name→value assertion, upserted idempotently by
+  name) or `memory` (anything else, added verbatim with dedup/supersede).
+- `id` is the created or updated resource. `remember` never bypasses validation,
+  limits, or the `source` provenance contract; agent-authored captures are
+  `source: "self"`.
+- On a dedup hit, `duplicate_of` is the surviving `mem_` id and the envelope
+  carries a `memory_duplicate`/`memory_merged` warning, mirroring the
+  [Mutation Result](#mutation-result) write contract. When no duplicate was
+  found, `duplicate_of` is `null`.
+- `remember` does not emit its own audit event; it routes to the existing
+  `memory.added`, `fact.created`, or `fact.updated` events.
+
+## Self Digest
+
+Used by `self show` and `GET /v1/self`. The bounded, always-loadable
+session-start digest: primary facts first, then top-N salient memories, then a
+one-line index. It is cheap and never requires the embedding provider. The
+digest shape, hard cap, and `elided` behavior are defined in
+[context-hydration.md](context-hydration.md).
+
+```json
+{
+  "identity": {
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent",
+    "realm_id": "realm_123",
+    "realm_name": "prod"
+  },
+  "primary_facts": [
+    {
+      "id": "fact_123",
+      "name": "display-name",
+      "value": "Atlas",
+      "primary": true,
+      "sensitive": false,
+      "redacted": false,
+      "source": "self"
+    }
+  ],
+  "salient_memories": [
+    {
+      "id": "mem_123",
+      "snippet": "Prefers pnpm as the package manager for this project.",
+      "kind": "profile",
+      "salience": 0.8
+    }
+  ],
+  "index": {
+    "kinds": ["profile", "episodic", "session"],
+    "tags": ["staging", "performance"],
+    "counts": {
+      "facts": 6,
+      "memories": 41
+    }
+  },
+  "elided": false
+}
+```
+
+Rules:
+
+- `primary_facts` are the owner's primary facts (one per logical kind), shaped as
+  trimmed [Fact](#fact) entries and honoring the same `sensitive` redaction
+  posture (`value: null`, `redacted: true`) used in list output.
+- `salient_memories` is the top-N set selected by a blended salience+recency
+  score (with pinned kinds such as `profile`/`session`), excluding
+  archived/forgotten records. Selection is deterministic and never calls the
+  embedding provider; the algorithm is defined in
+  [memory-model.md](memory-model.md). Each entry carries a short `snippet`
+  (redacted for `sensitive` content), its `kind`, and its `salience`.
+- `index` is a one-line summary of the store: the `kinds` and `tags` present and
+  `counts` of facts and memories.
+- The digest has a hard byte/line cap (default ~8 KiB / ~200 lines,
+  configurable). When the cap forces omission, `elided` is `true` and callers
+  should follow up with `memory recall`; the digest is never silently truncated.
+
+## Session Start and End
+
+Used by `session start`/`session end` and `POST /v1/sessions:start` /
+`POST /v1/sessions:end`. Start hydrates identity, open goals, and last progress
+in one round-trip; end persists a progress memory and updates open goals. See
+[context-hydration.md](context-hydration.md).
+
+Session start result:
+
+```json
+{
+  "identity": {
+    "agent_id": "agent_123",
+    "agent_name": "browser-agent",
+    "realm_id": "realm_123",
+    "realm_name": "prod"
+  },
+  "open_goals": [
+    "finish the recall regression writeup",
+    "import the staging AGENTS.md"
+  ],
+  "last_progress": {
+    "id": "mem_140",
+    "snippet": "Reproduced the cold-start recall slowdown on staging.",
+    "created_at": "2026-06-25T18:00:00Z"
+  }
+}
+```
+
+Session end result:
+
+```json
+{
+  "saved": true,
+  "progress_memory_id": "mem_141"
+}
+```
+
+Rules:
+
+- `identity` matches the [Self Digest](#self-digest) `identity` block.
+- `last_progress` is the most recent `session`-kind progress memory, or `null`
+  when none exists. Its `snippet` honors the `sensitive` redaction posture.
+- `session end` persists a progress memory of kind `session` (`source: "self"`),
+  records its id in `progress_memory_id`, and updates `open_goals`. It emits the
+  `session.ended` audit event; `session start` emits `session.started`.
+
+## Consolidation Result
+
+Used by `memory consolidate` and `POST /v1/memories:consolidate`. The garbage
+collection verb merges near-duplicate memories, supersedes stale ones, surfaces
+(does not auto-pick) conflicting facts, and trims the digest index. Dry run is
+the default. See [memory-model.md](memory-model.md).
+
+```json
+{
+  "dry_run": true,
+  "merged": [
+    {
+      "into": "mem_120",
+      "from": ["mem_123", "mem_131"],
+      "summary": "merged 2 near-duplicate staging notes into mem_120"
+    }
+  ],
+  "superseded": [
+    {
+      "id": "mem_090",
+      "by": "mem_140",
+      "summary": "stale progress note superseded by latest session memory"
+    }
+  ],
+  "conflicts": [
+    {
+      "kind": "fact",
+      "name": "package-manager",
+      "values": [
+        { "id": "fact_201", "source": "import:AGENTS.md" },
+        { "id": "fact_202", "source": "self" }
+      ],
+      "summary": "two values for package-manager; resolve manually"
+    }
+  ],
+  "trimmed_index": {
+    "kinds": ["profile", "episodic", "session"],
+    "tags": ["staging", "performance"],
+    "counts": {
+      "facts": 6,
+      "memories": 38
+    }
+  },
+  "audit_event_id": null
+}
+```
+
+Rules:
+
+- `dry_run` defaults to `true`; a dry run reports `merged`/`superseded`/
+  `conflicts` as planned actions, persists nothing, and leaves `audit_event_id`
+  `null`. An applied run sets `dry_run: false`, performs the changes, and emits
+  the `memory.consolidated` audit event.
+- `merged` records each near-duplicate collapse (`into` survivor, `from` sources);
+  `superseded` records each stale memory tombstoned in favor of a newer one.
+- `conflicts` SURFACES conflicting facts for human resolution rather than
+  auto-picking a winner. Consolidate never silently overwrites `operator`- or
+  `import:`-authored records; it respects the `source` provenance contract (see
+  [Fact](#fact)).
+- `trimmed_index` is the post-consolidation [Self Digest](#self-digest) `index`,
+  so callers can see the digest shrink.
+- `consolidate` is a mutating, guarded verb and is excluded in `--read-only` MCP
+  mode.
+
 ## Fact
 
 Used by `fact get`, `fact list`, and operator realm scans. Facts are ordinary
@@ -648,6 +870,10 @@ Rules:
 - Binary-safe values should use `value_encoding: "base64"`.
 - `format` is an optional display/validation hint such as `string`, `email`,
   `url`, `date`, or `number`.
+- `source` records authorship/provenance with the same value set as memories:
+  `self`, `agent:<name>`, `operator`, and `import:<file>`. `consolidate` and the
+  self-digest never silently overwrite an `operator`- or `import:`-authored fact;
+  conflicting values are surfaced rather than auto-resolved.
 - A `fact show --history` view returns a `history` array shaped like the memory
   [edit history](#memory-detail).
 
@@ -1151,6 +1377,7 @@ message, billing, support, and import/export commands.
     "id": "mem_123",
     "name": null
   },
+  "echo": "Added mem_123 (kind=episodic, salience=0.8)",
   "planned_changes": [],
   "audit_event_id": "aud_125"
 }
@@ -1192,6 +1419,16 @@ a reason. A `memory forget` across agents under a dry run:
 Rules:
 
 - Mutations should report whether anything changed.
+- Every successful mutation carries a deterministic, human-readable `echo` string
+  the model can self-verify and chain on, for example
+  `"Remembered fact display-name=Atlas"`,
+  `"Added mem_123 (kind=profile, salience=0.6)"`, or
+  `"Merged into mem_120 (duplicate)"`. `echo` never includes `sensitive` fact
+  values or `sensitive`-flagged memory content.
+- A write that hits a near-duplicate returns the existing `mem_` id and adds a
+  `memory_duplicate` (or `memory_merged`, when the records were combined) entry
+  to the envelope `warnings` array instead of silently creating a near-dup; the
+  `echo` reflects the merge.
 - Dry-run mutations should set `dry_run` to `true`, `changed` to `false`, and
   include `planned_changes`.
 - Each `planned_changes` entry should be an object with at least `action`,
@@ -1251,8 +1488,10 @@ Rules:
 - Audit `action` values are stable dotted event names from
   [requirements.md](requirements.md), for example `memory.added`,
   `memory.adjusted`, `memory.recalled`, `memory.forgotten`, `memory.restored`,
-  `memory.deleted`, `fact.set`, `fact.primary_changed`, `fact.deleted`,
-  `policy.created`, `policy.deleted`, `policy.access_denied`, `crossagent.read`,
+  `memory.deleted`, `memory.consolidated`, `memory.imported`, `fact.set`,
+  `fact.primary_changed`, `fact.deleted`, `fact.imported`, `session.started`,
+  `session.ended`, `policy.created`, `policy.deleted`, `policy.access_denied`,
+  `crossagent.read`,
   `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
   `group.created`, `group.member_added`, `group.member_removed`,
   `message.sent`, `message.delivered`, `message.read`, `message.acked`,

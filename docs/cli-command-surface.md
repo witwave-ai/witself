@@ -113,7 +113,12 @@ By default, human output should be readable and cautious:
   redacted in list/scan output by default.
 - `fact get NAME` returns the one deterministic value for an authorized read.
 - `whoami` and profile views surface `primary` facts first as identity anchors.
-- Mutating commands summarize what changed.
+- Mutating commands summarize what changed. Every mutation returns a
+  deterministic, human-readable `echo` line (such as
+  `Remembered fact display-name=Atlas`, `Added mem_123 (kind=profile, salience=0.6)`,
+  or `Merged into mem_120 (duplicate)`) so a human or agent can self-verify and
+  chain the result. The `echo` field is part of the Mutation Result contract in
+  [json-contracts.md](json-contracts.md).
 - Destructive or integrity-impacting commands require confirmation unless
   `--yes` is provided, and cross-agent or operator mutations require `--reason`.
 
@@ -172,7 +177,13 @@ witself
   realm create|list|show|use|rename|delete|members|init|status|export|import
   billing show|usage|limits|plans|subscribe|subscription|payment-methods|sessions|crypto|invoices
   support create|list|show|comment|close
-  memory add|adjust|read|recall|list|forget|restore|delete
+  remember
+  self show
+  session start|end
+  memory add|adjust|read|recall|list|forget|restore|delete|consolidate
+  digest emit
+  ingest
+  bootstrap-instructions
   fact set|get|list|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
@@ -437,6 +448,7 @@ Flags:
 | `--namespace NAME` | Kubernetes namespace for emitted manifests. |
 | `--secret-name NAME` | Kubernetes Secret name. Default should derive from the realm. |
 | `--out PATH` | Write setup output, manifest, or instructions to a file. |
+| `--write-agents-md` | Install the Witself teaching stanza (see [`witself bootstrap-instructions`](#witself-bootstrap-instructions)) into the project AGENTS.md so file-loaded agents learn to call Witself. |
 | `--dry-run` | Show planned resources and token destinations without creating them. |
 | `--verify` | Verify issued tokens. Default: true. |
 | `--no-verify` | Skip token verification. |
@@ -1165,6 +1177,115 @@ Flags:
 | `--dry-run` | Show planned close action without closing the ticket. |
 | `--yes` | Skip confirmation. |
 
+## `witself remember`
+
+Quick-add self-knowledge. `remember` is the tested primary capture path for
+agents and humans: it auto-routes a single piece of text to either a fact or a
+memory so callers do not have to choose. A clear name→value assertion (such as
+`package manager is pnpm`, `email = a@b.com`, or `display name is Atlas`) upserts
+a fact (idempotent by name); anything else is added as a verbatim memory with
+dedup/supersede. It never bypasses validation, limits, or the dedup contract.
+`fact set` and `memory add` remain for explicit control; `remember` is a
+first-class, tested command, not a thin alias. The auto-routing rules are tracked
+in [context-hydration.md](context-hydration.md).
+
+```sh
+witself remember "package manager is pnpm"
+witself remember "Operator prefers terse summaries." --scope self
+witself remember "shared on-call rotation starts Mondays" --scope group --reason "team context"
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--scope self\|project\|group` | Routing scope for the captured fact/memory. Default: `self`. |
+| `--sensitive` | Mark the created fact or memory as `sensitive` (PII); content/value is redacted in list/recall by default. |
+| `--reason TEXT` | Audit reason, required for cross-context (e.g. group) capture. |
+| `--json` | Emit the created/updated resource, its `kind` (`fact` or `memory`), the `echo` line, and `duplicate_of` when merged. |
+
+When `remember` adds a memory that near-duplicates an existing one, it returns
+the existing `mem_` id and a `memory_duplicate`/`memory_merged` warning plus
+`duplicate_of`, rather than silently creating a near-dup. `remember` does not emit
+its own audit event; it routes to the existing `memory.added` / `fact.created` /
+`fact.updated` events.
+
+## `witself self show`
+
+Show the always-loaded self-digest: a bounded, session-start view of who the
+agent is. The digest lists `primary` facts first, then the top-N salient memories
+(blended salience + recency), then a one-line index of kinds, tags, and counts.
+It is cheap and never requires the embedding provider, so it works even when
+semantic recall is degraded. This is the MCP/CLI analogue of an auto-loaded
+CLAUDE.md head. The digest shape, cap, and `elided` behavior are tracked in
+[context-hydration.md](context-hydration.md).
+
+The digest has a hard byte/line cap (default ~8 KiB / ~200 lines, configurable
+via `--max-bytes`). When capped, output sets `elided=true` and points to
+`memory recall`; it is never silently truncated.
+
+```sh
+witself self show
+witself self show --salient-limit 5 --json
+witself self show --no-salient --max-bytes 4096
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--no-facts` | Omit `primary` facts from the digest. |
+| `--no-salient` | Omit salient memories from the digest. |
+| `--salient-limit N` | Maximum salient memories to include. Default: `10`. |
+| `--max-bytes N` | Hard cap on digest size; sets `elided=true` when the cap is hit. |
+| `--json` | Emit `{ identity, primary_facts[], salient_memories[], index, elided }`. |
+
+## `witself session`
+
+Bootstrap and flush long-running, multi-session work. `session start` hydrates
+identity, open goals, and last progress in one round-trip; `session end` persists
+a progress memory and updates the open goals. This pairs with the
+assume-interruption / flush-before-long-operations habit so resuming a task is a
+single call rather than a list-and-recall crawl. The session model is tracked in
+[context-hydration.md](context-hydration.md).
+
+### `witself session start`
+
+Hydrate identity, open goals, and last progress for a new working session in one
+call. Reads only; never requires the embedding provider.
+
+```sh
+witself session start
+witself session start --json
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--json` | Emit `{ identity, open_goals[], last_progress }`. |
+
+### `witself session end`
+
+Persist a session progress memory (kind `session`) and update open goals.
+
+```sh
+witself session end --summary "Shipped v0.3; rollback documented." \
+  --open-goals "write release notes,monitor error rate"
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--summary TEXT` | Required progress summary stored as a `session`-kind memory. |
+| `--open-goals "a,b"` | Comma-separated open goals to carry into the next session. |
+| `--reason TEXT` | Audit reason. |
+| `--json` | Emit `{ saved, progress_memory_id }` plus the `echo` line. |
+
+`session start` emits a `session.started` audit event and `session end` emits
+`session.ended`.
+
 ## `witself memory`
 
 Manage memories. A memory is free-form self-content owned by an agent (or, in
@@ -1384,6 +1505,115 @@ Flags:
 | `--dry-run` | Show deletion impact, links, and blockers without deleting the memory. |
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Required audit reason for deletion. |
+
+### `witself memory consolidate`
+
+Consolidate (garbage-collect) the memory store: merge near-duplicate memories,
+supersede stale ones, surface (never auto-resolve) conflicting facts, and trim
+the digest/index. Consolidation respects `source` provenance and never silently
+overwrites human-, operator-, or import-authored records; such conflicts are
+surfaced for a human/agent to resolve. This addresses the primary failure mode of
+an append-only store. The selection and merge rules are tracked in
+[memory-model.md](memory-model.md).
+
+`--dry-run` defaults to true, so consolidation previews planned merges,
+supersessions, and conflicts without writing until the caller opts in. The
+command is excluded in `--read-only` MCP mode and emits a `memory.consolidated`
+audit event when it writes.
+
+```sh
+witself memory consolidate
+witself memory consolidate --dry-run=false --reason "post-session cleanup"
+witself memory consolidate --scope self --json
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Preview merges/supersessions/conflicts without writing. Default: true. |
+| `--scope SCOPE` | Restrict consolidation to a scope. |
+| `--reason TEXT` | Audit reason; required when writing. |
+| `--json` | Emit `{ merged[], superseded[], conflicts[], trimmed_index }`. |
+
+## `witself digest emit`
+
+Render the self-digest as a CLAUDE.md / AGENTS.md fragment for file-load agent
+harnesses. This is the outbound half of the two-way file bridge: it makes
+Witself-backed identity available for free to runtimes that auto-load AGENTS.md
+or CLAUDE.md, with provenance HTML comments (witself-generated marker plus
+timestamp) so the emitted block is recognizable and round-trippable. The emit
+formats and provenance markers are tracked in
+[context-hydration.md](context-hydration.md).
+
+`digest emit` reads only and never requires the embedding provider. It optionally
+emits a `self.digest.emitted` audit event.
+
+```sh
+witself digest emit --format agents-md -o ./AGENTS.md
+witself digest emit --format claude-md --max-bytes 4096
+witself digest emit --format markdown
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--format claude-md\|agents-md\|markdown` | Output fragment format. |
+| `--max-bytes N` | Hard cap on the emitted fragment size. |
+| `-o, --out PATH` | Write the fragment to a file instead of stdout. |
+
+## `witself ingest`
+
+Ingest existing agent context files into Witself: the inbound half of the file
+bridge. `ingest` parses CLAUDE.md / AGENTS.md / GEMINI.md, routing kv-shaped
+lines to facts (upsert) and prose paragraphs to memories, tagging everything
+`source=import:<file>`. Dedup/upsert prevents re-import duplication, so the same
+file can be re-ingested safely. This makes Witself a good citizen of the
+AGENTS.md ecosystem rather than a competitor; it composes the existing fact and
+memory create paths and adds no new resource. The parser rules are tracked in
+[context-hydration.md](context-hydration.md).
+
+```sh
+witself ingest ./AGENTS.md ./CLAUDE.md
+witself ingest ./docs/GEMINI.md --source-label legacy --dry-run
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--source-label L` | Override the `source=import:<file>` label applied to ingested records. |
+| `--dry-run` | Show planned created/updated/deduplicated facts and memories without writing. |
+| `--json` | Emit the per-file ingest plan and results, including `echo` lines and `duplicate_of` on merges. |
+
+`ingest` emits `fact.imported` and `memory.imported` audit events. It is excluded
+in `--read-only` MCP mode.
+
+## `witself bootstrap-instructions`
+
+Print the paste-able teaching stanza that installs the Witself usage habit
+(recall-before-act, write-after-learn, consolidate-when-noisy) into an agent's
+file-loaded context. Witself is a service an agent must be taught to call, so the
+stanza is the file-ecosystem half of the teaching layer, mirroring the MCP server
+`instructions` text. The canonical stanza is pinned in
+[context-hydration.md](context-hydration.md).
+
+```sh
+witself bootstrap-instructions
+witself bootstrap-instructions --format agents-md
+witself bootstrap-instructions --format text
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--format agents-md\|claude-md\|text` | Output format for the teaching stanza. |
+
+To install the stanza directly into a project's AGENTS.md as part of bootstrap,
+`witself setup --write-agents-md` writes it during setup (see
+[`witself setup`](#witself-setup)).
 
 ## `witself fact`
 
@@ -2203,6 +2433,17 @@ authorization checks as CLI commands, and agent-token MCP sessions act only as
 the token-bound agent. There is no reveal-style tool framing and no
 `--no-value-tools` mode, because there is no reveal ceremony.
 
+On connect, the server returns its `instructions` field carrying the canonical
+standing protocol that teaches the agent to call Witself: load `self.show` and
+`recall` at the start of non-trivial work, `remember` after learning something
+durable, `adjust`/`forget` instead of contradicting, and flush state with
+`session.end` before long operations. This is the MCP half of the teaching layer;
+the pinned text and the file-ecosystem counterpart
+([`witself bootstrap-instructions`](#witself-bootstrap-instructions)) are tracked
+in [context-hydration.md](context-hydration.md). In `--read-only` mode the server
+omits the mutating tools (`remember`, `session.end`, `memory.consolidate`,
+`ingest`); `self.show`, `session.start`, `recall`, and `digest.emit` remain.
+
 Flags:
 
 | Flag | Description |
@@ -2308,6 +2549,14 @@ is tracked in [v0-scope.md](v0-scope.md).
 - `witself memory recall`
 - `witself memory read`
 - `witself memory list`
+- `witself memory consolidate`
+- `witself remember`
+- `witself self show`
+- `witself session start`
+- `witself session end`
+- `witself digest emit`
+- `witself ingest`
+- `witself bootstrap-instructions`
 - `witself fact set`
 - `witself fact get`
 - `witself policy create`

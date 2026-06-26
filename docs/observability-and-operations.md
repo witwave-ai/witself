@@ -135,6 +135,15 @@ Initial metric families should include:
 | `witself_embedding_failures_total` | Embedding provider failures by provider and reason class. |
 | `witself_embedding_degrade_events_total` | Recall degrade-to-lexical events by provider and reason class. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
+| `witself_remember_total` | `remember` quick-add operations by `routed_kind` (`fact`, `memory`), owner kind, and result. The `routed_kind` label records auto-routing only; it never carries the captured text. |
+| `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
+| `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path never calls the embedding provider. |
+| `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
+| `witself_memory_consolidations_total` | Memory consolidation runs by `mode` (`dry_run`, `apply`), owner kind, and result. |
+| `witself_memory_consolidation_actions_total` | Consolidation outcomes by `action` (`merged`, `superseded`, `conflict`) and `mode` (`dry_run`, `apply`). Conflicts are surfaced, never auto-resolved. |
+| `witself_session_operations_total` | Session lifecycle operations by `phase` (`start`, `end`), owner kind, and result. |
+| `witself_ingest_operations_total` | Ingest runs (CLAUDE.md/AGENTS.md/GEMINI.md import) by `mode` (`dry_run`, `apply`) and result. Source labels are never raw file paths. |
+| `witself_ingest_records_total` | Records produced by ingest by `outcome` (`fact_added`, `memory_added`, `duplicate_skipped`). |
 | `witself_policy_decisions_total` | Policy evaluations by permission verb, decision (`allow`, `deny`), scope, and owner kind. |
 | `witself_crossagent_accesses_total` | Cross-agent identity accesses by permission verb, scope, owner kind, and result. |
 | `witself_group_operations_total` | Group operations by operation (`create`, `delete`, `member_add`, `member_remove`) and result. |
@@ -177,6 +186,10 @@ Forbidden metric labels and values include:
   object-store credentials, or provider secrets.
 - Raw HTTP paths, query strings, request bodies, user agents, IP addresses, or
   error messages.
+- Remembered, ingested, or digest-rendered content; raw ingest file paths or
+  source labels; per-record memory or fact ids in consolidation, ingest, or
+  remember metrics. Routing and outcome are recorded only as the normalized
+  `routed_kind`, `action`, and `outcome` labels.
 
 Allowed labels should be low cardinality and pre-normalized, such as:
 
@@ -189,7 +202,16 @@ Allowed labels should be low cardinality and pre-normalized, such as:
 - `decision`, such as `allow` or `deny`, for policy evaluations.
 - `permission`, the policy verb: `read`, `contribute`, `curate`, or `forget`.
 - `scope`, such as `memory`, `fact`, or `both`.
-- `mode`, such as `semantic` or `degraded`, for recall.
+- `mode`, such as `semantic` or `degraded`, for recall, and `dry_run` or
+  `apply` for consolidation and ingest.
+- `routed_kind`, such as `fact` or `memory`, recording how `remember`
+  auto-routed a quick-add; it never carries the captured text.
+- `phase`, such as `start` or `end`, for session lifecycle operations.
+- `action`, such as `merged`, `superseded`, or `conflict`, for consolidation
+  outcomes.
+- `outcome`, such as `fact_added`, `memory_added`, or `duplicate_skipped`, for
+  ingest records.
+- `elided`, `true` or `false`, for self-digest renders.
 - `stage`, such as `sent`, `delivered`, or `read`, for messaging.
 - `principal_kind`, such as `agent`, `operator`, `admin`, or `service`.
 - `owner_kind`, such as `self`, `other_agent`, or `group`.
