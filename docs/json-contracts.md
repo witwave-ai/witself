@@ -1537,21 +1537,44 @@ Used by `audit list` and `audit show`.
 
 Rules:
 
-- Audit `action` values are stable dotted event names from
-  [requirements.md](requirements.md), for example `memory.added`,
-  `memory.adjusted`, `memory.recalled`, `memory.forgotten`, `memory.restored`,
-  `memory.deleted`, `memory.consolidated`, `memory.imported`, `fact.set`,
-  `fact.primary_changed`, `fact.deleted`, `fact.imported`, `session.started`,
-  `session.ended`, `policy.created`, `policy.deleted`, `policy.access_denied`,
-  `crossagent.read`,
-  `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
-  `group.created`, `group.member_added`, `group.member_removed`,
-  `message.sent`, `message.delivered`, `message.read`, `message.acked`,
-  `identity.exported`, `identity.imported`, and the sealed-plane events
-  `secret.created`, `secret.updated`, `secret.renamed`, `secret.copied`,
-  `secret.archived`, `secret.restored`, `secret.deleted`, `secret.reveal`,
-  `secret.grant`, `secret.revoke`, `totp.enrolled`, `totp.code`,
-  `totp.seed_revealed`, `totp.deleted`, and `key.rotated`.
+- Audit `action` values are stable dotted `<resource>.<verb>` event names drawn
+  from the canonical registry. The authoritative, complete registry lives in
+  [audit-retention.md](audit-retention.md); this list mirrors it. The complete
+  set, grouped by family, is:
+  - Platform: `auth.succeeded`, `auth.failed`, `account.profile_changed`,
+    `account.member_changed`, `account.role_changed`, `operator.override`,
+    `agent.created`, `agent.renamed`, `agent.copied`, `agent.disabled`,
+    `agent.enabled`, `agent.archived`, `agent.deleted`, `token.created`,
+    `token.rotated`, `token.revoked`, `token.use_failed`, `token.file_choice`,
+    `audit.retention.swept`, `limit.decision`.
+  - Open plane (identity): `memory.added`, `memory.adjusted`, `memory.read`,
+    `memory.recalled`, `memory.forgotten`, `memory.restored`, `memory.deleted`,
+    `memory.consolidated`, `memory.imported`, `fact.created`, `fact.updated`,
+    `fact.deleted`, `fact.primary_changed`, `fact.imported`, `crossagent.read`,
+    `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
+    `policy.created`, `policy.updated`, `policy.deleted`, `policy.tested`,
+    `policy.access_allowed`, `policy.access_denied`, `group.created`,
+    `group.deleted`, `group.member_added`, `group.member_removed`,
+    `group.record_changed`, `message.sent`, `message.delivered`, `message.read`,
+    `message.acked`, `session.started`, `session.ended`, `self.digest.emitted`,
+    `identity.exported`, `identity.imported`.
+  - Sealed plane (credentials): `secret.created`, `secret.updated`,
+    `secret.renamed`, `secret.copied`, `secret.archived`, `secret.restored`,
+    `secret.deleted`, `secret.reveal`, `secret.grant`, `secret.revoke`,
+    `totp.enrolled`, `totp.code`, `totp.seed_revealed`, `totp.deleted`,
+    `key.rotated`.
+  - Billing and support (managed service): `billing.subscription.created`,
+    `billing.subscription.updated`, `billing.subscription.canceled`,
+    `billing.payment_method.added`, `billing.payment_method.removed`,
+    `billing.payment_method.default_changed`, `billing.invoice.created`,
+    `billing.invoice.paid`, `billing.invoice.payment_failed`,
+    `billing.refund.created`, `billing.crypto.quote.created`,
+    `billing.crypto.checkout.started`, `billing.crypto.payment.confirmed`,
+    `billing.crypto.payment.failed`, `billing.crypto.refund.created`,
+    `billing.crypto.provider_event.reconciled`, `support.ticket.created`,
+    `support.ticket.commented`, `support.ticket.closed`, `support.bundle.created`.
+- The `fact set` / `remember` upsert is not its own event: it emits
+  `fact.created` for a new fact or `fact.updated` for an existing one.
 - Cross-agent and group-owned mutation events include `owner`, the deciding
   `policy_id`, and the audit `reason` so each action is fully attributed (for
   example "memory mem_777 of agent archivist was pruned by agent browser-agent

@@ -1816,7 +1816,8 @@ reconciliation, and customer exports. Initial event names include:
 - `memory.imported`
 - `session.started`
 - `session.ended`
-- `fact.set`
+- `fact.created` (the `fact set` / `remember` upsert emits this for a new fact)
+- `fact.updated` (the `fact set` / `remember` upsert emits this for an existing fact)
 - `fact.imported`
 - `self.digest.emitted` (optional)
 - `fact.primary_changed`

@@ -1057,11 +1057,14 @@ MUST NOT be conflated. Stable actions span both planes:
 
 - Open plane: `memory.added`, `memory.adjusted`, `memory.recalled`,
   `memory.forgotten`, `memory.restored`, `memory.deleted`, `memory.consolidated`,
-  `fact.set`, `fact.deleted`, `fact.primary_changed`, `crossagent.read`,
+  `fact.created`, `fact.updated`, `fact.deleted`, `fact.primary_changed`,
+  `crossagent.read`,
   `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
   `policy.created`, `policy.deleted`, `policy.access_denied`, `group.created`,
   `group.member_added`, `group.member_removed`, `message.sent`,
-  `message.delivered`, `message.read`, `message.acked`.
+  `message.delivered`, `message.read`, `message.acked`. The `fact set` /
+  `remember` upsert emits `fact.created` for a new fact or `fact.updated` for an
+  existing one.
 - Sealed plane: `secret.created`, `secret.updated`, `secret.renamed`,
   `secret.copied`, `secret.archived`, `secret.restored`, `secret.deleted`,
   `secret.reveal`, `secret.grant`, `secret.revoke`, `totp.enrolled`, `totp.code`,

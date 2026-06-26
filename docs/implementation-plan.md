@@ -128,7 +128,7 @@ Deliverables:
 - Local token hashing and token-file bootstrap (raw token shown once; `0600`
   files, `0700` dirs, atomic writes; refuse overwrite without reuse/rotation).
 - Audit event generation with redacted payloads and stable dotted event names
-  (`memory.added`, `fact.set`, `policy.access_denied`, `crossagent.curated`,
+  (`memory.added`, `fact.created`, `policy.access_denied`, `crossagent.curated`,
   `message.sent`, `identity.exported`, ...).
 - Audit retention configuration with a managed/default Helm value of 365 days.
 - Memory and fact size validation for v0 inline limits (content max, tag/link

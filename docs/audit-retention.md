@@ -11,6 +11,11 @@ data, and under which policy (integrity and authenticity). The headline use of
 the audit log is attributing cross-agent mutation, not detecting reads. See
 [threat-model.md](threat-model.md).
 
+This document is the authoritative registry of stable dotted `<resource>.<verb>`
+audit-event names, grouped by family (platform, open plane, sealed plane, and
+billing & support). Other docs reference these exact spellings; the enumeration
+in [json-contracts.md](json-contracts.md) points back here.
+
 ## Decision
 
 Audit records are first-class, security-relevant, and retained on a defined
@@ -146,7 +151,7 @@ exports.
   surfaced conflicts, plus the resolved-against `source` provenance, never content)
 
 The `remember` quick-add does not emit its own event; it routes to `memory.added`,
-`fact.set`/`fact.created`, or `fact.updated` depending on what the core resolves it to.
+`fact.created`, or `fact.updated` depending on what the core resolves it to.
 
 ### Session
 
@@ -156,11 +161,16 @@ The `remember` quick-add does not emit its own event; it routes to `memory.added
 
 ### Fact
 
-- `fact.set` (create or update by name)
-- `fact.updated` (when distinguishing update from create is useful)
+- `fact.created` (a new fact created by name)
+- `fact.updated` (an existing fact updated by name)
 - `fact.deleted`
 - `fact.primary_changed` — records the promotion and the matching demotion of the
   prior primary of the same logical kind, with both fact ids.
+
+The `fact set` command and the `remember` upsert do not have their own event: a
+name with no existing fact emits `fact.created`, and a name that already exists
+emits `fact.updated`. (`fact.imported` covers the `ingest` path; see
+[Identity Export and Import](#identity-export-and-import).)
 
 ### Cross-Agent Access
 
@@ -279,9 +289,12 @@ See [token-lifecycle.md](token-lifecycle.md) and
 Recorded as stubs in v0 until the managed service is enabled; capability-gated
 operations still emit a deterministic record.
 
-- `billing.subscription.created/updated/canceled`
-- `billing.payment_method.added/removed/default_changed`
-- `billing.invoice.created/paid/payment_failed`
+- `billing.subscription.created`, `billing.subscription.updated`,
+  `billing.subscription.canceled`
+- `billing.payment_method.added`, `billing.payment_method.removed`,
+  `billing.payment_method.default_changed`
+- `billing.invoice.created`, `billing.invoice.paid`,
+  `billing.invoice.payment_failed`
 - `billing.refund.created`
 - `billing.crypto.quote.created`,
   `billing.crypto.checkout.started`,
@@ -289,7 +302,8 @@ operations still emit a deterministic record.
   `billing.crypto.payment.failed`,
   `billing.crypto.refund.created`,
   `billing.crypto.provider_event.reconciled`
-- `support.ticket.created/commented/closed`, `support.bundle.created`
+- `support.ticket.created`, `support.ticket.commented`,
+  `support.ticket.closed`, `support.bundle.created`
 
 Billing and crypto records may include non-sensitive context such as account id,
 realm id, invoice id, subscription id, payment provider, payment-method type,
