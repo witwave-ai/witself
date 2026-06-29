@@ -1,5 +1,5 @@
-// Package version exposes the build version of the ws CLI. The values are
-// overridden at release time with -ldflags; see .goreleaser.yaml.
+// Package version exposes the build version of the Witself binaries. The values
+// are overridden at release time with -ldflags; see .goreleaser.yaml.
 package version
 
 var (
@@ -11,7 +11,7 @@ var (
 	Date = "unknown"
 )
 
-// String returns a human-readable one-line version string.
-func String() string {
-	return "ws " + Version + " (commit " + Commit + ", built " + Date + ")"
+// String returns a human-readable one-line version string for the named program.
+func String(prog string) string {
+	return prog + " " + Version + " (commit " + Commit + ", built " + Date + ")"
 }

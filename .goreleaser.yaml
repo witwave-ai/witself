@@ -24,6 +24,23 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
+  - id: witself-server
+    main: ./cmd/witself-server
+    binary: witself-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
+
 archives:
   - id: ws
     ids:
@@ -31,6 +48,12 @@ archives:
     formats:
       - tar.gz
     name_template: "ws_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: witself-server
+    ids:
+      - witself-server
+    formats:
+      - tar.gz
+    name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -57,6 +80,53 @@ signs:
       - "--yes"
     artifacts: checksum
     output: true
+
+# witself-server container image: one image per arch, combined into a multi-arch
+# manifest. The Dockerfile only COPYs the prebuilt binary, so cross-arch builds
+# need no emulation.
+dockers:
+  - id: witself-server-amd64
+    ids:
+      - witself-server
+    goos: linux
+    goarch: amd64
+    dockerfile: images/witself-server/Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title=witself-server"
+      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+  - id: witself-server-arm64
+    ids:
+      - witself-server
+    goos: linux
+    goarch: arm64
+    dockerfile: images/witself-server/Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title=witself-server"
+      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/witwave-ai/images/witself-server:latest"
+    image_templates:
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
 
 brews:
   - name: ws

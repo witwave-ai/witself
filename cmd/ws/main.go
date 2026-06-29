@@ -21,7 +21,7 @@ func run(args []string) int {
 	}
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Println(version.String())
+		fmt.Println(version.String("ws"))
 		return 0
 	case "help", "--help", "-h":
 		usage(os.Stdout)
