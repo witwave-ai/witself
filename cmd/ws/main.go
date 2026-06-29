@@ -34,6 +34,8 @@ func run(args []string) int {
 		return authCmd(args[1:])
 	case "realm":
 		return realmCmd(args[1:])
+	case "agent":
+		return agentCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -192,6 +194,79 @@ func realmList(args []string) int {
 	return 0
 }
 
+func agentCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws agent create|list --endpoint URL --token-file FILE --realm REALM")
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return agentCreate(args[1:])
+	case "list":
+		return agentList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws agent: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func agentCreate(args []string) int {
+	fs := flag.NewFlagSet("agent create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	realm := fs.String("realm", "", "realm id the agent belongs to")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	name := fs.Arg(0)
+	if *endpoint == "" || *tokenFile == "" || *realm == "" || name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent create --endpoint URL --token-file FILE --realm REALM NAME")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	a, err := client.CreateAgent(context.Background(), *endpoint, tok, *realm, name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%s\t%s\n", a.ID, a.Name)
+	return 0
+}
+
+func agentList(args []string) int {
+	fs := flag.NewFlagSet("agent list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	realm := fs.String("realm", "", "realm id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" || *realm == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent list --endpoint URL --token-file FILE --realm REALM")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	agents, err := client.ListAgents(context.Background(), *endpoint, tok, *realm)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	for _, a := range agents {
+		fmt.Printf("%s\t%s\n", a.ID, a.Name)
+	}
+	return 0
+}
+
 func readToken(file string) (string, error) {
 	b, err := os.ReadFile(file)
 	if err != nil {
@@ -208,5 +283,6 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	fmt.Fprintln(w, "  ws realm create|list    Create or list realms (operator token)")
+	fmt.Fprintln(w, "  ws agent create|list    Create or list agents in a realm")
 	fmt.Fprintln(w, "  ws help                 Show this help")
 }

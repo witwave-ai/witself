@@ -88,6 +88,8 @@ func doJSON(ctx context.Context, method, url, token string, body []byte, out any
 		return fmt.Errorf("not authorized (check the token)")
 	case resp.StatusCode == http.StatusConflict:
 		return fmt.Errorf("already exists")
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("not found")
 	case resp.StatusCode >= 300:
 		return fmt.Errorf("request failed: %s", resp.Status)
 	}
@@ -133,4 +135,40 @@ func ListRealms(ctx context.Context, endpoint, token string) ([]Realm, error) {
 
 func realmsURL(endpoint string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/realms"
+}
+
+// Agent is the API view of an agent.
+type Agent struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CreateAgent creates an agent in a realm via POST {endpoint}/v1/realms/{realm}/agents.
+func CreateAgent(ctx context.Context, endpoint, token, realmID, name string) (*Agent, error) {
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Agent Agent `json:"agent"`
+	}
+	if err := doJSON(ctx, http.MethodPost, agentsURL(endpoint, realmID), token, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Agent, nil
+}
+
+// ListAgents lists a realm's agents via GET {endpoint}/v1/realms/{realm}/agents.
+func ListAgents(ctx context.Context, endpoint, token, realmID string) ([]Agent, error) {
+	var out struct {
+		Agents []Agent `json:"agents"`
+	}
+	if err := doJSON(ctx, http.MethodGet, agentsURL(endpoint, realmID), token, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Agents, nil
+}
+
+func agentsURL(endpoint, realmID string) string {
+	return strings.TrimRight(endpoint, "/") + "/v1/realms/" + realmID + "/agents"
 }

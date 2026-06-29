@@ -45,6 +45,10 @@ type Config struct {
 	// operator-authenticated /v1/realms endpoints, scoped to the caller's account.
 	CreateRealm func(ctx context.Context, accountID, name string) (Realm, error)
 	ListRealms  func(ctx context.Context, accountID string) ([]Realm, error)
+
+	// CreateAgent / ListAgents, when set, enable POST/GET /v1/realms/{realm}/agents.
+	CreateAgent func(ctx context.Context, accountID, realmID, name string) (Agent, error)
+	ListAgents  func(ctx context.Context, accountID, realmID string) ([]Agent, error)
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -65,6 +69,15 @@ type Realm struct {
 // ErrConflict signals a uniqueness conflict (-> 409). The wiring layer returns
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
+
+// ErrNotFound signals a missing resource (-> 404), e.g. a realm not in the account.
+var ErrNotFound = errors.New("not found")
+
+// Agent is the API view of an agent.
+type Agent struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
@@ -158,6 +171,12 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.ListRealms != nil {
 			mux.HandleFunc("GET /v1/realms", listRealmsHandler(cfg.Authenticate, cfg.ListRealms))
+		}
+		if cfg.CreateAgent != nil {
+			mux.HandleFunc("POST /v1/realms/{realm}/agents", createAgentHandler(cfg.Authenticate, cfg.CreateAgent))
+		}
+		if cfg.ListAgents != nil {
+			mux.HandleFunc("GET /v1/realms/{realm}/agents", listAgentsHandler(cfg.Authenticate, cfg.ListAgents))
 		}
 	}
 	return mux
@@ -352,6 +371,48 @@ func listRealmsHandler(auth AuthFunc, list func(ctx context.Context, accountID s
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "realms": realms})
+	})
+}
+
+func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountID, realmID, name string) (Agent, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing name")
+			return
+		}
+		agent, err := create(r.Context(), p.accountID, r.PathValue("realm"), req.Name)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "realm not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "agent already exists")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not create agent")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "agent": agent})
+	})
+}
+
+func listAgentsHandler(auth AuthFunc, list func(ctx context.Context, accountID, realmID string) ([]Agent, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		agents, err := list(r.Context(), p.accountID, r.PathValue("realm"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not list agents")
+			return
+		}
+		if agents == nil {
+			agents = []Agent{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "agents": agents})
 	})
 }
 

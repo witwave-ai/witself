@@ -108,6 +108,29 @@ func serve() int {
 			}
 			return out, nil
 		}
+		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (server.Agent, error) {
+			a, err := st.CreateAgent(ctx, accountID, realmID, name)
+			switch {
+			case errors.Is(err, store.ErrRealmNotFound):
+				return server.Agent{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAgentExists):
+				return server.Agent{}, server.ErrConflict
+			case err != nil:
+				return server.Agent{}, err
+			}
+			return server.Agent{ID: a.ID, Name: a.Name}, nil
+		}
+		cfg.ListAgents = func(ctx context.Context, accountID, realmID string) ([]server.Agent, error) {
+			as, err := st.ListAgents(ctx, accountID, realmID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]server.Agent, len(as))
+			for i, a := range as {
+				out[i] = server.Agent{ID: a.ID, Name: a.Name}
+			}
+			return out, nil
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {

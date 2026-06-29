@@ -156,6 +156,72 @@ func TestRealmsCreateAndList(t *testing.T) {
 	}
 }
 
+func TestAgentsCreateAndList(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	var created []Agent
+	create := func(_ context.Context, _, realmID, name string) (Agent, error) {
+		if realmID == "missing" {
+			return Agent{}, ErrNotFound
+		}
+		a := Agent{ID: "agent_" + name, Name: name}
+		created = append(created, a)
+		return a, nil
+	}
+	list := func(_ context.Context, _, _ string) ([]Agent, error) { return created, nil }
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgent: create, ListAgents: list}))
+	defer srv.Close()
+
+	post := func(realm, tok, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/realms/"+realm+"/agents", strings.NewReader(body))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	r := post("realm_1", "", `{"name":"a1"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", r.StatusCode)
+	}
+	r = post("missing", "good", `{"name":"a1"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("missing realm = %d, want 404", r.StatusCode)
+	}
+	r = post("realm_1", "good", `{"name":"a1"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		t.Errorf("create = %d, want 201", r.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/realms/realm_1/agents", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	lresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lresp.Body.Close()
+	var out struct {
+		Agents []Agent `json:"agents"`
+	}
+	if err := json.NewDecoder(lresp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Agents) != 1 || out.Agents[0].Name != "a1" {
+		t.Errorf("agents = %+v", out.Agents)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)
