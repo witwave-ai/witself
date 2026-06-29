@@ -41,6 +41,24 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
+  # witself-infra lives in its own nested Go module (infra/pulumi) so its large
+  # Pulumi/provider dependency tree never touches the lean ws / witself-server
+  # binaries. `dir` builds it from that module; `main` is relative to `dir`.
+  - id: witself-infra
+    dir: infra/pulumi
+    main: ./cmd/witself-infra
+    binary: witself-infra
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ws
     ids:
@@ -54,6 +72,12 @@ archives:
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: witself-infra
+    ids:
+      - witself-infra
+    formats:
+      - tar.gz
+    name_template: "witself-infra_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -148,3 +172,23 @@ brews:
       bin.install "ws"
     test: |
       system "#{bin}/ws", "version"
+
+  - name: witself-infra
+    ids:
+      - witself-infra
+    directory: Formula
+    repository:
+      owner: witwave-ai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/witwave-ai/witself"
+    description: "Witself cell infrastructure provisioner (Pulumi-Go via the Automation API)"
+    license: "FSL-1.1-ALv2"
+    # The Automation API drives the pulumi engine binary, so the formula pulls it
+    # in. (A future self-bootstrap can install a pinned engine and drop this.)
+    dependencies:
+      - name: pulumi
+    install: |
+      bin.install "witself-infra"
+    test: |
+      system "#{bin}/witself-infra", "help"
