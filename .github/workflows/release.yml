@@ -1,0 +1,39 @@
+name: release
+
+# Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, publishes the
+# GitHub release, and pushes the Homebrew formula to witwave-ai/homebrew-tap.
+# A manual run (workflow_dispatch) is a no-publish snapshot to validate the build.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: >-
+            ${{ github.event_name == 'push' && 'release --clean'
+                || 'release --snapshot --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for the Homebrew formula push (cross-repo). Create a token
+          # with contents:write on witwave-ai/homebrew-tap and add it as the
+          # repo secret HOMEBREW_TAP_TOKEN.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
