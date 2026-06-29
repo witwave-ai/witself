@@ -31,7 +31,16 @@ type Config struct {
 	// AccountID, when set, is surfaced as the account block in /v1/capabilities
 	// (the seeded default account on single-account backends).
 	AccountID string
+
+	// Login, when set, enables POST /v1/auth/bootstrap to exchange a bootstrap
+	// token for an operator token.
+	Login LoginFunc
 }
+
+// LoginFunc exchanges a bootstrap token for an operator token. ok is false when
+// the token is invalid or already used (-> 401); a non-nil error is a server
+// fault (-> 500).
+type LoginFunc func(ctx context.Context, bootstrapToken string) (operatorToken, operatorID string, ok bool, err error)
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
@@ -57,7 +66,7 @@ func Run(ctx context.Context, cfg Config) error {
 		name, addr string
 		handler    http.Handler
 	}{
-		{"api", cfg.APIAddr, apiMux(cfg.AccountID)},
+		{"api", cfg.APIAddr, apiMux(cfg.AccountID, cfg.Login)},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMux()},
 	}
@@ -107,7 +116,7 @@ func Run(ctx context.Context, cfg Config) error {
 	return runErr
 }
 
-func apiMux(accountID string) http.Handler {
+func apiMux(accountID string, login LoginFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -115,7 +124,48 @@ func apiMux(accountID string) http.Handler {
 			version.Version, version.Commit, version.Date)
 	})
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(accountID))
+	if login != nil {
+		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(login))
+	}
 	return mux
+}
+
+// bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
+// for an operator token, shown once.
+func bootstrapLoginHandler(login LoginFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BootstrapToken string `json:"bootstrap_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BootstrapToken == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing bootstrap_token")
+			return
+		}
+		opTok, opID, ok, err := login(r.Context(), req.BootstrapToken)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusUnauthorized, "invalid or already-used bootstrap token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"operator_token": opTok,
+			"operator_id":    opID,
+		})
+	}
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"schema_version": "witself.v0",
+		"error":          msg,
+	})
 }
 
 // backendInfo, feature, and capabilities describe the bare /v1/capabilities

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,23 @@ func serve() int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
+		}
+		if bt := os.Getenv("WITSELF_BOOTSTRAP_TOKEN"); bt != "" {
+			if err := st.AdoptBootstrapToken(ctx, acctID, oprID, bt); err != nil {
+				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, "witself-server: bootstrap token adopted")
+		}
+		cfg.Login = func(ctx context.Context, bt string) (string, string, bool, error) {
+			ot, oid, err := st.ExchangeBootstrap(ctx, bt)
+			if errors.Is(err, store.ErrInvalidBootstrap) {
+				return "", "", false, nil
+			}
+			if err != nil {
+				return "", "", false, err
+			}
+			return ot, oid, true, nil
 		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)

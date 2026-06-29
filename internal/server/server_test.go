@@ -70,7 +70,7 @@ func TestMetricsExposesUp(t *testing.T) {
 }
 
 func TestVersionEndpointIsBare(t *testing.T) {
-	srv := httptest.NewServer(apiMux(""))
+	srv := httptest.NewServer(apiMux("", nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/version")
 	if err != nil {
@@ -94,7 +94,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 
 func TestCapabilitiesShape(t *testing.T) {
 	t.Setenv("WITSELF_BACKEND_KIND", "self-hosted")
-	srv := httptest.NewServer(apiMux(""))
+	srv := httptest.NewServer(apiMux("", nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {
@@ -120,7 +120,7 @@ func TestCapabilitiesShape(t *testing.T) {
 }
 
 func TestCapabilitiesIncludesAccount(t *testing.T) {
-	srv := httptest.NewServer(apiMux("acc_test123"))
+	srv := httptest.NewServer(apiMux("acc_test123", nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {
