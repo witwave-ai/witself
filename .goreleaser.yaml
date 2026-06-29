@@ -1,0 +1,51 @@
+version: 2
+
+project_name: ws
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ws
+    main: ./cmd/ws
+    binary: ws
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
+
+archives:
+  - id: ws
+    ids:
+      - ws
+    formats:
+      - tar.gz
+    name_template: "ws_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: ws
+    ids:
+      - ws
+    repository:
+      owner: witwave-ai
+      name: homebrew-tap
+    homepage: "https://github.com/witwave-ai/witself"
+    description: "Witself CLI (ws)"
+    license: "Apache-2.0"
+    install: |
+      bin.install "ws"
+    test: |
+      system "#{bin}/ws", "version"
