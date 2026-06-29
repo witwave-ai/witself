@@ -907,9 +907,9 @@ kubectl -n witself rollout status deploy/witself
 
 kubectl -n witself port-forward deploy/witself 8080:8080 8081:8081 9090:9090
 
-curl -fsS http://127.0.0.1:8081/v1/health/live
-curl -fsS http://127.0.0.1:8081/v1/health/ready
-curl -fsS http://127.0.0.1:8081/v1/health/startup
+curl -fsS http://127.0.0.1:8081/livez
+curl -fsS http://127.0.0.1:8081/readyz
+curl -fsS http://127.0.0.1:8081/startupz
 curl -fsS http://127.0.0.1:9090/metrics | head
 ```
 

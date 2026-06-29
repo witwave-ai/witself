@@ -90,9 +90,10 @@ Initial route sketch:
 GET  /metrics
 
 # Health listener, default :8081.
-GET  /v1/health/live
-GET  /v1/health/ready
-GET  /v1/health/startup
+GET  /livez
+GET  /readyz
+GET  /startupz
+GET  /healthz                # alias
 
 # Signed realm card, served at the well-known path (not under /v1).
 GET  /.well-known/witself-card.json
@@ -268,7 +269,8 @@ values, field values, TOTP seeds or codes, raw paths, query strings, user
 input, or high-cardinality customer metadata.
 
 Health routes should be served on the dedicated health listener, default
-`:8081`, even though their paths use the `/v1/health/*` shape.
+`:8081`, at the short `/livez`, `/readyz`, `/startupz` (plus `/healthz` alias)
+paths rather than under `/v1`.
 
 Auth session routes are for CLI-initiated browser/device-code login when
 Witself owns the session flow. Self-hosted first-operator bootstrap should use

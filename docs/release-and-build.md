@@ -294,8 +294,8 @@ Required release checks once the API exists:
 - Example request/response validation for the memory, fact, policy, group, and
   message resources and their colon-action subroutes (for example
   `/v1/messages/{message_id}:ack`).
-- Health endpoint smoke tests for `/v1/health/live`, `/v1/health/ready`, and
-  `/v1/health/startup`.
+- Health endpoint smoke tests for `/livez`, `/readyz`, and
+  `/startupz`.
 - Prometheus scrape smoke test for `/metrics`.
 - Metrics-disabled smoke test proving the metrics listener and monitor resources
   are absent.

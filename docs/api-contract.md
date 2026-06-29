@@ -96,6 +96,12 @@ API responses should use the same envelope as CLI `--json` output:
 Error responses should use the same structured error object and error codes
 defined in [json-contracts.md](json-contracts.md).
 
+The meta/discovery endpoints are the exception: `GET /v1/version`,
+`GET /v1/capabilities`, and the health probes return a **bare/flat** JSON object
+with a top-level `schema_version` and no `ok`/`data`/`warnings` wrapper. The
+domain/data endpoints (memories, facts, policies, groups, messaging, secrets,
+totp, and the rest) keep the standard envelope above.
+
 HTTP status codes should align with the structured error:
 
 | HTTP | Error code | Meaning |
@@ -140,6 +146,10 @@ Every backend should expose its supported features:
 GET /v1/capabilities
 ```
 
+The HTTP `GET /v1/capabilities` response is a **bare/flat** object: a top-level
+`schema_version` alongside `backend`, `principal`, `features`, and `limits`, not
+the `ok`/`data` envelope.
+
 Clients should call this during setup, `ws capabilities`, and before
 service-administration operations whose availability differs by backend.
 `ws setup` should use the default managed Witself Cloud endpoint unless the
@@ -148,7 +158,12 @@ Local setup bypasses the remote API and is selected explicitly with `--local`.
 
 Capability results should include:
 
-- Backend kind: `managed`, `self-hosted`, or `local`.
+- Backend kind: `managed`, `self-hosted`, or `local`. `backend.kind` is a
+  configured value, not inferred: it comes from `WITSELF_BACKEND_KIND` and
+  defaults to `self-hosted`; `managed` is set only by Witself's managed
+  deployment, and `local` is reported by the CLI's local adapter and is never the
+  server. `kind` is advisory — clients should branch on specific feature flags,
+  and each feature is independently gated so a mislabeled kind unlocks nothing.
 - Server version and API version.
 - Supported feature flags.
 - Unsupported feature reasons.
@@ -190,6 +205,9 @@ Examples of feature flags:
 - `federation`
 - `agent_card`
 - `multi_cell`
+
+In v0.0.x the `features` are reported as `{"supported": false, "reason":
+"not_implemented"}` until each subsystem ships.
 
 The `secrets`, `totp`, `password_generate`, and `runtime_injection` flags report
 whether the sealed plane — the KMS-backed credential side of Witself, distinct
@@ -390,10 +408,11 @@ Initial route groups:
 
 | Route group | Purpose |
 |---|---|
-| `/v1/version` | Server version and build metadata. |
-| `/v1/health/live` | Liveness probe. No auth, no sensitive config. |
-| `/v1/health/ready` | Readiness probe. No sensitive config. |
-| `/v1/health/startup` | Startup probe. No auth, no sensitive config. |
+| `/v1/version` | Server version and build metadata. Bare/flat object, no auth. |
+| `/livez` | Liveness probe. No auth, no sensitive config. |
+| `/readyz` | Readiness probe. No sensitive config. |
+| `/startupz` | Startup probe. No auth, no sensitive config. |
+| `/healthz` | Alias probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery, limits, and embedding-provider state. |
 | `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
@@ -446,9 +465,9 @@ follow the privacy and low-cardinality label rules in
 [observability-and-operations.md](observability-and-operations.md).
 
 Health endpoints should be served from the dedicated health listener, default
-`:8081`, even though their paths use the `/v1/health/*` route shape. The public
-API listener, default `:8080`, should not be the default target for Kubernetes
-probes.
+`:8081`, at the short `/livez`, `/readyz`, `/startupz` (plus `/healthz` alias)
+paths rather than under `/v1`. The public API listener, default `:8080`, should
+not be the default target for Kubernetes probes.
 
 Billing usage and limit endpoints should expose plan-tier usage rather than raw
 per-call billing in v0. Backends should return deterministic `rate_limited` or

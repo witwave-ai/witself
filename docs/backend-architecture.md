@@ -479,7 +479,7 @@ and colon-action subroutes using `POST` for sensitive or workflow operations.
 Bootstrap and platform endpoints include:
 
 - `/v1/version`
-- `/v1/health/live`, `/v1/health/ready`, `/v1/health/startup`
+- `/livez`, `/readyz`, `/startupz` (plus `/healthz` alias)
 - `/metrics`
 - `/v1/whoami`
 - `/v1/capabilities`
@@ -511,8 +511,8 @@ A pragmatic first backend path:
    `local-dev` embedder.
 3. Build CLI commands against the core service and local adapter.
 4. Add a minimal `witself-server serve --dev` path using the local adapter.
-5. Add `/v1/version`, `/v1/health/live`, `/v1/health/ready`,
-   `/v1/health/startup`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
+5. Add `/v1/version`, `/livez`, `/readyz`,
+   `/startupz`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
 6. Add HTTP API handlers over the same core service.
 7. Add Postgres-backed production storage with pgvector for embeddings.
 8. Wire the embedding-provider abstraction with `voyage` as default.

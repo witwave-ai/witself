@@ -185,9 +185,9 @@ Deliverables:
 - `witself-server serve --dev`.
 - `witself-server config check`.
 - `/v1/version`.
-- `/v1/health/live`.
-- `/v1/health/ready`.
-- `/v1/health/startup`.
+- `/livez`.
+- `/readyz`.
+- `/startupz`.
 - `/metrics`.
 - Separate API, health, and metrics listeners with default ports `8080`,
   `8081`, and `9090`.

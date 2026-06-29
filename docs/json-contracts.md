@@ -306,8 +306,14 @@ The token lifecycle is tracked in [token-lifecycle.md](token-lifecycle.md).
 
 Used by `ws capabilities` and `/v1/capabilities`.
 
+The HTTP `GET /v1/capabilities` response is **bare/flat**: a top-level
+`schema_version` sits alongside `backend`, `principal`, `features`, and `limits`,
+not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as the
+`data` payload of the standard envelope.)
+
 ```json
 {
+  "schema_version": "witself.v0",
   "backend": {
     "kind": "self-hosted",
     "version": "v0.1.0",
@@ -430,7 +436,12 @@ Used by `ws capabilities` and `/v1/capabilities`.
 
 Rules:
 
-- `backend.kind` values are `managed`, `self-hosted`, and `local`.
+- `backend.kind` values are `managed`, `self-hosted`, and `local`. `backend.kind`
+  is a configured value, not inferred: it comes from `WITSELF_BACKEND_KIND` and
+  defaults to `self-hosted`; `managed` is set only by Witself's managed
+  deployment, and `local` is reported by the CLI's local adapter and is never the
+  server. `kind` is advisory — clients should branch on specific feature flags,
+  and each feature is independently gated so a mislabeled kind unlocks nothing.
 - `semantic_recall` reports the active embedding provider, model, and vector
   dimensionality. `degraded: true` means the provider is unavailable or disabled
   and recall has fallen back to keyword/tag/kind/time ranking (see
@@ -468,7 +479,9 @@ Rules:
   [deployment-cells.md](deployment-cells.md). A deployment that does not offer
   one of these reports `supported: false` with a stable `reason`.
 - `features` values must include at least `supported`.
-- Unsupported features should include a stable `reason` when known.
+- Unsupported features should include a stable `reason` when known. In v0.0.x the
+  `features` are reported as `{"supported": false, "reason": "not_implemented"}`
+  until each subsystem ships.
 - Capability responses must not include memory content, fact values, message
   bodies/payloads, embedding vectors, raw tokens, provider secrets, payment
   credentials, wallet credentials, or private infrastructure credentials.

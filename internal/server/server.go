@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -105,7 +106,59 @@ func apiMux() http.Handler {
 		fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler)
 	return mux
+}
+
+// backendInfo, feature, and capabilities describe the bare /v1/capabilities
+// document. Like /v1/version it is flat — schema_version at the top level, no
+// ok/data envelope — because the meta/discovery endpoints stay bare while the
+// domain API uses the standard envelope. The feature map is static while
+// subsystems are unbuilt and becomes config-driven as they land. backend.kind
+// is a configured value (WITSELF_BACKEND_KIND), never something the server
+// infers, and it is advisory: each feature is independently gated, so a
+// mislabeled kind unlocks nothing — clients should branch on feature flags.
+type backendInfo struct {
+	Kind       string `json:"kind"`
+	Version    string `json:"version"`
+	APIVersion string `json:"api_version"`
+}
+
+type feature struct {
+	Supported bool   `json:"supported"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type capabilities struct {
+	SchemaVersion string             `json:"schema_version"`
+	Backend       backendInfo        `json:"backend"`
+	Principal     any                `json:"principal"` // null until token auth exists
+	Features      map[string]feature `json:"features"`
+	Limits        map[string]any     `json:"limits"`
+}
+
+func capabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
+	notImpl := feature{Reason: "not_implemented"}
+	caps := capabilities{
+		SchemaVersion: "witself.v0",
+		Backend: backendInfo{
+			Kind:       envOr("WITSELF_BACKEND_KIND", "self-hosted"),
+			Version:    version.Version,
+			APIVersion: "v1",
+		},
+		Features: map[string]feature{
+			"memories":        notImpl,
+			"facts":           notImpl,
+			"semantic_recall": notImpl,
+			"policies":        notImpl,
+			"groups":          notImpl,
+			"messaging":       notImpl,
+			"audit":           notImpl,
+		},
+		Limits: map[string]any{},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(caps)
 }
 
 func healthMux() http.Handler {

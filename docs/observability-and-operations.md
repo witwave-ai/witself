@@ -14,10 +14,10 @@ The initial operational surface should include:
 - A public API listener, default `:8080`.
 - A separate health listener, default `:8081`.
 - A separate metrics listener, default `:9090`.
-- `GET /v1/health/live` on the health listener for Kubernetes liveness probes.
-- `GET /v1/health/ready` on the health listener for Kubernetes readiness
+- `GET /livez` on the health listener for Kubernetes liveness probes.
+- `GET /readyz` on the health listener for Kubernetes readiness
   probes.
-- `GET /v1/health/startup` on the health listener for Kubernetes startup
+- `GET /startupz` on the health listener for Kubernetes startup
   probes.
 - `GET /metrics` on the metrics listener for Prometheus scrape output.
 - Structured JSON logs with request IDs and strict redaction.
@@ -80,9 +80,10 @@ Probe semantics:
 
 | Endpoint | Purpose | Dependency checks |
 |---|---|---|
-| `/v1/health/live` | Process is alive and should not be restarted. | Minimal process-local checks only. |
-| `/v1/health/ready` | Server can safely receive traffic. | Storage, migrations, KMS reachability when the sealed plane is enabled, and read-only maintenance state. |
-| `/v1/health/startup` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
+| `/livez` | Process is alive and should not be restarted. | Minimal process-local checks only. |
+| `/readyz` | Server can safely receive traffic. | Storage, migrations, KMS reachability when the sealed plane is enabled, and read-only maintenance state. |
+| `/startupz` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
+| `/healthz` | Alias for the liveness probe. | Minimal process-local checks only. |
 
 Liveness should be conservative. A transient database, object-store,
 embedding-provider, or KMS failure should normally make readiness fail, not
@@ -422,7 +423,7 @@ metrics:
 probes:
   liveness:
     enabled: true
-    path: /v1/health/live
+    path: /livez
     port: health
     initialDelaySeconds: 10
     periodSeconds: 10
@@ -430,7 +431,7 @@ probes:
     failureThreshold: 3
   readiness:
     enabled: true
-    path: /v1/health/ready
+    path: /readyz
     port: health
     initialDelaySeconds: 5
     periodSeconds: 10
@@ -438,7 +439,7 @@ probes:
     failureThreshold: 3
   startup:
     enabled: true
-    path: /v1/health/startup
+    path: /startupz
     port: health
     periodSeconds: 5
     timeoutSeconds: 2

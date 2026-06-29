@@ -369,7 +369,7 @@ metrics:
 probes:
   liveness:
     enabled: true
-    path: /v1/health/live
+    path: /livez
     port: health
     initialDelaySeconds: 10
     periodSeconds: 10
@@ -377,7 +377,7 @@ probes:
     failureThreshold: 3
   readiness:
     enabled: true
-    path: /v1/health/ready
+    path: /readyz
     port: health
     initialDelaySeconds: 5
     periodSeconds: 10
@@ -385,7 +385,7 @@ probes:
     failureThreshold: 3
   startup:
     enabled: true
-    path: /v1/health/startup
+    path: /startupz
     port: health
     periodSeconds: 5
     timeoutSeconds: 2

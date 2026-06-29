@@ -2005,7 +2005,10 @@ route base is `/v1`.
 API contract requirements:
 
 - Use the shared JSON response envelope `{schema_version, ok, data, warnings}` and
-  the error-code-to-HTTP-to-exit-code table.
+  the error-code-to-HTTP-to-exit-code table. The meta/discovery endpoints
+  (`/v1/version`, `/v1/capabilities`, and the health probes) are the exception:
+  they return a bare/flat object with a top-level `schema_version` and no
+  `ok`/`data` wrapper.
 - Authenticate remote calls with bearer tokens loaded by the CLI or MCP adapter.
 - Expose `/v1/capabilities` for backend feature discovery, including the active
   embedding provider/model and, when the sealed plane is enabled, the KMS provider

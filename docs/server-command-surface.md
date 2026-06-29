@@ -302,7 +302,7 @@ managers.
 
 ```sh
 witself-server healthcheck --config /etc/witself/server.toml
-witself-server healthcheck --url http://127.0.0.1:8081/v1/health/ready
+witself-server healthcheck --url http://127.0.0.1:8081/readyz
 ```
 
 Flags:

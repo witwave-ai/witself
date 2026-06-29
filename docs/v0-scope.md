@@ -165,8 +165,8 @@ Core backend capabilities:
 
 - Shared Go core below CLI, MCP, API, and local development adapters.
 - `witself-server serve --dev`.
-- `/v1/version`, `/v1/health/live`, `/v1/health/ready`,
-  `/v1/health/startup`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
+- `/v1/version`, `/livez`, `/readyz`,
+  `/startupz`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
 - Initial `/v1/realms`, `/v1/agents`, `/v1/tokens`, `/v1/memories`,
   `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/messages`, and `/v1/audit`
   route groups.
