@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false # no go.sum yet (zero deps); re-enable when deps land
 
       - uses: goreleaser/goreleaser-action@v6
         with:
