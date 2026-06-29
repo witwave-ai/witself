@@ -52,7 +52,7 @@ func TestWhoamiAuth(t *testing.T) {
 		}
 		return "", "", false, nil
 	}
-	srv := httptest.NewServer(apiMux("", nil, auth))
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth}))
 	defer srv.Close()
 
 	if code := getStatus(t, srv.URL+"/v1/whoami"); code != http.StatusUnauthorized {
@@ -97,6 +97,65 @@ func TestWhoamiAuth(t *testing.T) {
 	}
 }
 
+func TestRealmsCreateAndList(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	var created []Realm
+	create := func(_ context.Context, _, name string) (Realm, error) {
+		r := Realm{ID: "realm_" + name, Name: name}
+		created = append(created, r)
+		return r, nil
+	}
+	list := func(_ context.Context, _ string) ([]Realm, error) { return created, nil }
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateRealm: create, ListRealms: list}))
+	defer srv.Close()
+
+	post := func(tok, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/realms", strings.NewReader(body))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := post("", `{"name":"prod"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("create without token = %d, want 401", resp.StatusCode)
+	}
+
+	resp = post("good", `{"name":"prod"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("create = %d, want 201", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/realms", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	lresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lresp.Body.Close()
+	var out struct {
+		Realms []Realm `json:"realms"`
+	}
+	if err := json.NewDecoder(lresp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Realms) != 1 || out.Realms[0].Name != "prod" {
+		t.Errorf("realms = %+v", out.Realms)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -122,7 +181,7 @@ func TestMetricsExposesUp(t *testing.T) {
 }
 
 func TestVersionEndpointIsBare(t *testing.T) {
-	srv := httptest.NewServer(apiMux("", nil, nil))
+	srv := httptest.NewServer(apiMux(Config{}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/version")
 	if err != nil {
@@ -146,7 +205,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 
 func TestCapabilitiesShape(t *testing.T) {
 	t.Setenv("WITSELF_BACKEND_KIND", "self-hosted")
-	srv := httptest.NewServer(apiMux("", nil, nil))
+	srv := httptest.NewServer(apiMux(Config{}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {
@@ -172,7 +231,7 @@ func TestCapabilitiesShape(t *testing.T) {
 }
 
 func TestCapabilitiesIncludesAccount(t *testing.T) {
-	srv := httptest.NewServer(apiMux("acc_test123", nil, nil))
+	srv := httptest.NewServer(apiMux(Config{AccountID: "acc_test123"}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {

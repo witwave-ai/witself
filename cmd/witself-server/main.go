@@ -87,6 +87,27 @@ func serve() int {
 			return ot, oid, true, nil
 		}
 		cfg.Authenticate = st.AuthenticateOperator
+		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (server.Realm, error) {
+			r, err := st.CreateRealm(ctx, accountID, name)
+			if errors.Is(err, store.ErrRealmExists) {
+				return server.Realm{}, server.ErrConflict
+			}
+			if err != nil {
+				return server.Realm{}, err
+			}
+			return server.Realm{ID: r.ID, Name: r.Name}, nil
+		}
+		cfg.ListRealms = func(ctx context.Context, accountID string) ([]server.Realm, error) {
+			rs, err := st.ListRealms(ctx, accountID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]server.Realm, len(rs))
+			for i, r := range rs {
+				out[i] = server.Realm{ID: r.ID, Name: r.Name}
+			}
+			return out, nil
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {

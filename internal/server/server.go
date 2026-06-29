@@ -40,6 +40,11 @@ type Config struct {
 	// Authenticate, when set, enables bearer-token auth (e.g. GET /v1/whoami):
 	// it resolves an operator token to its principal.
 	Authenticate AuthFunc
+
+	// CreateRealm / ListRealms, when set (with Authenticate), enable the
+	// operator-authenticated /v1/realms endpoints, scoped to the caller's account.
+	CreateRealm func(ctx context.Context, accountID, name string) (Realm, error)
+	ListRealms  func(ctx context.Context, accountID string) ([]Realm, error)
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -50,6 +55,16 @@ type LoginFunc func(ctx context.Context, bootstrapToken string) (operatorToken, 
 // AuthFunc resolves a bearer token to its operator principal. ok is false when
 // the token is missing/invalid (-> 401); a non-nil error is a server fault.
 type AuthFunc func(ctx context.Context, token string) (operatorID, accountID string, ok bool, err error)
+
+// Realm is the API view of a realm.
+type Realm struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ErrConflict signals a uniqueness conflict (-> 409). The wiring layer returns
+// it (e.g. for a duplicate realm name) without coupling the server to the store.
+var ErrConflict = errors.New("conflict")
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
@@ -75,7 +90,7 @@ func Run(ctx context.Context, cfg Config) error {
 		name, addr string
 		handler    http.Handler
 	}{
-		{"api", cfg.APIAddr, apiMux(cfg.AccountID, cfg.Login, cfg.Authenticate)},
+		{"api", cfg.APIAddr, apiMux(cfg)},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMux()},
 	}
@@ -125,19 +140,25 @@ func Run(ctx context.Context, cfg Config) error {
 	return runErr
 }
 
-func apiMux(accountID string, login LoginFunc, auth AuthFunc) http.Handler {
+func apiMux(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(accountID))
-	if login != nil {
-		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(login))
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID))
+	if cfg.Login != nil {
+		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
-	if auth != nil {
-		mux.HandleFunc("GET /v1/whoami", whoamiHandler(auth))
+	if cfg.Authenticate != nil {
+		mux.HandleFunc("GET /v1/whoami", whoamiHandler(cfg.Authenticate))
+		if cfg.CreateRealm != nil {
+			mux.HandleFunc("POST /v1/realms", createRealmHandler(cfg.Authenticate, cfg.CreateRealm))
+		}
+		if cfg.ListRealms != nil {
+			mux.HandleFunc("GET /v1/realms", listRealmsHandler(cfg.Authenticate, cfg.ListRealms))
+		}
 	}
 	return mux
 }
@@ -244,8 +265,14 @@ func capabilitiesHandler(accountID string) http.HandlerFunc {
 	}
 }
 
-// whoamiHandler returns the authenticated operator principal, or 401.
-func whoamiHandler(auth AuthFunc) http.HandlerFunc {
+type principal struct {
+	operatorID string
+	accountID  string
+}
+
+// requireOperator authenticates the bearer token and passes the principal to h,
+// or writes 401 (missing/invalid) / 500 (server fault).
+func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok {
@@ -261,15 +288,7 @@ func whoamiHandler(auth AuthFunc) http.HandlerFunc {
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"schema_version": "witself.v0",
-			"principal": map[string]string{
-				"kind":        "operator",
-				"operator_id": operatorID,
-				"account_id":  accountID,
-			},
-		})
+		h(w, r, principal{operatorID: operatorID, accountID: accountID})
 	}
 }
 
@@ -280,6 +299,60 @@ func bearerToken(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(h[len(prefix):]), true
+}
+
+// whoamiHandler returns the authenticated operator principal, or 401.
+func whoamiHandler(auth AuthFunc) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, _ *http.Request, p principal) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"principal": map[string]string{
+				"kind":        "operator",
+				"operator_id": p.operatorID,
+				"account_id":  p.accountID,
+			},
+		})
+	})
+}
+
+func createRealmHandler(auth AuthFunc, create func(ctx context.Context, accountID, name string) (Realm, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing name")
+			return
+		}
+		realm, err := create(r.Context(), p.accountID, req.Name)
+		if errors.Is(err, ErrConflict) {
+			writeJSONError(w, http.StatusConflict, "realm already exists")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not create realm")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "realm": realm})
+	})
+}
+
+func listRealmsHandler(auth AuthFunc, list func(ctx context.Context, accountID string) ([]Realm, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		realms, err := list(r.Context(), p.accountID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not list realms")
+			return
+		}
+		if realms == nil {
+			realms = []Realm{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "realms": realms})
+	})
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {
