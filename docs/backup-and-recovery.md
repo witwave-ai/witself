@@ -440,6 +440,46 @@ open plane remains recoverable from Postgres. Production self-host support is
 paid or contracted once backup/restore, migrations, upgrade, observability, and
 disaster recovery are real. See [self-host-support.md](self-host-support.md).
 
+## Tenant Migration Between Cells
+
+Witself deploys as a fleet of independent cells under a thin global control
+plane; a tenant has exactly one home cell at a time. Moving a realm/account from
+cell A to cell B is a deliberate, bounded operation — not continuous
+replication — and it **reuses the backup/export posture on this page unchanged**
+rather than adding a parallel data-movement path. See
+[deployment-cells.md](deployment-cells.md) for the cell topology and the
+control-plane repoint that completes a move.
+
+Migration is dual-plane, matching the two postures above:
+
+- **Open plane (memories + facts + messaging)** moves via the first-class
+  export/import described in [Identity Export And Import](#identity-export-and-import):
+  `witself export` from cell A, `witself import` into cell B. Identity data
+  travels in clear by design, so no KMS custody is involved. Embedding vectors
+  follow the [Embedding Vectors](#embedding-vectors) rule — recomputed in the
+  destination cell, or moved directly when the destination uses the same
+  embedding provider/model and dimensionality.
+- **Sealed plane (secrets + TOTP)** is KMS-rooted per cell/cloud, so it cannot be
+  carried as a plaintext export. Migration performs an audited **KMS re-wrap**:
+  the data keys are unwrapped under cell A's CMK and re-encrypted under cell B's
+  CMK (decrypt-at-source / re-encrypt-at-dest), exactly the
+  [Sealed-Plane Secret Backup](#sealed-plane-secret-backup) envelope rebound to a
+  new key identity. Secret *values* are never exported in plaintext and the
+  reveal ceremony is never exercised; the move re-lands ciphertext under the
+  destination CMK. See [key-hierarchy.md](key-hierarchy.md) and
+  [storage.md](storage.md).
+
+After both planes land in cell B, the control-plane realm/account -> home-cell
+mapping is repointed and clients re-resolve to cell B. Migration emits
+`tenant.migration_started`, `tenant.migration_completed`, and
+`tenant.migration_failed` (see [audit-retention.md](audit-retention.md)).
+
+**Open decisions.** The migration cutover mechanism is not yet fixed: a brief
+read-only freeze on cell A while the final delta moves, versus dual-write +
+reconcile across both cells during the transition. The
+placement/migration unit (account vs realm) is likewise open. Both are tracked
+in [deployment-cells.md](deployment-cells.md) and are not resolved here.
+
 ## Restore Checklist
 
 A managed or self-hosted restore should proceed in this order:
@@ -482,6 +522,7 @@ A managed or self-hosted restore should proceed in this order:
 - [requirements.md](requirements.md)
 - [data-model.md](data-model.md)
 - [storage.md](storage.md)
+- [deployment-cells.md](deployment-cells.md)
 - [memory-model.md](memory-model.md)
 - [facts-model.md](facts-model.md)
 - [secret-model.md](secret-model.md)

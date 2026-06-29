@@ -53,6 +53,19 @@ KMS; the sealed plane re-introduces KMS as a required dependency when enabled.
 `pgvector` is a hard gate for the open plane; the embedding provider is
 degradable (see [storage.md](storage.md)).
 
+**This schema is the per-cell schema.** Under the go-forward fleet of
+independent cells, each cell runs one instance of this schema and is the single
+writer and source of truth for the tenants placed on it. The **realm/account ->
+home-cell routing mapping lives in the thin global control plane, NOT in any
+cell's Postgres schema** below. The control plane holds only routing metadata
+(realm/account -> home cell + endpoint + realm signing key) and no tenant data —
+no memories, facts, secrets, messages, audit, or usage rows ever live in it. The
+`realm_handle` and realm signing-key columns on [`realms`](#realms) are the
+per-cell copy of a realm's federation identity; the control plane's separate
+directory is what routes a client (or the relay) to the realm's home cell. See
+[deployment-cells.md](deployment-cells.md) and
+[agent-collaboration.md](agent-collaboration.md).
+
 ## Scope And Conventions
 
 The schema covers exactly the storage responsibilities enumerated in
@@ -119,7 +132,8 @@ generate stable local ids.
 | `pol_` | cross-agent access policy | open | `policies` |
 | `grp_` | security group | open | `security_groups` |
 | `msg_` | message | open | `messages` |
-| `thr_` | message thread | open | (`messages.thread_id`) |
+| `thr_` | message thread / cross-realm conversation | open | (`messages.thread_id`); `conversations` |
+| `fpr_` | federation peer (allow-listed realm handle + key) | spine | `federation_peers` |
 | `sec_` | secret | sealed | `secrets` |
 | `fld_` | secret field | sealed | `secret_fields` |
 | `grt_` | secret grant | sealed | `secret_grants` |
@@ -305,16 +319,34 @@ rate limits attach to the account and roll up by realm; the per-realm KEK
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | tenant scope |
 | `name` | `text NOT NULL` | |
 | `description` | `text NULL` | |
+| `realm_handle` | `text NULL` | the realm's **federation identity** (the unit of trust; published in the realm card); globally unique when set. NULL for a realm not yet federated. Maps to the card `realm_handle` (see [agent-collaboration.md](agent-collaboration.md)) |
+| `signing_public_key` | `text NULL` | the realm signing **public key** / JWKS (or a JWKS ref) published in the realm card and used by peers to verify cross-realm envelopes. Public material only — the **private signing key is sealed-plane / KMS-custodied and is NEVER a column here** |
+| `signing_key_version` | `bigint NULL` | monotonic signing-key generation, bumped on rotation; lets peers select the verifying key during a rotation overlap |
+| `card_expires_at` | `timestamptz NULL` | TTL of the currently published realm card (`ttl` / `expires_at`); cards are re-fetched on expiry |
 | `row_version` | `bigint NOT NULL DEFAULT 1` | |
 | `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
 
+The signing **private** key lives where realm key material lives (KMS-custodied
+sealed plane; see [key-hierarchy.md](key-hierarchy.md)), never in `realms`. The
+`realm_handle` + `signing_public_key` here are the **per-cell copy** of the realm
+card's identity; the authoritative *routing* directory (handle -> home cell +
+endpoint + key) is the separate global control plane, not this table (see the
+[control-plane note above](#two-planes-one-schema) and
+[deployment-cells.md](deployment-cells.md)). Cross-realm features are post-v0; in
+a realm-local-only deployment these columns are simply NULL.
+
 Constraints: FK `account_id`; index `(account_id)`. Name uniqueness is a partial
-index:
+index; `realm_handle` is globally unique among live, federated realms:
 
 ```sql
 CREATE UNIQUE INDEX ux_realms_account_name
   ON realms (account_id, name)
   WHERE deleted_at IS NULL;
+
+-- federation handle is globally unique when present (live rows only)
+CREATE UNIQUE INDEX ux_realms_handle
+  ON realms (realm_handle)
+  WHERE realm_handle IS NOT NULL AND deleted_at IS NULL;
 ```
 
 ### `realm_members`
@@ -671,13 +703,38 @@ are untrusted on receipt and never authorize a write. Semantics in
 | `kind` | `text NOT NULL DEFAULT 'note'` | open label (`note`/`request`/`reply`/`event`/`handoff`/…) |
 | `body` | `text NOT NULL` | free-form text (<= 64 KiB); ordinary column; untrusted on receipt |
 | `payload` | `jsonb NULL` | optional small structured object (<= 16 KiB serialized); untrusted |
-| `thread_id` | `text NULL` | `thr_` prefix; orders a conversation per recipient/thread |
+| `thread_id` | `text NULL` | `thr_` prefix; orders a conversation per recipient/thread; promoted to `conversation_id` for cross-realm (see [`conversations`](#conversations-cross-realm-post-v0)) |
 | `created_at` | `timestamptz NOT NULL` | server-assigned send time |
 
-Constraints: subject/target discriminator `CHECK`; FKs all id columns. Indexes
-`(realm_id, thread_id, created_at)` for per-thread ordering and on the delivery
-join. `messages` is append-only at the body level (no edit/recall in v0); there
-is no `deleted_at` on the message body, only on deliveries per retention.
+**Cross-realm envelope columns (post-v0; additive, NULL for realm-local
+messages).** When `to`/`from` carry an optional `realm`, the message rides the
+signed cross-realm envelope (see [agent-collaboration.md](agent-collaboration.md));
+these columns capture the on-the-wire envelope. They are absent/NULL for an
+in-realm message, which is unchanged. `from` is **still token-derived** — the
+`from_realm_handle` is the sender's own realm handle, never caller-supplied:
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `from_realm_handle` | `text NULL` | sending realm's `realm_handle` (server-stamped from the authenticated realm, never input); NULL = local sender |
+| `to_realm_handle` | `text NULL` | recipient realm's `realm_handle`; NULL = local recipient. The relay routes by this handle to the recipient's home cell |
+| `conversation_id` | `text NULL` | `thr_` prefix (reuses the thread prefix); the first-class cross-realm conversation/task this envelope belongs to. FK -> [`conversations(id)`](#conversations-cross-realm-post-v0) |
+| `hop_count` | `smallint NOT NULL DEFAULT 0` | relay hops so far; each hop increments it |
+| `max_hops` | `smallint NOT NULL DEFAULT 8` | hop ceiling; over `max_hops` the message is dropped + audited |
+| `sequence` | `bigint NULL` | per-conversation monotonic ordering of the sender's envelopes |
+| `nonce` | `text NULL` | per-envelope unique nonce; dedup is on `(id, nonce)` (extends the at-least-once `msg_`-id dedup) |
+| `expires_at` | `timestamptz NULL` | envelope TTL (default 1h, max 24h); an expired envelope is NOT delivered |
+| `signature` | `text NULL` | the sending realm's **JWS over the canonicalized envelope**; verified against the peer's published `signing_public_key` before trust |
+
+Constraints: subject/target discriminator `CHECK`; FKs all id columns; FK
+`conversation_id` -> `conversations(id)` (nullable, constrains cross-realm rows
+only). Indexes `(realm_id, thread_id, created_at)` for per-thread ordering and on
+the delivery join; a `(realm_id, conversation_id, sequence)` index orders a
+cross-realm conversation; cross-realm dedup is enforced on `(id, nonce)`.
+`messages` is append-only at the body level (no edit/recall in v0); there is no
+`deleted_at` on the message body, only on deliveries per retention. The signed
+envelope is verified, and hop/TTL/budget governors applied, **before** a row is
+written and a delivery is created; the relay is blind (it cannot read `body` /
+`payload` or forge `signature`).
 
 ### `message_deliveries`
 
@@ -713,6 +770,43 @@ CREATE INDEX ix_message_deliveries_mailbox
 `message list` reads metadata only (no state change); `read` transitions
 `unread → read`; `ack` transitions to `acked`. Bodies/payloads never appear in
 audit, logs, or metrics.
+
+### `conversations` (cross-realm, post-v0)
+
+Purpose: the first-class cross-realm conversation/task — the realm-local
+`thread_id` **promoted** to a durable resource carrying an A2A-style task state
+machine and the per-conversation loop/budget governors. Maps to the
+Conversation/task JSON shape in [json-contracts.md](json-contracts.md); semantics
+in [agent-collaboration.md](agent-collaboration.md). The **durable mailbox in the
+home cell remains the source of truth** for conversation state; this row is the
+queryable projection of it. Reuses the `thr_` prefix so a promoted thread keeps
+its id. Realm-local-only deployments need not populate it.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `thr_` prefix (the promoted `conversation_id`) |
+| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
+| `realm_id` | `text NOT NULL` FK -> `realms(id)` | the local realm's view; the peer keeps its own row |
+| `state` | `text NOT NULL DEFAULT 'submitted'` | `submitted` \| `working` \| `input_required` \| `auth_required` \| `completed` \| `failed` \| `canceled` |
+| `participants` | `jsonb NOT NULL DEFAULT '[]'` | the participating realm-qualified agents (`{realm_handle, agent}`); local participants resolve to `agents` |
+| `peer_id` | `text NULL` FK -> `federation_peers(id)` | the allow-listed peer for a cross-realm conversation; NULL = realm-local |
+| `auto_reply` | `boolean NOT NULL DEFAULT false` | directed (human-gated, default) vs autonomous; enforced on the wire |
+| `turn_budget` | `integer NOT NULL DEFAULT 24` | per-conversation turn ceiling |
+| `turns_used` | `integer NOT NULL DEFAULT 0` | turns consumed; exhaustion suspends the conversation (`budget.exhausted`) |
+| `cost_budget` | `bigint NULL` | optional per-conversation cost ceiling (metered units) |
+| `cost_used` | `bigint NOT NULL DEFAULT 0` | cost consumed so far |
+| `expires_at` | `timestamptz NULL` | optional conversation-level TTL |
+| `row_version` | `bigint NOT NULL DEFAULT 1` | optimistic lock |
+| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
+
+Constraints: FKs `account_id`, `realm_id`, `peer_id`. Index `(realm_id, state,
+updated_at)` for listing conversations by state. State transitions emit the
+`conversation.*` audit events and budget exhaustion emits `budget.exhausted` /
+`loop.suspended`; the canonical names land in
+[audit-retention.md](audit-retention.md) on the contract pass. `remaining_turns`
+in the JSON shape is derived (`turn_budget - turns_used`), not a stored column.
+The state machine and budgets are authoritative on the home cell; any live stream
+is a latency accelerator only.
 
 ## Sealed-Plane Tables
 
@@ -1039,6 +1133,48 @@ usage sums inline ciphertext plus attachment `byte_size`.
 
 ## Spine Operational Tables
 
+### `federation_peers` (cross-realm, post-v0)
+
+Purpose: the realm's **deny-by-default federation allow-list** — which peer realm
+handles (and their pinned signing keys) this realm accepts cross-realm messages
+from. The cross-realm analog of the open-plane [policy](access-policy.md)
+allow-list: an inbound cross-realm message carries **no authority** and is
+accepted only if its sending handle is allow-listed here AND the message clears
+the receiving realm's standing policy. Managed via the `federation:manage` scope
+(realm:admin; see [authorization-and-roles.md](authorization-and-roles.md)).
+Semantics in [agent-collaboration.md](agent-collaboration.md). Realm-local-only
+deployments leave this table empty (no peer is trusted by default).
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `fpr_` prefix |
+| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
+| `realm_id` | `text NOT NULL` FK -> `realms(id)` | the local realm whose allow-list this is |
+| `peer_realm_handle` | `text NOT NULL` | the allow-listed peer realm's `realm_handle` (the unit of trust) |
+| `peer_signing_key` | `text NULL` | pinned peer signing **public key** / JWKS (or ref) used to verify the peer's envelopes; NULL = resolve from the peer's published card on each verify |
+| `peer_key_version` | `bigint NULL` | pinned peer signing-key generation, for rotation overlap |
+| `consent_state` | `text NOT NULL DEFAULT 'allowed'` | `allowed` \| `revoked`; per-conversation consent is layered on top (see `conversations`) |
+| `direction` | `text NOT NULL DEFAULT 'both'` | `inbound` \| `outbound` \| `both` — which edge(s) this peer is trusted on |
+| `added_by_operator_id` | `text NULL` FK -> `operators(id)` | who allow-listed the peer (audit) |
+| `row_version` | `bigint NOT NULL DEFAULT 1` | optimistic lock |
+| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
+
+Constraints: FKs `account_id`, `realm_id`, `added_by_operator_id`. One live entry
+per `(realm, peer handle)`:
+
+```sql
+CREATE UNIQUE INDEX ux_federation_peers_realm_peer
+  ON federation_peers (realm_id, peer_realm_handle)
+  WHERE deleted_at IS NULL;
+```
+
+Allow-list changes emit `federation.peer_allowed` / `federation.peer_denied` (and
+`federation.consent_accepted` for per-conversation consent); the canonical names
+land in [audit-retention.md](audit-retention.md) on the contract pass. Trust is
+the **handle + pinned key**, never the routing endpoint — compromising routing
+must not let an attacker into the allow-list (see
+[threat-model.md](threat-model.md)).
+
 ### `audit_events`
 
 Purpose: the platform audit trail across both planes. Append-only; emitted by the
@@ -1173,8 +1309,9 @@ by retention.
 Every mutable resource EXCEPT `agent_tokens` carries a `row_version bigint NOT
 NULL DEFAULT 1` column (`accounts`, `operators`, `realms`, `realm_members`,
 `agents`, `memories`, `facts`, `policies`, `security_groups`, `group_members`,
-`message_deliveries`, `secrets`, `secret_fields`, `secret_grants`,
-`totp_enrollments`, `realm_keys`, `attachments`, `usage_counters`).
+`message_deliveries`, `conversations`, `federation_peers`, `secrets`,
+`secret_fields`, `secret_grants`, `totp_enrollments`, `realm_keys`,
+`attachments`, `usage_counters`).
 `agent_tokens` is excluded because token mutations use create/rotate/revoke
 semantics (`revoked_at`), not `If-Match`/`row_version`. `memory_versions` /
 `fact_versions`, `messages`, and `audit_events` are append-only.
@@ -1321,6 +1458,15 @@ Owner / engineering sign-off items.
   windowed rows per `(realm, dimension, window_start)` for rate dimensions.
 - **Native enum vs CHECK.** Whether to keep `text` + `CHECK` (cheaper
   expand/contract) or adopt native Postgres enums for the stable enumerations.
+- **Cross-realm peer-key storage.** Whether `federation_peers` **pins** a peer's
+  `peer_signing_key` (explicit rotation handling, key-continuity guarantees) or
+  always resolves the key from the peer's published card at verify time (simpler,
+  no local rotation tracking) — the columns above support either. Per
+  [agent-collaboration.md](agent-collaboration.md).
+- **Cross-realm conversation projection.** Whether `conversations` is a
+  materialized row updated on each transition (queryable, listable by state) or a
+  pure projection reconstructed from the durable mailbox on read (the mailbox is
+  authoritative either way). Per [agent-collaboration.md](agent-collaboration.md).
 
 ## Related Docs
 
@@ -1329,6 +1475,8 @@ Owner / engineering sign-off items.
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [context-hydration.md](context-hydration.md)
 - [encryption-model.md](encryption-model.md)
 - [key-hierarchy.md](key-hierarchy.md)

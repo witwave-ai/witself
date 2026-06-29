@@ -88,6 +88,39 @@ is enabled:
   values and TOTP seeds unrecoverable, while leaving the open plane intact. See
   [backup-and-recovery.md](backup-and-recovery.md).
 
+Federation prerequisites — required only when a self-hosted realm participates
+in cross-realm collaboration (a post-v0 epic; an isolated single-realm deployment
+skips this):
+
+- A stable public **FQDN and TLS certificate** for the realm endpoint. A
+  self-hosted realm is reached by handle exactly like a managed one; peers and the
+  blind relay route to that endpoint after resolving the handle.
+- A **realm signing key** (the realm's published JWKS). Cross-realm envelopes are
+  signed with this key and verified by peers; signing is mandatory, and an unsigned
+  realm card is rejected.
+- A **signed, well-known realm/agent card** served at
+  `GET /.well-known/witself-card.json`, carrying the realm handle, advertised
+  skills, endpoint, accepted auth, the signing public key, delivery modes, and a
+  TTL. The card is a JWS over canonicalized JSON and is re-fetched on expiry.
+- Registration of the FQDN + signing key in the shared global directory so the
+  realm is resolvable to peers and the relay, and a documented **key-rotation and
+  revocation** posture so a compromised realm key stops being honored promptly
+  rather than at the next card TTL. See [agent-collaboration.md](agent-collaboration.md)
+  and [deployment-cells.md](deployment-cells.md).
+
+Deployment-cell prerequisites — required only when a self-hosted deployment runs
+as more than one cell (whether a self-host is always a single cell or may itself be
+a fleet is an Open decision in [deployment-cells.md](deployment-cells.md)):
+
+- Per-cell operational ownership: each cell is one complete, isolated Witself stack
+  (`witself-server`, Postgres + pgvector, sealed-plane KMS rooted in that cell, and
+  blob storage) with its own backup, recovery, and KMS. A cell holds the full data
+  and key material for its own tenants and depends on nothing in another cell.
+- Tenant migration between cells, when used, leans on the first-class export/import
+  for the open plane and a KMS **re-wrap** (decrypt-at-source / re-encrypt-at-dest)
+  for the sealed plane, both audited end to end. See
+  [backup-and-recovery.md](backup-and-recovery.md).
+
 Data-at-rest protection for the open plane relies on ordinary RDS/disk
 encryption; KMS is not a dependency for an open-plane-only deployment. The
 sealed plane, when enabled, makes KMS a hard dependency rather than an optional
@@ -124,6 +157,15 @@ Self-hosted operators remain responsible for:
   KMS provider configuration and the `WITSELF_KMS_KEY_ID` reference).
 - Policy, security-group, and messaging configuration appropriate to their
   deployment (see [Identity Configuration Guidance](#identity-configuration-guidance)).
+- **Federation (cross-realm, post-v0)**: the realm FQDN and TLS certificate, the
+  realm signing key and its rotation/revocation, the published signed realm card,
+  and the deny-by-default federation allow-list of accepted peer realm handles and
+  keys. Required only when the realm participates in cross-realm collaboration. See
+  [agent-collaboration.md](agent-collaboration.md).
+- **Per-cell operations (multi-cell self-host)**: when a deployment runs more than
+  one cell, the operator owns each cell as an isolated stack with its own Postgres,
+  KMS, blob storage, and backup, plus the audited export/import + KMS re-wrap that a
+  tenant migration between cells uses. See [deployment-cells.md](deployment-cells.md).
 - Payment, billing, and support integrations they choose to wire themselves.
 
 ## Identity Configuration Guidance
@@ -255,6 +297,14 @@ operator configures equivalents:
 - Managed embedding-provider provisioning and quota.
 - Internal Witself staff admin workflows.
 
+Account on self-host: a self-hosted deployment still has an account as the
+top-level owner of its realms, but it is a single implicit deployment root with
+managed billing, hosted payment, and plan enforcement capability-gated off. The
+account is the unit usage aggregates to (and, when a self-host runs as a fleet of
+independent cells, the unit cross-cell usage would aggregate to), but no managed
+billing or charging runs against it; operators wire any billing they want
+themselves. See [deployment-cells.md](deployment-cells.md).
+
 The CLI should surface unavailable self-hosted features through
 `witself capabilities` and deterministic `unsupported_operation` errors. The
 capability contract also reports the active embedding provider, model, and vector
@@ -264,6 +314,8 @@ running an operation.
 ## Related Docs
 
 - [self-hosting.md](self-hosting.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [governance-and-support.md](governance-and-support.md)
 - [requirements.md](requirements.md)
 - [helm-chart.md](helm-chart.md)

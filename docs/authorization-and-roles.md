@@ -127,6 +127,7 @@ verbs ([access-policy.md](access-policy.md)). Conversely `memory:read-others` /
 | `billing:manage` | Mutate billing/subscription/payment-method/refund. Requires audit reason + confirmation. |
 | `support:read` | Read support tickets. |
 | `support:manage` | Open/comment/close support tickets and support-sensitive actions (redact secret material by default). |
+| `federation:manage` | Manage the realm's cross-realm **federation allow-list** / trust registry (which peer realm handles + signing keys this realm accepts) and **publish/rotate the signed realm card** served at `/.well-known/witself-card.json`. Operator scope; not in the default agent bundle. Cross-realm SEND is unaffected — it still uses `message:send` gated by the federation allow-list + per-conversation consent (see [agent-collaboration.md](agent-collaboration.md)). |
 | `realm:admin` | Realm-wide administration: realm-wide inventory (`--all-agents`), cross-agent ops, agent/token lifecycle within the realm, realm rename/archive/delete, and (combined with `account:manage`) cross-realm administration. Operator override for the open plane ([access-policy.md](access-policy.md) Operator Override) and the elevated realm role across BOTH planes. Also the literal `realm_members.role` value for the elevated realm role. |
 | `realm:member` | Non-admin realm membership marker. Used only as a `realm_members.role` value (and read-only namespace anchor); confers minimal presence, not a power scope on its own. |
 
@@ -174,8 +175,8 @@ operator can administer identity data and credential material within one realm.
 
 | `realm_members.role` | Scope bundle |
 | --- | --- |
-| `realm:admin` | Open: `memory:read-others`, `memory:manage-others`, `group:read`, `group:manage`, `policy:read`, `policy:manage`, `message:read`. Sealed: `secret:create`, `secret:show`, `secret:reveal`, `secret:update`, `secret:delete`, `secret:grant`, `totp:enroll`, `totp:code`. Operator: `agent:manage`, `token:manage`, `audit:read`, `realm:admin` |
-| `realm:operator` | Open: `memory:read-others`, `memory:manage-others`, `group:read`, `policy:read`, `message:read`. Sealed: `secret:create`, `secret:show`, `secret:reveal`, `secret:update`, `secret:grant`, `totp:enroll`, `totp:code`. Operator: `audit:read` |
+| `realm:admin` | Open: `memory:read-others`, `memory:manage-others`, `group:read`, `group:manage`, `policy:read`, `policy:manage`, `message:read`. Sealed: `secret:create`, `secret:show`, `secret:reveal`, `secret:update`, `secret:delete`, `secret:grant`, `totp:enroll`, `totp:code`. Operator: `agent:manage`, `token:manage`, `audit:read`, `federation:manage`, `realm:admin` |
+| `realm:operator` | Open: `memory:read-others`, `memory:manage-others`, `group:read`, `policy:read`, `message:read`. Sealed: `secret:create`, `secret:show`, `secret:reveal`, `secret:update`, `secret:grant`, `totp:enroll`, `totp:code`. Operator: `audit:read`, `federation:manage` |
 | `realm:auditor` | Open: `memory:read-others` (read/inspect only), `group:read`, `policy:read`. Sealed: `secret:show`. Operator: `audit:read` |
 | `realm:member` | Open: `memory:read`, `fact:read`, `group:member`, `message:read`. Sealed: `secret:show`, `secret:create` |
 
@@ -185,9 +186,11 @@ operator can administer identity data and credential material within one realm.
   `--owner-agent`/`--owner-group` targeting, group-owned ops, agent + token lifecycle,
   realm rename/archive/delete, TOTP enroll/code across agents.
 - **`realm:operator`** — day-to-day curation and reveal across agents (with
-  `--owner-agent`/`--owner-group` + `--reason`) but CANNOT run `agent:manage`,
+  `--owner-agent`/`--owner-group` + `--reason`) plus `federation:manage` (manage the
+  federation allow-list and publish/rotate the realm card) but CANNOT run `agent:manage`,
   `token:manage`, `secret:delete`, `policy:manage`, or realm rename/delete. Sits between
-  `realm:auditor` and `realm:admin`.
+  `realm:auditor` and `realm:admin`. (Whether `realm:operator` carries `federation:manage`
+  or that scope is reserved to `realm:admin` is an Open decision below.)
 - **`realm:auditor`** — read-only compliance/inspection: lists/scans realm-wide
   redacted inventory (both planes), reads the audit trail and Policy set, but cannot
   reveal secret field values, mutate, grant, curate/forget, or run TOTP.
@@ -251,8 +254,11 @@ An agent's effective access to any datum (memory, fact, or secret) is the determ
 
    explicitly EXCLUDING `secret:grant`, the cross-agent umbrellas
    `memory:read-others`/`memory:manage-others`, `group:manage`, `policy:manage`,
-   `agent:manage`, `token:manage`, `audit:read`, `realm:admin`, `account:*`,
-   `billing:*`, `support:*`. A missing required scope is an immediate deny.
+   `agent:manage`, `token:manage`, `audit:read`, `federation:manage`, `realm:admin`,
+   `account:*`, `billing:*`, `support:*`. A missing required scope is an immediate deny.
+   Cross-realm SEND remains in the agent bundle as `message:send` (gated by the
+   federation allow-list + per-conversation consent), but managing that allow-list and
+   the realm card is operator-only via `federation:manage`.
 3. **Ownership-or-grant-or-policy.** The target datum is self-owned
    (`owner_kind='agent'` AND `owner_agent_id = this agent`) OR access is conferred by
    the plane-specific cross-agent mechanism:
@@ -428,6 +434,8 @@ Required scope is necessary but not sufficient — Step 5/6 gates still apply.
 | `billing subscribe|payment-method ...|refund` / `account close` | `billing:manage` | `--reason` + confirmation. |
 | `support show|list` | `support:read` | |
 | `support open|comment|close` | `support:manage` | Redact secret material by default. |
+| `federation peers add|remove|list` / `/v1/federation/peers` | `federation:manage` | Manage the accepted-peer allow-list / trust registry; deny-by-default. Cross-realm SEND uses `message:send`, not this scope. |
+| `federation card publish|rotate` / `GET /.well-known/witself-card.json` | `federation:manage` | Publish/rotate the realm's signed card; signing mandatory. Card read is public/unauthenticated. |
 
 ## Bootstrap Operator And Least-Privilege Defaults
 
@@ -573,8 +581,10 @@ removed — the consolidated vocabulary is reused verbatim.
   (single-column add assumed minimal; a table is needed only if one operator holds
   different account roles across multiple accounts, which v0 does not support).
 - Bundle boundary calls: should `realm:operator` include `secret:delete` or
-  `policy:manage`? Should `account_admin` get `billing:read` only (current: yes read, no
-  manage)? All-or-nothing until v1 composability.
+  `policy:manage`? Should `realm:operator` carry `federation:manage` (current: yes), or is
+  managing the federation allow-list / realm card reserved to `realm:admin`? Should
+  `account_admin` get `billing:read` only (current: yes read, no manage)? All-or-nothing
+  until v1 composability.
 - Whether `realm:operator` and `realm:auditor` ship in v0 or are deferred, leaving only
   `realm:admin`/`realm:member` at launch. Recommendation: ship all four — pure
   lookup-table additions with no schema cost.

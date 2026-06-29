@@ -44,7 +44,9 @@ Two distinct purposes, kept separate on purpose:
 A group record:
 
 - `id` — stable, `grp_` prefix.
-- `realm` — the enclosing realm. Groups never span realms in v0.
+- `realm` — the enclosing realm. Groups never span realms in v0. The
+  realm-spanning sibling is a post-v0 **cross-realm channel** (see
+  [Cross-Realm Channels](#cross-realm-channels)), not a wider group.
 - `name` — unique within the realm. Stable, human-meaningful, used in
   `witself://group/<group>/...` references.
 - `description` — optional, human-readable.
@@ -306,6 +308,21 @@ in [threat-model.md](threat-model.md):
 - **Deletion blast radius** — deleting a group can break many policies at once;
   mitigated by guarded deletion, `--dry-run`, and default-deny fallthrough.
 
+## Cross-Realm Channels (Post-v0)
+
+In-realm groups stop at the realm boundary. The cross-realm sibling of a group
+is a **channel**: realm-spanning membership formed by **mutual consent** between
+the participating realms, where members live in more than one realm rather than
+all within one. Channels are a [post-v0](post-v0-roadmap.md) topic specified in
+[agent-collaboration.md](agent-collaboration.md), which reuses the group
+fan-out mechanics described here (a message addressed to the collective delivers
+to every member) extended across the federation trust boundary.
+
+Nothing in this document changes for v0: in-realm group membership, policy
+binding, collective memory, and the `witself://group/<group>/...` reference shape
+all remain realm-scoped and behave exactly as above. Channels are additive and do
+not alter how groups resolve, fan out, or bind policy within a realm.
+
 ## See Also
 
 - [access-policy.md](access-policy.md) — policy objects, verbs, default-deny,
@@ -315,6 +332,8 @@ in [threat-model.md](threat-model.md):
   promotion.
 - [inter-agent-messaging.md](inter-agent-messaging.md) — messages addressed to a
   group fan out to members.
+- [agent-collaboration.md](agent-collaboration.md) — cross-realm channels, the
+  post-v0 realm-spanning sibling of in-realm groups (reuses group fan-out).
 - [json-contracts.md](json-contracts.md) — the `witself.v0` Group, Memory, and
   Fact JSON shapes and `witself://` references.
 - [cli-command-surface.md](cli-command-surface.md),

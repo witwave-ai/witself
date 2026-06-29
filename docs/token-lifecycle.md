@@ -130,6 +130,55 @@ documented as the least-safe unattended option. Production deployments should
 prefer a token file delivered through a secret mount and referenced with
 `--token-file` or `WITSELF_TOKEN_FILE`.
 
+## Home-Cell Resolution
+
+A token remains the agent's identity and the lifecycle above is unchanged. What
+the go-forward deployment topology adds is *where* a token-bound caller lands: in
+the multi-cloud cell model (see [deployment-cells.md](deployment-cells.md)) a
+realm lives in exactly one home cell at a time, and the CLI and MCP adapter must
+reach that cell.
+
+The control plane extends the existing `--endpoint` / token model rather than
+replacing it. Today a client points at an endpoint; the go-forward client points
+at the control plane, resolves its home cell (and may cache the result), then
+talks directly to that cell:
+
+```text
+witself --endpoint https://api.witself.cloud login   # control plane resolves home cell
+# subsequent calls go directly to the resolved home-cell endpoint
+```
+
+This does not change the token contract:
+
+- The token still asserts *who an agent is*; the realm and named agent are
+  resolved server-side from the token, never from input (see
+  [Token Identity](#token-identity)).
+- Tokens remain **cell-scoped and validated by the home cell, not the control
+  plane**. The thin control plane holds only routing metadata
+  (`realm/account -> home cell + endpoint + signing key`) and never sees token
+  hashes, memories, facts, secrets, or messages.
+- Authentication source precedence ([above](#authentication-source-precedence))
+  is unchanged. `WITSELF_ENDPOINT` / `--endpoint` keep their current targeting
+  meaning; the only difference is that the resolved endpoint may be a home-cell
+  endpoint returned by the control plane rather than a fixed cell URL.
+- Tenant migration between cells (deployment-cells.md) re-homes the realm's data
+  but does **not** rotate or re-issue tokens: after the control-plane mapping is
+  repointed, clients re-resolve and route to the new home cell with the same
+  token. Migration does not alter the agent identity binding, mirroring
+  [Rotation](#rotation)'s identity-stability guarantee.
+
+Cross-realm addressing rides the same directory: a message addressed to
+`witself://<realm-handle>/agent/<name>` resolves through the same control-plane
+registry that routes a client to its home cell (see
+[deployment-cells.md](deployment-cells.md) and
+[agent-collaboration.md](agent-collaboration.md)). A cross-realm send still uses
+`message:send` and is gated by the receiving realm's federation allow-list; it
+carries no authority of its own.
+
+Open decisions: how aggressively clients cache the resolved home-cell endpoint
+and how re-resolution is triggered after a migration are operational concerns
+left to [deployment-cells.md](deployment-cells.md).
+
 ## Ephemeral Pod Mounted-Token Pattern
 
 The canonical agent runtime pattern is a durable token mounted into an ephemeral
@@ -194,9 +243,14 @@ Tokens express these dimensions:
   group-owned memories/facts/secrets), `group:read`, and `group:manage`.
 - Messaging: `message:send` and `message:read`.
 - Policy and audit visibility: `policy:read`, `policy:manage`, `audit:read`.
-- Operator/admin surfaces: `agent:manage`, `token:manage`, `realm:admin`, and
-  the account/billing/support scopes, normally carried by operator tokens rather
-  than agent tokens.
+- Operator/admin surfaces: `agent:manage`, `token:manage`, `realm:admin`,
+  `federation:manage`, and the account/billing/support scopes, normally carried
+  by operator tokens rather than agent tokens. `federation:manage` is the
+  operator scope that governs the realm's federation allow-list / trust registry
+  and publishing or rotating the realm card; it does not authorize cross-realm
+  send, which still uses `message:send` (see
+  [authorization-and-roles.md](authorization-and-roles.md) and
+  [agent-collaboration.md](agent-collaboration.md)).
 
 ### Default Agent Token Bundle
 
@@ -218,7 +272,8 @@ The bundle is over **OWN data only** (`owner_kind='agent'` and
 member of for the open-plane verbs). It deliberately **excludes** `secret:grant`,
 the cross-agent umbrellas `memory:read-others`/`memory:manage-others`,
 `group:manage`, `policy:manage`, `agent:manage`, `token:manage`, `audit:read`,
-`realm:admin`, and the `account:*`/`billing:*`/`support:*` scopes. An agent
+`realm:admin`, `federation:manage`, and the `account:*`/`billing:*`/`support:*`
+scopes. An agent
 therefore cannot self-grant, cannot reach another agent's data, cannot author
 Policy, cannot manage agents/tokens/realms, and cannot see realm-wide inventory
 (`--all-agents` is operator-only).

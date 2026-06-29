@@ -90,8 +90,8 @@ Read-only mode:
 - In read-only mode, `witself.memory.add/adjust/forget`, `witself.fact.set/
   delete`, `witself.message.send`, `witself.remember`, `witself.session.end`,
   `witself.memory.consolidate`, `witself.secret.create/update`, and
-  `witself.totp.enroll` are unavailable. Read, recall, list, get, show, parse,
-  resolve, `policy.test`, `witself.self.show`, `witself.session.start`,
+  `witself.totp.enroll` are unavailable. Read, recall, list, listen, get, show,
+  parse, resolve, `policy.test`, `witself.self.show`, `witself.session.start`,
   `witself.digest.emit`, `witself.password.generate`, and the sealed-plane read
   tools (`witself.secret.list/show`) remain available subject to policy.
 - Cross-agent reads and recalls remain policy-gated even in read-only mode: a
@@ -218,10 +218,23 @@ Tool names should use the `witself.` prefix:
 - `witself.group.list`
 - `witself.group.show`
 - `witself.message.send`
+- `witself.message.listen`
 - `witself.message.list`
 - `witself.message.read`
 - `witself.reference.parse`
 - `witself.reference.resolve`
+
+Every CLI verb is reachable via MCP with **full parity**: the CLI is the primary
+surface, and the MCP tool set mirrors it one-for-one (modulo the CLI-first
+exceptions noted below). In particular, an agent **runs no HTTP server of its
+own** — it is an outbound MCP/CLI client only. There is no inbound listener to
+deliver to; instead the agent pulls its mailbox. `witself.message.listen`
+long-polls the durable mailbox (block up to N seconds, return any inbound
+messages) and is the **live face** of that mailbox: it lets a looping agent hear
+without standing up a server. Cross-realm sends are realm-qualified — the `to`
+target may be a `witself://<realm-handle>/agent/<name>` address — and ride the
+same durable mailbox and consent rules described in
+[agent-collaboration.md](agent-collaboration.md).
 
 Sealed-plane tools (secrets + TOTP):
 
@@ -283,7 +296,8 @@ as MCP tools.
 | `witself.policy.test` | yes | yes | Evaluates an access decision; never mutates. |
 | `witself.group.list` | yes | yes | Lists groups visible to the session. |
 | `witself.group.show` | yes | yes | Shows group metadata and membership where visible. |
-| `witself.message.send` | yes | no | Requires `message:send`; `from` is always token-derived. |
+| `witself.message.send` | yes | no | Requires `message:send`; `from` is always token-derived; cross-realm `to` is realm-qualified (`witself://<realm-handle>/agent/<name>`). |
+| `witself.message.listen` | yes | yes | Long-poll receive — the live face of the durable mailbox; non-mutating beyond delivery bookkeeping; requires `message:read`. |
 | `witself.message.list` | yes | yes | Lists the session's mailbox; requires `message:read`. |
 | `witself.message.read` | yes | yes | Reads and acks a message; requires `message:read`. |
 | `witself.reference.parse` | yes | yes | Validates reference syntax only. |
@@ -1008,8 +1022,58 @@ Input:
 Output data uses the message detail shape from
 [json-contracts.md](json-contracts.md), including the new `msg_` id and delivery
 state. A message granting no policy cannot itself authorize a cross-agent write;
-writes still require policy. See
-[inter-agent-messaging.md](inter-agent-messaging.md).
+writes still require policy. A cross-realm send addresses a realm-qualified
+target — `to_kind: "agent"` with `to` set to a
+`witself://<realm-handle>/agent/<name>` address — and is gated by the receiving
+realm's federation allow-list and per-conversation consent, not by this call. See
+[inter-agent-messaging.md](inter-agent-messaging.md) and
+[agent-collaboration.md](agent-collaboration.md).
+
+### `witself.message.listen`
+
+Long-poll the session's durable mailbox for inbound messages: block up to
+`wait_seconds`, then return any messages that arrived (or an empty set on
+timeout). This is the **live face of the durable mailbox** — the receive path a
+looping agent calls each turn to hear new work. Because an agent **runs no HTTP
+server** and exposes no inbound endpoint, this pull is how delivery reaches it;
+nothing is ever pushed into the agent process. Available in read-only mode;
+requires `message:read`.
+
+**Call this each loop to hear**, then reply with `witself.message.send`.
+
+Input:
+
+```json
+{
+  "direction": "inbox",
+  "wait_seconds": 25,
+  "unread_only": true,
+  "conversation_id": null,
+  "from_agent": null,
+  "ack": false,
+  "limit": 50,
+  "cursor": null
+}
+```
+
+Output data:
+
+```json
+{
+  "items": [],
+  "timed_out": false,
+  "next_cursor": null
+}
+```
+
+Each item uses the message summary shape from
+[json-contracts.md](json-contracts.md); `timed_out` is `true` when the wait
+window elapsed with no inbound message. Local and cross-realm messages arrive
+through the same mailbox, so a cross-realm reply (a realm-qualified
+`witself://<realm-handle>/agent/<name>` sender) surfaces here exactly like a
+local one. Bodies and payloads are untrusted input to the receiving agent and
+must be treated as such by the runtime. See
+[agent-collaboration.md](agent-collaboration.md).
 
 ### `witself.message.list`
 

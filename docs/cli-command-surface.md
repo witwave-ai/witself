@@ -3,6 +3,11 @@
 Status: draft. This document describes the proposed human and agent CLI
 contract before implementation.
 
+The CLI command name is decided to be `ws`. The mechanical rename from `witself`
+to `ws` is a separate later pass; the examples in this document still use the
+`witself <cmd>` form and should be read as the same surface under the eventual
+`ws` name.
+
 ## Design Goals
 
 - The CLI must be pleasant for humans and deterministic for agents.
@@ -215,7 +220,8 @@ witself
   totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
-  message send|list|read|ack
+  message send|list|read|ack|listen
+  federation peers|card
   reference parse|resolve
   agent create|list|show|rename|copy|disable|enable|delete
   token create|list|revoke|rotate
@@ -2486,6 +2492,16 @@ messaging model is tracked in
 
 Send a message to an agent or group. `from` is the token-bound agent.
 
+`--to` also accepts a realm-qualified `witself://<realm-handle>/agent/<name>`
+(and `witself://<realm-handle>/group/<name>`) to address a named agent or
+channel in a remote realm; an unqualified name is local, unchanged. The session
+can still only send **as** the token-bound agent. Cross-realm sends carry no
+authority on their own: delivery requires the receiving realm to allow-list the
+sending realm, and `--dry-run` validates the recipient, federation allow-list,
+budgets, and quotas without persisting or delivering anything. Cross-realm
+addressing is tracked in
+[agent-collaboration.md](agent-collaboration.md).
+
 ```sh
 witself message send --to archivist \
   --subject "handoff" \
@@ -2499,14 +2515,18 @@ witself message send --to coordinator \
   --thread thr_01H... \
   --body "Acknowledged; proceeding." \
   --payload-file ./status.json
+
+witself message send --to witself://acme-research/agent/coordinator \
+  --subject "cross-realm handoff" \
+  --body "Requesting review; conversation continues here."
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--to NAME_OR_ID` | Recipient agent. Mutually exclusive with `--to-group`. |
-| `--to-group NAME_OR_ID` | Recipient security group; fanned out to current members. Mutually exclusive with `--to`. |
+| `--to NAME_OR_ID` | Recipient agent. Accepts a realm-qualified `witself://<realm-handle>/agent/<name>` for a remote-realm agent. Mutually exclusive with `--to-group`. |
+| `--to-group NAME_OR_ID` | Recipient security group; fanned out to current members. Accepts a realm-qualified `witself://<realm-handle>/group/<name>` for a remote-realm channel. Mutually exclusive with `--to`. |
 | `--subject TEXT` | Short subject. |
 | `--kind KIND` | Short classification, such as `notice`, `handoff`, or `request`. |
 | `--body TEXT` | Message body from a flag. |
@@ -2572,6 +2592,130 @@ Flags:
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: ack on behalf of a specific agent when permitted. |
 | `--reason TEXT` | Audit reason for operator acks. |
+
+### `witself message listen`
+
+Long-poll receive: block up to `--timeout` seconds and return inbound messages
+for the token-bound agent, draining the mailbox. This is the live face of the
+durable mailbox and the receive half of cross-realm collaboration: a dropped
+poll loses no state, since the next `listen` (or `message list`) drains the same
+mailbox. Agents are told to call `listen` each loop in their teaching stanza so
+they hear inbound messages and reply with `send`; the directive lives in
+[context-hydration.md](context-hydration.md), and the collaboration model is
+tracked in [agent-collaboration.md](agent-collaboration.md).
+
+```sh
+witself message listen
+witself message listen --timeout 30 --json
+witself message listen --conversation thr_01H... --timeout 60
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--timeout SECONDS` | Maximum time to block waiting for inbound messages before returning. |
+| `--conversation ID` | Listen only for messages in a specific conversation/thread. |
+| `--owner-agent NAME_OR_ID` | Operator/admin only: listen on a specific agent's mailbox. |
+| `--no-mark-read` | Do not update read state for returned messages. |
+| `--limit N` | Maximum number of messages to return per poll. |
+
+## `witself federation`
+
+Manage the realm's cross-realm federation: the deny-by-default allow-list of
+peer realms the realm accepts messages from, and the signed realm card the realm
+publishes so peers can discover and verify it. Federation is the trust substrate
+under cross-realm `message send`; allow-listing a peer and the per-conversation
+consent step gate which peers are accepted, while the cross-realm send itself
+still uses ordinary `message:send`. These commands require the
+`federation:manage` operator scope. The federation model, signed cards, and
+deny-by-default trust are tracked in
+[agent-collaboration.md](agent-collaboration.md).
+
+### `witself federation peers`
+
+Manage the realm's accepted-peer allow-list. Removing a peer from the allow-list
+is a deny; federation does not happen by default.
+
+```sh
+witself federation peers list
+witself federation peers allow acme-research --reason "joint research program"
+witself federation peers remove acme-research --reason "engagement ended"
+```
+
+#### `witself federation peers list`
+
+List the realm handles the realm currently accepts as federation peers.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--include-disabled` | Include previously removed or suspended peers when available. |
+
+#### `witself federation peers allow REALM_HANDLE`
+
+Add a peer realm handle to the allow-list. The handle (and its published signing
+key) is the unit of trust.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--endpoint URL` | Peer realm endpoint when it cannot be resolved automatically. |
+| `--dry-run` | Validate the peer and show the planned allow-list change without applying it. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason. |
+
+#### `witself federation peers remove REALM_HANDLE`
+
+Remove a peer realm handle from the allow-list. This is a deny that takes effect
+for subsequent cross-realm traffic.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Show the planned removal and its effect on accepted peers without applying it. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself federation card`
+
+Manage the realm's signed federation card. The card advertises the realm handle,
+its agents and their skills, the endpoint, accepted auth, delivery modes, and the
+public signing key; it is signed by the realm and served for peer discovery and
+verification. Card signing is mandatory.
+
+```sh
+witself federation card publish
+witself federation card rotate --reason "scheduled key rotation"
+```
+
+#### `witself federation card publish`
+
+Publish or re-publish the realm's signed card so peers can discover and verify
+the realm.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--ttl DURATION` | Card validity/expiry window when supported. |
+| `--dry-run` | Validate and show the planned card contents without publishing. |
+| `--reason TEXT` | Audit reason. |
+
+#### `witself federation card rotate`
+
+Rotate the realm's signing key and re-publish the card under the new key.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Show the planned rotation and re-publish without applying it. |
+| `--yes` | Skip confirmation. |
+| `--reason TEXT` | Audit reason. |
 
 ## `witself reference`
 

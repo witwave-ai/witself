@@ -117,6 +117,10 @@ Notes on a few dimensions:
 - `message_delivered` can exceed `message_sent` because a message addressed to a
   security group fans out to current group members (see
   [inter-agent-messaging.md](inter-agent-messaging.md)).
+- Cross-realm messages (post-v0 cross-realm collaboration) are metered on the
+  same existing `message_sent` and `message_delivered` dimensions; a
+  realm-qualified destination does not introduce a new billing dimension (see
+  [agent-collaboration.md](agent-collaboration.md)).
 - `storage_byte` measures ordinary open-plane data-at-rest footprint (memories,
   facts, and the rest of the open plane on RDS/disk), not envelope-encrypted
   secret material (see [storage.md](storage.md)).
@@ -156,6 +160,24 @@ Whether a dimension is a point-in-time cap (`active_agent`, `stored_memory`,
 rates), not by the key name. Using one key across
 all three surfaces lets a client join capability limits, usage items, and metrics
 directly. Field shapes are pinned in [json-contracts.md](json-contracts.md).
+
+## Cross-Cell Aggregation
+
+Managed Witself runs as a fleet of independent cells, and an account may span
+more than one cell — for example when its realms are placed in different regions
+or residency zones (see [deployment-cells.md](deployment-cells.md)). Billing
+stays account-level and the canonical dimensions above are unchanged. When an
+account spans cells, per-realm usage is summed across the cells that hold the
+account's realms, and those per-realm rollups aggregate into the single
+account-level total that the plan attaches to.
+
+Each cell meters its own realms locally on the canonical dimensions; the
+account-level view is the sum of those per-cell contributions. A realm has a
+single home cell, so per-realm usage is never double-counted across cells. The
+control plane holds only the account/realm → home-cell mapping needed to drive
+this aggregation; it carries routing metadata, not tenant usage data (see
+[deployment-cells.md](deployment-cells.md)). Tenant migration moves a realm
+between cells without changing the account it bills to.
 
 ## Overage Behavior
 
@@ -319,6 +341,8 @@ cost and should be observed on the same basis (see
 - [key-hierarchy.md](key-hierarchy.md)
 - [secret-size-and-attachments.md](secret-size-and-attachments.md)
 - [storage.md](storage.md)
+- [deployment-cells.md](deployment-cells.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [self-hosting.md](self-hosting.md)
 - [implementation-plan.md](implementation-plan.md)
 - [audit-retention.md](audit-retention.md)

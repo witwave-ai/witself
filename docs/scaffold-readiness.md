@@ -87,6 +87,35 @@ internal/server/              # Server config, lifecycle, health, migrations
 
 This layout is a starting point, not a promise that every package name is final.
 
+### Post-v0 go-forward packages (collaboration + cells fast-follow)
+
+The realm-local core above is frozen and unchanged. The cross-realm
+collaboration substrate and the multi-cloud cells arrive as a **fast-follow**
+after v0 and add packages alongside the frozen core — additive, not a refactor:
+
+- `internal/relay/` — durable cross-realm message relay (the outbound-client
+  transport behind `POST /v1/messages:listen` and cross-realm send; agents run
+  no HTTP servers). Tracked in [agent-collaboration.md](agent-collaboration.md).
+- `internal/federation/` — the deny-by-default peer allow-list / trust registry,
+  realm-card signing and verification, and the `federation:manage` surface.
+  Tracked in [agent-collaboration.md](agent-collaboration.md).
+- `internal/conversation/` — the cross-realm conversation/task resource
+  (`thr_`-prefixed conversations, participant set, turn/cost budgets, loop and
+  flood governors). Tracked in [agent-collaboration.md](agent-collaboration.md).
+- A thin **control-plane** component (a separate surface, not a per-cell `/v1`
+  route) that holds the realm/account → home-cell mapping and resolves placement
+  and migration. It carries routing metadata only — no tenant data. Tracked in
+  [deployment-cells.md](deployment-cells.md).
+
+Cells are **deployment-shaped, not a package boundary**: a cell is one stack
+instance per cloud account/region (reusing the existing
+`infra/terraform/modules/*` + `stacks/*` layout, see
+[terraform-infrastructure.md](terraform-infrastructure.md)), and Witself Cloud
+runs a fleet of independent cells fronted by the thin control plane. Adding a
+cell (including a second account in the same cloud) provisions another stack
+instance; the realm-local core packages are identical in every cell. This is
+post-v0 go-forward and does not change the realm-local core freeze.
+
 Notes on the domain-specific packages:
 
 - `internal/policy/` is a first-class package, not a thin grant table. It owns
@@ -213,6 +242,14 @@ Frozen enough for scaffolding:
 - Terraform under `infra/terraform`.
 - Strong CI and release action from the beginning.
 - Post-v0 deferral list.
+
+The realm-local core freeze above stands as written. The collaboration
+substrate and multi-cloud cells are **post-v0 go-forward**: they add the
+`internal/relay`, `internal/federation`, and `internal/conversation` packages
+plus a thin control-plane component, and they treat a cell as one stack instance
+per cloud account/region. They extend the scaffold additively and do not reopen
+the realm-local core freeze. See [agent-collaboration.md](agent-collaboration.md)
+and [deployment-cells.md](deployment-cells.md).
 
 Still expected to evolve during implementation:
 

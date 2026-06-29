@@ -186,6 +186,10 @@ Examples of feature flags:
 - `runtime_injection`
 - `client_side_decrypt`
 - `server_side_decrypt`
+- `cross_realm_collaboration`
+- `federation`
+- `agent_card`
+- `multi_cell`
 
 The `secrets`, `totp`, `password_generate`, and `runtime_injection` flags report
 whether the sealed plane — the KMS-backed credential side of Witself, distinct
@@ -223,6 +227,18 @@ backend that supports memories and facts: the digest blends salience and recency
 deterministically and never calls the embedding provider, so it stays usable even
 when `semantic_recall` is degraded. The embedding-provider boundary is tracked in
 [memory-model.md](memory-model.md).
+
+The `cross_realm_collaboration`, `federation`, and `agent_card` flags report
+whether this backend speaks the cross-realm collaboration substrate: whether it
+accepts and runs cross-realm conversations, whether it maintains a federation
+allow-list of accepted peer realms, and whether it publishes a signed realm
+card. They travel together in practice but are advertised separately so a backend
+can publish a card without yet accepting inbound conversations. The cross-realm
+collaboration model is tracked in [agent-collaboration.md](agent-collaboration.md).
+The `multi_cell` flag reports whether tenant placement and migration across a
+fleet of independent cells is in effect; it is a managed-plane property and is
+off on single-cell self-hosted and local backends. Cell placement and migration
+are tracked in [deployment-cells.md](deployment-cells.md).
 
 Self-hosted and local deployments should return deterministic
 `unsupported_operation` errors for unsupported commands. They should also include
@@ -393,7 +409,9 @@ Initial route groups:
 | `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
-| `/v1/messages` | Inter-agent message send, list, read, and acknowledgement. |
+| `/v1/messages` | Inter-agent and cross-realm message send, list, read, long-poll receive (`:listen`), and acknowledgement. |
+| `/v1/conversations` | Cross-realm conversation/task resource: list and show participants, state, and turn/cost budgets. |
+| `/v1/federation/peers` | Federation allow-list: list, add, and remove the accepted peer realms for cross-realm collaboration. |
 | `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
 | `/v1/totp` | Sealed-plane TOTP enrollment, metadata, code generation, and deletion. |
 | `/v1/password` | Stateless password generation (`:generate`). |
@@ -406,6 +424,20 @@ Initial route groups:
 Exact route names can evolve during implementation, but they should preserve the
 style in [api-routes.md](api-routes.md) and remain recognizable in the OpenAPI
 document.
+
+The signed realm card is served at `GET /.well-known/witself-card.json` and is
+deliberately **not** under `/v1`: like a well-known discovery document it is
+fetched by peer realms during federation handshake, carries no caller identity,
+and returns the realm card shape (handle, agents and skills, endpoint, accepted
+auth, signing JWKS, delivery modes, and a mandatory JWS signature) defined in
+[json-contracts.md](json-contracts.md). The cross-realm collaboration substrate
+is tracked in [agent-collaboration.md](agent-collaboration.md).
+
+Tenant placement, home-cell resolution, and tenant migration across a fleet of
+independent cells are a **separate control-plane surface**, not per-cell `/v1`
+product routes. A cell serves the `/v1` contract above for the tenants placed on
+it; which cell a realm or account lives on is resolved by the thin control plane.
+That boundary is tracked in [deployment-cells.md](deployment-cells.md).
 
 Operational endpoints such as `GET /metrics` are server operations endpoints,
 not versioned product API routes. `/metrics` should be served from the dedicated
@@ -488,6 +520,7 @@ POST /v1/facts/{fact_id}:primary
 POST /v1/sessions:start
 POST /v1/sessions:end
 POST /v1/policies:test
+POST /v1/messages:listen
 POST /v1/messages/{message_id}:ack
 POST /v1/tokens/{token_id}:rotate
 POST /v1/secrets/{secret_id}:reveal
@@ -535,6 +568,16 @@ Notes on specific actions:
 - `:test` evaluates a subject/permission/target/scope against current policy and
   returns the deciding policy id or a deny reason. It never mutates state and is
   the canonical access-decision dry run.
+- `:listen` is the long-poll receive verb: it blocks up to a caller-specified
+  number of seconds and returns inbound messages from the durable mailbox as they
+  arrive, returning empty when the window elapses. It is the live face of the
+  mailbox and the route the CLI/MCP `listen`/`recv` verb maps to; agents run no
+  HTTP server and instead poll this route each loop. It is a `POST` because the
+  receiving agent is derived from the token and message bodies travel in the
+  response, never a URL. Inbound cross-realm messages surface here with their
+  resolved `from` realm; the cross-realm envelope is defined in
+  [json-contracts.md](json-contracts.md). Delivery semantics are tracked in
+  [inter-agent-messaging.md](inter-agent-messaging.md).
 - `:ack` records per-recipient read/acknowledgement state for a delivered
   message; the acknowledging agent is derived from the token.
 - `:rotate` (on `/v1/tokens`) issues a replacement token and returns the raw
@@ -663,6 +706,8 @@ embedding provider so semantic recall can be exercised offline, and reports
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [backend-architecture.md](backend-architecture.md)
 - [self-hosting.md](self-hosting.md)
 - [server-command-surface.md](server-command-surface.md)

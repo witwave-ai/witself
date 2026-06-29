@@ -166,6 +166,15 @@ Initial metric families should include:
 | `witself_group_operations_total` | Group operations by operation (`create`, `delete`, `member_add`, `member_remove`) and result. |
 | `witself_messages_total` | Messaging events by stage (`sent`, `delivered`, `read`), recipient kind, and result. |
 | `witself_message_delivery_duration_seconds` | Send-to-delivery latency histogram by recipient kind. |
+| `witself_conversations_total` | Cross-realm conversation/task lifecycle transitions by `conversation_state` (`submitted`, `working`, `input_required`, `auth_required`, `completed`, `failed`, `canceled`) and result. Counts state transitions only; it never carries the `conversation_id`, participant handles, or message content (see [agent-collaboration.md](agent-collaboration.md)). |
+| `witself_relay_envelopes_total` | Blind-relay envelope throughput by `direction` (`inbound`, `outbound`), `relay_action` (`routed`, `dropped`, `quarantined`), and `result`. The relay sees only routing metadata, so this metric carries no envelope body, signature, or peer realm handle. |
+| `witself_relay_envelope_duration_seconds` | Relay route/forward latency histogram by `direction`. |
+| `witself_loop_suspended_total` | Loop-safety suspensions by `suspend_reason` (`turn_budget`, `hop_limit`, `ttl_expired`, `repeat_hash`, `flood`). Mirrors the `loop.suspended` audit event; carries no conversation id or message content. |
+| `witself_budget_exhausted_total` | Per-conversation budget exhaustions by `budget_kind` (`turn`, `cost`) and `enforcement` (`warn`, `fail`). Mirrors the `budget.exhausted` audit event; carries no spend amount that identifies a tenant and no conversation id. |
+| `witself_federation_decisions_total` | Deny-by-default federation decisions by `federation_stage` (`peer_check`, `consent`), `decision` (`allow`, `deny`), and result. Mirrors the `federation.peer_allowed` / `federation.peer_denied` / `federation.consent_accepted` audit events; it never carries a peer realm handle, key, or card. |
+| `witself_cell_placements_total` | Tenant placement decisions by `placement_reason` (`residency`, `capacity`, `wave`, `manual`) and result. Mirrors the `tenant.placed` audit event; it never carries a realm/account id or a cell id (see [deployment-cells.md](deployment-cells.md)). |
+| `witself_cell_migrations_total` | Tenant migrations between cells by `migration_phase` (`started`, `completed`, `failed`) and `plane` (`open`, `sealed`). Mirrors the `tenant.migration_started` / `tenant.migration_completed` / `tenant.migration_failed` audit events; it never carries a realm/account id or a source/destination cell id. |
+| `witself_cell_migration_duration_seconds` | Tenant migration latency histogram by `plane` (`open`, `sealed`). |
 | `witself_audit_events_total` | Audit events emitted by type, result, and backend. |
 | `witself_audit_write_failures_total` | Audit sink write failures. |
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
@@ -190,6 +199,25 @@ value — `true` for token-only pods where the server mediates decryption,
 `false` for client-held decryption — per the hybrid model in
 [key-hierarchy.md](key-hierarchy.md).
 
+The cross-realm collaboration families
+(`witself_conversations_total`, `witself_relay_envelopes_total`,
+`witself_relay_envelope_duration_seconds`, `witself_loop_suspended_total`,
+`witself_budget_exhausted_total`, `witself_federation_decisions_total`) and the
+multi-cell families (`witself_cell_placements_total`,
+`witself_cell_migrations_total`, `witself_cell_migration_duration_seconds`)
+follow the same discipline: they count events and carry no envelope body,
+participant handle, conversation id, peer realm handle, signing key, card,
+realm/account id, or cell id. They mirror the conversation, federation, loop,
+budget, and cell audit events registered in
+[audit-retention.md](audit-retention.md), and their counts and latencies are
+the operational face of the collaboration substrate in
+[agent-collaboration.md](agent-collaboration.md) and the cell fleet in
+[deployment-cells.md](deployment-cells.md). The relay and cell families exist
+only where those surfaces are deployed: relay/federation/conversation metrics on
+realms that participate in cross-realm collaboration, and placement/migration
+metrics on the thin global control plane that owns those decisions (a separate
+surface from any per-cell `/v1` route).
+
 ## Label And Privacy Rules
 
 Metrics are operational metadata, not an escape hatch around the security
@@ -205,6 +233,11 @@ Forbidden metric labels and values include:
 - Memory content, memory titles, fact names that carry user data, fact values,
   tags, descriptions, sources, links, or arbitrary user input.
 - Message subjects, message bodies, or structured message payloads.
+- Cross-realm envelope bodies, conversation ids, participant agent handles, peer
+  realm handles, realm signing keys, realm cards, or per-conversation spend
+  amounts that identify a tenant.
+- Realm/account ids, cell ids, cell endpoints, or home-cell routing data on the
+  placement and migration families.
 - Embedding vectors or any vector component.
 - Secret names, secret field names, field values, secret tags, descriptions,
   URLs, or account labels.
@@ -245,6 +278,25 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   ingest records.
 - `elided`, `true` or `false`, for self-digest renders.
 - `stage`, such as `sent`, `delivered`, or `read`, for messaging.
+- `conversation_state`, the A2A-style state of a cross-realm conversation/task,
+  exactly one of `submitted`, `working`, `input_required`, `auth_required`,
+  `completed`, `failed`, or `canceled`. It never carries the `conversation_id`.
+- `direction`, `inbound` or `outbound`, for relay throughput.
+- `relay_action`, `routed`, `dropped`, or `quarantined`, for relay envelopes. It
+  never carries a peer realm handle or envelope content.
+- `suspend_reason`, a small normalized set — `turn_budget`, `hop_limit`,
+  `ttl_expired`, `repeat_hash`, or `flood` — for loop suspensions.
+- `budget_kind`, `turn` or `cost`, and `enforcement`, `warn` or `fail`, for
+  budget-exhaustion events. Neither carries a spend amount or conversation id.
+- `federation_stage`, `peer_check` or `consent`, for federation decisions. It
+  pairs with `decision` (`allow`/`deny`) and never carries a peer realm handle,
+  key, or card.
+- `placement_reason`, a small normalized set — `residency`, `capacity`, `wave`,
+  or `manual` — for tenant placement. It never carries a realm/account id or a
+  cell id.
+- `migration_phase`, `started`, `completed`, or `failed`, and `plane`, `open` or
+  `sealed`, for tenant migration. Neither carries a realm/account id or a
+  source/destination cell id.
 - `principal_kind`, such as `agent`, `operator`, `admin`, or `service`.
 - `owner_kind`. On open-plane access metrics it records the access perspective
   as `self`, `other_agent`, or `group`. On sealed-plane metrics (and anywhere
@@ -435,6 +487,12 @@ Initial alert candidates:
 - Cross-agent access denials above a baseline (possible policy or abuse signal).
 - Cross-agent curate/forget spikes (possible memory-poisoning or write abuse).
 - Message send or delivery failure rate above a baseline.
+- Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
+  flood signal).
+- Loop-suspension or budget-exhaustion spikes (possible cross-realm loop, flood,
+  or runaway auto-reply).
+- Federation deny rate above a baseline (possible misconfigured trust or probing).
+- Tenant migration failures (`migration_phase="failed"`).
 - Sustained rate limiting or limit blocking.
 - Pending migrations.
 - Token authentication failures above a baseline.
@@ -493,6 +551,8 @@ Required checks once the server and chart exist:
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [api-contract.md](api-contract.md)
 - [api-routes.md](api-routes.md)
 - [storage.md](storage.md)

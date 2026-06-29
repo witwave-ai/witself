@@ -113,6 +113,38 @@ alongside EKS, RDS, and S3.
   keyword/tag/kind/time ranking and the capability contract reports the degraded
   state. Cloud-target choice does not change this behavior.
 
+## Multi-Cloud Cells
+
+Cloud targets are not a single-cloud choice made once. Witself deploys as a fleet
+of independent cells, where a cell is one complete, isolated Witself stack in a
+single cloud account and region (see [deployment-cells.md](deployment-cells.md)).
+The fleet spans AWS, GCP, and Azure, across multiple accounts per cloud.
+
+- **A second AWS account is just another cell.** An independent second AWS account
+  is not a special case — it is simply another cell. The same applies to a second
+  GCP project or Azure subscription. Each cell is one cloud account/region.
+- **AWS-first applies per cell.** The AWS-first ordering above is about which
+  provider implementation hardens first, not about how many cells exist. Each cell
+  is provisioned from the per-cloud Terraform modules and stacks listed here; a
+  cell is one instantiation of a stack (see
+  [terraform-infrastructure.md](terraform-infrastructure.md)). AWS cells come
+  first because the AWS module hardens first; GCP and Azure cells follow as those
+  provider implementations land.
+- **Placement is by region and data-residency.** A thin global control plane picks
+  the home cell for a new tenant by region / data-residency requirement, capacity
+  across the fleet, and provider/account preference. The cloud target a tenant
+  lands on is a placement outcome, not a global setting.
+- **A fleet of independent cells, not a shared substrate.** There is no shared data
+  store spanning cells and no shared-data multi-master across clouds. Each cell
+  holds the full data and key material for its own tenants; a cell outage affects
+  only the tenants homed on that cell. Moving a tenant between clouds or accounts is
+  a deliberate, bounded migration (with a sealed-plane KMS re-wrap under the
+  destination cell), not continuous cross-cloud replication — see
+  [deployment-cells.md](deployment-cells.md).
+
+This is why the provider-neutral contracts below matter: they let any cloud target
+serve as a cell without AWS-only assumptions leaking into the fleet.
+
 ## Provider Portability
 
 AWS-first should not mean AWS-only.
@@ -137,6 +169,7 @@ identity, and Terraform boundaries.
 ## Related Docs
 
 - [requirements.md](requirements.md)
+- [deployment-cells.md](deployment-cells.md)
 - [storage.md](storage.md)
 - [encryption-model.md](encryption-model.md)
 - [key-hierarchy.md](key-hierarchy.md)

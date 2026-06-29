@@ -215,6 +215,49 @@ Differences:
 The public repo should show enough infrastructure code for reviewers to
 understand the security posture without exposing live credentials or state.
 
+## Deployment Cells And The Control Plane
+
+Witself's go-forward topology is a fleet of independent cells under a thin global
+control plane (see [deployment-cells.md](deployment-cells.md)). Terraform is how a
+cell is built. A **cell** is one complete, isolated Witself stack in a single cloud
+account/region: one instantiation of a `stacks/` composition over the existing
+per-provider `modules/` — `witself-server`, Postgres + `pgvector`, the sealed-plane
+KMS rooted in that cell's cloud, and object/blob storage. The repository layout above
+does not change for cells; a cell is one stack instance, and the fleet is many such
+instances stood up across multiple accounts and regions.
+
+Multi-account is the normal case, not a special one. An independent second AWS
+account in the same region is simply another cell — another instantiation of the AWS
+stack against that account's provider configuration. The same holds for additional
+GCP projects and Azure subscriptions. Each cell keeps its own state, credentials, and
+sealed-plane CMK; cells share nothing at the data layer (see [State And Secret
+Policy](#state-and-secret-policy) — per-cell state and credential isolation is a hard
+requirement, never a shared backend across cells).
+
+Alongside the per-cell stacks, the fleet adds one thin global **control-plane**
+component. It is the only always-on global piece and it holds routing metadata only —
+the realm/account -> home-cell + endpoint + signing-key mapping — never tenant
+memories, facts, secrets, or messages. It can be modeled as its own small stack
+(globally replicated, HA) distinct from the per-cell stacks; keeping it thin and
+metadata-only keeps its blast radius tiny. New cells register with the control plane;
+clients resolve their home cell through it and then talk directly to that cell (see
+[deployment-cells.md](deployment-cells.md)).
+
+Tenant migration between cells re-keys the sealed plane. Because each cell's sealed
+plane is KMS-rooted in its own cloud, moving a tenant from cell A to cell B is an
+audited decrypt-at-source / re-encrypt-at-dest pass that **re-wraps** the tenant's
+keys under the destination cell's CMK; Terraform's job is only to ensure both cells'
+KMS modules and deployment-identity grants exist so the application can run that
+re-wrap (see [key-hierarchy.md](key-hierarchy.md) and [storage.md](storage.md)). The
+open plane moves via the existing first-class export/import. Terraform never sees a
+KEK or DEK on either side; it provisions the roots and the IAM, and the application
+performs the re-wrap.
+
+Open decisions (tracked in [deployment-cells.md](deployment-cells.md), not resolved
+here): whether the placement/migration unit is the account or the realm, and whether a
+self-host deployment is always a single cell or may itself be a multi-cell fleet with
+its own control plane.
+
 ## Helm Integration
 
 Terraform should output the values or references needed by the Helm chart.
@@ -322,6 +365,7 @@ surface becomes stable enough to deserve independent versioning.
 - [key-hierarchy.md](key-hierarchy.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [cloud-targets.md](cloud-targets.md)
+- [deployment-cells.md](deployment-cells.md)
 - [release-and-build.md](release-and-build.md)
 - [requirements.md](requirements.md)
 - [implementation-plan.md](implementation-plan.md)

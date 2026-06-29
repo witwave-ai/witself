@@ -90,6 +90,44 @@ additionally reports the active KMS provider and the `client_side_decrypt` /
 `server_side_decrypt` reveal modes the deployment supports (see
 [key-hierarchy.md](key-hierarchy.md)).
 
+## Multi-Cloud Cells
+
+Witself deploys as a fleet of independent cells under a thin global control
+plane, and the same topology covers self-hosting. A **cell** is one complete,
+isolated Witself stack — `witself-server`, Postgres with pgvector for the open
+plane, blob storage, and (when the sealed plane is enabled) KMS rooted in that
+cell's cloud — running in a single cloud account/region. A self-hosted
+deployment can run as a cell on any supported cloud; an AWS account, a GCP
+project, and an Azure subscription are each just a cell, and a second AWS account
+is simply another cell rather than a special case. The cell model and its
+control plane are tracked in [deployment-cells.md](deployment-cells.md).
+
+Self-host posture for cells:
+
+- The same backend code (see [backend-architecture.md](backend-architecture.md))
+  runs in every cell; what differs is how many cells exist and who operates them.
+  The common self-host shape is a single cell, which is one instantiation of the
+  per-cloud Terraform stack (see [cloud-targets.md](cloud-targets.md) and
+  [terraform-infrastructure.md](terraform-infrastructure.md)).
+- Cells are isolated for blast-radius containment: a cell holds the full data and
+  key material for its own tenants and depends on nothing in another cell to
+  serve them. There is no shared data store spanning cells.
+- The control plane is thin and holds only routing metadata
+  (realm/account → home cell + endpoint + signing key), never tenant data. It is
+  a separate global surface, not a per-cell `/v1` route. The go-forward client
+  resolves its home cell from the control plane (and may cache it), then talks
+  directly to that cell against its `--endpoint`. Tokens stay cell-scoped and are
+  validated by the home cell.
+- Moving a tenant between cells is a deliberate, bounded migration: the open
+  plane moves via the first-class export/import, and the sealed plane is
+  **re-wrapped** under the destination cell's KMS (decrypt-at-source /
+  re-encrypt-at-dest, audited end to end). See
+  [backup-and-recovery.md](backup-and-recovery.md) and
+  [deployment-cells.md](deployment-cells.md).
+
+Whether a self-host is always a single cell or may itself be a multi-cell fleet
+with its own control plane is an [open decision](#open-decisions).
+
 ## Required Components
 
 A production self-hosted deployment will likely require:
@@ -328,6 +366,13 @@ The separate backend server command surface is tracked in
 
 Self-hosted deployments may differ from managed Witself Cloud:
 
+- The account model is unchanged — Witself is always account → realm → agent —
+  but a self-host has **no signup**. A single implicit deployment/org account
+  root anchors the deployment, its realms, agents, and durable token files. The
+  account-level billing, support, and managed-admin capabilities are
+  capability-gated off; the self-hosted operator never sees account billing or
+  signup surfaces (see [operator-auth.md](operator-auth.md) and
+  [deployment-cells.md](deployment-cells.md)).
 - Billing commands may be disabled, local-only, or wired to the operator's own
   billing system.
 - Hosted payment and crypto payment flows may be unavailable unless the operator
@@ -359,6 +404,43 @@ billing. When billing is disabled, `billing usage` and `billing limits` may be
 unsupported or mapped to operator-owned quota policy, but core rate-limit and
 limit errors should remain machine-readable. The billing and limits model is
 tracked in [billing-and-limits.md](billing-and-limits.md).
+
+## Federation Prerequisites
+
+Cross-realm / cross-account agent collaboration is the first post-v0 epic, built
+after the realm-local core. A self-hosted realm participates in it on the same
+footing as a managed realm: the cross-realm channel and its trust model are
+tracked in [agent-collaboration.md](agent-collaboration.md).
+
+To federate, a self-hosted deployment registers with the shared global directory
+and publishes a signed card:
+
+- **Register an FQDN + signing key** in the shared global directory so the realm
+  is reachable by handle. A self-hosted realm is resolved (realm handle → home
+  cell + endpoint + signing key) exactly like a managed realm; resolution is the
+  same control-plane directory that homes a tenant on a cell (see
+  [deployment-cells.md](deployment-cells.md)).
+- **Publish a signed realm/agent card** at `GET /.well-known/witself-card.json`.
+  Signing is mandatory — an unsigned card is rejected. The card is a JWS over
+  canonicalized JSON carrying the realm handle, advertised agent skills, the
+  endpoint, accepted auth, the signing public key (JWKS), delivery modes, and a
+  TTL. Consumers verify the card before they trust it.
+- **Maintain a deny-by-default federation allow-list.** A realm explicitly
+  allow-lists which remote realm handles + keys it accepts; first contact is
+  quarantined and requires consent. A cross-realm message carries **no
+  authority** — it can never author a write in the receiving realm without a
+  standing `allow` policy there (see [access-policy.md](access-policy.md)).
+- **Resolution is separated from the signing key.** *Where* a realm lives is
+  routing metadata in the directory; *whether to trust* a message is the
+  signature check against the published key, so compromising routing cannot forge
+  identity.
+
+Agents are **outbound clients** and run no HTTP servers for normal I/O; the only
+server in the deployment is `witself-server` / the relay. An agent "hears" by
+long-polling rather than accepting inbound connections. The capability surface
+(cross-realm send, the long-poll receive verb, the conversation/task resource,
+and the federation allow-list management) is reported through `/v1/capabilities`
+and lands on the follow-up contract pass.
 
 ## Security Requirements
 
@@ -433,6 +515,10 @@ as development scaffolding behind the same backend interface in
   re-index workflow for an operator-initiated embedding-model change.
 - KEK rotation cadence and the operator runbook for a KMS CMK rotation when the
   sealed plane is enabled.
+- Whether a self-host is always a single cell or may itself be a multi-cell fleet
+  with its own control plane (see [deployment-cells.md](deployment-cells.md)).
+- Self-host federation topology: cloud-relay-first vs peer-to-peer reachability
+  by FQDN (see [agent-collaboration.md](agent-collaboration.md)).
 
 ## Related Docs
 
@@ -451,6 +537,8 @@ as development scaffolding behind the same backend interface in
 - [memory-model.md](memory-model.md)
 - [access-policy.md](access-policy.md)
 - [cloud-targets.md](cloud-targets.md)
+- [deployment-cells.md](deployment-cells.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [backup-and-recovery.md](backup-and-recovery.md)
 - [helm-chart.md](helm-chart.md)
 - [terraform-infrastructure.md](terraform-infrastructure.md)

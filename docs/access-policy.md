@@ -46,6 +46,58 @@ grant and audited as a `secret.reveal`/`secret.grant`, not a `crossagent.*`
 event. Accordingly, the `scope` of a Policy is `memories`, `facts`, or both, and
 never a secret; a `secret`-scoped Policy is invalid.
 
+## Realm Boundary: The Federation Trust Registry (Post-v0)
+
+The Policy engine above is **realm-local**: it decides whether one agent may
+reach another agent's identity data *inside* one realm, and it is **unchanged**
+by cross-realm collaboration. Policies never span realms (the `realm` field on a
+Policy is the enclosing realm). When agents collaborate **across** realms (the
+first post-v0 epic, see [agent-collaboration.md](agent-collaboration.md)), the
+question "do I accept anything from this peer at all?" is answered one layer
+**outside** the Policy engine, by the **federation trust registry**.
+
+The trust registry is the cross-realm analog of the Policy allow-list, applied
+to whole realms instead of in-realm subjects:
+
+- It is **deny-by-default**. A realm **allow-lists** which remote realm handles —
+  and which **published signing keys** — it accepts. Absence from the registry is
+  a **deny**: federation does not happen by default, exactly as absence of a
+  matching `allow` Policy is a deny in-realm.
+- The unit of trust is the **realm handle + its key**, not the account and not a
+  token. A peer is accepted only when its signed realm card verifies against the
+  key the registry pins for that handle (card shape and verification live in
+  [agent-collaboration.md](agent-collaboration.md)).
+- **First contact is quarantined.** A message from a not-yet-trusted peer is held
+  under new-sender quarantine and requires an explicit **consent** step before the
+  conversation proceeds; consent is the durable decision that admits the peer.
+- Trust is **anchored, not transitive.** Trusting realm A never implies trusting
+  whatever A trusts. Each federation edge is its own allow-list decision, the same
+  way each in-realm grant is its own Policy.
+- Registry and consent decisions are audited (`federation.peer_allowed`,
+  `federation.peer_denied`, `federation.consent_accepted`); the canonical names
+  land in [audit-retention.md](audit-retention.md) on the contract pass.
+- Managing the registry (allow/remove peers, publish/rotate the realm card) is an
+  **operator** action gated on `federation:manage`, not on a cross-agent Policy
+  and not a default agent capability (see
+  [authorization-and-roles.md](authorization-and-roles.md)).
+
+### A verified peer carries no authority
+
+Passing the trust registry only proves **which realm/agent** a message came from;
+it grants **nothing**. A cross-realm message — even one whose signature verifies
+and whose sender is allow-listed — can **never** author a write in the receiving
+realm without a **standing `allow` Policy there**. The signed, allow-listed
+sender is admitted as a **peer principal, not a trusted one**: its `body` and
+`payload` remain untrusted input, and a `contribute`/`curate`/`forget` against
+local identity data still requires a matching in-realm Policy **and** the
+matching cross-agent scope, evaluated default-deny exactly as for a local caller
+(see [Default-Deny Evaluation](#default-deny-evaluation) and
+[inter-agent-messaging.md](inter-agent-messaging.md)).
+
+So the two layers compose without overlap: the **federation trust registry**
+decides *whether the realm is heard at all*; the **Policy engine** decides *what,
+if anything, a heard message may do*. Neither substitutes for the other.
+
 ## Policy Object
 
 A Policy is a first-class object in the realm. Its shape is pinned in
@@ -321,6 +373,7 @@ end-to-end secret boundary inherited from Witpass.
 - [facts-model.md](facts-model.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [threat-model.md](threat-model.md)
 - [audit-retention.md](audit-retention.md)
 - [json-contracts.md](json-contracts.md)

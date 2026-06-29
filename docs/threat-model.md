@@ -92,6 +92,29 @@ The product should assume attackers will try to:
   unwrap reachable per-realm KEKs and read sealed material across tenants.
 - Abuse the reveal/TOTP-code operations at volume, or smuggle sealed plaintext
   out through a non-reveal channel (recall, digest, export, ingest).
+- Publish a forged, shadowed, or look-alike realm/agent **card** — an unsigned
+  card, a card under a JWKS the attacker controls, or a card impersonating a
+  legitimate realm handle — to be accepted as a federation peer.
+- **Replay** a captured cross-realm message envelope into the receiving realm, or
+  reorder/duplicate envelopes, to re-drive a delivery or a conversation turn.
+- Exploit **federation trust drift** — a stale allow-list entry, a rotated-away
+  signing key still trusted, or transitive trust ("A trusts B, B trusts C, so C
+  reaches A") — to reach a realm that never consented.
+- **Amplify loops or floods** across realms: a conversation that bounces between
+  realms without terminating, or a fan-out that multiplies messages, to exhaust
+  budgets, mailboxes, or relay throughput.
+- Use an optional cross-realm **push/callback endpoint** as an **SSRF** pivot,
+  coaxing a realm or the relay into making requests to attacker-chosen internal
+  targets.
+- Cause a token or sealed material to **bleed across realm/domain boundaries** —
+  a token minted in one realm accepted in another, or sealed plaintext following
+  a cross-realm path it should never take.
+- Compromise the **thin global control plane** to corrupt placement or
+  realm→cell routing — redirecting a tenant's traffic, poisoning the federation
+  trust registry, or attempting to use it as a pivot into a cell.
+- Exploit the **cross-cloud KMS** path during a tenant **migration** between
+  cells (decrypt-at-source / re-encrypt-at-destination) to capture sealed
+  plaintext in flight or widen the sealed-plane blast radius across clouds.
 - Compromise self-hosted deployment configuration.
 - Abuse managed-service billing, support, or account flows.
 
@@ -192,6 +215,16 @@ A second agent reachable through policy, group membership, or messaging is a
 *peer principal*, not a trusted one. Data and instructions crossing from a peer
 agent are untrusted input to the receiving agent.
 
+A **peer realm** reachable through cross-realm collaboration is the same idea one
+level up: a remote realm that has been allow-listed for federation is a *peer
+realm*, not a trusted one. Its signed card, its agents, and every cross-realm
+message it sends are untrusted input that carries no standing authority into the
+receiving realm — a cross-realm message can deliver content but still needs a
+standing allow policy and in-scope token in the receiving realm to drive any
+write (see [agent-collaboration.md](agent-collaboration.md)). The
+post-v0 cross-realm substrate and multi-cloud cell model are not yet in the v0
+backend; this threat model states their posture ahead of implementation.
+
 ## Trust Boundaries
 
 Trust boundaries:
@@ -220,6 +253,21 @@ Trust boundaries:
 - One named agent to another, through **inter-agent messaging** — message
   bodies and payloads cross an authenticity and injection boundary into the
   receiving agent.
+- One realm to another realm, through **cross-realm collaboration** — a signed
+  realm/agent card, a federation allow-list decision, and a cross-realm message
+  envelope cross a *cross-realm* trust boundary into the receiving realm. This is
+  the federation analog of the agent-to-agent boundary: the sending realm is
+  re-derived from the envelope signature verified against the sender's published
+  card JWKS, never trusted from a caller-supplied `realm` field, and the message
+  carries no authority. Post-v0; see [agent-collaboration.md](agent-collaboration.md).
+- A client (CLI / MCP) or the cross-realm relay to the **thin global control
+  plane**, and the control plane to a per-tenant **cell** — the
+  control-plane/cell boundary. The control plane holds only routing and trust
+  metadata (realm/account → home cell + endpoint + signing key); tenant identity
+  and sealed material live entirely inside a cell. A cell is a complete, isolated
+  Witself stack, and a tenant is homed on exactly one cell, so a cell compromise
+  is contained to that cell's tenants. Post-v0; see
+  [deployment-cells.md](deployment-cells.md).
 - `witself-server` to object/blob storage (exports, attachments, backups).
 - `witself-server` to billing/payment providers.
 - `witself-server` to support systems.
@@ -421,6 +469,28 @@ Required controls:
   credentials.
 - CLI-initiated operator auth that avoids raw password collection and supports
   device-code fallback for headless environments.
+- Cross-realm trust controls (post-v0): **mandatory signed cards** (an unsigned
+  card is rejected; the sending realm is verified against the card's published
+  JWKS); **deny-by-default federation** with a per-realm allow-list and
+  per-edge consent, so an unknown peer is a deny; **real-time revocation** of a
+  peer or a compromised key that takes effect immediately; and **hop, TTL, and
+  budget governors** on every cross-realm envelope (`max_hops`, `expires_at`,
+  per-conversation turn/cost budgets) so a loop or flood terminates and is
+  suspended rather than amplified. Replay is contained by the envelope `nonce`,
+  `sequence`, and `expires_at`; any optional cross-realm push endpoint is
+  egress-restricted against SSRF and never accepts a caller-supplied target
+  (see [agent-collaboration.md](agent-collaboration.md),
+  [access-policy.md](access-policy.md)).
+- Control-plane and cell controls (post-v0): the global control plane is kept
+  **thin and metadata-only** (routing + trust registry; it persists and delivers
+  no tenant data), so a control-plane compromise is a routing/trust-registry
+  incident, not a tenant-data breach; **blast-radius isolation per cell** (a
+  tenant is homed on one isolated cell, with no shared data store across cells)
+  so a cell compromise stays contained to that cell's tenants; and a bounded,
+  audited **cross-cloud KMS re-wrap** for tenant migration (decrypt at the source
+  cell, re-encrypt under the destination cell's KMS) that never persists or logs
+  plaintext (see [deployment-cells.md](deployment-cells.md),
+  [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md)).
 
 ## Two-Plane Security Posture
 
@@ -666,6 +736,86 @@ detailed in [encryption-model.md](encryption-model.md),
 [totp-2fa.md](totp-2fa.md), and
 [authorization-and-roles.md](authorization-and-roles.md).
 
+## Cross-Realm Collaboration Risks
+
+Cross-realm collaboration (post-v0) extends the agent-to-agent boundary across an
+organizational and network boundary into another realm. It is deny-by-default and
+signature-anchored; the threats below are the federation analog of the
+inter-agent messaging and policy-misconfiguration risks above, and the open-plane
+posture — integrity, attribution, no standing authority from a message — carries
+over unchanged. See [agent-collaboration.md](agent-collaboration.md) and
+[deployment-cells.md](deployment-cells.md).
+
+- **Card shadowing / impersonation.** An attacker publishes a forged, unsigned,
+  or look-alike realm/agent card to be accepted as a peer or to impersonate a
+  legitimate realm handle. Mitigated by **mandatory signed cards** — an unsigned
+  card is not a card and is rejected — with the sending realm verified against
+  the card's published JWKS, and by deny-by-default federation that accepts only
+  allow-listed handles.
+- **Cross-realm replay.** A captured envelope is replayed, reordered, or
+  duplicated to re-drive a delivery or conversation turn. Mitigated by the
+  envelope `nonce`, `sequence`, and `expires_at` (TTL), so a stale or repeated
+  envelope is dropped; the durable mailbox in the recipient's home cell remains
+  the single source of truth.
+- **Federation trust drift.** A stale allow-list entry, a rotated-away signing
+  key still being trusted, or assumed transitive trust ("A trusts B, B trusts C")
+  silently widens reach. Mitigated by per-edge allow-list decisions (federation
+  is not transitive — each edge is its own decision), **real-time revocation**
+  of a peer or key, and audited `federation.peer_allowed` /
+  `federation.peer_denied` / `federation.consent_accepted` events.
+- **Loop and flood amplification.** A conversation bounces between realms without
+  terminating, or a fan-out multiplies messages, exhausting budgets, mailboxes,
+  or relay throughput. Mitigated by **hop/TTL/budget governors** — `max_hops`,
+  `expires_at`, and per-conversation turn/cost budgets — that suspend the loop
+  (`loop.suspended`) or exhaust the budget (`budget.exhausted`) rather than let
+  it amplify.
+- **SSRF on optional push.** An optional cross-realm push/callback endpoint is
+  abused as a pivot to reach attacker-chosen internal targets. Mitigated by
+  treating any push target as not caller-controlled, egress-restricting the
+  relay and cells, and keeping the durable mailbox (pull) the canonical delivery
+  path.
+- **Token bleed across domains.** A token minted in one realm is presented to
+  another, or sealed plaintext follows a cross-realm path. Mitigated because a
+  cross-realm message carries **no authority** — it still needs a standing allow
+  policy and an in-scope token in the *receiving* realm — tokens are cell-scoped
+  and validated by the home cell, and the sealed-plane carve-out keeps secret
+  values off every cross-realm path (never embedded, recalled, digested,
+  exported, or ingested).
+
+## Control-Plane and Cell Isolation Risks
+
+The multi-cloud cell model (post-v0) deploys Witself as a **fleet of independent
+cells** under a single thin global control plane. The control plane is the one new
+always-on global component; its compromise is a routing and trust-registry
+incident, deliberately not a tenant-data breach. See
+[deployment-cells.md](deployment-cells.md).
+
+- **Control-plane compromise.** Whoever controls the control plane can corrupt
+  tenant placement and realm→cell routing, poison the federation trust registry,
+  or attempt to use it as a pivot. The control plane is kept **thin and
+  metadata-only** — it holds the realm/account → home-cell + endpoint + signing
+  key mapping and persists/delivers no tenant identity or sealed material — so
+  the worst-case is misrouting and trust-registry tampering, both audited and
+  detectable, not bulk identity or secret disclosure. Tokens are validated by the
+  home cell, not the control plane.
+- **Blast-radius across cells.** A cell is a complete, isolated stack with no
+  shared data store, and a tenant is homed on exactly one cell. A cell compromise
+  is therefore contained to that cell's tenants; it does not reach tenants homed
+  on other cells, which preserves the same per-tenant containment goal as the
+  sealed-plane KMS blast-radius discipline above.
+- **Cross-cloud KMS during migration.** Moving a tenant between cells (possibly
+  across clouds) requires a **KMS re-wrap**: decrypt sealed material at the source
+  cell, re-encrypt it under the destination cell's KMS. The exposure window is the
+  migration, where plaintext exists transiently and two clouds' KMS are in play.
+  Mitigated by making migration a bounded, audited operation
+  (`tenant.migration_started` / `tenant.migration_completed` /
+  `tenant.migration_failed`), never persisting or logging the transient
+  plaintext, leaning on the first-class export/import for the open plane and the
+  sealed-plane KMS re-wrap for secrets, and scoping each cell's KMS to its own
+  tenants (see [storage.md](storage.md),
+  [backup-and-recovery.md](backup-and-recovery.md),
+  [key-hierarchy.md](key-hierarchy.md)).
+
 ## Self-Hosted Risks
 
 Self-hosted deployments add infrastructure risks:
@@ -760,6 +910,11 @@ Revisit this threat model when:
 - New 2FA modalities (SMS, email, push, passkeys, hardware keys) are added.
 - The sealed-plane carve-out (embed/recall/digest/export/ingest exclusions) is
   modified in any direction.
+- Cross-realm collaboration, the realm/agent card model, the federation
+  allow-list/consent model, the cross-realm message envelope, or the relay
+  topology changes (post-v0).
+- The multi-cloud cell model, the global control plane's surface, tenant
+  placement/migration, or the cross-cloud KMS re-wrap changes (post-v0).
 - Payment or crypto payment providers are integrated.
 - The Helm chart or Terraform modules become production-supported.
 - The internal support/admin (or AI support/admin) path is designed.
@@ -782,6 +937,8 @@ Revisit this threat model when:
 - [context-hydration.md](context-hydration.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [storage.md](storage.md)
 - [token-lifecycle.md](token-lifecycle.md)
 - [operator-auth.md](operator-auth.md)

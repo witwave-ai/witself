@@ -234,6 +234,16 @@ provider is abstracted. Initial provider names:
 `local-dev` exists for tests, demos, and `witself-server serve --dev`. It is not
 a production KMS provider.
 
+KMS is **per cell**. A cell is one complete, independent Witself stack in a
+single cloud account/region, and its sealed plane is rooted in that cell's own
+KMS (its CMK → per-realm KEK → per-secret/field DEK hierarchy). No CMK, KEK, or
+DEK is shared across cells, and the thin global control plane holds only routing
+metadata (realm/account → home cell + endpoint + signing key) — never tenant
+data and never key material. Moving a tenant between cells therefore re-roots its
+sealed plane under the destination cell's KMS; see
+[Cross-Cell KMS Re-Wrap](#cross-cell-kms-re-wrap) and
+[deployment-cells.md](deployment-cells.md).
+
 Managed Witself Cloud uses AWS KMS first, alongside AWS RDS for Postgres (with
 `pgvector`) and S3; see [First Cloud Target](#first-cloud-target). Self-hosted
 deployments that enable the sealed plane select a provider through server
@@ -303,6 +313,57 @@ are **never embedded** (no `pgvector` row), **never returned by semantic
 recall**, **never in the self-digest**, **never ingested** from
 CLAUDE.md/AGENTS.md, and **never written to a plaintext export**. Secret backup
 is encrypted-only; see [Backup And Restore Implications](#backup-and-restore-implications).
+
+## Cross-Cell KMS Re-Wrap
+
+Witself deploys as a fleet of independent cells under a thin global control
+plane: each cell is one complete, independent stack (its own Postgres + pgvector,
+its own KMS, its own blob store) and holds the full data and key material for the
+tenants homed on it. The control plane holds only routing metadata — the
+realm/account → home cell + endpoint + signing key mapping — and **no tenant
+data and no key material**. See [deployment-cells.md](deployment-cells.md).
+
+Because KMS is per cell (see [KMS Posture](#kms-posture)), the sealed plane's
+CMK → per-realm KEK → per-secret/field DEK hierarchy is rooted in the *home
+cell's* KMS. A tenant's wrapped KEK and wrapped DEKs only resolve under that
+cell's CMK; nothing in another cell can unwrap them. This is the same
+blast-radius containment the open plane gets from per-cell Postgres.
+
+Moving a realm/account from cell A to cell B therefore cannot just copy the
+encrypted blobs — cell B's KMS cannot unwrap material rooted in cell A's CMK. The
+sealed plane migrates by an audited **re-wrap**:
+
+- **Decrypt-at-source.** Under cell A's KMS, unwrap the per-realm KEK and unwrap
+  each affected DEK (key-on-key; the at-rest `ciphertext` is never decrypted and
+  no secret value or TOTP seed is exposed).
+- **Re-encrypt-at-dest.** Under cell B's KMS, mint the destination-rooted
+  per-realm KEK and re-wrap the DEKs beneath it, writing the destination
+  `realm_keys` / `secret_deks` rows. The DEK ciphertext stays put; only the
+  wrapping changes, exactly as in the in-cell KEK re-wrap of
+  [key-hierarchy.md](key-hierarchy.md) (Rotation, Re-Wrap, And Backfill), here
+  crossing a cloud/KMS boundary rather than rotating in place.
+
+The plaintext DEKs transit only in memory on the migration path and are zeroized
+after; CMK-rooted plaintext secret values and TOTP seeds are never materialized.
+The operation is audited end to end — it emits `tenant.migration_started`,
+`tenant.migration_completed`, or `tenant.migration_failed` alongside the
+sealed-plane re-wrap, per [deployment-cells.md](deployment-cells.md) and the
+audit-event registry in [audit-retention.md](audit-retention.md). After the
+control-plane mapping is repointed to cell B, clients re-resolve their home cell
+and route to B directly.
+
+The open plane (memories, facts, messaging) moves over the same migration by the
+first-class export/import path rather than a re-wrap, since it carries no KMS
+envelope; embeddings are recomputed in the destination or moved directly when the
+destination cell uses the same embedding model. See
+[backup-and-recovery.md](backup-and-recovery.md) and
+[Backup And Restore Implications](#backup-and-restore-implications).
+
+Open decisions (tracked in [deployment-cells.md](deployment-cells.md), not
+resolved here): whether the placement/migration unit is the account or the realm,
+and whether cutover uses a brief read-only freeze or dual-write + reconcile —
+either way the sealed-plane re-wrap is the same audited decrypt-at-source /
+re-encrypt-at-dest pass.
 
 ## Migration Tool
 
@@ -476,6 +537,7 @@ The backup, export, and recovery policy is tracked in
 - [helm-chart.md](helm-chart.md)
 - [terraform-infrastructure.md](terraform-infrastructure.md)
 - [cloud-targets.md](cloud-targets.md)
+- [deployment-cells.md](deployment-cells.md)
 - [audit-retention.md](audit-retention.md)
 - [billing-and-limits.md](billing-and-limits.md)
 - [backup-and-recovery.md](backup-and-recovery.md)

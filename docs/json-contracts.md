@@ -381,6 +381,18 @@ Used by `witself capabilities` and `/v1/capabilities`.
     "support": {
       "supported": false,
       "reason": "managed_only"
+    },
+    "cross_realm_collaboration": {
+      "supported": true
+    },
+    "federation": {
+      "supported": true
+    },
+    "agent_card": {
+      "supported": true
+    },
+    "multi_cell": {
+      "supported": true
     }
   },
   "limits": {
@@ -445,6 +457,16 @@ Rules:
   [billing-and-limits.md](billing-and-limits.md) (e.g. `active_agent`,
   `stored_memory`, `memory_recall`), so they join directly to
   `/v1/billing/usage` items and the `limit_dimension` metric label.
+- `cross_realm_collaboration`, `federation`, `agent_card`, and `multi_cell`
+  advertise the cross-realm and multi-cloud capabilities:
+  `cross_realm_collaboration` (conversations and cross-realm messaging via the
+  relay), `federation` (the realm's accepted-peer allow-list / trust registry),
+  `agent_card` (a signed [realm card](#realm-card) is published and served at
+  `/.well-known/witself-card.json`), and `multi_cell` (managed placement and
+  tenant migration across cells). The collaboration substrate is specified in
+  [agent-collaboration.md](agent-collaboration.md) and the cell model in
+  [deployment-cells.md](deployment-cells.md). A deployment that does not offer
+  one of these reports `supported: false` with a stable `reason`.
 - `features` values must include at least `supported`.
 - Unsupported features should include a stable `reason` when known.
 - Capability responses must not include memory content, fact values, message
@@ -1078,6 +1100,7 @@ always derived from the authenticated token; `from` is never accepted as input.
   },
   "to": {
     "kind": "agent",
+    "realm": "research-lab",
     "agent_id": "agent_456",
     "agent_name": "archivist"
   },
@@ -1088,7 +1111,15 @@ always derived from the authenticated token; `from` is never accepted as input.
     "memory_ref": "witself://agent/browser-agent/memory/mem_123"
   },
   "thread_id": "thr_123",
-  "conversation_id": "cnv_123",
+  "conversation_id": "thr_123",
+  "envelope": {
+    "hop_count": 0,
+    "max_hops": 8,
+    "sequence": 3,
+    "nonce": "b3f1c2...",
+    "expires_at": "2026-06-26T19:00:00Z",
+    "signature": "<JWS over the canonicalized envelope>"
+  },
   "created_at": "2026-06-26T18:00:00Z",
   "delivery": {
     "state": "delivered",
@@ -1116,13 +1147,141 @@ Rules:
   write (writes still require policy).
 - `subject`/`kind` are short classifications safe for list views.
 - `thread_id`/`conversation_id` are optional and drive per-conversation
-  ordering.
+  ordering. `conversation_id` is the first-class cross-realm conversation
+  handle and reuses the `thr_` prefix; an in-realm thread and its cross-realm
+  conversation share one id space (see [Conversation](#conversation)).
+- `to.realm` and `from.realm` are optional realm handles that make a recipient
+  or sender cross-realm. When `realm` is absent the participant is local
+  (unchanged from in-realm messaging); when present it qualifies the address as
+  `witself://<realm-handle>/agent/<name>`. As with `from`, the sending realm in
+  `from.realm` is derived from the authenticated, signed envelope, never
+  accepted as free input.
+- `envelope` carries the cross-realm safety fields and is present only for
+  messages that cross a realm boundary:
+  - `hop_count` / `max_hops` — relay-hop governor; each relay increments
+    `hop_count`, and a message exceeding `max_hops` (default `8`) is dropped and
+    audited (`loop.suspended`).
+  - `sequence` — per-conversation monotonic ordering counter.
+  - `nonce` — single-use value for replay rejection within the TTL window.
+  - `expires_at` — envelope TTL (default 1h); an expired envelope is rejected.
+  - `signature` — the sending realm's JWS over the canonicalized envelope,
+    verified against that realm's published JWKS (from its signed
+    [realm card](#realm-card)).
+  These governors and the relay model are specified in
+  [agent-collaboration.md](agent-collaboration.md). A cross-realm message still
+  carries no standing authority: the receiving realm must independently allow
+  the sender (federation allow-list + policy).
 - `direction` selects a mailbox view in `message list` and the messaging API.
   Its value set is `inbox` or `outbox`; there is no `all` value in v0. The MCP
   `direction` enum references this set, and the CLI selector maps to it.
 
 Inter-agent messaging is tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
+
+## Conversation
+
+Used by `GET /v1/conversations` / `GET /v1/conversations/{id}` and the
+cross-realm collaboration commands. A conversation is the first-class
+cross-realm task/thread resource: it carries an A2A-style task state machine and
+the per-conversation budget governors. It reuses the `thr_` id prefix so an
+in-realm thread and its cross-realm conversation share one id space.
+
+```json
+{
+  "id": "thr_123",
+  "state": "working",
+  "participants": [
+    {
+      "kind": "agent",
+      "realm": "default",
+      "agent_id": "agent_123",
+      "agent_name": "browser-agent"
+    },
+    {
+      "kind": "agent",
+      "realm": "research-lab",
+      "agent_name": "archivist"
+    }
+  ],
+  "turn_budget": 24,
+  "turns_used": 6,
+  "cost_budget": "5.00",
+  "remaining_turns": 18,
+  "created_at": "2026-06-26T18:00:00Z",
+  "updated_at": "2026-06-26T18:05:00Z"
+}
+```
+
+Rules:
+
+- `state` values are `submitted`, `working`, `input_required`, `auth_required`,
+  `completed`, `failed`, and `canceled`. Transitions emit the
+  `conversation.started` / `conversation.state_changed` /
+  `conversation.completed` / `conversation.failed` / `conversation.canceled`
+  audit events.
+- `participants[]` lists the agents on each side, each carrying an optional
+  `realm` handle; a participant without `realm` is local (matching the
+  [Message](#message) `to.realm` / `from.realm` convention).
+- `turn_budget` / `turns_used` / `remaining_turns` track the per-conversation
+  turn governor; exhaustion suspends the conversation and emits `loop.suspended`
+  and `budget.exhausted`. `cost_budget` is the optional cost ceiling for the
+  conversation.
+- Conversations never include message `body`/`payload` content; bodies follow
+  the [Message](#message) redaction posture.
+
+The cross-realm conversation and its governors are specified in
+[agent-collaboration.md](agent-collaboration.md).
+
+## Realm Card
+
+Used by `GET /.well-known/witself-card.json` (served outside `/v1`) and the
+`federation` command group. The card is the signed, fetchable description of
+what a realm offers across the federation: its handle, the agents and skills it
+exposes, its endpoint, accepted auth, signing key, and delivery modes.
+
+```json
+{
+  "realm_handle": "research-lab",
+  "agents": [
+    {
+      "handle": "archivist",
+      "skills": ["recall", "summarize"]
+    }
+  ],
+  "endpoint": "https://research-lab.example.com",
+  "accepted_auth": ["bearer", "mtls"],
+  "signing": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "realm-key-1",
+    "x": "<base64url public key>"
+  },
+  "delivery_modes": ["mailbox", "listen"],
+  "ttl": 3600,
+  "expires_at": "2026-06-26T19:00:00Z",
+  "signature": "<JWS over the canonicalized card>"
+}
+```
+
+Rules:
+
+- `realm_handle` is the federation-visible handle that resolves (through the
+  shared global directory) to the realm's home cell, endpoint, and signing key
+  (see [deployment-cells.md](deployment-cells.md)).
+- `agents[]` advertises each exposed agent `handle` and its `skills[]`;
+  cross-realm sends address `witself://<realm-handle>/agent/<handle>`.
+- `signing` is the realm signing **public key** (a JWKS-style entry) used to
+  verify message envelopes and the card itself.
+- `delivery_modes[]` advertises how inbound is received (e.g. durable `mailbox`
+  and long-poll `listen`); agents run no inbound HTTP servers.
+- `ttl` / `expires_at` bound the card's freshness so consumers refetch and
+  re-verify; revocation is real-time, not cache-only.
+- `signature` is **mandatory**: the card is a JWS over its canonicalized JSON,
+  and a consumer must verify it against the `signing` key before trusting the
+  card. An unsigned or unverifiable card is rejected.
+
+The signed card, resolution model, and verify-before-trust rule are specified in
+[agent-collaboration.md](agent-collaboration.md).
 
 ## Service Administration Shapes
 
@@ -1573,6 +1732,14 @@ Rules:
     `billing.crypto.payment.failed`, `billing.crypto.refund.created`,
     `billing.crypto.provider_event.reconciled`, `support.ticket.created`,
     `support.ticket.commented`, `support.ticket.closed`, `support.bundle.created`.
+  - Collaboration (cross-realm): `conversation.started`,
+    `conversation.state_changed`, `conversation.completed`,
+    `conversation.failed`, `conversation.canceled`, `federation.peer_allowed`,
+    `federation.peer_denied`, `federation.consent_accepted`, `loop.suspended`,
+    `budget.exhausted` (see [agent-collaboration.md](agent-collaboration.md)).
+  - Deployment cells: `tenant.placed`, `tenant.migration_started`,
+    `tenant.migration_completed`, `tenant.migration_failed` (see
+    [deployment-cells.md](deployment-cells.md)).
 - The `fact set` / `remember` upsert is not its own event: it emits
   `fact.created` for a new fact or `fact.updated` for an existing one.
 - Cross-agent and group-owned mutation events include `owner`, the deciding

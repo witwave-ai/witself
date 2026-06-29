@@ -12,9 +12,10 @@ the audit log is attributing cross-agent mutation, not detecting reads. See
 [threat-model.md](threat-model.md).
 
 This document is the authoritative registry of stable dotted `<resource>.<verb>`
-audit-event names, grouped by family (platform, open plane, sealed plane, and
-billing & support). Other docs reference these exact spellings; the enumeration
-in [json-contracts.md](json-contracts.md) points back here.
+audit-event names, grouped by family (platform, open plane, sealed plane,
+collaboration & cells, and billing & support). Other docs reference these exact
+spellings; the enumeration in [json-contracts.md](json-contracts.md) points back
+here.
 
 ## Decision
 
@@ -284,6 +285,52 @@ See [token-lifecycle.md](token-lifecycle.md) and
 - `limit.decision` (warn/throttle/block outcomes; see
   [billing-and-limits.md](billing-and-limits.md))
 
+### Collaboration (cross-realm)
+
+Cross-realm collaboration events attribute the lifecycle of a federated
+conversation/task and the federation-trust decisions that gate which peer realms
+are accepted. Every record names the local realm and, where applicable, the
+remote realm handle; none ever carries a message body, envelope signature, or
+peer signing-key material (see [Audit Content Rules](#audit-content-rules)). See
+[agent-collaboration.md](agent-collaboration.md).
+
+- `conversation.started` (a cross-realm conversation/task opened; records the
+  `thr_` conversation id, participant handles, and the local/remote realms,
+  never turn content)
+- `conversation.state_changed` (records the new state — for example
+  `working`/`input_required`/`auth_required` — and the prior state, never
+  content)
+- `conversation.completed`
+- `conversation.failed` (records the failure class only, never content)
+- `conversation.canceled` (requires reason)
+- `federation.peer_allowed` (a peer realm handle added to the deny-by-default
+  federation allow-list; records the peer handle and the acting operator)
+- `federation.peer_denied` (an inbound peer rejected by the allow-list, or a peer
+  removed; the canonical record for refused cross-realm trust)
+- `federation.consent_accepted` (per-conversation consent to accept an inbound
+  peer for a specific conversation; records the peer handle and conversation id)
+- `loop.suspended` (a conversation suspended by a hop/TTL/loop governor; records
+  which governor tripped and the conversation id, never content)
+- `budget.exhausted` (a conversation halted on its turn or cost budget; records
+  the budget dimension and the conversation id)
+
+### Deployment cells
+
+Cell placement and tenant-migration events attribute where a realm/tenant lives
+across the fleet of independent cells and any move between cells. These are
+control-plane and managed-mode operations; records carry routing metadata only —
+never tenant identity data, key material, or re-wrap plaintext (see
+[Audit Content Rules](#audit-content-rules)). See
+[deployment-cells.md](deployment-cells.md).
+
+- `tenant.placed` (a realm/tenant assigned to a home cell; records the cell id
+  and the placement basis — for example region or residency — never tenant data)
+- `tenant.migration_started` (a cross-cell move begun; records source and
+  destination cell ids and the migration id)
+- `tenant.migration_completed`
+- `tenant.migration_failed` (records the failure class and the migration id,
+  never tenant data)
+
 ### Billing, Payment, and Support
 
 Recorded as stubs in v0 until the managed service is enabled; capability-gated
@@ -398,6 +445,8 @@ and general API volume) is defined in
 - [encryption-model.md](encryption-model.md)
 - [key-hierarchy.md](key-hierarchy.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [billing-and-limits.md](billing-and-limits.md)
 - [threat-model.md](threat-model.md)
 - [json-contracts.md](json-contracts.md)

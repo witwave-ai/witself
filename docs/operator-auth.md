@@ -26,6 +26,30 @@ its agents. It is distinct from agent authentication: agents authenticate with
 durable, token-file bearer credentials and never use a browser flow. The agent
 token lifecycle is tracked in [token-lifecycle.md](token-lifecycle.md).
 
+### Account context
+
+Witself uses one model — account → realm → agent — everywhere, but the account
+root means different things in managed and self-hosted deployments:
+
+- Managed: the account is the customer and billing root. An operator signs up,
+  the account is the unit that holds billing, support, and managed-admin
+  capability, and its realms may be placed on different cells. The control plane
+  resolves the realm/account to a home cell (endpoint + signing key) at login,
+  and per-cell calls then go directly to that home cell; placement, resolution,
+  and account-level billing aggregation across cells are defined in
+  [deployment-cells.md](deployment-cells.md) and
+  [billing-and-limits.md](billing-and-limits.md).
+- Self-hosted: there is no signup. A single implicit deployment/org account root
+  is created at bootstrap and serves as the realm parent for that deployment. The
+  billing, support, and managed-admin capabilities are capability-gated off, so a
+  self-hosted operator never sees account billing or signup surfaces and is not
+  asked to choose or resolve a cell.
+
+In both cases the operator does its day-to-day work in realms and agents, not in
+the account root; the account context above only changes what the root carries
+(billing/support/managed-admin vs. an implicit deployment root) and, for managed,
+which home cell a realm resolves to.
+
 ## Stored Operator Auth
 
 The CLI should store human operator auth material carefully:
@@ -129,8 +153,10 @@ Recommended v0 posture:
 - In Kubernetes, the bootstrap token can be delivered as an existing Kubernetes
   Secret or printed once by an explicitly run admin job.
 - `witself setup --endpoint URL --bootstrap-token-file PATH` uses that one-time
-  token to create the first operator context, realm, agents, and durable token
-  files.
+  token to create the first operator context, the single implicit deployment/org
+  account root for that deployment, realm, agents, and durable token files. The
+  account-level billing, support, and managed-admin capabilities are
+  capability-gated off for self-hosted deployments (see Account context above).
 - Bootstrap tokens should expire quickly, be single-use, and be audited.
 - After the first operator exists, ordinary account, realm, agent, policy,
   group, and token management happens through the public `witself` CLI.

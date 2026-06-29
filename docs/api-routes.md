@@ -20,6 +20,8 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
+- `/v1/conversations`
+- `/v1/federation`
 - `/v1/tokens`
 - `/v1/audit`
 - `/v1/exports`
@@ -91,6 +93,9 @@ GET  /metrics
 GET  /v1/health/live
 GET  /v1/health/ready
 GET  /v1/health/startup
+
+# Signed realm card, served at the well-known path (not under /v1).
+GET  /.well-known/witself-card.json
 
 # API listener, default :8080.
 GET  /v1/version
@@ -207,6 +212,16 @@ GET  /v1/messages
 POST /v1/messages
 GET  /v1/messages/{message_id}
 POST /v1/messages/{message_id}:ack
+POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
+
+# Cross-realm conversation/task resource (post-v0 collaboration).
+GET  /v1/conversations
+GET  /v1/conversations/{conversation_id}
+
+# Realm federation allow-list (accepted peers). federation:manage scope.
+GET    /v1/federation/peers
+POST   /v1/federation/peers
+DELETE /v1/federation/peers/{peer}
 
 GET  /v1/tokens
 POST /v1/tokens
@@ -348,6 +363,71 @@ Some CLI commands map onto these routes without a dedicated path:
   `GET /v1/whoami`, but `witself auth status` and `witself auth logout` are
   local-only client operations over cached credentials and have no server
   route.
+
+## Cross-Realm Collaboration Routes
+
+These routes back the post-v0 cross-realm collaboration substrate; see
+[agent-collaboration.md](agent-collaboration.md). They reuse the existing
+`/v1/messages` resource and add a long-poll receive verb, a conversation/task
+resource, the realm federation allow-list, and the signed realm card.
+
+```text
+POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
+
+GET  /v1/conversations
+GET  /v1/conversations/{conversation_id}
+
+GET    /v1/federation/peers
+POST   /v1/federation/peers
+DELETE /v1/federation/peers/{peer}
+
+GET  /.well-known/witself-card.json
+```
+
+- `POST /v1/messages:listen` is the long-poll receive verb: it blocks up to a
+  caller-supplied timeout (bounded server-side) and returns the inbound messages
+  drained from the caller's durable mailbox, the source of truth for
+  conversation state. It is the live face of the mailbox, not a separate
+  transport — a dropped connection loses no state, and the next `:listen` (or a
+  plain `GET /v1/messages`) drains whatever has arrived. The timeout and
+  optional `conversation_id` filter travel in the request body. This is the HTTP
+  surface for the CLI/MCP `listen`/`recv` verb (`witself message listen`,
+  `witself.message.listen`); it honors `--read-only`. Local and cross-realm
+  inbound arrive on the same route — a cross-realm message carries no authority
+  and still resolves against a standing receive policy in this realm.
+- `GET /v1/conversations` and `GET /v1/conversations/{conversation_id}` expose
+  the cross-realm conversation/task resource and its A2A-style state machine
+  (`submitted`, `working`, `input_required`, `auth_required`, `completed`,
+  `failed`, `canceled`), participants, and the per-conversation turn/cost budget
+  and remaining turns. Conversation ids reuse the existing `thr_` prefix. The
+  resource is read-oriented here; conversations advance by sending and listening
+  over `/v1/messages`, and state transitions emit the
+  `conversation.*` audit events.
+- `/v1/federation/peers` is the realm's deny-by-default accepted-peer allow-list:
+  which realm handles and signing keys this realm will exchange messages with.
+  `GET` lists the allow-list, `POST` adds a peer, and
+  `DELETE /v1/federation/peers/{peer}` removes one (revocation takes effect for
+  subsequent acceptance decisions). These routes require the
+  `federation:manage` operator scope; they govern *which* peers are accepted,
+  while a cross-realm `POST /v1/messages` still uses `message:send` and is
+  additionally gated by per-conversation consent. Peer add/remove and consent
+  decisions emit the `federation.*` audit events. See
+  [access-policy.md](access-policy.md) and
+  [authorization-and-roles.md](authorization-and-roles.md).
+- `GET /.well-known/witself-card.json` serves the realm's signed card — its
+  handle, advertised agents and skills, endpoint, accepted auth, signing
+  (JWKS public key), delivery modes, and expiry — under a JWS signature over the
+  canonicalized card. Signing is mandatory; an unsigned or unverifiable card is
+  not honored. It is intentionally **not** under `/v1`: it is the well-known
+  discovery surface a peer realm reads before federating, the cross-realm
+  analog of `/metrics` living outside the product API. Publishing and rotating
+  the card is a `federation:manage` operation.
+
+Cross-realm placement is separate. The home-cell resolution that tells a CLI or
+peer *which* cell a realm lives on is a control-plane surface, not a per-cell
+`/v1` route; see [deployment-cells.md](deployment-cells.md). Once a caller has
+resolved a realm's home cell, the routes above are served by that cell exactly
+as documented here.
 
 ## Self-Management And Hydration Routes
 
@@ -537,4 +617,6 @@ identity export. The routes back `witself export` and `witself import`:
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [observability-and-operations.md](observability-and-operations.md)

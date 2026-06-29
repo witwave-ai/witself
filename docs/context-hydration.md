@@ -153,8 +153,18 @@ embeddings half of the same invariant, see
 
 Three reinforcing surfaces, all carrying the same heuristics:
 recall-before-act, write-after-learn, fix-don't-contradict, consolidate-when-noisy,
-and assume-interruption. Redundancy is the point — the agent should be taught
-whether it connects over MCP or only ever reads project files.
+assume-interruption, and listen-before-reply. Redundancy is the point — the agent
+should be taught whether it connects over MCP or only ever reads project files.
+
+Collaboration rides this same teaching layer. The `message.listen`/`message.send`
+habit — how an agent hears from and replies to other agents, including agents in other realms —
+is taught through exactly these three surfaces, not a separate channel. Cross-realm
+comms are the same teaching layer carrying the same instinct out across realm
+boundaries; the underlying substrate is pinned in
+[agent-collaboration.md](agent-collaboration.md). The sealed-plane carve-out still
+applies: no secret value or TOTP seed rides a collaboration message by default, the
+same way it never enters the self-digest or the file bridge (see
+[The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)).
 
 ### 1. MCP Server `instructions` (the canonical standing protocol)
 
@@ -164,7 +174,7 @@ is pinned **verbatim** here and in [mcp-tools.md](mcp-tools.md); the two copies
 must stay byte-identical. Do not paraphrase it in code:
 
 ```text
-You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. Memory work is not a substitute for doing the task.
+You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. To hear from other agents, call `witself.message.listen` each loop; reply with `witself.message.send`. Memory work is not a substitute for doing the task.
 ```
 
 It is modeled on Anthropic's memory-tool protocol and Letta's block protocol:
@@ -216,6 +226,11 @@ tools (or the `witself` CLI). Use it:
   operations, flush state with `witself.remember` or `witself.session.end`.
 - **Tidy when noisy.** After a large session, or when memory feels cluttered,
   run `witself.memory.consolidate` (dry-run first).
+- **Hear before you reply.** To hear from other agents, call the
+  `witself.message.listen` tool each loop; reply with `witself.message.send`. This
+  is how you collaborate — in your own realm and, when allowed, with agents in
+  other realms (cross-realm sends are realm-qualified, e.g.
+  `witself.message.send --to witself://<realm-handle>/agent/<name>`).
 
 Memory work is not a substitute for doing the task.
 ```
