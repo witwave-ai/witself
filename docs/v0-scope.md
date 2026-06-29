@@ -279,6 +279,13 @@ V0 does not include:
 - Production support promises for arbitrary self-hosted installations before
   hardening docs, backup guidance, upgrade guidance, and support contracts are
   ready.
+- Cross-realm agent collaboration and federation, including the signed realm
+  card, the blind relay, the federation allow-list/trust registry, and the
+  cross-realm conversation/task lifecycle. Realm-local inter-agent messaging is
+  fully in v0 (see above); only **cross-realm** collaboration is deferred, and
+  it is the flagship post-v0 epic. See
+  [agent-collaboration.md](agent-collaboration.md) and
+  [post-v0-roadmap.md](post-v0-roadmap.md).
 
 ## V0 Exit Criteria
 
@@ -361,6 +368,7 @@ When the sealed credential-plane slice ships, it is additionally credible when:
 - [storage.md](storage.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [observability-and-operations.md](observability-and-operations.md)
 - [mcp-tools.md](mcp-tools.md)
 - [json-contracts.md](json-contracts.md)

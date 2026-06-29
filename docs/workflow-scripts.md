@@ -502,6 +502,17 @@ ws message read msg_123 --json
 ws message ack msg_123 --json
 ```
 
+An agent loop drains its mailbox each turn — `ws message listen` blocks for new
+messages (with a timeout) so a long-running agent receives without busy-polling:
+
+```sh
+ws message listen --timeout 30s --json
+```
+
+The post-v0 cross-realm story (realm-qualified addressing, the signed realm card,
+blind relay, and federation) builds on this same mailbox. See
+[agent-collaboration.md](agent-collaboration.md).
+
 Expected behavior:
 
 - `from` is always derived from the authenticated token; sender forgery is
@@ -510,8 +521,9 @@ Expected behavior:
   especially when a message would drive a memory or fact write.
 - A message grants no policy by itself; a message-driven cross-agent write still
   requires a policy.
-- Send, deliver, and read are rate-limited, scope-gated (`message:send`,
-  `message:read`), audited, and metered.
+- Send, deliver, read, and listen are rate-limited, scope-gated (`message:send`,
+  `message:read`), audited, and metered; `message listen` is the receive verb an
+  agent loop calls each turn and shares the `message:read` scope.
 
 ## 10. Export And Import An Agent's Self
 
@@ -1065,6 +1077,7 @@ spec:
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [backup-and-recovery.md](backup-and-recovery.md)
 - [billing-and-limits.md](billing-and-limits.md)
 - [operator-auth.md](operator-auth.md)

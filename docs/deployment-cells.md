@@ -89,9 +89,10 @@ At account/realm creation, the control plane picks a cell by:
 - rollout wave (see versioning below)
 
 It records the realm/account -> cell mapping. Clients then resolve their home cell on
-login or first call and route directly. Placement emits `tenant.placed` (see
-[audit-retention.md](audit-retention.md) for the audit-event registry; the new
-deployment events land in the follow-up contract pass).
+login or first call and route directly. Placement emits `tenant.placed` — registered
+in the audit-event registry alongside `tenant.migration_started` /
+`tenant.migration_completed` / `tenant.migration_failed` (see
+[audit-retention.md](audit-retention.md)).
 
 ## Multi-cloud
 

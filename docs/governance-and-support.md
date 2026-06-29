@@ -26,6 +26,14 @@ plaintext export, and that values surface only through the audited reveal
 ceremony. See [encryption-model.md](encryption-model.md),
 [key-hierarchy.md](key-hierarchy.md), and [secret-model.md](secret-model.md).
 
+Realm-local inter-agent messaging is a v0 part of this trust surface. The
+cross-realm collaboration components are post-v0 and join the same inspectable
+trust surface when they land: the blind relay — a new always-on backend
+component that forwards signed envelopes between realms and never inspects
+bodies — and the global directory/control plane, which carries routing metadata
+only. Public code lets reviewers confirm those carve-outs hold. See
+[agent-collaboration.md](agent-collaboration.md).
+
 ## License Decision
 
 Decision: Witself is open source under the Apache License 2.0.
@@ -124,6 +132,12 @@ Self-hosted operators remain responsible for:
   semantic recall.
 - Terraform state protection.
 - Helm values and Kubernetes Secret management for agent token delivery.
+- Federation governance (post-v0), when cross-realm collaboration is enabled:
+  managing the deny-by-default allow-list / trust registry, publishing and
+  rotating the signed realm card, and custody of the realm/agent signing keys
+  and the federation signed-card private key. These are governed by the
+  operator `federation:manage` scope; see
+  [agent-collaboration.md](agent-collaboration.md).
 
 Optional field-level encryption of `sensitive` facts is an open-plane capability,
 not a core dependency; operators who enable it also own the associated key
@@ -164,6 +178,13 @@ by realm, plan-based in v0. Self-hosted operators may replace managed billing
 with local policy or their own billing system, and self-hosting must not require
 Witself-managed billing.
 
+Post-v0 cross-realm collaboration is a clear managed-vs-self-host split. The
+blind relay and the global directory/control plane are managed infrastructure
+that route signed envelopes and carry routing metadata only; self-hosted realms
+federate through them rather than reimplementing them, while each realm still
+owns its own federation allow-list and realm card. See
+[agent-collaboration.md](agent-collaboration.md).
+
 ## Public Repo Safety
 
 The public repository must not contain:
@@ -182,6 +203,9 @@ The public repository must not contain:
 - TOTP seeds (otpauth URIs or Base32 seeds) and TOTP QR images.
 - Optional field-level fact-encryption key material (when that capability is
   used).
+- Cross-realm identity-root material (post-v0) — realm and agent signing keys
+  and the federation signed-card private key. Only the realm JWKS public keys
+  are published, in the signed realm card.
 - Raw Witself tokens (the `witself_at_` raw prefix).
 - Payment provider credentials.
 - Wallet credentials.
@@ -237,6 +261,7 @@ tracked in [security-policy.md](security-policy.md) and
 - [encryption-model.md](encryption-model.md)
 - [key-hierarchy.md](key-hierarchy.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [api-contract.md](api-contract.md)
 - [release-and-build.md](release-and-build.md)
 - [terraform-infrastructure.md](terraform-infrastructure.md)

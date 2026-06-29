@@ -195,7 +195,12 @@ substrate; it is not a new mailbox model.
 
 The realm-local `thread_id` is **promoted** to a first-class, cross-realm
 `conversation_id`, carrying an **A2A-style task state machine** so both sides
-agree on where a unit of work stands.
+agree on where a unit of work stands. The promoted `conversation_id` **reuses the
+realm-local `thr_` id space** — the same `thr_`-prefixed identifier, now first
+class across the boundary — so it is the same conversation whether referenced
+realm-locally or cross-realm (the `thr_` prefix asserted in
+[json-contracts.md](json-contracts.md) and [api-routes.md](api-routes.md) is
+pinned here).
 
 ```
 submitted ──▶ working ──▶ completed

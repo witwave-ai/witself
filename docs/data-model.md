@@ -801,9 +801,11 @@ its id. Realm-local-only deployments need not populate it.
 
 Constraints: FKs `account_id`, `realm_id`, `peer_id`. Index `(realm_id, state,
 updated_at)` for listing conversations by state. State transitions emit the
-`conversation.*` audit events and budget exhaustion emits `budget.exhausted` /
-`loop.suspended`; the canonical names land in
-[audit-retention.md](audit-retention.md) on the contract pass. `remaining_turns`
+`conversation.started` / `conversation.state_changed` / `conversation.completed` /
+`conversation.failed` / `conversation.canceled` audit events and budget
+exhaustion emits `budget.exhausted` / `loop.suspended`; the canonical names land
+in [audit-retention.md](audit-retention.md) and the
+[`audit_events`](#audit_events) stable-actions list. `remaining_turns`
 in the JSON shape is derived (`turn_budget - turns_used`), not a stored column.
 The state machine and budgets are authoritative on the home cell; any live stream
 is a latency accelerator only.
@@ -1205,6 +1207,14 @@ MUST NOT be conflated. Stable actions span both planes:
   `secret.copied`, `secret.archived`, `secret.restored`, `secret.deleted`,
   `secret.reveal`, `secret.grant`, `secret.revoke`, `totp.enrolled`, `totp.code`,
   `totp.seed_revealed`, `totp.deleted`, `key.rotated` (KEK).
+- Cross-realm collaboration (post-v0; emitted only when federation is enabled,
+  see [agent-collaboration.md](agent-collaboration.md)): the conversation/task
+  lifecycle `conversation.started`, `conversation.state_changed`,
+  `conversation.completed`, `conversation.failed`, `conversation.canceled`; the
+  federation allow-list `federation.peer_allowed`, `federation.peer_denied`,
+  `federation.consent_accepted`; and the loop/budget governors
+  `budget.exhausted`, `loop.suspended`. Realm-local `message.*` is unchanged and
+  v0; only these cross-realm actions are deferred.
 
 | Column | Type | Notes |
 | --- | --- | --- |

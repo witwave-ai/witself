@@ -268,6 +268,49 @@ Server-side decrypt:
 - A reveal flowing through server-side decrypt without the `server_side_decrypt`
   flag being set on the audit event; see [audit-retention.md](audit-retention.md).
 
+The following classes cover cross-realm collaboration, which is post-v0:
+realm-local inter-agent messaging ships in v0, but cross-realm federation is the
+first post-v0 epic, so these classes become in scope as that surface lands; see
+[agent-collaboration.md](agent-collaboration.md). They guard the cross-realm
+identity root (the signed realm card, federation allow-list, and blind relay)
+and the loop/budget safety limits.
+
+Realm-card forgery / signature bypass (post-v0):
+
+- A forged or unsigned realm card being accepted in place of the mandatory-JWS
+  card served at `/.well-known/witself-card.json`, or a card whose JWS is not
+  verified against a trusted realm key.
+- Signature-verification bypass against the realm JWKS published in the card, so
+  that a signed envelope from another realm is accepted without a valid
+  signature over a trusted published key.
+- Any path that lets the federation card private key or the realm/agent signing
+  keys (the cross-realm identity root) be committed, exported, logged, or
+  otherwise leave the realm.
+
+Federation allow-list bypass (post-v0):
+
+- A peer realm being treated as allowed without a matching entry in the
+  deny-by-default allow-list / trust registry, or absence of an entry failing to
+  deny.
+- Allow-list or realm-card publishing/rotation changes made without the
+  `federation:manage` operator scope.
+- Forged or spoofed cross-realm addressing (`witself://<realm-handle>/agent/<name>`)
+  or `thr_` conversation injection that misattributes a cross-realm
+  conversation's authorship or ordering.
+
+Blind-relay body inspection (post-v0):
+
+- The blind relay inspecting, logging, altering, or retaining cross-realm
+  envelope bodies rather than forwarding signed envelopes opaquely, or the
+  global directory / control plane carrying anything beyond routing metadata.
+
+Loop / budget kill-switch evasion (post-v0):
+
+- A cross-realm conversation evading the loop and budget safety limits
+  (`max_hops=8`, `turn_budget=24`, TTL 1h, $5 soft / $25 hard kill-switch), or
+  suppressing the `budget.exhausted` / `loop.suspended` audit events that should
+  fire when they trip.
+
 In all cases, the strongest reports demonstrate a concrete authorization,
 integrity, authenticity, or confidentiality violation against a supported
 surface, not a theoretical one.
@@ -357,6 +400,7 @@ security issue:
 - [authorization-and-roles.md](authorization-and-roles.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
 - [secret-model.md](secret-model.md)
 - [totp-2fa.md](totp-2fa.md)
 - [encryption-model.md](encryption-model.md)

@@ -293,7 +293,8 @@ Required release checks once the API exists:
 - OpenAPI generation or validation for `/v1`.
 - Example request/response validation for the memory, fact, policy, group, and
   message resources and their colon-action subroutes (for example
-  `/v1/messages/{message_id}:ack`).
+  `/v1/messages/{message_id}:ack` and the mailbox `POST /v1/messages:listen`
+  long-poll action).
 - Health endpoint smoke tests for `/livez`, `/readyz`, and
   `/startupz`.
 - Prometheus scrape smoke test for `/metrics`.
@@ -305,6 +306,11 @@ Required release checks once the API exists:
   memory, fact, policy, group, and message subsystems, and the active embedding
   provider, model, and vector dimensionality, including the degraded-recall
   state when no embedding provider is available.
+- Capability-surface checks for the post-v0 cross-realm collaboration surface:
+  `/v1/capabilities` should report the `cross_realm_collaboration`,
+  `federation`, and `agent_card` flags as capability-gated and off by default
+  until cross-realm collaboration ships. Realm-local `messaging` is in v0; only
+  the cross-realm surface is deferred.
 - CLI `ws capabilities --json` smoke test.
 - MCP `witself.capabilities` schema check.
 - Deterministic `unsupported_operation` checks for unavailable backend
@@ -312,6 +318,10 @@ Required release checks once the API exists:
   group-scoped shared identity data, messaging, and billing.
 - `witself://` reference parse/resolve smoke tests for memory, fact, agent, and
   group reference forms.
+- `witself://` reference parse/resolve smoke tests for the post-v0
+  realm-qualified cross-realm agent form
+  `witself://<realm-handle>/agent/<name>`, which parses but resolves only once
+  cross-realm collaboration ships.
 
 ## Terraform Infrastructure
 

@@ -1,6 +1,6 @@
 # Witself Inter-Agent Messaging
 
-Status: pre-implementation draft. Last reviewed 2026-06-26. This document is the
+Status: pre-implementation draft. Last reviewed 2026-06-29. This document is the
 authority for the durable messaging model, message shape, delivery and ordering
 semantics, the anti-spoofing trust boundary, rate limits, scopes, audit, and
 metering. It binds the message shapes pinned in

@@ -1792,6 +1792,10 @@ Reference forms (the final path component is the leaf; URL-encode if needed):
   (cross-agent, policy-gated).
 - `witself://group/<group>/memory/<id>` and `witself://group/<group>/fact/<name>`
   — group-scoped memory or fact.
+- `witself://<realm-handle>/agent/<name>` — a realm-qualified cross-realm agent
+  address used by [Message](#message) `to.realm`/`from.realm` and the
+  [Realm Card](#realm-card). Cross-realm resolution is post-v0
+  (capability-gated; see [agent-collaboration.md](agent-collaboration.md)).
 
 Parse result (`reference parse`, no authorization or I/O):
 
