@@ -13,3 +13,16 @@ func TestOpenRejectsBadDSN(t *testing.T) {
 		t.Error("Open with malformed DSN = nil error, want error")
 	}
 }
+
+// The migrations must be embedded in the binary so the server can run them on
+// startup with no external files. (Applying them needs a live DB, exercised
+// in local/integration runs, not here.)
+func TestMigrationsEmbedded(t *testing.T) {
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no migrations embedded")
+	}
+}

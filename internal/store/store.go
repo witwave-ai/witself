@@ -14,6 +14,7 @@ import (
 // Store wraps a Postgres connection pool.
 type Store struct {
 	pool *pgxpool.Pool
+	dsn  string
 }
 
 // Open creates a connection pool from a Postgres DSN. The pool connects lazily,
@@ -23,7 +24,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, dsn: dsn}, nil
 }
 
 // Ping verifies live connectivity to the database, with a short timeout. It is

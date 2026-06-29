@@ -53,8 +53,12 @@ func serve() int {
 			return 1
 		}
 		defer st.Close()
+		if err := st.Migrate(); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
+		}
 		cfg.Ready = st.Ping
-		fmt.Fprintln(os.Stderr, "witself-server: database configured; /readyz gates on it")
+		fmt.Fprintln(os.Stderr, "witself-server: database migrated; /readyz gates on it")
 	} else {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
