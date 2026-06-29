@@ -305,7 +305,7 @@ Self-hosted sealed-plane posture:
 Illustrative Helm-based self-host bootstrap once the server exists:
 
 ```sh
-helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
   --version 0.1.0 \
   --namespace witself \
   --create-namespace \

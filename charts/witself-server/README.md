@@ -5,7 +5,7 @@ backend — onto Kubernetes. One chart serves both self-hosted and cloud/managed
 deployments; the difference is values, not templates.
 
 ```sh
-helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
   --version <version> \
   --namespace witself --create-namespace \
   --values ./my-values.yaml

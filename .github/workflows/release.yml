@@ -69,8 +69,8 @@ jobs:
         run: |
           VER="${GITHUB_REF_NAME#v}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm package charts/witself --version "$VER" --app-version "$VER" --destination dist-charts
-          helm push "dist-charts/witself-${VER}.tgz" oci://ghcr.io/witwave-ai/charts
+          helm package charts/witself-server --version "$VER" --app-version "$VER" --destination dist-charts
+          helm push "dist-charts/witself-server-${VER}.tgz" oci://ghcr.io/witwave-ai/charts
 
       - name: Attest chart provenance
         if: github.event_name == 'push'

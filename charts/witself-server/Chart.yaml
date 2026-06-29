@@ -1,5 +1,5 @@
 apiVersion: v2
-name: witself
+name: witself-server
 description: Witself — durable self/identity store for AI agents (deploys witself-server).
 type: application
 # Chart version; overridden to the release tag at publish time.

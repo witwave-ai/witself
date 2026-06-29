@@ -64,15 +64,15 @@ jobs:
 
       - name: helm lint
         run: |
-          helm lint charts/witself
-          helm lint charts/witself --values charts/witself/ci/cloud-values.yaml
+          helm lint charts/witself-server
+          helm lint charts/witself-server --values charts/witself-server/ci/cloud-values.yaml
 
       - name: helm template + kubeconform
         run: |
           for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml"; do
             args=(); label=default
-            if [ -n "$v" ]; then args=(--values "charts/witself/$v"); label="$v"; fi
+            if [ -n "$v" ]; then args=(--values "charts/witself-server/$v"); label="$v"; fi
             echo "::group::$label"
-            helm template r charts/witself "${args[@]}" -n witself | kubeconform -strict -ignore-missing-schemas -summary
+            helm template r charts/witself-server "${args[@]}" -n witself | kubeconform -strict -ignore-missing-schemas -summary
             echo "::endgroup::"
           done

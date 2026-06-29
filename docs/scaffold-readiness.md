@@ -38,7 +38,7 @@ The initial scaffold should create:
 - `.github/workflows/release.yml`.
 - `images/witself/Dockerfile`.
 - `images/witself-server/Dockerfile`.
-- `charts/witself`.
+- `charts/witself-server`.
 - `infra/terraform/modules/aws`.
 - `infra/terraform/modules/gcp`.
 - `infra/terraform/modules/azure`.
@@ -185,7 +185,7 @@ Notes on the domain-specific packages:
 
 ## Helm Chart
 
-- `charts/witself` → `ghcr.io/witwave-ai/charts/witself`. Deploys
+- `charts/witself-server` → `ghcr.io/witwave-ai/charts/witself-server`. Deploys
   `witself-server`, not the CLI.
 - External Postgres with pgvector is the production default. External
   embedding-provider configuration and object/blob storage configuration are

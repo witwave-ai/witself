@@ -233,7 +233,7 @@ Delivery capabilities:
 - Universal installer script.
 - Public CLI/MCP image under `images/witself`.
 - Public backend image under `images/witself-server`.
-- Helm chart skeleton under `charts/witself`.
+- Helm chart skeleton under `charts/witself-server`.
 - AWS Terraform skeleton under `infra/terraform`.
 - CI for Go, linting, docs, Dockerfiles, Helm, Terraform, release config,
   security scanning, SBOM/provenance, and install smoke paths as each surface

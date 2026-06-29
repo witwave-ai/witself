@@ -893,7 +893,7 @@ Expected behavior:
 Install with Helm:
 
 ```sh
-helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
   --version 0.1.0 \
   --namespace witself \
   --create-namespace \

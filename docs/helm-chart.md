@@ -28,21 +28,30 @@ open-plane-only deployment requires no KMS configuration. See
 
 ## Chart Identity
 
-- Chart path: `charts/witself`
-- Chart name: `witself`
-- Public OCI package: `ghcr.io/witwave-ai/charts/witself`
+- Chart path: `charts/witself-server`
+- Chart name: `witself-server`
+- Public OCI package: `ghcr.io/witwave-ai/charts/witself-server`
 - Primary image: `ghcr.io/witwave-ai/images/witself-server`
 - Primary process: `witself-server`
 
 Expected install shape:
 
 ```sh
-helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
   --version 0.1.0 \
   --namespace witself \
   --create-namespace \
   --values ./witself-values.yaml
 ```
+
+The chart is named after the component it deploys (`witself-server`), 1:1 with
+`images/witself-server`. The bare name `witself` is reserved for a future
+*umbrella* chart that aggregates components (`witself-server`, plus any later
+deployables such as a cross-realm relay) so `helm install witself` can stand up
+the whole product. MCP is intentionally **not** a separate chart: it is a
+frontend on the one core — served client-side by `ws mcp serve` next to the
+agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
+`witself-server` (a values toggle, not a new deployable).
 
 ## Chart Goals
 
@@ -540,7 +549,7 @@ before the migration Job runs. See
 
 Required checks once the chart exists:
 
-- `helm lint charts/witself`.
+- `helm lint charts/witself-server`.
 - `helm template` with default values.
 - `helm template` with representative production values.
 - Kubernetes schema validation for rendered manifests.
@@ -555,7 +564,7 @@ Required checks once the chart exists:
   true and the provider is not `local-dev`, and that no KMS block is required for
   an open-plane-only install.
 - Package and publish the chart to
-  `ghcr.io/witwave-ai/charts/witself`.
+  `ghcr.io/witwave-ai/charts/witself-server`.
 - Sign or provenance-attest the chart package.
 - Smoke test `helm show chart` against the published OCI chart.
 

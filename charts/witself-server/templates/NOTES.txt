@@ -1,4 +1,4 @@
-{{ include "witself.fullname" . }} (witself-server, image {{ include "witself.image" . }}) is deployed.
+{{ include "witself-server.fullname" . }} (witself-server, image {{ include "witself-server.image" . }}) is deployed.
 
 Backend kind: {{ .Values.backend.kind }}
 
@@ -11,7 +11,7 @@ Listeners (inside the pod):
 
 Check it from inside the cluster:
 
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "witself.fullname" . }} 8080:{{ .Values.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "witself-server.fullname" . }} 8080:{{ .Values.service.port }}
   curl -s localhost:8080/v1/capabilities
 
 Run the bundled smoke test:

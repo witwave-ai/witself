@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "witself.fullname" . }}
+  name: {{ include "witself-server.fullname" . }}
   labels:
-    {{- include "witself.labels" . | nindent 4 }}
+    {{- include "witself-server.labels" . | nindent 4 }}
 data:
   # Non-secret server config. Only values witself-server consumes today are set
   # here; secret-bearing config (DB, embeddings, KMS) arrives via Secret refs

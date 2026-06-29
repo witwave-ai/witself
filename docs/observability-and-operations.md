@@ -382,7 +382,7 @@ logging. Sealed-plane values are never logged at all, even at debug level.
 
 ## Helm Chart Integration
 
-The `charts/witself` chart should expose observability and operational controls
+The `charts/witself-server` chart should expose observability and operational controls
 through values.
 
 Illustrative values. [helm-chart.md](helm-chart.md) holds the authoritative

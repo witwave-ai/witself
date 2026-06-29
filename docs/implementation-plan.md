@@ -56,7 +56,7 @@ target includes:
 - KMS path (AWS-first) for the sealed plane: `realm_keys` and `secret_deks`
   envelope storage, required only when the sealed plane is enabled.
 - Public CLI/MCP and backend images.
-- `charts/witself` Helm skeleton.
+- `charts/witself-server` Helm skeleton.
 - AWS Terraform skeleton.
 - Strong CI, linting, and release automation.
 
@@ -763,7 +763,7 @@ artifact.
 
 Deliverables:
 
-- `charts/witself`.
+- `charts/witself-server`.
 - Deployment for `witself-server`.
 - ServiceAccount.
 - Service.
@@ -787,7 +787,7 @@ Deliverables:
 - Opt-in migration Job template run before rolling `witself-server`.
 - Values schema.
 - Helm README and examples.
-- OCI chart publication path: `ghcr.io/witwave-ai/charts/witself`.
+- OCI chart publication path: `ghcr.io/witwave-ai/charts/witself-server`.
 
 Exit criteria:
 

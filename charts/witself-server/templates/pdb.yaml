@@ -2,14 +2,14 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "witself.fullname" . }}
+  name: {{ include "witself-server.fullname" . }}
   labels:
-    {{- include "witself.labels" . | nindent 4 }}
+    {{- include "witself-server.labels" . | nindent 4 }}
 spec:
   {{- with .Values.podDisruptionBudget.minAvailable }}
   minAvailable: {{ . }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "witself.selectorLabels" . | nindent 6 }}
+      {{- include "witself-server.selectorLabels" . | nindent 6 }}
 {{- end }}

@@ -172,7 +172,7 @@ The release action should own:
   `ghcr.io/witwave-ai/images/witself`.
 - Publishing the public GHCR backend image at
   `ghcr.io/witwave-ai/images/witself-server` once the server exists.
-- Publishing the public Helm chart at `ghcr.io/witwave-ai/charts/witself` once
+- Publishing the public Helm chart at `ghcr.io/witwave-ai/charts/witself-server` once
   the server exists.
 - Signing the published GHCR images.
 - Signing or provenance-attesting the published Helm chart.
@@ -248,14 +248,14 @@ artifact once `witself-server` exists.
 
 Initial chart:
 
-- Chart path: `charts/witself`
-- OCI package: `ghcr.io/witwave-ai/charts/witself`
+- Chart path: `charts/witself-server`
+- OCI package: `ghcr.io/witwave-ai/charts/witself-server`
 - Primary workload: `witself-server`
 
 Expected install shape:
 
 ```sh
-helm install witself oci://ghcr.io/witwave-ai/charts/witself \
+helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
   --version 0.1.0 \
   --namespace witself \
   --create-namespace \
@@ -480,7 +480,7 @@ Installer requirements:
    `ghcr.io/witwave-ai/images/witself`.
 10. Publish the public signed backend GHCR image at
     `ghcr.io/witwave-ai/images/witself-server` once the server exists.
-11. Publish the public Helm chart at `ghcr.io/witwave-ai/charts/witself` once
+11. Publish the public Helm chart at `ghcr.io/witwave-ai/charts/witself-server` once
     the server exists.
 12. Publish or update the Homebrew formula in `witwave-ai/homebrew-tap`.
 13. Smoke test Homebrew installation.

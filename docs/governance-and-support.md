@@ -211,7 +211,7 @@ Public artifacts should use Witwave-owned package and repository names:
 - Homebrew tap: `github.com/witwave-ai/homebrew-tap`.
 - CLI/MCP image: `ghcr.io/witwave-ai/images/witself`.
 - Backend image: `ghcr.io/witwave-ai/images/witself-server`.
-- Helm chart: `ghcr.io/witwave-ai/charts/witself`.
+- Helm chart: `ghcr.io/witwave-ai/charts/witself-server`.
 
 Release ownership and signing credentials must be tightly controlled.
 

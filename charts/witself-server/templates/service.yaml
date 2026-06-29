@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "witself.fullname" . }}
+  name: {{ include "witself-server.fullname" . }}
   labels:
-    {{- include "witself.labels" . | nindent 4 }}
+    {{- include "witself-server.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -11,7 +11,7 @@ metadata:
 spec:
   type: {{ .Values.service.type }}
   selector:
-    {{- include "witself.selectorLabels" . | nindent 4 }}
+    {{- include "witself-server.selectorLabels" . | nindent 4 }}
   ports:
     # API only. Health and metrics are reached on their own ports/services so
     # they are never exposed through the public API service.

@@ -2113,8 +2113,8 @@ Container image requirements:
 
 Helm chart requirements:
 
-- Initial chart path: `charts/witself`.
-- Public chart package: `ghcr.io/witwave-ai/charts/witself`.
+- Initial chart path: `charts/witself-server`.
+- Public chart package: `ghcr.io/witwave-ai/charts/witself-server`.
 - The chart should deploy `witself-server`, not the customer/operator CLI.
 - External Postgres with pgvector should be the production default.
 - External embedding-provider configuration and object/blob storage configuration

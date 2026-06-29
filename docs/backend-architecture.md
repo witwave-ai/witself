@@ -54,7 +54,7 @@ internal/store/blob/          # Object/blob storage adapter when needed
 internal/server/              # Server config, lifecycle, health, migrations
 images/witself/               # CLI/MCP container image
 images/witself-server/        # Backend API server container image
-charts/witself/               # Self-hosted Kubernetes Helm chart
+charts/witself-server/               # Self-hosted Kubernetes Helm chart
 infra/terraform/              # AWS/GCP/Azure infrastructure modules and stacks
 docs/backend-architecture.md
 docs/self-hosting.md
@@ -518,7 +518,7 @@ A pragmatic first backend path:
 8. Wire the embedding-provider abstraction with `voyage` as default.
 9. Add Goose migrations, server config validation, health checks, metrics, and
    container image.
-10. Add the `charts/witself` Helm chart as the first self-hosting artifact.
+10. Add the `charts/witself-server` Helm chart as the first self-hosting artifact.
 11. Add Terraform modules and stacks under `infra/terraform` for AWS, GCP, and
     Azure substrate provisioning.
 12. Wire the managed cloud and self-hosted deployments to the production adapter.
