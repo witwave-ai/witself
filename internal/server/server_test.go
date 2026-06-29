@@ -45,6 +45,58 @@ func TestReadyzReflectsReadiness(t *testing.T) {
 	}
 }
 
+func TestWhoamiAuth(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	srv := httptest.NewServer(apiMux("", nil, auth))
+	defer srv.Close()
+
+	if code := getStatus(t, srv.URL+"/v1/whoami"); code != http.StatusUnauthorized {
+		t.Errorf("/v1/whoami with no token = %d, want 401", code)
+	}
+
+	get := func(tok string) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/whoami", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := get("bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("/v1/whoami with bad token = %d, want 401", resp.StatusCode)
+	}
+
+	resp, err = get("good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/whoami with good token = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Principal struct {
+			Kind       string `json:"kind"`
+			OperatorID string `json:"operator_id"`
+			AccountID  string `json:"account_id"`
+		} `json:"principal"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Principal.Kind != "operator" || out.Principal.OperatorID != "opr_x" || out.Principal.AccountID != "acc_y" {
+		t.Errorf("principal = %+v", out.Principal)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -70,7 +122,7 @@ func TestMetricsExposesUp(t *testing.T) {
 }
 
 func TestVersionEndpointIsBare(t *testing.T) {
-	srv := httptest.NewServer(apiMux("", nil))
+	srv := httptest.NewServer(apiMux("", nil, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/version")
 	if err != nil {
@@ -94,7 +146,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 
 func TestCapabilitiesShape(t *testing.T) {
 	t.Setenv("WITSELF_BACKEND_KIND", "self-hosted")
-	srv := httptest.NewServer(apiMux("", nil))
+	srv := httptest.NewServer(apiMux("", nil, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {
@@ -120,7 +172,7 @@ func TestCapabilitiesShape(t *testing.T) {
 }
 
 func TestCapabilitiesIncludesAccount(t *testing.T) {
-	srv := httptest.NewServer(apiMux("acc_test123", nil))
+	srv := httptest.NewServer(apiMux("acc_test123", nil, nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {

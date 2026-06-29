@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/version"
@@ -35,12 +36,20 @@ type Config struct {
 	// Login, when set, enables POST /v1/auth/bootstrap to exchange a bootstrap
 	// token for an operator token.
 	Login LoginFunc
+
+	// Authenticate, when set, enables bearer-token auth (e.g. GET /v1/whoami):
+	// it resolves an operator token to its principal.
+	Authenticate AuthFunc
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
 // the token is invalid or already used (-> 401); a non-nil error is a server
 // fault (-> 500).
 type LoginFunc func(ctx context.Context, bootstrapToken string) (operatorToken, operatorID string, ok bool, err error)
+
+// AuthFunc resolves a bearer token to its operator principal. ok is false when
+// the token is missing/invalid (-> 401); a non-nil error is a server fault.
+type AuthFunc func(ctx context.Context, token string) (operatorID, accountID string, ok bool, err error)
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
@@ -66,7 +75,7 @@ func Run(ctx context.Context, cfg Config) error {
 		name, addr string
 		handler    http.Handler
 	}{
-		{"api", cfg.APIAddr, apiMux(cfg.AccountID, cfg.Login)},
+		{"api", cfg.APIAddr, apiMux(cfg.AccountID, cfg.Login, cfg.Authenticate)},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMux()},
 	}
@@ -116,7 +125,7 @@ func Run(ctx context.Context, cfg Config) error {
 	return runErr
 }
 
-func apiMux(accountID string, login LoginFunc) http.Handler {
+func apiMux(accountID string, login LoginFunc, auth AuthFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -126,6 +135,9 @@ func apiMux(accountID string, login LoginFunc) http.Handler {
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(accountID))
 	if login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(login))
+	}
+	if auth != nil {
+		mux.HandleFunc("GET /v1/whoami", whoamiHandler(auth))
 	}
 	return mux
 }
@@ -230,6 +242,44 @@ func capabilitiesHandler(accountID string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(caps)
 	}
+}
+
+// whoamiHandler returns the authenticated operator principal, or 401.
+func whoamiHandler(auth AuthFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok {
+			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
+		operatorID, accountID, ok, err := auth(r.Context(), tok)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"principal": map[string]string{
+				"kind":        "operator",
+				"operator_id": operatorID,
+				"account_id":  accountID,
+			},
+		})
+	}
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) <= len(prefix) || !strings.HasPrefix(h, prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(h[len(prefix):]), true
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {

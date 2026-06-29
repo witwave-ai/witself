@@ -86,6 +86,7 @@ func serve() int {
 			}
 			return ot, oid, true, nil
 		}
+		cfg.Authenticate = st.AuthenticateOperator
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {

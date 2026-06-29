@@ -84,3 +84,20 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	}
 	return opTok, operatorID, nil
 }
+
+// AuthenticateOperator resolves an operator bearer token to its principal.
+// ok is false when the token is not a live operator token. (Revocation later
+// sets consumed_at, which excludes the token here.)
+func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (operatorID, accountID string, ok bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT operator_id, account_id FROM tokens
+		 WHERE token_hash = $1 AND kind = 'operator' AND consumed_at IS NULL`,
+		hashToken(plaintext)).Scan(&operatorID, &accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("authenticate: %w", err)
+	}
+	return operatorID, accountID, true, nil
+}
