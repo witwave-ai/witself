@@ -42,10 +42,11 @@ brews:
     repository:
       owner: witwave-ai
       name: homebrew-tap
-      # In CI the built-in GITHUB_TOKEN cannot push to a different repo, so the
-      # formula push uses HOMEBREW_TAP_TOKEN when set; locally it falls back to
-      # the ambient GITHUB_TOKEN (e.g. `gh auth token`).
-      token: '{{ envOrDefault "HOMEBREW_TAP_TOKEN" (envOrDefault "GITHUB_TOKEN" "") }}'
+      # The built-in GITHUB_TOKEN cannot push to another repo, so the formula
+      # push uses HOMEBREW_TAP_TOKEN (a token with write access to homebrew-tap).
+      # CI provides it from the org secret. For a local release, export it first,
+      # e.g. HOMEBREW_TAP_TOKEN="$(gh auth token)".
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/witwave-ai/witself"
     description: "Witself CLI (ws)"
     license: "Apache-2.0"
