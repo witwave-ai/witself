@@ -161,8 +161,12 @@ Do not file public issues for suspected vulnerabilities. See
 
 ## License
 
-Witself is open source under the [Apache License 2.0](LICENSE).
+Witself is **source-available** under the [Functional Source License,
+FSL-1.1-ALv2](LICENSE). You may use, modify, and self-host it for any purpose
+**except** offering it as a commercial product or service that competes with
+Witself. Two years after each release is published, that release converts to the
+Apache License 2.0.
 
-The Apache-2.0 license covers the software. It does not grant rights to use the
-Witself name, marks, logos, or branding except as allowed by the license for
-describing the origin of the work.
+The license covers the software. It does not grant rights to use the Witself
+name, marks, logos, or branding except as allowed by the license for describing
+the origin of the work.

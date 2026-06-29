@@ -100,7 +100,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
   - id: witself-server-arm64
     ids:
       - witself-server
@@ -116,7 +116,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
 
 docker_manifests:
   - name_template: "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}"
@@ -143,7 +143,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/witwave-ai/witself"
     description: "Witself CLI (ws)"
-    license: "Apache-2.0"
+    license: "FSL-1.1-ALv2"
     install: |
       bin.install "ws"
     test: |

@@ -83,7 +83,7 @@ Deliverables:
 - Root `README.md`.
 - Root `SECURITY.md`.
 - Root `CONTRIBUTING.md`.
-- Root Apache-2.0 `LICENSE`.
+- Root FSL-1.1-ALv2 `LICENSE`.
 - `.gitignore` covering local store files, token files, identity export bundles,
   Terraform state, cloud credentials, kubeconfigs, embedding-provider
   credentials, and local build output.
@@ -99,7 +99,7 @@ Exit criteria:
 
 - Docs links are valid.
 - CI can run on an empty or near-empty codebase.
-- Root docs identify Apache-2.0 as the repo license and reserve Witself
+- Root docs identify FSL-1.1-ALv2 as the repo license and reserve Witself
   trademark/branding rights.
 
 ## Milestone 1: Core Contracts And Local Adapter

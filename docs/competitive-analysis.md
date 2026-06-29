@@ -124,7 +124,8 @@ Relevant patterns:
 
 - Agent-managed memory: the model itself reads and rewrites memory blocks.
 - A clear hierarchy between always-in-context state and archival vector recall.
-- Apache 2.0 and self-hostable, like Witself's licensing posture.
+- Apache 2.0 and self-hostable; Witself is self-hostable too, but source-available
+  under FSL-1.1-ALv2 rather than permissive.
 
 Witself takeaway:
 

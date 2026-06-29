@@ -86,7 +86,7 @@ should also run on version tags.
 Required checks:
 
 - Root docs checks for `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, and the
-  Apache-2.0 `LICENSE`.
+  FSL-1.1-ALv2 `LICENSE`.
 - `gofmt` cleanliness.
 - `go build ./...`
 - `go test ./...`

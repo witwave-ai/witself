@@ -15,6 +15,8 @@ Before contributing, read:
 Security issues must be reported privately through [SECURITY.md](SECURITY.md),
 not through public issues or pull requests.
 
-Implementation contribution rules, local development commands, test commands,
-lint commands, and CLA or DCO policy will be added before the first public code
-contribution path is opened.
+Implementation contribution rules, local development commands, and test/lint
+commands will be added before the first public code contribution path is opened.
+Contributions, when accepted, require a Developer Certificate of Origin sign-off
+(a `Signed-off-by` line, via `git commit -s`), so the project retains the right
+to evolve the license.

@@ -36,35 +36,38 @@ only. Public code lets reviewers confirm those carve-outs hold. See
 
 ## License Decision
 
-Decision: Witself is open source under the Apache License 2.0.
+Decision: Witself is source-available under the Functional Source License
+(FSL-1.1-ALv2).
 
-Apache-2.0 should apply to the public repository as a whole, including the CLI,
-MCP adapter, backend API server, storage adapters, embedding-provider
-abstraction, Helm chart, Terraform modules, release automation, and docs unless
-a later file clearly states a different license.
+The FSL applies to the public repository as a whole, including the CLI, MCP
+adapter, backend API server, storage adapters, embedding-provider abstraction,
+Helm chart, infrastructure modules, release automation, and docs unless a later
+file clearly states a different license.
 
 Why this fits Witself:
 
-- It is permissive and broadly accepted by enterprises.
-- It allows users to inspect, run, fork, modify, redistribute, and self-host the
-  code.
+- It lets users inspect, run, fork, modify, redistribute, and self-host the code
+  for any Permitted Purpose, including internal commercial use.
 - It includes an explicit patent grant.
-- It keeps adoption friction low for agent platforms, package managers, security
-  reviewers, and self-hosted operators.
-- It lets the managed Witself Cloud business compete on reliability, trust,
-  support, integrations, billing, compliance posture, and hosted operations
-  rather than license friction.
+- The single restriction is a Competing Use: making Witself available as a
+  commercial product or service that substitutes for Witself or the managed
+  Witself Cloud. This protects the managed-Cloud business that funds development
+  without crippling self-hosting.
+- Each release carries a Grant of Future License: two years after it is published
+  it converts to the Apache License 2.0, so the protection is time-limited and
+  the code becomes permissively open over time.
 
-The root `LICENSE` file is the source of truth.
+The root `LICENSE` file is the source of truth. The FSL is source-available, not
+an OSI-approved open-source license.
 
 ## Trademark Boundary
 
-The Apache-2.0 license covers the software, not the Witself brand.
+The FSL covers the software, not the Witself brand.
 
 Witself names, marks, logos, and branding should be reserved for the official
-project and service. Forks and third-party hosted services may use the code
-under Apache-2.0, but they should not imply that they are Witself, Witself
-Cloud, or an official Witwave-operated service.
+project and service. Forks and permitted self-hosted deployments may use the code
+under the FSL, but they should not imply that they are Witself, Witself Cloud, or
+an official Witwave-operated service.
 
 A formal trademark policy can be added before public launch if forks, packages,
 or third-party hosted services become likely.
