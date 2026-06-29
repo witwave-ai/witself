@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +12,7 @@ import (
 )
 
 func TestHealthProbes(t *testing.T) {
-	srv := httptest.NewServer(healthMux())
+	srv := httptest.NewServer(healthMux(nil))
 	defer srv.Close()
 	for _, p := range []string{"/livez", "/readyz", "/startupz", "/healthz"} {
 		resp, err := http.Get(srv.URL + p)
@@ -22,6 +24,35 @@ func TestHealthProbes(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
+}
+
+func TestReadyzReflectsReadiness(t *testing.T) {
+	// Failing readiness check -> 503, but liveness stays 200.
+	down := httptest.NewServer(healthMux(func(context.Context) error { return errors.New("db down") }))
+	defer down.Close()
+	if code := getStatus(t, down.URL+"/readyz"); code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz with failing check = %d, want 503", code)
+	}
+	if code := getStatus(t, down.URL+"/livez"); code != http.StatusOK {
+		t.Errorf("/livez = %d, want 200 (must not gate on readiness)", code)
+	}
+
+	// Passing readiness check -> 200.
+	up := httptest.NewServer(healthMux(func(context.Context) error { return nil }))
+	defer up.Close()
+	if code := getStatus(t, up.URL+"/readyz"); code != http.StatusOK {
+		t.Errorf("/readyz with passing check = %d, want 200", code)
+	}
+}
+
+func getStatus(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
 }
 
 func TestMetricsExposesUp(t *testing.T) {

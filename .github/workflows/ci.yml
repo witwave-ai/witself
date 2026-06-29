@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false # no go.sum yet (zero deps)
+          cache: true # go.sum present (pgx)
 
       - name: gofmt
         run: |

@@ -23,6 +23,10 @@ type Config struct {
 	APIAddr     string // public /v1 API
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
 	MetricsAddr string // Prometheus metrics
+
+	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
+	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
+	Ready func(context.Context) error
 }
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
@@ -50,7 +54,7 @@ func Run(ctx context.Context, cfg Config) error {
 		handler    http.Handler
 	}{
 		{"api", cfg.APIAddr, apiMux()},
-		{"health", cfg.HealthAddr, healthMux()},
+		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMux()},
 	}
 
@@ -161,17 +165,28 @@ func capabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(caps)
 }
 
-func healthMux() http.Handler {
+func healthMux(ready func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 	ok := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	}
-	// Kubernetes-compatible probe endpoints (livez/readyz/startupz).
+	// Liveness and startup never gate on dependencies — a DB blip must not
+	// restart the pod, only pull it from the load balancer via readiness.
 	mux.HandleFunc("/livez", ok)
-	mux.HandleFunc("/readyz", ok)
 	mux.HandleFunc("/startupz", ok)
 	mux.HandleFunc("/healthz", ok) // convenience alias
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if ready != nil {
+			if err := ready(r.Context()); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprintf(w, "not ready: %v\n", err)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	return mux
 }
 

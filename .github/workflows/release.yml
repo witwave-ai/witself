@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false # no go.sum yet (zero deps); re-enable when deps land
+          cache: true # go.sum present (pgx)
 
       - uses: sigstore/cosign-installer@v3
       - uses: anchore/sbom-action/download-syft@v0
