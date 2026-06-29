@@ -1,6 +1,21 @@
 # Witself
 
-Status: pre-implementation draft.
+Status: pre-implementation draft. The `ws` CLI ships incrementally; v0.0.1 (the
+`version` command) is installable today.
+
+## Install
+
+```sh
+# Homebrew
+brew install witwave-ai/tap/ws
+
+# or curl | sh (verifies the SHA-256 checksum)
+curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
+
+ws version
+```
+
+## Overview
 
 Witself is the agent durable-state platform **and** the trust fabric agents
 collaborate over. Every agent gets a durable, attributable self — memories,
