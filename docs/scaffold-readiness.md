@@ -27,7 +27,7 @@ when the sealed plane is enabled.
 The initial scaffold should create:
 
 - Go module `github.com/witwave-ai/witself`.
-- `cmd/witself`.
+- `cmd/ws`.
 - `cmd/witself-server`.
 - Internal package layout for shared core, CLI adapter, MCP adapter, API
   adapter, storage adapters, embeddings/pgvector, policy engine, sealed-plane
@@ -52,7 +52,7 @@ The initial scaffold should create:
 
 - Single Go module `github.com/witwave-ai/witself`, `go 1.26`, toolchain
   `go1.26.4`, refreshed before the first implementation pass.
-- `cmd/witself` builds the `witself` CLI and `witself mcp serve`. There is no
+- `cmd/ws` builds the `ws` CLI and `ws mcp serve`. There is no
   `server` subcommand on the main CLI.
 - `cmd/witself-server` builds the separate backend API binary, including its
   `migrate` and `serve --dev` subcommands.
@@ -65,7 +65,7 @@ Starting internal layout. Names will evolve during implementation, but the
 boundaries are frozen:
 
 ```text
-cmd/witself/                  # CLI, including mcp serve
+cmd/ws/                  # CLI, including mcp serve
 cmd/witself-server/           # Backend API server (serve, migrate, serve --dev)
 internal/core/                # Domain service and use cases (memory/fact/policy/group/message + secret/totp/grant)
 internal/api/                 # HTTP handlers and request/response adapters
@@ -175,8 +175,8 @@ Notes on the domain-specific packages:
 ## Images
 
 - `images/witself/Dockerfile` → `ghcr.io/witwave-ai/images/witself`. Entrypoint
-  is the `witself` binary so the image runs both CLI commands and
-  `witself mcp serve`.
+  is the `ws` binary so the image runs both CLI commands and
+  `ws mcp serve`.
 - `images/witself-server/Dockerfile` →
   `ghcr.io/witwave-ai/images/witself-server`. Entrypoint is the separate
   `witself-server` process.

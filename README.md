@@ -33,7 +33,7 @@ and billing apparatus — but take deliberately opposite postures on the payload
   never plaintext-exported. They surface only through explicit, audited reveal.
 
 Witself consolidates the former Witpass credential vault and authenticator into
-the sealed plane: one product, one `witself` CLI, one backend, one account and
+the sealed plane: one product, one `ws` CLI, one backend, one account and
 agent model.
 
 The product goal is a CLI-first agent durable-state service spanning both planes:

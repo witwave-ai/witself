@@ -283,7 +283,7 @@ Reference rules:
 - References used in a memory's `links[]` are validated at write time and
   re-checked at resolve time; dangling references are reported, not silently
   dropped.
-- `witself reference parse` and `witself reference resolve` (CLI and MCP) handle
+- `ws reference parse` and `ws reference resolve` (CLI and MCP) handle
   references deterministically. Parsing and resolution are tracked in
   [json-contracts.md](json-contracts.md).
 

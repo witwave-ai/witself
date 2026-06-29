@@ -14,7 +14,7 @@ requirements before code exists.
 - Start from the scaffold boundary in [docs/scaffold-readiness.md](scaffold-readiness.md).
 - Keep the project on the latest stable Go release that is practical at the time
   implementation or release work happens.
-- Ship the `witself` binary with CLI commands and `witself mcp serve`.
+- Ship the `ws` binary with CLI commands and `ws mcp serve`.
 - Ship a separate `witself-server` binary from the same public repository once
   backend implementation starts.
 - Support Homebrew and universal `curl | sh` installation from the beginning.
@@ -161,7 +161,7 @@ The release action should own:
 - Verifying the Go toolchain from `go.mod`.
 - Running the required Go, module, docs, shell, and release-config checks.
 - Building release archives for macOS and Linux.
-- Building both `witself` and `witself-server` release archives once the server
+- Building both `ws` and `witself-server` release archives once the server
   exists.
 - Generating SHA256 checksums.
 - Signing release archives and checksum manifests.
@@ -203,7 +203,7 @@ artifacts and runs smoke tests without publishing a stable release.
 
 ## Release Artifacts
 
-The first primary release artifact is the `witself` binary. Once backend work
+The first primary release artifact is the `ws` binary. Once backend work
 starts, releases should also include the public, separate `witself-server`
 binary.
 
@@ -233,7 +233,7 @@ Target platforms:
 Release artifacts should include:
 
 - Compressed archives for each target platform.
-- Both `witself` and `witself-server` binaries once the server exists.
+- Both `ws` and `witself-server` binaries once the server exists.
 - SHA256 checksums.
 - Signatures for archives and checksum manifests.
 - SBOMs.
@@ -305,7 +305,7 @@ Required release checks once the API exists:
   memory, fact, policy, group, and message subsystems, and the active embedding
   provider, model, and vector dimensionality, including the degraded-recall
   state when no embedding provider is available.
-- CLI `witself capabilities --json` smoke test.
+- CLI `ws capabilities --json` smoke test.
 - MCP `witself.capabilities` schema check.
 - Deterministic `unsupported_operation` checks for unavailable backend
   features, including capability-gated embeddings, cross-agent access policy,
@@ -365,8 +365,8 @@ The first CLI/MCP image should be:
 - Image package: `ghcr.io/witwave-ai/images/witself`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-The CLI/MCP image should run the same `witself` binary published in release
-archives. The default entrypoint should be `witself`, allowing both ordinary CLI
+The CLI/MCP image should run the same `ws` binary published in release
+archives. The default entrypoint should be `ws`, allowing both ordinary CLI
 usage and MCP usage:
 
 ```sh
@@ -398,7 +398,7 @@ Image requirements:
 - Support `linux/amd64` and `linux/arm64`.
 - Avoid embedding tokens, passphrases, store files, identity exports,
   embedding-provider credentials, or test fixtures.
-- Smoke test `witself version` in the CLI/MCP image before publishing.
+- Smoke test `ws version` in the CLI/MCP image before publishing.
 - Smoke test `witself-server version` and `witself-server healthcheck` in the
   backend image before publishing.
 - Sign published images.
@@ -433,8 +433,8 @@ Homebrew release smoke tests should verify:
 
 - `brew tap witwave-ai/tap`
 - `brew install witwave-ai/tap/witself`
-- `witself version`
-- `witself completion --help`
+- `ws version`
+- `ws completion --help`
 
 The Homebrew formula may install `witself-server` once the backend server is a
 public release artifact. CLI installation should remain simple even if the
@@ -494,5 +494,5 @@ Installer requirements:
     when those artifacts exist.
 19. Verify Terraform modules and example stacks are formatted, validated,
     linted, and secret-scanned.
-20. Verify `witself version` and `witself-server version` report the expected
+20. Verify `ws version` and `witself-server version` report the expected
     version and build metadata.

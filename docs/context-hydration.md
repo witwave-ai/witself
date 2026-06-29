@@ -49,7 +49,7 @@ it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
 
-`witself self show` (MCP `witself.self.show`, API `GET /v1/self`) returns:
+`ws self show` (MCP `witself.self.show`, API `GET /v1/self`) returns:
 
 ```json
 {
@@ -138,13 +138,13 @@ mechanisms in this doc. Concretely:
   memory-create paths. It never creates secrets or TOTP enrollments from file
   content. A credential found in a CLAUDE.md/AGENTS.md file is **not** ingested as a
   secret; promoting a credential into the sealed plane is an explicit
-  `witself secret create` / `witself totp enroll`, never a side effect of hydration.
+  `ws secret create` / `ws totp enroll`, never a side effect of hydration.
 
 This is the hydration-layer face of the cross-cutting sealed-plane invariant:
 secrets and TOTP seeds are never embedded, never returned by semantic recall,
 never in the self-digest, and never ingested or plaintext-exported. Sealed-plane
 values are reachable only through the explicit, audited **reveal** path
-(`witself secret reveal` / `witself totp code`). For the full secret data model
+(`ws secret reveal` / `ws totp code`). For the full secret data model
 and that reveal ceremony, see [secret-model.md](secret-model.md); for the recall /
 embeddings half of the same invariant, see
 [memory-model.md](memory-model.md#recall-and-embeddings).
@@ -169,7 +169,7 @@ same way it never enters the self-digest or the file bridge (see
 ### 1. MCP Server `instructions` (the canonical standing protocol)
 
 The MCP server returns an `instructions` string on connect (emitted by
-`witself mcp serve`). This is the canonical standing protocol. The exact string
+`ws mcp serve`). This is the canonical standing protocol. The exact string
 is pinned **verbatim** here and in [mcp-tools.md](mcp-tools.md); the two copies
 must stay byte-identical. Do not paraphrase it in code:
 
@@ -199,17 +199,17 @@ dominates. The canonical per-tool wording lives in
 
 ### 3. The Bootstrap Stanza (paste-able file teaching)
 
-`witself bootstrap-instructions [--format agents-md|claude-md|text]` prints a
+`ws bootstrap-instructions [--format agents-md|claude-md|text]` prints a
 paste-able block that carries the same heuristics into the file ecosystem, so the
 habit installs even for agents taught only through AGENTS.md/CLAUDE.md.
-`witself setup --write-agents-md` installs it into the project AGENTS.md. Paste
+`ws setup --write-agents-md` installs it into the project AGENTS.md. Paste
 this verbatim:
 
 ```markdown
 ## Self / Memory (Witself)
 
-You have a persistent self/identity store reached through the `witself` MCP
-tools (or the `witself` CLI). Use it:
+You have a persistent self/identity store reached through the `ws` MCP
+tools (or the `ws` CLI). Use it:
 
 - **Recall before acting.** At the start of a non-trivial task, call
   `witself.self.show` to load your primary facts and salient memories, then
@@ -237,7 +237,7 @@ Memory work is not a substitute for doing the task.
 
 ## Digest Emit (the outbound file bridge)
 
-`witself digest emit --format claude-md|agents-md|markdown [--max-bytes N] [-o PATH]`
+`ws digest emit --format claude-md|agents-md|markdown [--max-bytes N] [-o PATH]`
 (MCP `witself.digest.emit`, API `GET /v1/self?format=`) renders the self-digest
 as a fragment suitable for the file-load harnesses. It is the same selection as
 `self show` (primary facts, then salient memories, then the index), rendered to
@@ -283,7 +283,7 @@ material stays out of CLAUDE.md/AGENTS.md entirely.
 
 ## Ingest (the inbound file bridge)
 
-`witself ingest <PATH ...> [--source-label L] [--dry-run] [--json]` parses
+`ws ingest <PATH ...> [--source-label L] [--dry-run] [--json]` parses
 existing CLAUDE.md / AGENTS.md / GEMINI.md files into Witself records. There is
 **no new resource**: ingest composes the existing fact-create and memory-create
 paths (`POST /v1/facts` + `POST /v1/memories`) with dedup. It is CLI-first; an
@@ -302,8 +302,8 @@ Parser rules:
   a file is **not** promoted into the sealed plane — there is no secret-create or
   TOTP-enroll path through ingest (see
   [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)). Move a credential
-  into the sealed plane explicitly with `witself secret create` /
-  `witself totp enroll`.
+  into the sealed plane explicitly with `ws secret create` /
+  `ws totp enroll`.
 - **provenance tag.** Every imported record is tagged
   `source=import:<file>` (overridable with `--source-label`). This keeps
   imported records distinguishable from `self`-authored ones, so the digest and
@@ -339,7 +339,7 @@ adopts Witself without rewriting its notes.
 
 ## Read-Only Mode
 
-In `witself mcp serve --read-only`, the inbound and mutating verbs are excluded
+In `ws mcp serve --read-only`, the inbound and mutating verbs are excluded
 (`remember`, `session.end`, `memory.consolidate`, `ingest`). The pull and outbound
 verbs remain available: `self.show`, `session.start`, `memory.recall`, and
 `digest.emit`. Hydration is always safe; teaching the agent to read its self

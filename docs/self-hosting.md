@@ -15,7 +15,7 @@ data residency, compliance boundaries, embedding-provider choice, or internal
 review of identity data.
 
 The self-hosted backend runs as the separate `witself-server` binary. The
-customer/operator CLI remains `witself`; production service management remains
+customer/operator CLI remains `ws`; production service management remains
 `witself-server`. There is no `server` subcommand on the main CLI.
 
 The first self-hosting deployment artifact should be a Helm chart, not Docker
@@ -57,7 +57,7 @@ support model is tracked in [self-host-support.md](self-host-support.md).
 ```mermaid
 flowchart LR
   CLI["witself CLI"] --> API["witself-server API"]
-  MCP["witself mcp serve"] --> API
+  MCP["ws mcp serve"] --> API
   API --> Core["Core service"]
   Core --> Policy["Policy engine"]
   Core --> Audit["Audit sink"]
@@ -76,7 +76,7 @@ deployments. Operators point the CLI at their deployment with `--endpoint` or
 `WITSELF_ENDPOINT`.
 
 Because managed Witself Cloud is the default setup target, self-hosted bootstrap
-should always be explicit through `witself setup --endpoint URL` or an
+should always be explicit through `ws setup --endpoint URL` or an
 equivalent stored profile/environment configuration. `--local` is reserved for
 local mock/development mode and is not a production setup path.
 
@@ -261,8 +261,8 @@ plane. The storage and provider decisions are tracked in
 
 The sealed plane (secrets + TOTP) is the confidentiality counterpart to the open
 plane. When an operator enables it, self-hosted deployments must honor the same
-secret, reveal, and TOTP contracts as managed Witself Cloud — `witself secret`,
-`witself secret reveal`, `witself totp code`, and value-returning reference
+secret, reveal, and TOTP contracts as managed Witself Cloud — `ws secret`,
+`ws secret reveal`, `ws totp code`, and value-returning reference
 resolution behave identically; only the backing KMS provider changes.
 
 Self-hosted sealed-plane posture:
@@ -282,7 +282,7 @@ Self-hosted sealed-plane posture:
   contract advertises which modes the deployment supports, and reveals/codes
   carry the `server_side_decrypt` flag in the audit record (see
   [audit-retention.md](audit-retention.md)).
-- `witself secret reveal` and `witself totp code` are the explicit, audited,
+- `ws secret reveal` and `ws totp code` are the explicit, audited,
   value-returning operations with the reveal ceremony. MCP exposure can be
   narrowed with `--no-value-tools`; the operations are gated by the
   `secret:reveal` and `totp:code` scopes (see
@@ -327,7 +327,7 @@ witself-server bootstrap token \
   --config /etc/witself/server.toml \
   --out ./bootstrap.token
 
-witself setup \
+ws setup \
   --endpoint https://witself.internal.example.com \
   --bootstrap-token-file ./bootstrap.token \
   --account "Acme Agents" \
@@ -396,7 +396,7 @@ KMS provider changes. Agent-facing behavior should not change because the backen
 is self-hosted.
 
 The CLI should surface unsupported managed-only features through
-`witself capabilities` and `unsupported_operation` errors instead of vague
+`ws capabilities` and `unsupported_operation` errors instead of vague
 provider or route failures.
 
 Self-hosted deployments may expose local policy limits without Witself-managed

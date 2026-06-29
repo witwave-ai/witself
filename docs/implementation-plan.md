@@ -40,7 +40,7 @@ architecture.
 V0 should be a usable cloud-shaped slice rather than a purely local mock. The
 target includes:
 
-- Installable `witself` CLI.
+- Installable `ws` CLI.
 - `witself-server serve --dev`.
 - Local development adapter with the `local-dev` embedding provider.
 - Agent token lifecycle.
@@ -137,28 +137,28 @@ Deliverables:
 
 Early CLI commands:
 
-- `witself version`
-- `witself capabilities`
-- `witself whoami`
-- `witself setup --local`
-- `witself auth login`
-- `witself realm init`
-- `witself agent create`
-- `witself token create`
-- `witself memory add`
-- `witself memory adjust`
-- `witself memory read`
-- `witself memory list`
-- `witself memory forget`
-- `witself memory restore`
-- `witself fact set`
-- `witself fact get`
-- `witself fact list`
-- `witself reference parse`
-- `witself reference resolve`
-- `witself export`
-- `witself import`
-- `witself mcp tools`
+- `ws version`
+- `ws capabilities`
+- `ws whoami`
+- `ws setup --local`
+- `ws auth login`
+- `ws realm init`
+- `ws agent create`
+- `ws token create`
+- `ws memory add`
+- `ws memory adjust`
+- `ws memory read`
+- `ws memory list`
+- `ws memory forget`
+- `ws memory restore`
+- `ws fact set`
+- `ws fact get`
+- `ws fact list`
+- `ws reference parse`
+- `ws reference resolve`
+- `ws export`
+- `ws import`
+- `ws mcp tools`
 
 Exit criteria:
 
@@ -214,7 +214,7 @@ Exit criteria:
 
 - A local dev server and the CLI produce equivalent behavior for the same core
   operations.
-- `witself capabilities --endpoint http://127.0.0.1:8080` reports
+- `ws capabilities --endpoint http://127.0.0.1:8080` reports
   `backend.kind: "local"` and the active embedding provider.
 - Health endpoints report live, ready, and startup status without exposing
   sensitive config.
@@ -243,7 +243,7 @@ Deliverables:
   vector from content (and optionally tags/kind).
 - pgvector-backed vector column and similarity index (introduced with the
   storage adapter; see [storage.md](storage.md)).
-- `witself memory recall <query>` and `/v1/memories:recall`
+- `ws memory recall <query>` and `/v1/memories:recall`
   (or `/v1/memories/{memory_id}:recall`).
 - Hybrid ranking blending vector similarity, lexical/keyword match, tag/kind
   match, recency, and `salience`, with documented default weights.
@@ -260,7 +260,7 @@ Deliverables:
 
 Exit criteria:
 
-- `witself memory recall` returns relevance-ranked results from the caller's
+- `ws memory recall` returns relevance-ranked results from the caller's
   accessible memories against a real provider and against `local-dev`.
 - With the provider disabled, recall degrades deterministically and the
   capabilities contract reports degraded semantic recall.
@@ -283,27 +283,27 @@ store.
 
 Deliverables:
 
-- `witself remember "<text>" [--scope] [--sensitive] [--reason]` and
+- `ws remember "<text>" [--scope] [--sensitive] [--reason]` and
   `witself.remember`/`POST /v1/remember`: a single auto-routing capture path —
   a clear name→value assertion upserts a fact (idempotent by name), anything
   else adds a verbatim memory with dedup/supersede. Tested primary capture path,
   not a thin alias; never bypasses validation/limits.
-- `witself self show` / `witself.self.show` / `GET /v1/self`: the bounded,
+- `ws self show` / `witself.self.show` / `GET /v1/self`: the bounded,
   always-loaded self-digest — primary facts first, then top-N salient memories
   (blended salience + recency), then a one-line index of kinds/tags/counts.
   Cheap; never requires the embedding provider; hard byte/line cap with
   `elided=true` pointing to `memory.recall` rather than silent truncation.
-- `witself session start/end` / `witself.session.start`/`.end` /
+- `ws session start/end` / `witself.session.start`/`.end` /
   `POST /v1/sessions:start`,`:end`: start hydrates identity + open goals + last
   progress in one round-trip; end persists a progress memory (kind `session`)
   and updates open goals. Pairs with assume-interruption / flush-before-long-ops.
-- `witself memory consolidate [--dry-run]` / `witself.memory.consolidate` /
+- `ws memory consolidate [--dry-run]` / `witself.memory.consolidate` /
   `POST /v1/memories:consolidate`: merges near-duplicate memories, supersedes
   stale ones, surfaces (does not auto-pick) conflicting facts, trims the
   digest/index. Dry-run defaults true; guarded; respects provenance and never
   silently overwrites human-/import-authored records.
-- `witself digest emit --format claude-md|agents-md|markdown` and
-  `witself ingest <PATH ...>` (the two-way file bridge): `emit` renders the
+- `ws digest emit --format claude-md|agents-md|markdown` and
+  `ws ingest <PATH ...>` (the two-way file bridge): `emit` renders the
   self-digest as a CLAUDE.md/AGENTS.md fragment with witself-generated
   provenance comments; `ingest` parses CLAUDE.md/AGENTS.md/GEMINI.md — kv-shaped
   lines to facts (upsert), prose to memories — tagged `source=import:<file>`,
@@ -323,8 +323,8 @@ Deliverables:
   server `instructions` field returned on connect (the canonical standing
   protocol pinned in [context-hydration.md](context-hydration.md) and
   [mcp-tools.md](mcp-tools.md)); per-tool descriptions rewritten with explicit
-  when-to-call trigger lists; and `witself bootstrap-instructions
-  [--format agents-md|claude-md|text]` plus `witself setup --write-agents-md`
+  when-to-call trigger lists; and `ws bootstrap-instructions
+  [--format agents-md|claude-md|text]` plus `ws setup --write-agents-md`
   to ship the paste-able teaching stanza into a project AGENTS.md.
 - Audit events: `memory.consolidated`, `session.started`, `session.ended`,
   `memory.imported`, `fact.imported`, and optional `self.digest.emitted`.
@@ -338,10 +338,10 @@ Deliverables:
 
 Exit criteria:
 
-- `witself remember` auto-routes a name→value assertion to an upserted fact and
+- `ws remember` auto-routes a name→value assertion to an upserted fact and
   free-form text to a deduped memory, returning a deterministic `echo` and
   `duplicate_of` when merged.
-- `witself self show` returns a digest under its byte cap without the embedding
+- `ws self show` returns a digest under its byte cap without the embedding
   provider, sets `elided=true` when capped, and points to `memory.recall`.
 - A session can be started and ended across process restarts so resuming is one
   call, not a list+recall crawl.
@@ -368,7 +368,7 @@ Deliverables:
   `forget`.
 - Default-deny evaluation: absence of a matching `allow` denies; an agent always
   retains access to its own identity data subject to its own scopes.
-- `witself policy create/list/show/delete` and `witself policy test`.
+- `ws policy create/list/show/delete` and `ws policy test`.
 - `/v1/policies`, `/v1/policies:test`, and policy colon actions, with `POST` for
   actions.
 - `witself.policy.test` (plus operator `witself.policy.list/show`).
@@ -407,7 +407,7 @@ Deliverables:
 
 - Group object shape (`grp_…`): name (unique per realm), members, admins/owner,
   bound policies, description, timestamps.
-- `witself group create/list/show/add-member/remove-member/delete`.
+- `ws group create/list/show/add-member/remove-member/delete`.
 - `/v1/groups` plus member colon actions, with `POST` for actions.
 - `witself.group.list/show`.
 - Group-as-subject evaluation (a policy on a group grants every member the
@@ -445,7 +445,7 @@ Deliverables:
   explicit read/acknowledgement state.
 - Group fan-out: a message to a group is delivered to current members with
   per-member delivery and ack state.
-- `witself message send/list/read/ack`.
+- `ws message send/list/read/ack`.
 - `/v1/messages`, `/v1/messages/{message_id}:ack`, with `POST` for actions.
 - `witself.message.send/list/read`.
 - `message:send` and `message:read` scope enforcement; rate limits on send and
@@ -496,13 +496,13 @@ Deliverables:
 - TOTP enrollment object shape (`totp_…`): `otpauth`/Base32 seed import, QR
   enrollment, and code generation per [totp-2fa.md](totp-2fa.md); the seed is
   high-value sealed material distinct from `totp:code`.
-- Password generator (`witself password generate`) per
+- Password generator (`ws password generate`) per
   [secret-model.md](secret-model.md).
 - Secret references (`witself://secret/<path>/<field>` for the current agent,
   `witself://agent/<agent>/secret/<path>/<field>` and
   `witself://group/<group>/secret/<path>/<field>` for granted/operator access),
   parsed and resolved through the same authorization as a direct reveal.
-- Runtime injection (`witself run`): resolve secret references into a subprocess
+- Runtime injection (`ws run`): resolve secret references into a subprocess
   environment without persisting plaintext, audited as a reveal-class read.
 - Sealed-plane redaction: secret field values, TOTP seeds, and generated
   passwords never leak into list/scan/errors/log-like output (no plain read;
@@ -512,22 +512,22 @@ Deliverables:
 
 Early CLI commands:
 
-- `witself secret create`
-- `witself secret show`
-- `witself secret list`
-- `witself secret scan`
-- `witself secret update`
-- `witself secret rename`
-- `witself secret copy`
-- `witself secret archive`
-- `witself secret restore`
-- `witself secret delete`
-- `witself password generate`
-- `witself totp enroll`
-- `witself totp code`
-- `witself totp show`
-- `witself totp delete`
-- `witself run`
+- `ws secret create`
+- `ws secret show`
+- `ws secret list`
+- `ws secret scan`
+- `ws secret update`
+- `ws secret rename`
+- `ws secret copy`
+- `ws secret archive`
+- `ws secret restore`
+- `ws secret delete`
+- `ws password generate`
+- `ws totp enroll`
+- `ws totp code`
+- `ws totp show`
+- `ws totp delete`
+- `ws run`
 
 Exit criteria:
 
@@ -539,7 +539,7 @@ Exit criteria:
   the reveal ceremony (M6.2), never a plain read.
 - No secret value, TOTP seed, or generated password is ever embedded, returned
   by `memory recall`, included in `self show`/`digest emit`, or written to a
-  plaintext `witself export`.
+  plaintext `ws export`.
 - The model matches [secret-model.md](secret-model.md),
   [totp-2fa.md](totp-2fa.md), and
   [secret-size-and-attachments.md](secret-size-and-attachments.md).
@@ -573,9 +573,9 @@ Deliverables:
 - Hybrid decrypt behind one capability switch: `client_side_decrypt` (default
   where the client holds key material) and `server_side_decrypt` (for
   token-only pods), reported through the capabilities contract.
-- The reveal ceremony: `witself secret reveal` and `witself totp code` as the
+- The reveal ceremony: `ws secret reveal` and `ws totp code` as the
   explicit, audited, value-returning operations; reference resolution and
-  `witself run` are reveal-class reads subject to the same authorization and
+  `ws run` are reveal-class reads subject to the same authorization and
   audit.
 - Capability reporting of the active KMS provider, key identity, and
   `client_side_decrypt`/`server_side_decrypt` support.
@@ -592,7 +592,7 @@ Exit criteria:
 - A secret created in M6.1 is stored only as ciphertext + wrapped DEK; no
   plaintext secret value, TOTP seed, or generated password is stored as an
   ordinary database value.
-- `witself secret reveal` and `witself totp code` return values only through the
+- `ws secret reveal` and `ws totp code` return values only through the
   audited reveal ceremony, against both a real KMS provider and `local-dev`.
 - With the sealed plane disabled, KMS is not required and the capabilities
   contract reports the sealed plane as off; the open plane is unaffected.
@@ -630,7 +630,7 @@ Deliverables:
 - The default agent token bundle includes `secret:create`/`show`/`reveal`/
   `update`/`delete` and `totp:enroll`/`code` over the agent's own data, but
   excludes `secret:grant` and any `*-others`/manage scopes.
-- `witself secret grant` and `witself secret revoke`; `--group` for group-owned
+- `ws secret grant` and `ws secret revoke`; `--group` for group-owned
   targets and `--owner-agent` for operator targeting.
 - Operator override: realm operators manage/reveal sealed-plane data within their
   realm, audited like agent actions and subject to the same `--reason`
@@ -664,7 +664,7 @@ Deliverables:
   `:grant`/`:revoke`), `/v1/totp` (+ `:code`), and `/v1/password:generate`,
   using `POST` for actions, with `client_side_decrypt`/`server_side_decrypt`
   capability flags surfaced in responses.
-- Export carve-out: `witself export` excludes the sealed plane from the plaintext
+- Export carve-out: `ws export` excludes the sealed plane from the plaintext
   identity bundle; secret backup is encrypted-only (envelope + KMS key identity,
   never plaintext) behind an explicit, audited, separate flag, per
   [backup-and-recovery.md](backup-and-recovery.md).
@@ -679,7 +679,7 @@ Exit criteria:
 - The MCP and API adapters expose secret/TOTP/password operations with
   equivalent behavior to the CLI, and `--no-value-tools` removes only the
   value-returning sealed-plane tools.
-- `witself export` produces a plaintext identity bundle with no secret material;
+- `ws export` produces a plaintext identity bundle with no secret material;
   encrypted secret backup is available only behind the explicit audited flag.
 - `self show`/`digest emit`/`ingest` never surface a secret value or TOTP seed.
 - Sealed-plane usage is metered through the new dimensions without secret
@@ -751,8 +751,8 @@ Exit criteria:
 
 - Release dry run builds the CLI, server, archives, checksums, images, and
   installer artifacts.
-- Image smoke tests can run `witself version` and `witself-server version`.
-- The CLI/MCP image entrypoint is `witself` (CLI and `witself mcp serve`); the
+- Image smoke tests can run `ws version` and `witself-server version`.
+- The CLI/MCP image entrypoint is `ws` (CLI and `ws mcp serve`); the
   backend image entrypoint is `witself-server`.
 - The build model matches [release-and-build.md](release-and-build.md).
 
@@ -872,7 +872,7 @@ Deliverables:
 
 Exit criteria:
 
-- A fresh operator can install `witself`, create or connect a managed account,
+- A fresh operator can install `ws`, create or connect a managed account,
   create a realm, create named agents, write token files, and verify agents can
   immediately authenticate through `WITSELF_TOKEN_FILE`.
 - Billing and support commands either work or return precise

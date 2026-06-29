@@ -61,7 +61,7 @@ Attachment rules:
   (group-owned attachments are the consolidated form of the former vault-shared
   material).
 - Attachment reveal/download must be explicit, authorized, and audited — the same
-  reveal ceremony as `witself secret reveal`, gated by `secret:reveal`, suppressed
+  reveal ceremony as `ws secret reveal`, gated by `secret:reveal`, suppressed
   when MCP runs with `--no-value-tools`.
 - Support bundles must redact secret material by default; encrypted attachment
   ciphertext is never decrypted into a diagnostic bundle.

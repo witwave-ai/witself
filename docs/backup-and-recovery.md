@@ -22,8 +22,8 @@ V0 posture (open plane — memories + facts):
   fully back, including memories, facts, primary flags, memory edit history,
   policies, group membership, group-owned records, messages, and audit.
 - Identity export is a supported plaintext feature, not a forbidden one.
-  `witself export` produces structured, human-readable, round-trippable identity
-  data; `witself import` restores it. See
+  `ws export` produces structured, human-readable, round-trippable identity
+  data; `ws import` restores it. See
   [Identity Export And Import](#identity-export-and-import).
 - Open-plane recovery does **not** require any KMS or key-material custody.
   There is no encrypted-only export, no no-plaintext rule, and no break-glass
@@ -41,7 +41,7 @@ V0 posture (sealed plane — secrets + TOTP):
   identity + rotation metadata. Never plaintext secret values, never TOTP seeds
   or codes, never key material. See [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
 - Secrets and TOTP seeds are **excluded from the plaintext identity export**.
-  `witself export` covers the open plane only and never emits a plaintext secret
+  `ws export` covers the open plane only and never emits a plaintext secret
   value or seed. The only secret backup is the encrypted envelope plus KMS key
   identity. See [Identity Export And Import](#identity-export-and-import) and
   [key-hierarchy.md](key-hierarchy.md).
@@ -53,7 +53,7 @@ V0 posture (sealed plane — secrets + TOTP):
 - Secrets/TOTP seeds are sealed material: never embedded, never returned by
   semantic recall, never in the self-digest, never plaintext-exported, never
   ingested from CLAUDE.md/AGENTS.md. The only value-returning paths are the
-  audited `witself secret reveal` / `witself totp code` reveal ceremonies, which
+  audited `ws secret reveal` / `ws totp code` reveal ceremonies, which
   backup/restore never exercises.
 
 Managed cloud recovery restores both planes: customer identity data, encrypted
@@ -147,7 +147,7 @@ and never recoverable from the backup without KMS unwrap authority.
 
 Secret and TOTP backup is encrypted-only, by construction. There is no plaintext
 secret backup path and no plaintext secret export path; the reveal ceremony
-(`witself secret reveal` / `witself totp code`) is the only value-returning
+(`ws secret reveal` / `ws totp code`) is the only value-returning
 surface and backup/restore never touches it.
 
 What a secret backup contains:
@@ -255,7 +255,7 @@ user-facing, portable counterpart to operational backups: backups protect a
 realm operationally; export/import moves identity between agents, realms, and
 environments.
 
-**Sealed-plane carve-out.** `witself export` covers memories and facts only.
+**Sealed-plane carve-out.** `ws export` covers memories and facts only.
 Secrets and TOTP seeds are **never** in the plaintext identity export — there is
 no plaintext secret value or seed in any export artifact. The only secret backup
 is the encrypted envelope plus KMS key identity described in
@@ -274,12 +274,12 @@ plane's first-class identity export, with explicit operator action and strong
 confirmation, an audit `--reason`, least-privilege authorization, an optional
 break-glass framing, redaction controls for support and diagnostics, and its own
 design doc separate from this normal backup/export guidance. It would route
-through the audited reveal ceremony, not `witself export`. See
+through the audited reveal ceremony, not `ws export`. See
 [secret-model.md](secret-model.md) and [threat-model.md](threat-model.md).
 
 Export rules:
 
-- `witself export` emits a structured, human-readable, plaintext export of an
+- `ws export` emits a structured, human-readable, plaintext export of an
   agent's self: all memories (content, kind, tags, source, salience, links,
   timestamps, and **edit history**), all facts (values, `primary` flags,
   `sensitive` flags, format hints, source, and edit history), and the agent's
@@ -311,7 +311,7 @@ Sensitivity handling (display-level, not encryption):
 
 Import rules:
 
-- `witself import` restores an exported self into the same or a different
+- `ws import` restores an exported self into the same or a different
   agent/realm, preserving primary flags, sensitive markers, links, and (where
   chosen) edit history.
 - Import is idempotent by stable id where ids are preserved, and supports a
@@ -323,7 +323,7 @@ Import rules:
 - Imported references are re-resolved and re-checked for authorization; a
   cross-agent or cross-group reference resolves only when policy permits.
 
-Local development exports use the same `witself export`/`witself import` paths
+Local development exports use the same `ws export`/`ws import` paths
 for fixtures, demos, backup, and migration, so the local backend exercises the
 real export contract rather than a parallel format. See
 [cli-command-surface.md](cli-command-surface.md).
@@ -454,7 +454,7 @@ Migration is dual-plane, matching the two postures above:
 
 - **Open plane (memories + facts + messaging)** moves via the first-class
   export/import described in [Identity Export And Import](#identity-export-and-import):
-  `witself export` from cell A, `witself import` into cell B. Identity data
+  `ws export` from cell A, `ws import` into cell B. Identity data
   travels in clear by design, so no KMS custody is involved. Embedding vectors
   follow the [Embedding Vectors](#embedding-vectors) rule — recomputed in the
   destination cell, or moved directly when the destination uses the same

@@ -78,7 +78,7 @@ These targets may change once Witself has a formal security operations process.
 
 Security support applies to:
 
-- Public `witself` CLI releases.
+- Public `ws` CLI releases.
 - Public `witself-server` releases once available.
 - Published container images.
 - Published Helm charts.

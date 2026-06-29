@@ -378,7 +378,7 @@ Witself takeaway:
 
 - These products validate the sealed-plane surface Witself ships: stable
   `witself://secret/<path>/<field>` references, runtime injection via
-  `witself run`, TOTP from sealed material, scoped/revocable per-agent access,
+  `ws run`, TOTP from sealed material, scoped/revocable per-agent access,
   and a local-first MCP posture with `--no-value-tools` and `--read-only`
   modes. See [secret-model.md](secret-model.md) and
   [totp-2fa.md](totp-2fa.md).
@@ -392,8 +392,8 @@ Witself takeaway:
   secrets to the model," Bitwarden/Doppler's warnings) as a structural rule, not
   a recommendation: the sealed plane is **never embedded, recalled, in the
   self-digest, ingested, or plaintext-exported**, and values are returned only
-  through an explicit, audited, reveal-gated ceremony (`witself secret reveal`,
-  `witself totp code`) under KMS-backed envelope encryption (CMK → per-realm KEK
+  through an explicit, audited, reveal-gated ceremony (`ws secret reveal`,
+  `ws totp code`) under KMS-backed envelope encryption (CMK → per-realm KEK
   → per-secret/field DEK). See [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md), and
   [authorization-and-roles.md](authorization-and-roles.md).
@@ -482,7 +482,7 @@ identity. Witself ships both as one platform. Secrets and TOTP live in a
 per-secret/field DEK, XChaCha20-Poly1305 / AES-256-GCM), owned by the same
 **agent** or **group** principals as memories and facts, governed by grants and
 realm roles, and returned only through an explicit, audited reveal ceremony
-(`witself secret reveal`, `witself totp code`) — with hybrid client-side or
+(`ws secret reveal`, `ws totp code`) — with hybrid client-side or
 server-side decrypt behind a capability switch. The carve-out is the product
 guarantee: sealed material is **never embedded, recalled, in the self-digest,
 ingested from CLAUDE.md/AGENTS.md, or plaintext-exported**. A secrets manager

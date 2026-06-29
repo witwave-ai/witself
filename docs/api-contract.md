@@ -6,7 +6,7 @@ server mode.
 
 ## Decision
 
-The backend API is a public product contract. The `witself` CLI, MCP adapter,
+The backend API is a public product contract. The `ws` CLI, MCP adapter,
 managed Witself Cloud, self-hosted deployments, and local development server
 mode should use the same API semantics where practical.
 
@@ -140,9 +140,9 @@ Every backend should expose its supported features:
 GET /v1/capabilities
 ```
 
-Clients should call this during setup, `witself capabilities`, and before
+Clients should call this during setup, `ws capabilities`, and before
 service-administration operations whose availability differs by backend.
-`witself setup` should use the default managed Witself Cloud endpoint unless the
+`ws setup` should use the default managed Witself Cloud endpoint unless the
 caller supplies `--endpoint`, `WITSELF_ENDPOINT`, or a stored profile endpoint.
 Local setup bypasses the remote API and is selected explicitly with `--local`.
 
@@ -280,7 +280,7 @@ Idempotency records must not store memory content, fact values, message
 bodies/payloads, embedding vectors, raw tokens, payment details, provider
 secrets, secret field values, TOTP seeds, generated codes, or key material.
 
-`witself setup` should combine API idempotency with name-based ensure semantics:
+`ws setup` should combine API idempotency with name-based ensure semantics:
 account, realm, and agent creation can safely select existing visible resources
 when names match. Token create and rotate operations remain sensitive. Setup
 must not silently reuse or rotate an existing token; callers must choose
@@ -546,7 +546,7 @@ Notes on specific actions:
   because the query and filters travel in the body and because cross-agent
   recall is metered and policy-gated. Recall over another agent's or group's
   memories requires a policy granting `read` on that target.
-- `:consolidate` is the guarded garbage-collection verb (`witself memory
+- `:consolidate` is the guarded garbage-collection verb (`ws memory
   consolidate`). It merges near-duplicate memories, supersedes stale ones, and
   surfaces — never auto-resolves — conflicting facts, trimming the digest index.
   It defaults to `dry_run: true`, requires `memory:update` (plus `memory:forget`

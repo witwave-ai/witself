@@ -7,7 +7,7 @@ from v0. They are product candidates, not first-release blockers.
 
 V0 should stay focused on the core agent self/identity store:
 
-- Installable `witself` CLI.
+- Installable `ws` CLI.
 - MCP stdio support.
 - Managed and self-hosted backend API shape.
 - Named realms and named agents.
@@ -235,7 +235,7 @@ model around browser automation, session cookies, server-side decrypt, runtime
 injection, and support diagnostics.
 
 V0 provides secrets, TOTP codes, secret references, and runtime injection through
-`witself run` (see [secret-model.md](secret-model.md) and
+`ws run` (see [secret-model.md](secret-model.md) and
 [cli-command-surface.md](cli-command-surface.md)). It does not try to own the
 browser session lifecycle. Any handoff must keep secret values reveal-gated and
 out of recall, the self-digest, and any plaintext export.
@@ -258,7 +258,7 @@ path.
 
 A private internal Witself admin CLI is post-v0. It should be a separate tool
 for Witself staff and trusted internal AI support/admin agents, not part of the
-public customer/operator `witself` CLI.
+public customer/operator `ws` CLI.
 
 The public CLI remains the customer-facing control plane.
 
@@ -441,7 +441,7 @@ Any future plaintext secret export must require deliberate operator
 authorization, strong confirmation, an audited reason, clear warnings,
 least-privilege controls, redaction rules, and separate documentation from the
 normal encrypted backup and restore flows. It must not be reachable through
-`witself export`, digest emit, ingest, or the self-digest, all of which remain
+`ws export`, digest emit, ingest, or the self-digest, all of which remain
 sealed-plane-free.
 
 ## Deferred Commercial Surfaces

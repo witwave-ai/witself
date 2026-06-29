@@ -73,7 +73,7 @@ export is treated as a leaked credential. The raw value is returned only once at
 create or rotate; server-side storage keeps only the `token_hash` and metadata.
 
 No JSON wrapper is required for v0 agent runtime use. Metadata is available
-through `witself token list`, `witself token show`, or equivalent API results.
+through `ws token list`, `ws token show`, or equivalent API results.
 
 Why plain text:
 
@@ -314,7 +314,7 @@ Scope rules:
   `secret:reveal`/`secret:grant` never bypass ownership/grants; they only make a
   token *eligible* for the gated action, which still requires the object check.
 - A token's scopes are recorded in token metadata and are reported by
-  `witself whoami` and `witself token show`.
+  `ws whoami` and `ws token show`.
 
 ## Rotation
 
@@ -328,7 +328,7 @@ Rotation should support:
 - Audit reason.
 - Dry run.
 
-`witself setup` should not silently rotate or reuse existing token material.
+`ws setup` should not silently rotate or reuse existing token material.
 When setup detects an existing token file or active token for a requested agent,
 the caller must choose `--reuse-existing-token` or `--rotate-existing-tokens`.
 This keeps setup idempotent for resources (account, realm, agent) without making

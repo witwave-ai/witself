@@ -334,7 +334,7 @@ These are **decided** invariants for the collaboration substrate.
   requirement.
 - **Agent-directive `listen` instruction.** Agents are told to listen in their
   **agent directive** — the context-hydration teaching stanza gains an
-  instruction equivalent to: *"to hear, call the `witself listen` tool each
+  instruction equivalent to: *"to hear, call the `ws listen` tool each
   loop."* See [context-hydration.md](context-hydration.md).
 
 ## Surfaces
@@ -345,10 +345,10 @@ land in the follow-up contract pass; the surface deltas are:
 
 ### CLI — the `message` group gains `listen`
 
-- `witself message listen [--timeout <sec>] [--conversation <id>] [--json]` —
+- `ws message listen [--timeout <sec>] [--conversation <id>] [--json]` —
   long-poll: block up to `--timeout` seconds, return inbound messages, drain the
   mailbox. Sits next to the existing `message send` / `list` / `read` / `ack`.
-- `witself message send` extends `--to` to accept a realm-qualified
+- `ws message send` extends `--to` to accept a realm-qualified
   `witself://<realm-handle>/agent/<name>` (and `/group/<name>`); absent realm is
   local, unchanged.
 - Cross-realm sends and channel fan-out honor `--dry-run` (validate recipient,
@@ -378,9 +378,9 @@ land in the follow-up contract pass; the surface deltas are:
   [api-routes.md](api-routes.md), [cli-command-surface.md](cli-command-surface.md),
   and [mcp-tools.md](mcp-tools.md) on the follow-up pass.
 
-Naming note: the CLI command is decided to become `ws` (the mechanical rename is
-a separate follow-up); examples here keep the current `witself <cmd>` form for
-repo consistency. See [requirements.md](requirements.md).
+Naming note: the CLI command is `ws`. The backend binary stays `witself-server`,
+and the `witself://` reference scheme is unchanged. See
+[requirements.md](requirements.md).
 
 ## Open decisions
 

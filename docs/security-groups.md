@@ -131,7 +131,7 @@ Evaluation notes:
 - The same escalating verbs apply (`read` < `contribute` < `curate` < `forget`);
   see [access-policy.md](access-policy.md). A group binding does not grant a
   stronger verb than the policy states.
-- `witself policy test` resolves group membership, so it answers "would agent X,
+- `ws policy test` resolves group membership, so it answers "would agent X,
   via its groups, be allowed to do Y on target Z" with the deciding policy id.
 
 ## Group-Scoped Collective Memory
@@ -179,28 +179,28 @@ The `group` noun lives in the CLI surface tracked by
 [cli-command-surface.md](cli-command-surface.md). All commands support `--json`;
 mutations honor `--dry-run`, `--yes`, `--reason`, and `--no-input` where noted.
 
-- `witself group create NAME [--description …]` — create a group. Idempotent by
+- `ws group create NAME [--description …]` — create a group. Idempotent by
   name within the realm (selects the existing group instead of erroring).
-- `witself group list [--member <agent>] [--json]` — list groups visible to the
+- `ws group list [--member <agent>] [--json]` — list groups visible to the
   caller; optionally filter to groups containing an agent.
-- `witself group show NAME|grp_… [--json]` — show one group: members, admins,
+- `ws group show NAME|grp_… [--json]` — show one group: members, admins,
   description, timestamps, and the policies that reference it as subject/target.
-- `witself group add-member NAME <agent> [--admin]` — add an agent (optionally as
+- `ws group add-member NAME <agent> [--admin]` — add an agent (optionally as
   an admin). Idempotent.
-- `witself group remove-member NAME <agent> [--dry-run] [--reason …]` — remove an
+- `ws group remove-member NAME <agent> [--dry-run] [--reason …]` — remove an
   agent. `--dry-run` reports which policies/permissions the agent loses.
-- `witself group delete NAME [--dry-run] [--reason …] [--yes]` — delete a group.
+- `ws group delete NAME [--dry-run] [--reason …] [--yes]` — delete a group.
   Guarded; see [Group Deletion](#group-deletion).
 
 Collective-memory writes are not new commands — they are the `--group` flag on
 existing `memory` / `fact` commands:
 
-- `witself memory add --group NAME "…"` — create a group-owned memory.
-- `witself fact set --group NAME NAME VALUE [--primary]` — set a group-owned
+- `ws memory add --group NAME "…"` — create a group-owned memory.
+- `ws fact set --group NAME NAME VALUE [--primary]` — set a group-owned
   fact.
-- `witself memory recall --group NAME "<query>"` — recall over a group's
+- `ws memory recall --group NAME "<query>"` — recall over a group's
   collective memory (policy-gated).
-- `witself memory list --owner-group NAME` / `witself fact list --owner-group
+- `ws memory list --owner-group NAME` / `ws fact list --owner-group
   NAME` — enumerate group-owned records.
 
 Operator inventory across the realm uses `--all-agents` / `--owner-group` per the

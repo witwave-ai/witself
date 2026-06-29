@@ -36,7 +36,7 @@ in [requirements.md](requirements.md).
 
 Unlike a harness-loaded `CLAUDE.md`/`AGENTS.md`, Witself is a service the agent
 must be **taught** to call. The MCP server therefore returns a canonical
-`instructions` string on connect (emitted by `witself mcp serve`). This is the
+`instructions` string on connect (emitted by `ws mcp serve`). This is the
 **primary teaching surface**: it is auto-returned to the client during the MCP
 handshake and stands as the always-loaded protocol for every session. It is
 reinforced by the trigger-laden tool descriptions below and by the paste-able
@@ -86,7 +86,7 @@ Session identity:
 
 Read-only mode:
 
-- `witself mcp serve --read-only` disables mutating tools.
+- `ws mcp serve --read-only` disables mutating tools.
 - In read-only mode, `witself.memory.add/adjust/forget`, `witself.fact.set/
   delete`, `witself.message.send`, `witself.remember`, `witself.session.end`,
   `witself.memory.consolidate`, `witself.secret.create/update`, and
@@ -105,7 +105,7 @@ Read-only mode:
 
 No-value-tools mode:
 
-- `witself mcp serve --no-value-tools` disables the tools that can return sealed
+- `ws mcp serve --no-value-tools` disables the tools that can return sealed
   values or generated one-time codes: `witself.secret.reveal`, `witself.totp.code`,
   and value-returning `witself.reference.resolve` (a sealed `witself://secret/...`
   reference). This mode is **distinct from `--read-only`**: `--read-only` disables

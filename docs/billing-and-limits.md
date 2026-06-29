@@ -48,7 +48,7 @@ Plans should define soft and hard limits for:
 - Stored secrets (sealed plane).
 - Secret reads, including reveal events and reference resolution (sealed plane).
 - TOTP code generation (sealed plane).
-- Runtime injection through `witself run` (sealed plane).
+- Runtime injection through `ws run` (sealed plane).
 - Total encrypted storage size for envelope-encrypted secret material (sealed
   plane).
 - General managed-service API request volume.
@@ -132,10 +132,10 @@ Notes on a few dimensions:
   [key-hierarchy.md](key-hierarchy.md), and
   [secret-size-and-attachments.md](secret-size-and-attachments.md)).
 - `secret_read` increments on the reveal-gated value-returning paths only —
-  `witself secret reveal` and value-returning reference resolution — never on
-  plain metadata listing. `totp_code` increments on `witself totp code`, and
+  `ws secret reveal` and value-returning reference resolution — never on
+  plain metadata listing. `totp_code` increments on `ws totp code`, and
   `runtime_injection` increments when a secret is injected into a child process
-  by `witself run` without being printed. None of these dimensions cause secret
+  by `ws run` without being printed. None of these dimensions cause secret
   values to be embedded, recalled, placed in the self-digest, or
   plaintext-exported (see [secret-model.md](secret-model.md) and
   [totp-2fa.md](totp-2fa.md)).
@@ -259,24 +259,24 @@ CLI-owned hosted flows:
   resumable session ID, polls or watches status, and emits machine-readable
   completion state.
 - Crypto checkout sessions are tracked through the same session surface as other
-  hosted payment flows (`witself billing sessions show`).
+  hosted payment flows (`ws billing sessions show`).
 
 ## CLI Requirements
 
 The CLI should expose:
 
-- `witself billing show`
-- `witself billing usage`
-- `witself billing limits`
-- `witself billing plans`
-- `witself billing subscribe --promo-code`
-- `witself billing payment-methods` (list/add/remove/default; hosted-flow
+- `ws billing show`
+- `ws billing usage`
+- `ws billing limits`
+- `ws billing plans`
+- `ws billing subscribe --promo-code`
+- `ws billing payment-methods` (list/add/remove/default; hosted-flow
   initiation, never raw card or wallet collection)
-- `witself billing crypto` (quote/checkout/status; provider-mediated, no wallet
+- `ws billing crypto` (quote/checkout/status; provider-mediated, no wallet
   custody)
-- `witself billing invoices` (list/show/download)
-- `witself billing sessions show`
-- `witself capabilities`
+- `ws billing invoices` (list/show/download)
+- `ws billing sessions show`
+- `ws capabilities`
 
 The full noun/verb surface and flag conventions are defined in
 [cli-command-surface.md](cli-command-surface.md). Billing-impacting payment

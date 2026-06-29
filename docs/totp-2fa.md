@@ -46,7 +46,7 @@ The expected login flow:
 - Agent retrieves or fills the username (a secret field — see
   [secret-model.md](secret-model.md)).
 - Agent retrieves or fills the password (a secret field).
-- Agent requests a current 2FA code from Witself (`witself totp code`).
+- Agent requests a current 2FA code from Witself (`ws totp code`).
 - Witself returns the current generated code through the authorized CLI, MCP, or
   API path, never the seed.
 
@@ -56,15 +56,15 @@ secret.
 
 ## Enroll
 
-`witself totp enroll NAME` enrolls TOTP setup material into an existing or new
+`ws totp enroll NAME` enrolls TOTP setup material into an existing or new
 secret. Enrollment is the **privileged seed path** and requires the `totp:enroll`
 scope.
 
 ```sh
-witself totp enroll github/builder --otpauth 'otpauth://totp/...'
-witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
-witself totp enroll github/builder --secret-file ./github-seed.txt
-witself totp enroll github/builder --qr ./github-2fa.png
+ws totp enroll github/builder --otpauth 'otpauth://totp/...'
+ws totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+ws totp enroll github/builder --secret-file ./github-seed.txt
+ws totp enroll github/builder --qr ./github-2fa.png
 ```
 
 Enrollment accepts the seed from any of four inputs:
@@ -102,12 +102,12 @@ The non-sensitive metadata is stored as ordinary columns. Enrollment emits
 
 ## Code generation
 
-`witself totp code NAME` generates the current one-time code. This is an
+`ws totp code NAME` generates the current one-time code. This is an
 explicit, audited, value-returning op gated by the `totp:code` scope.
 
 ```sh
-witself totp code github/builder
-witself totp code github/builder --remaining --json
+ws totp code github/builder
+ws totp code github/builder --remaining --json
 ```
 
 Flags:
@@ -147,7 +147,7 @@ generation emits `totp.code` and meters the `totp_code` dimension (see
 
 ## Show metadata
 
-`witself totp show NAME` returns the non-sensitive TOTP metadata — issuer,
+`ws totp show NAME` returns the non-sensitive TOTP metadata — issuer,
 account label, algorithm, digits, period — **with the seed redacted**. This is
 the safe inspection path and does not unwrap the envelope.
 
@@ -171,7 +171,7 @@ distinct from those carve-outs.
 
 ## Delete
 
-`witself totp delete NAME` removes the TOTP setup material from a secret. The
+`ws totp delete NAME` removes the TOTP setup material from a secret. The
 secret and its other fields are untouched.
 
 Flags:

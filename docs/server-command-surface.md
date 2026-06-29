@@ -5,12 +5,12 @@ managed and self-hosted backend API deployments.
 
 ## Decision
 
-`witself-server` is a separate binary from `witself`.
+`witself-server` is a separate binary from `ws`.
 
-- `witself` is for humans, agents, and MCP usage.
+- `ws` is for humans, agents, and MCP usage.
 - `witself-server` is for running and operating the backend API service.
 
-There should not be a public `witself server` subcommand for production service
+There should not be a public `ws server` subcommand for production service
 operation. Keeping the server process separate makes service packaging,
 container images, process permissions, and self-hosting documentation clearer.
 
@@ -38,7 +38,7 @@ and [key-hierarchy.md](key-hierarchy.md).
   API keys, raw payment details, or raw wallet credentials. Never print sealed-plane
   material: secret values, TOTP seeds, plaintext private keys, per-realm KEKs,
   per-secret/field DEKs, or KMS credentials. There is no secret-reveal or TOTP-code
-  surface on `witself-server`; reveal is reserved for the audited `witself` value
+  surface on `witself-server`; reveal is reserved for the audited `ws` value
   ceremony (see [secret-model.md](secret-model.md) and [totp-2fa.md](totp-2fa.md)).
 
 ## Command Tree
@@ -272,7 +272,7 @@ deployments.
 
 ### `witself-server bootstrap token`
 
-Create a short-lived, single-use token that lets `witself setup --endpoint`
+Create a short-lived, single-use token that lets `ws setup --endpoint`
 create the first operator context.
 
 ```sh
@@ -336,11 +336,11 @@ sensitive config.
 - Do not expose policy mutation, group management, message sending, identity
   export/import, secret reveal, TOTP code generation, secret grants, or runtime
   credential injection as server admin commands; those are agent/operator surfaces
-  on `witself`.
+  on `ws`.
 - Do not turn `witself-server` into a sealed-plane value surface. The server
   process wraps and unwraps key material via KMS to operate the sealed plane, but
-  the audited secret-reveal ceremony, TOTP code generation, and `witself run`
-  runtime injection live exclusively on `witself`; sealed-plane values are never
+  the audited secret-reveal ceremony, TOTP code generation, and `ws run`
+  runtime injection live exclusively on `ws`; sealed-plane values are never
   emitted by any `witself-server` command. See [secret-model.md](secret-model.md)
   and [totp-2fa.md](totp-2fa.md).
 

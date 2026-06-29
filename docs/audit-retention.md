@@ -65,7 +65,7 @@ Witpass model:
   stored-audit metering.
 - `hold` — retention sweeps are suspended (for legal hold or active
   investigation). A hold is itself an audited operator action and is surfaced in
-  `witself audit status`.
+  `ws audit status`.
 
 Modes are set per realm by an operator and may be overridden per plan in managed
 mode. The sweep is idempotent, advisory-locked (same pattern as migrations; see
@@ -360,7 +360,7 @@ phrases, wallet private keys, or full wallet identifiers.
 
 ## Audit Export
 
-`witself audit export` produces redacted, machine-readable audit data for the
+`ws audit export` produces redacted, machine-readable audit data for the
 realm where policy allows.
 
 - Default format is JSON using the `witself.v0` schema version; line-delimited

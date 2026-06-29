@@ -17,7 +17,7 @@ CLI-initiated hosted login flow:
   config files, logs, shell history, or support bundles.
 - No card, wallet, or payment credentials collected by the auth flow.
 
-`witself setup` should start or resume operator authentication when a managed or
+`ws setup` should start or resume operator authentication when a managed or
 remote endpoint requires an operator principal before account, realm, agent, or
 token creation.
 
@@ -60,7 +60,7 @@ The CLI should store human operator auth material carefully:
 - Use owner-only permissions for any auth file where the operating system
   supports them, such as POSIX mode `0600`.
 - Never store raw account passwords.
-- Clearly report the auth source in `witself auth status --show-source`.
+- Clearly report the auth source in `ws auth status --show-source`.
 
 Human operator sessions should be revocable. Expiration can be provider-driven,
 but long-lived unattended automation should not depend on a human browser
@@ -113,7 +113,7 @@ cross-agent access, rather than a separate admin grant model:
   policy model, permission verbs (`read`, `contribute`, `curate`, `forget`),
   and guardrails are defined in [access-policy.md](access-policy.md).
 - Operators are the principals who create, list, show, delete, and test
-  policies under `policy:manage`/`policy:read`. `witself policy test` is the
+  policies under `policy:manage`/`policy:read`. `ws policy test` is the
   canonical dry-run for whether a subject/permission/target would be allowed.
 - Security groups are operator-managed sets of agents that act as both policy
   subjects and policy targets, and may own group-scoped shared memories and
@@ -152,14 +152,14 @@ Recommended v0 posture:
   one-time bootstrap token.
 - In Kubernetes, the bootstrap token can be delivered as an existing Kubernetes
   Secret or printed once by an explicitly run admin job.
-- `witself setup --endpoint URL --bootstrap-token-file PATH` uses that one-time
+- `ws setup --endpoint URL --bootstrap-token-file PATH` uses that one-time
   token to create the first operator context, the single implicit deployment/org
   account root for that deployment, realm, agents, and durable token files. The
   account-level billing, support, and managed-admin capabilities are
   capability-gated off for self-hosted deployments (see Account context above).
 - Bootstrap tokens should expire quickly, be single-use, and be audited.
 - After the first operator exists, ordinary account, realm, agent, policy,
-  group, and token management happens through the public `witself` CLI.
+  group, and token management happens through the public `ws` CLI.
 
 There should be no default admin username/password for self-hosted deployments.
 
@@ -171,7 +171,7 @@ Local development mode can use:
 - `WITSELF_PASSPHRASE_FILE`.
 - Local operator profile stored in the local development identity store.
 
-The first local operator is created by `witself realm init` when the local store
+The first local operator is created by `ws realm init` when the local store
 is empty, and can then create named agents and write token files. Local auth is
 explicitly development/test behavior and should not define the managed or
 self-hosted production security model.

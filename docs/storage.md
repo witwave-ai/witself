@@ -492,7 +492,7 @@ can then be restored either from backed-up vectors or by re-embedding:
 Open-plane identity (memories + facts) is plaintext-exportable; that stays the
 headline backup/restore feature. The sealed plane is **never in the plaintext
 export** — secret backup is encrypted-only (envelope ciphertext plus KMS key
-identity, never plaintext), and `witself export` excludes secret values and TOTP
+identity, never plaintext), and `ws export` excludes secret values and TOTP
 seeds; see [backup-and-recovery.md](backup-and-recovery.md).
 
 Backups must not include raw tokens, raw database, object-store, or KMS

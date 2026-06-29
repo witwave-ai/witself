@@ -3,10 +3,9 @@
 Status: draft. This document describes the proposed human and agent CLI
 contract before implementation.
 
-The CLI command name is decided to be `ws`. The mechanical rename from `witself`
-to `ws` is a separate later pass; the examples in this document still use the
-`witself <cmd>` form and should be read as the same surface under the eventual
-`ws` name.
+The CLI command is `ws`. The backend binary stays `witself-server`; the
+`witself://` reference scheme, `WITSELF_` environment variables, and the
+`witself.*` MCP tool names are unchanged.
 
 ## Design Goals
 
@@ -33,7 +32,7 @@ to `ws` is a separate later pass; the examples in this document still use the
 - Secret values should be accepted from files or stdin whenever possible, not
   only from flags. The canonical secret primitive is named fields, each marked
   sensitive or non-sensitive; only secret `name` and `description` are required.
-- Secret references and runtime injection (`witself run`) should provide an
+- Secret references and runtime injection (`ws run`) should provide an
   alternative to printing sealed-plane values directly to stdout.
 - Cross-agent access is default-deny and policy-driven; integrity-impacting
   actions (`memory forget`/`restore`/`delete`, cross-agent `curate`/`forget`,
@@ -162,7 +161,7 @@ Rules:
 
 - Every service-administration command should support `--json`.
 - Commands whose availability may differ by backend should check
-  `witself capabilities` or the backend capabilities API and fail with
+  `ws capabilities` or the backend capabilities API and fail with
   `unsupported_operation` when unsupported.
 - Commands that create external sessions should return a stable session ID,
   status, URL when applicable, and the next command to check or resume the flow.
@@ -233,13 +232,13 @@ witself
   completion
 ```
 
-## `witself version`
+## `ws version`
 
 Print the CLI version and build metadata.
 
 ```sh
-witself version
-witself version --json
+ws version
+ws version --json
 ```
 
 Flags:
@@ -248,7 +247,7 @@ Flags:
 |---|---|
 | `--short` | Print only the version string in human mode. |
 
-## `witself capabilities`
+## `ws capabilities`
 
 Show the active backend kind, version, supported features, unavailable features,
 limits, embedding provider, and endpoint context.
@@ -260,10 +259,10 @@ active embedding provider/model, whether semantic recall is degraded, or
 local-development-only behavior before running a command.
 
 ```sh
-witself capabilities
-witself capabilities --endpoint https://witself.internal.example.com
-witself capabilities --feature messaging --include-reasons
-witself capabilities --feature semantic_recall --include-reasons
+ws capabilities
+ws capabilities --endpoint https://witself.internal.example.com
+ws capabilities --feature messaging --include-reasons
+ws capabilities --feature semantic_recall --include-reasons
 ```
 
 Flags:
@@ -283,7 +282,7 @@ recall as degraded so callers know `memory recall` will fall back to
 keyword/tag/kind/time ranking. Commands should use the same capability data when
 returning `unsupported_operation`.
 
-## `witself whoami`
+## `ws whoami`
 
 Show the current realm, profile, and principal, with `primary` facts surfaced
 first as identity anchors. This is the top-level convenience alias for
@@ -296,22 +295,22 @@ Flags:
 | `--show-permissions` | Include effective scopes/permissions. |
 | `--show-facts` | Include the agent's `primary` facts. Default: true for agent tokens. |
 
-## `witself auth`
+## `ws auth`
 
 Manage authentication to the managed service or active local profile.
 
-### `witself auth login`
+### `ws auth login`
 
 Authenticate a human or configure an unattended token.
 
 ```sh
-witself auth login
-witself auth login --device-code
-witself auth login --no-browser
-witself auth login --token-file /run/secrets/witself-token
-witself auth login --token-file ~/.config/witself/tokens/browser-agent.token
-witself auth login --endpoint https://api.witself.com
-witself auth login --endpoint https://witself.internal.example.com --bootstrap-token-file ./bootstrap.token
+ws auth login
+ws auth login --device-code
+ws auth login --no-browser
+ws auth login --token-file /run/secrets/witself-token
+ws auth login --token-file ~/.config/witself/tokens/browser-agent.token
+ws auth login --endpoint https://api.witself.com
+ws auth login --endpoint https://witself.internal.example.com --bootstrap-token-file ./bootstrap.token
 ```
 
 Flags:
@@ -333,7 +332,7 @@ not collect raw account passwords. When no credential store is available, stored
 operator auth should use an owner-only local auth file where supported. The
 operator auth model is tracked in [operator-auth.md](operator-auth.md).
 
-### `witself auth logout`
+### `ws auth logout`
 
 Remove local authentication material for a profile.
 
@@ -344,7 +343,7 @@ Flags:
 | `--all` | Remove authentication material for all profiles. |
 | `--yes` | Skip confirmation. |
 
-### `witself auth status`
+### `ws auth status`
 
 Show whether the current profile is authenticated or locally usable.
 
@@ -354,7 +353,7 @@ Flags:
 |---|---|
 | `--show-source` | Show whether auth came from env, token file, config, or prompt. |
 
-### `witself auth whoami`
+### `ws auth whoami`
 
 Show the current realm, profile, and principal.
 
@@ -365,7 +364,7 @@ Flags:
 | `--show-permissions` | Include effective permissions. |
 | `--show-facts` | Include the agent's `primary` facts. |
 
-## `witself setup`
+## `ws setup`
 
 Create or connect everything needed for agents to start using Witself managed
 service or a self-hosted Witself backend. This is the end-to-end bootstrap path
@@ -373,17 +372,17 @@ for a fresh operator.
 
 Setup target defaults:
 
-- `witself setup` with no target flag uses managed Witself Cloud.
-- `witself setup --managed` is an explicit form of the managed-cloud default.
-- `witself setup --endpoint URL` targets a specific remote backend, usually a
+- `ws setup` with no target flag uses managed Witself Cloud.
+- `ws setup --managed` is an explicit form of the managed-cloud default.
+- `ws setup --endpoint URL` targets a specific remote backend, usually a
   self-hosted deployment, staging endpoint, or private managed endpoint.
-- `witself setup --local` targets local mock/development mode only.
+- `ws setup --local` targets local mock/development mode only.
 
 The command should discover remote backend kind and capabilities through
 `/v1/capabilities` before creating account, realm, agent, token, billing, or
 support resources.
 
-`witself setup` should be safe for humans and deterministic for automation. In
+`ws setup` should be safe for humans and deterministic for automation. In
 interactive mode it can prompt for missing values. With `--no-input`, all
 required choices must be supplied through flags.
 
@@ -421,7 +420,7 @@ Expected outcomes:
 - The command verifies that each token authenticates as the expected agent.
 
 ```sh
-witself setup \
+ws setup \
   --account "Acme Agents" \
   --email ops@example.com \
   --realm prod \
@@ -435,7 +434,7 @@ tests, but it is not the production deployment path. It uses the `local-dev`
 embedding provider so semantic recall can be exercised offline:
 
 ```sh
-witself setup --local \
+ws setup --local \
   --realm dev \
   --store-file ./witself.store.json \
   --agent browser-agent \
@@ -446,7 +445,7 @@ Managed-service setup can also emit runtime delivery artifacts such as
 Kubernetes Secret manifests:
 
 ```sh
-witself setup \
+ws setup \
   --realm prod \
   --agent browser-agent \
   --token-out browser-agent=./tokens/browser-agent.token \
@@ -482,7 +481,7 @@ Flags:
 | `--namespace NAME` | Kubernetes namespace for emitted manifests. |
 | `--secret-name NAME` | Kubernetes Secret name. Default should derive from the realm. |
 | `--out PATH` | Write setup output, manifest, or instructions to a file. |
-| `--write-agents-md` | Install the Witself teaching stanza (see [`witself bootstrap-instructions`](#witself-bootstrap-instructions)) into the project AGENTS.md so file-loaded agents learn to call Witself. |
+| `--write-agents-md` | Install the Witself teaching stanza (see [`ws bootstrap-instructions`](#witself-bootstrap-instructions)) into the project AGENTS.md so file-loaded agents learn to call Witself. |
 | `--dry-run` | Show planned resources and token destinations without creating them. |
 | `--verify` | Verify issued tokens. Default: true. |
 | `--no-verify` | Skip token verification. |
@@ -491,13 +490,13 @@ When `--checkout` is used with `--json`, output should include setup progress
 plus the hosted provider session result from
 [json-contracts.md](json-contracts.md).
 
-## `witself account`
+## `ws account`
 
 Manage the Witself managed-service customer account from the CLI. The CLI is the
 primary control plane for customer account details, human operators/admins,
 billing ownership, support identity, and account exports.
 
-### `witself account create`
+### `ws account create`
 
 Create a managed-service customer account from the CLI.
 
@@ -524,7 +523,7 @@ When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md) for the payment setup
 portion of account creation.
 
-### `witself account show`
+### `ws account show`
 
 Show the current managed-service customer account.
 
@@ -535,7 +534,7 @@ Flags:
 | `--show-usage` | Include usage summary. |
 | `--show-billing` | Include billing summary when allowed. |
 
-### `witself account update`
+### `ws account update`
 
 Update customer account details.
 
@@ -553,7 +552,7 @@ Flags:
 | `--dry-run` | Show planned account changes without applying them. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account members`
+### `ws account members`
 
 List human operators and admins for the customer account.
 
@@ -564,7 +563,7 @@ Flags:
 | `--role ROLE` | Filter by role. |
 | `--include-disabled` | Include disabled members. |
 
-### `witself account invite EMAIL`
+### `ws account invite EMAIL`
 
 Invite a human operator/admin to the customer account.
 
@@ -578,7 +577,7 @@ Flags:
 | `--dry-run` | Validate and preview the invite without sending it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account remove PRINCIPAL`
+### `ws account remove PRINCIPAL`
 
 Remove a human operator/admin from the customer account.
 
@@ -591,7 +590,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account set-role PRINCIPAL ROLE`
+### `ws account set-role PRINCIPAL ROLE`
 
 Change a human operator/admin's account-level role.
 
@@ -602,7 +601,7 @@ Flags:
 | `--dry-run` | Show planned role change without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account export`
+### `ws account export`
 
 Export managed-service account metadata when policy allows.
 
@@ -615,7 +614,7 @@ Flags:
 | `--include-support` | Include support-ticket metadata when allowed. |
 | `--format json` | Export format. Initial format is JSON. |
 
-### `witself account close`
+### `ws account close`
 
 Close the managed-service customer account when policy allows.
 
@@ -628,7 +627,7 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
 
-## `witself realm`
+## `ws realm`
 
 Manage realms. A realm is the operator-owned container for a group of named
 agents. It holds agents, agent-owned and group-owned memories and facts,
@@ -636,7 +635,7 @@ security groups, policies, messages, grants, audit records, and usage limits.
 The realm is the rename of the Witpass "vault". In local mock/development mode,
 the realm is backed by a local development store file.
 
-### `witself realm create NAME`
+### `ws realm create NAME`
 
 Create a realm.
 
@@ -650,7 +649,7 @@ Flags:
 | `--store-file PATH` | Local development store file path for `--local` mode. |
 | `--dry-run` | Validate and show planned realm creation without creating it. |
 
-### `witself realm list`
+### `ws realm list`
 
 List realms visible to the current principal.
 
@@ -660,7 +659,7 @@ Flags:
 |---|---|
 | `--include-disabled` | Include disabled or archived realms when allowed. |
 
-### `witself realm show NAME_OR_ID`
+### `ws realm show NAME_OR_ID`
 
 Show realm metadata, usage summary, and counts.
 
@@ -672,7 +671,7 @@ Flags:
 | `--show-agents` | Include agent summary counts. |
 | `--show-groups` | Include security-group summary counts. |
 
-### `witself realm use NAME_OR_ID`
+### `ws realm use NAME_OR_ID`
 
 Set the default realm for the current profile.
 
@@ -682,7 +681,7 @@ Flags:
 |---|---|
 | `--profile NAME` | Set the default realm on a named profile. |
 
-### `witself realm rename NAME_OR_ID NEW_NAME`
+### `ws realm rename NAME_OR_ID NEW_NAME`
 
 Rename a realm. Operator/admin only.
 
@@ -693,7 +692,7 @@ Flags:
 | `--dry-run` | Show planned rename without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm delete NAME_OR_ID`
+### `ws realm delete NAME_OR_ID`
 
 Archive or delete a realm. Operator/admin only.
 
@@ -707,7 +706,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm members NAME_OR_ID`
+### `ws realm members NAME_OR_ID`
 
 List human operators, admins, and agent principals in a realm.
 
@@ -719,7 +718,7 @@ Flags:
 | `--humans` | Include human operators/admins. Default: true. |
 | `--role ROLE` | Filter by role. |
 
-### `witself realm members add REALM_NAME_OR_ID PRINCIPAL`
+### `ws realm members add REALM_NAME_OR_ID PRINCIPAL`
 
 Add a human operator/admin principal or agent principal to a realm.
 
@@ -731,7 +730,7 @@ Flags:
 | `--dry-run` | Validate and preview the member addition without changing access. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm members remove REALM_NAME_OR_ID PRINCIPAL`
+### `ws realm members remove REALM_NAME_OR_ID PRINCIPAL`
 
 Remove a human operator/admin principal or agent principal from a realm.
 
@@ -743,7 +742,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm members set-role REALM_NAME_OR_ID PRINCIPAL ROLE`
+### `ws realm members set-role REALM_NAME_OR_ID PRINCIPAL ROLE`
 
 Change a realm member's role.
 
@@ -754,7 +753,7 @@ Flags:
 | `--dry-run` | Show planned role change without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm init`
+### `ws realm init`
 
 Create the local development store for local mock/development mode. This is the
 local backend bootstrap command; `realm create --local` may call it internally.
@@ -763,9 +762,9 @@ context. The local backend uses the `local-dev` embedding provider so semantic
 recall works offline.
 
 ```sh
-witself realm init
-witself realm init --store-file ~/.witself/store.json
-witself realm init --operator ops
+ws realm init
+ws realm init --store-file ~/.witself/store.json
+ws realm init --operator ops
 ```
 
 Flags:
@@ -776,7 +775,7 @@ Flags:
 | `--operator NAME` | Name for the first local operator/admin context. |
 | `--force` | Overwrite an empty or test store. Should fail on non-empty stores. |
 
-### `witself realm status`
+### `ws realm status`
 
 Show local mock/development store file path, backend type, and item counts.
 
@@ -786,13 +785,13 @@ Flags:
 |---|---|
 | `--check-integrity` | Verify the store can be opened and decoded. |
 
-### `witself realm export`
+### `ws realm export`
 
 Export a realm for backup or migration. Unlike Witpass vault export, Witself
 realm export is structured/plaintext and round-trippable by default; it can
 include all agents' memories and facts, edit history, policies, security-group
 membership, and group-owned identity data when the operator is authorized. See
-also the top-level [`witself export`](#witself-export) for single-agent self
+also the top-level [`ws export`](#witself-export) for single-agent self
 export. Backup, export, and recovery are tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 
@@ -809,7 +808,7 @@ Flags:
 | `--no-sensitive` | Exclude `sensitive` memories and facts from the export. |
 | `--reason TEXT` | Required audit reason when exporting `sensitive` records. |
 
-### `witself realm import`
+### `ws realm import`
 
 Import a realm backup or export.
 
@@ -830,7 +829,7 @@ Flags:
 | `--yes` | Skip confirmation for replacement. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself billing`
+## `ws billing`
 
 Manage managed-service billing, usage, plans, payment methods, crypto payment
 flows, and invoices from the CLI. Billing attaches at the account level, and
@@ -859,7 +858,7 @@ custody. Supported assets and networks should come from the configured payment
 provider rather than being hard-coded into product assumptions. There is no
 Witself utility token.
 
-### `witself billing show`
+### `ws billing show`
 
 Show billing status for the current account.
 
@@ -871,7 +870,7 @@ Flags:
 | `--show-plan` | Include current plan. |
 | `--show-balance` | Include current balance when available. |
 
-### `witself billing usage`
+### `ws billing usage`
 
 Show usage and metering data.
 
@@ -893,7 +892,7 @@ Flags:
 | `--group-by FIELD` | Group usage by `realm`, `agent`, `dimension`, or `day`. |
 | `--show-limits` | Include limit and overage context for each dimension. |
 
-### `witself billing limits`
+### `ws billing limits`
 
 Show current plan limits and rate limits.
 
@@ -909,7 +908,7 @@ Flags:
 | `--dimension DIMENSION` | Show one limit dimension. Repeatable. |
 | `--include-usage` | Include current usage next to each limit. |
 
-### `witself billing plans`
+### `ws billing plans`
 
 List available plans.
 
@@ -919,7 +918,7 @@ Flags:
 |---|---|
 | `--include-enterprise` | Include enterprise/contact-sales plans when available. |
 
-### `witself billing subscribe PLAN`
+### `ws billing subscribe PLAN`
 
 Start or change a subscription.
 
@@ -940,7 +939,7 @@ Flags:
 When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md).
 
-### `witself billing subscription`
+### `ws billing subscription`
 
 Show or manage subscription state.
 
@@ -955,7 +954,7 @@ Flags:
 | `--yes` | Confirm the change. |
 | `--reason TEXT` | Audit reason for subscription changes. |
 
-### `witself billing payment-methods`
+### `ws billing payment-methods`
 
 List payment methods.
 
@@ -965,7 +964,7 @@ Flags:
 |---|---|
 | `--include-expired` | Include expired payment methods. |
 
-### `witself billing payment-methods add`
+### `ws billing payment-methods add`
 
 Add a payment method through a provider-safe flow.
 
@@ -985,15 +984,15 @@ Flags:
 When `--setup` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md).
 
-### `witself billing sessions show SESSION_ID`
+### `ws billing sessions show SESSION_ID`
 
 Show the status of a hosted provider session created by checkout,
 payment-method setup, identity verification, crypto payment, or another provider
 approval flow.
 
 ```sh
-witself billing sessions show hps_123
-witself billing sessions show hps_123 --watch --timeout 5m
+ws billing sessions show hps_123
+ws billing sessions show hps_123 --watch --timeout 5m
 ```
 
 Flags:
@@ -1007,7 +1006,7 @@ Flags:
 With `--json`, output should use the hosted provider session result from
 [json-contracts.md](json-contracts.md).
 
-### `witself billing payment-methods remove PAYMENT_METHOD_ID`
+### `ws billing payment-methods remove PAYMENT_METHOD_ID`
 
 Remove a payment method.
 
@@ -1019,7 +1018,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason for removing the payment method. |
 
-### `witself billing payment-methods set-default PAYMENT_METHOD_ID`
+### `ws billing payment-methods set-default PAYMENT_METHOD_ID`
 
 Set the default payment method.
 
@@ -1030,7 +1029,7 @@ Flags:
 | `--dry-run` | Show planned default-payment-method change without applying it. |
 | `--reason TEXT` | Audit reason for changing the default payment method. |
 
-### `witself billing crypto`
+### `ws billing crypto`
 
 Manage provider-mediated crypto payment flows. These commands are for payment
 rails such as stablecoins or ETH alongside traditional payments; they are not a
@@ -1045,7 +1044,7 @@ configured provider supports it. The provider determines the exact supported
 assets, networks, limits, confirmation behavior, settlement currency, refunds,
 and recurring-payment capabilities.
 
-### `witself billing crypto quote`
+### `ws billing crypto quote`
 
 Create or preview a crypto payment quote for an invoice, subscription setup, or
 account balance.
@@ -1063,7 +1062,7 @@ Flags:
 | `--provider NAME` | Payment provider to use when more than one is configured. |
 | `--expires-in DURATION` | Requested quote lifetime when the provider allows it. |
 
-### `witself billing crypto checkout`
+### `ws billing crypto checkout`
 
 Start a provider-hosted crypto checkout or payment setup flow.
 
@@ -1086,7 +1085,7 @@ With `--json`, output should use the hosted provider session result from
 [json-contracts.md](json-contracts.md), with crypto payment metadata included
 when available.
 
-### `witself billing crypto status SESSION_ID`
+### `ws billing crypto status SESSION_ID`
 
 Show the status of a crypto payment flow by its hosted provider session id
 (`hps_...`), matching the `next_command` poll examples. This reads
@@ -1103,7 +1102,7 @@ Flags:
 | `--timeout DURATION` | Maximum time to watch. |
 | `--show-provider` | Include provider-specific redacted metadata. |
 
-### `witself billing invoices`
+### `ws billing invoices`
 
 List invoices.
 
@@ -1115,7 +1114,7 @@ Flags:
 | `--until TIMESTAMP` | Invoice window end. |
 | `--status STATUS` | Filter by invoice status. |
 
-### `witself billing invoices show INVOICE_ID`
+### `ws billing invoices show INVOICE_ID`
 
 Show one invoice.
 
@@ -1125,7 +1124,7 @@ Flags:
 |---|---|
 | `--format json|text` | Output format. |
 
-### `witself billing invoices download INVOICE_ID`
+### `ws billing invoices download INVOICE_ID`
 
 Download an invoice PDF or JSON representation.
 
@@ -1136,7 +1135,7 @@ Flags:
 | `--out PATH` | Write invoice to a file. |
 | `--format pdf|json` | Download format. |
 
-## `witself support`
+## `ws support`
 
 Create and manage support tickets from the CLI.
 
@@ -1144,7 +1143,7 @@ Support commands must not attach memory content, fact values, message bodies or
 payloads, raw tokens, or private keys. Diagnostic bundles should redact
 sensitive material by default.
 
-### `witself support create`
+### `ws support create`
 
 Create a support ticket.
 
@@ -1163,7 +1162,7 @@ Flags:
 | `--include-diagnostics` | Attach a redacted diagnostic bundle. |
 | `--dry-run` | Validate ticket content, attachments, and redaction checks without creating the ticket. |
 
-### `witself support list`
+### `ws support list`
 
 List support tickets.
 
@@ -1175,7 +1174,7 @@ Flags:
 | `--priority PRIORITY` | Filter by priority. |
 | `--limit N` | Maximum number of rows. |
 
-### `witself support show TICKET_ID`
+### `ws support show TICKET_ID`
 
 Show one support ticket.
 
@@ -1186,7 +1185,7 @@ Flags:
 | `--include-comments` | Include comments. |
 | `--include-attachments` | Include attachment metadata, not attachment contents. |
 
-### `witself support comment TICKET_ID`
+### `ws support comment TICKET_ID`
 
 Add a comment to a support ticket.
 
@@ -1199,7 +1198,7 @@ Flags:
 | `--attach PATH` | Attach a redacted file. Repeatable. |
 | `--dry-run` | Validate the comment and attachments without posting it. |
 
-### `witself support close TICKET_ID`
+### `ws support close TICKET_ID`
 
 Close a support ticket.
 
@@ -1211,7 +1210,7 @@ Flags:
 | `--dry-run` | Show planned close action without closing the ticket. |
 | `--yes` | Skip confirmation. |
 
-## `witself remember`
+## `ws remember`
 
 Quick-add self-knowledge. `remember` is the tested primary capture path for
 agents and humans: it auto-routes a single piece of text to either a fact or a
@@ -1224,9 +1223,9 @@ first-class, tested command, not a thin alias. The auto-routing rules are tracke
 in [context-hydration.md](context-hydration.md).
 
 ```sh
-witself remember "package manager is pnpm"
-witself remember "Operator prefers terse summaries." --scope self
-witself remember "shared on-call rotation starts Mondays" --scope group --reason "team context"
+ws remember "package manager is pnpm"
+ws remember "Operator prefers terse summaries." --scope self
+ws remember "shared on-call rotation starts Mondays" --scope group --reason "team context"
 ```
 
 Flags:
@@ -1244,7 +1243,7 @@ the existing `mem_` id and a `memory_duplicate`/`memory_merged` warning plus
 its own audit event; it routes to the existing `memory.added` / `fact.created` /
 `fact.updated` events.
 
-## `witself self show`
+## `ws self show`
 
 Show the always-loaded self-digest: a bounded, session-start view of who the
 agent is. The digest lists `primary` facts first, then the top-N salient memories
@@ -1259,9 +1258,9 @@ via `--max-bytes`). When capped, output sets `elided=true` and points to
 `memory recall`; it is never silently truncated.
 
 ```sh
-witself self show
-witself self show --salient-limit 5 --json
-witself self show --no-salient --max-bytes 4096
+ws self show
+ws self show --salient-limit 5 --json
+ws self show --no-salient --max-bytes 4096
 ```
 
 Flags:
@@ -1274,7 +1273,7 @@ Flags:
 | `--max-bytes N` | Hard cap on digest size; sets `elided=true` when the cap is hit. |
 | `--json` | Emit `{ identity, primary_facts[], salient_memories[], index, elided }`. |
 
-## `witself session`
+## `ws session`
 
 Bootstrap and flush long-running, multi-session work. `session start` hydrates
 identity, open goals, and last progress in one round-trip; `session end` persists
@@ -1283,14 +1282,14 @@ assume-interruption / flush-before-long-operations habit so resuming a task is a
 single call rather than a list-and-recall crawl. The session model is tracked in
 [context-hydration.md](context-hydration.md).
 
-### `witself session start`
+### `ws session start`
 
 Hydrate identity, open goals, and last progress for a new working session in one
 call. Reads only; never requires the embedding provider.
 
 ```sh
-witself session start
-witself session start --json
+ws session start
+ws session start --json
 ```
 
 Flags:
@@ -1299,12 +1298,12 @@ Flags:
 |---|---|
 | `--json` | Emit `{ identity, open_goals[], last_progress }`. |
 
-### `witself session end`
+### `ws session end`
 
 Persist a session progress memory (kind `session`) and update open goals.
 
 ```sh
-witself session end --summary "Shipped v0.3; rollback documented." \
+ws session end --summary "Shipped v0.3; rollback documented." \
   --open-goals "write release notes,monitor error rate"
 ```
 
@@ -1320,7 +1319,7 @@ Flags:
 `session start` emits a `session.started` audit event and `session end` emits
 `session.ended`.
 
-## `witself memory`
+## `ws memory`
 
 Manage memories. A memory is free-form self-content owned by an agent (or, in
 the group case, by a security group). It is one of the two first-class identity
@@ -1351,26 +1350,26 @@ Memory targeting rules:
 Operator/cross-agent examples:
 
 ```sh
-witself memory list --all-agents
-witself memory recall "incident postmortem" --owner-agent archivist
-witself memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --reason "operator cleanup"
-witself memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
+ws memory list --all-agents
+ws memory recall "incident postmortem" --owner-agent archivist
+ws memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --reason "operator cleanup"
+ws memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
 ```
 
-### `witself memory add`
+### `ws memory add`
 
 Add a memory. The creating agent is the owner unless an authorized caller
 targets another agent with `--owner-agent` (under a `contribute` policy or operator
 override) or a group with `--owner-group`.
 
 ```sh
-witself memory add --content "Deployed v0.3 to prod; rollback plan documented." \
+ws memory add --content "Deployed v0.3 to prod; rollback plan documented." \
   --kind episodic --tag deploy --tag prod
 
-witself memory add --content-file ./postmortem.md \
+ws memory add --content-file ./postmortem.md \
   --kind semantic --salience 0.8 --link witself://fact/home-region
 
-echo "Operator prefers terse summaries." | witself memory add --content-stdin --kind profile
+echo "Operator prefers terse summaries." | ws memory add --content-stdin --kind profile
 ```
 
 Flags:
@@ -1390,7 +1389,7 @@ Flags:
 | `--owner-group NAME_OR_ID` | Create the memory as group-owned (collective). |
 | `--reason TEXT` | Audit reason when contributing to another agent or group. |
 
-### `witself memory adjust ID`
+### `ws memory adjust ID`
 
 Adjust an existing memory. Adjust appends a new version to the versioned edit
 history; prior versions are retained.
@@ -1416,7 +1415,7 @@ Flags:
 | `--dry-run` | Show planned changes and the resulting version without writing. |
 | `--reason TEXT` | Audit reason. Required for cross-agent or group-owned curation. |
 
-### `witself memory read ID`
+### `ws memory read ID`
 
 Read one memory deterministically by `id`. Reading updates `last_accessed_at`.
 This is the deterministic counterpart to semantic `recall`; it does not require
@@ -1433,7 +1432,7 @@ Flags:
 | `--show-links` | Resolve and show `witself://` links when authorized. |
 | `--reason TEXT` | Audit reason for cross-agent reads. |
 
-### `witself memory recall QUERY`
+### `ws memory recall QUERY`
 
 Recall memories by semantic similarity (the core Witself differentiator). Recall
 performs an embedding-backed vector similarity search over the caller's
@@ -1444,9 +1443,9 @@ deterministically to keyword/tag/kind/time ranking and the result reports the
 degraded state.
 
 ```sh
-witself memory recall "what do I know about the prod outage"
-witself memory recall "deploy preferences" --kind profile --limit 5 --json
-witself memory recall "shared runbooks" --owner-group shared-context
+ws memory recall "what do I know about the prod outage"
+ws memory recall "deploy preferences" --kind profile --limit 5 --json
+ws memory recall "shared runbooks" --owner-group shared-context
 ```
 
 Flags:
@@ -1466,16 +1465,16 @@ Flags:
 | `--keyword-only` | Force keyword/tag/kind/time ranking without the embedding provider. |
 | `--reason TEXT` | Audit reason for cross-agent recall. |
 
-### `witself memory list`
+### `ws memory list`
 
 List memories visible to the current principal with metadata and filters.
 `sensitive` content is redacted by default.
 
 ```sh
-witself memory list
-witself memory list --kind episodic --tag deploy
-witself memory list --all-agents
-witself memory list --owner-group shared-context
+ws memory list
+ws memory list --kind episodic --tag deploy
+ws memory list --all-agents
+ws memory list --owner-group shared-context
 ```
 
 Flags:
@@ -1495,7 +1494,7 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself memory forget ID`
+### `ws memory forget ID`
 
 Forget a memory. Forget is a soft delete (tombstone), reversible within the
 retention window. This is the default destructive path; it is audited and
@@ -1511,7 +1510,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. Required for cross-agent or group-owned forgets. |
 
-### `witself memory restore ID`
+### `ws memory restore ID`
 
 Restore a forgotten (tombstoned) memory within the retention window.
 
@@ -1523,7 +1522,7 @@ Flags:
 | `--owner-group NAME_OR_ID` | Restore a group-owned memory. |
 | `--reason TEXT` | Audit reason for cross-agent or group-owned restores. |
 
-### `witself memory delete ID`
+### `ws memory delete ID`
 
 Hard-delete a memory. Explicit, guarded, audited, and irreversible. Prefer
 `memory forget` for normal removal. Cross-agent hard delete is a
@@ -1540,7 +1539,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Required audit reason for deletion. |
 
-### `witself memory consolidate`
+### `ws memory consolidate`
 
 Consolidate (garbage-collect) the memory store: merge near-duplicate memories,
 supersede stale ones, surface (never auto-resolve) conflicting facts, and trim
@@ -1556,9 +1555,9 @@ command is excluded in `--read-only` MCP mode and emits a `memory.consolidated`
 audit event when it writes.
 
 ```sh
-witself memory consolidate
-witself memory consolidate --dry-run=false --reason "post-session cleanup"
-witself memory consolidate --scope self --json
+ws memory consolidate
+ws memory consolidate --dry-run=false --reason "post-session cleanup"
+ws memory consolidate --scope self --json
 ```
 
 Flags:
@@ -1570,7 +1569,7 @@ Flags:
 | `--reason TEXT` | Audit reason; required when writing. |
 | `--json` | Emit `{ merged[], superseded[], conflicts[], trimmed_index }`. |
 
-## `witself digest emit`
+## `ws digest emit`
 
 Render the self-digest as a CLAUDE.md / AGENTS.md fragment for file-load agent
 harnesses. This is the outbound half of the two-way file bridge: it makes
@@ -1584,9 +1583,9 @@ formats and provenance markers are tracked in
 emits a `self.digest.emitted` audit event.
 
 ```sh
-witself digest emit --format agents-md -o ./AGENTS.md
-witself digest emit --format claude-md --max-bytes 4096
-witself digest emit --format markdown
+ws digest emit --format agents-md -o ./AGENTS.md
+ws digest emit --format claude-md --max-bytes 4096
+ws digest emit --format markdown
 ```
 
 Flags:
@@ -1597,7 +1596,7 @@ Flags:
 | `--max-bytes N` | Hard cap on the emitted fragment size. |
 | `-o, --out PATH` | Write the fragment to a file instead of stdout. |
 
-## `witself ingest`
+## `ws ingest`
 
 Ingest existing agent context files into Witself: the inbound half of the file
 bridge. `ingest` parses CLAUDE.md / AGENTS.md / GEMINI.md, routing kv-shaped
@@ -1609,8 +1608,8 @@ memory create paths and adds no new resource. The parser rules are tracked in
 [context-hydration.md](context-hydration.md).
 
 ```sh
-witself ingest ./AGENTS.md ./CLAUDE.md
-witself ingest ./docs/GEMINI.md --source-label legacy --dry-run
+ws ingest ./AGENTS.md ./CLAUDE.md
+ws ingest ./docs/GEMINI.md --source-label legacy --dry-run
 ```
 
 Flags:
@@ -1624,7 +1623,7 @@ Flags:
 `ingest` emits `fact.imported` and `memory.imported` audit events. It is excluded
 in `--read-only` MCP mode.
 
-## `witself bootstrap-instructions`
+## `ws bootstrap-instructions`
 
 Print the paste-able teaching stanza that installs the Witself usage habit
 (recall-before-act, write-after-learn, consolidate-when-noisy) into an agent's
@@ -1634,9 +1633,9 @@ stanza is the file-ecosystem half of the teaching layer, mirroring the MCP serve
 [context-hydration.md](context-hydration.md).
 
 ```sh
-witself bootstrap-instructions
-witself bootstrap-instructions --format agents-md
-witself bootstrap-instructions --format text
+ws bootstrap-instructions
+ws bootstrap-instructions --format agents-md
+ws bootstrap-instructions --format text
 ```
 
 Flags:
@@ -1646,10 +1645,10 @@ Flags:
 | `--format agents-md\|claude-md\|text` | Output format for the teaching stanza. |
 
 To install the stanza directly into a project's AGENTS.md as part of bootstrap,
-`witself setup --write-agents-md` writes it during setup (see
-[`witself setup`](#witself-setup)).
+`ws setup --write-agents-md` writes it during setup (see
+[`ws setup`](#witself-setup)).
 
-## `witself fact`
+## `ws fact`
 
 Manage facts. A fact is a name→value pair: the canonical, queryable identity
 card for an agent (or, in the group case, a security group). Facts are deterministic
@@ -1669,7 +1668,7 @@ Fact targeting rules:
 - `--owner-group NAME_OR_ID`: targets a group-owned fact.
 - `--owner-agent` and `--owner-group` are mutually exclusive.
 
-### `witself fact set NAME VALUE`
+### `ws fact set NAME VALUE`
 
 Create or update a fact (upsert by name within the owner). `--primary` marks the
 canonical value of the fact's logical kind and atomically demotes any prior
@@ -1677,10 +1676,10 @@ primary of the same kind for the same owner. Value may also be supplied from a
 file or stdin.
 
 ```sh
-witself fact set display-name "Browser Agent"
-witself fact set email builder@example.com --primary --format email
-witself fact set aws/account-id 123456789012 --format string
-witself fact set notes --value-file ./notes.txt
+ws fact set display-name "Browser Agent"
+ws fact set email builder@example.com --primary --format email
+ws fact set aws/account-id 123456789012 --format string
+ws fact set notes --value-file ./notes.txt
 ```
 
 Flags:
@@ -1701,14 +1700,14 @@ Flags:
 | `--dry-run` | Show the planned upsert and any primary demotion without writing. |
 | `--reason TEXT` | Audit reason. Required for cross-agent or group-owned writes and for primary promotion across agents. |
 
-### `witself fact get NAME`
+### `ws fact get NAME`
 
 Get one fact deterministically by name. An authorized read returns the value,
 including for `sensitive` facts; there is no reveal ceremony.
 
 ```sh
-witself fact get email
-witself fact get email --owner-agent archivist --reason "operator lookup"
+ws fact get email
+ws fact get email --owner-agent archivist --reason "operator lookup"
 ```
 
 Flags:
@@ -1720,16 +1719,16 @@ Flags:
 | `--version VERSION` | Read a historical version from edit history when supported. |
 | `--reason TEXT` | Audit reason for cross-agent reads. |
 
-### `witself fact list`
+### `ws fact list`
 
 List facts visible to the current principal. `primary` facts are surfaced first
 as identity anchors. `sensitive` values are redacted by default.
 
 ```sh
-witself fact list
-witself fact list --primary-only
-witself fact list --all-agents
-witself fact list --owner-group shared-context
+ws fact list
+ws fact list --primary-only
+ws fact list --all-agents
+ws fact list --owner-group shared-context
 ```
 
 Flags:
@@ -1746,7 +1745,7 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself fact delete NAME`
+### `ws fact delete NAME`
 
 Delete a fact (guarded, audited).
 
@@ -1760,7 +1759,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. Required for cross-agent or group-owned deletes. |
 
-## `witself password generate`
+## `ws password generate`
 
 Generate a password or passphrase. This is a sealed-plane utility used most often
 to populate a sensitive secret field (see `secret create --generate-sensitive`),
@@ -1768,9 +1767,9 @@ but it also works standalone. Generated values are returned to the caller and ar
 not stored unless written into a secret.
 
 ```sh
-witself password generate
-witself password generate --length 40 --no-ambiguous
-witself password generate --words 5
+ws password generate
+ws password generate --length 40 --no-ambiguous
+ws password generate --words 5
 ```
 
 Flags:
@@ -1791,7 +1790,7 @@ Flags:
 | `--separator TEXT` | Separator for passphrase mode. Default: `-`. |
 | `--count N` | Generate N values. Default: `1`. |
 
-## `witself secret`
+## `ws secret`
 
 Manage stored secrets: the sealed plane of Witself. A secret can be a login, API
 key, token, private key, certificate bundle, connection string, or arbitrary
@@ -1828,32 +1827,32 @@ Secret targeting rules:
 Operator/admin multi-agent examples:
 
 ```sh
-witself secret scan --all-agents
-witself secret show github/builder --owner-agent browser-agent
-witself secret update github/builder --owner-agent browser-agent --field url=https://github.com/login
-witself secret grant github/builder --owner-agent browser-agent --agent release-agent --read --reveal password
-witself totp code github/builder --owner-agent browser-agent --reason "operator recovery"
+ws secret scan --all-agents
+ws secret show github/builder --owner-agent browser-agent
+ws secret update github/builder --owner-agent browser-agent --field url=https://github.com/login
+ws secret grant github/builder --owner-agent browser-agent --agent release-agent --read --reveal password
+ws totp code github/builder --owner-agent browser-agent --reason "operator recovery"
 ```
 
-### `witself secret create NAME`
+### `ws secret create NAME`
 
 Create a secret. `NAME` must be unique for the owning agent (or group) inside the
 current realm. Different agents may use the same `NAME`.
 
 ```sh
-witself secret create github/builder \
+ws secret create github/builder \
   --description "GitHub login for browser-agent" \
   --template login \
   --field username=builder@example.com \
   --field url=https://github.com/login \
   --generate-sensitive password
 
-witself secret create stripe/test \
+ws secret create stripe/test \
   --description "Stripe test API key" \
   --template api-key \
   --sensitive-stdin api-key
 
-witself secret create deploy/tls \
+ws secret create deploy/tls \
   --description "TLS certificate bundle for deploy agent" \
   --template certificate \
   --field-file cert=./tls.crt \
@@ -1880,7 +1879,7 @@ Flags:
 | `--owner-agent NAME_OR_ID` | Operator/admin only: create the secret for a specific owning agent. |
 | `--group NAME_OR_ID` | Create the secret as group-owned (collective). Operator/admin or `group:manage`. |
 
-### `witself secret show NAME`
+### `ws secret show NAME`
 
 Show non-sensitive fields and redacted sensitive fields for a secret. This never
 reveals sensitive values; use `secret reveal` for that.
@@ -1895,16 +1894,16 @@ Flags:
 | `--show-access` | Include access grants. |
 | `--version VERSION` | Show a historical version when supported. |
 
-### `witself secret list`
+### `ws secret list`
 
 List secrets visible to the current principal. Sensitive values are never
 included.
 
 ```sh
-witself secret list
-witself secret list --all-agents
-witself secret list --owner-agent builder-agent
-witself secret list --group shared-context
+ws secret list
+ws secret list --all-agents
+ws secret list --owner-agent builder-agent
+ws secret list --group shared-context
 ```
 
 Flags:
@@ -1922,15 +1921,15 @@ Flags:
 | `--include-archived` | Include archived secrets when allowed. Maps to MCP `include_archived` and the JSON `archived` field. |
 | `--include-disabled` | Include secrets whose owning agent is disabled, when allowed. |
 
-### `witself secret scan`
+### `ws secret scan`
 
 Scan visible secrets and produce a redacted inventory. Operator/admin callers can
 scan across all agents in the realm without revealing sensitive values.
 
 ```sh
-witself secret scan
-witself secret scan --all-agents
-witself secret scan --owner-agent builder-agent
+ws secret scan
+ws secret scan --all-agents
+ws secret scan --owner-agent builder-agent
 ```
 
 Flags:
@@ -1949,7 +1948,7 @@ Flags:
 | `--show-access` | Include access-grant summary. |
 | `--limit N` | Maximum number of rows. |
 
-### `witself secret reveal NAME FIELD`
+### `ws secret reveal NAME FIELD`
 
 Reveal one sensitive field. This is the explicit, audited reveal ceremony of the
 sealed plane; it is the only path (alongside `totp code` and `run`) that returns a
@@ -1960,9 +1959,9 @@ client-side / server-side decrypt is governed by the realm's
 audit record.
 
 ```sh
-witself secret reveal github/builder password
-witself secret reveal github/builder password --json
-witself secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
+ws secret reveal github/builder password
+ws secret reveal github/builder password --json
+ws secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
 ```
 
 Flags:
@@ -1975,7 +1974,7 @@ Flags:
 | `--reason TEXT` | Audit reason for the reveal. |
 | `--ttl DURATION` | Request a short-lived reveal lease when supported. |
 
-### `witself secret update NAME`
+### `ws secret update NAME`
 
 Update fields on an existing secret.
 
@@ -2002,7 +2001,7 @@ Flags:
 | `--remove-tag TAG` | Remove tag. Repeatable. |
 | `--reason TEXT` | Audit reason for the update. |
 
-### `witself secret rename NAME NEW_NAME`
+### `ws secret rename NAME NEW_NAME`
 
 Rename a secret within the same owner. `NEW_NAME` must be unique for that owner
 inside the current realm.
@@ -2015,7 +2014,7 @@ Flags:
 | `--group NAME_OR_ID` | Rename a group-owned secret. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret copy NAME NEW_NAME`
+### `ws secret copy NAME NEW_NAME`
 
 Copy a secret. By default this copies non-sensitive fields and structure only;
 copying sensitive values must be explicit.
@@ -2033,7 +2032,7 @@ Flags:
 | `--yes` | Skip confirmation when allowed. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret archive NAME`
+### `ws secret archive NAME`
 
 Archive a secret without permanently deleting it.
 
@@ -2047,7 +2046,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret restore NAME`
+### `ws secret restore NAME`
 
 Restore an archived secret when supported.
 
@@ -2059,7 +2058,7 @@ Flags:
 | `--group NAME_OR_ID` | Restore a group-owned secret. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret delete NAME`
+### `ws secret delete NAME`
 
 Permanently delete a secret when allowed. Prefer `secret archive` for normal
 removal.
@@ -2075,7 +2074,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason for deletion. |
 
-### `witself secret grant NAME`
+### `ws secret grant NAME`
 
 Grant an agent access to a secret. Secret access is grant-based and composes with
 realm roles per [authorization-and-roles.md](authorization-and-roles.md); it does
@@ -2096,7 +2095,7 @@ Flags:
 | `--dry-run` | Show planned access grant without changing permissions. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret revoke NAME`
+### `ws secret revoke NAME`
 
 Revoke an agent's access to a secret.
 
@@ -2117,7 +2116,7 @@ Flags:
 Secret references identify a secret field without embedding the plaintext value.
 They are intended for config files, scripts, MCP tool inputs, and runtime
 injection, and are distinct from the open-plane `witself://` identity references
-(memories/facts) described under [`witself reference`](#witself-reference).
+(memories/facts) described under [`ws reference`](#witself-reference).
 
 Reference forms (the unified ownership model is agent or group; the former
 `shared` scope is now a group):
@@ -2143,7 +2142,7 @@ printing or listing a secret should not resolve references, and the sealed-plane
 carve-outs apply: a secret reference is never embedded, recalled, placed in the
 self-digest, or plaintext-exported.
 
-## `witself run`
+## `ws run`
 
 Run a subprocess with selected secret references resolved only for that process
 lifetime. This is the safer path when an agent or human needs credentials for a
@@ -2151,8 +2150,8 @@ CLI tool, test suite, deploy script, or MCP server without printing the values.
 It is a sealed-plane, value-returning command and is audited.
 
 ```sh
-witself run --env GITHUB_TOKEN=witself://secret/github/builder/token -- gh repo view
-witself run --env-file .env.witself -- npm test
+ws run --env GITHUB_TOKEN=witself://secret/github/builder/token -- gh repo view
+ws run --env-file .env.witself -- npm test
 ```
 
 Flags:
@@ -2166,7 +2165,7 @@ Flags:
 | `--owner-agent NAME_OR_ID` | Operator/admin only: resolve unqualified references as a specific owning agent. |
 | `--reason TEXT` | Audit reason for resolving references. |
 
-## `witself totp`
+## `ws totp`
 
 Make Witself the authenticator application for accounts that use TOTP 2FA. A TOTP
 enrollment stores its seed as high-value sealed material in the same plane as
@@ -2175,15 +2174,15 @@ plaintext-exported, and is revealed only through the guarded `totp show
 --reveal-seed` path. The TOTP model is tracked in [totp-2fa.md](totp-2fa.md);
 `totp:enroll` and `totp:code` are distinct scopes.
 
-### `witself totp enroll NAME`
+### `ws totp enroll NAME`
 
 Enroll TOTP setup material into an existing or new secret.
 
 ```sh
-witself totp enroll github/builder --otpauth 'otpauth://totp/...'
-witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
-witself totp enroll github/builder --secret-file ./github-seed.txt
-witself totp enroll github/builder --qr ./github-2fa.png
+ws totp enroll github/builder --otpauth 'otpauth://totp/...'
+ws totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+ws totp enroll github/builder --secret-file ./github-seed.txt
+ws totp enroll github/builder --qr ./github-2fa.png
 ```
 
 Flags:
@@ -2204,15 +2203,15 @@ Flags:
 | `--algorithm SHA1|SHA256|SHA512` | TOTP HMAC algorithm. Default: `SHA1`. |
 | `--create-secret` | Create the secret if it does not exist. |
 
-### `witself totp code NAME`
+### `ws totp code NAME`
 
 Generate the current TOTP code for a secret. This is a value-returning,
 reveal-gated sealed-plane command: it requires `totp:code`, emits a `totp.code`
 audit event, and is disabled by `mcp serve --no-value-tools`.
 
 ```sh
-witself totp code github/builder
-witself totp code github/builder --json
+ws totp code github/builder
+ws totp code github/builder --json
 ```
 
 Flags:
@@ -2225,7 +2224,7 @@ Flags:
 | `--remaining` | Include seconds remaining in the current period. |
 | `--reason TEXT` | Audit reason for code generation. |
 
-### `witself totp show NAME`
+### `ws totp show NAME`
 
 Show TOTP metadata without revealing the seed.
 
@@ -2238,7 +2237,7 @@ Flags:
 | `--reveal-seed` | Reveal the underlying TOTP seed. Admin/operator path only; emits a `totp.seed_revealed` audit event. |
 | `--reason TEXT` | Audit reason when revealing seed. |
 
-### `witself totp delete NAME`
+### `ws totp delete NAME`
 
 Remove TOTP setup material from a secret.
 
@@ -2252,7 +2251,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself policy`
+## `ws policy`
 
 Manage cross-agent access policies. Authorization for cross-agent identity
 access is default-deny: with no matching `allow` policy, cross-agent access is
@@ -2270,19 +2269,19 @@ Permission verbs escalate in danger: `read`, `contribute`, `curate`, `forget`.
 Operators can always manage and access identity data within their realm
 (operator override), audited like any agent action.
 
-### `witself policy create`
+### `ws policy create`
 
 Create an `allow` policy.
 
 ```sh
-witself policy create \
+ws policy create \
   --subject-agent coordinator \
   --permission read \
   --target-agent archivist \
   --scope memory \
   --description "Coordinator may read archivist memories"
 
-witself policy create \
+ws policy create \
   --subject-group analysts \
   --permission contribute \
   --target-group shared-context \
@@ -2309,7 +2308,7 @@ Flags:
 | `--dry-run` | Validate and show the planned policy without creating it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself policy list`
+### `ws policy list`
 
 List policies in the realm.
 
@@ -2326,7 +2325,7 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself policy show ID`
+### `ws policy show ID`
 
 Show one policy, including subject, permission, target, scope, filters, effect,
 and metadata.
@@ -2337,7 +2336,7 @@ Flags:
 |---|---|
 | `--show-matches` | Summarize which agents/groups the policy currently resolves to (for group subjects/targets). |
 
-### `witself policy delete ID`
+### `ws policy delete ID`
 
 Delete a policy. Removing a policy can revoke cross-agent access, so it is
 guarded and audited.
@@ -2350,7 +2349,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself policy test`
+### `ws policy test`
 
 Evaluate whether a given subject/permission/target/scope would be allowed under
 current policy. This is the canonical dry-run for access decisions and returns
@@ -2358,13 +2357,13 @@ the deciding policy id or a deny reason. Available via CLI and MCP
 (`witself.policy.test`).
 
 ```sh
-witself policy test \
+ws policy test \
   --subject-agent coordinator \
   --permission read \
   --target-agent archivist \
   --scope memory
 
-witself policy test \
+ws policy test \
   --subject-agent coordinator \
   --permission forget \
   --target-agent archivist \
@@ -2386,7 +2385,7 @@ Flags:
 | `--filter-name PATTERN` | Evaluate against a fact name. |
 | `--explain` | Include the full evaluation trace, not just the decision. |
 
-## `witself group`
+## `ws group`
 
 Manage security groups. A security group is a named set of agents within a
 realm. It is both a policy subject and a policy target, and it can own
@@ -2394,13 +2393,13 @@ group-scoped shared memories and facts (collective memory). Membership is manage
 and by agents holding `group:manage`. Security groups are tracked in
 [security-groups.md](security-groups.md).
 
-### `witself group create NAME`
+### `ws group create NAME`
 
 Create a security group. `NAME` is unique within the realm.
 
 ```sh
-witself group create analysts --description "Read-only analysis agents"
-witself group create shared-context --admin coordinator
+ws group create analysts --description "Read-only analysis agents"
+ws group create shared-context --admin coordinator
 ```
 
 Flags:
@@ -2413,7 +2412,7 @@ Flags:
 | `--dry-run` | Validate and show planned group creation without creating it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself group list`
+### `ws group list`
 
 List security groups in the realm.
 
@@ -2425,7 +2424,7 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself group show NAME_OR_ID`
+### `ws group show NAME_OR_ID`
 
 Show one security group, including members, admins, and bound policies.
 
@@ -2437,7 +2436,7 @@ Flags:
 | `--show-policies` | Include policies bound to the group as subject and/or target. |
 | `--show-owned` | Include counts of group-owned memories and facts. |
 
-### `witself group add-member NAME_OR_ID AGENT`
+### `ws group add-member NAME_OR_ID AGENT`
 
 Add an agent to a security group. Operator/admin or `group:manage`.
 
@@ -2449,7 +2448,7 @@ Flags:
 | `--dry-run` | Show the planned membership change and resulting access without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself group remove-member NAME_OR_ID AGENT`
+### `ws group remove-member NAME_OR_ID AGENT`
 
 Remove an agent from a security group. Operator/admin or `group:manage`.
 Removing a member can revoke group-derived access, so it is guarded.
@@ -2462,7 +2461,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself group delete NAME_OR_ID`
+### `ws group delete NAME_OR_ID`
 
 Delete a security group. Deleting a group removes its policy bindings and affects
 access to group-owned memories and facts, so it is guarded and audited.
@@ -2477,7 +2476,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself message`
+## `ws message`
 
 Exchange durable messages with other agents and groups. Messaging is fully in
 scope for v0: a mailbox/queue model with at-least-once delivery, per-recipient
@@ -2488,7 +2487,7 @@ receiving agent; a message cannot itself authorize a cross-agent write. The
 messaging model is tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
-### `witself message send`
+### `ws message send`
 
 Send a message to an agent or group. `from` is the token-bound agent.
 
@@ -2503,20 +2502,20 @@ addressing is tracked in
 [agent-collaboration.md](agent-collaboration.md).
 
 ```sh
-witself message send --to archivist \
+ws message send --to archivist \
   --subject "handoff" \
   --body "Postmortem stored as mem_01H...; please review."
 
-witself message send --to-group shared-context \
+ws message send --to-group shared-context \
   --kind notice \
   --body-file ./broadcast.txt
 
-witself message send --to coordinator \
+ws message send --to coordinator \
   --thread thr_01H... \
   --body "Acknowledged; proceeding." \
   --payload-file ./status.json
 
-witself message send --to witself://acme-research/agent/coordinator \
+ws message send --to witself://acme-research/agent/coordinator \
   --subject "cross-realm handoff" \
   --body "Requesting review; conversation continues here."
 ```
@@ -2537,7 +2536,7 @@ Flags:
 | `--dry-run` | Validate recipients, authorization, and rate limits without sending. |
 | `--reason TEXT` | Audit reason when required by operator/cross-context policy. |
 
-### `witself message list`
+### `ws message list`
 
 List messages in the caller's mailbox. Defaults to received messages for the
 token-bound agent. The mailbox selector maps to the canonical `direction` set in
@@ -2545,10 +2544,10 @@ token-bound agent. The mailbox selector maps to the canonical `direction` set in
 `--sent` selects `outbox`.
 
 ```sh
-witself message list
-witself message list --unread
-witself message list --from coordinator --thread thr_01H...
-witself message list --sent
+ws message list
+ws message list --unread
+ws message list --from coordinator --thread thr_01H...
+ws message list --sent
 ```
 
 Flags:
@@ -2567,7 +2566,7 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself message read ID`
+### `ws message read ID`
 
 Read one message, including body and any structured payload. Reading marks the
 per-recipient read state. Treat the body and payload as untrusted input.
@@ -2581,7 +2580,7 @@ Flags:
 | `--show-payload` | Include the structured payload. Default: true. |
 | `--reason TEXT` | Audit reason for operator reads. |
 
-### `witself message ack ID`
+### `ws message ack ID`
 
 Acknowledge a message, recording explicit per-recipient ack state. Ack is
 distinct from read: it confirms the recipient processed the message.
@@ -2593,7 +2592,7 @@ Flags:
 | `--owner-agent NAME_OR_ID` | Operator/admin only: ack on behalf of a specific agent when permitted. |
 | `--reason TEXT` | Audit reason for operator acks. |
 
-### `witself message listen`
+### `ws message listen`
 
 Long-poll receive: block up to `--timeout` seconds and return inbound messages
 for the token-bound agent, draining the mailbox. This is the live face of the
@@ -2605,9 +2604,9 @@ they hear inbound messages and reply with `send`; the directive lives in
 tracked in [agent-collaboration.md](agent-collaboration.md).
 
 ```sh
-witself message listen
-witself message listen --timeout 30 --json
-witself message listen --conversation thr_01H... --timeout 60
+ws message listen
+ws message listen --timeout 30 --json
+ws message listen --conversation thr_01H... --timeout 60
 ```
 
 Flags:
@@ -2620,7 +2619,7 @@ Flags:
 | `--no-mark-read` | Do not update read state for returned messages. |
 | `--limit N` | Maximum number of messages to return per poll. |
 
-## `witself federation`
+## `ws federation`
 
 Manage the realm's cross-realm federation: the deny-by-default allow-list of
 peer realms the realm accepts messages from, and the signed realm card the realm
@@ -2632,18 +2631,18 @@ still uses ordinary `message:send`. These commands require the
 deny-by-default trust are tracked in
 [agent-collaboration.md](agent-collaboration.md).
 
-### `witself federation peers`
+### `ws federation peers`
 
 Manage the realm's accepted-peer allow-list. Removing a peer from the allow-list
 is a deny; federation does not happen by default.
 
 ```sh
-witself federation peers list
-witself federation peers allow acme-research --reason "joint research program"
-witself federation peers remove acme-research --reason "engagement ended"
+ws federation peers list
+ws federation peers allow acme-research --reason "joint research program"
+ws federation peers remove acme-research --reason "engagement ended"
 ```
 
-#### `witself federation peers list`
+#### `ws federation peers list`
 
 List the realm handles the realm currently accepts as federation peers.
 
@@ -2653,7 +2652,7 @@ Flags:
 |---|---|
 | `--include-disabled` | Include previously removed or suspended peers when available. |
 
-#### `witself federation peers allow REALM_HANDLE`
+#### `ws federation peers allow REALM_HANDLE`
 
 Add a peer realm handle to the allow-list. The handle (and its published signing
 key) is the unit of trust.
@@ -2667,7 +2666,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-#### `witself federation peers remove REALM_HANDLE`
+#### `ws federation peers remove REALM_HANDLE`
 
 Remove a peer realm handle from the allow-list. This is a deny that takes effect
 for subsequent cross-realm traffic.
@@ -2680,7 +2679,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself federation card`
+### `ws federation card`
 
 Manage the realm's signed federation card. The card advertises the realm handle,
 its agents and their skills, the endpoint, accepted auth, delivery modes, and the
@@ -2688,11 +2687,11 @@ public signing key; it is signed by the realm and served for peer discovery and
 verification. Card signing is mandatory.
 
 ```sh
-witself federation card publish
-witself federation card rotate --reason "scheduled key rotation"
+ws federation card publish
+ws federation card rotate --reason "scheduled key rotation"
 ```
 
-#### `witself federation card publish`
+#### `ws federation card publish`
 
 Publish or re-publish the realm's signed card so peers can discover and verify
 the realm.
@@ -2705,7 +2704,7 @@ Flags:
 | `--dry-run` | Validate and show the planned card contents without publishing. |
 | `--reason TEXT` | Audit reason. |
 
-#### `witself federation card rotate`
+#### `ws federation card rotate`
 
 Rotate the realm's signing key and re-publish the card under the new key.
 
@@ -2717,7 +2716,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself reference`
+## `ws reference`
 
 Parse and resolve `witself://` identity references. References let memories,
 facts, messages, scripts, config files, and MCP tools point at identity data
@@ -2747,15 +2746,15 @@ witself://agent/archivist/fact/home-region
 witself://group/shared-context/memory/mem_01H...
 ```
 
-### `witself reference parse REF`
+### `ws reference parse REF`
 
 Parse a `witself://` reference into its components (scheme, owner kind, owner,
 leaf kind, leaf) without resolving it. Does not require authorization to the
 target, because nothing is read.
 
 ```sh
-witself reference parse witself://agent/archivist/fact/home-region
-witself reference parse witself://memory/mem_01H... --json
+ws reference parse witself://agent/archivist/fact/home-region
+ws reference parse witself://memory/mem_01H... --json
 ```
 
 Flags:
@@ -2764,15 +2763,15 @@ Flags:
 |---|---|
 | `--strict` | Fail on unknown forms instead of returning a best-effort parse. |
 
-### `witself reference resolve REF`
+### `ws reference resolve REF`
 
 Resolve a `witself://` reference to the underlying memory or fact through an
 authorized read. Cross-agent and group references are policy-gated; resolution
 enforces the same authorization as `memory read`/`fact get`.
 
 ```sh
-witself reference resolve witself://fact/email
-witself reference resolve witself://agent/archivist/memory/mem_01H... --reason "operator lookup"
+ws reference resolve witself://fact/email
+ws reference resolve witself://agent/archivist/memory/mem_01H... --reason "operator lookup"
 ```
 
 Flags:
@@ -2783,14 +2782,14 @@ Flags:
 | `--show-metadata` | Include record metadata alongside the resolved value/content. |
 | `--reason TEXT` | Audit reason for cross-agent or operator resolution. |
 
-## `witself agent`
+## `ws agent`
 
 Manage agent principals. Billing rolls up to the realm, but identity and
 permissions are per agent. Operators can manage the full lifecycle of named
 agents inside a realm. Ordinary agents cannot run lifecycle operations unless
 explicitly granted that permission.
 
-### `witself agent create NAME`
+### `ws agent create NAME`
 
 Create an agent principal. Operator/admin by default.
 
@@ -2798,7 +2797,7 @@ For ephemeral runtimes, the normal bootstrap path is to create the named agent
 and write its durable token directly to a token file:
 
 ```sh
-witself agent create browser-agent --token-out /run/secrets/witself-agent-token
+ws agent create browser-agent --token-out /run/secrets/witself-agent-token
 ```
 
 Flags:
@@ -2812,7 +2811,7 @@ Flags:
 | `--token-out PATH` | Issue the initial durable agent token and write it to a file. |
 | `--dry-run` | Validate and show planned agent creation without creating the agent or issuing a token. |
 
-### `witself agent list`
+### `ws agent list`
 
 List agent principals.
 
@@ -2825,7 +2824,7 @@ Flags:
 | `--disabled` | Include disabled agents. |
 | `--limit N` | Maximum number of rows. |
 
-### `witself agent show NAME_OR_ID`
+### `ws agent show NAME_OR_ID`
 
 Show one agent principal, including its `primary` facts as identity anchors.
 
@@ -2838,7 +2837,7 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. Default: true. |
 | `--show-usage` | Include usage summary when available. |
 
-### `witself agent rename NAME_OR_ID NEW_NAME`
+### `ws agent rename NAME_OR_ID NEW_NAME`
 
 Rename an agent. Operator/admin by default. The agent keeps its identity,
 memories, facts, policies, group membership, audit history, and tokens unless a
@@ -2852,7 +2851,7 @@ Flags:
 | `--dry-run` | Show planned rename and token-rotation effects without applying them. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself agent copy SOURCE_AGENT NEW_AGENT`
+### `ws agent copy SOURCE_AGENT NEW_AGENT`
 
 Copy an agent into a new named agent. Operator/admin by default. By default this
 copies agent metadata, policy bindings, and group membership, but not memories
@@ -2874,7 +2873,7 @@ Flags:
 | `--yes` | Skip confirmation when allowed. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself agent disable NAME_OR_ID`
+### `ws agent disable NAME_OR_ID`
 
 Disable an agent principal. Operator/admin by default. Disabled agents cannot
 authenticate with existing tokens.
@@ -2887,7 +2886,7 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
 
-### `witself agent enable NAME_OR_ID`
+### `ws agent enable NAME_OR_ID`
 
 Re-enable an agent principal. Operator/admin by default.
 
@@ -2898,7 +2897,7 @@ Flags:
 | `--dry-run` | Show planned enable action without enabling the agent. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself agent delete NAME_OR_ID`
+### `ws agent delete NAME_OR_ID`
 
 Delete an agent principal when allowed. Operator/admin by default. Agent deletion
 invalidates that agent's tokens.
@@ -2916,7 +2915,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself token`
+## `ws token`
 
 Manage agent or operator tokens.
 
@@ -2925,7 +2924,7 @@ V0 agent tokens are durable by default. They do not expire unless `--ttl` or
 create or rotate; list/show output must contain metadata only. The token
 lifecycle is tracked in [token-lifecycle.md](token-lifecycle.md).
 
-### `witself token create`
+### `ws token create`
 
 Create a token for an agent or operator workflow.
 
@@ -2946,7 +2945,7 @@ If neither `--ttl` nor `--expires-at` is supplied for an agent token, the token
 has no default expiration in v0. The full scope list is defined in
 [requirements.md](requirements.md#authorization-and-scopes).
 
-### `witself token list`
+### `ws token list`
 
 List tokens visible to the current principal.
 
@@ -2959,7 +2958,7 @@ Flags:
 | `--include-expired` | Include expired tokens. |
 | `--include-revoked` | Include revoked tokens. |
 
-### `witself token revoke TOKEN_ID`
+### `ws token revoke TOKEN_ID`
 
 Revoke a token. Revocation is immediate.
 
@@ -2971,7 +2970,7 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
 
-### `witself token rotate TOKEN_ID`
+### `ws token rotate TOKEN_ID`
 
 Rotate a token and return the replacement once.
 
@@ -2987,11 +2986,11 @@ Flags:
 | `--dry-run` | Validate and show planned rotation without issuing or revoking tokens. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself audit`
+## `ws audit`
 
 Inspect audit records.
 
-### `witself audit list`
+### `ws audit list`
 
 List audit events.
 
@@ -3012,7 +3011,7 @@ Flags:
 | `--action ACTION` | Filter by action such as `memory.recalled`, `crossagent.forgotten`, or `message.sent`. |
 | `--limit N` | Maximum number of rows. |
 
-### `witself audit show EVENT_ID`
+### `ws audit show EVENT_ID`
 
 Show one audit event.
 
@@ -3022,14 +3021,14 @@ Flags:
 |---|---|
 | `--include-request` | Include request metadata when available. |
 
-## `witself export`
+## `ws export`
 
 Export an agent's self (single-agent identity export). This is the headline,
 plaintext, round-trippable export of a self: all memories (content, kind, tags,
 source, salience, links, timestamps, and edit history) and all facts (values,
 `primary` flags, `sensitive` flags, format hints, and edit history), with
 identity anchors surfaced. For realm-wide operator export including policies and
-groups, use [`witself realm export`](#witself-realm-export). Export/import is
+groups, use [`ws realm export`](#witself-realm-export). Export/import is
 tracked in [backup-and-recovery.md](backup-and-recovery.md).
 
 `sensitive` records are exported in clear by default; the CLI requires an audit
@@ -3038,9 +3037,9 @@ preserved on export and re-resolved on import; dangling references are reported,
 not silently dropped.
 
 ```sh
-witself export --out ./self.json
-witself export --agent archivist --out ./archivist-self/ --format dir
-witself export --no-sensitive --out ./self-public.json
+ws export --out ./self.json
+ws export --agent archivist --out ./archivist-self/ --format dir
+ws export --no-sensitive --out ./self-public.json
 ```
 
 Flags:
@@ -3055,7 +3054,7 @@ Flags:
 | `--no-sensitive` | Exclude `sensitive` memories and facts. |
 | `--reason TEXT` | Required audit reason when the export includes `sensitive` records. |
 
-## `witself import`
+## `ws import`
 
 Import an exported self into the same or a different agent/realm, preserving
 `primary` flags, `sensitive` markers, links, and (where chosen) edit history.
@@ -3064,8 +3063,8 @@ rename/remap mode when importing into a different agent. Import is audited and
 supports `--dry-run`.
 
 ```sh
-witself import --in ./self.json
-witself import --in ./archivist-self/ --remap-agent archivist=archivist-copy --dry-run
+ws import --in ./self.json
+ws import --in ./archivist-self/ --remap-agent archivist=archivist-copy --dry-run
 ```
 
 Flags:
@@ -3082,11 +3081,11 @@ Flags:
 | `--yes` | Skip confirmation for replacement. |
 | `--reason TEXT` | Audit reason. Required when importing `sensitive` records. |
 
-## `witself mcp`
+## `ws mcp`
 
 Expose Witself to MCP-compatible agent runtimes.
 
-### `witself mcp serve`
+### `ws mcp serve`
 
 Start the MCP server.
 
@@ -3107,7 +3106,7 @@ standing protocol that teaches the agent to call Witself: load `self.show` and
 durable, `adjust`/`forget` instead of contradicting, and flush state with
 `session.end` before long operations. This is the MCP half of the teaching layer;
 the pinned text and the file-ecosystem counterpart
-([`witself bootstrap-instructions`](#witself-bootstrap-instructions)) are tracked
+([`ws bootstrap-instructions`](#witself-bootstrap-instructions)) are tracked
 in [context-hydration.md](context-hydration.md). In `--read-only` mode the server
 omits the mutating tools (`remember`, `session.end`, `memory.consolidate`,
 `ingest`); `self.show`, `session.start`, `recall`, and `digest.emit` remain.
@@ -3123,7 +3122,7 @@ Flags:
 | `--no-value-tools` | Disable sealed-plane MCP tools that return a sensitive value or one-time code (`secret.reveal`, `totp.code`, value-returning `reference.resolve`). |
 | `--agent NAME_OR_ID` | Operator/admin only: bind the server to one agent principal. Agent tokens are already bound by identity. |
 
-### `witself mcp tools`
+### `ws mcp tools`
 
 Print the MCP tool list and schemas.
 
@@ -3136,11 +3135,11 @@ Flags:
 |---|---|
 | `--name NAME` | Show one tool schema. |
 
-## `witself config`
+## `ws config`
 
 Manage local CLI configuration.
 
-### `witself config get KEY`
+### `ws config get KEY`
 
 Print one config value.
 
@@ -3150,7 +3149,7 @@ Flags:
 |---|---|
 | `--show-source` | Include the source file or env var. |
 
-### `witself config set KEY VALUE`
+### `ws config set KEY VALUE`
 
 Set one config value.
 
@@ -3160,7 +3159,7 @@ Flags:
 |---|---|
 | `--profile NAME` | Set the value for a named profile. |
 
-### `witself config list`
+### `ws config list`
 
 List config values.
 
@@ -3170,7 +3169,7 @@ Flags:
 |---|---|
 | `--show-source` | Include the source of each value. |
 
-### `witself config unset KEY`
+### `ws config unset KEY`
 
 Remove one config value.
 
@@ -3180,15 +3179,15 @@ Flags:
 |---|---|
 | `--profile NAME` | Remove the value from a named profile. |
 
-## `witself completion`
+## `ws completion`
 
 Generate shell completion scripts.
 
 ```sh
-witself completion bash
-witself completion zsh
-witself completion fish
-witself completion powershell
+ws completion bash
+ws completion zsh
+ws completion fish
+ws completion powershell
 ```
 
 Flags:
@@ -3206,45 +3205,45 @@ Terraform, images, and release automation, is tracked in
 [implementation-plan.md](implementation-plan.md). The full v0 release boundary
 is tracked in [v0-scope.md](v0-scope.md).
 
-- `witself version`
-- `witself capabilities`
-- `witself setup`
-- `witself realm init` for local mock/development scaffolding only
-- `witself realm create`
-- `witself realm status`
-- `witself agent create`
-- `witself token create`
-- `witself memory add`
-- `witself memory recall`
-- `witself memory read`
-- `witself memory list`
-- `witself memory consolidate`
-- `witself remember`
-- `witself self show`
-- `witself session start`
-- `witself session end`
-- `witself digest emit`
-- `witself ingest`
-- `witself bootstrap-instructions`
-- `witself fact set`
-- `witself fact get`
-- `witself password generate`
-- `witself secret create`
-- `witself secret list`
-- `witself secret show`
-- `witself secret reveal`
-- `witself run`
-- `witself totp enroll`
-- `witself totp code`
-- `witself policy create`
-- `witself policy test`
-- `witself group create`
-- `witself message send`
-- `witself message read`
-- `witself reference resolve`
-- `witself export`
-- `witself import`
-- `witself mcp tools` as a schema preview command, even before `mcp serve`
+- `ws version`
+- `ws capabilities`
+- `ws setup`
+- `ws realm init` for local mock/development scaffolding only
+- `ws realm create`
+- `ws realm status`
+- `ws agent create`
+- `ws token create`
+- `ws memory add`
+- `ws memory recall`
+- `ws memory read`
+- `ws memory list`
+- `ws memory consolidate`
+- `ws remember`
+- `ws self show`
+- `ws session start`
+- `ws session end`
+- `ws digest emit`
+- `ws ingest`
+- `ws bootstrap-instructions`
+- `ws fact set`
+- `ws fact get`
+- `ws password generate`
+- `ws secret create`
+- `ws secret list`
+- `ws secret show`
+- `ws secret reveal`
+- `ws run`
+- `ws totp enroll`
+- `ws totp code`
+- `ws policy create`
+- `ws policy test`
+- `ws group create`
+- `ws message send`
+- `ws message read`
+- `ws reference resolve`
+- `ws export`
+- `ws import`
+- `ws mcp tools` as a schema preview command, even before `mcp serve`
   exists
 
 `realm init` is included so early CLI work has a local store to exercise commands

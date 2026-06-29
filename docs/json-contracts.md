@@ -304,7 +304,7 @@ The token lifecycle is tracked in [token-lifecycle.md](token-lifecycle.md).
 
 ## Capability Result
 
-Used by `witself capabilities` and `/v1/capabilities`.
+Used by `ws capabilities` and `/v1/capabilities`.
 
 ```json
 {
@@ -1431,7 +1431,7 @@ Limit summary:
       "resets_at": "2026-07-01T00:00:00Z"
     }
   ],
-  "next_command": "witself billing usage --realm prod --show-limits"
+  "next_command": "ws billing usage --realm prod --show-limits"
 }
 ```
 
@@ -1476,7 +1476,7 @@ approval session.
   "status": "open",
   "url": "https://payments.example/checkout/hps_123",
   "expires_at": "2026-06-26T18:15:00Z",
-  "next_command": "witself billing crypto status hps_123 --watch",
+  "next_command": "ws billing crypto status hps_123 --watch",
   "metadata": {
     "invoice_id": "inv_123",
     "promo_code": "FOUNDERS25",
@@ -1519,7 +1519,7 @@ Crypto payment quote:
   "settlement_currency": "usd",
   "checkout_url": "https://payments.example/checkout/cpq_123",
   "expires_at": "2026-06-26T18:15:00Z",
-  "next_command": "witself billing crypto status hps_123 --watch"
+  "next_command": "ws billing crypto status hps_123 --watch"
 }
 ```
 
@@ -1765,7 +1765,7 @@ The audit retention model is tracked in
 
 ## Reference Parse and Resolve
 
-Used by `witself reference parse`/`witself reference resolve` and the
+Used by `ws reference parse`/`ws reference resolve` and the
 `witself.reference.parse`/`witself.reference.resolve` MCP tools. References use
 the `witself://` scheme (never `ws://`, which collides with WebSocket).
 

@@ -14,9 +14,9 @@ same backend code should be usable by operators who want to self-host Witself in
 their own cloud, network, or compliance boundary.
 
 The backend API server should ship as a separate `witself-server` binary, not as
-a public `witself server` subcommand. Keeping the server process separate makes
+a public `ws server` subcommand. Keeping the server process separate makes
 production and self-hosted deployment packaging, container entrypoints, service
-permissions, and operational docs clearer while leaving `witself` focused on
+permissions, and operational docs clearer while leaving `ws` focused on
 human, agent, and MCP workflows.
 
 ## Deployment Modes
@@ -37,7 +37,7 @@ semantic recall can be exercised offline; see
 Initial target layout once code starts:
 
 ```text
-cmd/witself/                  # CLI, including mcp serve
+cmd/ws/                  # CLI, including mcp serve
 cmd/witself-server/           # Backend API server
 internal/core/                # Domain service and use cases
 internal/api/                 # HTTP handlers and request/response adapters
@@ -68,8 +68,8 @@ The important boundary is one core domain service with multiple adapters.
 
 Witself should have these public entrypoints:
 
-- `witself`: human and agent CLI.
-- `witself mcp serve`: local-first MCP adapter over the same core behavior.
+- `ws`: human and agent CLI.
+- `ws mcp serve`: local-first MCP adapter over the same core behavior.
 - `witself-server`: separate backend API server for managed and self-hosted
   deployments.
 
@@ -109,9 +109,9 @@ over MCP) never needs an inbound endpoint. The durable mailbox is the source of
 truth, so offline recipients are the default: a send never requires the recipient
 to be online, and any live stream is only a latency accelerator over the mailbox.
 
-The `ws` CLI-command name is decided as the go-forward invocation; the mechanical
-rename is a separate follow-up. Examples in this doc keep the current
-`witself <cmd>` convention for repo consistency.
+The CLI command is `ws`; the backend binary is `witself-server`. The `witself://`
+reference scheme, `WITSELF_` environment variables, and the `witself.*` MCP tool
+names are unchanged.
 
 ## Core Boundary
 

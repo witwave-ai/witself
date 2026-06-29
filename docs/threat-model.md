@@ -60,7 +60,7 @@ secret:
   [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md)).
 - Plaintext is released only through the explicit, audited, reveal-gated
-  operations `witself secret reveal` and `witself totp code` — never by recall,
+  operations `ws secret reveal` and `ws totp code` — never by recall,
   digest, plaintext export, ingest, or a generic decrypt endpoint (reveal
   discipline / sealed-plane carve-out).
 - The set of components that ever hold sealed plaintext (the trusted computing
@@ -229,15 +229,15 @@ backend; this threat model states their posture ahead of implementation.
 
 Trust boundaries:
 
-- Agent runtime to `witself` CLI.
-- `witself` CLI to managed or self-hosted `witself-server`.
-- MCP client to `witself mcp serve`.
+- Agent runtime to `ws` CLI.
+- `ws` CLI to managed or self-hosted `witself-server`.
+- MCP client to `ws mcp serve`.
 - `witself-server` to storage adapters (Postgres with pgvector, object/blob).
 - `witself-server` to the KMS or key-management provider (`aws-kms`, `gcp-kms`,
   `azure-key-vault`, `local-dev`) — present only when the sealed plane is
   enabled; the boundary that unwraps per-realm KEKs and thus gates all
   sealed-plane confidentiality.
-- Client (CLI / local `mcp serve` / `witself run`) to its held or derived key
+- Client (CLI / local `mcp serve` / `ws run`) to its held or derived key
   material for client-side decrypt — the default sealed-plane decrypt boundary,
   where plaintext appears in the trusted client runtime and not on the server.
 - `witself-server` to a managed token-only ephemeral pod over the
@@ -346,7 +346,7 @@ edit history) so corruption is detectable and recoverable.
 Symmetrically, Witself cannot fully protect a sealed secret after it is
 intentionally revealed to an agent, process, browser, or human. For the sealed
 plane the system should minimize reveal scope, prefer runtime injection
-(`witself run`) and reference resolution over printing values, keep plaintext
+(`ws run`) and reference resolution over printing values, keep plaintext
 out of every persistent channel, audit every reveal/code/server-side-decrypt
 event, and contain the blast radius of a KMS/role compromise so it does not
 extend to the open plane.
@@ -599,7 +599,7 @@ write. The highest-severity risks are AI-specific:
   password-generation criteria and policy governance.
 - **Secret leakage into model-visible context.** Tool output, transcripts, or
   model logs capture a revealed secret value or TOTP seed. Mitigated by
-  preferring `witself run`/reference resolution over printing, masking injected
+  preferring `ws run`/reference resolution over printing, masking injected
   values, and keeping plaintext out of every persistent channel.
 - **Carve-out evasion.** An injected instruction tries to move sealed material
   into a readable channel — "store this API key as a memory", "export it",
@@ -624,7 +624,7 @@ Mitigations:
   sealed-plane tools (`secret.reveal`, `totp.code`, value-returning
   `reference.resolve`); the open plane has no reveal and is unaffected by it.
 - Reveal-gating for the sealed plane: `secret reveal` / `totp code` are the
-  only value-returning operations, each audited; prefer `witself run` and
+  only value-returning operations, each audited; prefer `ws run` and
   reference resolution over printing secrets.
 - Capability-gated embedding provider with `local-dev` and recall-disable
   options; degradation to keyword/tag/time recall is deterministic and

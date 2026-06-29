@@ -22,7 +22,7 @@ store can prove itself without blocking on KMS. This mirrors
   embedding provider is degradable.
 - **Sealed credential plane (a defined v0 slice, may stage after the core).** The
   secret data model and lifecycle, secret references, TOTP/2FA, password
-  generation, runtime injection (`witself run`), two-tier envelope encryption
+  generation, runtime injection (`ws run`), two-tier envelope encryption
   (CMK → per-realm KEK → per-secret/field DEK), the reveal ceremony, secret
   grants and realm roles, and the sealed-plane carve-outs. This slice adds a
   **KMS dependency** that is a readiness gate **only when the sealed plane is
@@ -38,7 +38,7 @@ store can prove itself without blocking on KMS. This mirrors
 
 V0 should prove the end-to-end product boundary:
 
-- A human or AI agent can install `witself`.
+- A human or AI agent can install `ws`.
 - A human operator can authenticate through a CLI-initiated browser or
   device-code flow without giving the CLI a raw account password.
 - An operator can bootstrap a realm and named agents.
@@ -64,7 +64,7 @@ V0 should prove the end-to-end product boundary:
   with sender identity derived from the token.
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
-- `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
+- `ws mcp serve` can expose the safe v0 MCP stdio tool surface, including
   the self-management tools, and teach the always-loaded recall-before-act /
   write-after-learn protocol through its server `instructions` field.
 - `witself-server serve --dev` can exercise the same core through HTTP.
@@ -83,13 +83,13 @@ console.
 
 Core user-facing capabilities:
 
-- `witself version`.
-- `witself capabilities`.
-- `witself whoami`.
-- `witself setup`, defaulting to managed Witself Cloud.
-- `witself setup --endpoint URL` for self-hosted, staging, private, or other
+- `ws version`.
+- `ws capabilities`.
+- `ws whoami`.
+- `ws setup`, defaulting to managed Witself Cloud.
+- `ws setup --endpoint URL` for self-hosted, staging, private, or other
   explicit remote endpoints.
-- `witself setup --local` for dev/test-only local mode.
+- `ws setup --local` for dev/test-only local mode.
 - Idempotent setup for account, realm, and agent resources by name.
 - Explicit setup token handling through `--reuse-existing-token` or
   `--rotate-existing-tokens` when token material already exists.
@@ -98,7 +98,7 @@ Core user-facing capabilities:
 - Managed operator auth through browser/device-code flow, with self-hosted
   first-operator bootstrap through a one-time bootstrap token.
 - Realm create/status for remote-shaped use.
-- Local store initialization (`witself realm init`) for early development and
+- Local store initialization (`ws realm init`) for early development and
   tests.
 - Agent create/show/list/rename/copy/disable/enable/delete where operator
   policy allows.
@@ -125,16 +125,16 @@ Core user-facing capabilities:
   kv lines to fact upserts and prose to memories, tagged `import:<file>` with
   dedup.
 - `bootstrap-instructions` to print the paste-able teaching stanza, with
-  `witself setup --write-agents-md` to install it into the project AGENTS.md.
+  `ws setup --write-agents-md` to install it into the project AGENTS.md.
 - Policy create/list/show/delete/test under default deny.
 - Group create/list/show/add-member/remove-member/delete, including
   group-scoped shared memories and facts.
 - Message send/list/read/ack over a durable mailbox with per-recipient ordering
   and acknowledgement.
 - Identity reference parsing and resolution.
-- `witself export` and `witself import` for round-trippable structured
+- `ws export` and `ws import` for round-trippable structured
   identity data.
-- `witself mcp serve` over stdio, exposing the self-management tools and the
+- `ws mcp serve` over stdio, exposing the self-management tools and the
   pinned server-instructions teaching protocol.
 
 Sealed credential-plane capabilities (the defined v0 slice that may stage after
@@ -154,10 +154,10 @@ audited reveal ceremony):
   `totp enroll`.
 - `password generate`, offering generated material for storage as a sealed secret
   field without writing a plaintext value into the open plane.
-- `witself run` to resolve sealed-plane secret references and inject resolved
+- `ws run` to resolve sealed-plane secret references and inject resolved
   values into a child process environment, never into logs, audit records, or the
   open plane.
-- `witself mcp serve --no-value-tools` to disable the value-returning sealed-plane
+- `ws mcp serve --no-value-tools` to disable the value-returning sealed-plane
   tools (`secret.reveal`, `totp.code`, value-returning `reference.resolve`),
   separate from `--read-only` which disables mutations.
 
@@ -312,8 +312,8 @@ V0 is credible when:
   default and never silently overwrites human- or import-authored records;
   `digest emit`/`ingest` round-trip with CLAUDE.md/AGENTS.md fragments; and
   `--read-only` MCP mode excludes the mutating self-management tools.
-- `witself export` produces structured, round-trippable identity data and
-  `witself import` restores it, preserving primary flags, sensitive markers,
+- `ws export` produces structured, round-trippable identity data and
+  `ws import` restores it, preserving primary flags, sensitive markers,
   links, and edit history.
 - Managed recovery restores customer identity data and service availability,
   including the vector data needed to restore semantic recall.
@@ -335,7 +335,7 @@ When the sealed credential-plane slice ships, it is additionally credible when:
   each emits an audited event with the `server_side_decrypt` flag, and
   `--no-value-tools` disables them in MCP while `--read-only` disables mutations.
 - Secrets and TOTP seeds never appear in embeddings, `memory recall`, `self show`,
-  `digest emit`, `ingest`, or `witself export`; `witself export` excludes the
+  `digest emit`, `ingest`, or `ws export`; `ws export` excludes the
   sealed plane and secret backup is encrypted-only (envelope plus KMS key
   identity, never plaintext).
 - Loss of KMS access renders sealed secret values unrecoverable (crypto-shred)
