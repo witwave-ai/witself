@@ -1,20 +1,32 @@
 #!/bin/sh
-# install.sh — universal installer for the Witself CLI (ws).
+# install.sh — universal installer for Witself release binaries.
 #
+#   # ws (default):
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
+#   # witself-infra:
+#   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | WITSELF_BINARY=witself-infra sh
 #
-# Downloads the ws binary for your OS/arch from the GitHub releases, verifies
-# its SHA-256 checksum, and installs it on your PATH.
+# Downloads the selected binary for your OS/arch from the GitHub releases,
+# verifies its SHA-256 checksum, and installs it on your PATH.
 #
 # Environment:
+#   WITSELF_BINARY   which binary: ws (default), witself-infra, witself-server
 #   WS_VERSION       version to install (e.g. v0.0.1); default: latest release
 #   WS_INSTALL_DIR   install directory; default: /usr/local/bin (sudo if needed)
+#
+# Note: witself-infra drives the `pulumi` engine at runtime. Unlike `brew install`
+# (which pulls it automatically), this installer cannot — install pulumi yourself.
 
 set -eu
 
 REPO="witwave-ai/witself"
-BINARY="ws"
+BINARY="${WITSELF_BINARY:-ws}"
 INSTALL_DIR="${WS_INSTALL_DIR:-/usr/local/bin}"
+
+case "$BINARY" in
+  ws | witself-infra | witself-server) ;;
+  *) printf 'install: unknown WITSELF_BINARY "%s" (want ws|witself-infra|witself-server)\n' "$BINARY" >&2; exit 1 ;;
+esac
 
 err() { printf 'install: %s\n' "$1" >&2; exit 1; }
 info() { printf '%s\n' "$1" >&2; }
@@ -48,7 +60,7 @@ esac
 # Resolve the version: arg, then WS_VERSION, then the latest release.
 version="${1:-${WS_VERSION:-}}"
 if [ -z "$version" ]; then
-  info "Resolving latest ws release..."
+  info "Resolving latest ${BINARY} release..."
   version=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" |
     grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name":[[:space:]]*"//' -e 's/".*//')
   [ -n "$version" ] || err "could not resolve the latest version"
@@ -96,4 +108,17 @@ elif install_to "$HOME/.local/bin"; then dest="$HOME/.local/bin"; info "Installe
 else err "could not install to ${INSTALL_DIR} or ~/.local/bin"; fi
 
 info "Installed ${BINARY} to ${dest}/${BINARY}"
-"${dest}/${BINARY}" version
+case "$BINARY" in
+  witself-infra)
+    "${dest}/${BINARY}" help >/dev/null 2>&1 || err "installed ${BINARY} failed to run"
+    if ! have pulumi; then
+      info ""
+      info "Note: witself-infra drives the 'pulumi' engine at runtime, which this"
+      info "installer does not fetch. Install it with:  brew install pulumi"
+      info "  (or: curl -fsSL https://get.pulumi.com | sh)"
+    fi
+    ;;
+  *)
+    "${dest}/${BINARY}" version
+    ;;
+esac
