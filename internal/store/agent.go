@@ -16,6 +16,8 @@ var (
 	ErrAgentExists = errors.New("agent already exists")
 	// ErrRealmNotFound is returned when the realm does not exist in the account.
 	ErrRealmNotFound = errors.New("realm not found")
+	// ErrAgentNotFound is returned when the agent does not exist in the account.
+	ErrAgentNotFound = errors.New("agent not found")
 )
 
 // Agent is an agent row (id + name).

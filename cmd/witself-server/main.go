@@ -131,6 +131,13 @@ func serve() int {
 			}
 			return out, nil
 		}
+		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, error) {
+			tok, err := st.CreateAgentToken(ctx, accountID, agentID)
+			if errors.Is(err, store.ErrAgentNotFound) {
+				return "", server.ErrNotFound
+			}
+			return tok, err
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {

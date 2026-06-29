@@ -172,3 +172,18 @@ func ListAgents(ctx context.Context, endpoint, token, realmID string) ([]Agent, 
 func agentsURL(endpoint, realmID string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/realms/" + realmID + "/agents"
 }
+
+// CreateAgentToken mints an agent token via POST {endpoint}/v1/agents/{agent}/tokens.
+func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (string, error) {
+	var out struct {
+		AgentToken string `json:"agent_token"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/agents/" + agentID + "/tokens"
+	if err := doJSON(ctx, http.MethodPost, url, token, []byte("{}"), &out); err != nil {
+		return "", err
+	}
+	if out.AgentToken == "" {
+		return "", fmt.Errorf("server returned no token")
+	}
+	return out.AgentToken, nil
+}

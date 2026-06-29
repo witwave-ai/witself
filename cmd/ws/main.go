@@ -36,6 +36,8 @@ func run(args []string) int {
 		return realmCmd(args[1:])
 	case "agent":
 		return agentCmd(args[1:])
+	case "token":
+		return tokenCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -267,6 +269,50 @@ func agentList(args []string) int {
 	return 0
 }
 
+func tokenCmd(args []string) int {
+	if len(args) == 0 || args[0] != "create" {
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE --agent AGENT [--out FILE]")
+		return 2
+	}
+	return tokenCreate(args[1:])
+}
+
+func tokenCreate(args []string) int {
+	fs := flag.NewFlagSet("token create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	agent := fs.String("agent", "", "agent id to mint a token for")
+	out := fs.String("out", "", "write the agent token to this file (0600) instead of stdout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" || *agent == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE --agent AGENT [--out FILE]")
+		return 2
+	}
+	op, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	agentTok, err := client.CreateAgentToken(context.Background(), *endpoint, op, *agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(agentTok+"\n"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "wrote agent token to %s\n", *out)
+		return 0
+	}
+	fmt.Println(agentTok)
+	return 0
+}
+
 func readToken(file string) (string, error) {
 	b, err := os.ReadFile(file)
 	if err != nil {
@@ -284,5 +330,6 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	fmt.Fprintln(w, "  ws realm create|list    Create or list realms (operator token)")
 	fmt.Fprintln(w, "  ws agent create|list    Create or list agents in a realm")
+	fmt.Fprintln(w, "  ws token create         Mint an agent token (operator token)")
 	fmt.Fprintln(w, "  ws help                 Show this help")
 }

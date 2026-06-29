@@ -49,6 +49,10 @@ type Config struct {
 	// CreateAgent / ListAgents, when set, enable POST/GET /v1/realms/{realm}/agents.
 	CreateAgent func(ctx context.Context, accountID, realmID, name string) (Agent, error)
 	ListAgents  func(ctx context.Context, accountID, realmID string) ([]Agent, error)
+
+	// CreateAgentToken, when set, enables POST /v1/agents/{agent}/tokens to mint a
+	// durable agent token (returned once).
+	CreateAgentToken func(ctx context.Context, accountID, agentID string) (string, error)
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -177,6 +181,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.ListAgents != nil {
 			mux.HandleFunc("GET /v1/realms/{realm}/agents", listAgentsHandler(cfg.Authenticate, cfg.ListAgents))
+		}
+		if cfg.CreateAgentToken != nil {
+			mux.HandleFunc("POST /v1/agents/{agent}/tokens", createAgentTokenHandler(cfg.Authenticate, cfg.CreateAgentToken))
 		}
 	}
 	return mux
@@ -413,6 +420,28 @@ func listAgentsHandler(auth AuthFunc, list func(ctx context.Context, accountID, 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "agents": agents})
+	})
+}
+
+func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		agentID := r.PathValue("agent")
+		tok, err := create(r.Context(), p.accountID, agentID)
+		if errors.Is(err, ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not create token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"agent_token":    tok,
+			"agent_id":       agentID,
+		})
 	})
 }
 

@@ -101,3 +101,36 @@ func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (ope
 	}
 	return operatorID, accountID, true, nil
 }
+
+// CreateAgentToken mints a durable agent token bound to an agent that belongs to
+// the account, and returns the plaintext (shown once). ErrAgentNotFound if the
+// agent is not in the account.
+func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string) (string, error) {
+	var realmID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT a.realm_id FROM agents a
+		 JOIN realms r ON r.id = a.realm_id
+		 WHERE a.id = $1 AND r.account_id = $2`, agentID, accountID).Scan(&realmID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrAgentNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("verify agent: %w", err)
+	}
+
+	agtTok, err := token.New(token.KindAgent)
+	if err != nil {
+		return "", err
+	}
+	tokID, err := id.New("tok")
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO tokens (id, account_id, agent_id, kind, token_hash)
+		 VALUES ($1, $2, $3, 'agent', $4)`,
+		tokID, accountID, agentID, hashToken(agtTok)); err != nil {
+		return "", fmt.Errorf("store agent token: %w", err)
+	}
+	return agtTok, nil
+}

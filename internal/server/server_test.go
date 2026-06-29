@@ -222,6 +222,60 @@ func TestAgentsCreateAndList(t *testing.T) {
 	}
 }
 
+func TestAgentTokenCreate(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	create := func(_ context.Context, _, agentID string) (string, error) {
+		if agentID == "missing" {
+			return "", ErrNotFound
+		}
+		return "witself_agt_minted", nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgentToken: create}))
+	defer srv.Close()
+
+	post := func(agent, tok string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/agents/"+agent+"/tokens", nil)
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	r := post("agent_1", "")
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", r.StatusCode)
+	}
+	r = post("missing", "good")
+	r.Body.Close()
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("missing agent = %d, want 404", r.StatusCode)
+	}
+	r = post("agent_1", "good")
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", r.StatusCode)
+	}
+	var out struct {
+		AgentToken string `json:"agent_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentToken != "witself_agt_minted" {
+		t.Errorf("agent_token = %q", out.AgentToken)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)
