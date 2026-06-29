@@ -39,10 +39,9 @@ jobs:
       - name: test
         run: go test ./... -race
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      # golangci-lint is intentionally omitted for now: the published binary is
+      # built with an older Go and refuses to run against the go1.26 target.
+      # Re-add once a go1.26-built golangci-lint release is available.
 
       - name: govulncheck
         run: |
