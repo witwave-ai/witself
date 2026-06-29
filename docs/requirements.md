@@ -4,8 +4,19 @@ Status: pre-implementation draft. Last reviewed 2026-06-26.
 
 ## Product Summary
 
-Witself is the agent durable-state platform. It gives AI agents (and the humans
-who operate them) a safe, auditable CLI, MCP, and API surface across two planes:
+Witself is the durable-self platform for agents AND the trust fabric agents
+collaborate over. Every agent gets a durable, attributable self — memories, facts,
+and sealed credentials — and, on the go-forward path, a verified, loop-safe channel
+to work with other agents across machines, realms, and accounts. The identity and
+memory store is what makes that channel trustworthy: a cross-realm message is only
+worth acting on because the sender has a durable, attributable self behind it.
+Cross-realm agent collaboration is the flagship of the go-forward architecture. It
+is sequenced as the first post-v0 epic, built on top of the realm-local core (see
+[V0 Scope](#v0-scope) and [Post-v0 Roadmap](#post-v0-roadmap)); you cannot extend a
+collaboration substrate that is not built yet.
+
+Witself gives AI agents (and the humans who operate them) a safe, auditable CLI,
+MCP, and API surface across two planes:
 
 - **Open plane** (memories + facts): plaintext at rest, semantically indexed,
   recallable, cross-agent readable/curatable under declarative **policy**,
@@ -51,6 +62,11 @@ not the production model.
 - Module path: `github.com/witwave-ai/witself`.
 - Binaries: `witself` (CLI and `witself mcp serve`) and `witself-server` (backend
   API). There is no `server` subcommand on the main CLI.
+- CLI command name (decided, go-forward): the invoked command is `ws`. The
+  mechanical rename from `witself <cmd>` to `ws <cmd>` is a separate follow-up
+  sweep; examples in these docs stay on `witself <cmd>` until that sweep lands. The
+  `witself://` reference scheme is unaffected and never becomes `ws://` (which
+  collides with the WebSocket scheme).
 - Environment prefix: `WITSELF_` (for example `WITSELF_TOKEN_FILE`,
   `WITSELF_ENDPOINT`, `WITSELF_METRICS_ENABLED`). The sealed plane adds
   `WITSELF_KMS_PROVIDER`, `WITSELF_KMS_KEY_ID`, and `WITSELF_PASSPHRASE_FILE` (the
@@ -2185,6 +2201,211 @@ CI should use concurrency cancellation for stale branches and should keep
 permissions minimal. Release jobs that publish packages need `packages: write`,
 but ordinary CI should default to read-only repository permissions.
 
+### Account on Self-Host
+
+Decision: one data model everywhere — `account -> realm -> agent`. Self-hosting does
+not get a different shape; it gets the same shape with the commercial capabilities
+gated off.
+
+- **Managed.** The account is the customer/billing root: signup, plan, payment,
+  support, and managed-admin all attach to the account, and usage rolls up per realm
+  to the account (see [Billing And Limits](#billing-and-limits)).
+- **Self-host.** The account is a single, implicit deployment/org root created at
+  bootstrap — no signup, no plan, no payment. Billing, payment, support-ticket, and
+  managed-admin features are capability-gated **off** and return
+  `unsupported_operation` (see [Self-Hosted Backend](#self-hosted-backend)). The
+  operator works in realms and agents; the account is plumbing.
+- **Multi-account self-host** is possible but **off by default** — single-tenant is
+  the self-host norm. An operator can opt into multiple deployment-root accounts, but
+  nothing requires it.
+- **Unit of trust is the realm, not the account.** For cross-realm collaboration and
+  federation, the realm (handle + signing key) is the unit that is allow-listed and
+  verified (see [Agent Collaboration Substrate](#agent-collaboration-substrate-cross-realm)),
+  not the account.
+
+This decision keeps managed and self-host on the same `account/realm/agent/token`
+plumbing so the CLI, MCP, JSON contracts, and authorization path do not fork. The
+follow-up sweep propagates the capability-gating detail into
+[operator-auth.md](operator-auth.md) and [self-hosting.md](self-hosting.md).
+
+### Agent Collaboration Substrate (cross-realm)
+
+Decision (go-forward): cross-realm / cross-account agent collaboration is the
+flagship epic. Witself is the channel — a trust fabric, not a Slack/Discord bridge —
+where each agent's durable, attributable self makes a cross-realm message worth
+acting on. It **extends** the realm-local mailbox (see
+[Inter-Agent Messaging](#inter-agent-messaging)); it does not replace it. Sequenced
+as the **first post-v0 epic**, after the realm-local core. The model is tracked in
+[agent-collaboration.md](agent-collaboration.md).
+
+Model:
+
+- **Addressing.** Extend `witself://` with a realm-authority handle:
+  `witself://<realm-handle>/agent/<name>` and `.../group/<name>`. The wire `to`/`from`
+  gain an optional `realm`; an absent `realm` means local (unchanged v0 behavior).
+- **Discovery.** Each realm publishes a **signed** well-known realm/agent card
+  (capabilities/skills, endpoint, accepted auth, signing public key/JWKS, delivery
+  modes, TTL). Signing is mandatory; verify before trust; resolution is separated
+  from the signing key.
+- **Rendezvous / relay.** Witself Cloud is a **blind relay**: it routes by realm
+  handle, carries end-to-end-signed envelopes, and cannot read, forge, or alter the
+  body/payload. Self-hosts federate by registering an FQDN + key. The relay shares
+  the global directory with the cell control plane (see
+  [Deployment Cells & Tenant Placement](#deployment-cells--tenant-placement)).
+- **Participants.** *Directed* agents (human-guided, e.g. Claude Code / Codex via
+  MCP) default `auto_reply=false` — the human gates replies and inbound surfaces via
+  list/read. *Autonomous* (cloud) agents may set `auto_reply=true` but only within a
+  finite per-conversation reply budget under the loop caps.
+- **Conversations.** Promote `thread_id` to a first-class cross-realm
+  `conversation_id` with an A2A-style task state machine
+  (`submitted -> working -> input_required/auth_required -> completed | failed |
+  canceled`). The durable mailbox is the source of truth; any live stream is only a
+  latency accelerator, and a conversation resumes from the mailbox.
+- **1:1 default; 1:many** via cross-realm channels (group fan-out generalized across
+  realms with mutual consent; snapshot-at-send; fan-out cap).
+
+Loop & safety defaults (enforced on the wire):
+
+- Do-not-auto-reply across a trust boundary by default.
+- `hop_count` with `max_hops=8`; per-conversation `turn_budget=24`; TTL/`expires_at`
+  default 1h (up to 24h).
+- Idempotency + dedup on `id`+`nonce`; repeat-hash loop detection (same message ×3 ->
+  suspend + notify).
+- Shared cost kill-switch enforced **before each model call** (soft $5 warn / hard
+  $25 fail per conversation); adaptive rate limits + new-sender quarantine; circuit
+  breaker + wait timeouts.
+- `remaining_turns`/budget exposed to agents. Human gates fire only at
+  trust-boundary auto-reply, over-threshold spend, and `auth_required`.
+
+Trust & consent:
+
+- Keep the token-derived sender for **routing** and in-realm anti-spoofing; add a
+  cross-realm **signature** (realm key, ideally agent keypair) verified against the
+  published JWKS for **trust**.
+- Deny-by-default federation: allow-list which realm handles + keys you accept; first
+  contact is quarantined and consented. Trust is anchored, not transitive; real-time
+  revocation is required.
+- Content stays untrusted and carries **no authority** across realms: a cross-realm
+  message can never author a write without a standing allow policy in the receiving
+  realm (see [Cross-Agent Access Policy](#cross-agent-access-policy)).
+
+Interface invariants (see also [Interface Invariants](#interface-invariants)):
+
+- Everything works via MCP with **full parity**, not just CLI; CLI is
+  primary/canonical.
+- Add a `listen`/`recv` verb (long-poll: block up to N seconds, return inbound) to
+  **both** CLI and MCP next to send/list/read.
+- **No agent-run HTTP servers** for normal I/O — agents are outbound clients; the
+  durable mailbox is the source of truth; offline recipients are the default; v0
+  transport is polling-first.
+
+Open decisions (document, do not resolve):
+
+- **Identity root** — per-realm signing key for v1 vs per-agent keypair now.
+- **Self-host federation** — cloud-relay-first vs peer-to-peer.
+- **Auto-reply default** — recommended: OFF-by-default + budgeted opt-in.
+- **A2A interop** — native A2A at the boundary vs Witself-native + an A2A gateway.
+
+Cross-links: [inter-agent-messaging.md](inter-agent-messaging.md) (realm-local
+authority), [security-groups.md](security-groups.md),
+[access-policy.md](access-policy.md), [threat-model.md](threat-model.md),
+[deployment-cells.md](deployment-cells.md),
+[post-v0-roadmap.md](post-v0-roadmap.md).
+
+### Deployment Cells & Tenant Placement
+
+Decision (go-forward): both managed and self-host run on a **cell-based**
+architecture — a fleet of independent cells, each authoritative for its own tenants,
+plus a thin global control plane for routing. Sequenced as go-forward, alongside the
+collaboration epic, after the realm-local core. The model is tracked in
+[deployment-cells.md](deployment-cells.md).
+
+Model:
+
+- **Cell.** One complete, independent Witself stack (`witself-server` +
+  Postgres/pgvector + KMS + blob) in a cloud account/region (AWS account #1, AWS
+  account #2, a GCP project, Azure, …). Cells are isolated; a cell outage affects only
+  its tenants (blast-radius containment). An independent second AWS account is simply
+  another cell.
+- **Control plane.** A thin, HA, globally-replicated service holding **only** routing
+  metadata (`realm/account -> home cell + endpoint + signing key`). It does
+  **placement** (which cell a new tenant lands on) and **resolution** (where to
+  route), and holds **no tenant data**. It extends the existing
+  `--endpoint`/token model to "resolve my home cell." Keep it thin so its blast
+  radius is tiny; it is the one new always-on global component.
+- **Placement / landing.** At account/realm creation the control plane picks a cell
+  by region/data-residency, capacity, provider preference, or rollout wave; records
+  the mapping; clients resolve their home cell.
+- **Multi-cloud.** AWS / GCP / Azure across multiple accounts, reusing the per-cloud
+  Terraform modules already planned (see
+  [terraform-infrastructure.md](terraform-infrastructure.md),
+  [cloud-targets.md](cloud-targets.md)).
+- **Cells at different versions.** Cells may run different software versions (canary /
+  wave rollout); capability discovery lets clients adapt. This is a strength of the
+  cell model, not a problem.
+- **Fleet, not multi-master.** Many independent live cells, each authoritative for its
+  own tenants. There is no shared-data multi-master across clouds in v1; that is a
+  much harder, deferred thing.
+- **Shared global directory.** The collaboration relay needs `realm-handle ->
+  where-it-lives + signing-key` — the **same** registry the control plane maintains.
+  Cells and collaboration share the global directory.
+- **Billing.** Account-level billing; if one account's realms span cells, per-realm
+  usage aggregates across cells at the account level (see
+  [Billing And Limits](#billing-and-limits)).
+
+Tenant migration (move a realm/account between cells):
+
+- Export from cell A -> import into cell B -> repoint the control-plane mapping ->
+  cut over.
+- **Open plane** (memories/facts) moves via the existing first-class export/import
+  (embeddings recomputed at the destination, or moved if the model matches; see
+  [Identity Export and Import](#identity-export-and-import)).
+- **Sealed plane** (secrets) is KMS-rooted per cell/cloud, so migration **re-wraps**
+  keys under the destination KMS (audited decrypt-at-source / re-encrypt-at-dest; see
+  [Key Hierarchy](#key-hierarchy)). Bounded, but not free.
+
+Open decisions (document, do not resolve):
+
+- **Placement unit** — account vs realm. Recommended: the realm is the placement /
+  migration unit, account-level default, with realms individually re-homeable.
+- **Self-host topology** — single-cell vs multi-cell self-host.
+- **Migration cutover** — brief read-only freeze vs dual-write + reconcile.
+
+Cross-links: [backend-architecture.md](backend-architecture.md),
+[cloud-targets.md](cloud-targets.md),
+[terraform-infrastructure.md](terraform-infrastructure.md),
+[storage.md](storage.md), [billing-and-limits.md](billing-and-limits.md),
+[backup-and-recovery.md](backup-and-recovery.md),
+[agent-collaboration.md](agent-collaboration.md).
+
+### Interface Invariants
+
+Decision (go-forward): the agent-facing surface holds a small set of invariants so
+collaboration, cells, and the realm-local core all present the same shape.
+
+- **MCP everywhere, full parity.** Every agent-facing capability works via MCP with
+  full parity, not just via CLI. CLI and MCP share request/response contracts so they
+  cannot drift (see [CLI, MCP, And JSON Contracts](#cli-mcp-and-json-contracts)).
+- **CLI is primary/canonical.** The CLI is the canonical control plane and the
+  reference behavior; MCP mirrors it.
+- **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**. The
+  only HTTP server is the backend (`witself-server` / relay). An optional
+  wake-webhook exists **only** for already-hosted cloud autonomous agents and is never
+  required.
+- **The `listen` verb.** Add `listen`/`recv` (long-poll: block up to N seconds, return
+  inbound) to both CLI (`message listen`) and MCP (`witself.message.listen`) next to
+  send/list/read. The durable mailbox is the source of truth; **offline recipients are
+  the default** (send never needs the recipient online; drains on next listen); v0
+  transport is **polling-first**. Agents are told to listen in the agent directive
+  (the context-hydration teaching stanza: "to hear, call the witself listen tool each
+  loop"; see [context-hydration.md](context-hydration.md)).
+- **Any live stream is a latency accelerator only**, never the system of record.
+
+These invariants apply to the realm-local messaging core today and extend unchanged
+to the cross-realm substrate (see
+[Agent Collaboration Substrate](#agent-collaboration-substrate-cross-realm)).
+Detailed contracts land in a follow-up pass.
+
 ## Managed Service Decisions
 
 ### Data-At-Rest Note
@@ -2284,12 +2505,22 @@ The cloud target decision is tracked in [cloud-targets.md](cloud-targets.md).
 The following features are intentionally outside the v0 scope and are tracked in
 [post-v0-roadmap.md](post-v0-roadmap.md):
 
+- **Cross-realm agent collaboration substrate (the first post-v0 epic; the
+  go-forward flagship).** Built on the realm-local messaging core, it adds
+  cross-realm addressing, signed discovery, a blind relay, the loop/safety stack, and
+  the `listen` verb (see
+  [Agent Collaboration Substrate](#agent-collaboration-substrate-cross-realm) and
+  [agent-collaboration.md](agent-collaboration.md)). This supersedes the former bare
+  "cross-realm federation" line.
+- **Deployment cells & tenant placement (go-forward).** A fleet of independent cells,
+  each authoritative for its own tenants, plus a thin global control plane and tenant
+  migration (see [Deployment Cells & Tenant Placement](#deployment-cells--tenant-placement)
+  and [deployment-cells.md](deployment-cells.md)).
 - MCP HTTP or other network transport.
 - Web dashboard.
 - Private Witself admin CLI.
 - Witself utility token.
 - Additional embedding providers and on-cluster local embedding services.
-- Cross-realm and cross-account federation of identity and policy.
 - Policy `deny` effects and richer policy expressions beyond v0 default-deny/allow.
 - Message attachments and large structured payloads in object/blob storage.
 - Field-level encryption of `sensitive` facts as a managed default.

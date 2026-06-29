@@ -27,9 +27,12 @@ payload as **untrusted input**.
 
 ## Scope
 
-- Realm-local messaging only. A message's `from`, `to`, and the message itself
-  all live in one realm. Cross-realm messaging is out of scope for v0 and is
-  tracked in [post-v0-roadmap.md](post-v0-roadmap.md).
+- Realm-local messaging only here. A message's `from`, `to`, and the message
+  itself all live in one realm. Cross-realm and cross-account collaboration is
+  the documented go-forward extension of this model: it is specified in
+  [agent-collaboration.md](agent-collaboration.md), which builds on this
+  realm-local mailbox rather than replacing it. This document stays the
+  authority for the realm-local model.
 - Agent-to-agent and agent-to-group delivery. Group sends fan out to current
   group members with per-member delivery and ack state (see
   [security-groups.md](security-groups.md)).
@@ -39,8 +42,10 @@ payload as **untrusted input**.
   cross-agent write does not authorize that write; writes still require policy
   (see [access-policy.md](access-policy.md)).
 
-Out of scope for v0: cross-realm messaging, large attachments, broadcast to all
-agents, presence/typing indicators, message editing, and message recall/unsend.
+Out of scope for v0 here: large attachments, broadcast to all agents,
+presence/typing indicators, message editing, and message recall/unsend.
+Cross-realm messaging is not handled in this document; it is the go-forward
+extension specified in [agent-collaboration.md](agent-collaboration.md).
 
 ## Model
 
@@ -331,6 +336,8 @@ include message content (see
 - [access-policy.md](access-policy.md) — why a message carries no authority;
   policy still gates every cross-agent write.
 - [security-groups.md](security-groups.md) — group recipients and fan-out.
+- [agent-collaboration.md](agent-collaboration.md) — the go-forward cross-realm /
+  cross-account collaboration substrate that extends this realm-local mailbox.
 - [threat-model.md](threat-model.md) — spoofing, injection, poisoning, and
   interception in messaging.
 - [billing-and-limits.md](billing-and-limits.md) — limits, rate limits, and the

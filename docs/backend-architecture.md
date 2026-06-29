@@ -86,6 +86,33 @@ so clients can distinguish managed, self-hosted, and local behavior — includin
 the active embedding provider and whether semantic recall is degraded — without
 guessing.
 
+## Interface Invariant
+
+Two invariants are load-bearing and additive to the one-core/multi-adapter spine.
+
+MCP-everywhere with full parity. Everything reachable through the CLI is also
+reachable through MCP, and vice versa, because both adapters translate into the
+same core commands. The CLI is the primary, canonical surface; MCP is not a
+reduced subset of it. New verbs land on both surfaces together (for example the
+cross-realm `listen`/`recv` verb in the [Collaboration Subsystem](#collaboration-subsystem)
+lands as a CLI `message` action and an MCP `witself.message.listen` tool in the
+same pass).
+
+Agents run no HTTP servers for normal I/O. Agents are outbound clients only:
+they reach a backend by calling out to it (local adapter, managed cell, or
+self-hosted cell) and they drain inbound work by polling/long-polling, never by
+hosting an inbound listener. The only HTTP server in the system is the backend —
+`witself-server`, including the collaboration relay it exposes. A wake-webhook is
+optional and applies only to already-hosted cloud autonomous agents; it is never
+required, and a normal directed agent (for example Claude Code or Codex driven
+over MCP) never needs an inbound endpoint. The durable mailbox is the source of
+truth, so offline recipients are the default: a send never requires the recipient
+to be online, and any live stream is only a latency accelerator over the mailbox.
+
+The `ws` CLI-command name is decided as the go-forward invocation; the mechanical
+rename is a separate follow-up. Examples in this doc keep the current
+`witself <cmd>` convention for repo consistency.
+
 ## Core Boundary
 
 Core behavior should not live in CLI handlers or HTTP handlers. It should live
@@ -348,6 +375,102 @@ supported, which are unavailable, and why, before running an operation.
 - Remote setup calls capability discovery before attempting account, realm,
   agent, token, billing, payment, or support operations.
 
+## Deployment Cells And Control Plane
+
+The go-forward multi-cloud shape is a fleet of independent cells coordinated by a
+thin global control plane. This is additive to the one-core/multi-adapter spine:
+a cell runs the same `witself-server` and the same core service described above.
+The full model is tracked in [deployment-cells.md](deployment-cells.md).
+
+A cell is one complete, independent Witself stack — `witself-server` plus its
+Postgres/pgvector, optional KMS, and blob storage — running in a single cloud
+account/region (an AWS account, a second AWS account, a GCP project, an Azure
+subscription). Cells are isolated and each cell is authoritative for its own
+tenants; a cell outage affects only that cell's tenants, which contains blast
+radius. Cells may run different software versions during a canary or wave rollout,
+and capability discovery (`/v1/capabilities`) lets clients adapt — version skew
+across the fleet is a strength of the cell model, not a defect to engineer away.
+
+The control plane is a thin, highly available, globally replicated service that
+holds only routing metadata — the mapping from a realm/account handle to its home
+cell endpoint and signing key. It has two jobs:
+
+- Placement: at account/realm creation it picks a home cell by data-residency,
+  capacity, provider preference, or rollout wave, and records the mapping.
+- Resolution: clients resolve "where is my home cell" before talking to a cell.
+  This extends the existing `--endpoint`/token model from "talk to this endpoint"
+  to "resolve my home cell, then talk to it."
+
+The control plane holds no tenant data — no memories, facts, messages, tokens, or
+audit. It is the one new always-on global component, kept deliberately thin so its
+own blast radius is tiny. This is a fleet of independent cells, each authoritative
+for its own tenants; there is no shared-data multi-master across clouds in v1 (a
+harder, deferred problem).
+
+Tenant migration moves a realm/account between cells by exporting from cell A,
+importing into cell B, repointing the control-plane mapping, and cutting over.
+The open plane (memories/facts) moves through the existing first-class
+export/import path (see [Core Boundary](#core-boundary)); the sealed plane, where
+an operator has enabled per-cell KMS-rooted field encryption, re-wraps keys under
+the destination KMS as an audited decrypt-at-source / re-encrypt-at-dest step.
+Migration is bounded but not free; details and the cutover trade-off live in
+[deployment-cells.md](deployment-cells.md).
+
+### Open decisions
+
+These forks are deliberately left open; see
+[deployment-cells.md](deployment-cells.md).
+
+- Placement unit: account vs realm as the unit of placement and migration.
+- Self-host: whether a self-host deployment is single-cell only or may run as a
+  multi-cell fleet.
+- Migration cutover: brief read-only freeze vs dual-write + reconcile.
+
+## Collaboration Subsystem
+
+Cross-realm agent collaboration is the first post-v0 epic. It extends the
+realm-local [Messaging Boundary](#messaging-boundary) — it does not replace it —
+and is sequenced after the realm-local core is built. The full design is in
+[agent-collaboration.md](agent-collaboration.md); the realm-local authority stays
+[inter-agent-messaging.md](inter-agent-messaging.md).
+
+The cross-realm relay is a blind carry. The relay (hosted by `witself-server`, the
+only HTTP server in the system — see [Interface Invariant](#interface-invariant))
+routes end-to-end-signed envelopes by realm handle. It carries the signed envelope
+without reading its body or payload and without the ability to forge or alter it.
+Routing identity (the token-derived sender) stays for in-realm anti-spoofing; a
+cross-realm signature over the envelope, verified against the sender realm's
+published JWKS, is what establishes trust. Content stays untrusted and carries no
+authority across a realm boundary — a cross-realm message can never author a write
+without a standing allow policy in the receiving realm, exactly as in the
+realm-local messaging and [Authorization Boundary](#authorization-boundary) rules.
+
+The relay shares the control plane's global directory. The relay needs
+realm-handle → where-it-lives → signing-key resolution. That is the same routing
+registry the control plane maintains for cells. Cells and collaboration share one
+global directory: placement/resolution metadata and realm signing keys are the
+same lookup, so a realm is reachable for collaboration by the same handle that
+resolves its home cell.
+
+Cross-realm delivery follows the same invariants as realm-local messaging: the
+durable mailbox is the source of truth, offline recipients are the default, and
+agents drain inbound work by calling the `listen`/`recv` verb rather than hosting
+a listener. Federation is deny-by-default — a realm allow-lists the realm handles
+and keys it accepts, and first contact is quarantined pending consent. Loop and
+spend safety caps are enforced on the wire; those defaults live in
+[agent-collaboration.md](agent-collaboration.md).
+
+### Open decisions
+
+These forks are deliberately left open; see
+[agent-collaboration.md](agent-collaboration.md).
+
+- Identity root: per-realm signing key for v1 vs per-agent keypair now.
+- Self-host federation: cloud-relay-first vs peer-to-peer.
+- Auto-reply default across a trust boundary (off-by-default + budgeted opt-in is
+  the recommendation).
+- A2A interop: native A2A at the boundary vs Witself-native plus an A2A gateway.
+
 ## Backend Endpoint Set
 
 The public backend API uses an explicit versioned contract with a `/v1` base, the
@@ -434,6 +557,8 @@ full sequence is tracked in [implementation-plan.md](implementation-plan.md).
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
 - [token-lifecycle.md](token-lifecycle.md)
 - [operator-auth.md](operator-auth.md)
 - [audit-retention.md](audit-retention.md)

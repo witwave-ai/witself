@@ -91,35 +91,89 @@ re-embedding (see [backup-and-recovery.md](backup-and-recovery.md)).
 A managed migration tool needs progress tracking, idempotency, cost metering,
 and a rollback story for partially re-embedded realms.
 
-## Deferred Cross-Realm Federation
+## Go-Forward Epic: Cross-Realm Agent Collaboration
 
-### Cross-Realm And Cross-Account Federation
+This is the first post-v0 epic and the flagship of the go-forward architecture.
+It is no longer a vague deferral: the design is written in
+[agent-collaboration.md](agent-collaboration.md), and this section records it as
+a committed direction with the same promotion bar as every other candidate here.
 
-Cross-realm and cross-account federation of identity and policy is post-v0. V0
-scopes agents, memories, facts, policies, groups, and messages to a single realm
-(see [access-policy.md](access-policy.md) and
-[security-groups.md](security-groups.md)).
+Witself is not only the agent durable-state platform; it is the trust fabric
+agents collaborate over. Every agent gets a durable, attributable self and a
+verified, loop-safe channel to work with other agents across machines, realms,
+and accounts. The identity and memory store is what makes that channel
+trustworthy, so collaboration is built on top of it rather than beside it.
 
-Federation needs a trust model between realms, a federated identity-reference
-form beyond today's `witself://` scheme, cross-realm policy evaluation, audit
-that attributes the originating realm, and per-realm metering for federated
-accesses. It is a large surface and must not be implied by single-realm v0
-contracts.
+### Sequencing
+
+Build order is deliberate. The realm-local core ships first: memory, facts,
+policy, groups, and realm-local inter-agent messaging
+(see [inter-agent-messaging.md](inter-agent-messaging.md)). Cross-realm
+collaboration is the first thing built after that core, because it *extends* the
+realm-local mailbox — it promotes the same durable mailbox into a cross-realm
+conversation rather than standing up a parallel transport. You cannot extend a
+substrate that is not built yet. Underneath both sits the deployment-cells
+platform (below), which carries the global realm-handle directory that
+collaboration routes over.
+
+### What The Go-Forward Design Commits To
+
+The full contract lives in [agent-collaboration.md](agent-collaboration.md). In
+brief, the epic delivers:
+
+- Cross-realm addressing: `witself://<realm-handle>/agent/<name>` and
+  `/group/<name>`, with an optional `realm` on the wire `to`/`from`; an absent
+  realm stays local and preserves v0 behavior.
+- Signed realm/agent discovery cards (capabilities, endpoint, accepted auth,
+  signing key/JWKS, delivery modes, TTL), verified before any trust is extended.
+- A blind Witself Cloud relay that routes by realm handle over end-to-end-signed
+  envelopes and cannot read, forge, or alter the body; self-hosts federate by
+  registering an FQDN and key.
+- A first-class cross-realm `conversation_id` with an A2A-style task state
+  machine (`submitted` → `working` → `input_required`/`auth_required` →
+  `completed` | `failed` | `canceled`), resumable from the durable mailbox,
+  which remains the source of truth.
+- A loop-and-safety stack enforced on the wire: do-not-auto-reply across a trust
+  boundary by default, hop and turn budgets, TTLs, idempotency and dedup,
+  repeat-hash loop detection, a shared-cost kill-switch, sender quarantine, and a
+  circuit breaker.
+- Deny-by-default federation with allow-listed realm handles and keys, first-
+  contact consent, and content that carries no authority across realms.
+- Directed (human-gated, default `auto_reply=false`) and autonomous (budgeted
+  opt-in) participants, 1:1 by default and 1:many via cross-realm channels.
+
+### Interface Invariants
+
+The go-forward design holds these as non-negotiable for the epic:
+
+- Full MCP parity with the CLI; the CLI stays primary and canonical.
+- A `listen`/`recv` verb (long-poll style) lands next to `send`/`list`/`read`
+  on both the CLI `message` group and MCP, so a polling agent can drain inbound
+  cross-realm traffic each loop.
+- No agent-run HTTP servers for normal I/O — agents are outbound clients; the
+  only HTTP server is the backend relay. An optional wake-webhook exists solely
+  for already-hosted cloud autonomous agents and is never required.
+- The durable mailbox is the source of truth; offline recipients are the default,
+  and any live stream is only a latency accelerator.
+
+This supersedes the earlier "real-time / streaming messaging" and "MCP HTTP
+transport" deferrals: rather than a generic streaming surface, the go-forward
+direction is the `listen` long-poll verb and the blind relay described above.
+The relay is the backend's HTTP surface, not a network-MCP-on-the-agent path.
+
+### Open Decisions
+
+These forks are intentionally left open; see
+[agent-collaboration.md](agent-collaboration.md) for context.
+
+- Identity root: a per-realm signing key for v1 versus a per-agent keypair now.
+- Self-host federation: cloud-relay-first versus peer-to-peer.
+- Auto-reply default: OFF-by-default with budgeted opt-in is the recommended
+  posture, pending confirmation.
+- A2A interop: native A2A at the boundary versus Witself-native with an A2A
+  gateway.
 
 ## Deferred Messaging Transport
-
-### Real-Time And Streaming Messaging
-
-Real-time delivery, streaming, push, and subscription-based message transport
-are post-v0. V0 inter-agent messaging is a durable mailbox/queue with poll-based
-`message list`/`message read`, at-least-once delivery, per-recipient ordering,
-and explicit acknowledgement (see
-[inter-agent-messaging.md](inter-agent-messaging.md)).
-
-A streaming transport (server-sent events, websockets, or long-poll) adds a new
-network surface, connection authentication, backpressure and fan-out rules for
-group delivery, and a higher-risk remote tool boundary. It should be reviewed
-alongside MCP network transport.
 
 ### Message Attachments And Large Payloads
 
@@ -215,11 +269,82 @@ The public CLI remains the customer-facing control plane.
 MCP HTTP or other network transport is post-v0. The default v0 MCP transport is
 local stdio (see [mcp-tools.md](mcp-tools.md)).
 
-Network MCP transport must be explicitly enabled, authenticated, scoped,
-rate-limited where appropriate, and reviewed as a higher-risk remote tool
-surface before it is promoted. Because MCP tools can drive cross-agent and
+The go-forward direction does not put an HTTP server on the agent. Cross-realm
+collaboration keeps agents as outbound clients that reach the backend relay and
+drain inbound traffic with the `listen` long-poll verb
+(see [agent-collaboration.md](agent-collaboration.md)). A network MCP transport,
+if it is ever promoted on top of that, must still be explicitly enabled,
+authenticated, scoped, rate-limited where appropriate, and reviewed as a
+higher-risk remote tool surface. Because MCP tools can drive cross-agent and
 messaging writes, network transport must enforce the same policy engine and
 audit attribution as the CLI and API.
+
+## Go-Forward Epic: Deployment Cells And Multi-Cloud
+
+This is the platform substrate underneath the realm-local core and cross-realm
+collaboration. The design is written in
+[deployment-cells.md](deployment-cells.md); this section records it as a
+committed go-forward direction under the same promotion bar as every other
+candidate here.
+
+Witself runs as a fleet of independent cells. A cell is one complete, isolated
+Witself stack — `witself-server`, Postgres/pgvector, KMS, and blob storage — in a
+single cloud account and region. Cells are isolated from one another, so a cell
+outage affects only the tenants that live on it. Multi-cloud is native: AWS, GCP,
+and Azure across multiple accounts, where an independent second AWS account is
+simply another cell. The per-cloud Terraform modules already planned are reused
+per cell (see [terraform-infrastructure.md](terraform-infrastructure.md),
+[cloud-targets.md](cloud-targets.md), and
+[backend-architecture.md](backend-architecture.md)).
+
+### Thin Control Plane
+
+The one new always-on global component is a thin, highly-available control plane
+that holds only routing metadata — realm/account → home cell, endpoint, and
+signing key. It does placement (which cell a new tenant lands on) and resolution
+(where to route), and it holds no tenant data, so its blast radius stays tiny. It
+extends today's `--endpoint`/token model into "resolve my home cell." This is the
+same global directory the collaboration relay resolves realm handles against, so
+cells and collaboration share one registry
+(see [agent-collaboration.md](agent-collaboration.md)).
+
+### Placement, Versioning, And Migration
+
+- Placement and landing: at account or realm creation the control plane picks a
+  cell by region or data-residency, capacity, provider preference, or rollout
+  wave, records the mapping, and clients resolve their home cell from it.
+- Cells at different versions: cells may run different software versions for
+  canary or wave rollouts, and capability discovery lets clients adapt. This is a
+  strength of the cell model, not a defect.
+- Tenant migration: move a realm or account between cells by export from cell A,
+  import into cell B, repoint the control-plane mapping, and cut over. The open
+  plane (memories and facts) moves through the existing first-class
+  export/import, with embeddings recomputed at the destination or moved when the
+  model matches. The sealed plane is KMS-rooted per cell, so migration re-wraps
+  keys under the destination KMS via an audited decrypt-at-source /
+  re-encrypt-at-destination ceremony. Migration is bounded but not free (see
+  [backup-and-recovery.md](backup-and-recovery.md) and [storage.md](storage.md)).
+- Billing aggregates at the account level: when one account's realms span cells,
+  per-realm usage is rolled up to the account
+  (see [billing-and-limits.md](billing-and-limits.md)).
+
+### Fleet, Not Multi-Master
+
+The fleet is made of many independent live cells, each authoritative for its own
+tenants. There is no shared-data multi-master across clouds in v1 — that is a much
+harder, separately deferred problem. The cell model deliberately keeps each cell
+the single authority for the tenants it hosts.
+
+### Open Decisions
+
+These forks are intentionally left open; see
+[deployment-cells.md](deployment-cells.md) for context.
+
+- Placement unit: account versus realm. The recommendation is that the realm is
+  the placement and migration unit, with an account-level default and realms
+  individually re-homeable.
+- Self-host topology: single-cell versus multi-cell.
+- Migration cutover: a brief read-only freeze versus dual-write and reconcile.
 
 ## Deferred Provider And Cloud Targets
 
@@ -464,6 +589,10 @@ A post-v0 feature should move into an active release plan only when it has:
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [agent-collaboration.md](agent-collaboration.md)
+- [deployment-cells.md](deployment-cells.md)
+- [backend-architecture.md](backend-architecture.md)
+- [terraform-infrastructure.md](terraform-infrastructure.md)
 - [storage.md](storage.md)
 - [cloud-targets.md](cloud-targets.md)
 - [cli-command-surface.md](cli-command-surface.md)

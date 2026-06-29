@@ -2,12 +2,21 @@
 
 Status: pre-implementation draft.
 
-Witself is the agent durable-state platform. It is being designed to let AI
-agents and human operators manage their own state across two planes: an **open
-plane** of memories and facts, and a **sealed plane** of secrets and TOTP
-authenticators. Agents manage their own state, access other agents' state under
-declarative policy and grants, organize into security groups, and exchange
-durable messages — all through a safe, auditable CLI, MCP, and API surface.
+Witself is the agent durable-state platform **and** the trust fabric agents
+collaborate over. Every agent gets a durable, attributable self — memories,
+facts, and sealed credentials — plus a verified, loop-safe channel to work with
+other agents across machines, realms, and accounts. The identity and memory
+store is what makes that channel trustworthy: collaboration rides on the same
+attributable self, so a counterpart can be verified before it is trusted.
+
+It is being designed to let AI agents and human operators manage their own state
+across two planes: an **open plane** of memories and facts, and a **sealed
+plane** of secrets and TOTP authenticators. Agents manage their own state,
+access other agents' state under declarative policy and grants, organize into
+security groups, and exchange durable messages — within a realm and, as the
+flagship post-v0 epic, across realms and accounts — all through a safe,
+auditable CLI, MCP, and API surface. Witself is deployed as a fleet of
+independent multi-cloud cells, each authoritative for its own tenants.
 
 The two planes share one platform spine — one core domain service behind thin
 CLI/MCP/API adapters, the same account/realm/agent tenancy and token model, the
@@ -45,6 +54,10 @@ The product goal is a CLI-first agent durable-state service spanning both planes
 - Security groups that act as both policy subjects and policy targets and can own
   group-scoped shared memories and facts.
 - Durable inter-agent messaging with delivery, ordering, and acknowledgement.
+- Cross-realm agent collaboration: a verified, loop-safe channel for agents to
+  work together across machines, realms, and accounts — signed realm discovery,
+  a blind relay, and enforced loop and spend caps — built on the realm-local
+  mailbox as the first post-v0 epic.
 - First-class structured/plaintext identity export and round-trippable import.
 - Identity references such as `witself://fact/email` and
   `witself://agent/archivist/memory/mem_...`.
@@ -53,6 +66,10 @@ The product goal is a CLI-first agent durable-state service spanning both planes
   citizen via two-way `digest emit` / `ingest`.
 - MCP compatibility for agent runtimes.
 - Managed Witself Cloud by default.
+- A multi-cloud cell platform: each cell is one complete, independent Witself
+  stack in its own cloud account or region, with a thin global control plane for
+  tenant placement and routing — a fleet of cells, each authoritative for its
+  own tenants, so a cell outage stays contained.
 - Public backend code and first-class self-hosting for operators who want to run
   Witself in their own cloud.
 
@@ -83,6 +100,7 @@ contracts are clear.
 - [Access Policy](docs/access-policy.md)
 - [Security Groups](docs/security-groups.md)
 - [Inter-Agent Messaging](docs/inter-agent-messaging.md)
+- [Agent Collaboration](docs/agent-collaboration.md)
 - [Operator Authentication](docs/operator-auth.md)
 - [Token Lifecycle](docs/token-lifecycle.md)
 - [Workflow Scripts](docs/workflow-scripts.md)
@@ -93,6 +111,7 @@ contracts are clear.
 - [MCP Tools](docs/mcp-tools.md)
 - [JSON Contracts](docs/json-contracts.md)
 - [Backend Architecture](docs/backend-architecture.md)
+- [Deployment Cells](docs/deployment-cells.md)
 - [Storage](docs/storage.md)
 - [Observability And Operations](docs/observability-and-operations.md)
 - [Self-Hosting](docs/self-hosting.md)

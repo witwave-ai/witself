@@ -3,10 +3,15 @@
 Status: draft. These docs define Witself before implementation. Last reviewed
 2026-06-26.
 
-Witself is the agent durable-state platform: one open plane (memories + facts,
-plaintext at rest, recallable, in the self-digest, plaintext-exportable) and one
-sealed plane (secrets + TOTP, envelope-encrypted, reveal-gated, never embedded,
-recalled, in the digest, or plaintext-exported).
+Witself is the agent durable-state platform and the trust fabric agents
+collaborate over: one open plane (memories + facts, plaintext at rest,
+recallable, in the self-digest, plaintext-exportable) and one sealed plane
+(secrets + TOTP, envelope-encrypted, reveal-gated, never embedded, recalled, in
+the digest, or plaintext-exported). On top of that durable, attributable self,
+Witself adds a cross-realm agent collaboration substrate — a verified, loop-safe
+channel agents work over across machines, realms, and accounts — and runs as a
+multi-cloud platform of independent deployment cells under a thin global control
+plane.
 
 ## Product And Architecture
 
@@ -42,6 +47,11 @@ recalled, in the digest, or plaintext-exported).
   subjects and targets, membership, and group-owned shared identity data.
 - [inter-agent-messaging.md](inter-agent-messaging.md): the durable mailbox
   model, token-derived sender identity, delivery/ack state, and message threats.
+- [agent-collaboration.md](agent-collaboration.md): the cross-realm /
+  cross-account agent collaboration substrate — realm-authority addressing,
+  signed realm/agent discovery, the blind cloud relay, cross-realm conversations,
+  the loop and safety stack, and deny-by-default federation; extends
+  inter-agent-messaging.md as the first post-v0 epic.
 - [operator-auth.md](operator-auth.md): CLI-initiated human/operator auth,
   device-code fallback, self-hosted bootstrap, and unattended token posture.
 - [threat-model.md](threat-model.md): assets, principals, trust boundaries,
@@ -76,6 +86,11 @@ recalled, in the digest, or plaintext-exported).
   DEK key hierarchy, KMS providers, rotation, and the crypto-shred posture.
 - [cloud-targets.md](cloud-targets.md): AWS-first managed cloud and
   self-hosted Terraform target decision.
+- [deployment-cells.md](deployment-cells.md): the multi-cloud deployment
+  topology — a fleet of independent cells, each authoritative for its own
+  tenants, under a thin global control plane that does placement and routing
+  resolution; cells at different versions, tenant migration between cells, and
+  the shared global directory the collaboration relay reuses.
 - [token-lifecycle.md](token-lifecycle.md): durable v0 agent token behavior,
   token file format, rotation, revocation, and agent disable effects.
 - [billing-and-limits.md](billing-and-limits.md): account-level plan billing,
