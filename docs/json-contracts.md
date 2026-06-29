@@ -320,6 +320,9 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
     "api_version": "v1",
     "endpoint": "https://witself.internal.example.com"
   },
+  "account": {
+    "id": "acc_123"
+  },
   "principal": {
     "kind": "operator",
     "id": "opr_123",

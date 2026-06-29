@@ -164,6 +164,11 @@ Capability results should include:
   deployment, and `local` is reported by the CLI's local adapter and is never the
   server. `kind` is advisory — clients should branch on specific feature flags,
   and each feature is independently gated so a mislabeled kind unlocks nothing.
+- The deployment `account` block (`{"id": "acc_…"}`) on single-account backends
+  (local, self-hosted): the seeded default/root account, surfaced unauthenticated.
+  On `managed` the account context comes from the authenticated `principal`
+  instead, so the top-level block is omitted; it is omitted entirely when no
+  database is configured.
 - Server version and API version.
 - Supported feature flags.
 - Unsupported feature reasons.
