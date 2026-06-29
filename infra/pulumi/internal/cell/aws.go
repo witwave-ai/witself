@@ -1,0 +1,127 @@
+package cell
+
+import (
+	"fmt"
+
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
+	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
+
+// rname builds a witself-prefixed AWS resource name: witself-<cell>-<kind> (or
+// witself-<cell> when kind is empty). <cell> is the composed cell name.
+func rname(cell, kind string) string {
+	if kind == "" {
+		return "witself-" + cell
+	}
+	return "witself-" + cell + "-" + kind
+}
+
+// defaultTags are applied to EVERY cell resource through the AWS provider, so the
+// cell's identity and placement are tagged uniformly without repeating them on
+// each resource. Mutable, high-churn values (versions, shas, timestamps) are
+// deliberately NOT here — they belong in stack outputs / the registry.
+func defaultTags(c awsCell) pulumi.StringMap {
+	return pulumi.StringMap{
+		"witself:cell":          pulumi.String(c.name),
+		"witself:cloud":         pulumi.String("aws"),
+		"witself:account-alias": pulumi.String(c.accountAlias),
+		"witself:region":        pulumi.String(c.region),
+		"witself:role":          pulumi.String(c.role),
+		"witself:profile":       pulumi.String(c.profile),
+		"witself:managed-by":    pulumi.String("pulumi"),
+		"app":                   pulumi.String("witself"),
+	}
+}
+
+// resourceTags layer on top of the provider defaultTags: a human Name and the
+// component kind. Provider defaultTags + these merge, with these winning ties.
+func resourceTags(name, component string) pulumi.StringMap {
+	return pulumi.StringMap{
+		"Name":              pulumi.String(name),
+		"witself:component": pulumi.String(component),
+	}
+}
+
+// dbInstanceClass sizes the RDS instance for the profile. The minimal profile is
+// the cheap, single-AZ dev box (~$0.016/hr); prod sizing is a later slice.
+func dbInstanceClass(profile string) string {
+	if profile == "prod" {
+		return "db.t4g.small"
+	}
+	return "db.t4g.micro"
+}
+
+// provisionAWS provisions the cell's AWS substrate: its dedicated VPC (see
+// aws_vpc.go) and an RDS PostgreSQL instance on a pgvector-capable engine, sitting
+// privately in the cell's private subnets. Every resource is created through an
+// explicit provider that stamps the cell's defaultTags. EKS, KMS, object storage,
+// and ingress come in later slices.
+func provisionAWS(ctx *pulumi.Context, c awsCell) error {
+	minimal := c.profile != "prod"
+
+	// Explicit provider carrying defaultTags so every resource is tagged uniformly.
+	prov, err := aws.NewProvider(ctx, "aws", &aws.ProviderArgs{
+		Region:      pulumi.String(c.region),
+		DefaultTags: &aws.ProviderDefaultTagsArgs{Tags: defaultTags(c)},
+	})
+	if err != nil {
+		return err
+	}
+
+	// The cell owns its network: a dedicated VPC with private subnets for the
+	// database, so it never depends on a region's default VPC.
+	net, err := provisionAWSNetwork(ctx, c, minimal, prov)
+	if err != nil {
+		return err
+	}
+
+	// Master password: generated, never hard-coded. RDS disallows /, @, ", and
+	// spaces, so keep it alphanumeric. RandomPassword.Result is a secret output.
+	pw, err := random.NewRandomPassword(ctx, "witself-db", &random.RandomPasswordArgs{
+		Length:  pulumi.Int(24),
+		Special: pulumi.Bool(false),
+	})
+	if err != nil {
+		return err
+	}
+
+	db, err := rds.NewInstance(ctx, "witself", &rds.InstanceArgs{
+		Identifier:          pulumi.String(rname(c.name, "db")),
+		Engine:              pulumi.String("postgres"),
+		EngineVersion:       pulumi.String("16"), // pgvector-capable; latest 16.x minor
+		InstanceClass:       pulumi.String(dbInstanceClass(c.profile)),
+		AllocatedStorage:    pulumi.Int(20),
+		StorageType:         pulumi.String("gp3"),
+		DbName:              pulumi.String("witself"), // logical app DB stays "witself"
+		Username:            pulumi.String("witself"),
+		Password:            pw.Result,
+		DbSubnetGroupName:   net.dbSubnetGroup,
+		VpcSecurityGroupIds: pulumi.StringArray{net.dbSecurityGrp},
+		MultiAz:             pulumi.Bool(!minimal),
+		// Dev-friendly lifecycle so `destroy` is clean and leaves no billed
+		// snapshot. The prod profile will flip these in a later slice.
+		SkipFinalSnapshot:  pulumi.Bool(true),
+		DeletionProtection: pulumi.Bool(false),
+		PubliclyAccessible: pulumi.Bool(false),
+		Tags:               resourceTags(rname(c.name, "db"), "database"),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
+	// Convenience DSN; secret because it embeds the password.
+	dsn := pulumi.All(db.Endpoint, pw.Result).ApplyT(func(a []interface{}) string {
+		return fmt.Sprintf("postgres://witself:%s@%s/witself?sslmode=require", a[1], a[0])
+	}).(pulumi.StringOutput)
+
+	ctx.Export("status", pulumi.String("aws: cell vpc + rds postgres provisioned"))
+	ctx.Export("vpcId", net.vpcID)
+	ctx.Export("dbEndpoint", db.Endpoint)
+	ctx.Export("dbName", pulumi.String("witself"))
+	ctx.Export("dbUsername", pulumi.String("witself"))
+	ctx.Export("dbPassword", pw.Result) // secret
+	ctx.Export("dbDSN", dsn)            // secret
+	return nil
+}
