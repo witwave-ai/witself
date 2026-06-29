@@ -27,6 +27,10 @@ type Config struct {
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
 	Ready func(context.Context) error
+
+	// AccountID, when set, is surfaced as the account block in /v1/capabilities
+	// (the seeded default account on single-account backends).
+	AccountID string
 }
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
@@ -53,7 +57,7 @@ func Run(ctx context.Context, cfg Config) error {
 		name, addr string
 		handler    http.Handler
 	}{
-		{"api", cfg.APIAddr, apiMux()},
+		{"api", cfg.APIAddr, apiMux(cfg.AccountID)},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMux()},
 	}
@@ -103,14 +107,14 @@ func Run(ctx context.Context, cfg Config) error {
 	return runErr
 }
 
-func apiMux() http.Handler {
+func apiMux(accountID string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler)
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(accountID))
 	return mux
 }
 
@@ -133,36 +137,49 @@ type feature struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+// accountInfo identifies the deployment's account. On single-account backends
+// (local, self-managed) it is the seeded default/root account; it is omitted
+// when no database is configured.
+type accountInfo struct {
+	ID string `json:"id"`
+}
+
 type capabilities struct {
 	SchemaVersion string             `json:"schema_version"`
 	Backend       backendInfo        `json:"backend"`
+	Account       *accountInfo       `json:"account,omitempty"`
 	Principal     any                `json:"principal"` // null until token auth exists
 	Features      map[string]feature `json:"features"`
 	Limits        map[string]any     `json:"limits"`
 }
 
-func capabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
-	notImpl := feature{Reason: "not_implemented"}
-	caps := capabilities{
-		SchemaVersion: "witself.v0",
-		Backend: backendInfo{
-			Kind:       envOr("WITSELF_BACKEND_KIND", "self-hosted"),
-			Version:    version.Version,
-			APIVersion: "v1",
-		},
-		Features: map[string]feature{
-			"memories":        notImpl,
-			"facts":           notImpl,
-			"semantic_recall": notImpl,
-			"policies":        notImpl,
-			"groups":          notImpl,
-			"messaging":       notImpl,
-			"audit":           notImpl,
-		},
-		Limits: map[string]any{},
+func capabilitiesHandler(accountID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		notImpl := feature{Reason: "not_implemented"}
+		caps := capabilities{
+			SchemaVersion: "witself.v0",
+			Backend: backendInfo{
+				Kind:       envOr("WITSELF_BACKEND_KIND", "self-hosted"),
+				Version:    version.Version,
+				APIVersion: "v1",
+			},
+			Features: map[string]feature{
+				"memories":        notImpl,
+				"facts":           notImpl,
+				"semantic_recall": notImpl,
+				"policies":        notImpl,
+				"groups":          notImpl,
+				"messaging":       notImpl,
+				"audit":           notImpl,
+			},
+			Limits: map[string]any{},
+		}
+		if accountID != "" {
+			caps.Account = &accountInfo{ID: accountID}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(caps)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(caps)
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {

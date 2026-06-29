@@ -70,7 +70,7 @@ func TestMetricsExposesUp(t *testing.T) {
 }
 
 func TestVersionEndpointIsBare(t *testing.T) {
-	srv := httptest.NewServer(apiMux())
+	srv := httptest.NewServer(apiMux(""))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/version")
 	if err != nil {
@@ -94,7 +94,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 
 func TestCapabilitiesShape(t *testing.T) {
 	t.Setenv("WITSELF_BACKEND_KIND", "self-hosted")
-	srv := httptest.NewServer(apiMux())
+	srv := httptest.NewServer(apiMux(""))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/capabilities")
 	if err != nil {
@@ -113,5 +113,25 @@ func TestCapabilitiesShape(t *testing.T) {
 	}
 	if f, ok := c.Features["memories"]; !ok || f.Supported || f.Reason != "not_implemented" {
 		t.Errorf("memories feature = %+v (ok=%v)", f, ok)
+	}
+	if c.Account != nil {
+		t.Errorf("account should be omitted when no account id is set, got %+v", c.Account)
+	}
+}
+
+func TestCapabilitiesIncludesAccount(t *testing.T) {
+	srv := httptest.NewServer(apiMux("acc_test123"))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var c capabilities
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Account == nil || c.Account.ID != "acc_test123" {
+		t.Errorf("account = %+v, want id acc_test123", c.Account)
 	}
 }

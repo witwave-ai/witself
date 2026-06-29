@@ -62,6 +62,7 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
 		}
+		cfg.AccountID = acctID
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: database migrated; default account %s ready; /readyz gates on it\n", acctID)
 	} else {
