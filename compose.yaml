@@ -1,0 +1,33 @@
+# Dev-only stack for local Witself development. NOT for production — production
+# uses an external/managed Postgres referenced by the Helm chart.
+#
+# Quick start (with the Makefile):
+#   make serve     # starts Postgres + runs witself-server (mints a bootstrap token)
+#   make login     # in another terminal: ws auth login -> operator token
+#
+# By hand:
+#   docker compose up -d --wait
+#   WITSELF_DATABASE_URL=postgres://witself:witself@localhost:5432/witself?sslmode=disable \
+#     WITSELF_BOOTSTRAP_TOKEN="$(go run ./cmd/ws gen-bootstrap-token)" \
+#     go run ./cmd/witself-server serve
+services:
+  postgres:
+    # pgvector image (Postgres + the vector extension) so we never swap it when
+    # semantic recall lands; the extension just sits unused until then.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: witself
+      POSTGRES_PASSWORD: witself
+      POSTGRES_DB: witself
+    ports:
+      - "5432:5432"
+    volumes:
+      - witself-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U witself -d witself"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  witself-pgdata: {}

@@ -20,3 +20,7 @@ coverage.*
 *.local
 *.tfvars
 *.token
+
+# Local dev (compose.yaml) and chart packaging output
+.dev/
+dist-charts/
