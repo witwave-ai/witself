@@ -32,6 +32,8 @@ func run(args []string) int {
 		return genBootstrapToken(args[1:])
 	case "auth":
 		return authCmd(args[1:])
+	case "realm":
+		return realmCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -119,6 +121,85 @@ func authLogin(args []string) int {
 	return 0
 }
 
+func realmCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws realm create|list --endpoint URL --token-file FILE")
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return realmCreate(args[1:])
+	case "list":
+		return realmList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws realm: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func realmCreate(args []string) int {
+	fs := flag.NewFlagSet("realm create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	name := fs.Arg(0)
+	if *endpoint == "" || *tokenFile == "" || name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws realm create --endpoint URL --token-file FILE NAME")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	r, err := client.CreateRealm(context.Background(), *endpoint, tok, name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%s\t%s\n", r.ID, r.Name)
+	return 0
+}
+
+func realmList(args []string) int {
+	fs := flag.NewFlagSet("realm list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws realm list --endpoint URL --token-file FILE")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	realms, err := client.ListRealms(context.Background(), *endpoint, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	for _, r := range realms {
+		fmt.Printf("%s\t%s\n", r.ID, r.Name)
+	}
+	return 0
+}
+
+func readToken(file string) (string, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "ws — the Witself CLI")
 	fmt.Fprintln(w)
@@ -126,5 +207,6 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  ws version              Print version information")
 	fmt.Fprintln(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
+	fmt.Fprintln(w, "  ws realm create|list    Create or list realms (operator token)")
 	fmt.Fprintln(w, "  ws help                 Show this help")
 }

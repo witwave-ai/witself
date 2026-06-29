@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -58,4 +59,78 @@ func BootstrapLogin(ctx context.Context, endpoint, bootstrapToken string) (*Boot
 		return nil, fmt.Errorf("server returned no operator token")
 	}
 	return &BootstrapResult{OperatorToken: out.OperatorToken, OperatorID: out.OperatorID}, nil
+}
+
+// doJSON performs an authenticated JSON request and decodes the response into
+// out (if non-nil), mapping common statuses to friendly errors.
+func doJSON(ctx context.Context, method, url, token string, body []byte, out any) error {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return fmt.Errorf("not authorized (check the token)")
+	case resp.StatusCode == http.StatusConflict:
+		return fmt.Errorf("already exists")
+	case resp.StatusCode >= 300:
+		return fmt.Errorf("request failed: %s", resp.Status)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+// Realm is the API view of a realm.
+type Realm struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CreateRealm creates a realm via POST {endpoint}/v1/realms.
+func CreateRealm(ctx context.Context, endpoint, token, name string) (*Realm, error) {
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Realm Realm `json:"realm"`
+	}
+	if err := doJSON(ctx, http.MethodPost, realmsURL(endpoint), token, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Realm, nil
+}
+
+// ListRealms lists realms via GET {endpoint}/v1/realms.
+func ListRealms(ctx context.Context, endpoint, token string) ([]Realm, error) {
+	var out struct {
+		Realms []Realm `json:"realms"`
+	}
+	if err := doJSON(ctx, http.MethodGet, realmsURL(endpoint), token, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Realms, nil
+}
+
+func realmsURL(endpoint string) string {
+	return strings.TrimRight(endpoint, "/") + "/v1/realms"
 }
