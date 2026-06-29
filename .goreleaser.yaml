@@ -35,10 +35,34 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# SBOM per archive (syft). Attached to the release.
+sboms:
+  - id: archive
+    artifacts: archive
+
+# Keyless cosign signature over the checksums file (Sigstore; uses CI OIDC).
+# Verify: cosign verify-blob --certificate checksums.txt.pem \
+#   --signature checksums.txt.sig --certificate-identity-regexp '.*' \
+#   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+signs:
+  - id: checksums
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
 brews:
   - name: ws
     ids:
       - ws
+    directory: Formula
     repository:
       owner: witwave-ai
       name: homebrew-tap

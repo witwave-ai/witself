@@ -1,8 +1,10 @@
 name: release
 
-# Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, publishes the
-# GitHub release, and pushes the Homebrew formula to witwave-ai/homebrew-tap.
-# A manual run (workflow_dispatch) is a no-publish snapshot to validate the build.
+# Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, signs the
+# checksums (cosign keyless), generates SBOMs, publishes the GitHub release,
+# attaches build-provenance attestations, and pushes the Homebrew formula to
+# witwave-ai/homebrew-tap. A manual run (workflow_dispatch) is a no-publish
+# snapshot to validate the build.
 on:
   push:
     tags:
@@ -10,7 +12,9 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: write # create the release
+  id-token: write # cosign keyless signing + provenance OIDC
+  attestations: write # build-provenance attestations
 
 jobs:
   goreleaser:
@@ -25,16 +29,23 @@ jobs:
           go-version-file: go.mod
           cache: false # no go.sum yet (zero deps); re-enable when deps land
 
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
           args: >-
             ${{ github.event_name == 'push' && 'release --clean'
-                || 'release --snapshot --clean' }}
+                || 'release --snapshot --clean --skip=sign' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Required for the Homebrew formula push (cross-repo). Create a token
-          # with contents:write on witwave-ai/homebrew-tap and add it as the
-          # repo secret HOMEBREW_TAP_TOKEN.
+          # Required for the cross-repo Homebrew formula push (org secret).
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*.tar.gz"
