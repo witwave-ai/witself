@@ -47,3 +47,32 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar -xz
+          sudo install kubeconform /usr/local/bin/
+
+      - name: helm lint
+        run: |
+          helm lint charts/witself
+          helm lint charts/witself --values charts/witself/ci/cloud-values.yaml
+
+      - name: helm template + kubeconform
+        run: |
+          for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml"; do
+            args=(); label=default
+            if [ -n "$v" ]; then args=(--values "charts/witself/$v"); label="$v"; fi
+            echo "::group::$label"
+            helm template r charts/witself "${args[@]}" -n witself | kubeconform -strict -ignore-missing-schemas -summary
+            echo "::endgroup::"
+          done

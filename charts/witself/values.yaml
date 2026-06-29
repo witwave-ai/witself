@@ -1,0 +1,148 @@
+# Default values for the witself chart — production-safe by default: non-root,
+# read-only root filesystem, metrics on, default-deny NetworkPolicy.
+#
+# SCOPE NOTE: this chart deploys witself-server as it exists today — the API,
+# health, and metrics listeners plus backend.kind. Database (Postgres/pgvector),
+# embeddings, KMS/sealed-plane, and the migration Job are part of the chart's
+# target shape (docs/helm-chart.md) and are wired in as the server consumes
+# them, so no manifest here renders config the server would ignore.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/witwave-ai/images/witself-server
+  # Empty tag defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# backend.kind -> WITSELF_BACKEND_KIND. Advisory; "managed" in the cloud overlay.
+backend:
+  kind: self-hosted
+
+# Container ports. The env addresses are derived as ":<port>".
+server:
+  port: 8080
+health:
+  port: 8081
+
+metrics:
+  enabled: true
+  port: 9090
+  path: /metrics
+  service:
+    enabled: true
+    annotations: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
+  podMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+probes:
+  liveness:
+    enabled: true
+    path: /livez
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  startup:
+    enabled: true
+    path: /startupz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 30
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  # - host: witself.example.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  tls: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # witself-server needs no Kubernetes API access.
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Default-deny ingress, opened only for the three ports. Health is always
+# reachable (kubelet probes); api and metrics ingress can be narrowed with
+# selectors. Egress is left open until the server gains outbound dependencies.
+networkPolicy:
+  enabled: true
+  # Sources allowed to reach the api port. Empty = allow from any in-cluster
+  # source on the api port only.
+  apiFrom: []
+  # - namespaceSelector:
+  #     matchLabels:
+  #       kubernetes.io/metadata.name: ingress-nginx
+  # Sources allowed to scrape the metrics port. Empty = allow from any.
+  metricsFrom: []
+
+terminationGracePeriodSeconds: 30
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

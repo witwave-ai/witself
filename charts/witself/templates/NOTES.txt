@@ -1,0 +1,25 @@
+{{ include "witself.fullname" . }} (witself-server, image {{ include "witself.image" . }}) is deployed.
+
+Backend kind: {{ .Values.backend.kind }}
+
+Listeners (inside the pod):
+  api      :{{ .Values.server.port }}   (/v1/version, /v1/capabilities)
+  health   :{{ .Values.health.port }}   (/livez, /readyz, /startupz)
+{{- if .Values.metrics.enabled }}
+  metrics  :{{ .Values.metrics.port }}   ({{ .Values.metrics.path }})
+{{- end }}
+
+Check it from inside the cluster:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "witself.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s localhost:8080/v1/capabilities
+
+Run the bundled smoke test:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if not .Values.metrics.serviceMonitor.enabled }}
+
+Metrics are served on the metrics port but no ServiceMonitor is created. Set
+metrics.serviceMonitor.enabled=true (Prometheus Operator) to scrape them.
+{{- end }}

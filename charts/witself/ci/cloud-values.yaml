@@ -1,0 +1,65 @@
+# Cloud / managed profile — HA and production-hardened.
+backend:
+  kind: managed
+
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+metrics:
+  enabled: true
+  service:
+    enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+
+networkPolicy:
+  enabled: true
+  apiFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: witself.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: witself-tls
+      hosts:
+        - witself.example.com
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: witself

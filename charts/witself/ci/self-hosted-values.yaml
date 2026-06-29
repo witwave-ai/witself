@@ -1,0 +1,17 @@
+# Self-hosted profile — close to defaults; a minimal, single-replica install.
+backend:
+  kind: self-hosted
+
+replicaCount: 1
+
+networkPolicy:
+  enabled: true
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: false

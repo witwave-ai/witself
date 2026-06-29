@@ -1,0 +1,22 @@
+apiVersion: v2
+name: witself
+description: Witself — durable self/identity store for AI agents (deploys witself-server).
+type: application
+# Chart version; overridden to the release tag at publish time.
+version: 0.1.0
+# Default image tag; overridden to the release tag at publish time.
+appVersion: "0.0.7"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/witwave-ai/witself
+sources:
+  - https://github.com/witwave-ai/witself
+keywords:
+  - ai-agents
+  - identity
+  - memory
+  - witself
+maintainers:
+  - name: witwave-ai
+    url: https://github.com/witwave-ai
+annotations:
+  category: AI

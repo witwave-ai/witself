@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "witself.fullname" . }}
+  labels:
+    {{- include "witself.labels" . | nindent 4 }}
+data:
+  # Non-secret server config. Only values witself-server consumes today are set
+  # here; secret-bearing config (DB, embeddings, KMS) arrives via Secret refs
+  # when those subsystems land. See docs/helm-chart.md.
+  WITSELF_API_ADDR: ":{{ .Values.server.port }}"
+  WITSELF_HEALTH_ADDR: ":{{ .Values.health.port }}"
+  WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
+  WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
