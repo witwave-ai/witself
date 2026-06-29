@@ -17,6 +17,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -82,11 +84,14 @@ flags:
   -profile        resource sizing (functional): minimal|prod  (default "minimal")
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
+  -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -state-dir      local Pulumi state backend dir
 
 example:
-  witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev
+  witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
   # cell aws-sandbox-usw2-dev -> resources witself-aws-sandbox-usw2-dev-*
+  # creds come from -aws-profile (or the ambient AWS_PROFILE/OIDC). The local-state
+  # passphrase is managed for you — no PULUMI_CONFIG_PASSPHRASE needed.
 `
 
 func main() {
@@ -114,6 +119,7 @@ func run(args []string) error {
 	profile := fs.String("profile", "minimal", "resource sizing (functional): minimal|prod")
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
+	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -142,11 +148,23 @@ func run(args []string) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
+	passphrase, err := ensurePassphrase(*stateDir)
+	if err != nil {
+		return err
+	}
+	env := map[string]string{
+		"PULUMI_BACKEND_URL":       "file://" + *stateDir,
+		"PULUMI_CONFIG_PASSPHRASE": passphrase,
+	}
+	// A profile NAME is not a secret, so it is safe to pass as a flag; when
+	// omitted, the AWS provider uses the ambient credential chain (AWS_PROFILE
+	// env, SSO, OIDC), which is what CI / Witself Cloud rely on.
+	if *awsProfile != "" {
+		env["AWS_PROFILE"] = *awsProfile
+	}
+
 	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program,
-		auto.EnvVars(map[string]string{
-			"PULUMI_BACKEND_URL":       "file://" + *stateDir,
-			"PULUMI_CONFIG_PASSPHRASE": os.Getenv("PULUMI_CONFIG_PASSPHRASE"),
-		}),
+		auto.EnvVars(env),
 	)
 	if err != nil {
 		return fmt.Errorf("create/select cell %q: %w", cellName, err)
@@ -211,4 +229,28 @@ func defaultStateDir() string {
 		return ".witself-infra-state"
 	}
 	return filepath.Join(home, ".witself-infra", "state")
+}
+
+// ensurePassphrase returns the passphrase that encrypts secrets in the local
+// state. A passphrase is a secret, so it is never a CLI flag. It respects an
+// explicit PULUMI_CONFIG_PASSPHRASE if the user set one; otherwise it manages one
+// for them — generating a random passphrase on first use and persisting it 0600
+// alongside the state — so secret outputs work with nothing to export or type.
+func ensurePassphrase(stateDir string) (string, error) {
+	if p := os.Getenv("PULUMI_CONFIG_PASSPHRASE"); p != "" {
+		return p, nil
+	}
+	path := filepath.Join(stateDir, "passphrase")
+	if b, err := os.ReadFile(path); err == nil {
+		return strings.TrimSpace(string(b)), nil
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate state passphrase: %w", err)
+	}
+	p := base64.RawURLEncoding.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(p+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("persist state passphrase: %w", err)
+	}
+	return p, nil
 }

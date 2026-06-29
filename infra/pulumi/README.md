@@ -42,19 +42,21 @@ go build -o bin/witself-infra ./cmd/witself-infra
 
 # the cell name is composed from components: <cloud>-<account-alias>-<region-code>-<role>
 # e.g. these flags -> cell aws-sandbox-usw2-dev, resources witself-aws-sandbox-usw2-dev-*
-export AWS_PROFILE=witwave-sandbox          # creds are ambient, not derived from --account-alias
-export PULUMI_CONFIG_PASSPHRASE=…           # encrypts secret outputs in local state
-
-./bin/witself-infra preview -cloud aws -account-alias sandbox -region us-west-2 -role dev
-./bin/witself-infra up      -cloud aws -account-alias sandbox -region us-west-2 -role dev
-./bin/witself-infra outputs -cloud aws -account-alias sandbox -region us-west-2 -role dev
-./bin/witself-infra destroy -cloud aws -account-alias sandbox -region us-west-2 -role dev
+# creds come from -aws-profile (or the ambient AWS chain / OIDC). No passphrase to
+# export — the local-state secret is managed for you.
+F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox"
+./bin/witself-infra preview $F
+./bin/witself-infra up      $F
+./bin/witself-infra outputs $F
+./bin/witself-infra destroy $F
 ```
 
 Inputs split two ways: **functional** (`-cloud`, `-region`, `-profile`) drive
 behavior; **labels** (`-account-alias`, `-role`) are free text used only in the
-name. The real region is passed to the provider; its short code (`us-west-2` →
-`usw2`, from a lookup table) appears in the name. State defaults to a local file
+name. Credentials are a name, not a secret — `-aws-profile` (or the ambient
+`AWS_PROFILE`/OIDC when omitted); `-account-alias` does **not** select creds. The
+local-state secret passphrase is generated and persisted (`0600`) under the state
+dir on first use, so nothing needs to be exported. State defaults to a local file
 backend under `~/.witself-infra/state`.
 
 ## Roadmap (one slice at a time)
