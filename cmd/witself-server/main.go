@@ -63,8 +63,13 @@ func serve() int {
 			return 1
 		}
 		cfg.AccountID = acctID
+		oprID, err := st.EnsureRootOperator(ctx, acctID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
+		}
 		cfg.Ready = st.Ping
-		fmt.Fprintf(os.Stderr, "witself-server: database migrated; default account %s ready; /readyz gates on it\n", acctID)
+		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
