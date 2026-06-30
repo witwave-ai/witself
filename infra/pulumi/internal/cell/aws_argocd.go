@@ -2,7 +2,9 @@ package cell
 
 import (
 	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
+	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	helm "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/helm/v3"
+	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -15,6 +17,13 @@ const (
 	argocdChartRepo    = "https://argoproj.github.io/argo-helm"
 	argocdChartVersion = "10.0.1"
 	argocdNamespace    = "argocd"
+
+	// The GitOps source Argo reconciles. The repo is public, so no credentials
+	// are needed to read it. Constants for now; a later slice makes them flags so
+	// a self-hoster can point Argo at their own fork / config repo.
+	gitopsRepo     = "https://github.com/witwave-ai/witself"
+	gitopsPath     = ".gitops/bootstrap"
+	gitopsRevision = "main"
 )
 
 // provisionAWSArgoCD installs Argo CD into the cell's EKS cluster via Helm.
@@ -29,9 +38,10 @@ const (
 // (A run by a different principal would lack access; configurable admin is a
 // later slice.)
 //
-// This stands up the Argo CD control plane only. Pointing it at the .gitops/
-// repo (the root ApplicationSet) is a later slice; for now the server stays
-// ClusterIP — reach the UI with `kubectl port-forward`. SSO and ingress later.
+// It also creates the root Argo Application ("bootstrap") pointing at the public
+// repo's .gitops/bootstrap path, so Argo reconciles the GitOps tree (External
+// Secrets first) with no credentials. The server stays ClusterIP — reach the UI
+// with `kubectl port-forward`. SSO and ingress are later slices.
 func provisionAWSArgoCD(ctx *pulumi.Context, c awsCell, eks *awsEKS) error {
 	kubeconfig := pulumi.Sprintf(`apiVersion: v1
 kind: Config
@@ -74,7 +84,7 @@ users:
 	// what the minimal profile wants; the explicit ClusterIP documents intent.
 	// HA-by-profile is a later slice. The release name "argocd" yields the
 	// standard argocd-server/argocd-repo-server/... resources.
-	_, err = helm.NewRelease(ctx, "argocd", &helm.ReleaseArgs{
+	release, err := helm.NewRelease(ctx, "argocd", &helm.ReleaseArgs{
 		// Pin the release name. Without it Pulumi auto-names the release with a
 		// random suffix (argocd-<hash>), so the resources become
 		// argocd-<hash>-server/... — non-deterministic names that break the
@@ -102,8 +112,43 @@ users:
 		return err
 	}
 
+	// Root "app of apps": one Argo Application pointing at .gitops/bootstrap, so
+	// Argo discovers and reconciles every Application declared there (External
+	// Secrets first). DependsOn the release so the Application CRD that the chart
+	// installs exists before we create this CR.
+	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
+		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
+		Kind:       pulumi.String("Application"),
+		Metadata: &metav1.ObjectMetaArgs{
+			Name:      pulumi.String("bootstrap"),
+			Namespace: pulumi.String(argocdNamespace),
+		},
+		OtherFields: kubernetes.UntypedArgs{
+			"spec": map[string]interface{}{
+				"project": "default",
+				"source": map[string]interface{}{
+					"repoURL":        gitopsRepo,
+					"targetRevision": gitopsRevision,
+					"path":           gitopsPath,
+					"directory":      map[string]interface{}{"recurse": true},
+				},
+				"destination": map[string]interface{}{
+					"server":    "https://kubernetes.default.svc",
+					"namespace": argocdNamespace,
+				},
+				"syncPolicy": map[string]interface{}{
+					"automated": map[string]interface{}{"prune": true, "selfHeal": true},
+				},
+			},
+		},
+	}, pulumi.Provider(k8s), pulumi.DependsOn([]pulumi.Resource{release}))
+	if err != nil {
+		return err
+	}
+
 	ctx.Export("argocdNamespace", pulumi.String(argocdNamespace))
 	ctx.Export("argocdPortForward", pulumi.String("kubectl -n "+argocdNamespace+" port-forward svc/argocd-server 8080:443  # then https://localhost:8080 (user: admin)"))
 	ctx.Export("argocdAdminSecret", pulumi.String("kubectl -n "+argocdNamespace+" get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"))
+	ctx.Export("gitops", pulumi.String(gitopsRepo+" @ "+gitopsRevision+" ("+gitopsPath+")"))
 	return nil
 }
