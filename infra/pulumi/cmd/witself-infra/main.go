@@ -31,6 +31,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/cell"
@@ -166,6 +167,7 @@ func run(args []string) error {
 	}
 
 	var wsOpts []auto.LocalWorkspaceOption
+	var secretsProvider string
 	switch *backendFlag {
 	case "local":
 		// Local file backend with a tool-managed passphrase (dev default).
@@ -200,7 +202,8 @@ func run(args []string) error {
 			}
 		}
 		env["PULUMI_BACKEND_URL"] = info.BackendURL
-		wsOpts = append(wsOpts, auto.SecretsProvider(info.SecretsProvider))
+		secretsProvider = info.SecretsProvider
+		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
 	default:
 		return fmt.Errorf("unknown -backend %q (want local|s3)", *backendFlag)
 	}
@@ -209,6 +212,19 @@ func run(args []string) error {
 	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program, wsOpts...)
 	if err != nil {
 		return fmt.Errorf("create/select cell %q: %w", cellName, err)
+	}
+
+	// On the s3 backend, persist the KMS secrets provider into the (ephemeral)
+	// workspace's stack settings. auto.SecretsProvider only applies on stack
+	// CREATE; when a later run SELECTS an existing stack, config operations read
+	// the local Pulumi.<stack>.yaml (not the checkpoint) and would otherwise fall
+	// back to a passphrase. Re-saving it each run keeps select on KMS.
+	if secretsProvider != "" {
+		if err := stack.Workspace().SaveStackSettings(ctx, cellName, &workspace.ProjectStack{
+			SecretsProvider: secretsProvider,
+		}); err != nil {
+			return fmt.Errorf("set secrets provider: %w", err)
+		}
 	}
 
 	// Behavior config (cloud/profile/cidr/ingress) + the real region for the
