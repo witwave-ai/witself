@@ -97,7 +97,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	db, err := rds.NewInstance(ctx, "witself", &rds.InstanceArgs{
 		Identifier:          pulumi.String(rname(c.name, "db")),
 		Engine:              pulumi.String("postgres"),
-		EngineVersion:       pulumi.String("16"), // pgvector-capable; latest 16.x minor
+		EngineVersion:       pulumi.String("18"), // newest; pgvector-capable; RDS picks latest 18.x minor
 		InstanceClass:       pulumi.String(dbInstanceClass(c.profile)),
 		AllocatedStorage:    pulumi.Int(20),
 		StorageType:         pulumi.String("gp3"),
