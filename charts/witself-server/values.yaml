@@ -2,10 +2,10 @@
 # read-only root filesystem, metrics on, default-deny NetworkPolicy.
 #
 # SCOPE NOTE: this chart deploys witself-server as it exists today — the API,
-# health, and metrics listeners plus backend.kind. Database (Postgres/pgvector),
-# embeddings, KMS/sealed-plane, and the migration Job are part of the chart's
-# target shape (docs/helm-chart.md) and are wired in as the server consumes
-# them, so no manifest here renders config the server would ignore.
+# health, and metrics listeners, backend.kind, and the optional Postgres DSN
+# secret reference. Embeddings, KMS/sealed-plane, and the migration Job are part
+# of the chart's target shape (docs/helm-chart.md) and are wired in as the server
+# consumes them, so no manifest here renders config the server would ignore.
 
 replicaCount: 1
 
@@ -22,6 +22,13 @@ fullnameOverride: ""
 # backend.kind -> WITSELF_BACKEND_KIND. Advisory; "managed" in the cloud overlay.
 backend:
   kind: self-hosted
+
+database:
+  existingSecret:
+    # Name of a Secret containing the Postgres DSN. Empty disables DB wiring.
+    name: ""
+    # Key inside existingSecret.name to expose as WITSELF_DATABASE_URL.
+    urlKey: dsn
 
 # Container ports. The env addresses are derived as ":<port>".
 server:

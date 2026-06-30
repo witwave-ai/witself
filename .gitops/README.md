@@ -14,7 +14,11 @@ here and reconciled by Argo.
     apps.yaml       # Application -> apps/       (sync-wave 1)
   platform/     # shared cluster add-ons, one Application each
     external-secrets.yaml
-  apps/         # the application tier (witself-server, ...) — empty for now
+    namespace-witself.yaml
+    secrets-manager-store.yaml
+    witself-db-secret.yaml
+  apps/         # the application tier (witself-server, ...)
+    witself-server.yaml
   cells/        # per-cell overlays, by cell name — fleet scaffolding
 ```
 

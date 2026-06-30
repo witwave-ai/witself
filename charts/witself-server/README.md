@@ -14,11 +14,11 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 ## Scope
 
 This chart tracks what `witself-server` actually consumes today: the three
-listeners (API `:8080`, health `:8081`, metrics `:9090`) and `backend.kind`. The
-broader production surface in [docs/helm-chart.md](../../docs/helm-chart.md) —
-external Postgres/pgvector, the embedding provider, KMS for the sealed plane, and
-the migration `Job` — is wired in as the server gains those subsystems. Nothing
-here renders config the server would silently ignore.
+listeners (API `:8080`, health `:8081`, metrics `:9090`), `backend.kind`, and an
+optional Postgres DSN from an existing Secret. The broader production surface in
+[docs/helm-chart.md](../../docs/helm-chart.md) — embedding provider config, KMS
+for the sealed plane, and the migration `Job` — is wired in as the server gains
+those subsystems. Nothing here renders config the server would silently ignore.
 
 ## What it renders
 
@@ -32,6 +32,9 @@ here renders config the server would silently ignore.
 | PodDisruptionBudget | `podDisruptionBudget.enabled` |
 | NetworkPolicy | `networkPolicy.enabled` (default on) |
 | Helm test pod | `helm test` |
+
+Set `database.existingSecret.name` and `database.existingSecret.urlKey` to expose
+the referenced key as `WITSELF_DATABASE_URL` in the server container.
 
 ## Self-hosted vs cloud
 
@@ -55,5 +58,5 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
-`resources`, `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
-`networkPolicy.*`.
+`database.existingSecret.*`, `resources`, `metrics.serviceMonitor.enabled`,
+`autoscaling.*`, `ingress.*`, `networkPolicy.*`.

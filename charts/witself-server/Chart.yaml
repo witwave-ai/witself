@@ -5,7 +5,7 @@ type: application
 # Chart version; overridden to the release tag at publish time.
 version: 0.1.0
 # Default image tag; overridden to the release tag at publish time.
-appVersion: "0.0.7"
+appVersion: "0.0.41"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/witwave-ai/witself
 sources:

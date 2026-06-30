@@ -43,6 +43,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "witself-server.fullname" . }}
+          {{- if .Values.database.existingSecret.name }}
+          env:
+            - name: WITSELF_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret.name | quote }}
+                  key: {{ .Values.database.existingSecret.urlKey | quote }}
+          {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.server.port }}
