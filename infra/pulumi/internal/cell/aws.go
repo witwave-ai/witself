@@ -84,11 +84,15 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 
-	// GitOps control plane (opt-in): install Argo CD via Helm. Universal — the
-	// upstream chart, not the AWS-only managed capability — so the same install
-	// works on EKS, GKE, or a self-hosted cluster.
+	// GitOps control plane (opt-in): install Argo CD via Helm + wire it to
+	// .gitops/bootstrap (which installs External Secrets), AND create ESO's Pod
+	// Identity IAM so ESO can read this cell's secrets — all on `up`. Universal:
+	// the upstream charts, not the AWS-only managed capability.
 	if c.argocd {
 		if err := provisionAWSArgoCD(ctx, c, eksCluster); err != nil {
+			return err
+		}
+		if err := provisionAWSESOPodIdentity(ctx, c, eksCluster, prov); err != nil {
 			return err
 		}
 	}
