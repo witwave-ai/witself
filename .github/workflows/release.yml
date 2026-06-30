@@ -48,9 +48,13 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
+          # --parallelism 2: witself-infra (pulumi-aws + pulumi-kubernetes) is a
+          # memory-heavy compile; building all targets at once (default = nproc)
+          # OOM-killed the runner on v0.0.35. Cap concurrent builds so at most two
+          # heavy targets compile simultaneously.
           args: >-
-            ${{ github.event_name == 'push' && 'release --clean'
-                || 'release --snapshot --clean --skip=sign' }}
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 2'
+                || 'release --snapshot --clean --skip=sign --parallelism 2' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Required for the cross-repo Homebrew formula push (org secret).
