@@ -1,0 +1,29 @@
+# Application tier: witself-server and friends (empty until the chart lands).
+# Fans out to every Application under .gitops/apps/.
+#
+# sync-wave 1: the app tier comes up after the platform tier (wave 0), so its
+# dependencies (External Secrets, etc.) are in place first.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/witwave-ai/witself
+    targetRevision: main
+    path: .gitops/apps
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

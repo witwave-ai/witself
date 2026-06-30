@@ -7,10 +7,25 @@ here and reconciled by Argo.
 
 ## Layout
 
-- [`bootstrap/`](bootstrap) — the entrypoint the root app reads (recursively).
-  Each file is an Argo `Application`. The first is the External Secrets Operator.
-- _(later)_ `platform/`, `apps/`, `cells/<cell>/` — shared add-ons, the
-  application tier, and per-cell overlays.
+```text
+.gitops/
+  bootstrap/    # Argo's entrypoint — the root app reads this (recurse)
+    platform.yaml   # Application -> platform/  (sync-wave 0)
+    apps.yaml       # Application -> apps/       (sync-wave 1)
+  platform/     # shared cluster add-ons, one Application each
+    external-secrets.yaml
+  apps/         # the application tier (witself-server, ...) — empty for now
+  cells/        # per-cell overlays, by cell name — fleet scaffolding
+```
+
+`witself-infra up -argocd` creates one root Argo `Application` (`bootstrap`)
+pointing at [`bootstrap/`](bootstrap). It fans out to the `platform` and `apps`
+tiers, which reconcile everything under [`platform/`](platform) and `apps/`. The
+platform tier (sync-wave 0) comes up before the app tier (sync-wave 1).
+
+The Application manifests here reference this public repo by URL; a self-hosted
+fork (`-gitops-repo`) would adjust those URLs (or we templatize them via an
+ApplicationSet later).
 
 ## Notes
 

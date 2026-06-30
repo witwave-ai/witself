@@ -1,0 +1,2 @@
+# Application tier — Argo Applications for witself-server (and friends) land here.
+# Empty for now; the bootstrap `apps` Application recurses this directory.

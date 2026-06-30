@@ -1,0 +1,29 @@
+# Platform tier: shared cluster add-ons (External Secrets now; cert-manager,
+# cloudflared, observability later). Argo's root `bootstrap` app applies this,
+# which fans out to every Application under .gitops/platform/.
+#
+# sync-wave 0: the platform tier comes up before the application tier (wave 1).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/witwave-ai/witself
+    targetRevision: main
+    path: .gitops/platform
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
