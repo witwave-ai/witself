@@ -140,6 +140,12 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return fmt.Sprintf("postgres://witself:%s@%s/witself?sslmode=require", a[1], a[0])
 	}).(pulumi.StringOutput)
 
+	// Publish the DB connection to Secrets Manager as <cell>/db — the canonical
+	// source ESO syncs into the cluster (ESO's Pod Identity role reads <cell>/*).
+	if err := provisionAWSDBSecret(ctx, c, db, pw, prov); err != nil {
+		return err
+	}
+
 	ctx.Export("status", pulumi.String("aws: cell vpc + eks (auto mode) + rds postgres provisioned"))
 	ctx.Export("vpcId", net.vpcID)
 	ctx.Export("eksCluster", eksCluster.name)

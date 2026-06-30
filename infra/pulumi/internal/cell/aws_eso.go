@@ -24,8 +24,8 @@ const (
 )
 
 // provisionAWSESOPodIdentity creates the IAM role the External Secrets Operator
-// assumes — scoped to read only THIS cell's secrets under witself/<cell>/* — and
-// binds it to ESO's ServiceAccount via an EKS Pod Identity association, so ESO
+// assumes — scoped to read only THIS cell's secrets under <cell>/* — and binds
+// it to ESO's ServiceAccount via an EKS Pod Identity association, so ESO
 // pulls from AWS Secrets Manager with no static credentials.
 //
 // The association is just a mapping registered with EKS; it does NOT require ESO
@@ -38,9 +38,9 @@ func provisionAWSESOPodIdentity(ctx *pulumi.Context, c awsCell, cluster *awsEKS,
 		return err
 	}
 
-	// Least privilege: only this cell's secret prefix. Secrets Manager appends a
-	// random 6-char suffix to secret ARNs, which the trailing * also covers.
-	secretArn := fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:witself/%s/*", c.region, caller.AccountId, c.name)
+	// Least privilege: only this cell's secret prefix <cell>/*. Secrets Manager
+	// appends a random 6-char suffix to secret ARNs, which the trailing * covers.
+	secretArn := fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s/*", c.region, caller.AccountId, c.name)
 	policyDoc := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"%s"}]}`, secretArn)
 
 	role, err := iam.NewRole(ctx, "cell-eso", &iam.RoleArgs{
@@ -71,6 +71,6 @@ func provisionAWSESOPodIdentity(ctx *pulumi.Context, c awsCell, cluster *awsEKS,
 	}
 
 	ctx.Export("esoRole", role.Arn)
-	ctx.Export("esoSecretsPrefix", pulumi.String(fmt.Sprintf("witself/%s/", c.name)))
+	ctx.Export("esoSecretsPrefix", pulumi.String(c.name+"/"))
 	return nil
 }
