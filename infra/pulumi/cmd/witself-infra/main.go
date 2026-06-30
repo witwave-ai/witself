@@ -151,6 +151,12 @@ func run(args []string) error {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", *role)
 	}
 
+	// Refresh an expired AWS SSO session up front (interactive only) so the
+	// operation doesn't fail on credentials mid-flight.
+	if *cloud == "aws" {
+		backend.EnsureAWSSession(context.Background(), *awsProfile)
+	}
+
 	// bootstrap initializes the state backend (S3 + KMS) and returns; it is not a
 	// cell op, so it skips the stack/passphrase machinery below.
 	if cmd == "bootstrap" {
