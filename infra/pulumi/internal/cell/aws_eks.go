@@ -89,7 +89,7 @@ func provisionAWSEKS(ctx *pulumi.Context, c awsCell, net *awsNetwork, prov *aws.
 	cluster, err := eks.NewCluster(ctx, "cell", &eks.ClusterArgs{
 		Name:    pulumi.String(rname(c.name, "")), // witself-<cell> (bare; EKS name propagates widely)
 		RoleArn: clusterRole.Arn,
-		Version: pulumi.String("1.32"),
+		Version: pulumi.String("1.36"),
 		AccessConfig: &eks.ClusterAccessConfigArgs{
 			AuthenticationMode: pulumi.String("API"),
 			// The principal that runs `up` (the operator, or the CI OIDC role) gets
