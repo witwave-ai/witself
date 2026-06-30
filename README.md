@@ -15,6 +15,48 @@ curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh 
 ws version
 ```
 
+## Infrastructure Example
+
+`witself-infra` provisions one complete isolated cell per cloud account/region.
+For the current AWS sandbox cell in `us-west-2`:
+
+```sh
+witself-infra up \
+  -account-alias sandbox \
+  -argocd \
+  -aws-profile witwave-sandbox \
+  -backend s3 \
+  -cidr 10.20.0.0/16 \
+  -cloud aws \
+  -db-version 18 \
+  -gitops-path .gitops/charts/bootstrap \
+  -gitops-repo https://github.com/witwave-ai/witself \
+  -gitops-revision main \
+  -ingress cloudflare-tunnel \
+  -k8s-version 1.36 \
+  -profile minimal \
+  -region us-west-2 \
+  -role dev
+```
+
+The minimal teardown command only needs the stack identity, backend, and AWS
+credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
+backend remains for the next run.
+
+```sh
+witself-infra destroy \
+  -account-alias sandbox \
+  -aws-profile witwave-sandbox \
+  -backend s3 \
+  -cloud aws \
+  -region us-west-2 \
+  -role dev
+```
+
+See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
+[.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps
+tree after `-argocd` is enabled.
+
 ## Overview
 
 Witself is the agent durable-state platform **and** the trust fabric agents
@@ -94,9 +136,9 @@ support path once hardening docs and operational guidance are real.
 
 ## Repository Status
 
-This repository is currently docs-first. Code, release workflows, images, Helm
-charts, and Terraform modules will be added after the product and security
-contracts are clear.
+This repository is pre-v0 and still docs-led, but implementation is now landing
+incrementally. The `ws` CLI, `witself-server`, Helm chart, GitOps tree, release
+workflows, and Pulumi-based `witself-infra` module are built in this repo.
 
 ## Docs
 
