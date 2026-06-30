@@ -18,12 +18,12 @@ const (
 	argocdChartVersion = "10.0.1"
 	argocdNamespace    = "argocd"
 
-	// The GitOps source Argo reconciles. The repo is public, so no credentials
-	// are needed to read it. Constants for now; a later slice makes them flags so
-	// a self-hoster can point Argo at their own fork / config repo.
-	gitopsRepo     = "https://github.com/witwave-ai/witself"
-	gitopsPath     = ".gitops/bootstrap"
-	gitopsRevision = "main"
+	// Default GitOps source Argo reconciles, overridable via the -gitops-* flags
+	// so a self-hoster can point Argo at their own fork / config repo. The repo is
+	// public, so no credentials are needed to read it (private-repo creds: issue #7).
+	DefaultGitopsRepo     = "https://github.com/witwave-ai/witself"
+	DefaultGitopsPath     = ".gitops/bootstrap"
+	DefaultGitopsRevision = "main"
 )
 
 // provisionAWSArgoCD installs Argo CD into the cell's EKS cluster via Helm.
@@ -127,9 +127,9 @@ users:
 			"spec": map[string]interface{}{
 				"project": "default",
 				"source": map[string]interface{}{
-					"repoURL":        gitopsRepo,
-					"targetRevision": gitopsRevision,
-					"path":           gitopsPath,
+					"repoURL":        c.gitopsRepo,
+					"targetRevision": c.gitopsRevision,
+					"path":           c.gitopsPath,
 					"directory":      map[string]interface{}{"recurse": true},
 				},
 				"destination": map[string]interface{}{
@@ -149,6 +149,6 @@ users:
 	ctx.Export("argocdNamespace", pulumi.String(argocdNamespace))
 	ctx.Export("argocdPortForward", pulumi.String("kubectl -n "+argocdNamespace+" port-forward svc/argocd-server 8080:443  # then https://localhost:8080 (user: admin)"))
 	ctx.Export("argocdAdminSecret", pulumi.String("kubectl -n "+argocdNamespace+" get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"))
-	ctx.Export("gitops", pulumi.String(gitopsRepo+" @ "+gitopsRevision+" ("+gitopsPath+")"))
+	ctx.Export("gitops", pulumi.String(c.gitopsRepo+" @ "+c.gitopsRevision+" ("+c.gitopsPath+")"))
 	return nil
 }

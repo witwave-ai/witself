@@ -100,9 +100,21 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 The Kubernetes provider authenticates with an exec kubeconfig (`aws eks
 get-token`, auto-refreshing — Auto Mode provisions nodes on demand, so the first
-install can outlast a static token while Argo's pods wait for compute). Pointing
-Argo at the `.gitops/` repo (the root ApplicationSet), SSO, and ingress are later
-slices.
+install can outlast a static token while Argo's pods wait for compute).
+
+`-argocd` also creates a root Argo `Application` (`bootstrap`) pointing at
+[`.gitops/bootstrap`](../../.gitops); Argo reconciles everything declared there
+(the External Secrets Operator first). The repo is public, so Argo needs **no
+credentials** (private-repo creds: issue #7). Point Argo at a self-hosted fork
+with the `-gitops-*` flags:
+
+```sh
+witself-infra up -argocd \
+  -gitops-repo https://github.com/you/your-config \
+  -gitops-path .gitops/bootstrap -gitops-revision main $F
+```
+
+Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
 
 ## Roadmap (one slice at a time)
 
@@ -110,5 +122,6 @@ slices.
 2. **[done]** AWS substrate: cell VPC (NAT egress) + EKS Auto Mode + RDS Postgres.
 3. **[done]** S3 + KMS state backend (`bootstrap`).
 4. **[done]** Argo CD (GitOps control plane) via Helm — opt-in `-argocd`.
-5. Wire Argo CD at the `.gitops/` repo (root ApplicationSet) + SSO + ingress.
-6. Install the witself-server chart; sealed-plane KMS (prod), IRSA, GCP provider.
+5. **[done]** Wire Argo at `.gitops/bootstrap` + install External Secrets via GitOps.
+6. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
+   SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP provider.

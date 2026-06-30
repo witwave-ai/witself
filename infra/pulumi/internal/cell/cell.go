@@ -27,15 +27,18 @@ import (
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.
 type awsCell struct {
-	name         string // composed cell name (= ctx.Stack())
-	profile      string // minimal | prod
-	cidr         string // VPC CIDR (/16)
-	accountAlias string // free-text account label
-	region       string // real region, e.g. us-west-2
-	role         string // dev | prod | canary | ordinal
-	k8sVersion   string // EKS Kubernetes version
-	dbVersion    string // RDS PostgreSQL major version
-	argocd       bool   // install Argo CD (GitOps control plane) into the cluster
+	name           string // composed cell name (= ctx.Stack())
+	profile        string // minimal | prod
+	cidr           string // VPC CIDR (/16)
+	accountAlias   string // free-text account label
+	region         string // real region, e.g. us-west-2
+	role           string // dev | prod | canary | ordinal
+	k8sVersion     string // EKS Kubernetes version
+	dbVersion      string // RDS PostgreSQL major version
+	argocd         bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo     string // GitOps repo URL Argo's root app reconciles
+	gitopsPath     string // path in the repo Argo reads (recurse)
+	gitopsRevision string // repo revision (branch/tag)
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -62,6 +65,18 @@ func Program(ctx *pulumi.Context) error {
 		dbVersion = "18"
 	}
 	argocd := w.GetBool("argocd")
+	gitopsRepo := w.Get("gitopsRepo")
+	if gitopsRepo == "" {
+		gitopsRepo = DefaultGitopsRepo
+	}
+	gitopsPath := w.Get("gitopsPath")
+	if gitopsPath == "" {
+		gitopsPath = DefaultGitopsPath
+	}
+	gitopsRevision := w.Get("gitopsRevision")
+	if gitopsRevision == "" {
+		gitopsRevision = DefaultGitopsRevision
+	}
 
 	ctx.Export("cell", pulumi.String(cellName))
 	ctx.Export("cloud", pulumi.String(cloud))
@@ -71,15 +86,18 @@ func Program(ctx *pulumi.Context) error {
 	switch cloud {
 	case "", "aws":
 		return provisionAWS(ctx, awsCell{
-			name:         cellName,
-			profile:      profile,
-			cidr:         cidr,
-			accountAlias: w.Get("accountAlias"),
-			region:       a.Get("region"),
-			role:         w.Get("role"),
-			k8sVersion:   k8sVersion,
-			dbVersion:    dbVersion,
-			argocd:       argocd,
+			name:           cellName,
+			profile:        profile,
+			cidr:           cidr,
+			accountAlias:   w.Get("accountAlias"),
+			region:         a.Get("region"),
+			role:           w.Get("role"),
+			k8sVersion:     k8sVersion,
+			dbVersion:      dbVersion,
+			argocd:         argocd,
+			gitopsRepo:     gitopsRepo,
+			gitopsPath:     gitopsPath,
+			gitopsRevision: gitopsRevision,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

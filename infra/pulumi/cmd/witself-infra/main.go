@@ -90,6 +90,9 @@ flags:
   -db-version     RDS PostgreSQL major version                 (default "18")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -argocd         install Argo CD (GitOps control plane)        (default false)
+  -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
+  -gitops-path     path in the GitOps repo Argo reads           (default ".gitops/bootstrap")
+  -gitops-revision GitOps repo revision (branch/tag)            (default "main")
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
@@ -130,6 +133,9 @@ func run(args []string) error {
 	dbVersion := fs.String("db-version", "18", "RDS PostgreSQL major version")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
+	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
+	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path in the GitOps repo Argo's root app reads")
+	gitopsRevision := fs.String("gitops-revision", cell.DefaultGitopsRevision, "GitOps repo revision (branch/tag)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
@@ -242,16 +248,19 @@ func run(args []string) error {
 	// Behavior config (cloud/profile/cidr/ingress) + the real region for the
 	// provider. The name components are encoded in the cell/stack name itself.
 	for k, v := range map[string]string{
-		"witself:cloud":        *cloud,
-		"witself:profile":      *profile,
-		"witself:ingress":      *ingress,
-		"witself:cidr":         *cidr,
-		"witself:accountAlias": *accountAlias,
-		"witself:role":         *role,
-		"witself:k8sVersion":   *k8sVersion,
-		"witself:dbVersion":    *dbVersion,
-		"witself:argocd":       fmt.Sprintf("%t", *argocd),
-		"aws:region":           *region,
+		"witself:cloud":          *cloud,
+		"witself:profile":        *profile,
+		"witself:ingress":        *ingress,
+		"witself:cidr":           *cidr,
+		"witself:accountAlias":   *accountAlias,
+		"witself:role":           *role,
+		"witself:k8sVersion":     *k8sVersion,
+		"witself:dbVersion":      *dbVersion,
+		"witself:argocd":         fmt.Sprintf("%t", *argocd),
+		"witself:gitopsRepo":     *gitopsRepo,
+		"witself:gitopsPath":     *gitopsPath,
+		"witself:gitopsRevision": *gitopsRevision,
+		"aws:region":             *region,
 	} {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
 			return fmt.Errorf("set config %s: %w", k, err)
