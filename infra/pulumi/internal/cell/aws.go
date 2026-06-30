@@ -114,7 +114,10 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		DeletionProtection: pulumi.Bool(false),
 		PubliclyAccessible: pulumi.Bool(false),
 		Tags:               resourceTags(rname(c.name, "db"), "database"),
-	}, pulumi.Provider(prov))
+		// The DB has an explicit Identifier, so a replacement (e.g. enabling
+		// storage encryption) must delete the old instance before creating the new
+		// one — otherwise the two collide on the name (DBInstanceAlreadyExists).
+	}, pulumi.Provider(prov), pulumi.DeleteBeforeReplace(true))
 	if err != nil {
 		return err
 	}
