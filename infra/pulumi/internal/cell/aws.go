@@ -77,6 +77,13 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 
+	// EKS Auto Mode cluster: AWS manages the nodes, core add-ons, scaling, and
+	// patching, so the cell's Kubernetes layer is low-maintenance.
+	eksCluster, err := provisionAWSEKS(ctx, c, net, prov)
+	if err != nil {
+		return err
+	}
+
 	// Master password: generated, never hard-coded. RDS disallows /, @, ", and
 	// spaces, so keep it alphanumeric. RandomPassword.Result is a secret output.
 	pw, err := random.NewRandomPassword(ctx, "witself-db", &random.RandomPasswordArgs{
@@ -94,6 +101,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		InstanceClass:       pulumi.String(dbInstanceClass(c.profile)),
 		AllocatedStorage:    pulumi.Int(20),
 		StorageType:         pulumi.String("gp3"),
+		StorageEncrypted:    pulumi.Bool(true),        // KMS-encrypted at rest (AWS-managed RDS key)
 		DbName:              pulumi.String("witself"), // logical app DB stays "witself"
 		Username:            pulumi.String("witself"),
 		Password:            pw.Result,
@@ -116,8 +124,10 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return fmt.Sprintf("postgres://witself:%s@%s/witself?sslmode=require", a[1], a[0])
 	}).(pulumi.StringOutput)
 
-	ctx.Export("status", pulumi.String("aws: cell vpc + rds postgres provisioned"))
+	ctx.Export("status", pulumi.String("aws: cell vpc + eks (auto mode) + rds postgres provisioned"))
 	ctx.Export("vpcId", net.vpcID)
+	ctx.Export("eksCluster", eksCluster.name)
+	ctx.Export("eksEndpoint", eksCluster.endpoint)
 	ctx.Export("dbEndpoint", db.Endpoint)
 	ctx.Export("dbName", pulumi.String("witself"))
 	ctx.Export("dbUsername", pulumi.String("witself"))

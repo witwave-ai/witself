@@ -16,9 +16,11 @@ import (
 // it removes any dependency on a region's default VPC — which does not exist in
 // Control Tower-governed accounts.
 type awsNetwork struct {
-	vpcID         pulumi.StringOutput
-	dbSubnetGroup pulumi.StringOutput // RDS subnet group name (private subnets)
-	dbSecurityGrp pulumi.StringOutput // database security group id
+	vpcID          pulumi.StringOutput
+	publicSubnets  pulumi.StringArray  // public subnet ids (for EKS LBs / NAT)
+	privateSubnets pulumi.StringArray  // private subnet ids (for EKS nodes / RDS)
+	dbSubnetGroup  pulumi.StringOutput // RDS subnet group name (private subnets)
+	dbSecurityGrp  pulumi.StringOutput // database security group id
 }
 
 // cidrPrefix returns the first two octets of a /16 CIDR (e.g. "10.20.0.0/16" ->
@@ -94,7 +96,7 @@ func provisionAWSNetwork(ctx *pulumi.Context, c awsCell, minimal bool, prov *aws
 		return nil, err
 	}
 
-	var privateSubnets pulumi.StringArray
+	var publicSubnets, privateSubnets pulumi.StringArray
 	for i := 0; i < azCount; i++ {
 		az := azs.Names[i]
 
@@ -118,6 +120,7 @@ func provisionAWSNetwork(ctx *pulumi.Context, c awsCell, minimal bool, prov *aws
 		}, pulumi.Provider(prov)); err != nil {
 			return nil, err
 		}
+		publicSubnets = append(publicSubnets, pub.ID())
 
 		priv, err := ec2.NewSubnet(ctx, fmt.Sprintf("cell-private-%d", i), &ec2.SubnetArgs{
 			VpcId:            vpc.ID(),
@@ -140,6 +143,32 @@ func provisionAWSNetwork(ctx *pulumi.Context, c awsCell, minimal bool, prov *aws
 		}
 
 		privateSubnets = append(privateSubnets, priv.ID())
+	}
+
+	// NAT gateway so the private subnets (EKS nodes) have outbound internet for
+	// image pulls and AWS APIs. Minimal profile uses a single NAT; the public
+	// subnets already route to the IGW.
+	eip, err := ec2.NewEip(ctx, "cell-nat", &ec2.EipArgs{
+		Domain: pulumi.String("vpc"),
+		Tags:   resourceTags(rname(c.name, "nat"), "network"),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return nil, err
+	}
+	nat, err := ec2.NewNatGateway(ctx, "cell", &ec2.NatGatewayArgs{
+		AllocationId: eip.ID(),
+		SubnetId:     publicSubnets[0],
+		Tags:         resourceTags(rname(c.name, "nat"), "network"),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := ec2.NewRoute(ctx, "cell-private-nat", &ec2.RouteArgs{
+		RouteTableId:         privateRT.ID(),
+		DestinationCidrBlock: pulumi.String("0.0.0.0/0"),
+		NatGatewayId:         nat.ID(),
+	}, pulumi.Provider(prov)); err != nil {
+		return nil, err
 	}
 
 	dbSG, err := ec2.NewSecurityGroup(ctx, "cell-db", &ec2.SecurityGroupArgs{
@@ -180,8 +209,10 @@ func provisionAWSNetwork(ctx *pulumi.Context, c awsCell, minimal bool, prov *aws
 	}
 
 	return &awsNetwork{
-		vpcID:         vpc.ID().ToStringOutput(),
-		dbSubnetGroup: dbSubnetGroup.Name,
-		dbSecurityGrp: dbSG.ID().ToStringOutput(),
+		vpcID:          vpc.ID().ToStringOutput(),
+		publicSubnets:  publicSubnets,
+		privateSubnets: privateSubnets,
+		dbSubnetGroup:  dbSubnetGroup.Name,
+		dbSecurityGrp:  dbSG.ID().ToStringOutput(),
 	}, nil
 }
