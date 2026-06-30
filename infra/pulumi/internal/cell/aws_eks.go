@@ -13,6 +13,9 @@ import (
 type awsEKS struct {
 	name     pulumi.StringOutput
 	endpoint pulumi.StringOutput
+	// certificateAuthority is the base64 CA bundle, used to build a kubeconfig
+	// for the in-cluster add-ons (e.g. Argo CD) provisioned via Helm.
+	certificateAuthority pulumi.StringOutput
 }
 
 // EKS trust policies + the managed policies each role needs. Auto Mode lets EKS
@@ -126,5 +129,9 @@ func provisionAWSEKS(ctx *pulumi.Context, c awsCell, net *awsNetwork, prov *aws.
 		return nil, err
 	}
 
-	return &awsEKS{name: cluster.Name, endpoint: cluster.Endpoint}, nil
+	return &awsEKS{
+		name:                 cluster.Name,
+		endpoint:             cluster.Endpoint,
+		certificateAuthority: cluster.CertificateAuthority.Data().Elem(),
+	}, nil
 }

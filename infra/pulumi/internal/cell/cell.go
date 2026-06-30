@@ -35,6 +35,7 @@ type awsCell struct {
 	role         string // dev | prod | canary | ordinal
 	k8sVersion   string // EKS Kubernetes version
 	dbVersion    string // RDS PostgreSQL major version
+	argocd       bool   // install Argo CD (GitOps control plane) into the cluster
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -60,6 +61,7 @@ func Program(ctx *pulumi.Context) error {
 	if dbVersion == "" {
 		dbVersion = "18"
 	}
+	argocd := w.GetBool("argocd")
 
 	ctx.Export("cell", pulumi.String(cellName))
 	ctx.Export("cloud", pulumi.String(cloud))
@@ -77,6 +79,7 @@ func Program(ctx *pulumi.Context) error {
 			role:         w.Get("role"),
 			k8sVersion:   k8sVersion,
 			dbVersion:    dbVersion,
+			argocd:       argocd,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

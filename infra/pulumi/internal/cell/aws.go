@@ -84,6 +84,15 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 
+	// GitOps control plane (opt-in): install Argo CD via Helm. Universal — the
+	// upstream chart, not the AWS-only managed capability — so the same install
+	// works on EKS, GKE, or a self-hosted cluster.
+	if c.argocd {
+		if err := provisionAWSArgoCD(ctx, c, eksCluster); err != nil {
+			return err
+		}
+	}
+
 	// Master password: generated, never hard-coded. RDS disallows /, @, ", and
 	// spaces, so keep it alphanumeric. RandomPassword.Result is a secret output.
 	pw, err := random.NewRandomPassword(ctx, "witself-db", &random.RandomPasswordArgs{

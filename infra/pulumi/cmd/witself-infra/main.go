@@ -89,6 +89,7 @@ flags:
   -k8s-version    EKS Kubernetes version                       (default "1.36")
   -db-version     RDS PostgreSQL major version                 (default "18")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
+  -argocd         install Argo CD (GitOps control plane)        (default false)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
@@ -128,6 +129,7 @@ func run(args []string) error {
 	k8sVersion := fs.String("k8s-version", "1.36", "EKS Kubernetes version")
 	dbVersion := fs.String("db-version", "18", "RDS PostgreSQL major version")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
+	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
@@ -248,6 +250,7 @@ func run(args []string) error {
 		"witself:role":         *role,
 		"witself:k8sVersion":   *k8sVersion,
 		"witself:dbVersion":    *dbVersion,
+		"witself:argocd":       fmt.Sprintf("%t", *argocd),
 		"aws:region":           *region,
 	} {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {

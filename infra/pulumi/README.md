@@ -83,11 +83,32 @@ and prints the `s3://…` backend + `awskms://…` secrets provider. `up --backe
 **uses** that backend (KMS-encrypted secrets, no passphrase) and errors if it is
 missing; pass `-bootstrap` to create it on first use.
 
+## GitOps (Argo CD)
+
+Pass `-argocd` to install the Argo CD control plane into the cell's cluster from
+its upstream Helm chart (`argo-cd` 10.0.1). This is **universal** — the chart,
+not the AWS-only managed EKS capability — so the same install works on EKS, GKE,
+or a self-hosted cluster. It is **opt-in** and off by default.
+
+```sh
+witself-infra up -argocd $F
+
+# reach the UI (ClusterIP — no public LB yet):
+kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, user: admin
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
+The Kubernetes provider authenticates with an exec kubeconfig (`aws eks
+get-token`, auto-refreshing — Auto Mode provisions nodes on demand, so the first
+install can outlast a static token while Argo's pods wait for compute). Pointing
+Argo at the `.gitops/` repo (the root ApplicationSet), SSO, and ingress are later
+slices.
+
 ## Roadmap (one slice at a time)
 
 1. **[done]** module + CLI + Automation API loop.
-2. **[done]** AWS substrate: dedicated cell VPC (private subnets) + RDS Postgres.
-3. Install the published OCI chart
-   (`oci://ghcr.io/witwave-ai/charts/witself-server`).
-4. Ingress modes: `cloudflare-tunnel | alb | none`.
-5. Sealed-plane KMS (prod profile), IRSA, NAT/egress, GCP provider.
+2. **[done]** AWS substrate: cell VPC (NAT egress) + EKS Auto Mode + RDS Postgres.
+3. **[done]** S3 + KMS state backend (`bootstrap`).
+4. **[done]** Argo CD (GitOps control plane) via Helm — opt-in `-argocd`.
+5. Wire Argo CD at the `.gitops/` repo (root ApplicationSet) + SSO + ingress.
+6. Install the witself-server chart; sealed-plane KMS (prod), IRSA, GCP provider.
