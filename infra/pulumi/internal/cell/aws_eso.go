@@ -9,7 +9,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-// The External Secrets Operator (installed via GitOps, see .gitops/bootstrap)
+// The External Secrets Operator (installed via the cell GitOps bootstrap)
 // authenticates to AWS with EKS Pod Identity — preferred over IRSA: no OIDC
 // provider, no ServiceAccount annotations, and EKS Auto Mode ships the Pod
 // Identity Agent built-in, so there is nothing extra to install. The association

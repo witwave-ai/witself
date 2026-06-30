@@ -2,48 +2,37 @@
 
 Argo CD (installed per cell by `witself-infra up -argocd`) watches this
 directory. `witself-infra` creates a single root Argo `Application` named
-`bootstrap` that points at [`bootstrap/`](bootstrap); everything else is declared
-here and reconciled by Argo.
+`bootstrap` that renders the reusable [`charts/cell-bootstrap`](charts/cell-bootstrap)
+chart with one cell-specific [`cells/<cell>/values.yaml`](cells) file.
 
 ## Layout
 
 ```text
 .gitops/
-  bootstrap/    # Argo's entrypoint — the root app reads this (recurse)
-    platform.yaml   # Application -> platform/  (sync-wave 0)
-    apps.yaml       # Application -> apps/       (sync-wave 1)
-  platform/     # shared cluster add-ons, one Application each
-    external-secrets/
-      app.yaml
-      secrets-manager-store.yaml
-  apps/         # the application tier (witself-server, ...)
-    witself-server/
-      namespace.yaml
-      db-secret.yaml
-      app.yaml
-  cells/        # per-cell overlays, by cell name — fleet scaffolding
+  charts/
+    cell-bootstrap/ # root app-of-apps chart; renders platform + apps tiers
+    cell-platform/  # platform tier; renders platform add-ons/config
+    cell-apps/      # app tier; renders app prerequisites + app Applications
+  cells/                     # per-cell control files, by composed cell name
     aws-sandbox-usw2-dev/
-      bootstrap/
-        platform.yaml
-        apps.yaml
       values.yaml
     aws-sandbox-use1-dev/
-      bootstrap/
-        platform.yaml
-        apps.yaml
       values.yaml
 ```
 
 `witself-infra up -argocd` creates one root Argo `Application` (`bootstrap`)
-pointing at [`bootstrap/`](bootstrap). It fans out to the `platform` and `apps`
-tiers, which reconcile everything under [`platform/`](platform) and `apps/`. The
-platform tier (sync-wave 0) comes up before the app tier (sync-wave 1).
+pointing at [`charts/cell-bootstrap`](charts/cell-bootstrap), with values loaded
+from `cells/<cell>/values.yaml`. That bootstrap chart renders the child Argo
+Applications for the `platform` and `apps` tiers. Those tier Applications render
+their own Helm charts with the same cell values file. The cell values file is the
+single Git-owned place to pin chart versions, target revisions, regions,
+namespaces, and secret references for that cell.
 
 The Application manifests here reference this public repo by URL; a self-hosted
-fork (`-gitops-repo`) would adjust those URLs (or we templatize them via an
-ApplicationSet later). Multi-cell bootstraps live under
-[`cells/<cell>/bootstrap`](cells); a cell can point `-gitops-path` at its own
-bootstrap path once its per-cell `platform/` and `apps/` trees are populated.
+fork (`-gitops-repo`) would adjust the root source, and the per-cell values file
+would set `gitops.repoURL` for child Applications. A central fleet controller
+can move this to ApplicationSet later; for one Argo CD per cell, app-of-apps is
+the simpler control plane.
 
 ## Notes
 

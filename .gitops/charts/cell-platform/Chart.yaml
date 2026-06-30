@@ -1,0 +1,5 @@
+apiVersion: v2
+name: witself-cell-platform
+description: Renders the platform tier for one Witself cell.
+type: application
+version: 0.1.0

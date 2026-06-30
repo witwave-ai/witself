@@ -1,0 +1,8 @@
+{{- if .Values.apps.witselfServer.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.apps.witselfServer.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+{{- end }}

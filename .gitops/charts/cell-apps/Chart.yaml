@@ -1,0 +1,5 @@
+apiVersion: v2
+name: witself-cell-apps
+description: Renders the application tier for one Witself cell.
+type: application
+version: 0.1.0

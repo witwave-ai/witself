@@ -1,0 +1,33 @@
+{{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  sources:
+    - repoURL: {{ .Values.gitops.repoURL | quote }}
+      targetRevision: {{ .Values.gitops.targetRevision | quote }}
+      path: .gitops/charts/cell-apps
+      helm:
+        valueFiles:
+          - {{ printf "$values/%s" $valuesPath | quote }}
+    - repoURL: {{ .Values.gitops.repoURL | quote }}
+      targetRevision: {{ .Values.gitops.targetRevision | quote }}
+      ref: values
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true

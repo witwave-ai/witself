@@ -102,16 +102,19 @@ The Kubernetes provider authenticates with an exec kubeconfig (`aws eks
 get-token`, auto-refreshing — Auto Mode provisions nodes on demand, so the first
 install can outlast a static token while Argo's pods wait for compute).
 
-`-argocd` also creates a root Argo `Application` (`bootstrap`) pointing at
-[`.gitops/bootstrap`](../../.gitops); Argo reconciles everything declared there
-(the External Secrets Operator first). The repo is public, so Argo needs **no
-credentials** (private-repo creds: issue #7). Point Argo at a self-hosted fork
-with the `-gitops-*` flags:
+`-argocd` also creates a root Argo `Application` (`bootstrap`) that renders the
+shared `.gitops/charts/cell-bootstrap` chart with this cell's
+`.gitops/cells/<cell>/values.yaml` file. That Git-owned values file pins the
+platform/app chart versions and cell-specific settings. The repo is public, so
+Argo needs **no credentials** (private-repo creds: issue #7). Point Argo at a
+self-hosted fork with the `-gitops-*` flags:
 
 ```sh
 witself-infra up -argocd \
   -gitops-repo https://github.com/you/your-config \
-  -gitops-path .gitops/bootstrap -gitops-revision main $F
+  -gitops-path .gitops/charts/cell-bootstrap \
+  -gitops-values-path .gitops/cells/aws-sandbox-usw2-dev/values.yaml \
+  -gitops-revision main $F
 ```
 
 Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
@@ -122,7 +125,7 @@ Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
 2. **[done]** AWS substrate: cell VPC (NAT egress) + EKS Auto Mode + RDS Postgres.
 3. **[done]** S3 + KMS state backend (`bootstrap`).
 4. **[done]** Argo CD (GitOps control plane) via Helm — opt-in `-argocd`.
-5. **[done]** Wire Argo at `.gitops/bootstrap` + install External Secrets via GitOps.
+5. **[done]** Wire Argo at the cell-bootstrap app-of-apps chart + per-cell values.
 6. **[done]** Metrics Server as an EKS add-on (resource metrics API for
    `kubectl top` and HPA CPU/memory signals).
 7. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then

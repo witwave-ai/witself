@@ -1,26 +1,18 @@
 cell:
-  name: aws-sandbox-use1-dev
-  cloud: aws
-  accountAlias: sandbox
-  region: us-east-1
-  role: dev
+  name: ""
 
 gitops:
+  project: default
   repoURL: https://github.com/witwave-ai/witself
   targetRevision: main
-
-platform:
-  externalSecrets:
-    enabled: true
-    chartVersion: 2.7.0
-    namespace: external-secrets
-    storeName: aws
-    secretsManagerRegion: us-east-1
+  destinationServer: https://kubernetes.default.svc
 
 apps:
   witselfServer:
     enabled: true
     namespace: witself
+    chartRepoURL: ghcr.io/witwave-ai/charts
+    chartName: witself-server
     chartVersion: 0.0.42
     imageTag: 0.0.42
     backendKind: managed
@@ -30,3 +22,4 @@ apps:
         targetName: witself-db
         urlKey: dsn
         refreshInterval: 1h
+        storeName: aws

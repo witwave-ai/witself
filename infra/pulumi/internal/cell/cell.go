@@ -27,18 +27,19 @@ import (
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.
 type awsCell struct {
-	name           string // composed cell name (= ctx.Stack())
-	profile        string // minimal | prod
-	cidr           string // VPC CIDR (/16)
-	accountAlias   string // free-text account label
-	region         string // real region, e.g. us-west-2
-	role           string // dev | prod | canary | ordinal
-	k8sVersion     string // EKS Kubernetes version
-	dbVersion      string // RDS PostgreSQL major version
-	argocd         bool   // install Argo CD (GitOps control plane) into the cluster
-	gitopsRepo     string // GitOps repo URL Argo's root app reconciles
-	gitopsPath     string // path in the repo Argo reads (recurse)
-	gitopsRevision string // repo revision (branch/tag)
+	name             string // composed cell name (= ctx.Stack())
+	profile          string // minimal | prod
+	cidr             string // VPC CIDR (/16)
+	accountAlias     string // free-text account label
+	region           string // real region, e.g. us-west-2
+	role             string // dev | prod | canary | ordinal
+	k8sVersion       string // EKS Kubernetes version
+	dbVersion        string // RDS PostgreSQL major version
+	argocd           bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo       string // GitOps repo URL Argo's root app reconciles
+	gitopsPath       string // path in the repo for the root bootstrap chart
+	gitopsValuesPath string // path in the repo for this cell's bootstrap values
+	gitopsRevision   string // repo revision (branch/tag)
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -73,6 +74,10 @@ func Program(ctx *pulumi.Context) error {
 	if gitopsPath == "" {
 		gitopsPath = DefaultGitopsPath
 	}
+	gitopsValuesPath := w.Get("gitopsValuesPath")
+	if gitopsValuesPath == "" {
+		gitopsValuesPath = DefaultGitopsValuesPath(cellName)
+	}
 	gitopsRevision := w.Get("gitopsRevision")
 	if gitopsRevision == "" {
 		gitopsRevision = DefaultGitopsRevision
@@ -86,18 +91,19 @@ func Program(ctx *pulumi.Context) error {
 	switch cloud {
 	case "", "aws":
 		return provisionAWS(ctx, awsCell{
-			name:           cellName,
-			profile:        profile,
-			cidr:           cidr,
-			accountAlias:   w.Get("accountAlias"),
-			region:         a.Get("region"),
-			role:           w.Get("role"),
-			k8sVersion:     k8sVersion,
-			dbVersion:      dbVersion,
-			argocd:         argocd,
-			gitopsRepo:     gitopsRepo,
-			gitopsPath:     gitopsPath,
-			gitopsRevision: gitopsRevision,
+			name:             cellName,
+			profile:          profile,
+			cidr:             cidr,
+			accountAlias:     w.Get("accountAlias"),
+			region:           a.Get("region"),
+			role:             w.Get("role"),
+			k8sVersion:       k8sVersion,
+			dbVersion:        dbVersion,
+			argocd:           argocd,
+			gitopsRepo:       gitopsRepo,
+			gitopsPath:       gitopsPath,
+			gitopsValuesPath: gitopsValuesPath,
+			gitopsRevision:   gitopsRevision,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

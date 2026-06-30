@@ -1,6 +1,8 @@
 package cell
 
 import (
+	"fmt"
+
 	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
 	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	helm "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/helm/v3"
@@ -22,9 +24,13 @@ const (
 	// so a self-hoster can point Argo at their own fork / config repo. The repo is
 	// public, so no credentials are needed to read it (private-repo creds: issue #7).
 	DefaultGitopsRepo     = "https://github.com/witwave-ai/witself"
-	DefaultGitopsPath     = ".gitops/bootstrap"
+	DefaultGitopsPath     = ".gitops/charts/cell-bootstrap"
 	DefaultGitopsRevision = "main"
 )
+
+func DefaultGitopsValuesPath(cellName string) string {
+	return ".gitops/cells/" + cellName + "/values.yaml"
+}
 
 // provisionAWSArgoCD installs Argo CD into the cell's EKS cluster via Helm.
 //
@@ -38,10 +44,10 @@ const (
 // (A run by a different principal would lack access; configurable admin is a
 // later slice.)
 //
-// It also creates the root Argo Application ("bootstrap") pointing at the public
-// repo's .gitops/bootstrap path, so Argo reconciles the GitOps tree (External
-// Secrets first) with no credentials. The server stays ClusterIP — reach the UI
-// with `kubectl port-forward`. SSO and ingress are later slices.
+// It also creates the root Argo Application ("bootstrap") pointing at the cell's
+// GitOps bootstrap path, so Argo reconciles that cell's GitOps tree with no
+// credentials. The server stays ClusterIP — reach the UI with `kubectl
+// port-forward`. SSO and ingress are later slices.
 func provisionAWSArgoCD(ctx *pulumi.Context, c awsCell, eks *awsEKS) error {
 	kubeconfig := pulumi.Sprintf(`apiVersion: v1
 kind: Config
@@ -112,10 +118,11 @@ users:
 		return err
 	}
 
-	// Root "app of apps": one Argo Application pointing at .gitops/bootstrap, so
-	// Argo discovers and reconciles every Application declared there (External
-	// Secrets first). DependsOn the release so the Application CRD that the chart
-	// installs exists before we create this CR.
+	// Root "app of apps": one Argo Application renders the reusable cell
+	// bootstrap chart with this cell's values file. Git owns the child
+	// Applications and their versions; Pulumi only ensures Argo exists and points
+	// at the right Git source. DependsOn the release so the Application CRD that
+	// the chart installs exists before we create this CR.
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
 		Kind:       pulumi.String("Application"),
@@ -126,11 +133,21 @@ users:
 		OtherFields: kubernetes.UntypedArgs{
 			"spec": map[string]interface{}{
 				"project": "default",
-				"source": map[string]interface{}{
-					"repoURL":        c.gitopsRepo,
-					"targetRevision": c.gitopsRevision,
-					"path":           c.gitopsPath,
-					"directory":      map[string]interface{}{"recurse": true},
+				"sources": []interface{}{
+					map[string]interface{}{
+						"repoURL":        c.gitopsRepo,
+						"targetRevision": c.gitopsRevision,
+						"path":           c.gitopsPath,
+						"helm": map[string]interface{}{
+							"valueFiles": []interface{}{"$values/" + c.gitopsValuesPath},
+							"values":     fmt.Sprintf("gitops:\n  repoURL: %q\n  targetRevision: %q\n  valuesPath: %q\n", c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath),
+						},
+					},
+					map[string]interface{}{
+						"repoURL":        c.gitopsRepo,
+						"targetRevision": c.gitopsRevision,
+						"ref":            "values",
+					},
 				},
 				"destination": map[string]interface{}{
 					"server":    "https://kubernetes.default.svc",
@@ -149,6 +166,6 @@ users:
 	ctx.Export("argocdNamespace", pulumi.String(argocdNamespace))
 	ctx.Export("argocdPortForward", pulumi.String("kubectl -n "+argocdNamespace+" port-forward svc/argocd-server 8080:443  # then https://localhost:8080 (user: admin)"))
 	ctx.Export("argocdAdminSecret", pulumi.String("kubectl -n "+argocdNamespace+" get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"))
-	ctx.Export("gitops", pulumi.String(c.gitopsRepo+" @ "+c.gitopsRevision+" ("+c.gitopsPath+")"))
+	ctx.Export("gitops", pulumi.String(c.gitopsRepo+" @ "+c.gitopsRevision+" ("+c.gitopsPath+" + "+c.gitopsValuesPath+")"))
 	return nil
 }

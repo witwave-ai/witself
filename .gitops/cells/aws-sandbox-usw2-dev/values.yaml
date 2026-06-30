@@ -5,17 +5,28 @@ cell:
   region: us-west-2
   role: dev
 
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+
 platform:
   externalSecrets:
+    enabled: true
     chartVersion: 2.7.0
+    namespace: external-secrets
+    storeName: aws
     secretsManagerRegion: us-west-2
 
 apps:
   witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: 0.0.42
     imageTag: 0.0.42
     backendKind: managed
     secrets:
       database:
-        remoteKey: aws-sandbox-usw2-dev/db
+        remoteKeySuffix: db
         targetName: witself-db
         urlKey: dsn
+        refreshInterval: 1h

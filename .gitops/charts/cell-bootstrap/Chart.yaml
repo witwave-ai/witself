@@ -1,0 +1,5 @@
+apiVersion: v2
+name: witself-cell-bootstrap
+description: Renders the Argo CD Applications that make up one Witself cell.
+type: application
+version: 0.1.0

@@ -1,0 +1,20 @@
+cell:
+  name: ""
+  region: ""
+
+gitops:
+  project: default
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+  destinationServer: https://kubernetes.default.svc
+
+platform:
+  externalSecrets:
+    enabled: true
+    chartRepoURL: https://charts.external-secrets.io
+    chartName: external-secrets
+    chartVersion: 2.7.0
+    namespace: external-secrets
+    installCRDs: true
+    storeName: aws
+    secretsManagerRegion: ""
