@@ -13,13 +13,25 @@ here and reconciled by Argo.
     platform.yaml   # Application -> platform/  (sync-wave 0)
     apps.yaml       # Application -> apps/       (sync-wave 1)
   platform/     # shared cluster add-ons, one Application each
-    external-secrets.yaml
-    namespace-witself.yaml
-    secrets-manager-store.yaml
-    witself-db-secret.yaml
+    external-secrets/
+      app.yaml
+      secrets-manager-store.yaml
   apps/         # the application tier (witself-server, ...)
-    witself-server.yaml
+    witself-server/
+      namespace.yaml
+      db-secret.yaml
+      app.yaml
   cells/        # per-cell overlays, by cell name — fleet scaffolding
+    aws-sandbox-usw2-dev/
+      bootstrap/
+        platform.yaml
+        apps.yaml
+      values.yaml
+    aws-sandbox-use1-dev/
+      bootstrap/
+        platform.yaml
+        apps.yaml
+      values.yaml
 ```
 
 `witself-infra up -argocd` creates one root Argo `Application` (`bootstrap`)
@@ -29,7 +41,9 @@ platform tier (sync-wave 0) comes up before the app tier (sync-wave 1).
 
 The Application manifests here reference this public repo by URL; a self-hosted
 fork (`-gitops-repo`) would adjust those URLs (or we templatize them via an
-ApplicationSet later).
+ApplicationSet later). Multi-cell bootstraps live under
+[`cells/<cell>/bootstrap`](cells); a cell can point `-gitops-path` at its own
+bootstrap path once its per-cell `platform/` and `apps/` trees are populated.
 
 ## Notes
 

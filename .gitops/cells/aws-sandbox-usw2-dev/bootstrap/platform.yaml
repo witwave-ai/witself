@@ -1,8 +1,13 @@
+# Platform tier for aws-sandbox-usw2-dev.
+#
+# sync-wave 0: platform add-ons come up before the app tier.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: witself-server
+  name: platform
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -10,24 +15,13 @@ spec:
   source:
     repoURL: https://github.com/witwave-ai/witself
     targetRevision: main
-    path: charts/witself-server
-    helm:
-      releaseName: witself-server
-      values: |
-        backend:
-          kind: managed
-        image:
-          tag: "0.0.42"
-        database:
-          existingSecret:
-            name: witself-db
-            urlKey: dsn
+    path: .gitops/cells/aws-sandbox-usw2-dev/platform
+    directory:
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
-    namespace: witself
+    namespace: argocd
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
-    syncOptions:
-      - CreateNamespace=true

@@ -1,0 +1,21 @@
+cell:
+  name: aws-sandbox-use1-dev
+  cloud: aws
+  accountAlias: sandbox
+  region: us-east-1
+  role: dev
+
+platform:
+  externalSecrets:
+    chartVersion: 2.7.0
+    secretsManagerRegion: us-east-1
+
+apps:
+  witselfServer:
+    imageTag: 0.0.42
+    backendKind: managed
+    secrets:
+      database:
+        remoteKey: aws-sandbox-use1-dev/db
+        targetName: witself-db
+        urlKey: dsn

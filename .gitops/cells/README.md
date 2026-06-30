@@ -1,11 +1,18 @@
-# cells/ — per-cell overlays
+# cells/ — per-cell GitOps roots
 
-Per-cell customization lives here, one directory per cell named by its composed
-cell name (e.g. `aws-sandbox-usw2-dev/`): values that differ between cells —
-image tags, replica counts, hostnames, which secrets to sync.
+Each directory is named by its composed cell name (for example,
+`aws-sandbox-usw2-dev/`). A cell can point `witself-infra -gitops-path` at its
+own `bootstrap/` directory so Argo reconciles only that cell's platform and app
+trees.
 
-Shared definitions (the `platform/` add-ons, the `apps/` charts) stay
-cell-agnostic; a cell selects its overlay by name. Today the fleet is a single
-cell, so this is scaffolding — the per-cell selection (the bootstrap Application
-parameterized by the cell name `witself-infra` injects) is wired when a second
-cell exists.
+```text
+cells/<cell>/
+  bootstrap/    # root Argo app target for this cell
+    platform.yaml
+    apps.yaml
+  values.yaml   # cell-specific pins and secret references
+```
+
+The per-cell bootstrap files intentionally point at `cells/<cell>/platform` and
+`cells/<cell>/apps`. Those trees are populated as each shared manifest is moved
+behind the cell boundary.

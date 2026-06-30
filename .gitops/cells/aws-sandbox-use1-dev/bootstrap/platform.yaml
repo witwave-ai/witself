@@ -1,0 +1,27 @@
+# Platform tier for aws-sandbox-use1-dev.
+#
+# sync-wave 0: platform add-ons come up before the app tier.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/witwave-ai/witself
+    targetRevision: main
+    path: .gitops/cells/aws-sandbox-use1-dev/platform
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
