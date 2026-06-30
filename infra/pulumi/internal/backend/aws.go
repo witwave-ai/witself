@@ -35,8 +35,11 @@ func names(account, region, regionCode string) *Info {
 	bucket := fmt.Sprintf("witself-state-%s-%s", account, regionCode)
 	alias := "alias/witself-state-" + regionCode
 	return &Info{
-		Bucket:          bucket,
-		BackendURL:      "s3://" + bucket,
+		Bucket: bucket,
+		// The ?region is required: without it Pulumi's S3 backend (gocloud) hits
+		// the us-east-1 endpoint and a bucket in another region returns a 301
+		// PermanentRedirect.
+		BackendURL:      fmt.Sprintf("s3://%s?region=%s", bucket, region),
 		KeyAlias:        alias,
 		SecretsProvider: fmt.Sprintf("awskms://%s?region=%s", alias, region),
 	}
