@@ -33,6 +33,8 @@ type awsCell struct {
 	accountAlias string // free-text account label
 	region       string // real region, e.g. us-west-2
 	role         string // dev | prod | canary | ordinal
+	k8sVersion   string // EKS Kubernetes version
+	dbVersion    string // RDS PostgreSQL major version
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -50,6 +52,14 @@ func Program(ctx *pulumi.Context) error {
 	if cidr == "" {
 		cidr = "10.20.0.0/16"
 	}
+	k8sVersion := w.Get("k8sVersion")
+	if k8sVersion == "" {
+		k8sVersion = "1.36"
+	}
+	dbVersion := w.Get("dbVersion")
+	if dbVersion == "" {
+		dbVersion = "18"
+	}
 
 	ctx.Export("cell", pulumi.String(cellName))
 	ctx.Export("cloud", pulumi.String(cloud))
@@ -65,6 +75,8 @@ func Program(ctx *pulumi.Context) error {
 			accountAlias: w.Get("accountAlias"),
 			region:       a.Get("region"),
 			role:         w.Get("role"),
+			k8sVersion:   k8sVersion,
+			dbVersion:    dbVersion,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))
