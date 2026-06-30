@@ -18,3 +18,10 @@ platform:
     installCRDs: true
     storeName: aws
     secretsManagerRegion: ""
+  keda:
+    enabled: true
+    chartRepoURL: https://kedacore.github.io/charts
+    chartName: keda
+    chartVersion: 2.20.1
+    namespace: keda
+    installCRDs: true

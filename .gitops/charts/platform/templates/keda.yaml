@@ -1,0 +1,34 @@
+{{- if .Values.platform.keda.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keda
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  source:
+    repoURL: {{ .Values.platform.keda.chartRepoURL | quote }}
+    chart: {{ .Values.platform.keda.chartName | quote }}
+    targetRevision: {{ required "platform.keda.chartVersion is required" .Values.platform.keda.chartVersion | quote }}
+    helm:
+      releaseName: keda
+      values: |
+        crds:
+          install: {{ .Values.platform.keda.installCRDs }}
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: {{ .Values.platform.keda.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+{{- end }}

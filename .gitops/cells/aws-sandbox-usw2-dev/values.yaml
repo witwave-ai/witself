@@ -16,6 +16,10 @@ platform:
     namespace: external-secrets
     storeName: aws
     secretsManagerRegion: us-west-2
+  keda:
+    enabled: true
+    chartVersion: 2.20.1
+    namespace: keda
 
 apps:
   witselfServer:
