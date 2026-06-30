@@ -32,6 +32,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 
+	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/cell"
 )
 
@@ -68,6 +69,7 @@ usage:
   witself-infra <command> [flags]
 
 commands:
+  bootstrap initialize the state backend (S3 bucket + KMS key) for the account
   up        create or update the cell
   preview   show what up would change
   destroy   tear the cell down
@@ -85,7 +87,9 @@ flags:
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
-  -state-dir      local Pulumi state backend dir
+  -backend        state backend: local|s3                      (default "local")
+  -bootstrap      with -backend s3, create the backend if missing
+  -state-dir      local Pulumi state backend dir (backend=local)
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -120,6 +124,8 @@ func run(args []string) error {
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
+	backendFlag := fs.String("backend", "local", "state backend: local|s3")
+	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -140,32 +146,67 @@ func run(args []string) error {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", *role)
 	}
 
+	// bootstrap initializes the state backend (S3 + KMS) and returns; it is not a
+	// cell op, so it skips the stack/passphrase machinery below.
+	if cmd == "bootstrap" {
+		return runBootstrap(*cloud, *region, regionCode, *awsProfile)
+	}
+
 	// Compose the cell name: it is the Pulumi stack name and the resource prefix.
 	cellName := strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-")
 
 	ctx := context.Background()
-	if err := os.MkdirAll(*stateDir, 0o755); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
 
-	passphrase, err := ensurePassphrase(*stateDir)
-	if err != nil {
-		return err
-	}
-	env := map[string]string{
-		"PULUMI_BACKEND_URL":       "file://" + *stateDir,
-		"PULUMI_CONFIG_PASSPHRASE": passphrase,
-	}
 	// A profile NAME is not a secret, so it is safe to pass as a flag; when
 	// omitted, the AWS provider uses the ambient credential chain (AWS_PROFILE
 	// env, SSO, OIDC), which is what CI / Witself Cloud rely on.
+	env := map[string]string{}
 	if *awsProfile != "" {
 		env["AWS_PROFILE"] = *awsProfile
 	}
 
-	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program,
-		auto.EnvVars(env),
-	)
+	var wsOpts []auto.LocalWorkspaceOption
+	switch *backendFlag {
+	case "local":
+		// Local file backend with a tool-managed passphrase (dev default).
+		if err := os.MkdirAll(*stateDir, 0o755); err != nil {
+			return fmt.Errorf("create state dir: %w", err)
+		}
+		passphrase, err := ensurePassphrase(*stateDir)
+		if err != nil {
+			return err
+		}
+		env["PULUMI_BACKEND_URL"] = "file://" + *stateDir
+		env["PULUMI_CONFIG_PASSPHRASE"] = passphrase
+	case "s3":
+		// Shared S3 backend + KMS secrets provider (no passphrase). The backend is
+		// created out-of-band by `bootstrap`; up uses it, or creates it only when
+		// explicitly asked via -bootstrap.
+		if *cloud != "aws" {
+			return fmt.Errorf("-backend s3 is only implemented for -cloud aws")
+		}
+		info, exists, err := backend.ResolveAWS(ctx, *region, regionCode, *awsProfile)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if !*bootstrap {
+				return fmt.Errorf("state backend %s does not exist — run `witself-infra bootstrap -cloud aws -region %s` first (or pass -bootstrap)", info.Bucket, *region)
+			}
+			if _, err := backend.BootstrapAWS(ctx, *region, regionCode, *awsProfile, func(m string) {
+				fmt.Fprintln(os.Stderr, "  "+m)
+			}); err != nil {
+				return err
+			}
+		}
+		env["PULUMI_BACKEND_URL"] = info.BackendURL
+		wsOpts = append(wsOpts, auto.SecretsProvider(info.SecretsProvider))
+	default:
+		return fmt.Errorf("unknown -backend %q (want local|s3)", *backendFlag)
+	}
+
+	wsOpts = append(wsOpts, auto.EnvVars(env))
+	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program, wsOpts...)
 	if err != nil {
 		return fmt.Errorf("create/select cell %q: %w", cellName, err)
 	}
@@ -220,6 +261,24 @@ func printOutputs(ctx context.Context, stack auto.Stack) error {
 		}
 		fmt.Printf("%s = %v\n", k, outs[k].Value)
 	}
+	return nil
+}
+
+// runBootstrap initializes the state backend for the account+region (idempotent).
+func runBootstrap(cloud, region, regionCode, profile string) error {
+	if cloud != "aws" {
+		return fmt.Errorf("bootstrap is only implemented for -cloud aws")
+	}
+	info, err := backend.BootstrapAWS(context.Background(), region, regionCode, profile, func(m string) {
+		fmt.Fprintln(os.Stderr, "  "+m)
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println("state backend ready:")
+	fmt.Println("  bucket:           " + info.Bucket)
+	fmt.Println("  backend (s3):     " + info.BackendURL)
+	fmt.Println("  secrets provider: " + info.SecretsProvider)
 	return nil
 }
 

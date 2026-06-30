@@ -59,6 +59,26 @@ local-state secret passphrase is generated and persisted (`0600`) under the stat
 dir on first use, so nothing needs to be exported. State defaults to a local file
 backend under `~/.witself-infra/state`.
 
+## State backend
+
+The local file backend is the dev default. For shared, durable state, use S3 + a
+KMS secrets provider (no passphrase) — **one bucket + one KMS key per account +
+region**:
+
+```sh
+# once per account+region: create the bucket + KMS key (idempotent — reuses if present)
+witself-infra bootstrap -cloud aws -region us-west-2 -aws-profile witwave-sandbox
+
+# then point cells at it
+witself-infra up --backend s3 -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
+```
+
+`bootstrap` creates `witself-state-<account-id>-<region-code>` (versioned,
+SSE-KMS, public-access-blocked, TLS-only) and `alias/witself-state-<region-code>`,
+and prints the `s3://…` backend + `awskms://…` secrets provider. `up --backend s3`
+**uses** that backend (KMS-encrypted secrets, no passphrase) and errors if it is
+missing; pass `-bootstrap` to create it on first use.
+
 ## Roadmap (one slice at a time)
 
 1. **[done]** module + CLI + Automation API loop.
