@@ -24,7 +24,7 @@ const (
 	// so a self-hoster can point Argo at their own fork / config repo. The repo is
 	// public, so no credentials are needed to read it (private-repo creds: issue #7).
 	DefaultGitopsRepo     = "https://github.com/witwave-ai/witself"
-	DefaultGitopsPath     = ".gitops/charts/cell-bootstrap"
+	DefaultGitopsPath     = ".gitops/charts/bootstrap"
 	DefaultGitopsRevision = "main"
 )
 

@@ -2,10 +2,10 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: apps
+  name: platform
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "0"
   labels:
     witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
   finalizers:
@@ -15,7 +15,7 @@ spec:
   sources:
     - repoURL: {{ .Values.gitops.repoURL | quote }}
       targetRevision: {{ .Values.gitops.targetRevision | quote }}
-      path: .gitops/charts/cell-apps
+      path: .gitops/charts/platform
       helm:
         valueFiles:
           - {{ printf "$values/%s" $valuesPath | quote }}

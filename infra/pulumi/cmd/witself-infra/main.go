@@ -91,7 +91,7 @@ flags:
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -argocd         install Argo CD (GitOps control plane)        (default false)
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
-  -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/cell-bootstrap")
+  -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
   -gitops-revision GitOps repo revision (branch/tag)            (default "main")
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)

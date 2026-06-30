@@ -2,7 +2,7 @@
 
 Argo CD (installed per cell by `witself-infra up -argocd`) watches this
 directory. `witself-infra` creates a single root Argo `Application` named
-`bootstrap` that renders the reusable [`charts/cell-bootstrap`](charts/cell-bootstrap)
+`bootstrap` that renders the reusable [`charts/bootstrap`](charts/bootstrap)
 chart with one cell-specific [`cells/<cell>/values.yaml`](cells) file.
 
 ## Layout
@@ -10,9 +10,9 @@ chart with one cell-specific [`cells/<cell>/values.yaml`](cells) file.
 ```text
 .gitops/
   charts/
-    cell-bootstrap/ # root app-of-apps chart; renders platform + apps tiers
-    cell-platform/  # platform tier; renders platform add-ons/config
-    cell-apps/      # app tier; renders app prerequisites + app Applications
+    bootstrap/ # root app-of-apps chart; renders platform + apps tiers
+    platform/  # platform tier; renders platform add-ons/config
+    apps/      # app tier; renders app prerequisites + app Applications
   cells/                     # per-cell control files, by composed cell name
     aws-sandbox-usw2-dev/
       values.yaml
@@ -21,7 +21,7 @@ chart with one cell-specific [`cells/<cell>/values.yaml`](cells) file.
 ```
 
 `witself-infra up -argocd` creates one root Argo `Application` (`bootstrap`)
-pointing at [`charts/cell-bootstrap`](charts/cell-bootstrap), with values loaded
+pointing at [`charts/bootstrap`](charts/bootstrap), with values loaded
 from `cells/<cell>/values.yaml`. That bootstrap chart renders the child Argo
 Applications for the `platform` and `apps` tiers. Those tier Applications render
 their own Helm charts with the same cell values file. The cell values file is the
