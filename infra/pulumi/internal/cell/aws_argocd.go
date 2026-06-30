@@ -75,6 +75,12 @@ users:
 	// HA-by-profile is a later slice. The release name "argocd" yields the
 	// standard argocd-server/argocd-repo-server/... resources.
 	_, err = helm.NewRelease(ctx, "argocd", &helm.ReleaseArgs{
+		// Pin the release name. Without it Pulumi auto-names the release with a
+		// random suffix (argocd-<hash>), so the resources become
+		// argocd-<hash>-server/... — non-deterministic names that break the
+		// exported helper commands and the future GitOps/ingress wiring, which
+		// reference the stable argocd-server / argocd-repo-server / ... names.
+		Name:            pulumi.String(argocdNamespace),
 		Chart:           pulumi.String(argocdChart),
 		Version:         pulumi.String(argocdChartVersion),
 		RepositoryOpts:  helm.RepositoryOptsArgs{Repo: pulumi.String(argocdChartRepo)},
@@ -87,7 +93,11 @@ users:
 				"service": pulumi.Map{"type": pulumi.String("ClusterIP")},
 			},
 		},
-	}, pulumi.Provider(k8s))
+		// Delete-before-replace: the argo-cd chart has fixed-name resources
+		// (argocd-cm, argocd-rbac-cm, argocd-secret, the CRDs) that are NOT
+		// release-prefixed, so a create-before-delete replacement would collide
+		// with the outgoing release on those names. Tear down first, then create.
+	}, pulumi.Provider(k8s), pulumi.DeleteBeforeReplace(true))
 	if err != nil {
 		return err
 	}
