@@ -9,6 +9,15 @@ gitops:
   destinationServer: https://kubernetes.default.svc
 
 platform:
+  certManager:
+    enabled: true
+    chartRepoURL: https://charts.jetstack.io
+    chartName: cert-manager
+    chartVersion: v1.20.3
+    namespace: cert-manager
+    crds:
+      enabled: true
+      keep: true
   externalSecrets:
     enabled: true
     chartRepoURL: https://charts.external-secrets.io

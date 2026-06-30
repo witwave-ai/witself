@@ -1,0 +1,35 @@
+{{- if .Values.platform.certManager.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  source:
+    repoURL: {{ .Values.platform.certManager.chartRepoURL | quote }}
+    chart: {{ .Values.platform.certManager.chartName | quote }}
+    targetRevision: {{ required "platform.certManager.chartVersion is required" .Values.platform.certManager.chartVersion | quote }}
+    helm:
+      releaseName: cert-manager
+      values: |
+        crds:
+          enabled: {{ .Values.platform.certManager.crds.enabled }}
+          keep: {{ .Values.platform.certManager.crds.keep }}
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: {{ .Values.platform.certManager.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+{{- end }}

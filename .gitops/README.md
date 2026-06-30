@@ -15,7 +15,7 @@ loads one cell-specific [`cells/<cell>/values.yaml`](cells) file.
 .gitops/
   charts/
     bootstrap/  # root app-of-apps chart; renders child Argo Applications
-    platform/   # platform tier; renders External Secrets, KEDA, and other add-ons
+    platform/   # platform tier; renders cert-manager, External Secrets, KEDA, and other add-ons
     apps/       # app tier; renders Witself app prerequisites and apps
   cells/        # per-cell values, keyed by composed cell name
     aws-sandbox-usw2-dev/
