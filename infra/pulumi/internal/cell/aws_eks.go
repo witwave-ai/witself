@@ -92,6 +92,11 @@ func provisionAWSEKS(ctx *pulumi.Context, c awsCell, net *awsNetwork, prov *aws.
 		Version: pulumi.String("1.32"),
 		AccessConfig: &eks.ClusterAccessConfigArgs{
 			AuthenticationMode: pulumi.String("API"),
+			// The principal that runs `up` (the operator, or the CI OIDC role) gets
+			// cluster-admin automatically — no manual access entry needed. Note:
+			// this is a create-time setting, so it only applies to a freshly
+			// created cluster.
+			BootstrapClusterCreatorAdminPermissions: pulumi.Bool(true),
 		},
 		VpcConfig: &eks.ClusterVpcConfigArgs{
 			SubnetIds:             subnets,
