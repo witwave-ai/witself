@@ -42,9 +42,13 @@ go build -o bin/witself-infra ./cmd/witself-infra
 
 # the cell name is composed from components: <cloud>-<account-alias>-<region-code>-<role>
 # e.g. these flags -> cell aws-sandbox-usw2-dev, resources witself-aws-sandbox-usw2-dev-*
-# creds come from -aws-profile (or the ambient AWS chain / OIDC). No passphrase to
-# export — the local-state secret is managed for you.
+# creds come from -aws-profile (or the ambient AWS chain / OIDC).
 F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox"
+
+# state lives in S3 by default — create the per-account+region backend once:
+./bin/witself-infra bootstrap -cloud aws -region us-west-2 -aws-profile witwave-sandbox
+
+# then the cell loop (S3 is the default; add -backend local for a no-AWS dev run)
 ./bin/witself-infra preview $F
 ./bin/witself-infra up      $F
 ./bin/witself-infra outputs $F
@@ -54,16 +58,16 @@ F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile wi
 Inputs split two ways: **functional** (`-cloud`, `-region`, `-profile`) drive
 behavior; **labels** (`-account-alias`, `-role`) are free text used only in the
 name. Credentials are a name, not a secret — `-aws-profile` (or the ambient
-`AWS_PROFILE`/OIDC when omitted); `-account-alias` does **not** select creds. The
-local-state secret passphrase is generated and persisted (`0600`) under the state
-dir on first use, so nothing needs to be exported. State defaults to a local file
-backend under `~/.witself-infra/state`.
+`AWS_PROFILE`/OIDC when omitted); `-account-alias` does **not** select creds.
+State is stored in **S3 by default**; `up` errors with "run bootstrap first" if
+the backend is missing. Pass `-backend local` for a zero-setup local file backend
+(dev/experiments), which uses a tool-managed passphrase under `~/.witself-infra/state`.
 
 ## State backend
 
-The local file backend is the dev default. For shared, durable state, use S3 + a
-KMS secrets provider (no passphrase) — **one bucket + one KMS key per account +
-region**:
+State is stored in **S3 by default** — shared, durable, KMS-encrypted (no
+passphrase), **one bucket + one KMS key per account + region**. (`-backend local`
+is the dev opt-out.)
 
 ```sh
 # once per account+region: create the bucket + KMS key (idempotent — reuses if present)

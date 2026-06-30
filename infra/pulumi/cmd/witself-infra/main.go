@@ -87,7 +87,7 @@ flags:
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
-  -backend        state backend: local|s3                      (default "local")
+  -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
   -state-dir      local Pulumi state backend dir (backend=local)
 
@@ -124,7 +124,7 @@ func run(args []string) error {
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
-	backendFlag := fs.String("backend", "local", "state backend: local|s3")
+	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	if err := fs.Parse(args[1:]); err != nil {
