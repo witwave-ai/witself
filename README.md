@@ -28,10 +28,12 @@ witself-infra up \
   -backend s3 \
   -cidr 10.20.0.0/16 \
   -cloud aws \
-  -db-version 18.4 \
+  -db-version 18 \
+  -domain cell.witwave.ai \
   -gitops-path .gitops/charts/bootstrap \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
+  -gitops-values-path .gitops/cells/aws-sandbox-usw2-dev/values.yaml \
   -ingress cloudflare-tunnel \
   -k8s-version 1.36 \
   -profile minimal \
@@ -39,8 +41,12 @@ witself-infra up \
   -role dev
 ```
 
-The minimal teardown command only needs the stack identity, backend, and AWS
-credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
+When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
+per-cell Route 53 zone from the Cloudflare zone for the configured domain. Keep
+that token available during teardown so the delegated DNS records can be removed.
+
+The teardown command keeps only the stack identity, backend, configured domain,
+and credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
 backend remains for the next run.
 
 ```sh
@@ -49,6 +55,7 @@ witself-infra destroy \
   -aws-profile witwave-sandbox \
   -backend s3 \
   -cloud aws \
+  -domain cell.witwave.ai \
   -region us-west-2 \
   -role dev
 ```
