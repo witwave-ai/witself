@@ -26,6 +26,7 @@ witself-infra up \
   -argocd \
   -aws-profile witwave-sandbox \
   -backend s3 \
+  -bootstrap-token-file ~/.witself/bootstrap/aws-sandbox-usw2-dev/bootstrap-token \
   -cidr 10.20.0.0/16 \
   -cloud aws \
   -db-version 18 \
@@ -40,6 +41,10 @@ witself-infra up \
   -region us-west-2 \
   -role dev
 ```
+
+The bootstrap token file contains the first operator token that `witself-infra`
+publishes to the cell's cloud secret store. If `-bootstrap-token-file` is omitted,
+the CLI looks for the same path by default under `~/.witself/bootstrap/<cell>/`.
 
 When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
 per-cell Route 53 zone from the Cloudflare zone for the configured domain. Keep

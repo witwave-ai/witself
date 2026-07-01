@@ -37,40 +37,43 @@ func newCloudflareDNSRecord(ctx *pulumi.Context, name string, args pulumi.Map, o
 	return &record, nil
 }
 
-func provisionCloudflareDNSDelegation(ctx *pulumi.Context, c awsCell, dns *awsDNS, nameServers pulumi.StringArrayOutput) error {
-	if !c.cloudflareDNS || dns == nil {
+func provisionCloudflareDNSDelegation(ctx *pulumi.Context, c awsCell, zoneName string, nameServers pulumi.StringArrayOutput) ([]pulumi.Resource, error) {
+	if !c.cloudflareDNS || zoneName == "" {
 		ctx.Export("cloudflareDNSDelegation", pulumi.String("disabled"))
-		return nil
+		return nil, nil
 	}
 
 	prov, err := newCloudflareProvider(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	zoneName, err := lookupCloudflareZone(ctx, c.domain, prov)
+	parentZone, err := lookupCloudflareZone(ctx, c.domain, prov)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	recordName := cloudflareDelegationRecordName(dns.zoneName, zoneName.name)
+	recordName := cloudflareDelegationRecordName(zoneName, parentZone.name)
 
+	records := make([]pulumi.Resource, 0, 4)
 	for i := 0; i < 4; i++ {
-		if _, err := newCloudflareDNSRecord(ctx, fmt.Sprintf("cell-dns-delegation-%d", i), pulumi.Map{
-			"zoneId":  pulumi.String(zoneName.zoneID),
+		record, err := newCloudflareDNSRecord(ctx, fmt.Sprintf("cell-dns-delegation-%d", i), pulumi.Map{
+			"zoneId":  pulumi.String(parentZone.zoneID),
 			"name":    pulumi.String(recordName),
 			"type":    pulumi.String("NS"),
 			"content": nameServers.Index(pulumi.Int(i)),
 			"ttl":     pulumi.Float64(cloudflareDelegationTTL),
 			"comment": pulumi.String("Witself cell DNS delegation for " + c.name),
-		}, pulumi.Provider(prov)); err != nil {
-			return err
+		}, pulumi.Provider(prov))
+		if err != nil {
+			return nil, err
 		}
+		records = append(records, record)
 	}
 
 	ctx.Export("cloudflareDNSDelegation", pulumi.String("enabled"))
-	ctx.Export("cloudflareDNSZone", pulumi.String(zoneName.name))
+	ctx.Export("cloudflareDNSZone", pulumi.String(parentZone.name))
 	ctx.Export("cloudflareDNSDelegationName", pulumi.String(recordName))
-	return nil
+	return records, nil
 }
 
 type cloudflareZone struct {

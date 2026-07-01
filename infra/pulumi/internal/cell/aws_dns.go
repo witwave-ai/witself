@@ -68,11 +68,27 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 	if err != nil {
 		return nil, err
 	}
-	ingressCertificateARN := pulumi.All(cert.Status, cert.Arn).ApplyT(func(args []interface{}) string {
-		if args[0].(string) != "ISSUED" {
-			return ""
-		}
-		return args[1].(string)
+
+	delegationRecords, err := provisionCloudflareDNSDelegation(ctx, c, zoneName, zone.NameServers)
+	if err != nil {
+		return nil, err
+	}
+
+	validationDeps := []pulumi.Resource{validationRecord}
+	validationDeps = append(validationDeps, delegationRecords...)
+	certValidation, err := acm.NewCertificateValidation(ctx, "cell-api-cert-issued", &acm.CertificateValidationArgs{
+		CertificateArn: cert.Arn,
+		ValidationRecordFqdns: pulumi.StringArray{
+			validationRecord.Fqdn,
+		},
+	}, pulumi.Provider(prov), pulumi.DependsOn(validationDeps), pulumi.Timeouts(&pulumi.CustomTimeouts{
+		Create: "45m",
+	}))
+	if err != nil {
+		return nil, err
+	}
+	validatedStatus := certValidation.CertificateArn.ApplyT(func(string) string {
+		return "ISSUED"
 	}).(pulumi.StringOutput)
 
 	ctx.Export("cellDomain", pulumi.String(zoneName))
@@ -82,18 +98,15 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 	ctx.Export("dnsZoneNameServers", zone.NameServers)
 	ctx.Export("dnsDelegationRecordName", pulumi.String(zoneName))
 	ctx.Export("dnsDelegationRecordType", pulumi.String("NS"))
-	ctx.Export("tlsCertificateARN", cert.Arn)
-	ctx.Export("tlsCertificateStatus", cert.Status)
+	ctx.Export("tlsCertificateARN", certValidation.CertificateArn)
+	ctx.Export("tlsCertificateStatus", validatedStatus)
 	ctx.Export("tlsValidationRecord", validationRecord.Fqdn)
 
 	dns := &awsDNS{
 		zoneName:              zoneName,
 		apiHost:               apiHost,
 		zoneID:                zone.ZoneId,
-		ingressCertificateARN: ingressCertificateARN,
-	}
-	if err := provisionCloudflareDNSDelegation(ctx, c, dns, zone.NameServers); err != nil {
-		return nil, err
+		ingressCertificateARN: certValidation.CertificateArn,
 	}
 	return dns, nil
 }
