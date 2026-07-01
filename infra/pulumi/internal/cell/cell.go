@@ -43,6 +43,7 @@ type awsCell struct {
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
 	domain            string // optional parent domain for cell hostnames
+	cellDomain        string // cloud-managed DNS zone for this cell
 	apiHost           string // API hostname inside the cell domain
 	tlsCertificateARN pulumi.StringOutput
 	bootstrapToken    pulumi.StringOutput

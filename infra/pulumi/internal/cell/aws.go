@@ -75,6 +75,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 	if dns != nil {
+		c.cellDomain = dns.zoneName
 		c.apiHost = dns.apiHost
 		c.tlsCertificateARN = dns.ingressCertificateARN
 	} else {

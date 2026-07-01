@@ -129,7 +129,7 @@ cell:
   domain: %q
   apiHost: %q
   tlsCertificateARN: %q
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.domain, c.apiHost, c.tlsCertificateARN)
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.cellDomain, c.apiHost, c.tlsCertificateARN)
 
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
