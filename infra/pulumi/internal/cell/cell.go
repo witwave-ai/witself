@@ -40,6 +40,7 @@ type awsCell struct {
 	gitopsPath        string // path in the repo for the root bootstrap chart
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
+	dnsZone           string // optional cloud-managed public DNS zone for this cell
 	bootstrapToken    pulumi.StringOutput
 	bootstrapTokenSet bool
 }
@@ -84,6 +85,7 @@ func Program(ctx *pulumi.Context) error {
 	if gitopsRevision == "" {
 		gitopsRevision = DefaultGitopsRevision
 	}
+	dnsZone := w.Get("dnsZone")
 	_, bootstrapTokenErr := w.Try("bootstrapToken")
 	bootstrapTokenSet := bootstrapTokenErr == nil
 
@@ -108,6 +110,7 @@ func Program(ctx *pulumi.Context) error {
 			gitopsPath:        gitopsPath,
 			gitopsValuesPath:  gitopsValuesPath,
 			gitopsRevision:    gitopsRevision,
+			dnsZone:           dnsZone,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

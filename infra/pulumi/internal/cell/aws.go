@@ -70,6 +70,10 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 
+	if err := provisionAWSDNS(ctx, c, prov); err != nil {
+		return err
+	}
+
 	// The cell owns its network: a dedicated VPC with private subnets for the
 	// database, so it never depends on a region's default VPC.
 	net, err := provisionAWSNetwork(ctx, c, minimal, prov)
