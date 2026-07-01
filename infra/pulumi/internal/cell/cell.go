@@ -24,7 +24,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
-const DefaultDomain = "cell.witwave.ai"
+const DefaultDomain = "cells.witself.witwave.ai"
 
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.

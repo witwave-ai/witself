@@ -29,7 +29,7 @@ witself-infra up \
   -cidr 10.20.0.0/16 \
   -cloud aws \
   -db-version 18 \
-  -domain cell.witwave.ai \
+  -domain cells.witself.witwave.ai \
   -gitops-path .gitops/charts/bootstrap \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
@@ -55,7 +55,7 @@ witself-infra destroy \
   -aws-profile witwave-sandbox \
   -backend s3 \
   -cloud aws \
-  -domain cell.witwave.ai \
+  -domain cells.witself.witwave.ai \
   -region us-west-2 \
   -role dev
 ```
