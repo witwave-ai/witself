@@ -201,6 +201,10 @@ func run(args []string) error {
 	if *awsProfile != "" {
 		env["AWS_PROFILE"] = *awsProfile
 	}
+	cloudflareDelegation := os.Getenv("CLOUDFLARE_API_TOKEN") != ""
+	if cloudflareDelegation {
+		env["CLOUDFLARE_API_TOKEN"] = os.Getenv("CLOUDFLARE_API_TOKEN")
+	}
 
 	var wsOpts []auto.LocalWorkspaceOption
 	var secretsProvider string
@@ -280,6 +284,7 @@ func run(args []string) error {
 		"witself:gitopsValuesPath": *gitopsValuesPath,
 		"witself:gitopsRevision":   *gitopsRevision,
 		"witself:domain":           *domain,
+		"witself:cloudflareDNS":    fmt.Sprintf("%t", cloudflareDelegation),
 		"aws:region":               *region,
 	} {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {

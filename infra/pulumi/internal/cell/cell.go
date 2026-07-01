@@ -43,6 +43,7 @@ type awsCell struct {
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
 	domain            string // optional parent domain for cell hostnames
+	cloudflareDNS     bool   // delegate the cell zone from Cloudflare when credentials are available
 	cellDomain        string // cloud-managed DNS zone for this cell
 	apiHost           string // API hostname inside the cell domain
 	tlsCertificateARN pulumi.StringOutput
@@ -91,6 +92,7 @@ func Program(ctx *pulumi.Context) error {
 		gitopsRevision = DefaultGitopsRevision
 	}
 	domain := w.Get("domain")
+	cloudflareDNS := w.GetBool("cloudflareDNS")
 	_, bootstrapTokenErr := w.Try("bootstrapToken")
 	bootstrapTokenSet := bootstrapTokenErr == nil
 
@@ -116,6 +118,7 @@ func Program(ctx *pulumi.Context) error {
 			gitopsValuesPath:  gitopsValuesPath,
 			gitopsRevision:    gitopsRevision,
 			domain:            domain,
+			cloudflareDNS:     cloudflareDNS,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

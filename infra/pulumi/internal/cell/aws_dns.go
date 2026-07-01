@@ -86,12 +86,16 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 	ctx.Export("tlsCertificateStatus", cert.Status)
 	ctx.Export("tlsValidationRecord", validationRecord.Fqdn)
 
-	return &awsDNS{
+	dns := &awsDNS{
 		zoneName:              zoneName,
 		apiHost:               apiHost,
 		zoneID:                zone.ZoneId,
 		ingressCertificateARN: ingressCertificateARN,
-	}, nil
+	}
+	if err := provisionCloudflareDNSDelegation(ctx, c, dns, zone.NameServers); err != nil {
+		return nil, err
+	}
+	return dns, nil
 }
 
 func provisionAWSExternalDNSPodIdentity(ctx *pulumi.Context, c awsCell, cluster *awsEKS, dns *awsDNS, prov *aws.Provider) error {
