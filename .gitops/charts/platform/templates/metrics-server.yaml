@@ -1,0 +1,33 @@
+{{- if .Values.platform.metricsServer.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  source:
+    repoURL: {{ .Values.platform.metricsServer.chartRepoURL | quote }}
+    chart: {{ .Values.platform.metricsServer.chartName | quote }}
+    targetRevision: {{ required "platform.metricsServer.chartVersion is required" .Values.platform.metricsServer.chartVersion | quote }}
+    helm:
+      releaseName: metrics-server
+      values: |
+        replicas: {{ .Values.platform.metricsServer.replicas }}
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: {{ .Values.platform.metricsServer.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+{{- end }}

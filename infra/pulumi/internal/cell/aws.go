@@ -83,9 +83,6 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	if err != nil {
 		return err
 	}
-	if err := provisionAWSEKSAddons(ctx, c, eksCluster, prov); err != nil {
-		return err
-	}
 
 	// GitOps control plane (opt-in): install Argo CD via Helm + wire it to the
 	// cell bootstrap, AND create ESO's Pod Identity IAM so ESO can read this

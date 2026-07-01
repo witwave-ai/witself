@@ -126,7 +126,7 @@ Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
 3. **[done]** S3 + KMS state backend (`bootstrap`).
 4. **[done]** Argo CD (GitOps control plane) via Helm — opt-in `-argocd`.
 5. **[done]** Wire Argo at the bootstrap app-of-apps chart + per-cell values.
-6. **[done]** Metrics Server as an EKS add-on (resource metrics API for
-   `kubectl top` and HPA CPU/memory signals).
+6. **[done]** Metrics Server in the GitOps platform tier (resource metrics API
+   for `kubectl top` and HPA CPU/memory signals).
 7. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
    SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP provider.

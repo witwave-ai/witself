@@ -45,3 +45,8 @@ platform:
     enabled: true
     chartVersion: 2.20.1
     namespace: keda
+  metricsServer:
+    enabled: true
+    chartVersion: 3.13.1
+    namespace: kube-system
+    replicas: 2
