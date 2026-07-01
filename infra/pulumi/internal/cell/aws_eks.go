@@ -44,10 +44,15 @@ var eksNodePolicies = []string{
 // private. The creator (the principal running this) gets cluster-admin via the API
 // auth mode's bootstrap.
 func provisionAWSEKS(ctx *pulumi.Context, c awsCell, net *awsNetwork, prov *aws.Provider) (*awsEKS, error) {
+	clusterRoleTags := resourceTags(rname(c.name, "eks-cluster"), "kubernetes")
+	// EKS Auto Mode's managed load-balancing policy compares this principal tag
+	// with eks:eks-cluster-name resource/request tags on managed ELB resources.
+	clusterRoleTags["eks:eks-cluster-name"] = pulumi.String(rname(c.name, ""))
+
 	clusterRole, err := iam.NewRole(ctx, "cell-eks-cluster", &iam.RoleArgs{
 		Name:             pulumi.String(rname(c.name, "eks-cluster")),
 		AssumeRolePolicy: pulumi.String(eksClusterTrust),
-		Tags:             resourceTags(rname(c.name, "eks-cluster"), "kubernetes"),
+		Tags:             clusterRoleTags,
 	}, pulumi.Provider(prov))
 	if err != nil {
 		return nil, err
