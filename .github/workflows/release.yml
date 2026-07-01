@@ -57,7 +57,16 @@ jobs:
 
       - name: Free runner disk before GoReleaser
         run: |
+          available_gb=$(df -BG / | awk 'NR == 2 { gsub("G", "", $4); print $4 }')
+
           df -h
+
+          if (( available_gb >= 50 )); then
+            echo "Skipping deep cleanup; ${available_gb}G available on /."
+            exit 0
+          fi
+
+          echo "Only ${available_gb}G available on /; freeing bundled runner assets."
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           docker system prune -af || true
           df -h
