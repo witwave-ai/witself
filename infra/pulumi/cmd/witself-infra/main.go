@@ -63,7 +63,7 @@ var regionCodes = map[string]string{
 // label is the safe form for the free-text account-alias and role tokens: they
 // land in DNS-style resource names, so lowercase alphanumeric with internal hyphens.
 var label = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-var dnsZoneName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+var domainName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
 const usage = `witself-infra — provision and manage Witself cells
 
@@ -95,7 +95,7 @@ flags:
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
   -gitops-revision GitOps repo revision (branch/tag)            (default "main")
-  -dns-zone       public DNS zone to create for this cell        (optional)
+  -domain        parent domain for cell hostnames               (default "witwave.ai")
   -bootstrap-token-file first-operator bootstrap token file       (default "~/.witself/bootstrap/<cell>/bootstrap-token" when present)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
@@ -141,7 +141,7 @@ func run(args []string) error {
 	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path to the root bootstrap chart")
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
 	gitopsRevision := fs.String("gitops-revision", cell.DefaultGitopsRevision, "GitOps repo revision (branch/tag)")
-	dnsZone := fs.String("dns-zone", "", "public DNS zone to create for this cell, e.g. aws-sandbox-usw2-dev.cells.example.com")
+	domain := fs.String("domain", cell.DefaultDomain, "parent domain for cell hostnames, e.g. witwave.ai")
 	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: ~/.witself/bootstrap/<cell>/bootstrap-token when present)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
@@ -165,9 +165,9 @@ func run(args []string) error {
 	if !label.MatchString(*role) {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", *role)
 	}
-	*dnsZone = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*dnsZone)), ".")
-	if *dnsZone != "" && !dnsZoneName.MatchString(*dnsZone) {
-		return fmt.Errorf("-dns-zone %q must be a DNS zone name like aws-sandbox-usw2-dev.cells.example.com", *dnsZone)
+	*domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*domain)), ".")
+	if *domain != "" && !domainName.MatchString(*domain) {
+		return fmt.Errorf("-domain %q must be a DNS domain name like cells.example.com", *domain)
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
@@ -279,7 +279,7 @@ func run(args []string) error {
 		"witself:gitopsPath":       *gitopsPath,
 		"witself:gitopsValuesPath": *gitopsValuesPath,
 		"witself:gitopsRevision":   *gitopsRevision,
-		"witself:dnsZone":          *dnsZone,
+		"witself:domain":           *domain,
 		"aws:region":               *region,
 	} {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {

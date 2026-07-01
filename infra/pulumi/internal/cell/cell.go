@@ -24,6 +24,8 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
+const DefaultDomain = "witwave.ai"
+
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.
 type awsCell struct {
@@ -40,7 +42,7 @@ type awsCell struct {
 	gitopsPath        string // path in the repo for the root bootstrap chart
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
-	dnsZone           string // optional cloud-managed public DNS zone for this cell
+	domain            string // optional parent domain for cell hostnames
 	bootstrapToken    pulumi.StringOutput
 	bootstrapTokenSet bool
 }
@@ -85,7 +87,7 @@ func Program(ctx *pulumi.Context) error {
 	if gitopsRevision == "" {
 		gitopsRevision = DefaultGitopsRevision
 	}
-	dnsZone := w.Get("dnsZone")
+	domain := w.Get("domain")
 	_, bootstrapTokenErr := w.Try("bootstrapToken")
 	bootstrapTokenSet := bootstrapTokenErr == nil
 
@@ -110,7 +112,7 @@ func Program(ctx *pulumi.Context) error {
 			gitopsPath:        gitopsPath,
 			gitopsValuesPath:  gitopsValuesPath,
 			gitopsRevision:    gitopsRevision,
-			dnsZone:           dnsZone,
+			domain:            domain,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

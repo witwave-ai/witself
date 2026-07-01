@@ -13,10 +13,11 @@ func normalizeZoneName(name string) string {
 }
 
 func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) error {
-	zoneName := normalizeZoneName(c.dnsZone)
-	if zoneName == "" {
+	parentDomain := normalizeZoneName(c.domain)
+	if parentDomain == "" {
 		return nil
 	}
+	zoneName := c.name + "." + parentDomain
 
 	zone, err := route53.NewZone(ctx, "cell-dns", &route53.ZoneArgs{
 		Name:         pulumi.StringPtr(zoneName),
@@ -28,6 +29,7 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) error {
 		return err
 	}
 
+	ctx.Export("cellDomain", pulumi.String(zoneName))
 	ctx.Export("dnsZoneName", pulumi.String(zoneName))
 	ctx.Export("dnsZoneID", zone.ZoneId)
 	ctx.Export("dnsZoneNameServers", zone.NameServers)
