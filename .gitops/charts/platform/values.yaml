@@ -1,6 +1,10 @@
 cell:
   name: ""
+  cloud: ""
   region: ""
+  domain: ""
+  apiHost: ""
+  tlsCertificateARN: ""
 
 gitops:
   project: default
@@ -28,6 +32,24 @@ platform:
     crds:
       enabled: true
       keep: true
+  externalDNS:
+    enabled: false
+    chartRepoURL: https://kubernetes-sigs.github.io/external-dns/
+    chartName: external-dns
+    chartVersion: 1.21.1
+    namespace: external-dns
+    serviceAccountName: external-dns
+    sources:
+      - ingress
+    policy: sync
+    registry: txt
+    txtOwnerId: ""
+    domainFilters: []
+    interval: 1m
+    provider:
+      name: aws
+    extraArgs:
+      aws-zone-type: public
   externalSecrets:
     enabled: true
     chartRepoURL: https://charts.external-secrets.io

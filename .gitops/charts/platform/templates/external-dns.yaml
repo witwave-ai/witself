@@ -1,0 +1,46 @@
+{{- if and .Values.platform.externalDNS.enabled (eq .Values.cell.cloud "aws") }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-dns
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  source:
+    repoURL: {{ .Values.platform.externalDNS.chartRepoURL | quote }}
+    chart: {{ .Values.platform.externalDNS.chartName | quote }}
+    targetRevision: {{ required "platform.externalDNS.chartVersion is required" .Values.platform.externalDNS.chartVersion | quote }}
+    helm:
+      releaseName: external-dns
+      values: |
+        provider:
+          name: {{ .Values.platform.externalDNS.provider.name | quote }}
+        sources:
+{{ toYaml .Values.platform.externalDNS.sources | nindent 10 }}
+        policy: {{ .Values.platform.externalDNS.policy | quote }}
+        registry: {{ .Values.platform.externalDNS.registry | quote }}
+        txtOwnerId: {{ required "platform.externalDNS.txtOwnerId is required" .Values.platform.externalDNS.txtOwnerId | quote }}
+        domainFilters:
+{{ toYaml .Values.platform.externalDNS.domainFilters | nindent 10 }}
+        interval: {{ .Values.platform.externalDNS.interval | quote }}
+        serviceAccount:
+          create: true
+          name: {{ .Values.platform.externalDNS.serviceAccountName | quote }}
+        extraArgs:
+{{ toYaml .Values.platform.externalDNS.extraArgs | nindent 10 }}
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: {{ .Values.platform.externalDNS.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+{{- end }}

@@ -1,4 +1,18 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
+{{- $cellDomain := default "" .Values.cell.domain -}}
+{{- $certARN := default "" .Values.cell.tlsCertificateARN -}}
+{{- $platformRuntimeValues := dict -}}
+{{- $platformRuntime := dict -}}
+{{- if $cellDomain -}}
+{{- $_ := set $platformRuntime "externalDNS" (dict "enabled" true "domainFilters" (list $cellDomain) "txtOwnerId" (required "cell.name is required" .Values.cell.name)) -}}
+{{- end -}}
+{{- if $certARN -}}
+{{- $_ := set $platformRuntime "awsAlbIngress" (dict "certificateARNs" (list $certARN) "listeners" (list (dict "protocol" "HTTP" "port" 80) (dict "protocol" "HTTPS" "port" 443))) -}}
+{{- end -}}
+{{- if $platformRuntime -}}
+{{- $_ := set $platformRuntimeValues "cell" (dict "domain" $cellDomain "apiHost" (default "" .Values.cell.apiHost) "tlsCertificateARN" $certARN) -}}
+{{- $_ := set $platformRuntimeValues "platform" $platformRuntime -}}
+{{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -19,6 +33,10 @@ spec:
       helm:
         valueFiles:
           - {{ printf "$values/%s" $valuesPath | quote }}
+        {{- if $platformRuntimeValues }}
+        values: |
+{{ toYaml $platformRuntimeValues | nindent 10 }}
+        {{- end }}
     - repoURL: {{ .Values.gitops.repoURL | quote }}
       targetRevision: {{ .Values.gitops.targetRevision | quote }}
       ref: values

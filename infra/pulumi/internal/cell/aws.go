@@ -70,8 +70,15 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		return err
 	}
 
-	if err := provisionAWSDNS(ctx, c, prov); err != nil {
+	dns, err := provisionAWSDNS(ctx, c, prov)
+	if err != nil {
 		return err
+	}
+	if dns != nil {
+		c.apiHost = dns.apiHost
+		c.tlsCertificateARN = dns.certificateARN
+	} else {
+		c.tlsCertificateARN = pulumi.String("").ToStringOutput()
 	}
 
 	// The cell owns its network: a dedicated VPC with private subnets for the
@@ -97,6 +104,9 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 			return err
 		}
 		if err := provisionAWSESOPodIdentity(ctx, c, eksCluster, prov); err != nil {
+			return err
+		}
+		if err := provisionAWSExternalDNSPodIdentity(ctx, c, eksCluster, dns, prov); err != nil {
 			return err
 		}
 	}

@@ -1,8 +1,6 @@
 package cell
 
 import (
-	"fmt"
-
 	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
 	"github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	helm "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/helm/v3"
@@ -123,6 +121,16 @@ users:
 	// Applications and their versions; Pulumi only ensures Argo exists and points
 	// at the right Git source. DependsOn the release so the Application CRD that
 	// the chart installs exists before we create this CR.
+	runtimeValues := pulumi.Sprintf(`gitops:
+  repoURL: %q
+  targetRevision: %q
+  valuesPath: %q
+cell:
+  domain: %q
+  apiHost: %q
+  tlsCertificateARN: %q
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.domain, c.apiHost, c.tlsCertificateARN)
+
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
 		Kind:       pulumi.String("Application"),
@@ -140,7 +148,7 @@ users:
 						"path":           c.gitopsPath,
 						"helm": map[string]interface{}{
 							"valueFiles": []interface{}{"$values/" + c.gitopsValuesPath},
-							"values":     fmt.Sprintf("gitops:\n  repoURL: %q\n  targetRevision: %q\n  valuesPath: %q\n", c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath),
+							"values":     runtimeValues,
 						},
 					},
 					map[string]interface{}{

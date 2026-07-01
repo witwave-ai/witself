@@ -24,7 +24,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
-const DefaultDomain = "witwave.ai"
+const DefaultDomain = "cell.witwave.ai"
 
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.
@@ -43,6 +43,8 @@ type awsCell struct {
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
 	domain            string // optional parent domain for cell hostnames
+	apiHost           string // API hostname inside the cell domain
+	tlsCertificateARN pulumi.StringOutput
 	bootstrapToken    pulumi.StringOutput
 	bootstrapTokenSet bool
 }

@@ -1,4 +1,10 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
+{{- $apiHost := default "" .Values.cell.apiHost -}}
+{{- $appsRuntime := dict -}}
+{{- if $apiHost -}}
+{{- $_ := set $appsRuntime "cell" (dict "apiHost" $apiHost "domain" (default "" .Values.cell.domain) "tlsCertificateARN" (default "" .Values.cell.tlsCertificateARN)) -}}
+{{- $_ := set $appsRuntime "apps" (dict "witselfServer" (dict "awsAlbIngress" (dict "annotations" (dict "external-dns.alpha.kubernetes.io/hostname" $apiHost) "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/" "pathType" "Prefix"))))))) -}}
+{{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -19,6 +25,10 @@ spec:
       helm:
         valueFiles:
           - {{ printf "$values/%s" $valuesPath | quote }}
+        {{- if $appsRuntime }}
+        values: |
+{{ toYaml $appsRuntime | nindent 10 }}
+        {{- end }}
     - repoURL: {{ .Values.gitops.repoURL | quote }}
       targetRevision: {{ .Values.gitops.targetRevision | quote }}
       ref: values
