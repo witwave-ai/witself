@@ -13,9 +13,23 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.45
-    imageTag: 0.0.45
+    chartVersion: 0.0.47
+    imageTag: 0.0.47
     backendKind: managed
+    ingress:
+      enabled: true
+      className: alb
+      annotations:
+        alb.ingress.kubernetes.io/target-type: ip
+        alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+        alb.ingress.kubernetes.io/healthcheck-port: "8081"
+        alb.ingress.kubernetes.io/healthcheck-path: /readyz
+        alb.ingress.kubernetes.io/success-codes: "200"
+      hosts:
+        - paths:
+            - path: /
+              pathType: Prefix
+      tls: []
     secrets:
       bootstrap:
         enabled: true
@@ -31,6 +45,15 @@ apps:
         refreshInterval: 1h
 
 platform:
+  albIngress:
+    enabled: true
+    className: alb
+    scheme: internet-facing
+    ipAddressType: ipv4
+    groupName: witself-public
+    listeners:
+      - protocol: HTTP
+        port: 80
   certManager:
     enabled: true
     chartVersion: v1.20.3

@@ -16,6 +16,15 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
+    ingress:
+      enabled: false
+      className: alb
+      annotations: {}
+      hosts:
+        - paths:
+            - path: /
+              pathType: Prefix
+      tls: []
     secrets:
       bootstrap:
         enabled: true

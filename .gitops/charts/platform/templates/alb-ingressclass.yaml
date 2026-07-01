@@ -1,0 +1,45 @@
+{{- if .Values.platform.albIngress.enabled }}
+{{- $className := required "platform.albIngress.className is required" .Values.platform.albIngress.className -}}
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: {{ $className | quote }}
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  scheme: {{ required "platform.albIngress.scheme is required" .Values.platform.albIngress.scheme | quote }}
+  ipAddressType: {{ required "platform.albIngress.ipAddressType is required" .Values.platform.albIngress.ipAddressType | quote }}
+  {{- with .Values.platform.albIngress.groupName }}
+  group:
+    name: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.platform.albIngress.listeners }}
+  listeners:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.platform.albIngress.certificateARNs }}
+  certificateARNs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  tags:
+    - key: witself:cell
+      value: {{ required "cell.name is required" .Values.cell.name | quote }}
+    - key: witself:component
+      value: ingress
+    {{- with .Values.platform.albIngress.tags }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ $className | quote }}
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: {{ $className | quote }}
+{{- end }}

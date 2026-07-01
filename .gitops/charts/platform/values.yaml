@@ -9,6 +9,17 @@ gitops:
   destinationServer: https://kubernetes.default.svc
 
 platform:
+  albIngress:
+    enabled: false
+    className: alb
+    scheme: internet-facing
+    ipAddressType: ipv4
+    groupName: witself-public
+    listeners:
+      - protocol: HTTP
+        port: 80
+    certificateARNs: []
+    tags: []
   certManager:
     enabled: true
     chartRepoURL: https://charts.jetstack.io

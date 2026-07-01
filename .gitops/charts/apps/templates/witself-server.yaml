@@ -5,6 +5,9 @@
 {{- $bootstrapMountPath := default (printf "/.witself/bootstrap/%s/bootstrap-token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- if .Values.apps.witselfServer.ingress.enabled -}}
+{{- $_ := set $serverValues "ingress" .Values.apps.witselfServer.ingress -}}
+{{- end -}}
 {{- if $bootstrap.enabled -}}
 {{- $_ := set $serverValues "bootstrap" (dict "tokenFile" $bootstrapMountPath "existingSecret" (dict "name" $bootstrapTargetName "tokenKey" $bootstrap.tokenKey "ttlKey" $bootstrap.ttlKey)) -}}
 {{- end -}}
