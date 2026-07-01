@@ -28,7 +28,7 @@ witself-infra up \
   -backend s3 \
   -cidr 10.20.0.0/16 \
   -cloud aws \
-  -db-version 18 \
+  -db-version 18.4 \
   -gitops-path .gitops/charts/bootstrap \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
