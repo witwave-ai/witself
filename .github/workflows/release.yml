@@ -93,15 +93,19 @@ jobs:
         run: |
           set -o pipefail
 
-          date +%s > .release-goreleaser-start
+          release_start="$RUNNER_TEMP/release-goreleaser-start"
+          release_end="$RUNNER_TEMP/release-goreleaser-end"
+          release_log="$RUNNER_TEMP/goreleaser.log"
+
+          date +%s > "$release_start"
           read -r -a goreleaser_args <<< "$RELEASE_ARGS"
 
           set +e
-          goreleaser "${goreleaser_args[@]}" 2>&1 | tee goreleaser.log
+          goreleaser "${goreleaser_args[@]}" 2>&1 | tee "$release_log"
           status=${PIPESTATUS[0]}
           set -e
 
-          date +%s > .release-goreleaser-end
+          date +%s > "$release_end"
           exit "$status"
 
       - name: Summarize release timings
@@ -126,9 +130,13 @@ jobs:
             echo "| Release Go cache key | \`$RELEASE_CACHE_KEY\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ -f .release-goreleaser-start && -f .release-goreleaser-end ]]; then
-            start=$(<.release-goreleaser-start)
-            end=$(<.release-goreleaser-end)
+          release_start="$RUNNER_TEMP/release-goreleaser-start"
+          release_end="$RUNNER_TEMP/release-goreleaser-end"
+          release_log="$RUNNER_TEMP/goreleaser.log"
+
+          if [[ -f "$release_start" && -f "$release_end" ]]; then
+            start=$(<"$release_start")
+            end=$(<"$release_end")
             elapsed=$((end - start))
             {
               echo "| GoReleaser elapsed | \`${elapsed}s\` |"
@@ -138,8 +146,8 @@ jobs:
             echo >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if [[ -f goreleaser.log ]]; then
-            perl -pe 's/\e\[[0-9;]*[[:alpha:]]//g' goreleaser.log > goreleaser.clean.log
+          if [[ -f "$release_log" ]]; then
+            perl -pe 's/\e\[[0-9;]*[[:alpha:]]//g' "$release_log" > "$RUNNER_TEMP/goreleaser.clean.log"
             awk '
               /took:/ {
                 if (match($0, /took: [^[:space:]]+/)) {
@@ -161,9 +169,9 @@ jobs:
                   phase = line
                 }
               }
-            ' goreleaser.clean.log > goreleaser.phases
+            ' "$RUNNER_TEMP/goreleaser.clean.log" > "$RUNNER_TEMP/goreleaser.phases"
 
-            if [[ -s goreleaser.phases ]]; then
+            if [[ -s "$RUNNER_TEMP/goreleaser.phases" ]]; then
               {
                 echo "### GoReleaser Phases"
                 echo
@@ -171,7 +179,7 @@ jobs:
                 echo "| --- | ---: |"
                 while IFS='|' read -r phase took; do
                   echo "| $phase | \`$took\` |"
-                done < goreleaser.phases
+                done < "$RUNNER_TEMP/goreleaser.phases"
                 echo
               } >> "$GITHUB_STEP_SUMMARY"
             fi
