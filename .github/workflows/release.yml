@@ -32,6 +32,7 @@ jobs:
           cache: false
 
       - name: Cache Go release builds
+        id: release-go-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -61,21 +62,128 @@ jobs:
           docker system prune -af || true
           df -h
 
-      - uses: goreleaser/goreleaser-action@v6
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
+          install-only: true
+
+      - name: Run GoReleaser
+        env:
           # --parallelism 2: witself-infra (pulumi-aws + pulumi-kubernetes) is a
           # memory-heavy compile; building all targets at once (default = nproc)
           # OOM-killed the runner on v0.0.35. Cap concurrent builds so at most two
           # heavy targets compile simultaneously.
-          args: >-
+          RELEASE_ARGS: >-
             ${{ github.event_name == 'push' && 'release --clean --parallelism 2'
                 || 'release --snapshot --clean --skip=sign --parallelism 2' }}
-        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Required for the cross-repo Homebrew formula push (org secret).
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -o pipefail
+
+          date +%s > .release-goreleaser-start
+          read -r -a goreleaser_args <<< "$RELEASE_ARGS"
+
+          set +e
+          goreleaser "${goreleaser_args[@]}" 2>&1 | tee goreleaser.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          date +%s > .release-goreleaser-end
+          exit "$status"
+
+      - name: Summarize release timings
+        if: always()
+        env:
+          RELEASE_ARGS: >-
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 2'
+                || 'release --snapshot --clean --skip=sign --parallelism 2' }}
+          RELEASE_CACHE_HIT: ${{ steps.release-go-cache.outputs.cache-hit }}
+          RELEASE_CACHE_KEY: release-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'infra/pulumi/go.sum') }}
+        run: |
+          {
+            echo "## Release workflow summary"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Event | \`${{ github.event_name }}\` |"
+            echo "| Ref | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| GoReleaser args | \`$RELEASE_ARGS\` |"
+            echo "| Release Go cache hit | \`${RELEASE_CACHE_HIT:-false}\` |"
+            echo "| Release Go cache key | \`$RELEASE_CACHE_KEY\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -f .release-goreleaser-start && -f .release-goreleaser-end ]]; then
+            start=$(<.release-goreleaser-start)
+            end=$(<.release-goreleaser-end)
+            elapsed=$((end - start))
+            {
+              echo "| GoReleaser elapsed | \`${elapsed}s\` |"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f goreleaser.log ]]; then
+            perl -pe 's/\e\[[0-9;]*[[:alpha:]]//g' goreleaser.log > goreleaser.clean.log
+            awk '
+              /took:/ {
+                if (match($0, /took: [^[:space:]]+/)) {
+                  took = substr($0, RSTART + 6, RLENGTH - 6)
+                  if (phase != "") {
+                    print phase "|" took
+                  }
+                }
+                next
+              }
+              /cataloging/ {
+                phase = "cataloging"
+                next
+              }
+              /^[[:space:]]*[^[:alnum:][:space:]][[:space:]]+/ {
+                line = $0
+                sub(/^[[:space:]]*[^[:alnum:][:space:]][[:space:]]+/, "", line)
+                if (line != "" && line !~ /^took:/ && line !~ /^cmd=/) {
+                  phase = line
+                }
+              }
+            ' goreleaser.clean.log > goreleaser.phases
+
+            if [[ -s goreleaser.phases ]]; then
+              {
+                echo "### GoReleaser Phases"
+                echo
+                echo "| Phase | Duration |"
+                echo "| --- | ---: |"
+                while IFS='|' read -r phase took; do
+                  echo "| $phase | \`$took\` |"
+                done < goreleaser.phases
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          if [[ -f dist/artifacts.json ]]; then
+            total=$(jq 'length' dist/artifacts.json)
+            archives=$(jq '[.[] | select(.type == "Archive")] | length' dist/artifacts.json)
+            sboms=$(jq '[.[] | select(.type == "SBOM")] | length' dist/artifacts.json)
+            images=$(jq '[.[] | select(.type == "Docker Image")] | length' dist/artifacts.json)
+            {
+              echo "### Release Artifacts"
+              echo
+              echo "| Type | Count |"
+              echo "| --- | ---: |"
+              echo "| Total | $total |"
+              echo "| Archives | $archives |"
+              echo "| SBOMs | $sboms |"
+              echo "| Docker images | $images |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Attest build provenance
         if: github.event_name == 'push'
