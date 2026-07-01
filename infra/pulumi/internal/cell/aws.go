@@ -76,7 +76,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	}
 	if dns != nil {
 		c.apiHost = dns.apiHost
-		c.tlsCertificateARN = dns.certificateARN
+		c.tlsCertificateARN = dns.ingressCertificateARN
 	} else {
 		c.tlsCertificateARN = pulumi.String("").ToStringOutput()
 	}

@@ -17,10 +17,10 @@ const (
 )
 
 type awsDNS struct {
-	zoneName       string
-	apiHost        string
-	zoneID         pulumi.StringOutput
-	certificateARN pulumi.StringOutput
+	zoneName              string
+	apiHost               string
+	zoneID                pulumi.StringOutput
+	ingressCertificateARN pulumi.StringOutput
 }
 
 func normalizeZoneName(name string) string {
@@ -68,6 +68,12 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 	if err != nil {
 		return nil, err
 	}
+	ingressCertificateARN := pulumi.All(cert.Status, cert.Arn).ApplyT(func(args []interface{}) string {
+		if args[0].(string) != "ISSUED" {
+			return ""
+		}
+		return args[1].(string)
+	}).(pulumi.StringOutput)
 
 	ctx.Export("cellDomain", pulumi.String(zoneName))
 	ctx.Export("apiHost", pulumi.String(apiHost))
@@ -81,10 +87,10 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 	ctx.Export("tlsValidationRecord", validationRecord.Fqdn)
 
 	return &awsDNS{
-		zoneName:       zoneName,
-		apiHost:        apiHost,
-		zoneID:         zone.ZoneId,
-		certificateARN: cert.Arn,
+		zoneName:              zoneName,
+		apiHost:               apiHost,
+		zoneID:                zone.ZoneId,
+		ingressCertificateARN: ingressCertificateARN,
 	}, nil
 }
 
