@@ -2,6 +2,10 @@
 backend:
   kind: managed
 
+bootstrap:
+  existingSecret:
+    name: witself-bootstrap
+
 replicaCount: 3
 
 resources:

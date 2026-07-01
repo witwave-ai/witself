@@ -13,10 +13,17 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.42
-    imageTag: 0.0.42
+    chartVersion: 0.0.45
+    imageTag: 0.0.45
     backendKind: managed
     secrets:
+      bootstrap:
+        enabled: true
+        remoteKeySuffix: bootstrap/operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
       database:
         remoteKeySuffix: db
         targetName: witself-db

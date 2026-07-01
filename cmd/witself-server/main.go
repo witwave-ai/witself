@@ -10,12 +10,16 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 )
+
+const defaultBootstrapTokenFile = "/.witself/bootstrap/bootstrap-token"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -69,12 +73,22 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
 		}
-		if bt := os.Getenv("WITSELF_BOOTSTRAP_TOKEN"); bt != "" {
-			if err := st.AdoptBootstrapToken(ctx, acctID, oprID, bt); err != nil {
+		bt, err := bootstrapToken()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
+		}
+		if bt != "" {
+			ttl, err := bootstrapTokenTTL()
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 				return 1
 			}
-			fmt.Fprintln(os.Stderr, "witself-server: bootstrap token adopted")
+			if err := st.AdoptBootstrapToken(ctx, acctID, oprID, bt, ttl); err != nil {
+				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "witself-server: bootstrap token adopted (ttl %s)\n", ttl)
 		}
 		cfg.Login = func(ctx context.Context, bt string) (string, string, bool, error) {
 			ot, oid, err := st.ExchangeBootstrap(ctx, bt)
@@ -161,6 +175,49 @@ func dbDSN() string {
 	return os.Getenv("DATABASE_URL")
 }
 
+// bootstrapToken resolves first-operator bootstrap material from a token file,
+// preferring an explicit path but also checking the deployment well-known path.
+// WITSELF_BOOTSTRAP_TOKEN remains as a local/dev fallback.
+func bootstrapToken() (string, error) {
+	if path := os.Getenv("WITSELF_BOOTSTRAP_TOKEN_FILE"); path != "" {
+		return readTokenFile(path, true)
+	}
+	if tok := strings.TrimSpace(os.Getenv("WITSELF_BOOTSTRAP_TOKEN")); tok != "" {
+		return tok, nil
+	}
+	return readTokenFile(defaultBootstrapTokenFile, false)
+}
+
+func readTokenFile(path string, required bool) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !required && errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read bootstrap token file %s: %w", path, err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", fmt.Errorf("bootstrap token file %s is empty", path)
+	}
+	return tok, nil
+}
+
+func bootstrapTokenTTL() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("WITSELF_BOOTSTRAP_TOKEN_TTL"))
+	if raw == "" {
+		raw = "24h"
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse WITSELF_BOOTSTRAP_TOKEN_TTL: %w", err)
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("WITSELF_BOOTSTRAP_TOKEN_TTL must be positive")
+	}
+	return ttl, nil
+}
+
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "witself-server — the Witself backend API server")
 	fmt.Fprintln(w)
@@ -175,4 +232,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Database (optional; when set, /readyz gates on it):")
 	fmt.Fprintln(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Bootstrap (optional first-operator setup):")
+	fmt.Fprintln(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/bootstrap/bootstrap-token)")
+	fmt.Fprintln(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }

@@ -17,6 +17,10 @@ import (
 // Identity role (scoped to <cell>/*) can read only this cell's secrets.
 func dbSecretName(c awsCell) string { return c.name + "/db" }
 
+// bootstrapSecretName is the cell's first-operator bootstrap token secret. ESO's
+// Pod Identity role can read it because the IAM policy allows <cell>/*.
+func bootstrapSecretName(c awsCell) string { return c.name + "/bootstrap/operator-token" }
+
 // provisionAWSDBSecret writes the cell's Postgres connection (host, port, user,
 // password, dbname, and a ready-to-use DSN) into AWS Secrets Manager as
 // <cell>/db — the canonical source the External Secrets Operator syncs into the
@@ -62,5 +66,66 @@ func provisionAWSDBSecret(ctx *pulumi.Context, c awsCell, db *rds.Instance, pw *
 
 	ctx.Export("dbSecretName", pulumi.String(dbSecretName(c)))
 	ctx.Export("dbSecretArn", secret.Arn)
+	return nil
+}
+
+// provisionAWSBootstrapSecret writes a short-lived first-operator bootstrap token
+// into AWS Secrets Manager. The token is generated once per stack by Pulumi's
+// random provider and delivered to the cluster by ESO as a mounted file.
+func provisionAWSBootstrapSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provider) error {
+	var token pulumi.StringOutput
+	if c.bootstrapTokenSet {
+		token = c.bootstrapToken
+	} else {
+		tokenBody, err := random.NewRandomString(ctx, "witself-bootstrap-token", &random.RandomStringArgs{
+			Length:  pulumi.Int(43), // 256-ish bits with base62 chars.
+			Special: pulumi.Bool(false),
+			Upper:   pulumi.Bool(true),
+			Lower:   pulumi.Bool(true),
+			Numeric: pulumi.Bool(true),
+		})
+		if err != nil {
+			return err
+		}
+		token = tokenBody.Result.ApplyT(func(body string) string {
+			return "witself_boot_" + body
+		}).(pulumi.StringOutput)
+	}
+	payload := token.ApplyT(func(tok string) (string, error) {
+		b, err := json.Marshal(map[string]string{
+			"token": tok,
+			"ttl":   "24h",
+		})
+		return string(b), err
+	}).(pulumi.StringOutput)
+
+	// Dev cells force-delete the secret on destroy (no recovery window) so a
+	// teardown leaves no bootstrap material behind; prod keeps the default
+	// recovery window.
+	recovery := 0
+	if c.profile == "prod" {
+		recovery = 30
+	}
+
+	secret, err := secretsmanager.NewSecret(ctx, "witself-bootstrap-token", &secretsmanager.SecretArgs{
+		Name:                 pulumi.String(bootstrapSecretName(c)),
+		Description:          pulumi.String("Witself first-operator bootstrap token (managed by witself-infra)"),
+		RecoveryWindowInDays: pulumi.Int(recovery),
+		Tags:                 resourceTags(bootstrapSecretName(c), "bootstrap"),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
+	if _, err := secretsmanager.NewSecretVersion(ctx, "witself-bootstrap-token", &secretsmanager.SecretVersionArgs{
+		SecretId:     secret.ID(),
+		SecretString: payload,
+	}, pulumi.Provider(prov)); err != nil {
+		return err
+	}
+
+	ctx.Export("bootstrapSecretName", pulumi.String(bootstrapSecretName(c)))
+	ctx.Export("bootstrapSecretArn", secret.Arn)
+	ctx.Export("bootstrapTokenTTL", pulumi.String("24h"))
 	return nil
 }

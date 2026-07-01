@@ -26,8 +26,8 @@ apps:
     namespace: witself
     chartRepoURL: ghcr.io/witwave-ai/charts
     chartName: witself-server
-    chartVersion: 0.0.42
-    imageTag: 0.0.42
+    chartVersion: 0.0.45
+    imageTag: 0.0.45
     backendKind: managed
     secrets:
       database:

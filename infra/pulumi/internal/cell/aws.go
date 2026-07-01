@@ -148,6 +148,9 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	if err := provisionAWSDBSecret(ctx, c, db, pw, prov); err != nil {
 		return err
 	}
+	if err := provisionAWSBootstrapSecret(ctx, c, prov); err != nil {
+		return err
+	}
 
 	ctx.Export("status", pulumi.String("aws: cell vpc + eks (auto mode) + rds postgres provisioned"))
 	ctx.Export("vpcId", net.vpcID)

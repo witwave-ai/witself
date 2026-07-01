@@ -15,10 +15,12 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 
 This chart tracks what `witself-server` actually consumes today: the three
 listeners (API `:8080`, health `:8081`, metrics `:9090`), `backend.kind`, and an
-optional Postgres DSN from an existing Secret. The broader production surface in
-[docs/helm-chart.md](../../docs/helm-chart.md) — embedding provider config, KMS
-for the sealed plane, and the migration `Job` — is wired in as the server gains
-those subsystems. Nothing here renders config the server would silently ignore.
+optional Postgres DSN from an existing Secret, and an optional first-operator
+bootstrap token mounted from an existing Secret. The broader production surface
+in [docs/helm-chart.md](../../docs/helm-chart.md) — embedding provider config,
+KMS for the sealed plane, and the migration `Job` — is wired in as the server
+gains those subsystems. Nothing here renders config the server would silently
+ignore.
 
 ## What it renders
 
@@ -35,6 +37,10 @@ those subsystems. Nothing here renders config the server would silently ignore.
 
 Set `database.existingSecret.name` and `database.existingSecret.urlKey` to expose
 the referenced key as `WITSELF_DATABASE_URL` in the server container.
+
+Set `bootstrap.existingSecret.name` to mount a first-operator bootstrap token at
+`bootstrap.tokenFile` (default `/.witself/bootstrap/bootstrap-token`) and expose
+the configured TTL as `WITSELF_BOOTSTRAP_TOKEN_TTL`.
 
 ## Self-hosted vs cloud
 
@@ -58,5 +64,6 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
-`database.existingSecret.*`, `resources`, `metrics.serviceMonitor.enabled`,
-`autoscaling.*`, `ingress.*`, `networkPolicy.*`.
+`database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,
+`metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
+`networkPolicy.*`.

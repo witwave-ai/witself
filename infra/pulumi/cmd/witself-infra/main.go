@@ -94,6 +94,7 @@ flags:
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
   -gitops-revision GitOps repo revision (branch/tag)            (default "main")
+  -bootstrap-token-file first-operator bootstrap token file       (default "~/.witself/bootstrap/<cell>/bootstrap-token" when present)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
@@ -138,6 +139,7 @@ func run(args []string) error {
 	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path to the root bootstrap chart")
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
 	gitopsRevision := fs.String("gitops-revision", cell.DefaultGitopsRevision, "GitOps repo revision (branch/tag)")
+	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: ~/.witself/bootstrap/<cell>/bootstrap-token when present)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
@@ -177,6 +179,10 @@ func run(args []string) error {
 	cellName := strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-")
 	if *gitopsValuesPath == "" {
 		*gitopsValuesPath = cell.DefaultGitopsValuesPath(cellName)
+	}
+	defaultBootstrapPath, err := defaultBootstrapTokenFile(cellName)
+	if err != nil {
+		return fmt.Errorf("resolve default bootstrap token path: %w", err)
 	}
 
 	ctx := context.Background()
@@ -272,6 +278,32 @@ func run(args []string) error {
 			return fmt.Errorf("set config %s: %w", k, err)
 		}
 	}
+	if cmd == "up" || cmd == "preview" {
+		path := *bootstrapTokenFile
+		explicit := path != ""
+		if path == "" {
+			path = defaultBootstrapPath
+		}
+		tok, ok, err := readBootstrapTokenFile(path, explicit)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := stack.SetConfig(ctx, "witself:bootstrapToken", auto.ConfigValue{Value: tok, Secret: true}); err != nil {
+				return fmt.Errorf("set bootstrap token config: %w", err)
+			}
+		} else {
+			cfg, err := stack.GetAllConfig(ctx)
+			if err != nil {
+				return fmt.Errorf("read stack config: %w", err)
+			}
+			if _, exists := cfg["witself:bootstrapToken"]; exists {
+				if err := stack.RemoveConfig(ctx, "witself:bootstrapToken"); err != nil {
+					return fmt.Errorf("clear bootstrap token config: %w", err)
+				}
+			}
+		}
+	}
 
 	switch cmd {
 	case "up":
@@ -334,6 +366,33 @@ func defaultStateDir() string {
 		return ".witself-infra-state"
 	}
 	return filepath.Join(home, ".witself-infra", "state")
+}
+
+func defaultBootstrapTokenFile(cellName string) (string, error) {
+	root := os.Getenv("WITSELF_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(home, ".witself")
+	}
+	return filepath.Join(root, "bootstrap", cellName, "bootstrap-token"), nil
+}
+
+func readBootstrapTokenFile(path string, required bool) (token string, ok bool, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !required && os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read bootstrap token file %s: %w", path, err)
+	}
+	token = strings.TrimSpace(string(b))
+	if token == "" {
+		return "", false, fmt.Errorf("bootstrap token file %s is empty", path)
+	}
+	return token, true, nil
 }
 
 // ensurePassphrase returns the passphrase that encrypts secrets in the local

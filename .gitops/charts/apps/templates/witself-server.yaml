@@ -1,7 +1,13 @@
 {{- if .Values.apps.witselfServer.enabled }}
+{{- $bootstrap := .Values.apps.witselfServer.secrets.bootstrap -}}
 {{- $db := .Values.apps.witselfServer.secrets.database -}}
+{{- $bootstrapTargetName := default "witself-bootstrap" $bootstrap.targetName -}}
+{{- $bootstrapMountPath := default (printf "/.witself/bootstrap/%s/bootstrap-token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- if $bootstrap.enabled -}}
+{{- $_ := set $serverValues "bootstrap" (dict "tokenFile" $bootstrapMountPath "existingSecret" (dict "name" $bootstrapTargetName "tokenKey" $bootstrap.tokenKey "ttlKey" $bootstrap.ttlKey)) -}}
+{{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

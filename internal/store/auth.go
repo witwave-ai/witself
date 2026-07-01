@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -22,19 +23,20 @@ func hashToken(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// AdoptBootstrapToken records the hash of a bootstrap token (from
-// WITSELF_BOOTSTRAP_TOKEN) bound to the root operator, so it can later be
-// exchanged. Idempotent: re-adopting the same token is a no-op.
-func (s *Store) AdoptBootstrapToken(ctx context.Context, accountID, operatorID, plaintext string) error {
+// AdoptBootstrapToken records the hash of a bootstrap token bound to the root
+// operator, so it can later be exchanged. Idempotent: re-adopting the same token
+// is a no-op, so a restart does not extend the token's original expiry.
+func (s *Store) AdoptBootstrapToken(ctx context.Context, accountID, operatorID, plaintext string, ttl time.Duration) error {
 	tokID, err := id.New("tok")
 	if err != nil {
 		return err
 	}
+	expiresAt := time.Now().UTC().Add(ttl)
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash)
-		 VALUES ($1, $2, $3, 'bootstrap', $4)
+		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash, expires_at)
+		 VALUES ($1, $2, $3, 'bootstrap', $4, $5)
 		 ON CONFLICT (token_hash) DO NOTHING`,
-		tokID, accountID, operatorID, hashToken(plaintext))
+		tokID, accountID, operatorID, hashToken(plaintext), expiresAt)
 	if err != nil {
 		return fmt.Errorf("adopt bootstrap token: %w", err)
 	}
@@ -56,6 +58,7 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	err = tx.QueryRow(ctx,
 		`UPDATE tokens SET consumed_at = now()
 		 WHERE token_hash = $1 AND kind = 'bootstrap' AND consumed_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > now())
 		 RETURNING account_id, operator_id`, hashToken(plaintext)).Scan(&accountID, &operatorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrInvalidBootstrap
@@ -91,7 +94,8 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (operatorID, accountID string, ok bool, err error) {
 	err = s.pool.QueryRow(ctx,
 		`SELECT operator_id, account_id FROM tokens
-		 WHERE token_hash = $1 AND kind = 'operator' AND consumed_at IS NULL`,
+		 WHERE token_hash = $1 AND kind = 'operator' AND consumed_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > now())`,
 		hashToken(plaintext)).Scan(&operatorID, &accountID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", false, nil

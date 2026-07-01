@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/token"
 	"github.com/witwave-ai/witself/internal/version"
 )
+
+var cellNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -54,9 +58,18 @@ func run(args []string) int {
 func genBootstrapToken(args []string) int {
 	fs := flag.NewFlagSet("gen-bootstrap-token", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	cell := fs.String("cell", "", "cell name for the default output path (~/.witself/bootstrap/<cell>/bootstrap-token)")
 	out := fs.String("out", "", "write the token to this file (0600) instead of stdout")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *out == "" && *cell != "" {
+		p, err := defaultBootstrapTokenPath(*cell)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		*out = p
 	}
 
 	tok, err := token.New(token.KindBootstrap)
@@ -69,12 +82,31 @@ func genBootstrapToken(args []string) int {
 		fmt.Println(tok)
 		return 0
 	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
 	if err := os.WriteFile(*out, []byte(tok+"\n"), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "wrote operator bootstrap token to %s\n", *out)
 	return 0
+}
+
+func defaultBootstrapTokenPath(cell string) (string, error) {
+	if !cellNamePattern.MatchString(cell) {
+		return "", fmt.Errorf("invalid cell name %q", cell)
+	}
+	root := os.Getenv("WITSELF_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(home, ".witself")
+	}
+	return filepath.Join(root, "bootstrap", cell, "bootstrap-token"), nil
 }
 
 func authCmd(args []string) int {

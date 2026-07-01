@@ -43,13 +43,25 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "witself-server.fullname" . }}
-          {{- if .Values.database.existingSecret.name }}
+          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name }}
           env:
+          {{- if .Values.bootstrap.existingSecret.name }}
+            - name: WITSELF_BOOTSTRAP_TOKEN_FILE
+              value: {{ .Values.bootstrap.tokenFile | quote }}
+            - name: WITSELF_BOOTSTRAP_TOKEN_TTL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bootstrap.existingSecret.name | quote }}
+                  key: {{ .Values.bootstrap.existingSecret.ttlKey | quote }}
+                  optional: true
+          {{- end }}
+          {{- if .Values.database.existingSecret.name }}
             - name: WITSELF_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.existingSecret.name | quote }}
                   key: {{ .Values.database.existingSecret.urlKey | quote }}
+          {{- end }}
           {{- end }}
           ports:
             - name: api
@@ -95,9 +107,22 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.bootstrap.existingSecret.name }}
+            - name: bootstrap-token
+              mountPath: {{ dir .Values.bootstrap.tokenFile | quote }}
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
       volumes:
+        {{- if .Values.bootstrap.existingSecret.name }}
+        - name: bootstrap-token
+          secret:
+            secretName: {{ .Values.bootstrap.existingSecret.name | quote }}
+            items:
+              - key: {{ .Values.bootstrap.existingSecret.tokenKey | quote }}
+                path: {{ base .Values.bootstrap.tokenFile | quote }}
+        {{- end }}
         # readOnlyRootFilesystem is on; give the process a writable /tmp.
         - name: tmp
           emptyDir: {}

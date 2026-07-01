@@ -33,6 +33,20 @@
         }
       }
     },
+    "bootstrap": {
+      "type": "object",
+      "properties": {
+        "tokenFile": { "type": "string", "minLength": 1 },
+        "existingSecret": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "tokenKey": { "type": "string", "minLength": 1 },
+            "ttlKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
     "server": {
       "type": "object",
       "required": ["port"],
