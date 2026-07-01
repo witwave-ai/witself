@@ -21,14 +21,6 @@ spec:
   certificateARNs:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  tags:
-    - key: witself:cell
-      value: {{ required "cell.name is required" .Values.cell.name | quote }}
-    - key: witself:component
-      value: ingress
-    {{- with .Values.platform.awsAlbIngress.tags }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: IngressClass
