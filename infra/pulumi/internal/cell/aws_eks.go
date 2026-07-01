@@ -67,7 +67,54 @@ func provisionAWSEKS(ctx *pulumi.Context, c awsCell, net *awsNetwork, prov *aws.
 		return nil, err
 	}
 
+	lbTagCleanup, err := iam.NewRolePolicy(ctx, "cell-eks-lb-tag-cleanup", &iam.RolePolicyArgs{
+		Role: clusterRole.Name,
+		Policy: pulumi.String(fmt.Sprintf(`{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RemoveELBTagsForCellIngress",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:RemoveTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/eks:eks-cluster-name": "%s"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "witself:cell",
+            "witself:component"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DeleteEC2TagsForCellIngress",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteTags",
+      "Resource": "arn:aws:ec2:*:*:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/eks:eks-cluster-name": "%s"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "witself:cell",
+            "witself:component"
+          ]
+        }
+      }
+    }
+  ]
+}`, rname(c.name, ""), rname(c.name, ""))),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return nil, err
+	}
+
 	var deps []pulumi.Resource
+	deps = append(deps, lbTagCleanup)
 	for i, p := range eksClusterPolicies {
 		a, err := iam.NewRolePolicyAttachment(ctx, fmt.Sprintf("cell-eks-cluster-%d", i), &iam.RolePolicyAttachmentArgs{
 			Role:      clusterRole.Name,
