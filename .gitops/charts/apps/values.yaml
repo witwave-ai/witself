@@ -16,7 +16,7 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
-    ingress:
+    awsAlbIngress:
       enabled: false
       className: alb
       annotations: {}

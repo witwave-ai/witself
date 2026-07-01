@@ -16,7 +16,7 @@ apps:
     chartVersion: 0.0.47
     imageTag: 0.0.47
     backendKind: managed
-    ingress:
+    awsAlbIngress:
       enabled: true
       className: alb
       annotations:
@@ -45,7 +45,7 @@ apps:
         refreshInterval: 1h
 
 platform:
-  albIngress:
+  awsAlbIngress:
     enabled: true
     className: alb
     scheme: internet-facing

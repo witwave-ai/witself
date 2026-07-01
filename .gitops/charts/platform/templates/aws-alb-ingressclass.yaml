@@ -1,5 +1,5 @@
-{{- if .Values.platform.albIngress.enabled }}
-{{- $className := required "platform.albIngress.className is required" .Values.platform.albIngress.className -}}
+{{- if and .Values.platform.awsAlbIngress.enabled (eq .Values.cell.cloud "aws") }}
+{{- $className := required "platform.awsAlbIngress.className is required" .Values.platform.awsAlbIngress.className -}}
 apiVersion: eks.amazonaws.com/v1
 kind: IngressClassParams
 metadata:
@@ -7,17 +7,17 @@ metadata:
   labels:
     witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
 spec:
-  scheme: {{ required "platform.albIngress.scheme is required" .Values.platform.albIngress.scheme | quote }}
-  ipAddressType: {{ required "platform.albIngress.ipAddressType is required" .Values.platform.albIngress.ipAddressType | quote }}
-  {{- with .Values.platform.albIngress.groupName }}
+  scheme: {{ required "platform.awsAlbIngress.scheme is required" .Values.platform.awsAlbIngress.scheme | quote }}
+  ipAddressType: {{ required "platform.awsAlbIngress.ipAddressType is required" .Values.platform.awsAlbIngress.ipAddressType | quote }}
+  {{- with .Values.platform.awsAlbIngress.groupName }}
   group:
     name: {{ . | quote }}
   {{- end }}
-  {{- with .Values.platform.albIngress.listeners }}
+  {{- with .Values.platform.awsAlbIngress.listeners }}
   listeners:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- with .Values.platform.albIngress.certificateARNs }}
+  {{- with .Values.platform.awsAlbIngress.certificateARNs }}
   certificateARNs:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -26,7 +26,7 @@ spec:
       value: {{ required "cell.name is required" .Values.cell.name | quote }}
     - key: witself:component
       value: ingress
-    {{- with .Values.platform.albIngress.tags }}
+    {{- with .Values.platform.awsAlbIngress.tags }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 ---

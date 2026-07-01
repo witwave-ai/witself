@@ -9,7 +9,7 @@ gitops:
   destinationServer: https://kubernetes.default.svc
 
 platform:
-  albIngress:
+  awsAlbIngress:
     enabled: false
     className: alb
     scheme: internet-facing
