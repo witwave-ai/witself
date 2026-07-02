@@ -98,7 +98,7 @@ flags:
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
   -gitops-revision GitOps repo revision (branch/tag)            (default "main")
   -domain        parent domain for cell hostnames               (default "cells.witself.witwave.ai")
-  -bootstrap-token-file first-operator bootstrap token file       (default "~/.witself/bootstrap/<cell>/bootstrap-token" when present)
+  -bootstrap-token-file first-operator bootstrap token file       (default "~/.witself/bootstrap/<cell>/bootstrap.token" when present)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
@@ -108,7 +108,7 @@ flags:
                   destroy: drains + removes the cell first (refuses while
                   accounts live on it). Omit = no fleet (self-host).
   -fleet-token-file  fleet token file (default: WITSELF_FLEET_TOKEN env,
-                  then ~/.witself-infra/fleet.token)
+                  then ~/.witself/fleet.token)
   -destroy-accounts  with destroy: also purge this cell's accounts from the
                   control-plane directory (the data dies with the cell)
 
@@ -152,13 +152,13 @@ func run(args []string) error {
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
 	gitopsRevision := fs.String("gitops-revision", cell.DefaultGitopsRevision, "GitOps repo revision (branch/tag)")
 	domain := fs.String("domain", cell.DefaultDomain, "parent domain for cell hostnames, e.g. cells.witself.witwave.ai")
-	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: ~/.witself/bootstrap/<cell>/bootstrap-token when present)")
+	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: ~/.witself/bootstrap/<cell>/bootstrap.token when present)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
-	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself-infra/fleet.token)")
+	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: purge this cell's accounts from the control-plane directory")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -476,7 +476,15 @@ func defaultBootstrapTokenFile(cellName string) (string, error) {
 		}
 		root = filepath.Join(home, ".witself")
 	}
-	return filepath.Join(root, "bootstrap", cellName, "bootstrap-token"), nil
+	path := filepath.Join(root, "bootstrap", cellName, "bootstrap.token")
+	// Fall back to the pre-rename file name if only it exists.
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		legacy := filepath.Join(root, "bootstrap", cellName, "bootstrap-token")
+		if _, lerr := os.Stat(legacy); lerr == nil {
+			return legacy, nil
+		}
+	}
+	return path, nil
 }
 
 func readBootstrapTokenFile(path string, required bool) (token string, ok bool, err error) {

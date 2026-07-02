@@ -73,7 +73,7 @@ Expected server environment variables may include:
 | `WITSELF_HEALTH_LISTEN` | Dedicated health probe listen address. Default should be `:8081`. |
 | `WITSELF_PUBLIC_URL` | Public URL for generated callbacks and metadata. |
 | `WITSELF_DATABASE_URL` | Postgres connection string, supplied by the runtime or secret manager. The target database must have the pgvector extension available. |
-| `WITSELF_BOOTSTRAP_TOKEN_FILE` | File containing a first-operator bootstrap token. Default deployment path: `/.witself/bootstrap/bootstrap-token`; cell deployments mount a cell-scoped path under `/.witself/bootstrap/<cell>/`. |
+| `WITSELF_BOOTSTRAP_TOKEN_FILE` | File containing a first-operator bootstrap token. Default deployment path: `/.witself/bootstrap/bootstrap.token`; cell deployments mount a cell-scoped path under `/.witself/bootstrap/<cell>/`. |
 | `WITSELF_BOOTSTRAP_TOKEN_TTL` | Lifetime applied when the server adopts the bootstrap token. Current deployment default: `24h`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |

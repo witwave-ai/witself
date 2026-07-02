@@ -2,7 +2,9 @@
 // (/v1/cells on e.g. https://self.witwave.ai). The provisioner — not the cell —
 // registers: `up -control-plane URL` registers as a post-step, and `destroy`
 // drains + removes (or purges) as a pre-step. Authorization is the fleet token,
-// read from WITSELF_FLEET_TOKEN or ~/.witself-infra/fleet.token.
+// read from -fleet-token-file, WITSELF_FLEET_TOKEN, or ~/.witself/fleet.token
+// (all Witself credentials consolidate under ~/.witself; WITSELF_HOME overrides
+// the root).
 package fleet
 
 import (
@@ -47,7 +49,8 @@ type Client struct {
 
 // NewClient resolves the fleet token and returns a client for the control
 // plane. Resolution order: the explicit tokenFile (an error if unreadable),
-// then WITSELF_FLEET_TOKEN, then ~/.witself-infra/fleet.token.
+// then WITSELF_FLEET_TOKEN, then ~/.witself/fleet.token (with a fallback to
+// the legacy ~/.witself-infra/fleet.token).
 func NewClient(controlPlane, tokenFile string) (*Client, error) {
 	tok, err := fleetToken(tokenFile)
 	if err != nil {
@@ -67,16 +70,25 @@ func fleetToken(tokenFile string) (string, error) {
 	if t := strings.TrimSpace(os.Getenv("WITSELF_FLEET_TOKEN")); t != "" {
 		return t, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home for fleet token: %w", err)
+	root := os.Getenv("WITSELF_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home for fleet token: %w", err)
+		}
+		root = filepath.Join(home, ".witself")
 	}
-	path := filepath.Join(home, ".witself-infra", "fleet.token")
-	t, err := readTokenFile(path)
-	if err != nil {
-		return "", fmt.Errorf("no fleet token: pass -fleet-token-file, set WITSELF_FLEET_TOKEN, or create %s: %w", path, err)
+	path := filepath.Join(root, "fleet.token")
+	if t, err := readTokenFile(path); err == nil {
+		return t, nil
 	}
-	return t, nil
+	// Legacy location from before credentials consolidated under ~/.witself.
+	if home, err := os.UserHomeDir(); err == nil {
+		if t, err := readTokenFile(filepath.Join(home, ".witself-infra", "fleet.token")); err == nil {
+			return t, nil
+		}
+	}
+	return "", fmt.Errorf("no fleet token: pass -fleet-token-file, set WITSELF_FLEET_TOKEN, or create %s", path)
 }
 
 func readTokenFile(path string) (string, error) {
