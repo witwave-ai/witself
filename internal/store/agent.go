@@ -88,7 +88,7 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var exists bool
 	err = tx.QueryRow(ctx,

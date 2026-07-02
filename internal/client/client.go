@@ -75,7 +75,7 @@ func BootstrapLogin(ctx context.Context, endpoint, bootstrapToken string) (*Boot
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -119,7 +119,7 @@ func doJSON(ctx context.Context, method, url, token string, body []byte, out any
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return responseError(resp, "not authorized (check the token)")

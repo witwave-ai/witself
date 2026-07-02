@@ -654,15 +654,19 @@ func tabSafe(s string) string {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "ws — the Witself CLI")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  ws version              Print version information")
-	fmt.Fprintln(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
-	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
-	fmt.Fprintln(w, "  ws realm create|list|delete")
-	fmt.Fprintln(w, "  ws agent create|list|delete")
-	fmt.Fprintln(w, "  ws operator list|create|delete")
-	fmt.Fprintln(w, "  ws token create|revoke  Mint or revoke agent/operator tokens")
-	fmt.Fprintln(w, "  ws help                 Show this help")
+	usageLine(w, "ws — the Witself CLI")
+	usageLine(w)
+	usageLine(w, "Usage:")
+	usageLine(w, "  ws version              Print version information")
+	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
+	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
+	usageLine(w, "  ws realm create|list|delete")
+	usageLine(w, "  ws agent create|list|delete")
+	usageLine(w, "  ws operator list|create|delete")
+	usageLine(w, "  ws token create|revoke  Mint or revoke agent/operator tokens")
+	usageLine(w, "  ws help                 Show this help")
+}
+
+func usageLine(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
 }

@@ -23,7 +23,7 @@ func TestHealthProbes(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200", p, resp.StatusCode)
 		}
-		resp.Body.Close()
+		closeBody(t, resp)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestWhoamiAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("/v1/whoami with bad token = %d, want 401", resp.StatusCode)
 	}
@@ -79,7 +79,7 @@ func TestWhoamiAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/v1/whoami with good token = %d, want 200", resp.StatusCode)
 	}
@@ -114,7 +114,7 @@ func TestAuthWhoamiAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/v1/auth/whoami = %d, want 200", resp.StatusCode)
 	}
@@ -150,13 +150,13 @@ func TestRealmsCreateAndList(t *testing.T) {
 	}
 
 	resp := post("", `{"name":"prod"}`)
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("create without token = %d, want 401", resp.StatusCode)
 	}
 
 	resp = post("good", `{"name":"prod"}`)
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("create = %d, want 201", resp.StatusCode)
 	}
@@ -167,7 +167,7 @@ func TestRealmsCreateAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lresp.Body.Close()
+	defer closeBody(t, lresp)
 	var out struct {
 		Realms []Realm `json:"realms"`
 	}
@@ -212,17 +212,17 @@ func TestAgentsCreateAndList(t *testing.T) {
 	}
 
 	r := post("realm_1", "", `{"name":"a1"}`)
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token = %d, want 401", r.StatusCode)
 	}
 	r = post("missing", "good", `{"name":"a1"}`)
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusNotFound {
 		t.Errorf("missing realm = %d, want 404", r.StatusCode)
 	}
 	r = post("realm_1", "good", `{"name":"a1"}`)
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Errorf("create = %d, want 201", r.StatusCode)
 	}
@@ -233,7 +233,7 @@ func TestAgentsCreateAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lresp.Body.Close()
+	defer closeBody(t, lresp)
 	var out struct {
 		Agents []Agent `json:"agents"`
 	}
@@ -274,17 +274,17 @@ func TestAgentTokenCreate(t *testing.T) {
 	}
 
 	r := post("agent_1", "")
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token = %d, want 401", r.StatusCode)
 	}
 	r = post("missing", "good")
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusNotFound {
 		t.Errorf("missing agent = %d, want 404", r.StatusCode)
 	}
 	r = post("agent_1", "good")
-	defer r.Body.Close()
+	defer closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
 	}
@@ -337,17 +337,17 @@ func TestOperatorTokenCreate(t *testing.T) {
 	}
 
 	r := post("", `{}`)
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token = %d, want 401", r.StatusCode)
 	}
 	r = post("good", `{"ttl":"0s"}`)
-	r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("invalid ttl = %d, want 400", r.StatusCode)
 	}
 	r = post("good", `{"display_name":"deploy bot","ttl":"24h"}`)
-	defer r.Body.Close()
+	defer closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
 	}
@@ -390,7 +390,7 @@ func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("mint token = %d, want 201", resp.StatusCode)
 	}
@@ -401,7 +401,7 @@ func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("whoami with minted token = %d, want 200", resp.StatusCode)
 	}
@@ -432,7 +432,7 @@ func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		closeBody(t, resp)
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("%s token create = %d, want 401", tok, resp.StatusCode)
 		}
@@ -510,7 +510,7 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list operators = %d, want 200", resp.StatusCode)
 	}
@@ -530,7 +530,7 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create operator = %d, want 201", resp.StatusCode)
 	}
@@ -551,7 +551,7 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete operator = %d, want 204", resp.StatusCode)
 	}
@@ -588,7 +588,7 @@ func TestOperatorDeleteGuards(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer closeBody(t, resp)
 			if resp.StatusCode != http.StatusConflict {
 				t.Fatalf("delete operator = %d, want 409", resp.StatusCode)
 			}
@@ -650,7 +650,7 @@ func TestDeleteAndRevokeRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		closeBody(t, resp)
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("%s %s = %d, want 204", req.Method, req.URL.Path, resp.StatusCode)
 		}
@@ -675,7 +675,7 @@ func getStatus(t *testing.T, url string) int {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	return resp.StatusCode
 }
 
@@ -686,7 +686,7 @@ func TestMetricsExposesUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "witself_up 1") {
 		t.Errorf("metrics missing witself_up gauge:\n%s", body)
@@ -700,7 +700,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	var m map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
 		t.Fatal(err)
@@ -724,7 +724,7 @@ func TestCapabilitiesShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	var c capabilities
 	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
 		t.Fatal(err)
@@ -750,12 +750,19 @@ func TestCapabilitiesIncludesAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	var c capabilities
 	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
 		t.Fatal(err)
 	}
 	if c.Account == nil || c.Account.ID != "acc_test123" {
 		t.Errorf("account = %+v, want id acc_test123", c.Account)
+	}
+}
+
+func closeBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
 	}
 }

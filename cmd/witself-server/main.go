@@ -305,21 +305,25 @@ func bootstrapTokenTTL() (time.Duration, error) {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "witself-server — the Witself backend API server")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  witself-server version    Print version information")
-	fmt.Fprintln(w, "  witself-server serve      Run the API, health, and metrics listeners")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Listeners (override with env):")
-	fmt.Fprintln(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")
-	fmt.Fprintln(w, "  WITSELF_HEALTH_ADDR   default :8081  (/livez /readyz /startupz)")
-	fmt.Fprintln(w, "  WITSELF_METRICS_ADDR  default :9090  (/metrics)")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Database (optional; when set, /readyz gates on it):")
-	fmt.Fprintln(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Bootstrap (optional first-operator setup):")
-	fmt.Fprintln(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/bootstrap/bootstrap-token)")
-	fmt.Fprintln(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
+	usageLine(w, "witself-server — the Witself backend API server")
+	usageLine(w)
+	usageLine(w, "Usage:")
+	usageLine(w, "  witself-server version    Print version information")
+	usageLine(w, "  witself-server serve      Run the API, health, and metrics listeners")
+	usageLine(w)
+	usageLine(w, "Listeners (override with env):")
+	usageLine(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")
+	usageLine(w, "  WITSELF_HEALTH_ADDR   default :8081  (/livez /readyz /startupz)")
+	usageLine(w, "  WITSELF_METRICS_ADDR  default :9090  (/metrics)")
+	usageLine(w)
+	usageLine(w, "Database (optional; when set, /readyz gates on it):")
+	usageLine(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
+	usageLine(w)
+	usageLine(w, "Bootstrap (optional first-operator setup):")
+	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/bootstrap/bootstrap-token)")
+	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
+}
+
+func usageLine(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
 }

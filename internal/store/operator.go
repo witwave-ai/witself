@@ -114,7 +114,7 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, displayName, toke
 	if err != nil {
 		return Operator{}, "", nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	operatorID, err := id.New("opr")
 	if err != nil {
@@ -181,7 +181,7 @@ func (s *Store) DeleteOperator(ctx context.Context, accountID, actorOperatorID, 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var isRoot bool
 	err = tx.QueryRow(ctx,

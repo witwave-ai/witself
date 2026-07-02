@@ -73,7 +73,7 @@ func (s *Store) DeleteRealm(ctx context.Context, accountID, realmID string) erro
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var exists bool
 	err = tx.QueryRow(ctx,

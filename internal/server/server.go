@@ -205,7 +205,7 @@ func apiMux(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
+		_, _ = fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID))
@@ -740,7 +740,7 @@ func healthMux(ready func(context.Context) error) http.Handler {
 		if ready != nil {
 			if err := ready(r.Context()); err != nil {
 				w.WriteHeader(http.StatusServiceUnavailable)
-				fmt.Fprintf(w, "not ready: %v\n", err)
+				_, _ = fmt.Fprintf(w, "not ready: %v\n", err)
 				return
 			}
 		}

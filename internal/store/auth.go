@@ -59,7 +59,7 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	if err != nil {
 		return "", "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var accountID, operatorID string
 	err = tx.QueryRow(ctx,
