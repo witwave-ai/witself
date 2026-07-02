@@ -122,6 +122,17 @@ func serve() int {
 			}
 			return out, nil
 		}
+		cfg.DeleteRealm = func(ctx context.Context, accountID, realmID string) error {
+			err := st.DeleteRealm(ctx, accountID, realmID)
+			switch {
+			case errors.Is(err, store.ErrRealmNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrRealmNotEmpty):
+				return server.ErrConflict
+			default:
+				return err
+			}
+		}
 		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (server.Agent, error) {
 			a, err := st.CreateAgent(ctx, accountID, realmID, name)
 			switch {
@@ -145,19 +156,66 @@ func serve() int {
 			}
 			return out, nil
 		}
-		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, error) {
-			tok, err := st.CreateAgentToken(ctx, accountID, agentID)
+		cfg.DeleteAgent = func(ctx context.Context, accountID, realmID, agentID string) error {
+			err := st.DeleteAgent(ctx, accountID, realmID, agentID)
 			if errors.Is(err, store.ErrAgentNotFound) {
-				return "", server.ErrNotFound
+				return server.ErrNotFound
 			}
-			return tok, err
+			return err
 		}
-		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error) {
-			tok, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, displayName, ttl)
-			if errors.Is(err, store.ErrOperatorNotFound) {
-				return "", nil, server.ErrNotFound
+		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, string, error) {
+			tok, tokenID, err := st.CreateAgentToken(ctx, accountID, agentID)
+			if errors.Is(err, store.ErrAgentNotFound) {
+				return "", "", server.ErrNotFound
 			}
-			return tok, expiresAt, err
+			return tok, tokenID, err
+		}
+		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
+			tok, tokenID, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, displayName, ttl)
+			if errors.Is(err, store.ErrOperatorNotFound) {
+				return "", "", nil, server.ErrNotFound
+			}
+			return tok, tokenID, expiresAt, err
+		}
+		cfg.ListOperators = func(ctx context.Context, accountID string) ([]server.Operator, error) {
+			ops, err := st.ListOperators(ctx, accountID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]server.Operator, len(ops))
+			for i, op := range ops {
+				out[i] = serverOperator(op)
+			}
+			return out, nil
+		}
+		cfg.CreateOperator = func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (server.Operator, string, *time.Time, error) {
+			op, tok, expiresAt, err := st.CreateOperator(ctx, accountID, displayName, tokenDisplayName, ttl)
+			if err != nil {
+				return server.Operator{}, "", nil, err
+			}
+			return serverOperator(op), tok, expiresAt, nil
+		}
+		cfg.DeleteOperator = func(ctx context.Context, accountID, actorOperatorID, targetOperatorID string) error {
+			err := st.DeleteOperator(ctx, accountID, actorOperatorID, targetOperatorID)
+			switch {
+			case errors.Is(err, store.ErrOperatorNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrCannotDeleteSelf):
+				return server.ErrCannotDeleteSelf
+			case errors.Is(err, store.ErrCannotDeleteRootOperator):
+				return server.ErrCannotDeleteRoot
+			case errors.Is(err, store.ErrLastOperator):
+				return server.ErrLastOperator
+			default:
+				return err
+			}
+		}
+		cfg.RevokeToken = func(ctx context.Context, accountID, tokenID string) error {
+			err := st.RevokeToken(ctx, accountID, tokenID)
+			if errors.Is(err, store.ErrTokenNotFound) {
+				return server.ErrNotFound
+			}
+			return err
 		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
@@ -171,6 +229,27 @@ func serve() int {
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func serverOperator(op store.Operator) server.Operator {
+	out := server.Operator{
+		ID:          op.ID,
+		DisplayName: op.DisplayName,
+		Role:        op.Role,
+		IsRoot:      op.IsRoot,
+		CreatedAt:   op.CreatedAt,
+		UpdatedAt:   op.UpdatedAt,
+		Tokens:      make([]server.OperatorToken, len(op.Tokens)),
+	}
+	for i, tok := range op.Tokens {
+		out.Tokens[i] = server.OperatorToken{
+			ID:          tok.ID,
+			DisplayName: tok.DisplayName,
+			CreatedAt:   tok.CreatedAt,
+			ExpiresAt:   tok.ExpiresAt,
+		}
+	}
+	return out
 }
 
 // dbDSN resolves the Postgres DSN from the environment, preferring the

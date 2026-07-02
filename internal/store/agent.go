@@ -38,7 +38,10 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO agents (id, realm_id, name)
 		 SELECT $1, $2, $3
-		 WHERE EXISTS (SELECT 1 FROM realms WHERE id = $2 AND account_id = $4)
+		 WHERE EXISTS (
+		   SELECT 1 FROM realms
+		   WHERE id = $2 AND account_id = $4 AND deleted_at IS NULL
+		 )
 		 RETURNING id`,
 		agentID, realmID, name, accountID).Scan(&returned)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -60,6 +63,7 @@ func (s *Store) ListAgents(ctx context.Context, accountID, realmID string) ([]Ag
 		`SELECT a.id, a.name FROM agents a
 		 JOIN realms r ON r.id = a.realm_id
 		 WHERE a.realm_id = $1 AND r.account_id = $2
+		   AND r.deleted_at IS NULL AND a.deleted_at IS NULL
 		 ORDER BY a.created_at`, realmID, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
@@ -75,4 +79,43 @@ func (s *Store) ListAgents(ctx context.Context, accountID, realmID string) ([]Ag
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// DeleteAgent soft-deletes an agent in a realm and immediately revokes its live
+// tokens. The agent row stays as a tombstone for future audit/history surfaces.
+func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var exists bool
+	err = tx.QueryRow(ctx,
+		`SELECT true FROM agents a
+		 JOIN realms r ON r.id = a.realm_id
+		 WHERE a.id = $1 AND a.realm_id = $2 AND r.account_id = $3
+		   AND a.deleted_at IS NULL AND r.deleted_at IS NULL
+		 FOR UPDATE`,
+		agentID, realmID, accountID).Scan(&exists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAgentNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verify agent: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE tokens SET consumed_at = now()
+		 WHERE account_id = $1 AND agent_id = $2 AND consumed_at IS NULL`,
+		accountID, agentID); err != nil {
+		return fmt.Errorf("revoke agent tokens: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE agents SET deleted_at = now(), updated_at = now()
+		 WHERE id = $1 AND realm_id = $2 AND deleted_at IS NULL`,
+		agentID, realmID); err != nil {
+		return fmt.Errorf("delete agent: %w", err)
+	}
+	return tx.Commit(ctx)
 }

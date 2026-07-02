@@ -147,8 +147,12 @@ Unattended auth should use explicitly issued tokens:
   preferred over environment variables.
 - In the current self-hosted implementation, an authenticated operator can mint
   another token for the same operator record with `ws token create --operator`.
-  `--name` labels that token; creating named additional operator records is
-  tracked separately from this token-minting path.
+  `--name` labels that token.
+- Named additional operator records are managed separately with
+  `ws operator create --name`, `ws operator list`, and
+  `ws operator delete --yes`. Deleting an operator is a soft delete that revokes
+  all live tokens bound to that operator. The seeded root operator, the
+  authenticated operator, and the last live operator are protected from delete.
 
 ## Self-Hosted Bootstrap
 
@@ -194,6 +198,7 @@ self-hosted production security model.
 - [api-contract.md](api-contract.md)
 - [authorization-and-roles.md](authorization-and-roles.md)
 - [access-policy.md](access-policy.md)
+- [resource-lifecycle.md](resource-lifecycle.md)
 - [agent-collaboration.md](agent-collaboration.md)
 - [security-groups.md](security-groups.md)
 - [token-lifecycle.md](token-lifecycle.md)

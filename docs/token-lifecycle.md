@@ -376,6 +376,12 @@ Revoking a token does not delete the agent's memories, facts, group membership,
 or messages; the identity persists and can be re-credentialed with a new token.
 Revocation only invalidates the credential, not the self it authenticated.
 
+The current self-hosted API revokes live operator and agent tokens with
+`POST /v1/tokens/{token_id}:revoke`; the CLI wrapper is
+`ws token revoke --token TOKEN_ID --yes`. Raw token values are never used for
+revocation. Token IDs are returned in token create responses, and operator token
+IDs are also visible through `ws operator list`.
+
 ## Agent Disable And Delete
 
 Disabled agents cannot authenticate with existing tokens.
@@ -400,6 +406,9 @@ Identity-data interaction:
 - Cross-agent policies naming the deleted agent as subject or target, and group
   memberships, are evaluated against the agent's deleted/tombstoned state and
   reported in `policy test`.
+
+The current self-hosted implementation uses `ws agent delete --yes` as a
+soft-delete/tombstone operation and immediately revokes that agent's live tokens.
 
 ## Token Metadata
 
@@ -452,6 +461,7 @@ without a migration path.
 
 - [requirements.md](requirements.md)
 - [authorization-and-roles.md](authorization-and-roles.md)
+- [resource-lifecycle.md](resource-lifecycle.md)
 - [server-command-surface.md](server-command-surface.md)
 - [api-contract.md](api-contract.md)
 - [access-policy.md](access-policy.md)

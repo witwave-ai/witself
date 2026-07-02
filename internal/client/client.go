@@ -24,8 +24,36 @@ type BootstrapResult struct {
 type OperatorTokenResult struct {
 	OperatorToken string
 	OperatorID    string
+	TokenID       string
 	DisplayName   string
 	ExpiresAt     string
+}
+
+// OperatorToken is safe token metadata returned in operator listings.
+type OperatorToken struct {
+	ID          string     `json:"id"`
+	DisplayName string     `json:"display_name"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// Operator is the API view of an operator principal.
+type Operator struct {
+	ID          string          `json:"id"`
+	DisplayName string          `json:"display_name"`
+	Role        string          `json:"role"`
+	IsRoot      bool            `json:"is_root"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Tokens      []OperatorToken `json:"tokens"`
+}
+
+// CreateOperatorResult is returned when creating a named operator and its first
+// token. The raw token is shown once.
+type CreateOperatorResult struct {
+	Operator       Operator
+	OperatorToken  string
+	TokenExpiresAt *time.Time
 }
 
 // BootstrapLogin exchanges a bootstrap token for an operator token by POSTing to
@@ -94,13 +122,13 @@ func doJSON(ctx context.Context, method, url, token string, body []byte, out any
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return fmt.Errorf("not authorized (check the token)")
+		return responseError(resp, "not authorized (check the token)")
 	case resp.StatusCode == http.StatusConflict:
-		return fmt.Errorf("already exists")
+		return responseError(resp, "conflict")
 	case resp.StatusCode == http.StatusNotFound:
-		return fmt.Errorf("not found")
+		return responseError(resp, "not found")
 	case resp.StatusCode >= 300:
-		return fmt.Errorf("request failed: %s", resp.Status)
+		return responseError(resp, "request failed: "+resp.Status)
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -108,6 +136,16 @@ func doJSON(ctx context.Context, method, url, token string, body []byte, out any
 		}
 	}
 	return nil
+}
+
+func responseError(resp *http.Response, fallback string) error {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
+		return fmt.Errorf("%s", out.Error)
+	}
+	return fmt.Errorf("%s", fallback)
 }
 
 // Realm is the API view of a realm.
@@ -140,6 +178,11 @@ func ListRealms(ctx context.Context, endpoint, token string) ([]Realm, error) {
 		return nil, err
 	}
 	return out.Realms, nil
+}
+
+// DeleteRealm soft-deletes an empty realm via DELETE {endpoint}/v1/realms/{realm}.
+func DeleteRealm(ctx context.Context, endpoint, token, realmID string) error {
+	return doJSON(ctx, http.MethodDelete, realmsURL(endpoint)+"/"+realmID, token, nil, nil)
 }
 
 func realmsURL(endpoint string) string {
@@ -183,18 +226,24 @@ func agentsURL(endpoint, realmID string) string {
 }
 
 // CreateAgentToken mints an agent token via POST {endpoint}/v1/agents/{agent}/tokens.
-func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (string, error) {
+func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (string, string, error) {
 	var out struct {
 		AgentToken string `json:"agent_token"`
+		TokenID    string `json:"token_id"`
 	}
 	url := strings.TrimRight(endpoint, "/") + "/v1/agents/" + agentID + "/tokens"
 	if err := doJSON(ctx, http.MethodPost, url, token, []byte("{}"), &out); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if out.AgentToken == "" {
-		return "", fmt.Errorf("server returned no token")
+		return "", "", fmt.Errorf("server returned no token")
 	}
-	return out.AgentToken, nil
+	return out.AgentToken, out.TokenID, nil
+}
+
+// DeleteAgent soft-deletes an agent and revokes its tokens.
+func DeleteAgent(ctx context.Context, endpoint, token, realmID, agentID string) error {
+	return doJSON(ctx, http.MethodDelete, agentsURL(endpoint, realmID)+"/"+agentID, token, nil, nil)
 }
 
 // CreateOperatorToken mints another token for the authenticated operator.
@@ -213,6 +262,7 @@ func CreateOperatorToken(ctx context.Context, endpoint, token, displayName, ttl 
 	var out struct {
 		OperatorToken string `json:"operator_token"`
 		OperatorID    string `json:"operator_id"`
+		TokenID       string `json:"token_id"`
 		DisplayName   string `json:"display_name,omitempty"`
 		ExpiresAt     string `json:"expires_at,omitempty"`
 	}
@@ -226,7 +276,65 @@ func CreateOperatorToken(ctx context.Context, endpoint, token, displayName, ttl 
 	return &OperatorTokenResult{
 		OperatorToken: out.OperatorToken,
 		OperatorID:    out.OperatorID,
+		TokenID:       out.TokenID,
 		DisplayName:   out.DisplayName,
 		ExpiresAt:     out.ExpiresAt,
 	}, nil
+}
+
+// ListOperators lists current operators for the authenticated account.
+func ListOperators(ctx context.Context, endpoint, token string) ([]Operator, error) {
+	var out struct {
+		Operators []Operator `json:"operators"`
+	}
+	if err := doJSON(ctx, http.MethodGet, operatorsURL(endpoint), token, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Operators, nil
+}
+
+// CreateOperator creates a named operator and returns its first token once.
+func CreateOperator(ctx context.Context, endpoint, token, displayName, tokenDisplayName, ttl string) (*CreateOperatorResult, error) {
+	body := map[string]string{"display_name": displayName}
+	if tokenDisplayName != "" {
+		body["token_display_name"] = tokenDisplayName
+	}
+	if ttl != "" {
+		body["ttl"] = ttl
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Operator       Operator   `json:"operator"`
+		OperatorToken  string     `json:"operator_token"`
+		TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
+	}
+	if err := doJSON(ctx, http.MethodPost, operatorsURL(endpoint), token, raw, &out); err != nil {
+		return nil, err
+	}
+	if out.OperatorToken == "" {
+		return nil, fmt.Errorf("server returned no operator token")
+	}
+	return &CreateOperatorResult{
+		Operator:       out.Operator,
+		OperatorToken:  out.OperatorToken,
+		TokenExpiresAt: out.TokenExpiresAt,
+	}, nil
+}
+
+// DeleteOperator soft-deletes another operator and revokes its tokens.
+func DeleteOperator(ctx context.Context, endpoint, token, operatorID string) error {
+	return doJSON(ctx, http.MethodDelete, operatorsURL(endpoint)+"/"+operatorID, token, nil, nil)
+}
+
+// RevokeToken immediately revokes a live operator or agent token by token id.
+func RevokeToken(ctx context.Context, endpoint, token, tokenID string) error {
+	url := strings.TrimRight(endpoint, "/") + "/v1/tokens/" + tokenID + ":revoke"
+	return doJSON(ctx, http.MethodPost, url, token, []byte("{}"), nil)
+}
+
+func operatorsURL(endpoint string) string {
+	return strings.TrimRight(endpoint, "/") + "/v1/operators"
 }

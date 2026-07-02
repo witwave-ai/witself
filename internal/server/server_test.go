@@ -252,11 +252,11 @@ func TestAgentTokenCreate(t *testing.T) {
 		}
 		return "", "", false, nil
 	}
-	create := func(_ context.Context, _, agentID string) (string, error) {
+	create := func(_ context.Context, _, agentID string) (string, string, error) {
 		if agentID == "missing" {
-			return "", ErrNotFound
+			return "", "", ErrNotFound
 		}
-		return "witself_agt_minted", nil
+		return "witself_agt_minted", "tok_agent", nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgentToken: create}))
 	defer srv.Close()
@@ -290,12 +290,13 @@ func TestAgentTokenCreate(t *testing.T) {
 	}
 	var out struct {
 		AgentToken string `json:"agent_token"`
+		TokenID    string `json:"token_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.AgentToken != "witself_agt_minted" {
-		t.Errorf("agent_token = %q", out.AgentToken)
+	if out.AgentToken != "witself_agt_minted" || out.TokenID != "tok_agent" {
+		t.Errorf("agent token response = %+v", out)
 	}
 }
 
@@ -306,7 +307,7 @@ func TestOperatorTokenCreate(t *testing.T) {
 		}
 		return "", "", false, nil
 	}
-	create := func(_ context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error) {
+	create := func(_ context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
 		if accountID != "acc_y" || operatorID != "opr_x" {
 			t.Fatalf("create principal = account %q operator %q", accountID, operatorID)
 		}
@@ -318,7 +319,7 @@ func TestOperatorTokenCreate(t *testing.T) {
 			tm := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC)
 			expiresAt = &tm
 		}
-		return "witself_opr_minted", expiresAt, nil
+		return "witself_opr_minted", "tok_operator", expiresAt, nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
 	defer srv.Close()
@@ -353,13 +354,14 @@ func TestOperatorTokenCreate(t *testing.T) {
 	var out struct {
 		OperatorToken string `json:"operator_token"`
 		OperatorID    string `json:"operator_id"`
+		TokenID       string `json:"token_id"`
 		DisplayName   string `json:"display_name"`
 		ExpiresAt     string `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.OperatorToken != "witself_opr_minted" || out.OperatorID != "opr_x" || out.DisplayName != "deploy bot" || out.ExpiresAt == "" {
+	if out.OperatorToken != "witself_opr_minted" || out.OperatorID != "opr_x" || out.TokenID != "tok_operator" || out.DisplayName != "deploy bot" || out.ExpiresAt == "" {
 		t.Errorf("operator token response = %+v", out)
 	}
 }
@@ -372,12 +374,12 @@ func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
 		}
 		return "", "", false, nil
 	}
-	create := func(_ context.Context, accountID, operatorID, _ string, _ *time.Duration) (string, *time.Time, error) {
+	create := func(_ context.Context, accountID, operatorID, _ string, _ *time.Duration) (string, string, *time.Time, error) {
 		if accountID != "acc_y" || operatorID != "opr_x" {
 			t.Fatalf("create principal = account %q operator %q", accountID, operatorID)
 		}
 		valid["child"] = true
-		return "child", nil, nil
+		return "child", "tok_child", nil, nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
 	defer srv.Close()
@@ -416,9 +418,9 @@ func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
 			return "", "", false, nil
 		}
 	}
-	create := func(context.Context, string, string, string, *time.Duration) (string, *time.Time, error) {
+	create := func(context.Context, string, string, string, *time.Duration) (string, string, *time.Time, error) {
 		t.Fatal("create should not be called")
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
 	defer srv.Close()
@@ -435,6 +437,236 @@ func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
 			t.Fatalf("%s token create = %d, want 401", tok, resp.StatusCode)
 		}
 	}
+}
+
+func TestOperatorsListCreateAndDelete(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_root", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	now := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC)
+	operators := []Operator{{
+		ID:          "opr_root",
+		DisplayName: "owner",
+		Role:        "account_owner",
+		IsRoot:      true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Tokens: []OperatorToken{{
+			ID:          "tok_root",
+			DisplayName: "laptop",
+			CreatedAt:   now,
+		}},
+	}}
+	list := func(_ context.Context, accountID string) ([]Operator, error) {
+		if accountID != "acc_y" {
+			t.Fatalf("list account = %q", accountID)
+		}
+		return operators, nil
+	}
+	create := func(_ context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+		if accountID != "acc_y" || displayName != "deploy bot" || tokenDisplayName != "deploy token" {
+			t.Fatalf("create args account=%q display=%q tokenDisplay=%q", accountID, displayName, tokenDisplayName)
+		}
+		if ttl == nil || *ttl != 24*time.Hour {
+			t.Fatalf("ttl = %v, want 24h", ttl)
+		}
+		op := Operator{
+			ID:          "opr_deploy",
+			DisplayName: displayName,
+			Role:        "account_operator",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			Tokens: []OperatorToken{{
+				ID:          "tok_deploy",
+				DisplayName: tokenDisplayName,
+				CreatedAt:   now,
+			}},
+		}
+		operators = append(operators, op)
+		return op, "witself_opr_deploy", nil, nil
+	}
+	var deleted string
+	deleteOperator := func(_ context.Context, accountID, actorOperatorID, targetOperatorID string) error {
+		if accountID != "acc_y" || actorOperatorID != "opr_root" {
+			t.Fatalf("delete principal account=%q actor=%q", accountID, actorOperatorID)
+		}
+		deleted = targetOperatorID
+		return nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		Authenticate:   auth,
+		ListOperators:  list,
+		CreateOperator: create,
+		DeleteOperator: deleteOperator,
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/operators", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list operators = %d, want 200", resp.StatusCode)
+	}
+	var listed struct {
+		Operators []Operator `json:"operators"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Operators) != 1 || listed.Operators[0].Tokens[0].DisplayName != "laptop" {
+		t.Fatalf("operators = %+v", listed.Operators)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/v1/operators", strings.NewReader(`{"display_name":"deploy bot","token_display_name":"deploy token","ttl":"24h"}`))
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create operator = %d, want 201", resp.StatusCode)
+	}
+	var created struct {
+		Operator      Operator `json:"operator"`
+		OperatorToken string   `json:"operator_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Operator.ID != "opr_deploy" || created.Operator.Tokens[0].ID != "tok_deploy" || created.OperatorToken != "witself_opr_deploy" {
+		t.Fatalf("created = %+v", created)
+	}
+
+	req, _ = http.NewRequest(http.MethodDelete, srv.URL+"/v1/operators/opr_deploy", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete operator = %d, want 204", resp.StatusCode)
+	}
+	if deleted != "opr_deploy" {
+		t.Fatalf("deleted = %q, want opr_deploy", deleted)
+	}
+}
+
+func TestOperatorDeleteGuards(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_root", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"self", ErrCannotDeleteSelf, "cannot delete the authenticated operator"},
+		{"root", ErrCannotDeleteRoot, "cannot delete the root operator"},
+		{"last", ErrLastOperator, "cannot delete the last operator"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deleteOperator := func(context.Context, string, string, string) error { return tc.err }
+			srv := httptest.NewServer(apiMux(Config{Authenticate: auth, DeleteOperator: deleteOperator}))
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/operators/opr_x", nil)
+			req.Header.Set("Authorization", "Bearer good")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("delete operator = %d, want 409", resp.StatusCode)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), tc.want) {
+				t.Fatalf("body = %s, want %q", body, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeleteAndRevokeRoutes(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	var deletedRealm, deletedAgent, revokedToken string
+	deleteRealm := func(_ context.Context, accountID, realmID string) error {
+		if accountID != "acc_y" {
+			t.Fatalf("realm account = %q", accountID)
+		}
+		deletedRealm = realmID
+		return nil
+	}
+	deleteAgent := func(_ context.Context, accountID, realmID, agentID string) error {
+		if accountID != "acc_y" || realmID != "realm_1" {
+			t.Fatalf("agent delete account=%q realm=%q", accountID, realmID)
+		}
+		deletedAgent = agentID
+		return nil
+	}
+	revoke := func(_ context.Context, accountID, tokenID string) error {
+		if accountID != "acc_y" {
+			t.Fatalf("revoke account = %q", accountID)
+		}
+		revokedToken = tokenID
+		return nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		Authenticate: auth,
+		DeleteRealm:  deleteRealm,
+		DeleteAgent:  deleteAgent,
+		RevokeToken:  revoke,
+	}))
+	defer srv.Close()
+
+	for _, req := range []*http.Request{
+		mustRequest(t, http.MethodDelete, srv.URL+"/v1/realms/realm_1"),
+		mustRequest(t, http.MethodDelete, srv.URL+"/v1/realms/realm_1/agents/agent_1"),
+		mustRequest(t, http.MethodPost, srv.URL+"/v1/tokens/tok_1:revoke"),
+	} {
+		req.Header.Set("Authorization", "Bearer good")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("%s %s = %d, want 204", req.Method, req.URL.Path, resp.StatusCode)
+		}
+	}
+	if deletedRealm != "realm_1" || deletedAgent != "agent_1" || revokedToken != "tok_1" {
+		t.Fatalf("deletedRealm=%q deletedAgent=%q revokedToken=%q", deletedRealm, deletedAgent, revokedToken)
+	}
+}
+
+func mustRequest(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
 }
 
 func getStatus(t *testing.T, url string) int {

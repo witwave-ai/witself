@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +98,97 @@ func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	}
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--name", "deploy bot"}); code != 2 {
 		t.Fatalf("agent name code = %d, want 2", code)
+	}
+}
+
+func TestOperatorLifecycleCommands(t *testing.T) {
+	var deletedOperator, revokedToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operators":
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operators":[{"id":"opr_1","display_name":"owner","role":"account_owner","is_root":true,"created_at":"2026-07-02T00:00:00Z","updated_at":"2026-07-02T00:00:00Z","tokens":[{"id":"tok_1","display_name":"laptop","created_at":"2026-07-02T00:00:00Z"}]}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/operators":
+			var body struct {
+				DisplayName      string `json:"display_name"`
+				TokenDisplayName string `json:"token_display_name"`
+				TTL              string `json:"ttl"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.DisplayName != "deploy bot" || body.TokenDisplayName != "deploy token" || body.TTL != "24h" {
+				t.Errorf("create body = %+v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator":{"id":"opr_2","display_name":"deploy bot","role":"account_operator","is_root":false,"created_at":"2026-07-02T00:00:00Z","updated_at":"2026-07-02T00:00:00Z","tokens":[{"id":"tok_2","display_name":"deploy token","created_at":"2026-07-02T00:00:00Z"}]},"operator_token":"witself_opr_new"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/operators/opr_2":
+			deletedOperator = strings.TrimPrefix(r.URL.Path, "/v1/operators/")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tokens/tok_2:revoke":
+			revokedToken = "tok_2"
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "parent.token")
+	out := filepath.Join(dir, "new.token")
+	if err := os.WriteFile(parent, []byte("witself_opr_parent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := run([]string{"operator", "list", "--endpoint", srv.URL, "--token-file", parent}); code != 0 {
+		t.Fatalf("operator list code = %d, want 0", code)
+	}
+	if code := run([]string{
+		"operator", "create",
+		"--endpoint", srv.URL,
+		"--token-file", parent,
+		"--name", "deploy bot",
+		"--token-name", "deploy token",
+		"--ttl", "24h",
+		"--out", out,
+	}); code != 0 {
+		t.Fatalf("operator create code = %d, want 0", code)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "witself_opr_new\n" {
+		t.Fatalf("operator token file = %q", got)
+	}
+	if code := run([]string{"operator", "delete", "--endpoint", srv.URL, "--token-file", parent, "--yes", "opr_2"}); code != 0 {
+		t.Fatalf("operator delete code = %d, want 0", code)
+	}
+	if deletedOperator != "opr_2" {
+		t.Fatalf("deletedOperator = %q, want opr_2", deletedOperator)
+	}
+	if code := run([]string{"token", "revoke", "--endpoint", srv.URL, "--token-file", parent, "--token", "tok_2", "--yes"}); code != 0 {
+		t.Fatalf("token revoke code = %d, want 0", code)
+	}
+	if revokedToken != "tok_2" {
+		t.Fatalf("revokedToken = %q, want tok_2", revokedToken)
+	}
+}
+
+func TestDestructiveCommandsRequireYes(t *testing.T) {
+	if code := run([]string{"operator", "delete", "--endpoint", "http://example.test", "--token-file", "token", "opr_1"}); code != 2 {
+		t.Fatalf("operator delete without yes code = %d, want 2", code)
+	}
+	if code := run([]string{"realm", "delete", "--endpoint", "http://example.test", "--token-file", "token", "realm_1"}); code != 2 {
+		t.Fatalf("realm delete without yes code = %d, want 2", code)
+	}
+	if code := run([]string{"agent", "delete", "--endpoint", "http://example.test", "--token-file", "token", "--realm", "realm_1", "agent_1"}); code != 2 {
+		t.Fatalf("agent delete without yes code = %d, want 2", code)
+	}
+	if code := run([]string{"token", "revoke", "--endpoint", "http://example.test", "--token-file", "token", "--token", "tok_1"}); code != 2 {
+		t.Fatalf("token revoke without yes code = %d, want 2", code)
 	}
 }

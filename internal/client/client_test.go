@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestBootstrapLoginSuccess(t *testing.T) {
@@ -62,7 +63,7 @@ func TestCreateOperatorToken(t *testing.T) {
 			t.Errorf("ttl = %q, want 24h", body.TTL)
 		}
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator_token":"witself_opr_child","operator_id":"opr_1","display_name":"deploy bot","expires_at":"2026-07-03T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator_token":"witself_opr_child","operator_id":"opr_1","token_id":"tok_1","display_name":"deploy bot","expires_at":"2026-07-03T00:00:00Z"}`))
 	}))
 	defer srv.Close()
 
@@ -70,7 +71,64 @@ func TestCreateOperatorToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.OperatorToken != "witself_opr_child" || res.OperatorID != "opr_1" || res.DisplayName != "deploy bot" || res.ExpiresAt == "" {
+	if res.OperatorToken != "witself_opr_child" || res.OperatorID != "opr_1" || res.TokenID != "tok_1" || res.DisplayName != "deploy bot" || res.ExpiresAt == "" {
 		t.Errorf("operator token result = %+v", res)
+	}
+}
+
+func TestOperatorLifecycleClient(t *testing.T) {
+	now := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC).Format(time.RFC3339)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operators":
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operators":[{"id":"opr_1","display_name":"owner","role":"account_owner","is_root":true,"created_at":"` + now + `","updated_at":"` + now + `","tokens":[{"id":"tok_1","display_name":"laptop","created_at":"` + now + `"}]}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/operators":
+			var body struct {
+				DisplayName      string `json:"display_name"`
+				TokenDisplayName string `json:"token_display_name"`
+				TTL              string `json:"ttl"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.DisplayName != "deploy bot" || body.TokenDisplayName != "deploy token" || body.TTL != "24h" {
+				t.Errorf("create body = %+v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator":{"id":"opr_2","display_name":"deploy bot","role":"account_operator","is_root":false,"created_at":"` + now + `","updated_at":"` + now + `","tokens":[{"id":"tok_2","display_name":"deploy token","created_at":"` + now + `"}]},"operator_token":"witself_opr_new"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/operators/opr_2":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tokens/tok_2:revoke":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ops, err := ListOperators(context.Background(), srv.URL, "witself_opr_parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].Tokens[0].DisplayName != "laptop" {
+		t.Fatalf("operators = %+v", ops)
+	}
+
+	created, err := CreateOperator(context.Background(), srv.URL, "witself_opr_parent", "deploy bot", "deploy token", "24h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Operator.ID != "opr_2" || created.OperatorToken != "witself_opr_new" || created.Operator.Tokens[0].ID != "tok_2" {
+		t.Fatalf("created = %+v", created)
+	}
+
+	if err := DeleteOperator(context.Background(), srv.URL, "witself_opr_parent", "opr_2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RevokeToken(context.Background(), srv.URL, "witself_opr_parent", "tok_2"); err != nil {
+		t.Fatal(err)
 	}
 }

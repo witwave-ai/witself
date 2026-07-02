@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/token"
@@ -40,6 +41,8 @@ func run(args []string) int {
 		return realmCmd(args[1:])
 	case "agent":
 		return agentCmd(args[1:])
+	case "operator":
+		return operatorCmd(args[1:])
 	case "token":
 		return tokenCmd(args[1:])
 	case "help", "--help", "-h":
@@ -159,7 +162,7 @@ func authLogin(args []string) int {
 
 func realmCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws realm create|list --endpoint URL --token-file FILE")
+		fmt.Fprintln(os.Stderr, "usage: ws realm create|list|delete --endpoint URL --token-file FILE")
 		return 2
 	}
 	switch args[0] {
@@ -167,6 +170,8 @@ func realmCmd(args []string) int {
 		return realmCreate(args[1:])
 	case "list":
 		return realmList(args[1:])
+	case "delete":
+		return realmDelete(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ws realm: unknown subcommand %q\n", args[0])
 		return 2
@@ -200,6 +205,37 @@ func realmCreate(args []string) int {
 	return 0
 }
 
+func realmDelete(args []string) int {
+	fs := flag.NewFlagSet("realm delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	yes := fs.Bool("yes", false, "confirm realm deletion")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	realmID := fs.Arg(0)
+	if *endpoint == "" || *tokenFile == "" || realmID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws realm delete --endpoint URL --token-file FILE --yes REALM")
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "ws: refusing to delete realm without --yes")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.DeleteRealm(context.Background(), *endpoint, tok, realmID); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "deleted realm %s\n", realmID)
+	return 0
+}
+
 func realmList(args []string) int {
 	fs := flag.NewFlagSet("realm list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -230,7 +266,7 @@ func realmList(args []string) int {
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws agent create|list --endpoint URL --token-file FILE --realm REALM")
+		fmt.Fprintln(os.Stderr, "usage: ws agent create|list|delete --endpoint URL --token-file FILE --realm REALM")
 		return 2
 	}
 	switch args[0] {
@@ -238,6 +274,8 @@ func agentCmd(args []string) int {
 		return agentCreate(args[1:])
 	case "list":
 		return agentList(args[1:])
+	case "delete":
+		return agentDelete(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ws agent: unknown subcommand %q\n", args[0])
 		return 2
@@ -301,12 +339,180 @@ func agentList(args []string) int {
 	return 0
 }
 
-func tokenCmd(args []string) int {
-	if len(args) == 0 || args[0] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
+func agentDelete(args []string) int {
+	fs := flag.NewFlagSet("agent delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	realm := fs.String("realm", "", "realm id")
+	yes := fs.Bool("yes", false, "confirm agent deletion and token revocation")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	return tokenCreate(args[1:])
+	agentID := fs.Arg(0)
+	if *endpoint == "" || *tokenFile == "" || *realm == "" || agentID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent delete --endpoint URL --token-file FILE --realm REALM --yes AGENT")
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "ws: refusing to delete agent without --yes")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.DeleteAgent(context.Background(), *endpoint, tok, *realm, agentID); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "deleted agent %s\n", agentID)
+	return 0
+}
+
+func operatorCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws operator list|create|delete --endpoint URL --token-file FILE")
+		return 2
+	}
+	switch args[0] {
+	case "list":
+		return operatorList(args[1:])
+	case "create":
+		return operatorCreate(args[1:])
+	case "delete":
+		return operatorDelete(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws operator: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func operatorList(args []string) int {
+	fs := flag.NewFlagSet("operator list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws operator list --endpoint URL --token-file FILE")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	operators, err := client.ListOperators(context.Background(), *endpoint, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	for _, op := range operators {
+		fmt.Printf("%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+			op.ID,
+			tabSafe(op.DisplayName),
+			op.Role,
+			op.IsRoot,
+			formatTime(op.CreatedAt),
+			formatTime(op.UpdatedAt),
+			operatorTokenSummary(op.Tokens),
+		)
+	}
+	return 0
+}
+
+func operatorCreate(args []string) int {
+	fs := flag.NewFlagSet("operator create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	name := fs.String("name", "", "operator display name")
+	tokenName := fs.String("token-name", "", "initial operator token display name")
+	ttl := fs.String("ttl", "", "initial operator token lifetime, such as 24h or 30m")
+	out := fs.String("out", "", "write the new operator token to this file (0600) instead of stdout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" || *name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws operator create --endpoint URL --token-file FILE --name NAME [--token-name NAME] [--ttl DURATION] [--out FILE]")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	res, err := client.CreateOperator(context.Background(), *endpoint, tok, *name, *tokenName, *ttl)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	tokenID := "-"
+	if len(res.Operator.Tokens) > 0 {
+		tokenID = res.Operator.Tokens[0].ID
+	}
+	fmt.Fprintf(os.Stderr, "created operator %s (%s), token %s\n", res.Operator.ID, res.Operator.DisplayName, tokenID)
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "wrote operator token to %s\n", *out)
+		return 0
+	}
+	fmt.Println(res.OperatorToken)
+	return 0
+}
+
+func operatorDelete(args []string) int {
+	fs := flag.NewFlagSet("operator delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	yes := fs.Bool("yes", false, "confirm operator deletion and token revocation")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	operatorID := fs.Arg(0)
+	if *endpoint == "" || *tokenFile == "" || operatorID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws operator delete --endpoint URL --token-file FILE --yes OPERATOR")
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "ws: refusing to delete operator without --yes")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.DeleteOperator(context.Background(), *endpoint, tok, operatorID); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "deleted operator %s\n", operatorID)
+	return 0
+}
+
+func tokenCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws token create|revoke --endpoint URL --token-file FILE")
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return tokenCreate(args[1:])
+	case "revoke":
+		return tokenRevoke(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws token: unknown subcommand %q\n", args[0])
+		return 2
+	}
 }
 
 func tokenCreate(args []string) int {
@@ -345,6 +551,9 @@ func tokenCreate(args []string) int {
 			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 			return 1
 		}
+		if res.TokenID != "" {
+			fmt.Fprintf(os.Stderr, "created operator token %s\n", res.TokenID)
+		}
 		if *out != "" {
 			if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
 				fmt.Fprintf(os.Stderr, "ws: %v\n", err)
@@ -357,10 +566,13 @@ func tokenCreate(args []string) int {
 		return 0
 	}
 
-	agentTok, err := client.CreateAgentToken(context.Background(), *endpoint, op, *agent)
+	agentTok, tokenID, err := client.CreateAgentToken(context.Background(), *endpoint, op, *agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
+	}
+	if tokenID != "" {
+		fmt.Fprintf(os.Stderr, "created agent token %s\n", tokenID)
 	}
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(agentTok+"\n"), 0o600); err != nil {
@@ -374,12 +586,71 @@ func tokenCreate(args []string) int {
 	return 0
 }
 
+func tokenRevoke(args []string) int {
+	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	tokenID := fs.String("token", "", "token id to revoke")
+	yes := fs.Bool("yes", false, "confirm token revocation")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *endpoint == "" || *tokenFile == "" || *tokenID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws token revoke --endpoint URL --token-file FILE --token TOKEN_ID --yes")
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "ws: refusing to revoke token without --yes")
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.RevokeToken(context.Background(), *endpoint, tok, *tokenID); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "revoked token %s\n", *tokenID)
+	return 0
+}
+
 func readToken(file string) (string, error) {
 	b, err := os.ReadFile(file)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+func operatorTokenSummary(tokens []client.OperatorToken) string {
+	if len(tokens) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		label := tok.ID
+		if tok.DisplayName != "" {
+			label += ":" + tabSafe(tok.DisplayName)
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func tabSafe(s string) string {
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
 }
 
 func usage(w io.Writer) {
@@ -389,8 +660,9 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  ws version              Print version information")
 	fmt.Fprintln(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
-	fmt.Fprintln(w, "  ws realm create|list    Create or list realms (operator token)")
-	fmt.Fprintln(w, "  ws agent create|list    Create or list agents in a realm")
-	fmt.Fprintln(w, "  ws token create         Mint an agent or operator token")
+	fmt.Fprintln(w, "  ws realm create|list|delete")
+	fmt.Fprintln(w, "  ws agent create|list|delete")
+	fmt.Fprintln(w, "  ws operator list|create|delete")
+	fmt.Fprintln(w, "  ws token create|revoke  Mint or revoke agent/operator tokens")
 	fmt.Fprintln(w, "  ws help                 Show this help")
 }

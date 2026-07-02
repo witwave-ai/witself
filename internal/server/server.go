@@ -46,18 +46,28 @@ type Config struct {
 	// operator-authenticated /v1/realms endpoints, scoped to the caller's account.
 	CreateRealm func(ctx context.Context, accountID, name string) (Realm, error)
 	ListRealms  func(ctx context.Context, accountID string) ([]Realm, error)
+	DeleteRealm func(ctx context.Context, accountID, realmID string) error
 
 	// CreateAgent / ListAgents, when set, enable POST/GET /v1/realms/{realm}/agents.
 	CreateAgent func(ctx context.Context, accountID, realmID, name string) (Agent, error)
 	ListAgents  func(ctx context.Context, accountID, realmID string) ([]Agent, error)
+	DeleteAgent func(ctx context.Context, accountID, realmID, agentID string) error
 
 	// CreateAgentToken, when set, enables POST /v1/agents/{agent}/tokens to mint a
 	// durable agent token (returned once).
-	CreateAgentToken func(ctx context.Context, accountID, agentID string) (string, error)
+	CreateAgentToken func(ctx context.Context, accountID, agentID string) (token string, tokenID string, err error)
 
 	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
 	// an additional operator token for the authenticated operator (returned once).
-	CreateOperatorToken func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error)
+	CreateOperatorToken func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (token string, tokenID string, expiresAt *time.Time, err error)
+
+	// Operator lifecycle endpoints manage named operator principals.
+	ListOperators  func(ctx context.Context, accountID string) ([]Operator, error)
+	CreateOperator func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)
+	DeleteOperator func(ctx context.Context, accountID, actorOperatorID, targetOperatorID string) error
+
+	// RevokeToken, when set, enables POST /v1/tokens/{token}:revoke.
+	RevokeToken func(ctx context.Context, accountID, tokenID string) error
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -87,6 +97,35 @@ type Agent struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
+
+// OperatorToken is safe token metadata shown in operator listings.
+type OperatorToken struct {
+	ID          string     `json:"id"`
+	DisplayName string     `json:"display_name"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// Operator is the API view of a human/admin operator principal.
+type Operator struct {
+	ID          string          `json:"id"`
+	DisplayName string          `json:"display_name"`
+	Role        string          `json:"role"`
+	IsRoot      bool            `json:"is_root"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Tokens      []OperatorToken `json:"tokens"`
+}
+
+var (
+	// ErrLastOperator signals a rejected delete that would leave the account
+	// without any live operator.
+	ErrLastOperator = errors.New("last operator")
+	// ErrCannotDeleteSelf signals a rejected self-delete.
+	ErrCannotDeleteSelf = errors.New("cannot delete self")
+	// ErrCannotDeleteRoot signals a rejected root operator delete.
+	ErrCannotDeleteRoot = errors.New("cannot delete root operator")
+)
 
 // ConfigFromEnv builds a Config from WITSELF_* env vars, defaulting to the
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
@@ -183,17 +222,35 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ListRealms != nil {
 			mux.HandleFunc("GET /v1/realms", listRealmsHandler(cfg.Authenticate, cfg.ListRealms))
 		}
+		if cfg.DeleteRealm != nil {
+			mux.HandleFunc("DELETE /v1/realms/{realm}", deleteRealmHandler(cfg.Authenticate, cfg.DeleteRealm))
+		}
 		if cfg.CreateAgent != nil {
 			mux.HandleFunc("POST /v1/realms/{realm}/agents", createAgentHandler(cfg.Authenticate, cfg.CreateAgent))
 		}
 		if cfg.ListAgents != nil {
 			mux.HandleFunc("GET /v1/realms/{realm}/agents", listAgentsHandler(cfg.Authenticate, cfg.ListAgents))
 		}
+		if cfg.DeleteAgent != nil {
+			mux.HandleFunc("DELETE /v1/realms/{realm}/agents/{agent}", deleteAgentHandler(cfg.Authenticate, cfg.DeleteAgent))
+		}
 		if cfg.CreateAgentToken != nil {
 			mux.HandleFunc("POST /v1/agents/{agent}/tokens", createAgentTokenHandler(cfg.Authenticate, cfg.CreateAgentToken))
 		}
 		if cfg.CreateOperatorToken != nil {
 			mux.HandleFunc("POST /v1/operators/self/tokens", createOperatorTokenHandler(cfg.Authenticate, cfg.CreateOperatorToken))
+		}
+		if cfg.ListOperators != nil {
+			mux.HandleFunc("GET /v1/operators", listOperatorsHandler(cfg.Authenticate, cfg.ListOperators))
+		}
+		if cfg.CreateOperator != nil {
+			mux.HandleFunc("POST /v1/operators", createOperatorHandler(cfg.Authenticate, cfg.CreateOperator))
+		}
+		if cfg.DeleteOperator != nil {
+			mux.HandleFunc("DELETE /v1/operators/{operator}", deleteOperatorHandler(cfg.Authenticate, cfg.DeleteOperator))
+		}
+		if cfg.RevokeToken != nil {
+			mux.HandleFunc("POST /v1/tokens/", revokeTokenHandler(cfg.Authenticate, cfg.RevokeToken))
 		}
 	}
 	return mux
@@ -391,6 +448,24 @@ func listRealmsHandler(auth AuthFunc, list func(ctx context.Context, accountID s
 	})
 }
 
+func deleteRealmHandler(auth AuthFunc, deleteRealm func(ctx context.Context, accountID, realmID string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		err := deleteRealm(r.Context(), p.accountID, r.PathValue("realm"))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "realm not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "realm is not empty")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not delete realm")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountID, realmID, name string) (Agent, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
@@ -433,10 +508,25 @@ func listAgentsHandler(auth AuthFunc, list func(ctx context.Context, accountID, 
 	})
 }
 
-func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, error)) http.HandlerFunc {
+func deleteAgentHandler(auth AuthFunc, deleteAgent func(ctx context.Context, accountID, realmID, agentID string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		err := deleteAgent(r.Context(), p.accountID, r.PathValue("realm"), r.PathValue("agent"))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not delete agent")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, string, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		agentID := r.PathValue("agent")
-		tok, err := create(r.Context(), p.accountID, agentID)
+		tok, tokenID, err := create(r.Context(), p.accountID, agentID)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
@@ -450,12 +540,13 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"schema_version": "witself.v0",
 			"agent_token":    tok,
+			"token_id":       tokenID,
 			"agent_id":       agentID,
 		})
 	})
 }
 
-func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error)) http.HandlerFunc {
+func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
 			DisplayName string `json:"display_name,omitempty"`
@@ -477,7 +568,7 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 			ttl = &d
 		}
 
-		tok, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, ttl)
+		tok, tokenID, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, ttl)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "operator not found")
 			return
@@ -490,6 +581,7 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 			"schema_version": "witself.v0",
 			"operator_token": tok,
 			"operator_id":    p.operatorID,
+			"token_id":       tokenID,
 			"display_name":   displayName,
 		}
 		if expiresAt != nil {
@@ -499,6 +591,138 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(out)
 	})
+}
+
+func listOperatorsHandler(auth AuthFunc, list func(ctx context.Context, accountID string) ([]Operator, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		operators, err := list(r.Context(), p.accountID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not list operators")
+			return
+		}
+		if operators == nil {
+			operators = []Operator{}
+		}
+		for i := range operators {
+			if operators[i].Tokens == nil {
+				operators[i].Tokens = []OperatorToken{}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "operators": operators})
+	})
+}
+
+func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			DisplayName      string `json:"display_name"`
+			TokenDisplayName string `json:"token_display_name,omitempty"`
+			TTL              string `json:"ttl,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		displayName := strings.TrimSpace(req.DisplayName)
+		if displayName == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing display_name")
+			return
+		}
+		tokenDisplayName := strings.TrimSpace(req.TokenDisplayName)
+		if tokenDisplayName == "" {
+			tokenDisplayName = displayName
+		}
+
+		var ttl *time.Duration
+		if req.TTL != "" {
+			d, err := time.ParseDuration(req.TTL)
+			if err != nil || d <= 0 {
+				writeJSONError(w, http.StatusBadRequest, "invalid ttl")
+				return
+			}
+			ttl = &d
+		}
+
+		operator, token, expiresAt, err := create(r.Context(), p.accountID, displayName, tokenDisplayName, ttl)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not create operator")
+			return
+		}
+		out := map[string]any{
+			"schema_version":   "witself.v0",
+			"operator":         operator,
+			"operator_token":   token,
+			"token_expires_at": expiresAt,
+		}
+		if expiresAt == nil {
+			delete(out, "token_expires_at")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(out)
+	})
+}
+
+func deleteOperatorHandler(auth AuthFunc, deleteOperator func(ctx context.Context, accountID, actorOperatorID, targetOperatorID string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		err := deleteOperator(r.Context(), p.accountID, p.operatorID, r.PathValue("operator"))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "operator not found")
+			return
+		case errors.Is(err, ErrCannotDeleteSelf):
+			writeJSONError(w, http.StatusConflict, "cannot delete the authenticated operator")
+			return
+		case errors.Is(err, ErrCannotDeleteRoot):
+			writeJSONError(w, http.StatusConflict, "cannot delete the root operator")
+			return
+		case errors.Is(err, ErrLastOperator):
+			writeJSONError(w, http.StatusConflict, "cannot delete the last operator")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not delete operator")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func revokeTokenHandler(auth AuthFunc, revoke func(ctx context.Context, accountID, tokenID string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		tokenID, ok := tokenActionID(r.URL.Path, "revoke")
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		err := revoke(r.Context(), p.accountID, tokenID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "token not found")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not revoke token")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func tokenActionID(path, action string) (string, bool) {
+	const prefix = "/v1/tokens/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	for _, suffix := range []string{":" + action, "/" + action} {
+		if strings.HasSuffix(rest, suffix) {
+			id := strings.TrimSuffix(rest, suffix)
+			if id != "" && !strings.Contains(id, "/") {
+				return id, true
+			}
+		}
+	}
+	return "", false
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {

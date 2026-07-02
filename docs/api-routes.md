@@ -113,6 +113,11 @@ POST /v1/auth/sessions/{session_id}:complete
 
 POST /v1/bootstrap/operator
 
+GET  /v1/operators
+POST /v1/operators
+DELETE /v1/operators/{operator_id}
+POST /v1/operators/self/tokens
+
 GET  /v1/accounts
 POST /v1/accounts
 GET  /v1/accounts/{account_id}
@@ -314,6 +319,8 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   the request body; sender forgery is structurally impossible.
 - `POST /v1/tokens/{token_id}:rotate` issues a replacement token. The raw token
   value is returned once.
+- `POST /v1/tokens/{token_id}:revoke` immediately invalidates a live operator
+  or agent token by token ID. It never requires or returns the raw token value.
 - `POST /v1/secrets/{secret_id}:reveal` is the explicit, audited value-returning
   op (`ws secret reveal`). It runs the reveal ceremony, requires the
   `secret:reveal` scope, and is audited as `secret.reveal`. The field selector

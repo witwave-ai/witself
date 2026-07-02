@@ -202,6 +202,7 @@ witself
   auth login|logout|status|whoami
   setup
   account create|show|update|members|invite|remove|set-role|export|close
+  operator list|create|delete
   realm create|list|show|use|rename|delete|members|init|status|export|import
   billing show|usage|limits|plans|subscribe|subscription|payment-methods|sessions|crypto|invoices
   support create|list|show|comment|close
@@ -231,6 +232,32 @@ witself
   config get|set|list|unset
   completion
 ```
+
+## Current Lifecycle Slice
+
+The current self-hosted implementation includes the first operator lifecycle
+commands:
+
+```sh
+ws operator list --endpoint URL --token-file OPERATOR_TOKEN
+ws operator create --endpoint URL --token-file OPERATOR_TOKEN --name "Deploy bot" --token-name "Deploy token" --out ./deploy.token
+ws operator delete --endpoint URL --token-file OPERATOR_TOKEN --yes OPERATOR_ID
+```
+
+`ws operator create` creates a new operator principal and returns that
+operator's first token once. `ws token create --operator` is different: it mints
+another token for the already authenticated operator record.
+
+Destructive commands are explicit and guarded:
+
+```sh
+ws realm delete --endpoint URL --token-file OPERATOR_TOKEN --yes REALM_ID
+ws agent delete --endpoint URL --token-file OPERATOR_TOKEN --realm REALM_ID --yes AGENT_ID
+ws token revoke --endpoint URL --token-file OPERATOR_TOKEN --token TOKEN_ID --yes
+```
+
+The create/delete/revoke policy for currently implemented resources is tracked
+in [resource-lifecycle.md](resource-lifecycle.md).
 
 ## `ws version`
 
