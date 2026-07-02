@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -53,6 +54,10 @@ type Config struct {
 	// CreateAgentToken, when set, enables POST /v1/agents/{agent}/tokens to mint a
 	// durable agent token (returned once).
 	CreateAgentToken func(ctx context.Context, accountID, agentID string) (string, error)
+
+	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
+	// an additional operator token for the authenticated operator (returned once).
+	CreateOperatorToken func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error)
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -184,6 +189,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.CreateAgentToken != nil {
 			mux.HandleFunc("POST /v1/agents/{agent}/tokens", createAgentTokenHandler(cfg.Authenticate, cfg.CreateAgentToken))
+		}
+		if cfg.CreateOperatorToken != nil {
+			mux.HandleFunc("POST /v1/operators/self/tokens", createOperatorTokenHandler(cfg.Authenticate, cfg.CreateOperatorToken))
 		}
 	}
 	return mux
@@ -442,6 +450,49 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 			"agent_token":    tok,
 			"agent_id":       agentID,
 		})
+	})
+}
+
+func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			TTL string `json:"ttl,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var ttl *time.Duration
+		if req.TTL != "" {
+			d, err := time.ParseDuration(req.TTL)
+			if err != nil || d <= 0 {
+				writeJSONError(w, http.StatusBadRequest, "invalid ttl")
+				return
+			}
+			ttl = &d
+		}
+
+		tok, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, ttl)
+		if errors.Is(err, ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "operator not found")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not create token")
+			return
+		}
+		out := map[string]string{
+			"schema_version": "witself.v0",
+			"operator_token": tok,
+			"operator_id":    p.operatorID,
+		}
+		if expiresAt != nil {
+			out["expires_at"] = expiresAt.Format(time.RFC3339)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(out)
 	})
 }
 

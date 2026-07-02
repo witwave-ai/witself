@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,5 +36,37 @@ func TestBootstrapLoginUnauthorized(t *testing.T) {
 
 	if _, err := BootstrapLogin(context.Background(), srv.URL, "bad"); err == nil {
 		t.Error("want error on 401, got nil")
+	}
+}
+
+func TestCreateOperatorToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/operators/self/tokens" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var body struct {
+			TTL string `json:"ttl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.TTL != "24h" {
+			t.Errorf("ttl = %q, want 24h", body.TTL)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator_token":"witself_opr_child","operator_id":"opr_1","expires_at":"2026-07-03T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	res, err := CreateOperatorToken(context.Background(), srv.URL, "witself_opr_parent", "24h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OperatorToken != "witself_opr_child" || res.OperatorID != "opr_1" || res.ExpiresAt == "" {
+		t.Errorf("operator token result = %+v", res)
 	}
 }

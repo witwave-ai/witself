@@ -18,6 +18,9 @@ import (
 // match an unconsumed bootstrap record.
 var ErrInvalidBootstrap = errors.New("invalid or already-used bootstrap token")
 
+// ErrOperatorNotFound is returned when an operator is not in the account.
+var ErrOperatorNotFound = errors.New("operator not found")
+
 func hashToken(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
@@ -104,6 +107,46 @@ func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (ope
 		return "", "", false, fmt.Errorf("authenticate: %w", err)
 	}
 	return operatorID, accountID, true, nil
+}
+
+// CreateOperatorToken mints a durable operator token bound to an operator that
+// belongs to the account, and returns the plaintext (shown once). Expiration is
+// optional; nil ttl means no explicit expiry.
+func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT true FROM operators WHERE id = $1 AND account_id = $2`,
+		operatorID, accountID).Scan(&exists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil, ErrOperatorNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("verify operator: %w", err)
+	}
+
+	opTok, err := token.New(token.KindOperator)
+	if err != nil {
+		return "", nil, err
+	}
+	tokID, err := id.New("tok")
+	if err != nil {
+		return "", nil, err
+	}
+
+	var expiresAt *time.Time
+	var expiresValue any
+	if ttl != nil {
+		t := time.Now().UTC().Add(*ttl)
+		expiresAt = &t
+		expiresValue = t
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash, expires_at)
+		 VALUES ($1, $2, $3, 'operator', $4, $5)`,
+		tokID, accountID, operatorID, hashToken(opTok), expiresValue); err != nil {
+		return "", nil, fmt.Errorf("store operator token: %w", err)
+	}
+	return opTok, expiresAt, nil
 }
 
 // CreateAgentToken mints a durable agent token bound to an agent that belongs to

@@ -27,6 +27,10 @@ Default v0 posture:
 
 - Agent tokens are bearer tokens.
 - Agent tokens are bound server-side to one realm and one named agent.
+- Operator tokens are bearer tokens bound server-side to an operator in an
+  account. The first operator token comes from the single-use bootstrap
+  exchange; later operator tokens are minted by an already authenticated
+  operator.
 - Agent tokens do not expire by default unless the operator sets `--ttl` or
   `--expires-at`.
 - Raw token values are returned only once, during create or rotate.
@@ -63,14 +67,19 @@ cross-agent actions. They are not authentication.
 v0 token files should contain only the raw token text:
 
 ```text
-witself_at_...
+witself_agt_...
 ```
 
-Raw agent tokens carry the `witself_at_` prefix (consolidated from the former
-Witpass `wp_at_`). The prefix is a stable, greppable marker for the secret-leak
-scanners and repo-safety checks — a `witself_at_` string in a commit, log, or
-export is treated as a leaked credential. The raw value is returned only once at
-create or rotate; server-side storage keeps only the `token_hash` and metadata.
+Raw agent tokens carry the `witself_agt_` prefix. The prefix is a stable,
+greppable marker for the secret-leak scanners and repo-safety checks — a
+`witself_agt_` string in a commit, log, or export is treated as a leaked
+credential. The raw value is returned only once at create or rotate; server-side
+storage keeps only the `token_hash` and metadata.
+
+Raw bootstrap and operator tokens use their own `witself_boot_` and
+`witself_opr_` prefixes. Bootstrap tokens are not normal operator credentials:
+they are adopted by the server, consumed once by `ws auth login`, and exchanged
+for an operator token.
 
 No JSON wrapper is required for v0 agent runtime use. Metadata is available
 through `ws token list`, `ws token show`, or equivalent API results.

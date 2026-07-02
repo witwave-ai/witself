@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthProbes(t *testing.T) {
@@ -273,6 +274,67 @@ func TestAgentTokenCreate(t *testing.T) {
 	}
 	if out.AgentToken != "witself_agt_minted" {
 		t.Errorf("agent_token = %q", out.AgentToken)
+	}
+}
+
+func TestOperatorTokenCreate(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	create := func(_ context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
+		if accountID != "acc_y" || operatorID != "opr_x" {
+			t.Fatalf("create principal = account %q operator %q", accountID, operatorID)
+		}
+		var expiresAt *time.Time
+		if ttl != nil {
+			tm := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC)
+			expiresAt = &tm
+		}
+		return "witself_opr_minted", expiresAt, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
+	defer srv.Close()
+
+	post := func(tok, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/operators/self/tokens", strings.NewReader(body))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	r := post("", `{}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", r.StatusCode)
+	}
+	r = post("good", `{"ttl":"0s"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid ttl = %d, want 400", r.StatusCode)
+	}
+	r = post("good", `{"ttl":"24h"}`)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", r.StatusCode)
+	}
+	var out struct {
+		OperatorToken string `json:"operator_token"`
+		OperatorID    string `json:"operator_id"`
+		ExpiresAt     string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.OperatorToken != "witself_opr_minted" || out.OperatorID != "opr_x" || out.ExpiresAt == "" {
+		t.Errorf("operator token response = %+v", out)
 	}
 }
 

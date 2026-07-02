@@ -152,6 +152,13 @@ func serve() int {
 			}
 			return tok, err
 		}
+		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
+			tok, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, ttl)
+			if errors.Is(err, store.ErrOperatorNotFound) {
+				return "", nil, server.ErrNotFound
+			}
+			return tok, expiresAt, err
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {

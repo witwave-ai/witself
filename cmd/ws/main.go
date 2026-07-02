@@ -303,7 +303,7 @@ func agentList(args []string) int {
 
 func tokenCmd(args []string) int {
 	if len(args) == 0 || args[0] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE --agent AGENT [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--ttl DURATION] [--out FILE]")
 		return 2
 	}
 	return tokenCreate(args[1:])
@@ -315,12 +315,18 @@ func tokenCreate(args []string) int {
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	agent := fs.String("agent", "", "agent id to mint a token for")
-	out := fs.String("out", "", "write the agent token to this file (0600) instead of stdout")
+	operator := fs.Bool("operator", false, "mint another token for the authenticated operator")
+	ttl := fs.String("ttl", "", "operator token lifetime, such as 24h or 30m")
+	out := fs.String("out", "", "write the new token to this file (0600) instead of stdout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" || *agent == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE --agent AGENT [--out FILE]")
+	if *endpoint == "" || *tokenFile == "" || (*agent == "" && !*operator) || (*agent != "" && *operator) {
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--ttl DURATION] [--out FILE]")
+		return 2
+	}
+	if *agent != "" && *ttl != "" {
+		fmt.Fprintln(os.Stderr, "ws: --ttl is currently supported only with --operator")
 		return 2
 	}
 	op, err := readToken(*tokenFile)
@@ -328,6 +334,24 @@ func tokenCreate(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
+	if *operator {
+		res, err := client.CreateOperatorToken(context.Background(), *endpoint, op, *ttl)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
+				fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "wrote operator token for %s to %s\n", res.OperatorID, *out)
+			return 0
+		}
+		fmt.Println(res.OperatorToken)
+		return 0
+	}
+
 	agentTok, err := client.CreateAgentToken(context.Background(), *endpoint, op, *agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
@@ -362,6 +386,6 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	fmt.Fprintln(w, "  ws realm create|list    Create or list realms (operator token)")
 	fmt.Fprintln(w, "  ws agent create|list    Create or list agents in a realm")
-	fmt.Fprintln(w, "  ws token create         Mint an agent token (operator token)")
+	fmt.Fprintln(w, "  ws token create         Mint an agent or operator token")
 	fmt.Fprintln(w, "  ws help                 Show this help")
 }

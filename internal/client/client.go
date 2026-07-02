@@ -19,6 +19,14 @@ type BootstrapResult struct {
 	OperatorID    string
 }
 
+// OperatorTokenResult is returned when an authenticated operator mints another
+// operator token. The raw token is shown once.
+type OperatorTokenResult struct {
+	OperatorToken string
+	OperatorID    string
+	ExpiresAt     string
+}
+
 // BootstrapLogin exchanges a bootstrap token for an operator token by POSTing to
 // {endpoint}/v1/auth/bootstrap.
 func BootstrapLogin(ctx context.Context, endpoint, bootstrapToken string) (*BootstrapResult, error) {
@@ -186,4 +194,33 @@ func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (str
 		return "", fmt.Errorf("server returned no token")
 	}
 	return out.AgentToken, nil
+}
+
+// CreateOperatorToken mints another token for the authenticated operator.
+func CreateOperatorToken(ctx context.Context, endpoint, token, ttl string) (*OperatorTokenResult, error) {
+	body := map[string]string{}
+	if ttl != "" {
+		body["ttl"] = ttl
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		OperatorToken string `json:"operator_token"`
+		OperatorID    string `json:"operator_id"`
+		ExpiresAt     string `json:"expires_at,omitempty"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/operators/self/tokens"
+	if err := doJSON(ctx, http.MethodPost, url, token, raw, &out); err != nil {
+		return nil, err
+	}
+	if out.OperatorToken == "" {
+		return nil, fmt.Errorf("server returned no token")
+	}
+	return &OperatorTokenResult{
+		OperatorToken: out.OperatorToken,
+		OperatorID:    out.OperatorID,
+		ExpiresAt:     out.ExpiresAt,
+	}, nil
 }

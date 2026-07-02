@@ -145,6 +145,10 @@ Unattended auth should use explicitly issued tokens:
   owner-only token files.
 - Tokens are bearer credentials in v0, so deployment-native secret mounts are
   preferred over environment variables.
+- In the current self-hosted implementation, an authenticated operator can mint
+  another token for the same operator record with `ws token create --operator`.
+  Creating named additional operator records is tracked separately from this
+  token-minting path.
 
 ## Self-Hosted Bootstrap
 
@@ -165,6 +169,8 @@ Recommended v0 posture:
 - Bootstrap tokens should expire quickly, be single-use, and be audited.
 - After the first operator exists, ordinary account, realm, agent, policy,
   group, and token management happens through the public `ws` CLI.
+- Additional operator tokens are created through normal authenticated token
+  management, not by reusing or regenerating the bootstrap token.
 
 There should be no default admin username/password for self-hosted deployments.
 

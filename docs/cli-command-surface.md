@@ -2945,6 +2945,18 @@ If neither `--ttl` nor `--expires-at` is supplied for an agent token, the token
 has no default expiration in v0. The full scope list is defined in
 [requirements.md](requirements.md#authorization-and-scopes).
 
+The current implemented self-hosted slice supports:
+
+```sh
+ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --agent AGENT_ID
+ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator
+ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator --ttl 24h --out ./operator.token
+```
+
+`--operator` mints another token for the authenticated operator record. It does
+not create a named additional operator yet; operator listing, names, and safe
+operator deletion are tracked as the next lifecycle slice.
+
 ### `ws token list`
 
 List tokens visible to the current principal.
