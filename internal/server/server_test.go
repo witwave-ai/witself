@@ -687,7 +687,7 @@ func TestProvisionAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unmounted provisioning = %d, want 404", resp.StatusCode)
 	}
@@ -707,27 +707,27 @@ func TestProvisionAccount(t *testing.T) {
 	}
 
 	r := post("", `{"email":"a@b.c"}`)
-	_ = r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token = %d, want 401", r.StatusCode)
 	}
 	r = post("witself_prv_bad", `{"email":"a@b.c"}`)
-	_ = r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("bad token = %d, want 401", r.StatusCode)
 	}
 	r = post("witself_prv_good", `{"email":"not-an-email"}`)
-	_ = r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad email = %d, want 400", r.StatusCode)
 	}
 	r = post("witself_prv_good", `{"email":"taken@x.com"}`)
-	_ = r.Body.Close()
+	closeBody(t, r)
 	if r.StatusCode != http.StatusConflict {
 		t.Errorf("duplicate email = %d, want 409", r.StatusCode)
 	}
 	r = post("witself_prv_good", `{"email":"Amy@Co.com"}`)
-	defer r.Body.Close()
+	defer closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
 	}
