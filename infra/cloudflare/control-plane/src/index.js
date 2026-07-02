@@ -22,13 +22,16 @@
 // in KV is best-effort (no atomic increment) — fine for invite gating; exact
 // counting arrives with the Durable Object authority.
 //
-// KV schema (v0, one namespace, three prefixes):
-//   acct:<account_id> -> {"cell":"<name>","endpoint":"https://..."}
-//   cell:<name>       -> {"endpoint","cloud","region","owner","weight",
-//                          "accepting","registered_at"}
-//   invite:<code>     -> {"enabled","not_before","expires_at","max_uses",
-//                          "uses","note","created_at","cell","region"}
-//   config:placement  -> {"strategy":"weighted"|"pinned","pinned_cell"}
+// KV schema (v0, one namespace):
+//   acct:<account_id>    -> {"cell":"<name>","endpoint":"https://..."}
+//   pending:<account_id> -> {"cell":"<name>","created_at":"<iso>"}
+//                           reap candidate; dropped on activation/close/reap
+//   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
+//                             "accepting","registered_at"}
+//   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
+//                             "uses","note","created_at","cell","region"}
+//   config:placement     -> {"strategy":"weighted"|"pinned","pinned_cell"}
+//   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:
 //   1. invite.cell    — hard pin (dedicated/enterprise cells); 503 if unavailable
@@ -387,6 +390,7 @@ async function handleCells(request, env, url) {
       }
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
+    await deletePendingForCell(env, name);
     const key = `cell:${name}`;
     const existed = (await env.DIRECTORY.get(key)) !== null;
     if (existed) await env.DIRECTORY.delete(key);
@@ -412,11 +416,30 @@ async function handleCells(request, env, url) {
     if (await cellHasAccounts(env, name)) {
       return err("accounts still live on this cell", 409);
     }
+    await deletePendingForCell(env, name); // no accounts -> candidates are stale
     await env.DIRECTORY.delete(key);
     return new Response(null, { status: 204 });
   }
 
   return err("method not allowed", 405);
+}
+
+// deletePendingForCell drops every reap candidate naming the cell. Called when
+// a cell leaves the registry (purge/delete): a candidate without a registry
+// entry can never be reaped, and a later re-registration under the same name
+// must not inherit a dead fleet's candidate list.
+async function deletePendingForCell(env, name) {
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "pending:", cursor });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.cell === name) {
+        await env.DIRECTORY.delete(k.name);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
 }
 
 // handleSignup is POST /v1/accounts — the public, invite-gated front door of
@@ -484,6 +507,15 @@ async function handleSignup(request, env) {
     return err("cell returned an invalid provisioning response", 502);
   }
 
+  // Expiry candidate FIRST, routing pointer second: if the second write
+  // fails, a candidate without routing is self-healing (the sweep reaps the
+  // orphaned provision), whereas routing without a candidate would be a
+  // pending account the reaper can never see. Only a candidate — the cell's
+  // only-if-pending :reap guard is the truth at reap time.
+  await env.DIRECTORY.put(
+    `pending:${provisioned.account_id}`,
+    JSON.stringify({ cell: cell.name, created_at: new Date().toISOString() }),
+  );
   // Routing pointer + best-effort invite consumption (exact counting arrives
   // with the DO authority).
   await env.DIRECTORY.put(
@@ -549,11 +581,143 @@ async function handleClose(request, env, accountId) {
     });
   }
   await env.DIRECTORY.delete(key); // the fleet forgets; the cell remembers
+  await env.DIRECTORY.delete(`pending:${accountId}`); // no longer a reap candidate
   return json({
     schema_version: "witself.v0",
     account_id: accountId,
     status: "closed",
   });
+}
+
+// handleReaper is the fleet-wide pending-account expiry policy: GET returns
+// it, POST sets it ({enabled, ttl_minutes}). Accounts pending longer than the
+// TTL are closed by the scheduled sweep. Disabled until configured — which
+// also makes rollout ordering safe (cells must serve :reap before the sweep
+// may run).
+async function handleReaper(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (request.method === "GET") {
+    const cfg = (await env.DIRECTORY.get("config:reaper", { type: "json" })) ?? {
+      enabled: false,
+    };
+    return json({ schema_version: "witself.v0", reaper: cfg });
+  }
+  if (request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return err("invalid JSON body", 400);
+    }
+    if (typeof body.enabled !== "boolean") {
+      return err("enabled must be a boolean", 400);
+    }
+    if (body.enabled && (typeof body.ttl_minutes !== "number" || !Number.isFinite(body.ttl_minutes) || body.ttl_minutes < 1)) {
+      return err("ttl_minutes must be a number >= 1 when enabled", 400);
+    }
+    const cfg = { enabled: body.enabled };
+    if (cfg.enabled) {
+      cfg.ttl_minutes = body.ttl_minutes;
+    }
+    await env.DIRECTORY.put("config:reaper", JSON.stringify(cfg));
+    return json({ schema_version: "witself.v0", reaper: cfg });
+  }
+  return err("method not allowed", 405);
+}
+
+// reapExpiredPendings is the signup-lifecycle sweep: accounts that never
+// activated within the configured window are closed on their cell and
+// forgotten here. The pending: keys are only a candidate list — the cell's
+// only-if-pending :reap is the authority, so a stale candidate (the account
+// activated moments ago) bounces with 409 and is simply dropped. Every arm
+// is idempotent; anything unreachable is retried on the next cron tick.
+async function reapExpiredPendings(env) {
+  const cfg = (await env.DIRECTORY.get("config:reaper", { type: "json" })) ?? {};
+  if (cfg.enabled !== true || !(cfg.ttl_minutes > 0)) {
+    return;
+  }
+  const cutoff = Date.now() - cfg.ttl_minutes * 60 * 1000;
+
+  const cells = new Map(); // cell name -> registry entry (cached per sweep)
+  const deadCells = new Set(); // unreachable this sweep — skip their candidates
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "pending:", cursor });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("pending:".length);
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!entry) {
+        continue;
+      }
+      const createdAt = Date.parse(entry.created_at);
+      if (Number.isNaN(createdAt)) {
+        // Never written by this Worker — surface it, don't guess.
+        console.log(`reaper: ${k.name} has unparseable created_at ${JSON.stringify(entry.created_at)}; skipping`);
+        continue;
+      }
+      if (createdAt >= cutoff) {
+        continue;
+      }
+      if (deadCells.has(entry.cell)) {
+        continue; // one 15s timeout per dead cell per sweep, not per candidate
+      }
+      if (!cells.has(entry.cell)) {
+        cells.set(
+          entry.cell,
+          await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" }),
+        );
+      }
+      const cell = cells.get(entry.cell);
+      if (!cell?.provision_token || !cell?.endpoint) {
+        console.log(`reaper: cell ${entry.cell} missing or has no provision token; skipping ${accountId}`);
+        continue;
+      }
+      let resp;
+      try {
+        resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:reap`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${cell.provision_token}` },
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch {
+        deadCells.add(entry.cell);
+        continue; // cell unreachable — next tick retries
+      }
+      let body = null;
+      try {
+        body = await resp.json();
+      } catch {
+        // Not JSON — not an answer from a witself-server handler.
+      }
+      if (resp.ok) {
+        // Only a genuine reap acknowledgement may make the fleet forget the
+        // account: a stray 200 (LB default page, captive portal, wrong
+        // service on the endpoint) must never destroy live routing.
+        if (body?.status === "closed" && body?.account_id === accountId) {
+          await env.DIRECTORY.delete(`acct:${accountId}`);
+          await env.DIRECTORY.delete(k.name);
+          console.log(`reaper: closed ${accountId} on ${entry.cell}`);
+        } else {
+          console.log(`reaper: ${accountId} on ${entry.cell}: 2xx without a reap acknowledgement; retrying next tick`);
+        }
+      } else if (resp.status === 409 && body?.error) {
+        // Activated first — drop the candidate, keep the routing.
+        await env.DIRECTORY.delete(k.name);
+        console.log(`reaper: ${accountId} activated before expiry; candidate dropped`);
+      } else if (resp.status === 404 && body?.error) {
+        // The cell's handler answered "no such account" (JSON error shape).
+        // A bare mux 404 — a cell too old to serve :reap — stays retryable,
+        // so enabling the reaper before a cell rolls loses nothing.
+        await env.DIRECTORY.delete(k.name);
+        console.log(`reaper: ${accountId} unknown on ${entry.cell} (404); candidate dropped`);
+      } else {
+        console.log(`reaper: reap ${accountId} on ${entry.cell} failed: ${resp.status}`);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
 }
 
 export default {
@@ -599,6 +763,11 @@ export default {
       return handlePlacement(request, env);
     }
 
+    // Fleet-wide pending-account expiry policy (fleet-token authorized).
+    if (url.pathname === "/v1/reaper") {
+      return handleReaper(request, env);
+    }
+
     // Signup: public, invite-gated. The one door you can knock on with nothing.
     if (url.pathname === "/v1/accounts") {
       if (request.method !== "POST") {
@@ -618,5 +787,10 @@ export default {
 
     // Cold path: the Go container.
     return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
+  },
+
+  // Cron: the pending-account expiry sweep (see reapExpiredPendings).
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(reapExpiredPendings(env));
   },
 };

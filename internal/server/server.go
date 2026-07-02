@@ -85,6 +85,13 @@ type Config struct {
 	// cells never set the token, so the route is not even mounted there.
 	ProvisionToken   string
 	ProvisionAccount func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)
+
+	// ReapAccount, when set (with the provisioning pair), enables POST
+	// /v1/accounts/{id}:reap — the control plane's expiry sweep closing an
+	// account that never activated. Same trust link and same cloud-only gating
+	// as provisioning; the only-if-pending guard lives in the implementation,
+	// which returns ErrConflict for an activated account.
+	ReapAccount func(ctx context.Context, accountID string) (reaped bool, err error)
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -268,6 +275,9 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
+		if cfg.ReapAccount != nil {
+			mux.HandleFunc("POST /v1/accounts/", reapAccountHandler(cfg.ProvisionToken, cfg.ReapAccount))
+		}
 	}
 	if cfg.Authenticate != nil {
 		whoami := whoamiHandler(cfg.Authenticate)
@@ -516,6 +526,46 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"account":        acct,
+		})
+	}
+}
+
+// reapAccountHandler closes a still-pending account (POST
+// /v1/accounts/{id}:reap). Provision-token authorized — instance-level
+// authority, the same trust link as provisioning, so only the control plane's
+// expiry sweep can call it. 200 whether it reaped just now or found the
+// account already closed (idempotent); 409 when the account activated first
+// (the sweep's view was stale — the cell is truth); 404 for an unknown id.
+func reapAccountHandler(provisionToken string, reap func(ctx context.Context, accountID string) (bool, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap")
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		reaped, err := reap(r.Context(), accountID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "account is active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not reap account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     accountID,
+			"status":         "closed",
+			"reaped":         reaped,
 		})
 	}
 }
@@ -897,7 +947,12 @@ func revokeTokenHandler(auth AuthFunc, revoke func(ctx context.Context, accountI
 }
 
 func tokenActionID(path, action string) (string, bool) {
-	const prefix = "/v1/tokens/"
+	return pathActionID(path, "/v1/tokens/", action)
+}
+
+// pathActionID extracts the id from "{prefix}{id}:{action}" (or the
+// "/{action}" spelling), refusing empty or multi-segment ids.
+func pathActionID(path, prefix, action string) (string, bool) {
 	if !strings.HasPrefix(path, prefix) {
 		return "", false
 	}

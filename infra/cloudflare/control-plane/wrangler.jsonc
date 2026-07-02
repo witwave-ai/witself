@@ -54,6 +54,11 @@
       "custom_domain": true
     }
   ],
+  // Pending-account expiry sweep. The cron only ticks; the sweep no-ops
+  // unless config:reaper (POST /v1/reaper, fleet-token) enables it.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "observability": {
     "enabled": true
   }

@@ -984,3 +984,74 @@ func TestPendingAccountIsGated(t *testing.T) {
 		t.Error("close did not run for pending account")
 	}
 }
+
+// TestReapAccount proves the reap contract: provision-token only, 200 for a
+// reaped (or already-closed) account, 409 when the account activated first,
+// 404 for unknown ids — and the route only exists alongside provisioning.
+func TestReapAccount(t *testing.T) {
+	reap := func(_ context.Context, accountID string) (bool, error) {
+		switch accountID {
+		case "acc_pending":
+			return true, nil
+		case "acc_closed":
+			return false, nil
+		case "acc_active":
+			return false, ErrConflict
+		default:
+			return false, ErrNotFound
+		}
+	}
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:   "witself_prv_test",
+		ProvisionAccount: provision,
+		ReapAccount:      reap,
+	}))
+	defer srv.Close()
+
+	do := func(id, token string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/accounts/"+id+":reap", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		id, token string
+		want      int
+	}{
+		{"acc_pending", "wrong-token", http.StatusUnauthorized},
+		{"acc_pending", "", http.StatusUnauthorized},
+		{"acc_pending", "witself_prv_test", http.StatusOK},
+		{"acc_closed", "witself_prv_test", http.StatusOK},
+		{"acc_active", "witself_prv_test", http.StatusConflict},
+		{"acc_missing", "witself_prv_test", http.StatusNotFound},
+	} {
+		resp := do(tc.id, tc.token)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("reap %s (token %q) = %d, want %d", tc.id, tc.token, resp.StatusCode, tc.want)
+		}
+	}
+
+	// Without the provisioning pair the route must not exist at all.
+	bare := httptest.NewServer(apiMux(Config{ReapAccount: reap}))
+	defer bare.Close()
+	req, _ := http.NewRequest(http.MethodPost, bare.URL+"/v1/accounts/acc_pending:reap", nil)
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("reap on self-hosted config = %d, want 404 (route unmounted)", resp.StatusCode)
+	}
+}

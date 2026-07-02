@@ -274,6 +274,16 @@ func serve() int {
 					BootstrapToken: p.BootstrapToken,
 				}, nil
 			}
+			cfg.ReapAccount = func(ctx context.Context, accountID string) (bool, error) {
+				reaped, err := st.ReapPendingAccount(ctx, accountID, "activation window expired")
+				switch {
+				case errors.Is(err, store.ErrAccountNotFound):
+					return false, server.ErrNotFound
+				case errors.Is(err, store.ErrAccountActive):
+					return false, server.ErrConflict
+				}
+				return reaped, err
+			}
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
 		cfg.Ready = st.Ping

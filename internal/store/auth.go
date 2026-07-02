@@ -61,20 +61,22 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var accountID, operatorID string
+	// Resolve the token first WITHOUT locking it, then lock the account, then
+	// consume. Lock order is accounts-before-tokens everywhere (mints, close,
+	// reap) — consuming the token row first would invert it and deadlock
+	// against a reap/close sweeping this very account.
+	var tokID, accountID, operatorID string
 	err = tx.QueryRow(ctx,
-		`UPDATE tokens t SET consumed_at = now()
-		 FROM operators o
+		`SELECT t.id, t.account_id, t.operator_id FROM tokens t
+		 JOIN operators o ON o.id = t.operator_id AND o.account_id = t.account_id
 		 WHERE t.token_hash = $1 AND t.kind = 'bootstrap' AND t.consumed_at IS NULL
 		   AND (t.expires_at IS NULL OR t.expires_at > now())
-		   AND o.id = t.operator_id AND o.account_id = t.account_id
-		   AND o.deleted_at IS NULL
-		 RETURNING t.account_id, t.operator_id`, hashToken(plaintext)).Scan(&accountID, &operatorID)
+		   AND o.deleted_at IS NULL`, hashToken(plaintext)).Scan(&tokID, &accountID, &operatorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrInvalidBootstrap
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("consume bootstrap token: %w", err)
+		return "", "", fmt.Errorf("resolve bootstrap token: %w", err)
 	}
 	// Pending is allowed — claiming the credential is how a new owner watches
 	// for activation. A closed account's bootstrap is simply dead.
@@ -84,19 +86,32 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 		}
 		return "", "", err
 	}
+	// Single-use, atomically: a concurrent exchange (or a close/reap sweep
+	// that fired between the SELECT and the account lock) wins here, and this
+	// caller gets the same answer as any spent token.
+	tag, err := tx.Exec(ctx,
+		`UPDATE tokens SET consumed_at = now()
+		 WHERE id = $1 AND consumed_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > now())`, tokID)
+	if err != nil {
+		return "", "", fmt.Errorf("consume bootstrap token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return "", "", ErrInvalidBootstrap
+	}
 
 	opTok, err := token.New(token.KindOperator)
 	if err != nil {
 		return "", "", err
 	}
-	tokID, err := id.New("tok")
+	opTokID, err := id.New("tok")
 	if err != nil {
 		return "", "", err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash)
 		 VALUES ($1, $2, $3, 'operator', $4)`,
-		tokID, accountID, operatorID, hashToken(opTok)); err != nil {
+		opTokID, accountID, operatorID, hashToken(opTok)); err != nil {
 		return "", "", fmt.Errorf("store operator token: %w", err)
 	}
 
