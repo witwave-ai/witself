@@ -29,6 +29,12 @@
       }
     ]
   },
+  "kv_namespaces": [
+    {
+      "binding": "DIRECTORY",
+      "id": "ec620d5131524e138a9fca6207953cd2"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
