@@ -28,7 +28,7 @@ sealed plane only through the explicit, audited value-returning operations
 Homebrew:
 
 ```sh
-brew install witwave-ai/tap/witself
+brew install witwave-ai/tap/ws
 ws version
 ```
 

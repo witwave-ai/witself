@@ -428,8 +428,10 @@ Homebrew distribution must use the Witwave-owned tap repository:
 - Repository: `github.com/witwave-ai/homebrew-tap`
 - Visibility: public
 - Tap name: `witwave-ai/tap`
-- Formula path: `Formula/witself.rb`
-- Install command: `brew install witwave-ai/tap/witself`
+- Formula path: `Formula/ws.rb`
+- Optional infra formula path: `Formula/witself-infra.rb`
+- Install command: `brew install witwave-ai/tap/ws`
+- Optional infra install command: `brew install witwave-ai/tap/witself-infra`
 
 Before the first Homebrew release, release automation should check whether
 `witwave-ai/homebrew-tap` exists. If it does not exist, create it under the
@@ -442,13 +444,14 @@ tap instead.
 Homebrew release smoke tests should verify:
 
 - `brew tap witwave-ai/tap`
-- `brew install witwave-ai/tap/witself`
+- `brew install witwave-ai/tap/ws`
 - `ws version`
-- `ws completion --help`
+- `brew install witwave-ai/tap/witself-infra`
+- `witself-infra help`
 
-The Homebrew formula may install `witself-server` once the backend server is a
-public release artifact. CLI installation should remain simple even if the
-server binary is present.
+The default CLI install should stay lean. Operators who provision cells install
+`witself-infra` explicitly; most `ws` users should not receive the infrastructure
+provisioner or its Pulumi dependency.
 
 ## Universal Installer
 
@@ -458,6 +461,7 @@ Expected invocation:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
 ```
 
 Later, this can move to a product-owned domain such as `https://witself.dev` if
@@ -471,8 +475,12 @@ Installer requirements:
 - Verify signatures when the required signing metadata is available.
 - Install to `/usr/local/bin` when writable.
 - Fall back to `$HOME/.local/bin` when a system install path is not writable.
-- Support selecting a version through an environment variable such as
-  `WITSELF_VERSION`.
+- Install `ws` by default.
+- Support selecting `ws`, `witself-infra`, or `witself-server` through the first
+  positional argument, such as `sh -s witself-infra`.
+- Keep `WITSELF_BINARY` as a compatibility alias for selecting the binary.
+- Support selecting a version through `WS_VERSION`, or through the second
+  positional argument when a binary is also supplied.
 - Print the installed version and next-step PATH guidance.
 
 ## First Release Flow

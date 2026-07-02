@@ -4,13 +4,19 @@
 #   # ws (default):
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
 #   # witself-infra:
-#   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | WITSELF_BINARY=witself-infra sh
+#   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
 #
 # Downloads the selected binary for your OS/arch from the GitHub releases,
 # verifies its SHA-256 checksum, and installs it on your PATH.
 #
+# Usage:
+#   sh                 install latest ws
+#   sh -s BINARY       install latest ws, witself-infra, or witself-server
+#   sh -s BINARY VER   install a specific binary version
+#   sh -s VER          install a specific ws version
+#
 # Environment:
-#   WITSELF_BINARY   which binary: ws (default), witself-infra, witself-server
+#   WITSELF_BINARY   back-compat binary selector; positional BINARY wins
 #   WS_VERSION       version to install (e.g. v0.0.1); default: latest release
 #   WS_INSTALL_DIR   install directory; default: /usr/local/bin (sudo if needed)
 #
@@ -20,17 +26,34 @@
 set -eu
 
 REPO="witwave-ai/witself"
-BINARY="${WITSELF_BINARY:-ws}"
 INSTALL_DIR="${WS_INSTALL_DIR:-/usr/local/bin}"
-
-case "$BINARY" in
-  ws | witself-infra | witself-server) ;;
-  *) printf 'install: unknown WITSELF_BINARY "%s" (want ws|witself-infra|witself-server)\n' "$BINARY" >&2; exit 1 ;;
-esac
 
 err() { printf 'install: %s\n' "$1" >&2; exit 1; }
 info() { printf '%s\n' "$1" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+BINARY="${WITSELF_BINARY:-ws}"
+version="${WS_VERSION:-}"
+
+case "${1:-}" in
+  "")
+    [ "$#" -eq 0 ] || err "empty binary/version argument"
+    ;;
+  ws | witself-infra | witself-server)
+    BINARY="$1"
+    version="${2:-${WS_VERSION:-}}"
+    [ "$#" -le 2 ] || err "too many arguments (usage: sh -s [BINARY] [VERSION])"
+    ;;
+  *)
+    version="$1"
+    [ "$#" -le 1 ] || err "too many arguments (usage: sh -s [BINARY] [VERSION])"
+    ;;
+esac
+
+case "$BINARY" in
+  ws | witself-infra | witself-server) ;;
+  *) err "unknown binary \"${BINARY}\" (want ws|witself-infra|witself-server)" ;;
+esac
 
 download() { # url dest
   if have curl; then curl -fsSL "$1" -o "$2"
@@ -57,8 +80,7 @@ case "$arch" in
   *) err "unsupported architecture: $arch (amd64 and arm64 only)" ;;
 esac
 
-# Resolve the version: arg, then WS_VERSION, then the latest release.
-version="${1:-${WS_VERSION:-}}"
+# Resolve the version: positional arg, then WS_VERSION, then the latest release.
 if [ -z "$version" ]; then
   info "Resolving latest ${BINARY} release..."
   version=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" |

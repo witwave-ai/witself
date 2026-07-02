@@ -9,8 +9,14 @@ Status: pre-implementation draft. The `ws` CLI ships incrementally; v0.0.1 (the
 # Homebrew
 brew install witwave-ai/tap/ws
 
-# or curl | sh (verifies the SHA-256 checksum)
+# Optional infrastructure provisioner
+brew install witwave-ai/tap/witself-infra
+
+# or curl | sh (verifies the SHA-256 checksum; installs ws by default)
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
+
+# Optional infrastructure provisioner
+curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
 
 ws version
 ```
