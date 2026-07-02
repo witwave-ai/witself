@@ -27,7 +27,17 @@
 //   cell:<name>       -> {"endpoint","cloud","region","owner","weight",
 //                          "accepting","registered_at"}
 //   invite:<code>     -> {"enabled","not_before","expires_at","max_uses",
-//                          "uses","note","created_at"}
+//                          "uses","note","created_at","cell","region"}
+//   config:placement  -> {"strategy":"weighted"|"pinned","pinned_cell"}
+//
+// PLACEMENT (which cell gets a new account), precedence top wins:
+//   1. invite.cell    — hard pin (dedicated/enterprise cells); 503 if unavailable
+//   2. invite.region  — hard constraint (compliance); 503 if no cell in region
+//   3. config:placement strategy — "pinned" (soft: falls back if the pinned
+//      cell is ineligible) or "weighted" (default; equal weights ≈ round-robin)
+//   4. weighted random among what remains
+// "geo" (request.cf-based nearest-region) is reserved for when the fleet has
+// multiple regions; exact sequential round-robin arrives with the DO authority.
 // The registry is small and rarely written; when signup lands, the
 // authoritative copy moves to a Durable Object (KV has no transactions) and
 // KV stays the read projection. The O(accounts) scan in DELETE moves to DO
@@ -53,6 +63,8 @@ const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const INVITE_PATH = /^\/v1\/invites\/([a-z0-9][a-z0-9-]{2,63})$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
+const REGION_NAME = /^[a-z0-9-]{2,32}$/;
+const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 
 function timingSafeEqual(a, b) {
   const enc = new TextEncoder();
@@ -175,6 +187,12 @@ async function handleInvites(request, env, url) {
     if (body.max_uses != null && (!Number.isInteger(body.max_uses) || body.max_uses < 1)) {
       return err("max_uses must be a positive integer", 400);
     }
+    if (body.cell != null && !CELL_NAME.test(body.cell)) {
+      return err("cell must be a valid cell name", 400);
+    }
+    if (body.region != null && !REGION_NAME.test(body.region)) {
+      return err("region must be a region name like us-west-2", 400);
+    }
     const key = `invite:${code}`;
     const existing = await env.DIRECTORY.get(key, { type: "json" });
     const entry = {
@@ -182,6 +200,9 @@ async function handleInvites(request, env, url) {
       not_before: body.not_before ?? null,
       expires_at: body.expires_at ?? null,
       max_uses: body.max_uses ?? null,
+      // Placement constraints: cell = hard pin, region = hard constraint.
+      cell: body.cell ?? existing?.cell ?? null,
+      region: body.region ?? existing?.region ?? null,
       // uses/created_at survive upserts; consumption belongs to the signup path.
       uses: existing?.uses ?? 0,
       note: body.note ?? existing?.note ?? "",
@@ -215,6 +236,84 @@ async function handleInvites(request, env, url) {
   }
 
   return err("method not allowed", 405);
+}
+
+// handlePlacement is the fleet-wide default placement strategy: GET returns it
+// (default weighted), POST sets it.
+async function handlePlacement(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (request.method === "GET") {
+    const cfg = (await env.DIRECTORY.get("config:placement", { type: "json" })) ?? {
+      strategy: "weighted",
+    };
+    return json({ schema_version: "witself.v0", placement: cfg });
+  }
+  if (request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return err("invalid JSON body", 400);
+    }
+    if (!PLACEMENT_STRATEGIES.includes(body.strategy)) {
+      return err(`strategy must be one of: ${PLACEMENT_STRATEGIES.join(", ")} (geo arrives with a multi-region fleet)`, 400);
+    }
+    if (body.strategy === "pinned" && !CELL_NAME.test(body.pinned_cell || "")) {
+      return err("pinned strategy requires pinned_cell", 400);
+    }
+    const cfg = { strategy: body.strategy };
+    if (body.strategy === "pinned") {
+      cfg.pinned_cell = body.pinned_cell;
+    }
+    await env.DIRECTORY.put("config:placement", JSON.stringify(cfg));
+    return json({ schema_version: "witself.v0", placement: cfg });
+  }
+  return err("method not allowed", 405);
+}
+
+// placeAccount picks the cell for a new account. Precedence: invite pin (hard),
+// invite region (hard), fleet pinned strategy (soft), weighted random.
+// Returns {cell} or {fail: Response}.
+async function placeAccount(env, invite) {
+  let pool = (await listCells(env)).filter(
+    (c) => c.accepting !== false && c.provision_token,
+  );
+  if (invite.cell) {
+    pool = pool.filter((c) => c.name === invite.cell);
+    if (pool.length === 0) {
+      return { fail: err(`no capacity: invite-pinned cell ${invite.cell} unavailable`, 503) };
+    }
+  } else if (invite.region) {
+    pool = pool.filter((c) => c.region === invite.region);
+    if (pool.length === 0) {
+      return { fail: err(`no capacity in region ${invite.region}`, 503) };
+    }
+  }
+  if (pool.length === 0) {
+    return { fail: err("no capacity: no accepting cells", 503) };
+  }
+
+  const cfg = (await env.DIRECTORY.get("config:placement", { type: "json" })) ?? {};
+  if (cfg.strategy === "pinned" && cfg.pinned_cell) {
+    const pinned = pool.find((c) => c.name === cfg.pinned_cell);
+    if (pinned) {
+      return { cell: pinned }; // soft pin: absent/ineligible falls through
+    }
+  }
+
+  const total = pool.reduce((s, c) => s + (c.weight > 0 ? c.weight : 1), 0);
+  let r = Math.random() * total;
+  let cell = pool[pool.length - 1];
+  for (const c of pool) {
+    r -= c.weight > 0 ? c.weight : 1;
+    if (r <= 0) {
+      cell = c;
+      break;
+    }
+  }
+  return { cell };
 }
 
 async function handleCells(request, env, url) {
@@ -346,23 +445,12 @@ async function handleSignup(request, env) {
     return err(`invalid invite: ${verdict.reason}`, 403);
   }
 
-  // Placement v0: accepting cells that can actually provision, weighted random.
-  const eligible = (await listCells(env)).filter(
-    (c) => c.accepting !== false && c.provision_token,
-  );
-  if (eligible.length === 0) {
-    return err("no capacity: no accepting cells", 503);
+  // Placement: invite pin -> invite region -> fleet strategy -> weighted.
+  const placed = await placeAccount(env, invite);
+  if (placed.fail) {
+    return placed.fail;
   }
-  const total = eligible.reduce((s, c) => s + (c.weight > 0 ? c.weight : 1), 0);
-  let r = Math.random() * total;
-  let cell = eligible[eligible.length - 1];
-  for (const c of eligible) {
-    r -= c.weight > 0 ? c.weight : 1;
-    if (r <= 0) {
-      cell = c;
-      break;
-    }
-  }
+  const cell = placed.cell;
 
   // The cell provisions the account (its data, its database).
   let cellResp;
@@ -377,13 +465,13 @@ async function handleSignup(request, env) {
       signal: AbortSignal.timeout(15000),
     });
   } catch {
-    return err("cell unreachable — try again shortly", 502);
+    return err(`cell ${cell.name} unreachable — try again shortly`, 502);
   }
   if (cellResp.status === 409) {
     return err("an account with this email already exists", 409);
   }
   if (cellResp.status !== 201) {
-    return err("cell provisioning failed", 502);
+    return err(`cell provisioning failed (${cell.name})`, 502);
   }
   let provisioned;
   try {
@@ -455,6 +543,11 @@ export default {
     // Invite codes (fleet-token authorized).
     if (url.pathname === "/v1/invites" || INVITE_PATH.test(url.pathname)) {
       return handleInvites(request, env, url);
+    }
+
+    // Fleet-wide placement strategy (fleet-token authorized).
+    if (url.pathname === "/v1/placement") {
+      return handlePlacement(request, env);
     }
 
     // Signup: public, invite-gated. The one door you can knock on with nothing.
