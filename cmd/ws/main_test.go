@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/local"
 )
 
 func TestDefaultBootstrapTokenPath(t *testing.T) {
@@ -190,5 +193,52 @@ func TestDestructiveCommandsRequireYes(t *testing.T) {
 	}
 	if code := run([]string{"token", "revoke", "--endpoint", "http://example.test", "--token-file", "token", "--token", "tok_1"}); code != 2 {
 		t.Fatalf("token revoke without yes code = %d, want 2", code)
+	}
+}
+
+func TestAccountForget(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	if err := local.Save("stale", local.Account{ID: "acc_1"}, "witself_opr_dead"); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := run([]string{"account", "forget", "--account", "stale"}); code != 2 {
+		t.Fatalf("forget without --yes code = %d, want 2", code)
+	}
+	if _, _, _, err := local.Resolve("stale"); err != nil {
+		t.Fatalf("binding gone after refused forget: %v", err)
+	}
+
+	if code := run([]string{"account", "forget", "--account", "stale", "--yes"}); code != 0 {
+		t.Fatalf("forget code = %d, want 0", code)
+	}
+	cfg, err := local.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Accounts["stale"]; ok {
+		t.Fatal("config still has the forgotten account")
+	}
+	tp, err := local.TokenPath("stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("token file still present after forget: stat err = %v", err)
+	}
+}
+
+func TestAccountForgetRequiresExplicitName(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv("WITSELF_ACCOUNT", "stale") // must never stand in for --account
+	if code := run([]string{"account", "forget", "--yes"}); code != 2 {
+		t.Fatalf("forget without --account code = %d, want 2", code)
+	}
+}
+
+func TestAccountForgetUnknownName(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	if code := run([]string{"account", "forget", "--account", "nope", "--yes"}); code != 1 {
+		t.Fatalf("forget unknown name code = %d, want 1", code)
 	}
 }

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -713,7 +714,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|status|close ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|status|close|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -723,6 +724,8 @@ func accountCmd(args []string) int {
 		return accountStatus(args[1:])
 	case "close":
 		return accountClose(args[1:])
+	case "forget":
+		return accountForget(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
 		return 2
@@ -829,6 +832,48 @@ func accountClose(args []string) int {
 	return 0
 }
 
+// accountForget removes a LOCAL account binding — the config.json entry and
+// the token file — without ever contacting a server. It exists for stranded
+// names: when the control plane closes an account the CLI didn't see close
+// (the pending-account reaper, a torn-down cell), the credentials are already
+// dead, so `ws account close` can't clean up the local half. Closing a live
+// account is `ws account close`, which retires the local name itself.
+func accountForget(args []string) int {
+	fs := flag.NewFlagSet("account forget", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := fs.String("account", "", "local account name to forget (required)")
+	yes := fs.Bool("yes", false, "confirm forgetting the local binding")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// No WITSELF_ACCOUNT or "default" fallback: forgetting always names its
+	// target explicitly, so a stray invocation can't drop a live credential.
+	if *account == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account forget --account NAME --yes")
+		return 2
+	}
+	// Available answering "taken" is exactly what forget needs: the name is
+	// bound locally (config entry or token file), even if only half survives.
+	switch err := local.Available(*account); {
+	case err == nil:
+		fmt.Fprintf(os.Stderr, "ws: no local account named %q\n", *account)
+		return 1
+	case !errors.Is(err, local.ErrNameTaken):
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if !*yes {
+		fmt.Fprintf(os.Stderr, "ws: forgetting %q removes this machine's binding and token only — it does NOT close the account server-side (that is `ws account close`).\n    Nothing has changed yet; re-run with --yes to confirm.\n", *account)
+		return 2
+	}
+	if err := local.Delete(*account); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "local account %q forgotten. The account itself, if it still exists, is untouched server-side.\n", *account)
+	return 0
+}
+
 // accountCreate is Witself Cloud signup: one command from nothing to a working
 // operator token. The control plane places the account on a cell; the CLI then
 // claims it with the ordinary bootstrap exchange — the same path a self-hosted
@@ -914,6 +959,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
+	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")
 	usageLine(w, "  ws realm create|list|delete")
 	usageLine(w, "  ws agent create|list|delete")
 	usageLine(w, "  ws operator list|create|delete")
