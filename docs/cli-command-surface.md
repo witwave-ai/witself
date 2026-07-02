@@ -2950,12 +2950,13 @@ The current implemented self-hosted slice supports:
 ```sh
 ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --agent AGENT_ID
 ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator
-ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator --ttl 24h --out ./operator.token
+ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator --name "deploy bot" --ttl 24h --out ./operator.token
 ```
 
 `--operator` mints another token for the authenticated operator record. It does
-not create a named additional operator yet; operator listing, names, and safe
-operator deletion are tracked as the next lifecycle slice.
+not create a named additional operator yet; `--name` labels the token for later
+list/show surfaces. Operator listing, additional named operator records, and
+safe operator deletion are tracked as the next lifecycle slice.
 
 ### `ws token list`
 

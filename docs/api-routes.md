@@ -101,6 +101,7 @@ GET  /.well-known/witself-card.json
 # API listener, default :8080.
 GET  /v1/version
 GET  /v1/whoami
+GET  /v1/auth/whoami         # compatibility alias for authenticated whoami
 GET  /v1/capabilities
 
 GET  /v1/self                # the always-loaded self-digest; ?format= renders an emit fragment

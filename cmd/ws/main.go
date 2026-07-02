@@ -303,7 +303,7 @@ func agentList(args []string) int {
 
 func tokenCmd(args []string) int {
 	if len(args) == 0 || args[0] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--ttl DURATION] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
 		return 2
 	}
 	return tokenCreate(args[1:])
@@ -316,17 +316,22 @@ func tokenCreate(args []string) int {
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	agent := fs.String("agent", "", "agent id to mint a token for")
 	operator := fs.Bool("operator", false, "mint another token for the authenticated operator")
+	name := fs.String("name", "", "display name for an operator token")
 	ttl := fs.String("ttl", "", "operator token lifetime, such as 24h or 30m")
 	out := fs.String("out", "", "write the new token to this file (0600) instead of stdout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *endpoint == "" || *tokenFile == "" || (*agent == "" && !*operator) || (*agent != "" && *operator) {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--ttl DURATION] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
 		return 2
 	}
 	if *agent != "" && *ttl != "" {
 		fmt.Fprintln(os.Stderr, "ws: --ttl is currently supported only with --operator")
+		return 2
+	}
+	if *agent != "" && *name != "" {
+		fmt.Fprintln(os.Stderr, "ws: --name is currently supported only with --operator")
 		return 2
 	}
 	op, err := readToken(*tokenFile)
@@ -335,7 +340,7 @@ func tokenCreate(args []string) int {
 		return 1
 	}
 	if *operator {
-		res, err := client.CreateOperatorToken(context.Background(), *endpoint, op, *ttl)
+		res, err := client.CreateOperatorToken(context.Background(), *endpoint, op, *name, *ttl)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 			return 1

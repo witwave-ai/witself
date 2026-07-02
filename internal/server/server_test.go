@@ -98,6 +98,28 @@ func TestWhoamiAuth(t *testing.T) {
 	}
 }
 
+func TestAuthWhoamiAlias(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/auth/whoami", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/auth/whoami = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestRealmsCreateAndList(t *testing.T) {
 	auth := func(_ context.Context, tok string) (string, string, bool, error) {
 		if tok == "good" {
@@ -284,9 +306,12 @@ func TestOperatorTokenCreate(t *testing.T) {
 		}
 		return "", "", false, nil
 	}
-	create := func(_ context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
+	create := func(_ context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error) {
 		if accountID != "acc_y" || operatorID != "opr_x" {
 			t.Fatalf("create principal = account %q operator %q", accountID, operatorID)
+		}
+		if displayName != "deploy bot" {
+			t.Fatalf("displayName = %q, want deploy bot", displayName)
 		}
 		var expiresAt *time.Time
 		if ttl != nil {
@@ -320,7 +345,7 @@ func TestOperatorTokenCreate(t *testing.T) {
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("invalid ttl = %d, want 400", r.StatusCode)
 	}
-	r = post("good", `{"ttl":"24h"}`)
+	r = post("good", `{"display_name":"deploy bot","ttl":"24h"}`)
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
@@ -328,13 +353,87 @@ func TestOperatorTokenCreate(t *testing.T) {
 	var out struct {
 		OperatorToken string `json:"operator_token"`
 		OperatorID    string `json:"operator_id"`
+		DisplayName   string `json:"display_name"`
 		ExpiresAt     string `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.OperatorToken != "witself_opr_minted" || out.OperatorID != "opr_x" || out.ExpiresAt == "" {
+	if out.OperatorToken != "witself_opr_minted" || out.OperatorID != "opr_x" || out.DisplayName != "deploy bot" || out.ExpiresAt == "" {
 		t.Errorf("operator token response = %+v", out)
+	}
+}
+
+func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
+	valid := map[string]bool{"parent": true}
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		if valid[tok] {
+			return "opr_x", "acc_y", true, nil
+		}
+		return "", "", false, nil
+	}
+	create := func(_ context.Context, accountID, operatorID, _ string, _ *time.Duration) (string, *time.Time, error) {
+		if accountID != "acc_y" || operatorID != "opr_x" {
+			t.Fatalf("create principal = account %q operator %q", accountID, operatorID)
+		}
+		valid["child"] = true
+		return "child", nil, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/operators/self/tokens", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer parent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("mint token = %d, want 201", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/v1/auth/whoami", nil)
+	req.Header.Set("Authorization", "Bearer child")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("whoami with minted token = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		switch tok {
+		case "good":
+			return "opr_x", "acc_y", true, nil
+		case "agent", "consumed", "expired", "invalid":
+			return "", "", false, nil
+		default:
+			return "", "", false, nil
+		}
+	}
+	create := func(context.Context, string, string, string, *time.Duration) (string, *time.Time, error) {
+		t.Fatal("create should not be called")
+		return "", nil, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateOperatorToken: create}))
+	defer srv.Close()
+
+	for _, tok := range []string{"agent", "consumed", "expired", "invalid"} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/operators/self/tokens", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s token create = %d, want 401", tok, resp.StatusCode)
+		}
 	}
 }
 

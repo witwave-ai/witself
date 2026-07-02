@@ -152,8 +152,8 @@ func serve() int {
 			}
 			return tok, err
 		}
-		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
-			tok, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, ttl)
+		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error) {
+			tok, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, displayName, ttl)
 			if errors.Is(err, store.ErrOperatorNotFound) {
 				return "", nil, server.ErrNotFound
 			}

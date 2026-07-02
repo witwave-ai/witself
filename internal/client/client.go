@@ -24,6 +24,7 @@ type BootstrapResult struct {
 type OperatorTokenResult struct {
 	OperatorToken string
 	OperatorID    string
+	DisplayName   string
 	ExpiresAt     string
 }
 
@@ -197,8 +198,11 @@ func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (str
 }
 
 // CreateOperatorToken mints another token for the authenticated operator.
-func CreateOperatorToken(ctx context.Context, endpoint, token, ttl string) (*OperatorTokenResult, error) {
+func CreateOperatorToken(ctx context.Context, endpoint, token, displayName, ttl string) (*OperatorTokenResult, error) {
 	body := map[string]string{}
+	if displayName != "" {
+		body["display_name"] = displayName
+	}
 	if ttl != "" {
 		body["ttl"] = ttl
 	}
@@ -209,6 +213,7 @@ func CreateOperatorToken(ctx context.Context, endpoint, token, ttl string) (*Ope
 	var out struct {
 		OperatorToken string `json:"operator_token"`
 		OperatorID    string `json:"operator_id"`
+		DisplayName   string `json:"display_name,omitempty"`
 		ExpiresAt     string `json:"expires_at,omitempty"`
 	}
 	url := strings.TrimRight(endpoint, "/") + "/v1/operators/self/tokens"
@@ -221,6 +226,7 @@ func CreateOperatorToken(ctx context.Context, endpoint, token, ttl string) (*Ope
 	return &OperatorTokenResult{
 		OperatorToken: out.OperatorToken,
 		OperatorID:    out.OperatorID,
+		DisplayName:   out.DisplayName,
 		ExpiresAt:     out.ExpiresAt,
 	}, nil
 }

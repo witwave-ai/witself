@@ -40,10 +40,14 @@ func TestTokenCreateOperatorWritesOutFile(t *testing.T) {
 			t.Errorf("Authorization = %q", got)
 		}
 		var body struct {
-			TTL string `json:"ttl"`
+			DisplayName string `json:"display_name"`
+			TTL         string `json:"ttl"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
+		}
+		if body.DisplayName != "deploy bot" {
+			t.Errorf("display_name = %q, want deploy bot", body.DisplayName)
 		}
 		if body.TTL != "24h" {
 			t.Errorf("ttl = %q, want 24h", body.TTL)
@@ -65,6 +69,7 @@ func TestTokenCreateOperatorWritesOutFile(t *testing.T) {
 		"--endpoint", srv.URL,
 		"--token-file", parent,
 		"--operator",
+		"--name", "deploy bot",
 		"--ttl", "24h",
 		"--out", out,
 	})
@@ -89,5 +94,8 @@ func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	}
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--ttl", "24h"}); code != 2 {
 		t.Fatalf("agent ttl code = %d, want 2", code)
+	}
+	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--name", "deploy bot"}); code != 2 {
+		t.Fatalf("agent name code = %d, want 2", code)
 	}
 }

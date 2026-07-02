@@ -112,7 +112,7 @@ func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (ope
 // CreateOperatorToken mints a durable operator token bound to an operator that
 // belongs to the account, and returns the plaintext (shown once). Expiration is
 // optional; nil ttl means no explicit expiry.
-func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error) {
+func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
 		`SELECT true FROM operators WHERE id = $1 AND account_id = $2`,
@@ -141,9 +141,9 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID s
 		expiresValue = t
 	}
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash, expires_at)
-		 VALUES ($1, $2, $3, 'operator', $4, $5)`,
-		tokID, accountID, operatorID, hashToken(opTok), expiresValue); err != nil {
+		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash, expires_at, display_name)
+		 VALUES ($1, $2, $3, 'operator', $4, $5, $6)`,
+		tokID, accountID, operatorID, hashToken(opTok), expiresValue, displayName); err != nil {
 		return "", nil, fmt.Errorf("store operator token: %w", err)
 	}
 	return opTok, expiresAt, nil

@@ -147,8 +147,8 @@ Unattended auth should use explicitly issued tokens:
   preferred over environment variables.
 - In the current self-hosted implementation, an authenticated operator can mint
   another token for the same operator record with `ws token create --operator`.
-  Creating named additional operator records is tracked separately from this
-  token-minting path.
+  `--name` labels that token; creating named additional operator records is
+  tracked separately from this token-minting path.
 
 ## Self-Hosted Bootstrap
 

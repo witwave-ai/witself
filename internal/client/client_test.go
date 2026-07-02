@@ -49,24 +49,28 @@ func TestCreateOperatorToken(t *testing.T) {
 			t.Errorf("Authorization = %q", got)
 		}
 		var body struct {
-			TTL string `json:"ttl"`
+			DisplayName string `json:"display_name"`
+			TTL         string `json:"ttl"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
+		}
+		if body.DisplayName != "deploy bot" {
+			t.Errorf("display_name = %q, want deploy bot", body.DisplayName)
 		}
 		if body.TTL != "24h" {
 			t.Errorf("ttl = %q, want 24h", body.TTL)
 		}
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator_token":"witself_opr_child","operator_id":"opr_1","expires_at":"2026-07-03T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operator_token":"witself_opr_child","operator_id":"opr_1","display_name":"deploy bot","expires_at":"2026-07-03T00:00:00Z"}`))
 	}))
 	defer srv.Close()
 
-	res, err := CreateOperatorToken(context.Background(), srv.URL, "witself_opr_parent", "24h")
+	res, err := CreateOperatorToken(context.Background(), srv.URL, "witself_opr_parent", "deploy bot", "24h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.OperatorToken != "witself_opr_child" || res.OperatorID != "opr_1" || res.ExpiresAt == "" {
+	if res.OperatorToken != "witself_opr_child" || res.OperatorID != "opr_1" || res.DisplayName != "deploy bot" || res.ExpiresAt == "" {
 		t.Errorf("operator token result = %+v", res)
 	}
 }

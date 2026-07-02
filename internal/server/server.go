@@ -57,7 +57,7 @@ type Config struct {
 
 	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
 	// an additional operator token for the authenticated operator (returned once).
-	CreateOperatorToken func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error)
+	CreateOperatorToken func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error)
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -174,7 +174,9 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
 	if cfg.Authenticate != nil {
-		mux.HandleFunc("GET /v1/whoami", whoamiHandler(cfg.Authenticate))
+		whoami := whoamiHandler(cfg.Authenticate)
+		mux.HandleFunc("GET /v1/whoami", whoami)
+		mux.HandleFunc("GET /v1/auth/whoami", whoami)
 		if cfg.CreateRealm != nil {
 			mux.HandleFunc("POST /v1/realms", createRealmHandler(cfg.Authenticate, cfg.CreateRealm))
 		}
@@ -453,15 +455,17 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 	})
 }
 
-func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, operatorID string, ttl *time.Duration) (string, *time.Time, error)) http.HandlerFunc {
+func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, *time.Time, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
-			TTL string `json:"ttl,omitempty"`
+			DisplayName string `json:"display_name,omitempty"`
+			TTL         string `json:"ttl,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		displayName := strings.TrimSpace(req.DisplayName)
 
 		var ttl *time.Duration
 		if req.TTL != "" {
@@ -473,7 +477,7 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 			ttl = &d
 		}
 
-		tok, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, ttl)
+		tok, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, ttl)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "operator not found")
 			return
@@ -486,6 +490,7 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 			"schema_version": "witself.v0",
 			"operator_token": tok,
 			"operator_id":    p.operatorID,
+			"display_name":   displayName,
 		}
 		if expiresAt != nil {
 			out["expires_at"] = expiresAt.Format(time.RFC3339)

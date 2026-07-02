@@ -36,6 +36,8 @@ Default v0 posture:
 - Raw token values are returned only once, during create or rotate.
 - Server-side storage keeps token hashes and token metadata, never raw token
   values.
+- Token display names are metadata for later list/show surfaces; they do not
+  affect token authority.
 - Token files use plain token text in v0.
 - Revocation is immediate.
 - Disabled agents cannot authenticate with existing tokens.
