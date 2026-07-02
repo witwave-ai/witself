@@ -20,12 +20,25 @@ command uses when `--account` is omitted.
 
 ## Check account status
 
-New accounts start **pending**: nothing works until activation (email
-verification, eventually). Watch for it to flip to `active`:
+New accounts start **pending**: nothing works until the emailed verification
+link is clicked (`ws account resend-verification` sends a fresh one). Watch
+for it to flip to `active`:
 
 ```sh
 ws account status --account test-account-1
 ```
+
+## List operators
+
+Every account is born with one root operator, `owner` — the identity your
+local token authenticates as. Operators you add later appear alongside it:
+
+```sh
+ws operator list --account test-account-1
+```
+
+One line per operator: id, display name, role, whether it is the root,
+timestamps, and its live tokens.
 
 ## Close an account
 
@@ -37,19 +50,3 @@ ws account close --account test-account-1 --yes
 ```
 
 Add `--reason TEXT` to record why.
-
-## Forget a stranded local account name
-
-When an account is closed out from under the CLI — the pending-account reaper
-retired it, or its cell was torn down — the local name lives on in
-`~/.witself/config.json` with a dead token, and `ws account close` can no
-longer authenticate to clean it up. Drop the local binding and token file only:
-
-```sh
-ws account forget --account test-account-1 --yes
-```
-
-This never contacts the server: an account that still exists stays open.
-`--account` is required — forgetting never falls back to `WITSELF_ACCOUNT` or
-`default`. Closing a live account is `ws account close`, which removes the
-local name itself.
