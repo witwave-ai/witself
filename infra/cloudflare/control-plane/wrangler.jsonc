@@ -14,6 +14,9 @@
   "compatibility_date": "2026-06-01",
   "containers": [
     {
+      // Explicit application name — wrangler otherwise derives
+      // "<worker>-<class>" = "witself-control-plane-controlplane" (stutter).
+      "name": "witself-control-plane",
       "class_name": "ControlPlane",
       "image": "../../../images/witself-control-plane/Dockerfile",
       "image_build_context": "../../..",
