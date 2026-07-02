@@ -37,3 +37,19 @@ ws account close --account test-account-1 --yes
 ```
 
 Add `--reason TEXT` to record why.
+
+## Forget a stranded local account name
+
+When an account is closed out from under the CLI — the pending-account reaper
+retired it, or its cell was torn down — the local name lives on in
+`~/.witself/config.json` with a dead token, and `ws account close` can no
+longer authenticate to clean it up. Drop the local binding and token file only:
+
+```sh
+ws account forget --account test-account-1 --yes
+```
+
+This never contacts the server: an account that still exists stays open.
+`--account` is required — forgetting never falls back to `WITSELF_ACCOUNT` or
+`default`. Closing a live account is `ws account close`, which removes the
+local name itself.
