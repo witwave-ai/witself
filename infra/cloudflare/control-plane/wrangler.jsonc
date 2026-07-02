@@ -17,7 +17,7 @@
       // Explicit application name — wrangler otherwise derives
       // "<worker>-<class>" = "witself-control-plane-controlplane" (stutter).
       "name": "witself-control-plane",
-      "class_name": "ControlPlane",
+      "class_name": "Backend",
       "image": "../../../images/witself-control-plane/Dockerfile",
       "image_build_context": "../../..",
       "instance_type": "lite",
@@ -28,7 +28,7 @@
     "bindings": [
       {
         "name": "CONTROL_PLANE",
-        "class_name": "ControlPlane"
+        "class_name": "Backend"
       }
     ]
   },
@@ -42,6 +42,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ControlPlane"]
+    },
+    {
+      "tag": "v2",
+      "renamed_classes": [{ "from": "ControlPlane", "to": "Backend" }]
     }
   ],
   "routes": [

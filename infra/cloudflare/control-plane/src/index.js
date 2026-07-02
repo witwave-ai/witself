@@ -26,7 +26,7 @@
 // counters at the same time.
 import { Container, getContainer } from "@cloudflare/containers";
 
-export class ControlPlane extends Container {
+export class Backend extends Container {
   defaultPort = 8080;
   sleepAfter = "10m";
 }
