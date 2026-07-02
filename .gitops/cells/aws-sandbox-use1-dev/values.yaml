@@ -4,6 +4,8 @@ cell:
   accountAlias: sandbox
   region: us-east-1
   role: dev
+  domain: aws-sandbox-use1-dev.cells.witself.witwave.ai
+  apiHost: api.aws-sandbox-use1-dev.cells.witself.witwave.ai
 
 gitops:
   repoURL: https://github.com/witwave-ai/witself
@@ -60,6 +62,14 @@ platform:
     enabled: true
     chartVersion: v1.20.3
     namespace: cert-manager
+  externalDNS:
+    enabled: true
+    chartVersion: 1.21.1
+    namespace: external-dns
+    serviceAccountName: external-dns
+    domainFilters:
+      - aws-sandbox-use1-dev.cells.witself.witwave.ai
+    txtOwnerId: aws-sandbox-use1-dev
   externalSecrets:
     enabled: true
     chartVersion: 2.7.0

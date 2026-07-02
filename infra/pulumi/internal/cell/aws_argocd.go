@@ -118,18 +118,17 @@ users:
 
 	// Root "app of apps": one Argo Application renders the reusable cell
 	// bootstrap chart with this cell's values file. Git owns the child
-	// Applications and their versions; Pulumi only ensures Argo exists and points
-	// at the right Git source. DependsOn the release so the Application CRD that
-	// the chart installs exists before we create this CR.
+	// Applications, versions, and stable DNS names; Pulumi only ensures Argo
+	// exists, points at the right Git source, and passes generated cloud outputs.
+	// DependsOn the release so the Application CRD that the chart installs exists
+	// before we create this CR.
 	runtimeValues := pulumi.Sprintf(`gitops:
   repoURL: %q
   targetRevision: %q
   valuesPath: %q
 cell:
-  domain: %q
-  apiHost: %q
   tlsCertificateARN: %q
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.cellDomain, c.apiHost, c.tlsCertificateARN)
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.tlsCertificateARN)
 
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),

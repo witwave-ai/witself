@@ -38,9 +38,14 @@ are mostly a tidy way to template Argo `Application` YAML and pass the same
 per-cell values through each layer.
 
 The cell values file is the single Git-owned place to pin chart versions, target
-revisions, regions, namespaces, and secret references for that cell. For the
-current sandbox cell, that file is
+revisions, regions, stable DNS names, namespaces, and secret references for that
+cell. For the current sandbox cell, that file is
 [`cells/aws-sandbox-usw2-dev/values.yaml`](cells/aws-sandbox-usw2-dev/values.yaml).
+
+Stable DNS intent lives in that values file too: `cell.domain`, `cell.apiHost`,
+and `platform.externalDNS` describe what ExternalDNS should manage. Pulumi keeps
+ownership of the cloud resources behind that intent, including Route 53,
+Cloudflare delegation, ACM validation, and the ExternalDNS Pod Identity role.
 
 The Application manifests here reference this public repo by URL; a self-hosted
 fork (`-gitops-repo`) would adjust the root source, and the per-cell values file
