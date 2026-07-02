@@ -670,7 +670,7 @@ func mustRequest(t *testing.T, method, url string) *http.Request {
 }
 
 func TestProvisionAccount(t *testing.T) {
-	provision := func(_ context.Context, email, displayName string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, email, _ string) (ProvisionedAccount, error) {
 		if email == "taken@x.com" {
 			return ProvisionedAccount{}, ErrConflict
 		}
@@ -687,7 +687,7 @@ func TestProvisionAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unmounted provisioning = %d, want 404", resp.StatusCode)
 	}
@@ -707,22 +707,22 @@ func TestProvisionAccount(t *testing.T) {
 	}
 
 	r := post("", `{"email":"a@b.c"}`)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token = %d, want 401", r.StatusCode)
 	}
 	r = post("witself_prv_bad", `{"email":"a@b.c"}`)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("bad token = %d, want 401", r.StatusCode)
 	}
 	r = post("witself_prv_good", `{"email":"not-an-email"}`)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad email = %d, want 400", r.StatusCode)
 	}
 	r = post("witself_prv_good", `{"email":"taken@x.com"}`)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if r.StatusCode != http.StatusConflict {
 		t.Errorf("duplicate email = %d, want 409", r.StatusCode)
 	}
