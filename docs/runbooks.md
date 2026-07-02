@@ -18,8 +18,10 @@ follow-up commands are just `--account test-account-1`.
 Leave off `--name` and the account is saved as `default` — the name every
 command uses when `--account` is omitted.
 
+## Check account status
+
 New accounts start **pending**: nothing works until activation (email
-verification, eventually). Watch for it to flip:
+verification, eventually). Watch for it to flip to `active`:
 
 ```sh
 ws account status --account test-account-1
