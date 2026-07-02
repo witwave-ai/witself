@@ -101,49 +101,38 @@ make psql   # select id, status, closed_reason, closed_at from accounts;
 
 ## 3. Cloud — the full customer lifecycle (create → use → close)
 
-Needs: a registered cell (runbook 5) and a valid invite (runbook 4).
-Uses invite quota; each create consumes one use.
+Needs: a registered cell (runbook 5) and a valid invite (runbook 4). Each
+create consumes an invite use; the close at the end leaves nothing behind.
 
 ```sh
+EP=https://api.aws-sandbox-usw2-dev.cells.witself.witwave.ai
+T=/tmp/runbook-operator.token
+
 # create — one command from nothing to a working operator token
-ws account create \
-  --email you@example.com \
-  --invite friends-2026 \
-  --display-name "Your Name" \
-  --out ~/.witself/tokens/cloud/operator.token
+ws account create --email test-$(date +%s)@example.com \
+  --invite friends-2026 --out $T
 # expect: "account acc_… created on cell aws-sandbox-usw2-dev"
 #         "logged in as operator opr_…"
-# NOTE: --out OVERWRITES. One file per account, or you orphan the old account's key.
-
-EP=https://api.aws-sandbox-usw2-dev.cells.witself.witwave.ai
-T=~/.witself/tokens/cloud/operator.token
 
 # use it
-curl -s $EP/v1/whoami -H "Authorization: Bearer $(cat $T)"
-ws realm create --endpoint $EP --token-file $T prod
-RID=$(ws realm list --endpoint $EP --token-file $T | cut -f1)
-ws agent create --endpoint $EP --token-file $T --realm $RID scott
-
-# fleet-side evidence
 ACC=$(curl -s $EP/v1/whoami -H "Authorization: Bearer $(cat $T)" | python3 -c 'import sys,json;print(json.load(sys.stdin)["principal"]["account_id"])')
-curl -s $CP/v1/directory/$ACC            # expect: routes to the cell
-curl -s $CP/v1/invites/friends-2026 -H "$FT"   # expect: uses incremented
+ws realm create --endpoint $EP --token-file $T prod        # expect: realm_…  prod
+curl -s $CP/v1/directory/$ACC                              # expect: routes to the cell
 
-# close (permanent; demands --yes)
-ws account close --account $ACC --token-file $T --reason "done testing" --yes
-# expect: "account acc_… closed. Its operator token is now dead …"
-curl -s -o /dev/null -w '%{http_code}\n' $EP/v1/whoami -H "Authorization: Bearer $(cat $T)"   # expect: 401
-curl -s -o /dev/null -w '%{http_code}\n' $CP/v1/directory/$ACC                                 # expect: 404
-# (directory reads cache ~5 min at your location — a brief stale 200 is the edge cache, not a failed close)
+# close — permanent, demands --yes; every credential dies with it
+ws account close --account $ACC --token-file $T --reason "runbook" --yes
+curl -s -o /dev/null -w '%{http_code}\n' $EP/v1/whoami -H "Authorization: Bearer $(cat $T)"
+# expect: 401 — and rm $T, it is dead
+rm -f $T
 ```
 
-Failure paths worth trying on purpose:
+Failure paths worth trying on purpose: a bogus invite (`--invite nope-nope` →
+"invalid invite: unknown code"), the same email twice (409 per cell), and
+`ws account close` without `--yes` (refuses with a warning).
 
-```sh
-ws account create --email x@y.z --invite nope-nope        # expect: invalid invite: unknown code
-ws account create --email you@example.com --invite friends-2026   # same email again
-# expect: an account with this email already exists (per cell)
-```
+For a real account you keep: use a stable `--out` path like
+`~/.witself/tokens/cloud/operator.token` — and remember `--out` OVERWRITES, so
+one file per account or you orphan the old account's key.
 
 ## 4. Cloud — fleet administration (invites, placement, registry)
 
