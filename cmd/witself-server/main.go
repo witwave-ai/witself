@@ -19,7 +19,7 @@ import (
 	"github.com/witwave-ai/witself/internal/version"
 )
 
-const defaultBootstrapTokenFile = "/.witself/bootstrap/bootstrap.token"
+const defaultBootstrapTokenFile = "/.witself/tokens/bootstrap.token"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -320,7 +320,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
 	usageLine(w)
 	usageLine(w, "Bootstrap (optional first-operator setup):")
-	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/bootstrap/bootstrap.token)")
+	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
 	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }
 

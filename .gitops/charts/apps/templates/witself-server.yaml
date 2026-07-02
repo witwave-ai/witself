@@ -2,7 +2,7 @@
 {{- $bootstrap := .Values.apps.witselfServer.secrets.bootstrap -}}
 {{- $db := .Values.apps.witselfServer.secrets.database -}}
 {{- $bootstrapTargetName := default "witself-bootstrap" $bootstrap.targetName -}}
-{{- $bootstrapMountPath := default (printf "/.witself/bootstrap/%s/bootstrap-token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
+{{- $bootstrapMountPath := default (printf "/.witself/tokens/%s/bootstrap.token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- if and .Values.apps.witselfServer.awsAlbIngress.enabled (eq .Values.cell.cloud "aws") -}}

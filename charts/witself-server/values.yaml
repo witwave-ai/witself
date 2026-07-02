@@ -32,7 +32,7 @@ database:
 
 bootstrap:
   # Well-known file path read by witself-server for first-operator setup.
-  tokenFile: /.witself/bootstrap/bootstrap.token
+  tokenFile: /.witself/tokens/bootstrap.token
   existingSecret:
     # Name of a Secret containing the bootstrap token. Empty disables bootstrap
     # token mounting.

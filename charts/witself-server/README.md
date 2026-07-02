@@ -39,7 +39,7 @@ Set `database.existingSecret.name` and `database.existingSecret.urlKey` to expos
 the referenced key as `WITSELF_DATABASE_URL` in the server container.
 
 Set `bootstrap.existingSecret.name` to mount a first-operator bootstrap token at
-`bootstrap.tokenFile` (default `/.witself/bootstrap/bootstrap.token`) and expose
+`bootstrap.tokenFile` (default `/.witself/tokens/bootstrap.token`) and expose
 the configured TTL as `WITSELF_BOOTSTRAP_TOKEN_TTL`.
 
 ## Self-hosted vs cloud

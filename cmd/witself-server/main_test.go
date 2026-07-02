@@ -8,7 +8,7 @@ import (
 )
 
 func TestReadTokenFileRejectsEmpty(t *testing.T) {
-	tokenFile := filepath.Join(t.TempDir(), "bootstrap-token")
+	tokenFile := filepath.Join(t.TempDir(), "bootstrap.token")
 	if err := os.WriteFile(tokenFile, []byte("\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
