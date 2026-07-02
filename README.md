@@ -43,7 +43,7 @@ witself-infra up \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
   -gitops-values-path .gitops/cells/aws-sandbox-usw2-dev/values.yaml \
-  -ingress cloudflare-tunnel \
+  -ingress alb \
   -k8s-version 1.36 \
   -profile minimal \
   -region us-west-2 \
