@@ -29,6 +29,10 @@ const (
 	KindOperator Kind = "opr"
 	// KindAgent is a machine agent token, bound to one realm.
 	KindAgent Kind = "agt"
+	// KindFleet is a control-plane fleet token: it authorizes registering and
+	// removing cells in the fleet registry. v0 is one shared fleet token (one
+	// party); partner-hosted cells later get per-party credentials.
+	KindFleet Kind = "flt"
 )
 
 // New mints a fresh opaque token of the given kind: witself_<kind>_<random>.
