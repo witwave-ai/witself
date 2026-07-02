@@ -1,0 +1,47 @@
+// Cloudflare deployment of witself-control-plane: a thin Worker front door +
+// the Go container (Cloudflare Containers, DO-addressed). One deployment, one
+// domain: self.witwave.ai.
+//
+// Architecture notes (from the 2026-07 scaling research):
+// - Containers do NOT autoscale; each instance is DO-fronted (~1k rps cap).
+//   Fine for the cold path (signup/webhooks/registry). The future hot path
+//   (account->cell directory reads) must be answered IN this Worker from a KV
+//   binding and never reach the container.
+// - Deploy: npm install && npx wrangler deploy (CLOUDFLARE_API_TOKEN in env).
+{
+  "name": "witself-control-plane",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-01",
+  "containers": [
+    {
+      "class_name": "ControlPlane",
+      "image": "../../../images/witself-control-plane/Dockerfile",
+      "image_build_context": "../../..",
+      "instance_type": "lite",
+      "max_instances": 2
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTROL_PLANE",
+        "class_name": "ControlPlane"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ControlPlane"]
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "self.witwave.ai",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
