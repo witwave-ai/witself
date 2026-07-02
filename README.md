@@ -181,6 +181,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 
 ## Docs
 
+- [Runbooks](docs/runbooks.md) — hand-testing recipes for everything that is built and running
 - [Requirements](docs/requirements.md)
 - [Data Model](docs/data-model.md)
 - [Context Hydration](docs/context-hydration.md)
