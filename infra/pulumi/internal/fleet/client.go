@@ -45,10 +45,11 @@ type Client struct {
 	hc    *http.Client
 }
 
-// NewClient resolves the fleet token (WITSELF_FLEET_TOKEN, then
-// ~/.witself-infra/fleet.token) and returns a client for the control plane.
-func NewClient(controlPlane string) (*Client, error) {
-	tok, err := fleetToken()
+// NewClient resolves the fleet token and returns a client for the control
+// plane. Resolution order: the explicit tokenFile (an error if unreadable),
+// then WITSELF_FLEET_TOKEN, then ~/.witself-infra/fleet.token.
+func NewClient(controlPlane, tokenFile string) (*Client, error) {
+	tok, err := fleetToken(tokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +60,10 @@ func NewClient(controlPlane string) (*Client, error) {
 	}, nil
 }
 
-func fleetToken() (string, error) {
+func fleetToken(tokenFile string) (string, error) {
+	if tokenFile != "" {
+		return readTokenFile(tokenFile)
+	}
 	if t := strings.TrimSpace(os.Getenv("WITSELF_FLEET_TOKEN")); t != "" {
 		return t, nil
 	}
@@ -68,9 +72,17 @@ func fleetToken() (string, error) {
 		return "", fmt.Errorf("resolve home for fleet token: %w", err)
 	}
 	path := filepath.Join(home, ".witself-infra", "fleet.token")
+	t, err := readTokenFile(path)
+	if err != nil {
+		return "", fmt.Errorf("no fleet token: pass -fleet-token-file, set WITSELF_FLEET_TOKEN, or create %s: %w", path, err)
+	}
+	return t, nil
+}
+
+func readTokenFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("no fleet token: set WITSELF_FLEET_TOKEN or create %s: %w", path, err)
+		return "", fmt.Errorf("read fleet token file %s: %w", path, err)
 	}
 	t := strings.TrimSpace(string(b))
 	if t == "" {

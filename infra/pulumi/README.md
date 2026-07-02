@@ -141,8 +141,8 @@ witself-infra destroy -control-plane https://self.witwave.ai $F
 witself-infra destroy -control-plane https://self.witwave.ai -destroy-accounts $F
 ```
 
-Authorization is the **fleet token**, read from `WITSELF_FLEET_TOKEN` or
-`~/.witself-infra/fleet.token` (minted when the control plane was deployed; its
+Authorization is the **fleet token**, read from `-fleet-token-file` if given,
+else `WITSELF_FLEET_TOKEN`, else `~/.witself-infra/fleet.token` (minted when the control plane was deployed; its
 counterpart lives as the `FLEET_TOKEN` Worker secret). One token per fleet — all
 cells registering to the same control plane use the same token.
 
@@ -156,6 +156,7 @@ control plane forgets them.
 |---|---|---|
 | `-control-plane URL` | `up` | register the cell (upsert) after provisioning |
 | `-control-plane URL` | `destroy` | drain, then remove from the fleet before teardown; refuses while accounts live on the cell |
+| `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself-infra/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: purge the cell's directory entries too — explicit acknowledgment that the accounts die with the cell |
 
 ## Roadmap (one slice at a time)

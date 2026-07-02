@@ -106,8 +106,9 @@ flags:
   -control-plane  fleet control plane URL, e.g. https://self.witwave.ai
                   up: registers the cell after provisioning
                   destroy: drains + removes the cell first (refuses while
-                  accounts live on it). Fleet token from WITSELF_FLEET_TOKEN
-                  or ~/.witself-infra/fleet.token. Omit = no fleet (self-host).
+                  accounts live on it). Omit = no fleet (self-host).
+  -fleet-token-file  fleet token file (default: WITSELF_FLEET_TOKEN env,
+                  then ~/.witself-infra/fleet.token)
   -destroy-accounts  with destroy: also purge this cell's accounts from the
                   control-plane directory (the data dies with the cell)
 
@@ -157,6 +158,7 @@ func run(args []string) error {
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
+	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself-infra/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: purge this cell's accounts from the control-plane directory")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -335,7 +337,7 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			err = registerCell(ctx, stack, *controlPlane, cellName, *cloud, *region)
+			err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
 		}
 	case "preview":
 		_, err = stack.Preview(ctx, optpreview.ProgressStreams(os.Stdout))
@@ -344,7 +346,7 @@ func run(args []string) error {
 			// Fleet removal is a pre-step: drain first (placement stops), then
 			// remove — refusing while accounts live on the cell unless the
 			// operator explicitly acknowledges their destruction.
-			if err := removeCell(ctx, *controlPlane, cellName, *destroyAccounts); err != nil {
+			if err := removeCell(ctx, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts); err != nil {
 				return err
 			}
 		}
@@ -361,8 +363,8 @@ func run(args []string) error {
 
 // registerCell reports the freshly provisioned cell to the control plane. The
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, cellName, cloud, region string) error {
-	cl, err := fleet.NewClient(controlPlane)
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region string) error {
+	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return err
 	}
@@ -389,8 +391,8 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, cellName,
 // removeCell drains the cell and removes it from the fleet ahead of teardown.
 // Without -destroy-accounts it refuses while accounts live on the cell; with it,
 // the cell AND its directory entries are purged (the data dies with the cell).
-func removeCell(ctx context.Context, controlPlane, cellName string, destroyAccounts bool) error {
-	cl, err := fleet.NewClient(controlPlane)
+func removeCell(ctx context.Context, controlPlane, fleetTokenFile, cellName string, destroyAccounts bool) error {
+	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return err
 	}
