@@ -47,6 +47,12 @@ apps:
         targetName: witself-db
         urlKey: dsn
         refreshInterval: 1h
+      provision:
+        enabled: true
+        remoteKeySuffix: provision/token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
 
 platform:
   awsAlbIngress:

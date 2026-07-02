@@ -69,6 +69,8 @@ function fleetAuthorized(request, env) {
   return timingSafeEqual(h.slice(7).trim(), env.FLEET_TOKEN);
 }
 
+// listCells returns raw registry entries INCLUDING the per-cell provision
+// token. Never serve these to clients — use publicCell() first.
 async function listCells(env) {
   const out = [];
   let cursor;
@@ -81,6 +83,14 @@ async function listCells(env) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return out;
+}
+
+// publicCell strips credentials from a registry entry before it leaves the
+// control plane (the provision token is the control plane's secret for the
+// cell — even fleet-token holders don't need to read it back).
+function publicCell(cell) {
+  const { provision_token: _omitted, ...rest } = cell;
+  return { ...rest, has_provision_token: Boolean(cell.provision_token) };
 }
 
 // True if any acct: directory entry points at the named cell. O(accounts) —
@@ -213,7 +223,8 @@ async function handleCells(request, env, url) {
   }
 
   if (url.pathname === "/v1/cells" && request.method === "GET") {
-    return json({ schema_version: "witself.v0", cells: await listCells(env) });
+    const cells = (await listCells(env)).map(publicCell);
+    return json({ schema_version: "witself.v0", cells });
   }
 
   if (url.pathname === "/v1/cells" && request.method === "POST") {
@@ -229,6 +240,9 @@ async function handleCells(request, env, url) {
     if (typeof body.endpoint !== "string" || !body.endpoint.startsWith("https://")) {
       return err("endpoint must be an https URL", 400);
     }
+    if (body.provision_token != null && typeof body.provision_token !== "string") {
+      return err("provision_token must be a string", 400);
+    }
     const key = `cell:${body.name}`;
     const existing = await env.DIRECTORY.get(key, { type: "json" });
     const entry = {
@@ -240,11 +254,14 @@ async function handleCells(request, env, url) {
       owner: "witwave",
       weight: Number.isFinite(body.weight) ? body.weight : 1,
       accepting: body.accepting !== false,
+      // The cell's account-provisioning credential. Preserved when the payload
+      // omits it (drain re-registers from a stripped read and must not wipe it).
+      provision_token: body.provision_token ?? existing?.provision_token ?? null,
       registered_at: existing?.registered_at ?? new Date().toISOString(),
     };
     await env.DIRECTORY.put(key, JSON.stringify(entry));
     return json(
-      { schema_version: "witself.v0", cell: { name: body.name, ...entry } },
+      { schema_version: "witself.v0", cell: publicCell({ name: body.name, ...entry }) },
       existing ? 200 : 201,
     );
   }
@@ -302,6 +319,106 @@ async function handleCells(request, env, url) {
   return err("method not allowed", 405);
 }
 
+// handleSignup is POST /v1/accounts — the public, invite-gated front door of
+// Witself Cloud. It orchestrates but stores no tenant data: validate the
+// invite, place onto an accepting cell, have the CELL provision the account,
+// record the one routing pointer, and return everything the CLI needs inline
+// (never depending on KV propagation for the first request).
+async function handleSignup(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return err("invalid JSON body", 400);
+  }
+  const email = (body.email ?? "").trim().toLowerCase();
+  if (!email || !email.includes("@")) {
+    return err("valid email required", 400);
+  }
+  const code = body.invite ?? "";
+  if (!INVITE_CODE.test(code)) {
+    return err("invite code required", 403);
+  }
+  const inviteKey = `invite:${code}`;
+  const invite = await env.DIRECTORY.get(inviteKey, { type: "json" });
+  const verdict = validateInvite(invite);
+  if (!verdict.valid) {
+    return err(`invalid invite: ${verdict.reason}`, 403);
+  }
+
+  // Placement v0: accepting cells that can actually provision, weighted random.
+  const eligible = (await listCells(env)).filter(
+    (c) => c.accepting !== false && c.provision_token,
+  );
+  if (eligible.length === 0) {
+    return err("no capacity: no accepting cells", 503);
+  }
+  const total = eligible.reduce((s, c) => s + (c.weight > 0 ? c.weight : 1), 0);
+  let r = Math.random() * total;
+  let cell = eligible[eligible.length - 1];
+  for (const c of eligible) {
+    r -= c.weight > 0 ? c.weight : 1;
+    if (r <= 0) {
+      cell = c;
+      break;
+    }
+  }
+
+  // The cell provisions the account (its data, its database).
+  let cellResp;
+  try {
+    cellResp = await fetch(`${cell.endpoint}/v1/accounts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({ email, display_name: body.display_name ?? "" }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return err("cell unreachable — try again shortly", 502);
+  }
+  if (cellResp.status === 409) {
+    return err("an account with this email already exists", 409);
+  }
+  if (cellResp.status !== 201) {
+    return err("cell provisioning failed", 502);
+  }
+  let provisioned;
+  try {
+    provisioned = (await cellResp.json()).account;
+  } catch {
+    provisioned = null;
+  }
+  if (!provisioned?.account_id || !provisioned?.bootstrap_token) {
+    return err("cell returned an invalid provisioning response", 502);
+  }
+
+  // Routing pointer + best-effort invite consumption (exact counting arrives
+  // with the DO authority).
+  await env.DIRECTORY.put(
+    `acct:${provisioned.account_id}`,
+    JSON.stringify({ cell: cell.name, endpoint: cell.endpoint }),
+  );
+  const fresh = (await env.DIRECTORY.get(inviteKey, { type: "json" })) ?? invite;
+  fresh.uses = (fresh.uses ?? 0) + 1;
+  await env.DIRECTORY.put(inviteKey, JSON.stringify(fresh));
+
+  return json(
+    {
+      schema_version: "witself.v0",
+      account_id: provisioned.account_id,
+      operator_id: provisioned.operator_id,
+      email: provisioned.email,
+      status: provisioned.status,
+      cell: { name: cell.name, endpoint: cell.endpoint },
+      bootstrap_token: provisioned.bootstrap_token,
+    },
+    201,
+  );
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -338,6 +455,14 @@ export default {
     // Invite codes (fleet-token authorized).
     if (url.pathname === "/v1/invites" || INVITE_PATH.test(url.pathname)) {
       return handleInvites(request, env, url);
+    }
+
+    // Signup: public, invite-gated. The one door you can knock on with nothing.
+    if (url.pathname === "/v1/accounts") {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleSignup(request, env);
     }
 
     // Cold path: the Go container.

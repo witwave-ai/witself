@@ -378,11 +378,15 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 	if host == "" {
 		return fmt.Errorf("cell exports no apiHost (ingress/domain disabled) — cannot register with the control plane")
 	}
+	// The per-cell provisioning credential rides the registration payload; the
+	// control plane stores it and presents it to this cell on each signup.
+	provisionToken, _ := outs["provisionToken"].Value.(string)
 	if err := cl.Register(ctx, fleet.Cell{
-		Name:     cellName,
-		Endpoint: "https://" + host,
-		Cloud:    cloud,
-		Region:   region,
+		Name:           cellName,
+		Endpoint:       "https://" + host,
+		Cloud:          cloud,
+		Region:         region,
+		ProvisionToken: provisionToken,
 	}); err != nil {
 		return err
 	}

@@ -11,6 +11,10 @@
 {{- if $bootstrap.enabled -}}
 {{- $_ := set $serverValues "bootstrap" (dict "tokenFile" $bootstrapMountPath "existingSecret" (dict "name" $bootstrapTargetName "tokenKey" $bootstrap.tokenKey "ttlKey" $bootstrap.ttlKey)) -}}
 {{- end -}}
+{{- $provision := .Values.apps.witselfServer.secrets.provision -}}
+{{- if $provision.enabled -}}
+{{- $_ := set $serverValues "provision" (dict "existingSecret" (dict "name" (default "witself-provision" $provision.targetName) "tokenKey" (default "token" $provision.tokenKey))) -}}
+{{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

@@ -38,6 +38,9 @@ type Cell struct {
 	Region    string  `json:"region,omitempty"`
 	Weight    float64 `json:"weight,omitempty"`
 	Accepting *bool   `json:"accepting,omitempty"`
+	// ProvisionToken is the cell's account-provisioning credential, sent once at
+	// registration; the control plane stores it and never returns it on reads.
+	ProvisionToken string `json:"provision_token,omitempty"`
 }
 
 // Client talks to one control plane with the fleet token.

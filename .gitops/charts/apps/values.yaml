@@ -41,3 +41,12 @@ apps:
         urlKey: dsn
         refreshInterval: 1h
         storeName: aws
+      provision:
+        # The cell's account-provisioning token (control-plane trust link).
+        # Disabled by default: self-hosted cells never provision accounts.
+        enabled: false
+        remoteKeySuffix: provision/token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+        storeName: aws

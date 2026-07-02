@@ -42,6 +42,14 @@ bootstrap:
     # Key exposed as WITSELF_BOOTSTRAP_TOKEN_TTL.
     ttlKey: ttl
 
+provision:
+  existingSecret:
+    # Name of a Secret containing the cell's account-provisioning token, exposed
+    # as WITSELF_PROVISION_TOKEN (enables POST /v1/accounts — the control-plane
+    # trust link). Empty disables account provisioning: the self-hosted posture.
+    name: ""
+    tokenKey: token
+
 # Container ports. The env addresses are derived as ":<port>".
 server:
   port: 8080

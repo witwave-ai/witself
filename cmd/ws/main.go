@@ -37,6 +37,8 @@ func run(args []string) int {
 		return genBootstrapToken(args[1:])
 	case "auth":
 		return authCmd(args[1:])
+	case "account":
+		return accountCmd(args[1:])
 	case "realm":
 		return realmCmd(args[1:])
 	case "agent":
@@ -653,6 +655,75 @@ func tabSafe(s string) string {
 	return s
 }
 
+// defaultControlPlane is the Witself Cloud front door: the one address a Cloud
+// user ever needs. Self-hosted deployments never contact it.
+const defaultControlPlane = "https://self.witwave.ai"
+
+// accountCmd handles `ws account ...`.
+func accountCmd(args []string) int {
+	if len(args) == 0 || args[0] != "create" {
+		fmt.Fprintln(os.Stderr, "usage: ws account create --email EMAIL --invite CODE [--display-name NAME] [--endpoint URL] [--out FILE]")
+		return 2
+	}
+	return accountCreate(args[1:])
+}
+
+// accountCreate is Witself Cloud signup: one command from nothing to a working
+// operator token. The control plane places the account on a cell; the CLI then
+// claims it with the ordinary bootstrap exchange — the same path a self-hosted
+// bootstrap uses.
+func accountCreate(args []string) int {
+	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	email := fs.String("email", "", "account owner email")
+	invite := fs.String("invite", "", "invite code")
+	displayName := fs.String("display-name", "", "account display name (default: the email)")
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	out := fs.String("out", "", "write the operator token to this file (0600) instead of stdout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *email == "" || *invite == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account create --email EMAIL --invite CODE [--display-name NAME] [--endpoint URL] [--out FILE]")
+		return 2
+	}
+
+	ctx := context.Background()
+	acct, err := client.CreateAccount(ctx, *endpoint, *email, *invite, *displayName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "account %s created on cell %s (%s)\n", acct.AccountID, acct.Cell.Name, acct.Cell.Endpoint)
+
+	// Claim it: the same exchange a self-hosted bootstrap uses.
+	res, err := client.BootstrapLogin(ctx, acct.Cell.Endpoint, acct.BootstrapToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: account created but login failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "logged in as operator %s\n", res.OperatorID)
+
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "wrote operator token to %s\n", *out)
+	} else {
+		fmt.Println(res.OperatorToken)
+	}
+	fmt.Fprintf(os.Stderr, "next: ws realm create --endpoint %s --token-file %s NAME\n", acct.Cell.Endpoint, tokenFileHint(*out))
+	return 0
+}
+
+func tokenFileHint(out string) string {
+	if out != "" {
+		return out
+	}
+	return "FILE"
+}
+
 func usage(w io.Writer) {
 	usageLine(w, "ws — the Witself CLI")
 	usageLine(w)
@@ -660,6 +731,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws version              Print version information")
 	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
+	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
 	usageLine(w, "  ws realm create|list|delete")
 	usageLine(w, "  ws agent create|list|delete")
 	usageLine(w, "  ws operator list|create|delete")
