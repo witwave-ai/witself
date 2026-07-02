@@ -29,8 +29,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          # The release job has its own cache below. Sharing setup-go's root-module
+          # cache with CI made releases restore a partial cache and then skip saving
+          # the fully warmed infra/pulumi cache on primary-key hits.
           cache: false
 
+      # Cache both Go module downloads and compiled package objects for release
+      # builds. The nested infra/pulumi module pulls in the large Pulumi/provider
+      # graph, so a warm cache takes full releases from roughly 20m to about 4m.
       - name: Cache Go release builds
         id: release-go-cache
         uses: actions/cache@v4
@@ -61,6 +67,9 @@ jobs:
 
           df -h
 
+          # The old unconditional cleanup could spend more than a minute deleting
+          # bundled runner assets even with 70G free. Keep it as a safety valve for
+          # unusually full runners, but skip it when there is already enough space.
           if (( available_gb >= 50 )); then
             echo "Skipping deep cleanup; ${available_gb}G available on /."
             exit 0
@@ -97,6 +106,8 @@ jobs:
           release_end="$RUNNER_TEMP/release-goreleaser-end"
           release_log="$RUNNER_TEMP/goreleaser.log"
 
+          # Keep timing/log files outside the checkout. Real tag releases fail
+          # GoReleaser's dirty-state validation if wrapper files touch the worktree.
           date +%s > "$release_start"
           read -r -a goreleaser_args <<< "$RELEASE_ARGS"
 
