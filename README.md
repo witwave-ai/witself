@@ -35,8 +35,10 @@ witself-infra up \
   -bootstrap-token-file ~/.witself/bootstrap/aws-sandbox-usw2-dev/bootstrap-token \
   -cidr 10.20.0.0/16 \
   -cloud aws \
+  -control-plane https://self.witwave.ai \
   -db-version 18 \
   -domain cells.witself.witwave.ai \
+  -fleet-token-file ~/.witself-infra/fleet.token \
   -gitops-path .gitops/charts/bootstrap \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
@@ -56,6 +58,13 @@ When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
 per-cell Route 53 zone from the Cloudflare zone for the configured domain. Keep
 that token available during teardown so the delegated DNS records can be removed.
 
+With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
+after provisioning (endpoint = the cell's `apiHost` output), authorized by the
+fleet token. `-fleet-token-file` points at the token file; when omitted the
+token is read from `WITSELF_FLEET_TOKEN`, then `~/.witself-infra/fleet.token`.
+Omit `-control-plane` entirely and no registration happens — the self-hosted
+path is the same command without the flag.
+
 The teardown command keeps only the stack identity, backend, configured domain,
 and credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
 backend remains for the next run.
@@ -66,10 +75,19 @@ witself-infra destroy \
   -aws-profile witwave-sandbox \
   -backend s3 \
   -cloud aws \
+  -control-plane https://self.witwave.ai \
+  -destroy-accounts \
   -domain cells.witself.witwave.ai \
+  -fleet-token-file ~/.witself-infra/fleet.token \
   -region us-west-2 \
   -role dev
 ```
+
+With `-control-plane`, `destroy` first drains the cell (placement stops) and
+removes it from the fleet before tearing anything down. Removal refuses while
+accounts still live on the cell; `-destroy-accounts` is the explicit
+acknowledgment that those accounts die with the cell and purges their
+directory entries too. Without it, migrate the accounts off first.
 
 See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
 [.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps
