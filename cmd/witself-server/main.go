@@ -236,9 +236,6 @@ func serve() int {
 			cfg.ProvisionToken = pt
 			cfg.ProvisionAccount = func(ctx context.Context, email, displayName string) (server.ProvisionedAccount, error) {
 				p, err := st.ProvisionAccount(ctx, email, displayName, provisionBootstrapTTL)
-				if errors.Is(err, store.ErrAccountEmailExists) {
-					return server.ProvisionedAccount{}, server.ErrConflict
-				}
 				if err != nil {
 					return server.ProvisionedAccount{}, err
 				}

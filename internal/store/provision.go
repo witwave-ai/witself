@@ -2,19 +2,12 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/token"
 )
-
-// ErrAccountEmailExists is returned when an account with the email already
-// exists on this cell.
-var ErrAccountEmailExists = errors.New("an account with this email already exists")
 
 // ProvisionedAccount is the result of provisioning a new (non-default) account:
 // the account, its root operator, and a short-lived bootstrap token (returned
@@ -57,14 +50,11 @@ func (s *Store) ProvisionAccount(ctx context.Context, email, displayName string,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Emails may repeat across accounts (contact info, not identity).
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO accounts (id, is_default, display_name, email, status)
 		 VALUES ($1, false, $2, $3, 'active')`,
 		acctID, displayName, email); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
-			return ProvisionedAccount{}, ErrAccountEmailExists
-		}
 		return ProvisionedAccount{}, fmt.Errorf("create account: %w", err)
 	}
 
