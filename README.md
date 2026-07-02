@@ -32,13 +32,13 @@ witself-infra up \
   -argocd \
   -aws-profile witwave-sandbox \
   -backend s3 \
-  -bootstrap-token-file ~/.witself/bootstrap.token \
+  -bootstrap-token-file ~/.witself/tokens/bootstrap.token \
   -cidr 10.20.0.0/16 \
   -cloud aws \
   -control-plane https://self.witwave.ai \
   -db-version 18 \
   -domain cells.witself.witwave.ai \
-  -fleet-token-file ~/.witself/fleet.token \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
   -gitops-path .gitops/charts/bootstrap \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
@@ -54,8 +54,8 @@ The bootstrap token file contains the first operator token that `witself-infra`
 publishes to the cell's cloud secret store. One shared token can bootstrap every
 cell (it is single-use *per cell* — each cell consumes its own copy on first
 claim). If `-bootstrap-token-file` is omitted, the CLI prefers a per-cell
-`~/.witself/bootstrap/<cell>/bootstrap.token` and falls back to the shared
-`~/.witself/bootstrap.token`.
+`~/.witself/tokens/<cell>/bootstrap.token` and falls back to the shared
+`~/.witself/tokens/bootstrap.token`.
 
 When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
 per-cell Route 53 zone from the Cloudflare zone for the configured domain. Keep
@@ -64,7 +64,7 @@ that token available during teardown so the delegated DNS records can be removed
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the
 fleet token. `-fleet-token-file` points at the token file; when omitted the
-token is read from `WITSELF_FLEET_TOKEN`, then `~/.witself/fleet.token`.
+token is read from `WITSELF_FLEET_TOKEN`, then `~/.witself/tokens/fleet.token`.
 Omit `-control-plane` entirely and no registration happens — the self-hosted
 path is the same command without the flag.
 
@@ -81,7 +81,7 @@ witself-infra destroy \
   -control-plane https://self.witwave.ai \
   -destroy-accounts \
   -domain cells.witself.witwave.ai \
-  -fleet-token-file ~/.witself/fleet.token \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
   -region us-west-2 \
   -role dev
 ```

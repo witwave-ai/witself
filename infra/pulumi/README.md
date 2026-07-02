@@ -142,7 +142,7 @@ witself-infra destroy -control-plane https://self.witwave.ai -destroy-accounts $
 ```
 
 Authorization is the **fleet token**, read from `-fleet-token-file` if given,
-else `WITSELF_FLEET_TOKEN`, else `~/.witself/fleet.token` (minted when the control plane was deployed; its
+else `WITSELF_FLEET_TOKEN`, else `~/.witself/tokens/fleet.token` (minted when the control plane was deployed; its
 counterpart lives as the `FLEET_TOKEN` Worker secret). One token per fleet — all
 cells registering to the same control plane use the same token.
 
@@ -156,7 +156,7 @@ control plane forgets them.
 |---|---|---|
 | `-control-plane URL` | `up` | register the cell (upsert) after provisioning |
 | `-control-plane URL` | `destroy` | drain, then remove from the fleet before teardown; refuses while accounts live on the cell |
-| `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/fleet.token`) |
+| `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: purge the cell's directory entries too — explicit acknowledgment that the accounts die with the cell |
 
 ## Roadmap (one slice at a time)
@@ -170,6 +170,6 @@ control plane forgets them.
    for `kubectl top` and HPA CPU/memory signals).
 7. **[done]** Fleet registration: `-control-plane` on `up`/`destroy` registers /
    drains+removes the cell against the control plane (`-destroy-accounts` to
-   purge); fleet token from `~/.witself/fleet.token`.
+   purge); fleet token from `~/.witself/tokens/fleet.token`.
 8. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
    SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP provider.

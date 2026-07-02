@@ -2,9 +2,9 @@
 // (/v1/cells on e.g. https://self.witwave.ai). The provisioner — not the cell —
 // registers: `up -control-plane URL` registers as a post-step, and `destroy`
 // drains + removes (or purges) as a pre-step. Authorization is the fleet token,
-// read from -fleet-token-file, WITSELF_FLEET_TOKEN, or ~/.witself/fleet.token
-// (all Witself credentials consolidate under ~/.witself; WITSELF_HOME overrides
-// the root).
+// read from -fleet-token-file, WITSELF_FLEET_TOKEN, or
+// ~/.witself/tokens/fleet.token (all Witself credentials live under
+// ~/.witself/tokens; WITSELF_HOME overrides the root).
 package fleet
 
 import (
@@ -49,8 +49,8 @@ type Client struct {
 
 // NewClient resolves the fleet token and returns a client for the control
 // plane. Resolution order: the explicit tokenFile (an error if unreadable),
-// then WITSELF_FLEET_TOKEN, then ~/.witself/fleet.token (with a fallback to
-// the legacy ~/.witself-infra/fleet.token).
+// then WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token (with legacy
+// fallbacks to ~/.witself/fleet.token and ~/.witself-infra/fleet.token).
 func NewClient(controlPlane, tokenFile string) (*Client, error) {
 	tok, err := fleetToken(tokenFile)
 	if err != nil {
@@ -78,13 +78,13 @@ func fleetToken(tokenFile string) (string, error) {
 		}
 		root = filepath.Join(home, ".witself")
 	}
-	path := filepath.Join(root, "fleet.token")
-	if t, err := readTokenFile(path); err == nil {
-		return t, nil
-	}
-	// Legacy location from before credentials consolidated under ~/.witself.
+	path := filepath.Join(root, "tokens", "fleet.token")
+	candidates := []string{path, filepath.Join(root, "fleet.token")} // + legacy root
 	if home, err := os.UserHomeDir(); err == nil {
-		if t, err := readTokenFile(filepath.Join(home, ".witself-infra", "fleet.token")); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".witself-infra", "fleet.token"))
+	}
+	for _, c := range candidates {
+		if t, err := readTokenFile(c); err == nil {
 			return t, nil
 		}
 	}

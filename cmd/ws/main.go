@@ -61,7 +61,7 @@ func run(args []string) int {
 func genBootstrapToken(args []string) int {
 	fs := flag.NewFlagSet("gen-bootstrap-token", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	cell := fs.String("cell", "", "cell name for the default output path (~/.witself/bootstrap/<cell>/bootstrap.token)")
+	cell := fs.String("cell", "", "cell name for the default output path (~/.witself/tokens/<cell>/bootstrap.token)")
 	out := fs.String("out", "", "write the token to this file (0600) instead of stdout")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -109,7 +109,7 @@ func defaultBootstrapTokenPath(cell string) (string, error) {
 		}
 		root = filepath.Join(home, ".witself")
 	}
-	return filepath.Join(root, "bootstrap", cell, "bootstrap.token"), nil
+	return filepath.Join(root, "tokens", cell, "bootstrap.token"), nil
 }
 
 func authCmd(args []string) int {

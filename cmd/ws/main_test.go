@@ -18,7 +18,7 @@ func TestDefaultBootstrapTokenPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, "bootstrap", "aws-sandbox-usw2-dev", "bootstrap.token")
+	want := filepath.Join(home, "tokens", "aws-sandbox-usw2-dev", "bootstrap.token")
 	if got != want {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
