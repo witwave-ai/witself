@@ -242,3 +242,120 @@ func TestAccountForgetUnknownName(t *testing.T) {
 		t.Fatalf("forget unknown name code = %d, want 1", code)
 	}
 }
+
+// adoptServer plays both the control plane directory and the cell: the
+// directory entry for accountID points back at the server itself, and
+// /v1/account answers with servedID for the expected token.
+func adoptServer(t *testing.T, accountID, servedID, email string) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/directory/"+accountID:
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","cell":{"cell":"test-cell","endpoint":"` + srv.URL + `"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/account":
+			if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_teammate" {
+				t.Errorf("Authorization = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","account":{"id":"` + servedID + `","email":"` + email + `","status":"active","created_at":"2026-07-02T00:00:00Z"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return srv
+}
+
+func TestAccountAdopt(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	srv := adoptServer(t, "acc_1", "acc_1", "teammate@witwave.ai")
+	defer srv.Close()
+
+	tf := filepath.Join(t.TempDir(), "teammate.token")
+	if err := os.WriteFile(tf, []byte("witself_opr_teammate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"account", "adopt",
+		"--id", "acc_1",
+		"--token-file", tf,
+		"--name", "team",
+		"--endpoint", srv.URL,
+	})
+	if code != 0 {
+		t.Fatalf("adopt code = %d, want 0", code)
+	}
+	name, acct, tok, err := local.Resolve("team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "team" || acct.ID != "acc_1" || acct.Email != "teammate@witwave.ai" {
+		t.Fatalf("binding = %q %+v", name, acct)
+	}
+	if tok != "witself_opr_teammate" {
+		t.Fatalf("token = %q", tok)
+	}
+}
+
+func TestAccountAdoptRefusesForeignToken(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	// The cell authenticates the token but as a DIFFERENT account.
+	srv := adoptServer(t, "acc_1", "acc_2", "")
+	defer srv.Close()
+
+	tf := filepath.Join(t.TempDir(), "teammate.token")
+	if err := os.WriteFile(tf, []byte("witself_opr_teammate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"account", "adopt",
+		"--id", "acc_1",
+		"--token-file", tf,
+		"--name", "team",
+		"--endpoint", srv.URL,
+	})
+	if code != 1 {
+		t.Fatalf("adopt with foreign token code = %d, want 1", code)
+	}
+	if err := local.Available("team"); err != nil {
+		t.Fatalf("name bound despite refused adopt: %v", err)
+	}
+}
+
+func TestAccountAdoptRequiresFlags(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	// No --name default fallback, and the id must be a raw acc_ id.
+	if code := run([]string{"account", "adopt", "--id", "acc_1", "--token-file", "token"}); code != 2 {
+		t.Fatalf("adopt without --name code = %d, want 2", code)
+	}
+	if code := run([]string{"account", "adopt", "--id", "team", "--token-file", "token", "--name", "team"}); code != 2 {
+		t.Fatalf("adopt with non-acc_ id code = %d, want 2", code)
+	}
+	if code := run([]string{"account", "adopt", "--id", "acc_1", "--name", "team"}); code != 2 {
+		t.Fatalf("adopt without --token-file code = %d, want 2", code)
+	}
+}
+
+func TestAccountAdoptRefusesTakenName(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	if err := local.Save("team", local.Account{ID: "acc_9"}, "witself_opr_existing"); err != nil {
+		t.Fatal(err)
+	}
+	tf := filepath.Join(t.TempDir(), "teammate.token")
+	if err := os.WriteFile(tf, []byte("witself_opr_teammate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No server: the taken name must fail before any network round trip.
+	code := run([]string{
+		"account", "adopt",
+		"--id", "acc_1",
+		"--token-file", tf,
+		"--name", "team",
+		"--endpoint", "http://127.0.0.1:0",
+	})
+	if code != 1 {
+		t.Fatalf("adopt onto taken name code = %d, want 1", code)
+	}
+	if _, _, tok, err := local.Resolve("team"); err != nil || tok != "witself_opr_existing" {
+		t.Fatalf("existing binding disturbed: tok=%q err=%v", tok, err)
+	}
+}

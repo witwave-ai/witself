@@ -759,12 +759,14 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|status|resend-verification|close|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|status|resend-verification|close|forget ...")
 		return 2
 	}
 	switch args[0] {
 	case "create":
 		return accountCreate(args[1:])
+	case "adopt":
+		return accountAdopt(args[1:])
 	case "status":
 		return accountStatus(args[1:])
 	case "resend-verification":
@@ -1033,6 +1035,72 @@ func accountCreate(args []string) int {
 	return 0
 }
 
+// accountAdopt binds an EXISTING account — an id plus an operator token the
+// user already holds — under a local name. This is how a credential that
+// arrived from elsewhere (a teammate-minted operator token, a pre-local-names
+// --out file, a second machine for the same account) escapes permanent
+// --endpoint/--token-file ceremony. The token is verified against the
+// account's cell — it must authenticate AND belong to the given account —
+// before anything is written.
+func accountAdopt(args []string) int {
+	fs := flag.NewFlagSet("account adopt", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	id := fs.String("id", "", "account id (acc_...)")
+	tokenFile := fs.String("token-file", "", "file containing the account's operator token")
+	name := fs.String("name", "", "local name for the account (required)")
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// No WITSELF_ACCOUNT or "default" fallback: adopting always names its
+	// target explicitly.
+	if !strings.HasPrefix(*id, "acc_") || *tokenFile == "" || *name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account adopt --id acc_ID --token-file FILE --name NAME")
+		return 2
+	}
+	// Claim the local name before any round trip, so a taken name fails fast.
+	if err := local.Available(*name); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if tok == "" {
+		fmt.Fprintf(os.Stderr, "ws: token file %s is empty\n", *tokenFile)
+		return 1
+	}
+
+	// Verify before binding: the directory says which cell hosts the account,
+	// the cell says whether the token authenticates — and to which account.
+	ctx := context.Background()
+	_, cellEndpoint, err := client.LookupAccount(ctx, *endpoint, *id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: locate account %s: %v\n", *id, err)
+		return 1
+	}
+	rec, err := client.GetAccount(ctx, cellEndpoint, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: verify token against %s: %v\n", cellEndpoint, err)
+		return 1
+	}
+	if rec.ID != *id {
+		fmt.Fprintf(os.Stderr, "ws: token belongs to account %s, not %s\n", rec.ID, *id)
+		return 1
+	}
+
+	// Bind what the cell reported. Email may be empty (the seeded default
+	// account has none) — the binding stores it only when present.
+	if err := local.Save(*name, local.Account{ID: rec.ID, Email: rec.Email}, tok); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "adopted account %s (%s) as %q\n", rec.ID, rec.Status, *name)
+	return 0
+}
+
 func usage(w io.Writer) {
 	usageLine(w, "ws — the Witself CLI")
 	usageLine(w)
@@ -1041,6 +1109,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
+	usageLine(w, "  ws account adopt        Bind an existing account (id + token) to a local name")
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
 	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
