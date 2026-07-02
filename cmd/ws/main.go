@@ -770,7 +770,7 @@ func accountClose(args []string) int {
 	}
 
 	if !*yes {
-		fmt.Fprintf(os.Stderr, "ws: closing %s is permanent — credentials are revoked and the account is retired.\n    Re-run with --yes to confirm.\n", accountID)
+		fmt.Fprintf(os.Stderr, "ws: closing %s is permanent — its credentials will be revoked and the account will be retired.\n    Nothing has changed yet; re-run with --yes to confirm.\n", accountID)
 		return 2
 	}
 	if err := client.CloseAccount(context.Background(), *endpoint, accountID, tok, *reason); err != nil {
