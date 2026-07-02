@@ -63,6 +63,34 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 	return &out, nil
 }
 
+// AccountRecord is an account's lifecycle record as served by its cell.
+type AccountRecord struct {
+	ID           string     `json:"id"`
+	Email        string     `json:"email,omitempty"`
+	DisplayName  string     `json:"display_name,omitempty"`
+	Status       string     `json:"status"`
+	CreatedAt    time.Time  `json:"created_at"`
+	ClosedAt     *time.Time `json:"closed_at,omitempty"`
+	ClosedReason string     `json:"closed_reason,omitempty"`
+}
+
+// GetAccount reads the authenticated operator's account record from its cell
+// (GET {endpoint}/v1/account). Works at any status — checking whether a
+// pending account has been activated is its main job.
+func GetAccount(ctx context.Context, endpoint, token string) (*AccountRecord, error) {
+	var out struct {
+		Account AccountRecord `json:"account"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/account"
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Account.ID == "" {
+		return nil, fmt.Errorf("server returned no account")
+	}
+	return &out.Account, nil
+}
+
 // CloseAccount permanently closes an account via the control plane
 // (POST {controlPlane}/v1/accounts/{id}:close). The operator token is forwarded
 // to the account's cell, which authorizes (owner-only) and tombstones; the

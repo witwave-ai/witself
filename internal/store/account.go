@@ -1,0 +1,77 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// ErrAccountNotFound is returned when an account id does not exist.
+var ErrAccountNotFound = errors.New("account not found")
+
+// ErrAccountNotActive is returned when credential minting is attempted on an
+// account that is not active. The HTTP layer normally refuses such requests
+// at auth time; this store-level check exists for the race where CloseAccount
+// commits while a mint is in flight.
+var ErrAccountNotActive = errors.New("account is not active")
+
+// lockAccountForMint share-locks the account row and verifies its status
+// permits credential minting. The lock serializes minting against
+// CloseAccount: a concurrent close's tombstone UPDATE waits for this
+// transaction to commit, so its token sweep always sees what was minted here;
+// and once a close has committed, this re-read sees 'closed' and refuses.
+// Bootstrap exchange passes allowPending — a pending account's owner claims
+// their credential to watch for activation; every other mint requires active.
+func lockAccountForMint(ctx context.Context, tx pgx.Tx, accountID string, allowPending bool) error {
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT status FROM accounts WHERE id = $1 FOR SHARE`, accountID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock account: %w", err)
+	}
+	if status == "active" || (allowPending && status == "pending") {
+		return nil
+	}
+	return ErrAccountNotActive
+}
+
+// Account is the stored view of an account's lifecycle record.
+type Account struct {
+	ID           string
+	Email        string
+	DisplayName  string
+	Status       string
+	CreatedAt    time.Time
+	ClosedAt     *time.Time
+	ClosedReason string
+}
+
+// GetAccount reads one account's lifecycle record. Closed accounts are
+// returned too — the record is a tombstone, not an absence.
+func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, error) {
+	var a Account
+	var email, closedReason *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, email, display_name, status, created_at, closed_at, closed_reason
+		 FROM accounts WHERE id = $1`, accountID).
+		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt, &a.ClosedAt, &closedReason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Account{}, ErrAccountNotFound
+	}
+	if err != nil {
+		return Account{}, fmt.Errorf("get account: %w", err)
+	}
+	if email != nil {
+		a.Email = *email
+	}
+	if closedReason != nil {
+		a.ClosedReason = *closedReason
+	}
+	return a, nil
+}

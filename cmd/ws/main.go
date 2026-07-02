@@ -713,18 +713,59 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|close ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|status|close ...")
 		return 2
 	}
 	switch args[0] {
 	case "create":
 		return accountCreate(args[1:])
+	case "status":
+		return accountStatus(args[1:])
 	case "close":
 		return accountClose(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// accountStatus reads the account's lifecycle record from its cell. It works
+// at any status — its main job is watching a pending account for activation.
+func accountStatus(args []string) int {
+	fs := flag.NewFlagSet("account status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	rec, err := client.GetAccount(ctx, ep, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%s\t%s\t%s\n", rec.ID, rec.Status, tabSafe(rec.Email))
+	if rec.Status == "pending" {
+		fmt.Fprintln(os.Stderr, "pending: activation required before the account can be used")
+	}
+	if rec.ClosedAt != nil {
+		fmt.Fprintf(os.Stderr, "closed %s%s\n", rec.ClosedAt.UTC().Format(time.RFC3339), closedReasonSuffix(rec.ClosedReason))
+	}
+	return 0
+}
+
+func closedReasonSuffix(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return ": " + reason
 }
 
 // accountClose permanently closes an account. The account's data remains as a
@@ -851,10 +892,14 @@ func accountCreate(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "wrote operator token to %s\n", *out)
 	}
-	if localName == "default" {
-		fmt.Fprintln(os.Stderr, "next: ws realm create NAME")
+	accountRef := ""
+	if localName != "default" {
+		accountRef = " --account " + localName
+	}
+	if acct.Status == "active" {
+		fmt.Fprintf(os.Stderr, "next: ws realm create%s NAME\n", accountRef)
 	} else {
-		fmt.Fprintf(os.Stderr, "next: ws realm create --account %s NAME\n", localName)
+		fmt.Fprintf(os.Stderr, "account is %s — activation required before use\nnext: ws account status%s\n", acct.Status, accountRef)
 	}
 	return 0
 }
@@ -867,6 +912,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
+	usageLine(w, "  ws account status       Show an account's lifecycle status")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws realm create|list|delete")
 	usageLine(w, "  ws agent create|list|delete")

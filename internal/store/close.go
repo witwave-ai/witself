@@ -49,17 +49,18 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 	if !isOwner {
 		return ErrNotAccountOwner
 	}
-	if status == "closed" {
-		return nil // idempotent
-	}
-
-	if _, err := tx.Exec(ctx,
-		`UPDATE accounts SET status = 'closed', closed_at = now(), closed_reason = $2
-		 WHERE id = $1`, accountID, reason); err != nil {
-		return fmt.Errorf("close account: %w", err)
+	if status != "closed" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE accounts SET status = 'closed', closed_at = now(), closed_reason = $2
+			 WHERE id = $1`, accountID, reason); err != nil {
+			return fmt.Errorf("close account: %w", err)
+		}
 	}
 	// Every live credential dies with the account — operator, agent, and any
-	// unclaimed bootstrap tokens alike.
+	// unclaimed bootstrap tokens alike. This sweep runs even when the account
+	// is already closed (only the tombstone write above is skipped): a token
+	// mint racing the original close can commit after that close's sweep, and
+	// re-closing must be able to kill the straggler.
 	if _, err := tx.Exec(ctx,
 		`UPDATE tokens SET consumed_at = now()
 		 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {

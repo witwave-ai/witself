@@ -47,11 +47,11 @@ func TestReadyzReflectsReadiness(t *testing.T) {
 }
 
 func TestWhoamiAuth(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth}))
 	defer srv.Close()
@@ -99,11 +99,11 @@ func TestWhoamiAuth(t *testing.T) {
 }
 
 func TestAuthWhoamiAlias(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth}))
 	defer srv.Close()
@@ -121,11 +121,11 @@ func TestAuthWhoamiAlias(t *testing.T) {
 }
 
 func TestRealmsCreateAndList(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	var created []Realm
 	create := func(_ context.Context, _, name string) (Realm, error) {
@@ -180,11 +180,11 @@ func TestRealmsCreateAndList(t *testing.T) {
 }
 
 func TestAgentsCreateAndList(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	var created []Agent
 	create := func(_ context.Context, _, realmID, name string) (Agent, error) {
@@ -246,11 +246,11 @@ func TestAgentsCreateAndList(t *testing.T) {
 }
 
 func TestAgentTokenCreate(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	create := func(_ context.Context, _, agentID string) (string, string, error) {
 		if agentID == "missing" {
@@ -301,11 +301,11 @@ func TestAgentTokenCreate(t *testing.T) {
 }
 
 func TestOperatorTokenCreate(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	create := func(_ context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
 		if accountID != "acc_y" || operatorID != "opr_x" {
@@ -368,11 +368,11 @@ func TestOperatorTokenCreate(t *testing.T) {
 
 func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
 	valid := map[string]bool{"parent": true}
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if valid[tok] {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	create := func(_ context.Context, accountID, operatorID, _ string, _ *time.Duration) (string, string, *time.Time, error) {
 		if accountID != "acc_y" || operatorID != "opr_x" {
@@ -408,14 +408,14 @@ func TestOperatorTokenCreateMintsTokenThatCanAuthenticate(t *testing.T) {
 }
 
 func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		switch tok {
 		case "good":
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		case "agent", "consumed", "expired", "invalid":
-			return "", "", false, nil
+			return "", "", "", false, nil
 		default:
-			return "", "", false, nil
+			return "", "", "", false, nil
 		}
 	}
 	create := func(context.Context, string, string, string, *time.Duration) (string, string, *time.Time, error) {
@@ -440,11 +440,11 @@ func TestOperatorTokenCreateRejectsNonOperatorCallers(t *testing.T) {
 }
 
 func TestOperatorsListCreateAndDelete(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_root", "acc_y", true, nil
+			return "opr_root", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	now := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC)
 	operators := []Operator{{
@@ -561,11 +561,11 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 }
 
 func TestOperatorDeleteGuards(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_root", "acc_y", true, nil
+			return "opr_root", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	cases := []struct {
 		name string
@@ -604,11 +604,11 @@ func TestOperatorDeleteGuards(t *testing.T) {
 }
 
 func TestDeleteAndRevokeRoutes(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {
-			return "opr_x", "acc_y", true, nil
+			return "opr_x", "acc_y", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	var deletedRealm, deletedAgent, revokedToken string
 	deleteRealm := func(_ context.Context, accountID, realmID string) error {
@@ -743,16 +743,16 @@ func TestProvisionAccount(t *testing.T) {
 }
 
 func TestCloseAccount(t *testing.T) {
-	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		switch tok {
 		case "owner":
-			return "opr_owner", "acc_y", true, nil
+			return "opr_owner", "acc_y", "active", true, nil
 		case "member":
-			return "opr_member", "acc_y", true, nil
+			return "opr_member", "acc_y", "active", true, nil
 		case "root":
-			return "opr_root", "acc_default", true, nil
+			return "opr_root", "acc_default", "active", true, nil
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	closeFn := func(_ context.Context, accountID, operatorID, _ string) error {
 		if accountID == "acc_default" {
@@ -904,5 +904,83 @@ func closeBody(t *testing.T, resp *http.Response) {
 	t.Helper()
 	if err := resp.Body.Close(); err != nil {
 		t.Fatalf("close response body: %v", err)
+	}
+}
+
+// TestPendingAccountIsGated proves the pending lifecycle contract: everything
+// is refused (403) — including whoami — except checking the account's own
+// status and closing it. An unactivated account can be watched or abandoned,
+// nothing else.
+func TestPendingAccountIsGated(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		if tok == "pending-token" {
+			return "opr_p", "acc_p", "pending", true, nil
+		}
+		return "", "", "", false, nil
+	}
+	created := false
+	create := func(_ context.Context, _, name string) (Realm, error) {
+		created = true
+		return Realm{ID: "realm_x", Name: name}, nil
+	}
+	closed := false
+	closeFn := func(_ context.Context, _, _, _ string) error {
+		closed = true
+		return nil
+	}
+	get := func(_ context.Context, accountID string) (AccountRecord, error) {
+		return AccountRecord{ID: accountID, Status: "pending", Email: "p@example.com"}, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateRealm: create, CloseAccount: closeFn, GetAccount: get}))
+	defer srv.Close()
+
+	do := func(method, path, body string) *http.Response {
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, srv.URL+path, rdr)
+		req.Header.Set("Authorization", "Bearer pending-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := do(http.MethodPost, "/v1/realms", `{"name":"prod"}`)
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("realm create while pending = %d, want 403", resp.StatusCode)
+	}
+	if created {
+		t.Error("realm create ran despite pending account")
+	}
+
+	resp = do(http.MethodGet, "/v1/whoami", "")
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("whoami while pending = %d, want 403 (only status and close are allowed)", resp.StatusCode)
+	}
+
+	resp = do(http.MethodGet, "/v1/account", "")
+	var out struct {
+		Account AccountRecord `json:"account"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK || out.Account.Status != "pending" {
+		t.Errorf("account status while pending = %d %+v, want 200/pending", resp.StatusCode, out.Account)
+	}
+
+	resp = do(http.MethodPost, "/v1/account:close", `{"reason":"abandoning"}`)
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("close while pending = %d, want 200", resp.StatusCode)
+	}
+	if !closed {
+		t.Error("close did not run for pending account")
 	}
 }

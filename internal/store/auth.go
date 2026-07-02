@@ -76,6 +76,14 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	if err != nil {
 		return "", "", fmt.Errorf("consume bootstrap token: %w", err)
 	}
+	// Pending is allowed — claiming the credential is how a new owner watches
+	// for activation. A closed account's bootstrap is simply dead.
+	if err := lockAccountForMint(ctx, tx, accountID, true); err != nil {
+		if errors.Is(err, ErrAccountNotActive) || errors.Is(err, ErrAccountNotFound) {
+			return "", "", ErrInvalidBootstrap
+		}
+		return "", "", err
+	}
 
 	opTok, err := token.New(token.KindOperator)
 	if err != nil {
@@ -98,32 +106,44 @@ func (s *Store) ExchangeBootstrap(ctx context.Context, plaintext string) (string
 	return opTok, operatorID, nil
 }
 
-// AuthenticateOperator resolves an operator bearer token to its principal.
-// ok is false when the token is not a live operator token. (Revocation later
-// sets consumed_at, which excludes the token here.)
-func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (operatorID, accountID string, ok bool, err error) {
+// AuthenticateOperator resolves an operator bearer token to its principal,
+// including the account's lifecycle status — status is part of the principal,
+// so callers can gate actions on it without a second lookup. ok is false when
+// the token is not a live operator token. (Revocation later sets consumed_at,
+// which excludes the token here.)
+func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (operatorID, accountID, accountStatus string, ok bool, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT t.operator_id, t.account_id FROM tokens t
+		`SELECT t.operator_id, t.account_id, a.status FROM tokens t
 		 JOIN operators o ON o.id = t.operator_id AND o.account_id = t.account_id
+		 JOIN accounts a ON a.id = t.account_id
 		 WHERE t.token_hash = $1 AND t.kind = 'operator' AND t.consumed_at IS NULL
 		   AND (t.expires_at IS NULL OR t.expires_at > now())
 		   AND o.deleted_at IS NULL`,
-		hashToken(plaintext)).Scan(&operatorID, &accountID)
+		hashToken(plaintext)).Scan(&operatorID, &accountID, &accountStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("authenticate: %w", err)
+		return "", "", "", false, fmt.Errorf("authenticate: %w", err)
 	}
-	return operatorID, accountID, true, nil
+	return operatorID, accountID, accountStatus, true, nil
 }
 
 // CreateOperatorToken mints a durable operator token bound to an operator that
 // belongs to the account, and returns the plaintext (shown once). Expiration is
 // optional; nil ttl means no explicit expiry.
 func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return "", "", nil, err
+	}
 	var exists bool
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT true FROM operators
 		 WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL`,
 		operatorID, accountID).Scan(&exists)
@@ -150,11 +170,14 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, 
 		expiresAt = &t
 		expiresValue = t
 	}
-	if _, err := s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO tokens (id, account_id, operator_id, kind, token_hash, expires_at, display_name)
 		 VALUES ($1, $2, $3, 'operator', $4, $5, $6)`,
 		tokID, accountID, operatorID, hashToken(opTok), expiresValue, displayName); err != nil {
 		return "", "", nil, fmt.Errorf("store operator token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", nil, err
 	}
 	return opTok, tokID, expiresAt, nil
 }
@@ -163,8 +186,17 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, 
 // the account, and returns the plaintext (shown once). ErrAgentNotFound if the
 // agent is not in the account.
 func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string) (string, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return "", "", err
+	}
 	var realmID string
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT a.realm_id FROM agents a
 		 JOIN realms r ON r.id = a.realm_id
 		 WHERE a.id = $1 AND r.account_id = $2
@@ -184,11 +216,14 @@ func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string)
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO tokens (id, account_id, agent_id, kind, token_hash)
 		 VALUES ($1, $2, $3, 'agent', $4)`,
 		tokID, accountID, agentID, hashToken(agtTok)); err != nil {
 		return "", "", fmt.Errorf("store agent token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", err
 	}
 	return agtTok, tokID, nil
 }

@@ -74,12 +74,28 @@ type Config struct {
 	// owner-only tombstone of the authenticated operator's account.
 	CloseAccount func(ctx context.Context, accountID, operatorID, reason string) error
 
+	// GetAccount, when set, enables GET /v1/account — the authenticated
+	// operator's account lifecycle record. Reachable at any status: a pending
+	// account checks here whether its activation gates have passed.
+	GetAccount func(ctx context.Context, accountID string) (AccountRecord, error)
+
 	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
 	// the control-plane -> cell trust link that creates a new (non-default)
 	// account with its root operator and a one-shot bootstrap token. Self-hosted
 	// cells never set the token, so the route is not even mounted there.
 	ProvisionToken   string
 	ProvisionAccount func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)
+}
+
+// AccountRecord is the API view of an account's lifecycle record.
+type AccountRecord struct {
+	ID           string     `json:"id"`
+	Email        string     `json:"email,omitempty"`
+	DisplayName  string     `json:"display_name,omitempty"`
+	Status       string     `json:"status"`
+	CreatedAt    time.Time  `json:"created_at"`
+	ClosedAt     *time.Time `json:"closed_at,omitempty"`
+	ClosedReason string     `json:"closed_reason,omitempty"`
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -98,9 +114,12 @@ type ProvisionedAccount struct {
 // fault (-> 500).
 type LoginFunc func(ctx context.Context, bootstrapToken string) (operatorToken, operatorID string, ok bool, err error)
 
-// AuthFunc resolves a bearer token to its operator principal. ok is false when
-// the token is missing/invalid (-> 401); a non-nil error is a server fault.
-type AuthFunc func(ctx context.Context, token string) (operatorID, accountID string, ok bool, err error)
+// AuthFunc resolves a bearer token to its operator principal, including the
+// account's lifecycle status ("pending"/"active"/"closed") — status is part of
+// the principal so handlers can gate on it without a second lookup. ok is
+// false when the token is missing/invalid (-> 401); a non-nil error is a
+// server fault.
+type AuthFunc func(ctx context.Context, token string) (operatorID, accountID, accountStatus string, ok bool, err error)
 
 // Realm is the API view of a realm.
 type Realm struct {
@@ -117,6 +136,11 @@ var ErrNotFound = errors.New("not found")
 
 // ErrNotAccountOwner signals an owner-only action attempted by a non-owner (-> 403).
 var ErrNotAccountOwner = errors.New("only the account owner may do this")
+
+// ErrAccountNotActive signals a store-level refusal to mint credentials for a
+// non-active account (-> 403). requireOperator normally refuses first; this
+// surfaces the race where a close commits while the request is in flight.
+var ErrAccountNotActive = errors.New("account is not active")
 
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
@@ -288,6 +312,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.CloseAccount != nil {
 			mux.HandleFunc("POST /v1/account:close", closeAccountHandler(cfg.Authenticate, cfg.CloseAccount))
 		}
+		if cfg.GetAccount != nil {
+			mux.HandleFunc("GET /v1/account", getAccountHandler(cfg.Authenticate, cfg.GetAccount))
+		}
 	}
 	return mux
 }
@@ -395,20 +422,38 @@ func capabilitiesHandler(accountID string) http.HandlerFunc {
 }
 
 type principal struct {
-	operatorID string
-	accountID  string
+	operatorID    string
+	accountID     string
+	accountStatus string
 }
 
-// requireOperator authenticates the bearer token and passes the principal to h,
-// or writes 401 (missing/invalid) / 500 (server fault).
+// requireOperator authenticates the bearer token and passes the principal to
+// h, or writes 401 (missing/invalid) / 500 (server fault). It also requires
+// the account to be ACTIVE (-> 403 otherwise): a pending account can do
+// nothing until its activation gates pass. The only exceptions — checking its
+// own status and closing itself — use requireOperatorAnyStatus instead.
 func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if p.accountStatus != "active" {
+			writeJSONError(w, http.StatusForbidden,
+				fmt.Sprintf("account is %s — this action requires an active account", p.accountStatus))
+			return
+		}
+		h(w, r, p)
+	})
+}
+
+// requireOperatorAnyStatus authenticates without gating on account status. Use
+// only for the two endpoints a not-yet-active account must still reach:
+// checking its own status and closing itself.
+func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		operatorID, accountID, ok, err := auth(r.Context(), tok)
+		operatorID, accountID, accountStatus, ok, err := auth(r.Context(), tok)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 			return
@@ -417,7 +462,7 @@ func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, p
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-		h(w, r, principal{operatorID: operatorID, accountID: accountID})
+		h(w, r, principal{operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})
 	}
 }
 
@@ -477,9 +522,10 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 
 // closeAccountHandler permanently closes the authenticated operator's account:
 // tombstone + revoke every live credential. Owner-only; the seeded default
-// account is refused. Idempotent.
+// account is refused. Idempotent. Not status-gated: a pending account can
+// always be abandoned by its owner.
 func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, accountID, operatorID, reason string) error) http.HandlerFunc {
-	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
 			Reason string `json:"reason"`
 		}
@@ -502,6 +548,25 @@ func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, a
 			"account_id":     p.accountID,
 			"status":         "closed",
 		})
+	})
+}
+
+// getAccountHandler returns the authenticated operator's account lifecycle
+// record. Deliberately not status-gated: a pending account's owner checks here
+// whether activation has happened yet.
+func getAccountHandler(auth AuthFunc, get func(ctx context.Context, accountID string) (AccountRecord, error)) http.HandlerFunc {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		rec, err := get(r.Context(), p.accountID)
+		if errors.Is(err, ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not read account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "account": rec})
 	})
 }
 
@@ -642,6 +707,10 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
+		if errors.Is(err, ErrAccountNotActive) {
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "could not create token")
 			return
@@ -682,6 +751,10 @@ func createOperatorTokenHandler(auth AuthFunc, create func(ctx context.Context, 
 		tok, tokenID, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, ttl)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "operator not found")
+			return
+		}
+		if errors.Is(err, ErrAccountNotActive) {
+			writeJSONError(w, http.StatusForbidden, "account is not active")
 			return
 		}
 		if err != nil {
@@ -756,6 +829,10 @@ func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accou
 		}
 
 		operator, token, expiresAt, err := create(r.Context(), p.accountID, displayName, tokenDisplayName, ttl)
+		if errors.Is(err, ErrAccountNotActive) {
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "could not create operator")
 			return

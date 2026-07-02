@@ -50,10 +50,12 @@ func (s *Store) ProvisionAccount(ctx context.Context, email, displayName string,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Emails may repeat across accounts (contact info, not identity).
+	// Emails may repeat across accounts (contact info, not identity). New
+	// accounts start pending: nothing works until activation gates pass
+	// (email verification universally; KYC/billing for paid plans later).
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO accounts (id, is_default, display_name, email, status)
-		 VALUES ($1, false, $2, $3, 'active')`,
+		 VALUES ($1, false, $2, $3, 'pending')`,
 		acctID, displayName, email); err != nil {
 		return ProvisionedAccount{}, fmt.Errorf("create account: %w", err)
 	}
@@ -79,7 +81,7 @@ func (s *Store) ProvisionAccount(ctx context.Context, email, displayName string,
 		AccountID:      acctID,
 		OperatorID:     oprID,
 		Email:          email,
-		Status:         "active",
+		Status:         "pending",
 		BootstrapToken: bootTok,
 	}, nil
 }

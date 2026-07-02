@@ -116,6 +116,10 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, displayName, toke
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return Operator{}, "", nil, err
+	}
+
 	operatorID, err := id.New("opr")
 	if err != nil {
 		return Operator{}, "", nil, err

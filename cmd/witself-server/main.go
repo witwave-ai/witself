@@ -165,15 +165,21 @@ func serve() int {
 		}
 		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, string, error) {
 			tok, tokenID, err := st.CreateAgentToken(ctx, accountID, agentID)
-			if errors.Is(err, store.ErrAgentNotFound) {
+			switch {
+			case errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotFound):
 				return "", "", server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive):
+				return "", "", server.ErrAccountNotActive
 			}
 			return tok, tokenID, err
 		}
 		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
 			tok, tokenID, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, displayName, ttl)
-			if errors.Is(err, store.ErrOperatorNotFound) {
+			switch {
+			case errors.Is(err, store.ErrOperatorNotFound), errors.Is(err, store.ErrAccountNotFound):
 				return "", "", nil, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive):
+				return "", "", nil, server.ErrAccountNotActive
 			}
 			return tok, tokenID, expiresAt, err
 		}
@@ -190,6 +196,9 @@ func serve() int {
 		}
 		cfg.CreateOperator = func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (server.Operator, string, *time.Time, error) {
 			op, tok, expiresAt, err := st.CreateOperator(ctx, accountID, displayName, tokenDisplayName, ttl)
+			if errors.Is(err, store.ErrAccountNotActive) {
+				return server.Operator{}, "", nil, server.ErrAccountNotActive
+			}
 			if err != nil {
 				return server.Operator{}, "", nil, err
 			}
@@ -227,6 +236,24 @@ func serve() int {
 			default:
 				return err
 			}
+		}
+		cfg.GetAccount = func(ctx context.Context, accountID string) (server.AccountRecord, error) {
+			a, err := st.GetAccount(ctx, accountID)
+			if errors.Is(err, store.ErrAccountNotFound) {
+				return server.AccountRecord{}, server.ErrNotFound
+			}
+			if err != nil {
+				return server.AccountRecord{}, err
+			}
+			return server.AccountRecord{
+				ID:           a.ID,
+				Email:        a.Email,
+				DisplayName:  a.DisplayName,
+				Status:       a.Status,
+				CreatedAt:    a.CreatedAt,
+				ClosedAt:     a.ClosedAt,
+				ClosedReason: a.ClosedReason,
+			}, nil
 		}
 		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
 			// Account provisioning: the control-plane -> cell trust link. The
