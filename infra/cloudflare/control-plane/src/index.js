@@ -726,19 +726,20 @@ async function handleResend(request, env, accountId) {
   // email address must not become a spam cannon: sends are capped per
   // account and spaced by a cooldown, tracked on the pending: entry.
   // Best-effort counting (KV has no atomic increment — same accepted
-  // pattern as invite uses; the DO authority tightens both later), and it
-  // FAILS CLOSED: no candidate entry, no resend.
+  // pattern as invite uses; the DO authority tightens both later). A
+  // MISSING candidate is decided after the cell answers — usually it means
+  // the account already activated, and "already active" beats a misleading
+  // "try again shortly"; either way, no candidate ever means no send.
   const pendingKey = `pending:${accountId}`;
   const pending = await env.DIRECTORY.get(pendingKey, { type: "json" });
-  if (!pending) {
-    return err("verification state unavailable — try again shortly", 503);
-  }
-  const sent = pending.emails_sent ?? 1; // signup's email is the first
-  if (sent >= 5) {
-    return err("too many verification emails for this account — it closes unverified at the end of its window", 429);
-  }
-  if (pending.last_email_at && Date.now() - Date.parse(pending.last_email_at) < 2 * 60 * 1000) {
-    return err("a verification email was just sent — wait a couple of minutes", 429);
+  if (pending) {
+    const sent = pending.emails_sent ?? 1; // signup's email is the first
+    if (sent >= 5) {
+      return err("too many verification emails for this account — it closes unverified at the end of its window", 429);
+    }
+    if (pending.last_email_at && Date.now() - Date.parse(pending.last_email_at) < 2 * 60 * 1000) {
+      return err("a verification email was just sent — wait a couple of minutes", 429);
+    }
   }
   let cellResp;
   try {
@@ -768,6 +769,12 @@ async function handleResend(request, env, accountId) {
   }
   if (account.status !== "pending") {
     return err(`account is already ${account.status}`, 409);
+  }
+  if (!pending) {
+    // The cell says pending but the candidate is missing (KV lag, or the
+    // reaper is mid-flight). Without it there is no rate-limit state, so
+    // fail closed rather than send unmetered email.
+    return err("verification state unavailable — try again shortly", 503);
   }
   let emailSent = false;
   try {
