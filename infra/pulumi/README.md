@@ -119,6 +119,45 @@ witself-infra up -argocd \
 
 Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
 
+## Fleet (control plane)
+
+Pass `-control-plane` to make cell lifecycle changes known to the Witself Cloud
+control plane (`https://self.witwave.ai`). Omit it and no registration happens —
+that is the self-hosted path, same command.
+
+```sh
+# up: provision, then REGISTER the cell with the fleet (post-step).
+# The registered endpoint is the cell's apiHost output (api.<cell>.<domain>).
+witself-infra up -control-plane https://self.witwave.ai $F
+
+# destroy: DRAIN the cell (placement stops), REMOVE it from the fleet, then tear
+# down. Removal REFUSES while accounts still live on the cell:
+witself-infra destroy -control-plane https://self.witwave.ai $F
+#   -> error: accounts still live on cell <name> — migrate them first, or
+#      re-run with -destroy-accounts to acknowledge their destruction
+
+# teardown where the cell's data genuinely dies (dev/sandbox): also purge the
+# cell's account entries from the control-plane directory:
+witself-infra destroy -control-plane https://self.witwave.ai -destroy-accounts $F
+```
+
+Authorization is the **fleet token**, read from `WITSELF_FLEET_TOKEN` or
+`~/.witself-infra/fleet.token` (minted when the control plane was deployed; its
+counterpart lives as the `FLEET_TOKEN` Worker secret). One token per fleet — all
+cells registering to the same control plane use the same token.
+
+Registration is deliberately **outside the Pulumi resource graph**: fleet
+membership is bookkeeping on the control plane, not a cloud resource. `up`
+registers after a successful provision; `destroy` drains/removes before teardown.
+The control plane never touches infrastructure — Pulumi destroys things, the
+control plane forgets them.
+
+| Flag | Applies to | Effect |
+|---|---|---|
+| `-control-plane URL` | `up` | register the cell (upsert) after provisioning |
+| `-control-plane URL` | `destroy` | drain, then remove from the fleet before teardown; refuses while accounts live on the cell |
+| `-destroy-accounts` | `destroy` | with `-control-plane`: purge the cell's directory entries too — explicit acknowledgment that the accounts die with the cell |
+
 ## Roadmap (one slice at a time)
 
 1. **[done]** module + CLI + Automation API loop.
@@ -128,5 +167,8 @@ Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
 5. **[done]** Wire Argo at the bootstrap app-of-apps chart + per-cell values.
 6. **[done]** Metrics Server in the GitOps platform tier (resource metrics API
    for `kubectl top` and HPA CPU/memory signals).
-7. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
+7. **[done]** Fleet registration: `-control-plane` on `up`/`destroy` registers /
+   drains+removes the cell against the control plane (`-destroy-accounts` to
+   purge); fleet token from `~/.witself-infra/fleet.token`.
+8. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
    SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP provider.
