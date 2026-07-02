@@ -8,7 +8,7 @@ a time.
 Requires an invite code.
 
 ```sh
-ws account create --email you@example.com --invite friends-2026
+ws account create --email scott@witwave.ai --invite friends-2026
 ```
 
 Prints the account, the cell it landed on, and your operator token (add
