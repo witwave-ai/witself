@@ -94,6 +94,41 @@ func GetAccount(ctx context.Context, endpoint, token string) (*AccountRecord, er
 	return &out.Account, nil
 }
 
+// ResendVerification asks the control plane to email a fresh verification
+// link for a still-pending account (POST
+// {controlPlane}/v1/accounts/{id}:resend-verification). The operator token
+// proves ownership — the control plane forwards it to the account's cell and
+// only a "still pending" answer sends. Refusals ("account is already
+// active", dead token) surface verbatim. Returns the address written to.
+func ResendVerification(ctx context.Context, controlPlane, accountID, operatorToken string) (string, error) {
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":resend-verification"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("connect to %s: %w", controlPlane, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", responseError(resp, "resend failed: "+resp.Status)
+	}
+	var out struct {
+		Email string `json:"email"`
+		Sent  bool   `json:"verification_email_sent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	if !out.Sent {
+		return "", fmt.Errorf("control plane did not send the email")
+	}
+	return out.Email, nil
+}
+
 // CloseAccount permanently closes an account via the control plane
 // (POST {controlPlane}/v1/accounts/{id}:close). The operator token is forwarded
 // to the account's cell, which authorizes (owner-only) and tombstones; the

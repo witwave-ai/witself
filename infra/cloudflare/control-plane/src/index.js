@@ -68,6 +68,7 @@ const VERIFY_PATH = /^\/verify\/([0-9a-f]{64})$/;
 // route accepts, enforced at every ingestion point.
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_CLOSE_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):close$/;
+const ACCOUNT_RESEND_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):resend-verification$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -574,7 +575,7 @@ async function sha256hex(s) {
 // hash (verify:<hash> -> {account_id, cell}, self-expiring), and emails the
 // link. Returns false when no EMAIL binding is configured — signup proceeds;
 // the account simply stays pending until some other activation path exists.
-async function sendVerificationEmail(env, origin, email, accountId, cellName) {
+async function sendVerificationEmail(env, origin, email, accountId, cellName, opts = {}) {
   if (!env.EMAIL) {
     return false;
   }
@@ -591,28 +592,43 @@ async function sendVerificationEmail(env, origin, email, accountId, cellName) {
     { expirationTtl: 7 * 24 * 3600 }, // links self-expire; the reaper usually wins long before
   );
   const link = `${origin}/verify/${token}`;
-  const deadline = await verificationDeadline(env);
+  const deadline = await verificationDeadline(env, opts.windowStartedAt);
+  const greeting = opts.resend
+    ? "Here is a fresh verification link for your Witself account."
+    : "Welcome to Witself.";
+  const greetingHTML = opts.resend
+    ? "Here is a fresh verification link for your <strong>Witself</strong> account."
+    : "Welcome to <strong>Witself</strong>.";
   await env.EMAIL.send({
     to: email,
     from: "no-reply@witwave.ai",
     subject: "Verify your Witself account",
-    text: `Welcome to Witself.\n\nVerify your account (${accountId}) by opening this link:\n\n${link}\n\n${deadline} If you didn't sign up, ignore this email.\n`,
-    html: `<p>Welcome to <strong>Witself</strong>.</p><p>Verify your account (<code>${accountId}</code>) by clicking the link below:</p><p><a href="${link}">Verify my account</a></p><p>${deadline} If you didn't sign up, ignore this email.</p>`,
+    text: `${greeting}\n\nVerify your account (${accountId}) by opening this link:\n\n${link}\n\n${deadline} If you didn't sign up, ignore this email.\n`,
+    html: `<p>${greetingHTML}</p><p>Verify your account (<code>${accountId}</code>) by clicking the link below:</p><p><a href="${link}">Verify my account</a></p><p>${deadline} If you didn't sign up, ignore this email.</p>`,
   });
   return true;
 }
 
 // verificationDeadline phrases the REAL reaper window for the email, so the
-// stated deadline and the enforcement can't drift apart.
-async function verificationDeadline(env) {
+// stated deadline and the enforcement can't drift apart. For a resend,
+// windowStartedAt lets it state the REMAINING time — a fresh link never
+// resets the reap clock and must not pretend otherwise.
+async function verificationDeadline(env, windowStartedAt) {
   const cfg = (await env.DIRECTORY.get("config:reaper", { type: "json" })) ?? {};
   if (cfg.enabled !== true || !(cfg.ttl_minutes > 0)) {
     return "Unverified accounts may be closed automatically.";
   }
-  const m = cfg.ttl_minutes;
-  const window =
+  const phrase = (m) =>
     m < 120 ? `${m} minutes` : m < 2880 ? `${Math.round(m / 60)} hours` : `${Math.round(m / 1440)} days`;
-  return `Unverified accounts are closed automatically after ${window}.`;
+  const started = windowStartedAt ? Date.parse(windowStartedAt) : NaN;
+  if (!Number.isNaN(started)) {
+    const remaining = Math.floor(cfg.ttl_minutes - (Date.now() - started) / 60000);
+    if (remaining <= 1) {
+      return "Your verification window is almost over — this account closes very soon if unverified.";
+    }
+    return `Your original verification window still applies: about ${phrase(remaining)} remain before the account closes unverified.`;
+  }
+  return `Unverified accounts are closed automatically after ${phrase(cfg.ttl_minutes)}.`;
 }
 
 // handleVerify is GET /verify/<token> — the human half of activation. The
@@ -651,6 +667,10 @@ async function handleVerify(env, token) {
     // SECOND request. Replay is harmless — the cell answers already-active
     // idempotently — and the key (a hash) self-expires on its KV TTL.
     await env.DIRECTORY.delete(`pending:${entry.account_id}`); // the reaper stands down
+    if (body.activated === false) {
+      // Any later link (a resent email, a second click) lands here.
+      return htmlPage(200, "Already verified", `Your account <code>${entry.account_id}</code> was already verified — nothing more to do. Back in your terminal, <code>ws account status</code> will show it active.`);
+    }
     return htmlPage(200, "Account verified", `Your account <code>${entry.account_id}</code> is active. Back in your terminal, <code>ws account status</code> will confirm it — you're ready to create realms and agents.`);
   }
   // Dead-link arms match the cell handler's EXACT error strings: an old cell
@@ -674,6 +694,102 @@ function htmlPage(status, title, message) {
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} — Witself</title><style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:15vh auto 0;padding:0 1.5rem;color:#1a1a1a}h1{font-size:1.4rem}code{background:#f2f2f2;padding:.1em .3em;border-radius:4px}</style></head><body><h1>${title}</h1><p>${message}</p></body></html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
+}
+
+// handleResend is POST /v1/accounts/{id}:resend-verification — a fresh
+// verification email for a still-pending account. The control plane holds no
+// authority here either: it forwards the caller's operator token to the
+// account's cell (GET /v1/account, reachable at any status), and only a
+// "live operator, this account, still pending" answer mints and sends. The
+// email address comes from the cell's record, used in flight, never stored.
+async function handleResend(request, env, accountId) {
+  const auth = request.headers.get("Authorization");
+  if (!auth) {
+    return err("operator token required", 401);
+  }
+  const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (!entry) {
+    return err("unknown account", 404);
+  }
+  // Rate limit BEFORE spending a cell round trip. An invite plus a victim's
+  // email address must not become a spam cannon: sends are capped per
+  // account and spaced by a cooldown, tracked on the pending: entry.
+  // Best-effort counting (KV has no atomic increment — same accepted
+  // pattern as invite uses; the DO authority tightens both later), and it
+  // FAILS CLOSED: no candidate entry, no resend.
+  const pendingKey = `pending:${accountId}`;
+  const pending = await env.DIRECTORY.get(pendingKey, { type: "json" });
+  if (!pending) {
+    return err("verification state unavailable — try again shortly", 503);
+  }
+  const sent = pending.emails_sent ?? 1; // signup's email is the first
+  if (sent >= 5) {
+    return err("too many verification emails for this account — it closes unverified at the end of its window", 429);
+  }
+  if (pending.last_email_at && Date.now() - Date.parse(pending.last_email_at) < 2 * 60 * 1000) {
+    return err("a verification email was just sent — wait a couple of minutes", 429);
+  }
+  let cellResp;
+  try {
+    cellResp = await fetch(`${entry.endpoint}/v1/account`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+  }
+  if (!cellResp.ok) {
+    // Pass the cell's refusal (401/...) through verbatim.
+    const text = await cellResp.text();
+    return new Response(text, {
+      status: cellResp.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  let account = null;
+  try {
+    account = (await cellResp.json()).account;
+  } catch {
+    account = null;
+  }
+  if (!account?.id || account.id !== accountId) {
+    return err("token does not belong to this account", 403);
+  }
+  if (account.status !== "pending") {
+    return err(`account is already ${account.status}`, 409);
+  }
+  let emailSent = false;
+  try {
+    emailSent = await sendVerificationEmail(
+      env,
+      new URL(request.url).origin,
+      account.email,
+      accountId,
+      entry.cell,
+      { resend: true, windowStartedAt: pending.created_at },
+    );
+  } catch (e) {
+    console.log(`resend: verification email for ${accountId} failed: ${e}`);
+  }
+  if (!emailSent) {
+    return err("could not send the verification email — try again shortly", 502);
+  }
+  // created_at is preserved deliberately: resending never resets the reap
+  // clock — the email says so.
+  await env.DIRECTORY.put(
+    pendingKey,
+    JSON.stringify({
+      ...pending,
+      emails_sent: sent + 1,
+      last_email_at: new Date().toISOString(),
+    }),
+  );
+  return json({
+    schema_version: "witself.v0",
+    account_id: accountId,
+    email: account.email,
+    verification_email_sent: true,
+  });
 }
 
 // handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's
@@ -929,6 +1045,15 @@ export default {
         return err("method not allowed", 405);
       }
       return handleClose(request, env, cm[1]);
+    }
+
+    // Resend verification: operator-token authorized via the account's cell.
+    const rm = url.pathname.match(ACCOUNT_RESEND_PATH);
+    if (rm) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleResend(request, env, rm[1]);
     }
 
     // Cold path: the Go container.

@@ -714,7 +714,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|status|close|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|status|resend-verification|close|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -722,6 +722,8 @@ func accountCmd(args []string) int {
 		return accountCreate(args[1:])
 	case "status":
 		return accountStatus(args[1:])
+	case "resend-verification":
+		return accountResendVerification(args[1:])
 	case "close":
 		return accountClose(args[1:])
 	case "forget":
@@ -730,6 +732,35 @@ func accountCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// accountResendVerification emails a fresh verification link for a
+// still-pending account. Proof of ownership is the operator token the CLI
+// already holds from signup; the control plane checks with the cell and only
+// a still-pending answer sends.
+func accountResendVerification(args []string) int {
+	fs := flag.NewFlagSet("account resend-verification", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	name, acct, tok, err := local.Resolve(*account)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	email, err := client.ResendVerification(context.Background(), *endpoint, acct.ID, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		if strings.Contains(err.Error(), "unknown account") {
+			fmt.Fprintf(os.Stderr, "    (it may have been closed for missing the verification window — `ws account forget --account %s --yes` removes the local name)\n", name)
+		}
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "verification email re-sent to %s for account %q (%s)\n", email, name, acct.ID)
+	return 0
 }
 
 // accountStatus reads the account's lifecycle record from its cell. It works
@@ -961,6 +992,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
+	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")
 	usageLine(w, "  ws realm create|list|delete")
