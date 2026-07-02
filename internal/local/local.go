@@ -10,8 +10,12 @@
 //
 // Layout (WITSELF_HOME overrides ~/.witself):
 //
-//	~/.witself/config.json                    non-secret bindings, CLI-managed
-//	~/.witself/tokens/accounts/<name>.token   the operator token, 0600
+//	~/.witself/config.json                          non-secret bindings, CLI-managed
+//	~/.witself/tokens/accounts/<name>/owner.token   the owner's operator token, 0600
+//
+// Each account gets a directory so future per-operator tokens have a home
+// beside the owner's. (One legacy generation is still read: the flat
+// accounts/<name>.token files written before the per-account directories.)
 //
 // The name "default" is what commands use when no --account flag and no
 // WITSELF_ACCOUNT env are given. There is no separate default pointer: the
@@ -66,13 +70,43 @@ func configPath() (string, error) {
 	return filepath.Join(r, "config.json"), nil
 }
 
-// TokenPath returns where the named account's operator token lives.
+// TokenPath returns where the named account's owner token lives.
 func TokenPath(name string) (string, error) {
 	r, err := root()
 	if err != nil {
 		return "", err
 	}
+	return filepath.Join(r, "tokens", "accounts", name, "owner.token"), nil
+}
+
+// legacyTokenPath is the flat pre-directory layout, still honored on reads.
+func legacyTokenPath(name string) (string, error) {
+	r, err := root()
+	if err != nil {
+		return "", err
+	}
 	return filepath.Join(r, "tokens", "accounts", name+".token"), nil
+}
+
+// readTokenFile reads the named account's token, preferring the per-account
+// directory and falling back to the legacy flat file.
+func readTokenFile(name string) (string, string, error) {
+	tp, err := TokenPath(name)
+	if err != nil {
+		return "", "", err
+	}
+	b, err := os.ReadFile(tp)
+	if errors.Is(err, os.ErrNotExist) {
+		if lp, lerr := legacyTokenPath(name); lerr == nil {
+			if lb, lerr := os.ReadFile(lp); lerr == nil {
+				return string(lb), lp, nil
+			}
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return string(b), tp, nil
 }
 
 // Load reads the config; a missing file is an empty config.
@@ -132,6 +166,11 @@ func Available(name string) error {
 	if _, err := os.Stat(tp); err == nil {
 		return fmt.Errorf("%w: token file %s", ErrNameTaken, tp)
 	}
+	if lp, err := legacyTokenPath(name); err == nil {
+		if _, err := os.Stat(lp); err == nil {
+			return fmt.Errorf("%w: token file %s", ErrNameTaken, lp)
+		}
+	}
 	return nil
 }
 
@@ -175,6 +214,12 @@ func Delete(name string) error {
 	if err := os.Remove(tp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	_ = os.Remove(filepath.Dir(tp)) // the account's dir, if now empty
+	if lp, err := legacyTokenPath(name); err == nil {
+		if err := os.Remove(lp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -196,15 +241,11 @@ func Resolve(explicit string) (name string, acct Account, operatorToken string, 
 	if !ok {
 		return "", Account{}, "", fmt.Errorf("no local account named %q (create one with `ws account create --name %s …`, or pass --endpoint/--token-file)", name, name)
 	}
-	tp, err := TokenPath(name)
-	if err != nil {
-		return "", Account{}, "", err
-	}
-	b, err := os.ReadFile(tp)
+	raw, tp, err := readTokenFile(name)
 	if err != nil {
 		return "", Account{}, "", fmt.Errorf("account %q token: %w", name, err)
 	}
-	tok := strings.TrimSpace(string(b))
+	tok := strings.TrimSpace(raw)
 	if tok == "" {
 		return "", Account{}, "", fmt.Errorf("account %q token file %s is empty", name, tp)
 	}

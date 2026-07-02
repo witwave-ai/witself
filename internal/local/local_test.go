@@ -2,6 +2,8 @@ package local
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -64,5 +66,54 @@ func TestBadName(t *testing.T) {
 		if err := Save(bad, Account{}, "t"); err == nil {
 			t.Errorf("Save(%q) succeeded, want error", bad)
 		}
+	}
+}
+
+func TestTokenLayoutAndLegacyFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+
+	// New saves land in the per-account directory.
+	if err := Save("test-account-1", Account{ID: "acc_1"}, "witself_opr_x"); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "tokens", "accounts", "test-account-1", "owner.token")
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("token not at %s: %v", want, err)
+	}
+
+	// A legacy flat file still resolves, still counts as taken, and Delete
+	// cleans it up.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Accounts["old-name"] = Account{ID: "acc_2"}
+	if err := write(cfg); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(home, "tokens", "accounts", "old-name.token")
+	if err := os.WriteFile(legacy, []byte("witself_opr_legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, tok, err := Resolve("old-name"); err != nil || tok != "witself_opr_legacy" {
+		t.Errorf("legacy resolve = %q, %v", tok, err)
+	}
+	delete(cfg.Accounts, "old-name")
+	if err := write(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save("old-name", Account{ID: "acc_3"}, "t"); !errors.Is(err, ErrNameTaken) {
+		t.Errorf("save over legacy file = %v, want ErrNameTaken", err)
+	}
+	cfg.Accounts["old-name"] = Account{ID: "acc_2"}
+	if err := write(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("old-name"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("legacy file survived delete: %v", err)
 	}
 }
