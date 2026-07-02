@@ -70,6 +70,10 @@ type Config struct {
 	// RevokeToken, when set, enables POST /v1/tokens/{token}:revoke.
 	RevokeToken func(ctx context.Context, accountID, tokenID string) error
 
+	// CloseAccount, when set, enables POST /v1/account:close — the permanent,
+	// owner-only tombstone of the authenticated operator's account.
+	CloseAccount func(ctx context.Context, accountID, operatorID, reason string) error
+
 	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
 	// the control-plane -> cell trust link that creates a new (non-default)
 	// account with its root operator and a one-shot bootstrap token. Self-hosted
@@ -110,6 +114,13 @@ var ErrConflict = errors.New("conflict")
 
 // ErrNotFound signals a missing resource (-> 404), e.g. a realm not in the account.
 var ErrNotFound = errors.New("not found")
+
+// ErrNotAccountOwner signals an owner-only action attempted by a non-owner (-> 403).
+var ErrNotAccountOwner = errors.New("only the account owner may do this")
+
+// ErrCannotCloseDefault signals an attempt to close the deployment's seeded
+// default account (-> 403).
+var ErrCannotCloseDefault = errors.New("the default account cannot be closed")
 
 // Agent is the API view of an agent.
 type Agent struct {
@@ -273,6 +284,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.RevokeToken != nil {
 			mux.HandleFunc("POST /v1/tokens/", revokeTokenHandler(cfg.Authenticate, cfg.RevokeToken))
+		}
+		if cfg.CloseAccount != nil {
+			mux.HandleFunc("POST /v1/account:close", closeAccountHandler(cfg.Authenticate, cfg.CloseAccount))
 		}
 	}
 	return mux
@@ -459,6 +473,36 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 			"account":        acct,
 		})
 	}
+}
+
+// closeAccountHandler permanently closes the authenticated operator's account:
+// tombstone + revoke every live credential. Owner-only; the seeded default
+// account is refused. Idempotent.
+func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, accountID, operatorID, reason string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req) // body optional
+		err := closeAccount(r.Context(), p.accountID, p.operatorID, req.Reason)
+		switch {
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner can close the account")
+			return
+		case errors.Is(err, ErrCannotCloseDefault):
+			writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be closed")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not close account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"account_id":     p.accountID,
+			"status":         "closed",
+		})
+	})
 }
 
 // whoamiHandler returns the authenticated operator principal, or 401.

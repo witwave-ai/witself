@@ -217,6 +217,17 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.CloseAccount = func(ctx context.Context, accountID, operatorID, reason string) error {
+			err := st.CloseAccount(ctx, accountID, operatorID, reason)
+			switch {
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return server.ErrNotAccountOwner
+			case errors.Is(err, store.ErrCannotCloseDefault):
+				return server.ErrCannotCloseDefault
+			default:
+				return err
+			}
+		}
 		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
 			// Account provisioning: the control-plane -> cell trust link. The
 			// bootstrap tokens minted per signup are short-lived — the CLI

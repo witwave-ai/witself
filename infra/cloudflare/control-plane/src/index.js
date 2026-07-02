@@ -58,6 +58,7 @@ const json = (obj, status = 200, extra = {}) =>
 const err = (msg, status) => json({ schema_version: "witself.v0", error: msg }, status);
 
 const DIRECTORY_PATH = /^\/v1\/directory\/([A-Za-z0-9_-]{1,128})$/;
+const ACCOUNT_CLOSE_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):close$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -507,6 +508,54 @@ async function handleSignup(request, env) {
   );
 }
 
+// handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's
+// entrance: born through the front door, closed through the front door. The
+// control plane holds no authority here — it forwards the caller's operator
+// token to the account's cell, which decides (owner-only, tombstone, revoke).
+// Only on the cell's success does the control plane forget its routing pointer.
+async function handleClose(request, env, accountId) {
+  const auth = request.headers.get("Authorization");
+  if (!auth) {
+    return err("operator token required", 401);
+  }
+  const key = `acct:${accountId}`;
+  const entry = await env.DIRECTORY.get(key, { type: "json" });
+  if (!entry) {
+    return err("unknown account", 404);
+  }
+  let body = "{}";
+  try {
+    body = await request.text();
+  } catch {
+    // keep the empty default
+  }
+  let cellResp;
+  try {
+    cellResp = await fetch(`${entry.endpoint}/v1/account:close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: body || "{}",
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+  }
+  if (!cellResp.ok) {
+    // Pass the cell's refusal (401/403/...) through verbatim.
+    const text = await cellResp.text();
+    return new Response(text, {
+      status: cellResp.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  await env.DIRECTORY.delete(key); // the fleet forgets; the cell remembers
+  return json({
+    schema_version: "witself.v0",
+    account_id: accountId,
+    status: "closed",
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -556,6 +605,15 @@ export default {
         return err("method not allowed", 405);
       }
       return handleSignup(request, env);
+    }
+
+    // Account close: operator-token pass-through to the account's cell.
+    const cm = url.pathname.match(ACCOUNT_CLOSE_PATH);
+    if (cm) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleClose(request, env, cm[1]);
     }
 
     // Cold path: the Go container.

@@ -742,6 +742,73 @@ func TestProvisionAccount(t *testing.T) {
 	}
 }
 
+func TestCloseAccount(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, bool, error) {
+		switch tok {
+		case "owner":
+			return "opr_owner", "acc_y", true, nil
+		case "member":
+			return "opr_member", "acc_y", true, nil
+		case "root":
+			return "opr_root", "acc_default", true, nil
+		}
+		return "", "", false, nil
+	}
+	closeFn := func(_ context.Context, accountID, operatorID, _ string) error {
+		if accountID == "acc_default" {
+			return ErrCannotCloseDefault
+		}
+		if operatorID != "opr_owner" {
+			return ErrNotAccountOwner
+		}
+		return nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CloseAccount: closeFn}))
+	defer srv.Close()
+
+	post := func(tok string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/account:close", strings.NewReader(`{"reason":"test"}`))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	r := post("")
+	closeBody(t, r)
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", r.StatusCode)
+	}
+	r = post("member")
+	closeBody(t, r)
+	if r.StatusCode != http.StatusForbidden {
+		t.Errorf("non-owner = %d, want 403", r.StatusCode)
+	}
+	r = post("root")
+	closeBody(t, r)
+	if r.StatusCode != http.StatusForbidden {
+		t.Errorf("default account = %d, want 403", r.StatusCode)
+	}
+	r = post("owner")
+	defer closeBody(t, r)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("owner close = %d, want 200", r.StatusCode)
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "closed" {
+		t.Errorf("status = %q, want closed", out.Status)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)

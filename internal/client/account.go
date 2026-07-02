@@ -62,3 +62,31 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 	}
 	return &out, nil
 }
+
+// CloseAccount permanently closes an account via the control plane
+// (POST {controlPlane}/v1/accounts/{id}:close). The operator token is forwarded
+// to the account's cell, which authorizes (owner-only) and tombstones; the
+// control plane then removes its routing pointer. Refusals surface verbatim.
+func CloseAccount(ctx context.Context, controlPlane, accountID, operatorToken, reason string) error {
+	body, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":close"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", controlPlane, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return responseError(resp, "close failed: "+resp.Status)
+	}
+	return nil
+}

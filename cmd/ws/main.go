@@ -661,11 +661,54 @@ const defaultControlPlane = "https://self.witwave.ai"
 
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
-	if len(args) == 0 || args[0] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: ws account create --email EMAIL --invite CODE [--display-name NAME] [--endpoint URL] [--out FILE]")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws account create|close ...")
 		return 2
 	}
-	return accountCreate(args[1:])
+	switch args[0] {
+	case "create":
+		return accountCreate(args[1:])
+	case "close":
+		return accountClose(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+// accountClose permanently closes an account. The account's data remains as a
+// tombstone forever; routing and every credential die now. Owner-only, and it
+// demands --yes because there is no undo.
+func accountClose(args []string) int {
+	fs := flag.NewFlagSet("account close", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := fs.String("account", "", "account id (acc_...) to close")
+	tokenFile := fs.String("token-file", "", "file containing the account owner's operator token")
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	reason := fs.String("reason", "", "optional close reason, recorded on the account")
+	yes := fs.Bool("yes", false, "confirm: closing is permanent")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *account == "" || *tokenFile == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account close --account acc_ID --token-file FILE [--reason TEXT] [--endpoint URL] --yes")
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintf(os.Stderr, "ws: closing %s is permanent — credentials are revoked and the account is retired.\n    Re-run with --yes to confirm.\n", *account)
+		return 2
+	}
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.CloseAccount(context.Background(), *endpoint, *account, tok, *reason); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "account %s closed. Its operator token is now dead — you can delete %s.\n", *account, *tokenFile)
+	return 0
 }
 
 // accountCreate is Witself Cloud signup: one command from nothing to a working
@@ -732,6 +775,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
+	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws realm create|list|delete")
 	usageLine(w, "  ws agent create|list|delete")
 	usageLine(w, "  ws operator list|create|delete")
