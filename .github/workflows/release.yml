@@ -2,9 +2,9 @@ name: release
 
 # Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, signs the
 # checksums (cosign keyless), generates SBOMs, publishes the GitHub release,
-# attaches build-provenance attestations, pushes the witself-server multi-arch
-# image to GHCR, publishes the witself Helm chart as an OCI artifact to
-# ghcr.io/witwave-ai/charts, and pushes the Homebrew formula to witwave-ai/
+# attaches build-provenance attestations, pushes the ws and witself-server
+# multi-arch images to GHCR, publishes the witself Helm chart as an OCI artifact
+# to ghcr.io/witwave-ai/charts, and pushes the Homebrew formula to witwave-ai/
 # homebrew-tap. A manual run (workflow_dispatch) is a no-publish snapshot.
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
   contents: write # create the release
   id-token: write # cosign keyless signing + provenance OIDC
   attestations: write # build-provenance attestations
-  packages: write # push the witself-server image to GHCR
+  packages: write # push container images to GHCR
 
 jobs:
   goreleaser:
@@ -118,6 +118,21 @@ jobs:
 
           date +%s > "$release_end"
           exit "$status"
+
+      - name: Attest container SBOMs
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          for image_name in ws witself-server; do
+            image="ghcr.io/witwave-ai/images/${image_name}"
+            sbom="$RUNNER_TEMP/${image_name}-${version}.spdx.json"
+
+            syft "${image}:${version}" --output "spdx-json=${sbom}" --enrich all
+            cosign attest --yes --type https://spdx.dev/Document --predicate "$sbom" "${image}:${version}"
+            cosign attest --yes --type https://spdx.dev/Document --predicate "$sbom" "${image}:latest"
+          done
 
       - name: Summarize release timings
         if: always()

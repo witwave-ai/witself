@@ -105,10 +105,42 @@ signs:
     artifacts: checksum
     output: true
 
-# witself-server container image: one image per arch, combined into a multi-arch
-# manifest. The Dockerfile only COPYs the prebuilt binary, so cross-arch builds
-# need no emulation.
+# Container images: one image per arch, combined into multi-arch manifests. The
+# Dockerfiles only COPY the prebuilt binaries, so cross-arch builds need no Go
+# compilation or emulation.
 dockers:
+  - id: ws-amd64
+    ids:
+      - ws
+    goos: linux
+    goarch: amd64
+    dockerfile: images/ws/Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title=ws"
+      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
+  - id: ws-arm64
+    ids:
+      - ws
+    goos: linux
+    goarch: arm64
+    dockerfile: images/ws/Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title=ws"
+      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
   - id: witself-server-amd64
     ids:
       - witself-server
@@ -143,6 +175,14 @@ dockers:
       - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
 
 docker_manifests:
+  - name_template: "ghcr.io/witwave-ai/images/ws:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/witwave-ai/images/ws:latest"
+    image_templates:
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
   - name_template: "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}"
     image_templates:
       - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
@@ -151,6 +191,18 @@ docker_manifests:
     image_templates:
       - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
       - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
+
+# Keyless cosign signatures over the published multi-arch container manifests.
+# GoReleaser supplies the manifest digest from the registry after publish.
+docker_signs:
+  - id: container-manifests
+    cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+    output: true
 
 brews:
   - name: ws
