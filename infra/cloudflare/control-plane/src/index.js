@@ -519,9 +519,10 @@ async function handleSignup(request, env) {
   // orphaned provision), whereas routing without a candidate would be a
   // pending account the reaper can never see. Only a candidate — the cell's
   // only-if-pending :reap guard is the truth at reap time.
+  const pendingEntry = { cell: cell.name, created_at: new Date().toISOString() };
   await env.DIRECTORY.put(
     `pending:${provisioned.account_id}`,
-    JSON.stringify({ cell: cell.name, created_at: new Date().toISOString() }),
+    JSON.stringify(pendingEntry),
   );
   // Routing pointer + best-effort invite consumption (exact counting arrives
   // with the DO authority).
@@ -547,6 +548,16 @@ async function handleSignup(request, env) {
     );
   } catch (e) {
     console.log(`signup: verification email for ${provisioned.account_id} failed: ${e}`);
+  }
+  if (emailSent) {
+    // Stamp the send on the candidate so the resend cooldown starts at
+    // signup, not at the first resend.
+    pendingEntry.emails_sent = 1;
+    pendingEntry.last_email_at = new Date().toISOString();
+    await env.DIRECTORY.put(
+      `pending:${provisioned.account_id}`,
+      JSON.stringify(pendingEntry),
+    );
   }
 
   return json(
