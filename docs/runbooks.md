@@ -21,3 +21,14 @@ ws realm list --account test-account-1
 
 Leave off `--name` and the account is saved as `default` — the name every
 command uses when `--account` is omitted.
+
+## Close an account
+
+Closing is permanent: every credential is revoked and the account is retired
+(its record remains as a tombstone). On success the local name is removed too.
+
+```sh
+ws account close --account test-account-1 --yes
+```
+
+Add `--reason TEXT` to record why.
