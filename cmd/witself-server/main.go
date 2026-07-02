@@ -217,6 +217,30 @@ func serve() int {
 			}
 			return err
 		}
+		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
+			// Account provisioning: the control-plane -> cell trust link. The
+			// bootstrap tokens minted per signup are short-lived — the CLI
+			// exchanges them within seconds.
+			const provisionBootstrapTTL = time.Hour
+			cfg.ProvisionToken = pt
+			cfg.ProvisionAccount = func(ctx context.Context, email, displayName string) (server.ProvisionedAccount, error) {
+				p, err := st.ProvisionAccount(ctx, email, displayName, provisionBootstrapTTL)
+				if errors.Is(err, store.ErrAccountEmailExists) {
+					return server.ProvisionedAccount{}, server.ErrConflict
+				}
+				if err != nil {
+					return server.ProvisionedAccount{}, err
+				}
+				return server.ProvisionedAccount{
+					AccountID:      p.AccountID,
+					OperatorID:     p.OperatorID,
+					Email:          p.Email,
+					Status:         p.Status,
+					BootstrapToken: p.BootstrapToken,
+				}, nil
+			}
+			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
@@ -321,6 +345,7 @@ func usage(w io.Writer) {
 	usageLine(w)
 	usageLine(w, "Bootstrap (optional first-operator setup):")
 	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
+	usageLine(w, "  WITSELF_PROVISION_TOKEN       enables POST /v1/accounts (control-plane account provisioning)")
 	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }
 

@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,24 @@ type Config struct {
 
 	// RevokeToken, when set, enables POST /v1/tokens/{token}:revoke.
 	RevokeToken func(ctx context.Context, accountID, tokenID string) error
+
+	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
+	// the control-plane -> cell trust link that creates a new (non-default)
+	// account with its root operator and a one-shot bootstrap token. Self-hosted
+	// cells never set the token, so the route is not even mounted there.
+	ProvisionToken   string
+	ProvisionAccount func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)
+}
+
+// ProvisionedAccount is the API view of a freshly provisioned account. The
+// bootstrap token is returned exactly once; the new owner exchanges it for an
+// operator token via the ordinary POST /v1/auth/bootstrap.
+type ProvisionedAccount struct {
+	AccountID      string `json:"account_id"`
+	OperatorID     string `json:"operator_id"`
+	Email          string `json:"email"`
+	Status         string `json:"status"`
+	BootstrapToken string `json:"bootstrap_token"`
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -211,6 +230,9 @@ func apiMux(cfg Config) http.Handler {
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
+	}
+	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
+		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
 	}
 	if cfg.Authenticate != nil {
 		whoami := whoamiHandler(cfg.Authenticate)
@@ -392,6 +414,51 @@ func bearerToken(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(h[len(prefix):]), true
+}
+
+// provisionAccountHandler creates a new account on this cell. It is authorized
+// by the pre-shared provision token (the control plane's credential), never by
+// operator/agent tokens — provisioning is instance-level authority, above any
+// account.
+func provisionAccountHandler(provisionToken string, provision func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		var req struct {
+			Email       string `json:"email"`
+			DisplayName string `json:"display_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+		if req.Email == "" || !strings.Contains(req.Email, "@") {
+			writeJSONError(w, http.StatusBadRequest, "valid email required")
+			return
+		}
+		if req.DisplayName == "" {
+			req.DisplayName = req.Email
+		}
+		acct, err := provision(r.Context(), req.Email, req.DisplayName)
+		if errors.Is(err, ErrConflict) {
+			writeJSONError(w, http.StatusConflict, "an account with this email already exists")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not provision account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account":        acct,
+		})
+	}
 }
 
 // whoamiHandler returns the authenticated operator principal, or 401.

@@ -669,6 +669,79 @@ func mustRequest(t *testing.T, method, url string) *http.Request {
 	return req
 }
 
+func TestProvisionAccount(t *testing.T) {
+	provision := func(_ context.Context, email, displayName string) (ProvisionedAccount, error) {
+		if email == "taken@x.com" {
+			return ProvisionedAccount{}, ErrConflict
+		}
+		return ProvisionedAccount{
+			AccountID: "acc_new", OperatorID: "opr_new", Email: email,
+			Status: "active", BootstrapToken: "witself_boot_x",
+		}, nil
+	}
+
+	// Route absent entirely when no provision token is configured.
+	bare := httptest.NewServer(apiMux(Config{ProvisionAccount: provision}))
+	defer bare.Close()
+	resp, err := http.Post(bare.URL+"/v1/accounts", "application/json", strings.NewReader(`{"email":"a@b.c"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unmounted provisioning = %d, want 404", resp.StatusCode)
+	}
+
+	srv := httptest.NewServer(apiMux(Config{ProvisionToken: "witself_prv_good", ProvisionAccount: provision}))
+	defer srv.Close()
+	post := func(tok, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/accounts", strings.NewReader(body))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	r := post("", `{"email":"a@b.c"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", r.StatusCode)
+	}
+	r = post("witself_prv_bad", `{"email":"a@b.c"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("bad token = %d, want 401", r.StatusCode)
+	}
+	r = post("witself_prv_good", `{"email":"not-an-email"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad email = %d, want 400", r.StatusCode)
+	}
+	r = post("witself_prv_good", `{"email":"taken@x.com"}`)
+	r.Body.Close()
+	if r.StatusCode != http.StatusConflict {
+		t.Errorf("duplicate email = %d, want 409", r.StatusCode)
+	}
+	r = post("witself_prv_good", `{"email":"Amy@Co.com"}`)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", r.StatusCode)
+	}
+	var out struct {
+		Account ProvisionedAccount `json:"account"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Account.AccountID != "acc_new" || out.Account.Email != "amy@co.com" || out.Account.BootstrapToken == "" {
+		t.Errorf("account = %+v", out.Account)
+	}
+}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)
