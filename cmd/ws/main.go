@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/token"
 	"github.com/witwave-ai/witself/internal/version"
 )
@@ -162,9 +163,45 @@ func authLogin(args []string) int {
 	return 0
 }
 
+// connect resolves how to reach a cell as an operator. Explicit
+// --endpoint/--token-file always wins (the self-hosted path). Otherwise a
+// named local account (--account, WITSELF_ACCOUNT, or "default") supplies the
+// operator token, and the control plane directory is asked — fresh, every
+// time — which cell hosts the account. Accounts can move between cells; the
+// CLI never caches an endpoint.
+func connect(ctx context.Context, accountName, endpoint, tokenFile string) (string, string, error) {
+	if tokenFile != "" {
+		if endpoint == "" {
+			return "", "", fmt.Errorf("--token-file needs --endpoint (or drop both to use a local account name)")
+		}
+		tok, err := readToken(tokenFile)
+		if err != nil {
+			return "", "", err
+		}
+		return endpoint, tok, nil
+	}
+	name, acct, tok, err := local.Resolve(accountName)
+	if err != nil {
+		return "", "", err
+	}
+	if endpoint != "" { // explicit endpoint, named account's token
+		return endpoint, tok, nil
+	}
+	_, cellEndpoint, err := client.LookupAccount(ctx, defaultControlPlane, acct.ID)
+	if err != nil {
+		return "", "", fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
+	}
+	return cellEndpoint, tok, nil
+}
+
+// accountFlag registers the shared --account flag on a cell command.
+func accountFlag(fs *flag.FlagSet) *string {
+	return fs.String("account", "", `local account name (default: WITSELF_ACCOUNT or "default")`)
+}
+
 func realmCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws realm create|list|delete --endpoint URL --token-file FILE")
+		fmt.Fprintln(os.Stderr, "usage: ws realm create|list|delete [--account NAME]")
 		return 2
 	}
 	switch args[0] {
@@ -183,22 +220,24 @@ func realmCmd(args []string) int {
 func realmCreate(args []string) int {
 	fs := flag.NewFlagSet("realm create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	name := fs.Arg(0)
-	if *endpoint == "" || *tokenFile == "" || name == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws realm create --endpoint URL --token-file FILE NAME")
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws realm create [--account NAME] NAME")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	r, err := client.CreateRealm(context.Background(), *endpoint, tok, name)
+	r, err := client.CreateRealm(ctx, ep, tok, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -210,6 +249,7 @@ func realmCreate(args []string) int {
 func realmDelete(args []string) int {
 	fs := flag.NewFlagSet("realm delete", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	yes := fs.Bool("yes", false, "confirm realm deletion")
@@ -217,20 +257,21 @@ func realmDelete(args []string) int {
 		return 2
 	}
 	realmID := fs.Arg(0)
-	if *endpoint == "" || *tokenFile == "" || realmID == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws realm delete --endpoint URL --token-file FILE --yes REALM")
+	if realmID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws realm delete [--account NAME] --yes REALM")
 		return 2
 	}
 	if !*yes {
 		fmt.Fprintln(os.Stderr, "ws: refusing to delete realm without --yes")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.DeleteRealm(context.Background(), *endpoint, tok, realmID); err != nil {
+	if err := client.DeleteRealm(ctx, ep, tok, realmID); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
@@ -241,21 +282,19 @@ func realmDelete(args []string) int {
 func realmList(args []string) int {
 	fs := flag.NewFlagSet("realm list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws realm list --endpoint URL --token-file FILE")
-		return 2
-	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	realms, err := client.ListRealms(context.Background(), *endpoint, tok)
+	realms, err := client.ListRealms(ctx, ep, tok)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -268,7 +307,7 @@ func realmList(args []string) int {
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws agent create|list|delete --endpoint URL --token-file FILE --realm REALM")
+		fmt.Fprintln(os.Stderr, "usage: ws agent create|list|delete [--account NAME] --realm REALM")
 		return 2
 	}
 	switch args[0] {
@@ -287,6 +326,7 @@ func agentCmd(args []string) int {
 func agentCreate(args []string) int {
 	fs := flag.NewFlagSet("agent create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	realm := fs.String("realm", "", "realm id the agent belongs to")
@@ -294,16 +334,17 @@ func agentCreate(args []string) int {
 		return 2
 	}
 	name := fs.Arg(0)
-	if *endpoint == "" || *tokenFile == "" || *realm == "" || name == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws agent create --endpoint URL --token-file FILE --realm REALM NAME")
+	if *realm == "" || name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent create [--account NAME] --realm REALM NAME")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	a, err := client.CreateAgent(context.Background(), *endpoint, tok, *realm, name)
+	a, err := client.CreateAgent(ctx, ep, tok, *realm, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -315,22 +356,24 @@ func agentCreate(args []string) int {
 func agentList(args []string) int {
 	fs := flag.NewFlagSet("agent list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	realm := fs.String("realm", "", "realm id")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" || *realm == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws agent list --endpoint URL --token-file FILE --realm REALM")
+	if *realm == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent list [--account NAME] --realm REALM")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	agents, err := client.ListAgents(context.Background(), *endpoint, tok, *realm)
+	agents, err := client.ListAgents(ctx, ep, tok, *realm)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -344,6 +387,7 @@ func agentList(args []string) int {
 func agentDelete(args []string) int {
 	fs := flag.NewFlagSet("agent delete", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	realm := fs.String("realm", "", "realm id")
@@ -352,20 +396,21 @@ func agentDelete(args []string) int {
 		return 2
 	}
 	agentID := fs.Arg(0)
-	if *endpoint == "" || *tokenFile == "" || *realm == "" || agentID == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws agent delete --endpoint URL --token-file FILE --realm REALM --yes AGENT")
+	if *realm == "" || agentID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws agent delete [--account NAME] --realm REALM --yes AGENT")
 		return 2
 	}
 	if !*yes {
 		fmt.Fprintln(os.Stderr, "ws: refusing to delete agent without --yes")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.DeleteAgent(context.Background(), *endpoint, tok, *realm, agentID); err != nil {
+	if err := client.DeleteAgent(ctx, ep, tok, *realm, agentID); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
@@ -375,7 +420,7 @@ func agentDelete(args []string) int {
 
 func operatorCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws operator list|create|delete --endpoint URL --token-file FILE")
+		fmt.Fprintln(os.Stderr, "usage: ws operator list|create|delete [--account NAME]")
 		return 2
 	}
 	switch args[0] {
@@ -394,21 +439,19 @@ func operatorCmd(args []string) int {
 func operatorList(args []string) int {
 	fs := flag.NewFlagSet("operator list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws operator list --endpoint URL --token-file FILE")
-		return 2
-	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	operators, err := client.ListOperators(context.Background(), *endpoint, tok)
+	operators, err := client.ListOperators(ctx, ep, tok)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -430,6 +473,7 @@ func operatorList(args []string) int {
 func operatorCreate(args []string) int {
 	fs := flag.NewFlagSet("operator create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	name := fs.String("name", "", "operator display name")
@@ -439,16 +483,17 @@ func operatorCreate(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" || *name == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws operator create --endpoint URL --token-file FILE --name NAME [--token-name NAME] [--ttl DURATION] [--out FILE]")
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws operator create [--account NAME] --name NAME [--token-name NAME] [--ttl DURATION] [--out FILE]")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	res, err := client.CreateOperator(context.Background(), *endpoint, tok, *name, *tokenName, *ttl)
+	res, err := client.CreateOperator(ctx, ep, tok, *name, *tokenName, *ttl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -473,6 +518,7 @@ func operatorCreate(args []string) int {
 func operatorDelete(args []string) int {
 	fs := flag.NewFlagSet("operator delete", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	yes := fs.Bool("yes", false, "confirm operator deletion and token revocation")
@@ -480,20 +526,21 @@ func operatorDelete(args []string) int {
 		return 2
 	}
 	operatorID := fs.Arg(0)
-	if *endpoint == "" || *tokenFile == "" || operatorID == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws operator delete --endpoint URL --token-file FILE --yes OPERATOR")
+	if operatorID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws operator delete [--account NAME] --yes OPERATOR")
 		return 2
 	}
 	if !*yes {
 		fmt.Fprintln(os.Stderr, "ws: refusing to delete operator without --yes")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.DeleteOperator(context.Background(), *endpoint, tok, operatorID); err != nil {
+	if err := client.DeleteOperator(ctx, ep, tok, operatorID); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
@@ -503,7 +550,7 @@ func operatorDelete(args []string) int {
 
 func tokenCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws token create|revoke --endpoint URL --token-file FILE")
+		fmt.Fprintln(os.Stderr, "usage: ws token create|revoke [--account NAME]")
 		return 2
 	}
 	switch args[0] {
@@ -520,6 +567,7 @@ func tokenCmd(args []string) int {
 func tokenCreate(args []string) int {
 	fs := flag.NewFlagSet("token create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	agent := fs.String("agent", "", "agent id to mint a token for")
@@ -530,8 +578,8 @@ func tokenCreate(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" || (*agent == "" && !*operator) || (*agent != "" && *operator) {
-		fmt.Fprintln(os.Stderr, "usage: ws token create --endpoint URL --token-file FILE (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
+	if (*agent == "" && !*operator) || (*agent != "" && *operator) {
+		fmt.Fprintln(os.Stderr, "usage: ws token create [--account NAME] (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
 		return 2
 	}
 	if *agent != "" && *ttl != "" {
@@ -542,13 +590,14 @@ func tokenCreate(args []string) int {
 		fmt.Fprintln(os.Stderr, "ws: --name is currently supported only with --operator")
 		return 2
 	}
-	op, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, op, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
 	if *operator {
-		res, err := client.CreateOperatorToken(context.Background(), *endpoint, op, *name, *ttl)
+		res, err := client.CreateOperatorToken(ctx, ep, op, *name, *ttl)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 			return 1
@@ -568,7 +617,7 @@ func tokenCreate(args []string) int {
 		return 0
 	}
 
-	agentTok, tokenID, err := client.CreateAgentToken(context.Background(), *endpoint, op, *agent)
+	agentTok, tokenID, err := client.CreateAgentToken(ctx, ep, op, *agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -591,6 +640,7 @@ func tokenCreate(args []string) int {
 func tokenRevoke(args []string) int {
 	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	tokenID := fs.String("token", "", "token id to revoke")
@@ -598,20 +648,21 @@ func tokenRevoke(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *endpoint == "" || *tokenFile == "" || *tokenID == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws token revoke --endpoint URL --token-file FILE --token TOKEN_ID --yes")
+	if *tokenID == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws token revoke [--account NAME] --token TOKEN_ID --yes")
 		return 2
 	}
 	if !*yes {
 		fmt.Fprintln(os.Stderr, "ws: refusing to revoke token without --yes")
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.RevokeToken(context.Background(), *endpoint, tok, *tokenID); err != nil {
+	if err := client.RevokeToken(ctx, ep, tok, *tokenID); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
@@ -678,57 +729,95 @@ func accountCmd(args []string) int {
 
 // accountClose permanently closes an account. The account's data remains as a
 // tombstone forever; routing and every credential die now. Owner-only, and it
-// demands --yes because there is no undo.
+// demands --yes because there is no undo. On success the local name (if one
+// was used) is retired too.
 func accountClose(args []string) int {
 	fs := flag.NewFlagSet("account close", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	account := fs.String("account", "", "account id (acc_...) to close")
-	tokenFile := fs.String("token-file", "", "file containing the account owner's operator token")
+	account := fs.String("account", "", "local account name (default \"default\"), or a raw acc_ id with --token-file")
+	tokenFile := fs.String("token-file", "", "file containing the account owner's operator token (with a raw acc_ id)")
 	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
 	reason := fs.String("reason", "", "optional close reason, recorded on the account")
 	yes := fs.Bool("yes", false, "confirm: closing is permanent")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *account == "" || *tokenFile == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws account close --account acc_ID --token-file FILE [--reason TEXT] [--endpoint URL] --yes")
-		return 2
+
+	var accountID, tok, localName string
+	if *tokenFile != "" {
+		// Raw path: explicit id + token file, no local state involved.
+		if !strings.HasPrefix(*account, "acc_") {
+			fmt.Fprintln(os.Stderr, "usage: ws account close --account acc_ID --token-file FILE [--reason TEXT] --yes")
+			return 2
+		}
+		t, err := readToken(*tokenFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		accountID, tok = *account, t
+	} else {
+		if strings.HasPrefix(*account, "acc_") {
+			fmt.Fprintln(os.Stderr, "ws: a raw account id needs --token-file; local names never start with acc_")
+			return 2
+		}
+		name, acct, t, err := local.Resolve(*account)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		accountID, tok, localName = acct.ID, t, name
 	}
+
 	if !*yes {
-		fmt.Fprintf(os.Stderr, "ws: closing %s is permanent — credentials are revoked and the account is retired.\n    Re-run with --yes to confirm.\n", *account)
+		fmt.Fprintf(os.Stderr, "ws: closing %s is permanent — credentials are revoked and the account is retired.\n    Re-run with --yes to confirm.\n", accountID)
 		return 2
 	}
-	tok, err := readToken(*tokenFile)
-	if err != nil {
+	if err := client.CloseAccount(context.Background(), *endpoint, accountID, tok, *reason); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.CloseAccount(context.Background(), *endpoint, *account, tok, *reason); err != nil {
-		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
-		return 1
+	fmt.Fprintf(os.Stderr, "account %s closed. Its operator token is now dead.\n", accountID)
+	if localName != "" {
+		if err := local.Delete(localName); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: retiring local name %q: %v\n", localName, err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "local account %q removed.\n", localName)
 	}
-	fmt.Fprintf(os.Stderr, "account %s closed. Its operator token is now dead — you can delete %s.\n", *account, *tokenFile)
 	return 0
 }
 
 // accountCreate is Witself Cloud signup: one command from nothing to a working
 // operator token. The control plane places the account on a cell; the CLI then
 // claims it with the ordinary bootstrap exchange — the same path a self-hosted
-// bootstrap uses.
+// bootstrap uses — and remembers it under a local name so later commands are
+// just `ws realm create --account NAME ...`.
 func accountCreate(args []string) int {
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	email := fs.String("email", "", "account owner email")
 	invite := fs.String("invite", "", "invite code")
+	name := fs.String("name", "", `local name for the new account (default "default")`)
 	displayName := fs.String("display-name", "", "account display name (default: the email)")
 	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
-	out := fs.String("out", "", "write the operator token to this file (0600) instead of stdout")
+	out := fs.String("out", "", "also write the operator token to this file (0600)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *email == "" || *invite == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws account create --email EMAIL --invite CODE [--display-name NAME] [--endpoint URL] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: ws account create --email EMAIL --invite CODE [--name LOCALNAME] [--display-name NAME] [--endpoint URL] [--out FILE]")
 		return 2
+	}
+	localName := *name
+	if localName == "" {
+		localName = "default"
+	}
+	// Claim the local name BEFORE creating anything remote: a taken name must
+	// not strand a freshly provisioned account's only credential.
+	if err := local.Available(localName); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
 	}
 
 	ctx := context.Background()
@@ -747,24 +836,27 @@ func accountCreate(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "logged in as operator %s\n", res.OperatorID)
 
+	if err := local.Save(localName, local.Account{ID: acct.AccountID, Email: acct.Email}, res.OperatorToken); err != nil {
+		// Never strand the only credential: surface the token if we can't store it.
+		fmt.Fprintf(os.Stderr, "ws: saving local account: %v\n", err)
+		fmt.Println(res.OperatorToken)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "saved locally as %q\n", localName)
+
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "wrote operator token to %s\n", *out)
+	}
+	if localName == "default" {
+		fmt.Fprintln(os.Stderr, "next: ws realm create NAME")
 	} else {
-		fmt.Println(res.OperatorToken)
+		fmt.Fprintf(os.Stderr, "next: ws realm create --account %s NAME\n", localName)
 	}
-	fmt.Fprintf(os.Stderr, "next: ws realm create --endpoint %s --token-file %s NAME\n", acct.Cell.Endpoint, tokenFileHint(*out))
 	return 0
-}
-
-func tokenFileHint(out string) string {
-	if out != "" {
-		return out
-	}
-	return "FILE"
 }
 
 func usage(w io.Writer) {
@@ -781,6 +873,9 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws operator list|create|delete")
 	usageLine(w, "  ws token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  ws help                 Show this help")
+	usageLine(w)
+	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")
+	usageLine(w, `WITSELF_ACCOUNT or "default"). Self-hosted: --endpoint URL --token-file FILE.`)
 }
 
 func usageLine(w io.Writer, args ...any) {
