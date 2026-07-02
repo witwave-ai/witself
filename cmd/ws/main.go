@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -200,6 +201,21 @@ func accountFlag(fs *flag.FlagSet) *string {
 	return fs.String("account", "", `local account name (default: WITSELF_ACCOUNT or "default")`)
 }
 
+// jsonFlag registers the shared --json flag on read commands: self-describing
+// output for agents and scripts, instead of positional TSV columns.
+func jsonFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("json", false, "print JSON instead of columns")
+}
+
+// printJSON writes one compact JSON document to stdout.
+func printJSON(v any) int {
+	if err := json.NewEncoder(os.Stdout).Encode(v); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func realmCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: ws realm create|list|delete [--account NAME]")
@@ -284,6 +300,7 @@ func realmList(args []string) int {
 	fs := flag.NewFlagSet("realm list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
@@ -300,6 +317,13 @@ func realmList(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
+	if realms == nil {
+		realms = []client.Realm{}
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"realms": realms})
+	}
+	fmt.Fprintln(os.Stderr, "id\tname")
 	for _, r := range realms {
 		fmt.Printf("%s\t%s\n", r.ID, r.Name)
 	}
@@ -358,6 +382,7 @@ func agentList(args []string) int {
 	fs := flag.NewFlagSet("agent list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	realm := fs.String("realm", "", "realm id")
@@ -379,6 +404,13 @@ func agentList(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
+	if agents == nil {
+		agents = []client.Agent{}
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"agents": agents})
+	}
+	fmt.Fprintln(os.Stderr, "id\tname")
 	for _, a := range agents {
 		fmt.Printf("%s\t%s\n", a.ID, a.Name)
 	}
@@ -441,6 +473,7 @@ func operatorList(args []string) int {
 	fs := flag.NewFlagSet("operator list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
@@ -457,6 +490,18 @@ func operatorList(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
+	if operators == nil {
+		operators = []client.Operator{}
+	}
+	if *jsonOut {
+		for i := range operators {
+			if operators[i].Tokens == nil {
+				operators[i].Tokens = []client.OperatorToken{}
+			}
+		}
+		return printJSON(map[string]any{"operators": operators})
+	}
+	fmt.Fprintln(os.Stderr, "id\tname\trole\troot\tcreated\tupdated\ttokens")
 	for _, op := range operators {
 		fmt.Printf("%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
 			op.ID,
@@ -769,6 +814,7 @@ func accountStatus(args []string) int {
 	fs := flag.NewFlagSet("account status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	if err := fs.Parse(args); err != nil {
@@ -785,6 +831,10 @@ func accountStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
+	if *jsonOut {
+		return printJSON(map[string]any{"account": rec})
+	}
+	fmt.Fprintln(os.Stderr, "id\tstatus\temail")
 	fmt.Printf("%s\t%s\t%s\n", rec.ID, rec.Status, tabSafe(rec.Email))
 	if rec.Status == "pending" {
 		fmt.Fprintln(os.Stderr, "pending: activation required before the account can be used")
