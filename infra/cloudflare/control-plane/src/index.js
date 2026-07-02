@@ -41,6 +41,7 @@ const err = (msg, status) => json({ schema_version: "witself.v0", error: msg }, 
 
 const DIRECTORY_PATH = /^\/v1\/directory\/([A-Za-z0-9_-]{1,128})$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
+const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 
 function timingSafeEqual(a, b) {
@@ -130,6 +131,38 @@ async function handleCells(request, env, url) {
     );
   }
 
+  // PURGE: the explicitly destructive removal path, for teardowns where the
+  // cell's data is genuinely dying (witself-infra down --destroy-accounts).
+  // Deletes every directory entry pointing at the cell, then the cell itself.
+  // Idempotent: re-running reports zero. The safe path is DELETE below, which
+  // refuses while accounts exist.
+  const pm = url.pathname.match(PURGE_PATH);
+  if (pm && request.method === "POST") {
+    const name = pm[1];
+    let purged = 0;
+    let cursor;
+    do {
+      const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+      for (const k of page.keys) {
+        const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+        if (entry && entry.cell === name) {
+          await env.DIRECTORY.delete(k.name);
+          purged++;
+        }
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    const key = `cell:${name}`;
+    const existed = (await env.DIRECTORY.get(key)) !== null;
+    if (existed) await env.DIRECTORY.delete(key);
+    return json({
+      schema_version: "witself.v0",
+      name,
+      purged_accounts: purged,
+      cell_deleted: existed,
+    });
+  }
+
   const m = url.pathname.match(CELL_PATH);
   if (m && request.method === "DELETE") {
     const name = m[1];
@@ -176,7 +209,11 @@ export default {
     }
 
     // Fleet registry (fleet-token authorized).
-    if (url.pathname === "/v1/cells" || CELL_PATH.test(url.pathname)) {
+    if (
+      url.pathname === "/v1/cells" ||
+      CELL_PATH.test(url.pathname) ||
+      PURGE_PATH.test(url.pathname)
+    ) {
       return handleCells(request, env, url);
     }
 
