@@ -1055,3 +1055,78 @@ func TestReapAccount(t *testing.T) {
 		t.Errorf("reap on self-hosted config = %d, want 404 (route unmounted)", resp.StatusCode)
 	}
 }
+
+// TestActivateAccount proves the activation contract: provision-token only,
+// 200 for a freshly activated or already-active account (idempotent second
+// click), 409 for a closed/ineligible account, 404 for unknown ids — and
+// both lifecycle verbs coexist on the shared route.
+func TestActivateAccount(t *testing.T) {
+	activate := func(_ context.Context, accountID string) (bool, error) {
+		switch accountID {
+		case "acc_pending":
+			return true, nil
+		case "acc_active":
+			return false, nil
+		case "acc_closed":
+			return false, ErrConflict
+		default:
+			return false, ErrNotFound
+		}
+	}
+	reap := func(_ context.Context, _ string) (bool, error) { return true, nil }
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:   "witself_prv_test",
+		ProvisionAccount: provision,
+		ReapAccount:      reap,
+		ActivateAccount:  activate,
+	}))
+	defer srv.Close()
+
+	do := func(path, token string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token string
+		want        int
+	}{
+		{"/v1/accounts/acc_pending:activate", "wrong", http.StatusUnauthorized},
+		{"/v1/accounts/acc_pending:activate", "witself_prv_test", http.StatusOK},
+		{"/v1/accounts/acc_active:activate", "witself_prv_test", http.StatusOK},
+		{"/v1/accounts/acc_closed:activate", "witself_prv_test", http.StatusConflict},
+		{"/v1/accounts/acc_missing:activate", "witself_prv_test", http.StatusNotFound},
+		{"/v1/accounts/acc_pending:reap", "witself_prv_test", http.StatusOK}, // dispatcher still reaps
+		{"/v1/accounts/acc_pending:frobnicate", "witself_prv_test", http.StatusNotFound},
+	} {
+		resp := do(tc.path, tc.token)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s (token %q) = %d, want %d", tc.path, tc.token, resp.StatusCode, tc.want)
+		}
+	}
+
+	// activated=true vs false must be distinguishable in the body.
+	resp := do("/v1/accounts/acc_active:activate", "witself_prv_test")
+	var out struct {
+		Activated bool   `json:"activated"`
+		Status    string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if out.Activated || out.Status != "active" {
+		t.Errorf("already-active response = %+v, want activated=false status=active", out)
+	}
+}

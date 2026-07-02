@@ -59,6 +59,14 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  // Verification email dispatch (Cloudflare Email Service, public beta).
+  // Requires Workers Paid + witwave.ai enabled as a sending domain; the
+  // Worker degrades gracefully (signup still succeeds) if sending fails.
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
   "observability": {
     "enabled": true
   }

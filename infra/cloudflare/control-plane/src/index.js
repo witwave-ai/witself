@@ -26,6 +26,8 @@
 //   acct:<account_id>    -> {"cell":"<name>","endpoint":"https://..."}
 //   pending:<account_id> -> {"cell":"<name>","created_at":"<iso>"}
 //                           reap candidate; dropped on activation/close/reap
+//   verify:<sha256(token)> -> {"account_id","cell","created_at"}
+//                           email-verification token (hash only, KV TTL 7d)
 //   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
 //                             "accepting","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
@@ -61,6 +63,10 @@ const json = (obj, status = 200, extra = {}) =>
 const err = (msg, status) => json({ schema_version: "witself.v0", error: msg }, status);
 
 const DIRECTORY_PATH = /^\/v1\/directory\/([A-Za-z0-9_-]{1,128})$/;
+const VERIFY_PATH = /^\/verify\/([0-9a-f]{64})$/;
+// Account ids are splice into URLs and HTML — same charset the directory
+// route accepts, enforced at every ingestion point.
+const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_CLOSE_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):close$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
@@ -503,7 +509,7 @@ async function handleSignup(request, env) {
   } catch {
     provisioned = null;
   }
-  if (!provisioned?.account_id || !provisioned?.bootstrap_token) {
+  if (!provisioned?.account_id || !provisioned?.bootstrap_token || !ACCOUNT_ID.test(provisioned.account_id)) {
     return err("cell returned an invalid provisioning response", 502);
   }
 
@@ -526,6 +532,22 @@ async function handleSignup(request, env) {
   fresh.uses = (fresh.uses ?? 0) + 1;
   await env.DIRECTORY.put(inviteKey, JSON.stringify(fresh));
 
+  // Verification email — best-effort by design: the account exists either
+  // way, and an unverified one is the reaper's problem, not signup's. The
+  // email address is used in flight and never stored here.
+  let emailSent = false;
+  try {
+    emailSent = await sendVerificationEmail(
+      env,
+      new URL(request.url).origin,
+      provisioned.email,
+      provisioned.account_id,
+      cell.name,
+    );
+  } catch (e) {
+    console.log(`signup: verification email for ${provisioned.account_id} failed: ${e}`);
+  }
+
   return json(
     {
       schema_version: "witself.v0",
@@ -533,10 +555,124 @@ async function handleSignup(request, env) {
       operator_id: provisioned.operator_id,
       email: provisioned.email,
       status: provisioned.status,
+      verification_email_sent: emailSent,
       cell: { name: cell.name, endpoint: cell.endpoint },
       bootstrap_token: provisioned.bootstrap_token,
     },
     201,
+  );
+}
+
+// sha256hex hashes a verification token for storage — KV holds only hashes,
+// so a KV read can never recover a clickable link.
+async function sha256hex(s) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// sendVerificationEmail mints a single-use verification token, stores its
+// hash (verify:<hash> -> {account_id, cell}, self-expiring), and emails the
+// link. Returns false when no EMAIL binding is configured — signup proceeds;
+// the account simply stays pending until some other activation path exists.
+async function sendVerificationEmail(env, origin, email, accountId, cellName) {
+  if (!env.EMAIL) {
+    return false;
+  }
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  const token = [...raw].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await env.DIRECTORY.put(
+    `verify:${await sha256hex(token)}`,
+    JSON.stringify({
+      account_id: accountId,
+      cell: cellName,
+      created_at: new Date().toISOString(),
+    }),
+    { expirationTtl: 7 * 24 * 3600 }, // links self-expire; the reaper usually wins long before
+  );
+  const link = `${origin}/verify/${token}`;
+  const deadline = await verificationDeadline(env);
+  await env.EMAIL.send({
+    to: email,
+    from: "no-reply@witwave.ai",
+    subject: "Verify your Witself account",
+    text: `Welcome to Witself.\n\nVerify your account (${accountId}) by opening this link:\n\n${link}\n\n${deadline} If you didn't sign up, ignore this email.\n`,
+    html: `<p>Welcome to <strong>Witself</strong>.</p><p>Verify your account (<code>${accountId}</code>) by clicking the link below:</p><p><a href="${link}">Verify my account</a></p><p>${deadline} If you didn't sign up, ignore this email.</p>`,
+  });
+  return true;
+}
+
+// verificationDeadline phrases the REAL reaper window for the email, so the
+// stated deadline and the enforcement can't drift apart.
+async function verificationDeadline(env) {
+  const cfg = (await env.DIRECTORY.get("config:reaper", { type: "json" })) ?? {};
+  if (cfg.enabled !== true || !(cfg.ttl_minutes > 0)) {
+    return "Unverified accounts may be closed automatically.";
+  }
+  const m = cfg.ttl_minutes;
+  const window =
+    m < 120 ? `${m} minutes` : m < 2880 ? `${Math.round(m / 60)} hours` : `${Math.round(m / 1440)} days`;
+  return `Unverified accounts are closed automatically after ${window}.`;
+}
+
+// handleVerify is GET /verify/<token> — the human half of activation. The
+// token's hash locates the account, the cell flips it active (only-if-pending
+// — the cell is truth), and only on the cell's acknowledgement does the
+// control plane retire the verification token and the reap candidate.
+async function handleVerify(env, token) {
+  const key = `verify:${await sha256hex(token)}`;
+  const entry = await env.DIRECTORY.get(key, { type: "json" });
+  if (!entry?.account_id || !entry?.cell || !ACCOUNT_ID.test(entry.account_id)) {
+    return htmlPage(404, "Link invalid or expired", "This verification link is invalid or has expired. If you already verified, your account is active — <code>ws account status</code> will confirm it. If the account was closed for missing the verification window, simply sign up again.");
+  }
+  const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+  if (!cell?.provision_token || !cell?.endpoint) {
+    return htmlPage(503, "Temporarily unavailable", "We couldn't reach your account's home just now. Please try the link again in a few minutes.");
+  }
+  let resp;
+  try {
+    resp = await fetch(`${cell.endpoint}/v1/accounts/${entry.account_id}:activate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cell.provision_token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return htmlPage(503, "Temporarily unavailable", "We couldn't reach your account's home just now. Please try the link again in a few minutes.");
+  }
+  let body = null;
+  try {
+    body = await resp.json();
+  } catch {
+    // Not JSON — not an answer from a witself-server handler.
+  }
+  if (resp.ok && body?.status === "active" && body?.account_id === entry.account_id) {
+    // Deliberately KEEP the verify: key: mail scanners and prefetchers GET
+    // links before the human ever clicks, so the human's click is often the
+    // SECOND request. Replay is harmless — the cell answers already-active
+    // idempotently — and the key (a hash) self-expires on its KV TTL.
+    await env.DIRECTORY.delete(`pending:${entry.account_id}`); // the reaper stands down
+    return htmlPage(200, "Account verified", `Your account <code>${entry.account_id}</code> is active. Back in your terminal, <code>ws account status</code> will confirm it — you're ready to create realms and agents.`);
+  }
+  // Dead-link arms match the cell handler's EXACT error strings: an old cell
+  // whose dispatcher predates :activate answers 404 with a DIFFERENT JSON
+  // message, and that must stay retryable — never burn a live account's link
+  // over a deploy-ordering gap.
+  if (resp.status === 409 && body?.error === "account cannot be activated") {
+    await env.DIRECTORY.delete(key); // beyond activating; the link is dead
+    return htmlPage(410, "Link expired", "This account was closed before it was verified. Sign up again to get a fresh account and link.");
+  }
+  if (resp.status === 404 && body?.error === "account not found") {
+    await env.DIRECTORY.delete(key);
+    return htmlPage(404, "Account not found", "This account no longer exists. Sign up again to get a fresh account and link.");
+  }
+  return htmlPage(503, "Temporarily unavailable", "Something went wrong verifying your account. Please try the link again in a few minutes.");
+}
+
+// htmlPage renders the tiny human-facing pages for /verify links.
+function htmlPage(status, title, message) {
+  return new Response(
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} — Witself</title><style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:15vh auto 0;padding:0 1.5rem;color:#1a1a1a}h1{font-size:1.4rem}code{background:#f2f2f2;padding:.1em .3em;border-radius:4px}</style></head><body><h1>${title}</h1><p>${message}</p></body></html>`,
+    { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
 
@@ -706,10 +842,11 @@ async function reapExpiredPendings(env) {
         // Activated first — drop the candidate, keep the routing.
         await env.DIRECTORY.delete(k.name);
         console.log(`reaper: ${accountId} activated before expiry; candidate dropped`);
-      } else if (resp.status === 404 && body?.error) {
-        // The cell's handler answered "no such account" (JSON error shape).
-        // A bare mux 404 — a cell too old to serve :reap — stays retryable,
-        // so enabling the reaper before a cell rolls loses nothing.
+      } else if (resp.status === 404 && body?.error === "account not found") {
+        // The cell's handler answered "no such account" — its EXACT string.
+        // A bare mux 404 (cell too old for :reap) or the dispatcher's
+        // unknown-action 404 stays retryable, so enabling the reaper before
+        // a cell rolls loses nothing.
         await env.DIRECTORY.delete(k.name);
         console.log(`reaper: ${accountId} unknown on ${entry.cell} (404); candidate dropped`);
       } else {
@@ -766,6 +903,15 @@ export default {
     // Fleet-wide pending-account expiry policy (fleet-token authorized).
     if (url.pathname === "/v1/reaper") {
       return handleReaper(request, env);
+    }
+
+    // Email-verification links: the human half of account activation.
+    const vm = url.pathname.match(VERIFY_PATH);
+    if (vm) {
+      if (request.method !== "GET") {
+        return err("method not allowed", 405);
+      }
+      return handleVerify(env, vm[1]);
     }
 
     // Signup: public, invite-gated. The one door you can knock on with nothing.

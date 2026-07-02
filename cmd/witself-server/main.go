@@ -284,6 +284,16 @@ func serve() int {
 				}
 				return reaped, err
 			}
+			cfg.ActivateAccount = func(ctx context.Context, accountID string) (bool, error) {
+				activated, err := st.ActivateAccount(ctx, accountID)
+				switch {
+				case errors.Is(err, store.ErrAccountNotFound):
+					return false, server.ErrNotFound
+				case errors.Is(err, store.ErrAccountNotActivatable):
+					return false, server.ErrConflict
+				}
+				return activated, err
+			}
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
 		cfg.Ready = st.Ping

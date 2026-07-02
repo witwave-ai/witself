@@ -18,7 +18,10 @@ type CreatedAccount struct {
 	Email          string `json:"email"`
 	Status         string `json:"status"`
 	BootstrapToken string `json:"bootstrap_token"`
-	Cell           struct {
+	// EmailSent reports whether the control plane dispatched a verification
+	// email (older control planes simply omit it).
+	EmailSent bool `json:"verification_email_sent"`
+	Cell      struct {
 		Name     string `json:"name"`
 		Endpoint string `json:"endpoint"`
 	} `json:"cell"`

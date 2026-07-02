@@ -941,9 +941,12 @@ func accountCreate(args []string) int {
 	if localName != "default" {
 		accountRef = " --account " + localName
 	}
-	if acct.Status == "active" {
+	switch {
+	case acct.Status == "active":
 		fmt.Fprintf(os.Stderr, "next: ws realm create%s NAME\n", accountRef)
-	} else {
+	case acct.EmailSent:
+		fmt.Fprintf(os.Stderr, "account is %s — a verification link was emailed to %s\nafter clicking it: ws account status%s\n", acct.Status, acct.Email, accountRef)
+	default:
 		fmt.Fprintf(os.Stderr, "account is %s — activation required before use\nnext: ws account status%s\n", acct.Status, accountRef)
 	}
 	return 0

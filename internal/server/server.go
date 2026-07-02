@@ -92,6 +92,14 @@ type Config struct {
 	// as provisioning; the only-if-pending guard lives in the implementation,
 	// which returns ErrConflict for an activated account.
 	ReapAccount func(ctx context.Context, accountID string) (reaped bool, err error)
+
+	// ActivateAccount, when set (with the provisioning pair), enables POST
+	// /v1/accounts/{id}:activate — the control plane flipping a pending
+	// account to active after its verification gate passes. The mirror of
+	// ReapAccount: only-if-pending, idempotent when already active
+	// (activated=false), ErrConflict when the account is closed or otherwise
+	// ineligible.
+	ActivateAccount func(ctx context.Context, accountID string) (activated bool, err error)
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -275,8 +283,8 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil {
-			mux.HandleFunc("POST /v1/accounts/", reapAccountHandler(cfg.ProvisionToken, cfg.ReapAccount))
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil {
+			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg.ProvisionToken, cfg.ReapAccount, cfg.ActivateAccount))
 		}
 	}
 	if cfg.Authenticate != nil {
@@ -530,43 +538,74 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 	}
 }
 
-// reapAccountHandler closes a still-pending account (POST
-// /v1/accounts/{id}:reap). Provision-token authorized — instance-level
-// authority, the same trust link as provisioning, so only the control plane's
-// expiry sweep can call it. 200 whether it reaped just now or found the
-// account already closed (idempotent); 409 when the account activated first
-// (the sweep's view was stale — the cell is truth); 404 for an unknown id.
-func reapAccountHandler(provisionToken string, reap func(ctx context.Context, accountID string) (bool, error)) http.HandlerFunc {
+// accountLifecycleHandler serves the provision-token-authorized lifecycle
+// verbs on POST /v1/accounts/{id}:reap and /v1/accounts/{id}:activate —
+// instance-level authority, the same trust link as provisioning, so only the
+// control plane can call them.
+//
+// reap: 200 whether it reaped just now or found the account already closed
+// (idempotent); 409 when the account activated first (the sweep's view was
+// stale — the cell is truth); 404 for an unknown id.
+//
+// activate: 200 whether it activated just now or was already active (an
+// idempotent second click); 409 when the account is closed or otherwise
+// ineligible (the link outlived its account); 404 for an unknown id.
+func accountLifecycleHandler(provisionToken string, reap, activate func(ctx context.Context, accountID string) (bool, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
-		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap")
-		if !ok {
-			writeJSONError(w, http.StatusNotFound, "not found")
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap"); ok && reap != nil {
+			reaped, err := reap(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account is active")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not reap account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"status":         "closed",
+				"reaped":         reaped,
+			})
 			return
 		}
-		reaped, err := reap(r.Context(), accountID)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			writeJSONError(w, http.StatusNotFound, "account not found")
-			return
-		case errors.Is(err, ErrConflict):
-			writeJSONError(w, http.StatusConflict, "account is active")
-			return
-		case err != nil:
-			writeJSONError(w, http.StatusInternalServerError, "could not reap account")
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "activate"); ok && activate != nil {
+			activated, err := activate(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account cannot be activated")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not activate account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"status":         "active",
+				"activated":      activated,
+			})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"schema_version": "witself.v0",
-			"account_id":     accountID,
-			"status":         "closed",
-			"reaped":         reaped,
-		})
+		// Deliberately distinct from the handlers' "account not found": the
+		// control plane treats that exact string as authoritative and this
+		// one as retryable, so a cell that doesn't serve an action yet never
+		// burns a verification link or a reap candidate.
+		writeJSONError(w, http.StatusNotFound, "unknown account action")
 	}
 }
 
