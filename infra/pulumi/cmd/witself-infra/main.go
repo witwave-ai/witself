@@ -98,7 +98,9 @@ flags:
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
   -gitops-revision GitOps repo revision (branch/tag)            (default "main")
   -domain        parent domain for cell hostnames               (default "cells.witself.witwave.ai")
-  -bootstrap-token-file first-operator bootstrap token file       (default "~/.witself/bootstrap/<cell>/bootstrap.token" when present)
+  -bootstrap-token-file first-operator bootstrap token file
+                  (default: ~/.witself/bootstrap/<cell>/bootstrap.token when
+                  present, else the shared ~/.witself/bootstrap.token)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -backend        state backend: s3|local                      (default "s3")
   -bootstrap      with -backend s3, create the backend if missing
@@ -152,7 +154,7 @@ func run(args []string) error {
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
 	gitopsRevision := fs.String("gitops-revision", cell.DefaultGitopsRevision, "GitOps repo revision (branch/tag)")
 	domain := fs.String("domain", cell.DefaultDomain, "parent domain for cell hostnames, e.g. cells.witself.witwave.ai")
-	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: ~/.witself/bootstrap/<cell>/bootstrap.token when present)")
+	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: per-cell ~/.witself/bootstrap/<cell>/bootstrap.token, else shared ~/.witself/bootstrap.token)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
@@ -476,15 +478,17 @@ func defaultBootstrapTokenFile(cellName string) (string, error) {
 		}
 		root = filepath.Join(home, ".witself")
 	}
-	path := filepath.Join(root, "bootstrap", cellName, "bootstrap.token")
-	// Fall back to the pre-rename file name if only it exists.
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		legacy := filepath.Join(root, "bootstrap", cellName, "bootstrap-token")
-		if _, lerr := os.Stat(legacy); lerr == nil {
-			return legacy, nil
-		}
+	// Most specific wins: a per-cell token (new then legacy name), else the
+	// shared ~/.witself/bootstrap.token used for all cells.
+	perCell := filepath.Join(root, "bootstrap", cellName, "bootstrap.token")
+	if _, err := os.Stat(perCell); err == nil {
+		return perCell, nil
 	}
-	return path, nil
+	legacy := filepath.Join(root, "bootstrap", cellName, "bootstrap-token")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, nil
+	}
+	return filepath.Join(root, "bootstrap.token"), nil
 }
 
 func readBootstrapTokenFile(path string, required bool) (token string, ok bool, err error) {
