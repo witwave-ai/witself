@@ -1326,7 +1326,16 @@ func accountCreate(args []string) int {
 	// Claim it: the same exchange a self-hosted bootstrap uses.
 	res, err := client.BootstrapLogin(ctx, acct.Cell.Endpoint, acct.BootstrapToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ws: account created but login failed: %v\n", err)
+		// Never strand the only credential: the bootstrap token is valid for
+		// about an hour — surface it with the finish-by-hand recipe instead
+		// of abandoning a freshly provisioned account to the reaper.
+		fmt.Fprintf(os.Stderr, "ws: account created but login failed: %v\n"+
+			"    finish by hand: (1) save the token below to a file, then\n"+
+			"    (2) ws auth login --endpoint %s --bootstrap-token-file FILE --out op.token\n"+
+			"    (3) ws account adopt --id %s --token-file op.token --name %s\n"+
+			"    bootstrap token (expires in ~1 hour, shown once):\n",
+			err, acct.Cell.Endpoint, acct.AccountID, localName)
+		fmt.Println(acct.BootstrapToken)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "logged in as operator %s\n", res.OperatorID)
