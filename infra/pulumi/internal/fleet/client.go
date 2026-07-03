@@ -210,11 +210,15 @@ type EvacuationResult struct {
 	Remaining int                `json:"remaining"`
 }
 
-// EvacuatedAccount is one line in an evacuation batch's report.
+// EvacuatedAccount is one line in an evacuation batch's report. Reaped is
+// set for pending accounts the Worker dropped inline instead of archiving —
+// signups too incomplete to preserve, treated the same way the pending
+// expiry sweep treats them.
 type EvacuatedAccount struct {
 	AccountID string `json:"account_id"`
 	OK        bool   `json:"ok"`
 	Error     string `json:"error,omitempty"`
+	Reaped    bool   `json:"reaped,omitempty"`
 }
 
 // Evacuate asks the control plane to move a batch of the cell's accounts into

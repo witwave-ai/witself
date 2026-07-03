@@ -1659,9 +1659,13 @@ async function handleEvacuate(request, env, cellName) {
   const results = [];
   for (const accountId of targets) {
     try {
-      await evacuateAccount(env, cellName, cell, accountId);
+      const outcome = (await evacuateAccount(env, cellName, cell, accountId)) ?? {};
       progress.done += 1;
-      results.push({ account_id: accountId, ok: true });
+      results.push({
+        account_id: accountId,
+        ok: true,
+        ...(outcome.reaped ? { reaped: true } : {}),
+      });
     } catch (e) {
       const msg = String(e?.message ?? e);
       progress.failed = [
@@ -1724,6 +1728,14 @@ async function evacuateAccount(env, cellName, cell, accountId) {
 
   // (1) System-suspend under the "evacuation" category. Owner-suspended
   // accounts keep their original category; closed tombstones are idempotent.
+  //
+  // Pending accounts — a signup landed on this cell moments before drain —
+  // refuse suspension with 409 "pending — not suspendable" (the cell's
+  // SuspendAccountSystem allows only active/suspended/closed). Without a
+  // rescue path, one late signup would wedge every teardown. Mirror the
+  // reaper: POST :reap, verify the acknowledged tombstone, retire pending:
+  // and acct:, and skip the archive step (incomplete signups die with the
+  // cell, same policy as the pending-expiry sweep at reapExpiredPendings).
   const suspendResp = await fetch(
     `${cell.endpoint}/v1/accounts/${accountId}:suspend`,
     {
@@ -1737,7 +1749,12 @@ async function evacuateAccount(env, cellName, cell, accountId) {
     },
   );
   if (!suspendResp.ok) {
-    throw new Error(`suspend ${suspendResp.status}`);
+    const suspendBody = await suspendResp.text().catch(() => "");
+    if (suspendResp.status === 409 && suspendBody.includes("pending")) {
+      await reapPendingDuringEvacuation(env, cell, accountId);
+      return { reaped: true };
+    }
+    throw new Error(`suspend ${suspendResp.status}: ${suspendBody.slice(0, 200)}`);
   }
   await suspendResp.text().catch(() => "");
 
@@ -2081,6 +2098,42 @@ async function restoreAccount(env, cellName, cell, accountId, archived) {
     // restore.
   }
   await env.DIRECTORY.delete(claimKey);
+}
+
+// reapPendingDuringEvacuation is the pending-account escape hatch inside an
+// evacuation batch. Mirrors reapExpiredPendings' contract exactly: only a
+// {status:"closed", account_id:<id>} acknowledgement is accepted as proof
+// the cell reaped the account, so a stray 2xx (LB default page, captive
+// portal) can't destroy live routing. Deletes pending: AND acct: on
+// success, then returns; the caller records reaped=true and does not
+// write an archive — incomplete signups die with the cell.
+async function reapPendingDuringEvacuation(env, cell, accountId) {
+  const reapResp = await fetch(
+    `${cell.endpoint}/v1/accounts/${accountId}:reap`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cell.provision_token}` },
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  const bodyText = await reapResp.text().catch(() => "");
+  if (!reapResp.ok) {
+    throw new Error(`reap-pending ${reapResp.status}: ${bodyText.slice(0, 200)}`);
+  }
+  let body = null;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    // ignore
+  }
+  if (body?.status !== "closed" || body?.account_id !== accountId) {
+    throw new Error(
+      `reap-pending returned 2xx without a valid acknowledgement for ${accountId}`,
+    );
+  }
+  await env.DIRECTORY.delete(`pending:${accountId}`);
+  await env.DIRECTORY.delete(`acct:${accountId}`);
+  console.log(`evacuate: reaped pending ${accountId} on ${cell.name || cell.endpoint}`);
 }
 
 // streamToR2Multipart pipes an unknown-length ReadableStream into an R2

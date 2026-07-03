@@ -494,7 +494,11 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 				return fmt.Errorf("evacuation failed for %s on %s: %s", a.AccountID, cellName, a.Error)
 			}
 			total++
-			fmt.Fprintf(os.Stderr, "evacuated %s from %s\n", a.AccountID, cellName)
+			if a.Reaped {
+				fmt.Fprintf(os.Stderr, "reaped pending %s on %s (no archive)\n", a.AccountID, cellName)
+			} else {
+				fmt.Fprintf(os.Stderr, "evacuated %s from %s\n", a.AccountID, cellName)
+			}
 		}
 		if res.Remaining == 0 {
 			if total == 0 && iter == 0 {
@@ -560,13 +564,13 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string) error {
 			// Remaining > 0 but the batch reported nothing — the control
 			// plane sees archived accounts it will not hand us. Silent loop
 			// would be wrong.
-			return fmt.Errorf("restore stalled on cell %s with %d account(s) still awaiting placement in region", cellName, res.Remaining)
+			return fmt.Errorf("restore stalled on cell %s with %d account(s) still awaiting placement in region %s", cellName, res.Remaining, res.Region)
 		}
 		if prevRemaining != -1 && res.Remaining >= prevRemaining {
 			// A batch fired (per-account "ok") but the count didn't drop.
 			// The acct: pointer never landed, or the archived: entry
 			// wasn't retired — either way, spinning is the wrong answer.
-			return fmt.Errorf("restore on cell %s is not making progress (%d accounts remaining after batch reported success)", cellName, res.Remaining)
+			return fmt.Errorf("restore on cell %s is not making progress in region %s (%d accounts remaining after batch reported success)", cellName, res.Region, res.Remaining)
 		}
 		prevRemaining = res.Remaining
 	}

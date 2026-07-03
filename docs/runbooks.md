@@ -205,3 +205,72 @@ ws account close --yes
 ```
 
 Add `--reason TEXT` to record why.
+
+## Decommission a cell and preserve its accounts
+
+`witself-infra destroy` is the fleet operator's counterpart to signup: it drains
+the cell (stops placement), evacuates every account into a per-account archive
+in Cloudflare R2, then removes the cell from the fleet and tears down the AWS
+resources. The accounts wait in R2 as `archived — awaiting placement` until
+they are restored onto another cell.
+
+```sh
+witself-infra destroy \
+  -account-alias sandbox -aws-profile witwave-sandbox \
+  -backend s3 -cloud aws -region us-west-2 -role dev \
+  -control-plane https://self.witwave.ai \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
+  -domain cells.witself.witwave.ai
+```
+
+You'll see one line per account: `evacuated acc_… from <cell>` for real users,
+`reaped pending acc_… on <cell> (no archive)` for signups that hadn't yet
+verified their email (those die with the cell — incomplete signups are not
+preserved). The loop ends with `<cell>: N accounts evacuated to Cloudflare R2`,
+after which Pulumi tears down the stack.
+
+Sandbox override: add `-destroy-accounts` to skip the archive step entirely
+and force-purge the directory entries. This is an explicit acknowledgment
+that every account on the cell dies with it — no restore is possible.
+
+While the archives sit in R2 you can verify state at any time:
+
+```sh
+ws account status --account <name>          # says "archived — awaiting placement"
+curl https://self.witwave.ai/v1/directory/<account-id>
+```
+
+## Bring archived accounts back onto a new cell
+
+`witself-infra up -restore-archives` closes the loop: after the new cell
+registers, it pulls every archived account whose recorded region matches this
+cell's region back from R2 into the cell's local database and reactivates the
+system-suspension. The user experience is invisible — old credentials still
+work, memories/facts/agents come back byte-identical to the export.
+
+```sh
+witself-infra up -restore-archives \
+  -account-alias sandbox -aws-profile witwave-sandbox \
+  -backend s3 -cloud aws -region us-west-2 -role dev \
+  -control-plane https://self.witwave.ai \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
+  ...  # the full up flag set
+```
+
+One line per account: `restored acc_… onto <cell>`. The loop ends with
+`<cell>: N accounts restored from Cloudflare R2`. If no archives match the
+cell's region you see `no archived accounts awaiting placement in region
+<region>` and the up completes normally — a fresh cell in a region with no
+archives is not an error.
+
+Placement rule: an archive is only restored into a cell in the SAME region it
+was exported from. A us-west-2 account never silently lands in eu-central-1;
+if you bring up an eu-central-1 cell with us-west-2 archives waiting, they
+stay in R2 until a us-west-2 cell exists.
+
+If restore fails mid-flight (one account errors, or the cell endpoint isn't
+ready yet), the up command exits with the failure detail. Re-run `up
+-restore-archives` after fixing — restoreAccount is idempotent per account,
+so already-restored accounts short-circuit and only the remaining ones
+finish. The Cloudflare Worker's `restore:<cell>` KV entry tracks
+cross-invocation progress if you need to debug.
