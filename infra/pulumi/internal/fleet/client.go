@@ -276,6 +276,53 @@ func (c *Client) Evacuate(ctx context.Context, name string, batch int) (Evacuati
 // restores) into it. Re-register the cell as accepting=true and retry.
 var ErrCellDrained = errors.New("cell is drained — cannot restore accounts into it")
 
+// ProbeResult reports what a POST /v1/cells/{name}:probe call saw when it
+// tried to reach the cell's API from inside the Cloudflare Worker. OK=true
+// means the Worker's GET on <cell>/v1/version returned a witself-server-
+// shaped JSON body. Otherwise Reason describes what actually happened
+// (DNS error, TLS error, HTTP status code, non-JSON response).
+type ProbeResult struct {
+	OK          bool   `json:"ok"`
+	Reason      string `json:"reason,omitempty"`
+	CellStatus  int    `json:"cell_status,omitempty"`
+	CellVersion string `json:"cell_version,omitempty"`
+}
+
+// Probe asks the control plane whether it can reach the named cell. The
+// Worker is the client that will do the actual restore, so its view of
+// cell reachability is what the driver's wait step should trust — not the
+// operator's local resolver, which can hold stale NXDOMAIN across
+// destroy+up cycles for hours (issue #22).
+//
+// Returns ErrNotRegistered for a 404 unknown cell (mirroring Evacuate /
+// Restore's disambiguated 404 handling). Any other HTTP failure comes
+// through as a generic error. A 200 always decodes into ProbeResult —
+// including probe-said-cell-is-not-ready cases, where OK is false and
+// Reason names the problem.
+func (c *Client) Probe(ctx context.Context, name string) (ProbeResult, error) {
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells/"+name+":probe", struct{}{}, nil)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	if code == http.StatusNotFound {
+		// Same disambiguation as Evacuate/Restore — an "unknown cell" body
+		// means the fleet doesn't know about it; anything else is either
+		// no-route (control plane too old) or transport-level 404.
+		if strings.Contains(body, "unknown cell") {
+			return ProbeResult{}, ErrNotRegistered
+		}
+		return ProbeResult{}, fmt.Errorf("probe cell: HTTP 404: %s (control plane may be too old — upgrade)", strings.TrimSpace(body))
+	}
+	if code != http.StatusOK {
+		return ProbeResult{}, fmt.Errorf("probe cell: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	var out ProbeResult
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		return ProbeResult{}, fmt.Errorf("decode probe response: %w", err)
+	}
+	return out, nil
+}
+
 // RestoreResult reports one :restore call's outcome. Restored is the
 // per-account report for THIS batch; Remaining is the number of archived:
 // pointers matching this cell's region still awaiting placement. The caller

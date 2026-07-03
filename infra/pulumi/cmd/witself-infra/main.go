@@ -22,7 +22,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -357,18 +356,19 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			var apiHost string
-			apiHost, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
 				// publish the A record, the ALB target has to pass its
-				// health check, and TLS has to deploy. Wait for the
-				// public API to actually answer before firing restore.
-				if err = waitForCellHealthy(ctx, apiHost, 20*time.Minute, 20*time.Second); err == nil {
-					var cl *fleet.Client
-					cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
-					if err == nil {
+				// health check, and TLS has to deploy. Poll the control
+				// plane's :probe verb (which runs inside the Cloudflare
+				// Worker, the client that will do the restore) until it
+				// reports the cell as reachable.
+				var cl *fleet.Client
+				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
+				if err == nil {
+					if err = waitForCellHealthy(ctx, cl, cellName, 20*time.Minute, 20*time.Second); err == nil {
 						err = restoreCell(ctx, cl, cellName)
 					}
 				}
@@ -442,49 +442,58 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 // typically takes 5–10 minutes; on a cell that was already up, it returns
 // on the first poll. The default budget comfortably covers the worst
 // realistic cold-start seen on the sandbox (~8 minutes) plus headroom.
-// httpClientFactory constructs the client used by waitForCellHealthy.
-// Overridable so tests can substitute an httptest-served client without
-// spinning up a real HTTPS listener.
-var httpClientFactory = func() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
+// cellProber is the subset of fleet.Client the wait step needs. Declared
+// locally so tests can substitute a fake Probe without spinning up a
+// real HTTP server or reaching for a package-level override hook.
+type cellProber interface {
+	Probe(ctx context.Context, name string) (fleet.ProbeResult, error)
 }
 
-func waitForCellHealthy(ctx context.Context, host string, maxWait, pollEvery time.Duration) error {
-	url := "https://" + host + "/v1/version"
-	client := httpClientFactory()
+// waitForCellHealthy polls the control plane's cell reachability probe
+// until it reports OK=true. The probe runs INSIDE the Cloudflare Worker,
+// which is the client that will do the actual restore, so its view of
+// cell reachability is what actually matters — not the operator's local
+// resolver, which on macOS can cache NXDOMAIN across destroy+up cycles
+// well past a wait budget (issue #22).
+//
+// Everything that must be true before restore can succeed — Argo CD
+// reconciled, external-dns wrote the A record, ALB target-group health
+// check passed, TLS certificate deployed, witself-server pod running
+// with DB migrations applied — is transitively true when the Worker's
+// GET on <cell>/v1/version returns witself-server-shaped JSON.
+func waitForCellHealthy(ctx context.Context, cl cellProber, cellName string, maxWait, pollEvery time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	started := time.Now()
 
-	fmt.Fprintf(os.Stderr, "waiting for cell %s API endpoint to be reachable (up to %s)…\n", host, maxWait)
-
-	// urlPrefix is what net/http prepends to every transport error, e.g.
-	// `Get "https://api.<cell>.<domain>/v1/version": `. It's 60-80 chars
-	// of noise we already know (the host is in the log line) and it
-	// otherwise consumes the truncation budget where the actual
-	// diagnostic tail — "no such host", "certificate has expired",
-	// "unknown authority" — lives. Strip it before anything else.
-	urlPrefix := `Get "` + url + `": `
+	fmt.Fprintf(os.Stderr, "waiting for cell %s to be reachable via the control plane (up to %s)…\n", cellName, maxWait)
 
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := client.Do(req)
-		// fullReason keeps the untruncated last-seen problem for the
-		// terminal timeout message; shortReason is what per-iteration
-		// progress lines log so they stay readable.
+		result, err := cl.Probe(ctx, cellName)
 		var fullReason string
-		if err == nil {
-			if resp.StatusCode == http.StatusOK {
-				_ = resp.Body.Close()
-				fmt.Fprintf(os.Stderr, "cell %s endpoint healthy (took %s)\n", host, time.Since(started).Round(time.Second))
-				return nil
+		if err == nil && result.OK {
+			verInfo := ""
+			if result.CellVersion != "" {
+				verInfo = fmt.Sprintf(" [witself-server %s]", result.CellVersion)
 			}
-			_ = resp.Body.Close()
-			fullReason = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			fmt.Fprintf(os.Stderr, "cell %s reachable%s (took %s)\n", cellName, verInfo, time.Since(started).Round(time.Second))
+			return nil
+		}
+		if err != nil {
+			// Probe-transport error (not the same as "the probe reported
+			// the cell isn't ready"). ErrNotRegistered means someone
+			// deregistered the cell — no amount of waiting fixes that.
+			if errors.Is(err, fleet.ErrNotRegistered) {
+				return fmt.Errorf("cell %s is not registered with the control plane — cannot probe", cellName)
+			}
+			fullReason = fmt.Sprintf("probe error: %s", err.Error())
 		} else {
-			fullReason = strings.TrimPrefix(err.Error(), urlPrefix)
+			// result.OK == false: the Worker reached the fleet but the
+			// probe reports the cell is not yet reachable. Reason carries
+			// the actual diagnostic (DNS lookup, TLS error, HTTP status).
+			fullReason = result.Reason
+			if fullReason == "" {
+				fullReason = fmt.Sprintf("HTTP %d", result.CellStatus)
+			}
 		}
 		shortReason := fullReason
 		if len(shortReason) > 120 {
@@ -492,10 +501,10 @@ func waitForCellHealthy(ctx context.Context, host string, maxWait, pollEvery tim
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("cell %s endpoint did not become healthy within %s (last: %s)", host, maxWait, fullReason)
+			return fmt.Errorf("cell %s did not become reachable within %s (last: %s)", cellName, maxWait, fullReason)
 		}
 
-		fmt.Fprintf(os.Stderr, "  %s: %s (%s elapsed)\n", host, shortReason, time.Since(started).Round(time.Second))
+		fmt.Fprintf(os.Stderr, "  %s: %s (%s elapsed)\n", cellName, shortReason, time.Since(started).Round(time.Second))
 
 		select {
 		case <-ctx.Done():

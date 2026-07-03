@@ -93,6 +93,7 @@ const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const EVACUATE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):evacuate$/;
 const RESTORE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):restore$/;
+const PROBE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):probe$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const INVITE_PATH = /^\/v1\/invites\/([a-z0-9][a-z0-9-]{2,63})$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -2135,6 +2136,77 @@ async function reapPendingDuringEvacuation(env, cell, accountId) {
   console.log(`evacuate: reaped pending ${accountId} on ${cell.name || cell.endpoint}`);
 }
 
+// handleProbe is POST /v1/cells/{name}:probe — a fleet-token-authorized
+// reachability check. Reads the cell's endpoint from KV, does a bounded
+// GET on <endpoint>/v1/version, and reports whether the Worker (which is
+// the client that will do the restore) can currently reach the cell.
+//
+// The probe ALWAYS returns 200 to the caller unless authorization fails
+// or the cell is unknown; whether the cell itself is reachable is
+// reported in the response body via {ok, reason}. This keeps the wait
+// loop simple: any HTTP-level failure is an infrastructure problem the
+// caller can't fix by retrying, but ok=false is a "cell not ready yet"
+// signal it should keep polling on.
+async function handleProbe(request, env, cellName) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  const cell = await env.DIRECTORY.get(`cell:${cellName}`, { type: "json" });
+  if (!cell) {
+    return err("unknown cell", 404);
+  }
+  if (!cell.endpoint) {
+    return json({ ok: false, reason: "cell has no endpoint" });
+  }
+
+  let resp;
+  try {
+    resp = await fetch(`${cell.endpoint}/v1/version`, {
+      method: "GET",
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (e) {
+    // DNS errors, TLS errors, connect refused all land here.
+    const msg = String(e?.message ?? e);
+    return json({ ok: false, reason: msg.slice(0, 200) });
+  }
+
+  if (!resp.ok) {
+    // The cell answered but not with success — during warmup this looks
+    // like 502 (ALB target draining), 503 (pod not ready), 404 (default
+    // backend before ingress reconciles).
+    const body = await resp.text().catch(() => "");
+    return json({
+      ok: false,
+      reason: `HTTP ${resp.status}: ${body.slice(0, 120)}`,
+      cell_status: resp.status,
+    });
+  }
+
+  // Success shape: witself-server /v1/version returns
+  // {schema_version, version, commit, date}. Extract version so the
+  // driver can log which build actually answered.
+  let cellVersion = "";
+  try {
+    const body = await resp.json();
+    cellVersion = body?.version ?? "";
+  } catch {
+    // Answered 200 but not with a witself-server-shaped JSON: something
+    // else is on that hostname. Treat as not-ready — a fresh witself
+    // pod will answer correctly once it starts.
+    return json({
+      ok: false,
+      reason: "cell /v1/version response was not JSON — wrong service on the endpoint?",
+      cell_status: resp.status,
+    });
+  }
+  return json({
+    ok: true,
+    cell_status: resp.status,
+    cell_version: cellVersion,
+  });
+}
+
 // streamToR2Multipart pipes an unknown-length ReadableStream into an R2
 // object using multipart uploads. It's the workhorse for the "no
 // Content-Length on cell exports" reality: R2's single-shot put() rejects
@@ -2272,6 +2344,19 @@ export default {
         return err("method not allowed", 405);
       }
       return handleRestore(request, env, rsm[1]);
+    }
+
+    // Cell reachability probe: the driver polls this between registerCell
+    // and restoreCell so the wait step reflects the Worker's DNS/routing
+    // view — the client that will actually do the restore — rather than
+    // the operator's local resolver, which can hold stale NXDOMAIN across
+    // destroy+up cycles for hours (see issue #22).
+    const pbm = url.pathname.match(PROBE_PATH);
+    if (pbm) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleProbe(request, env, pbm[1]);
     }
 
     // Invite codes (fleet-token authorized).
