@@ -22,11 +22,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
@@ -355,12 +357,20 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
+			var apiHost string
+			apiHost, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
 			if err == nil && *restoreArchives {
-				var cl *fleet.Client
-				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
-				if err == nil {
-					err = restoreCell(ctx, cl, cellName)
+				// Pulumi returning success doesn't mean the cell is
+				// reachable — Argo has to reconcile, external-dns has to
+				// publish the A record, the ALB target has to pass its
+				// health check, and TLS has to deploy. Wait for the
+				// public API to actually answer before firing restore.
+				if err = waitForCellHealthy(ctx, apiHost, 20*time.Minute, 20*time.Second); err == nil {
+					var cl *fleet.Client
+					cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
+					if err == nil {
+						err = restoreCell(ctx, cl, cellName)
+					}
 				}
 			}
 		}
@@ -387,19 +397,21 @@ func run(args []string) error {
 }
 
 // registerCell reports the freshly provisioned cell to the control plane. The
-// endpoint comes from the cell's apiHost output (api.<cell>.<domain>).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region string) error {
+// endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
+// hostname is returned so callers can chain a readiness poll before the
+// next post-provision step (restore-archives).
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region string) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
-		return err
+		return "", err
 	}
 	outs, err := stack.Outputs(ctx)
 	if err != nil {
-		return fmt.Errorf("read outputs for fleet registration: %w", err)
+		return "", fmt.Errorf("read outputs for fleet registration: %w", err)
 	}
 	host, _ := outs["apiHost"].Value.(string)
 	if host == "" {
-		return fmt.Errorf("cell exports no apiHost (ingress/domain disabled) — cannot register with the control plane")
+		return "", fmt.Errorf("cell exports no apiHost (ingress/domain disabled) — cannot register with the control plane")
 	}
 	// The per-cell provisioning credential rides the registration payload; the
 	// control plane stores it and presents it to this cell on each signup.
@@ -411,10 +423,75 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 		Region:         region,
 		ProvisionToken: provisionToken,
 	}); err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
-	return nil
+	return host, nil
+}
+
+// waitForCellHealthy polls the cell's public API endpoint until GET
+// /v1/version returns 200. Everything that must be true before -restore-
+// archives can succeed — Argo CD reconciled, external-dns wrote the A
+// record, ALB target-group health check passed, TLS certificate deployed,
+// witself-server pod running with DB migrations applied — is transitively
+// true when /v1/version answers 200 (the API listener refuses to accept
+// requests until migrations complete, and the ALB won't route until the
+// health check passes).
+//
+// On a fresh cell (Pulumi just finished, Argo hasn't reconciled) this
+// typically takes 5–10 minutes; on a cell that was already up, it returns
+// on the first poll. The default budget comfortably covers the worst
+// realistic cold-start seen on the sandbox (~8 minutes) plus headroom.
+// httpClientFactory constructs the client used by waitForCellHealthy.
+// Overridable so tests can substitute an httptest-served client without
+// spinning up a real HTTPS listener.
+var httpClientFactory = func() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
+}
+
+func waitForCellHealthy(ctx context.Context, host string, maxWait, pollEvery time.Duration) error {
+	url := "https://" + host + "/v1/version"
+	client := httpClientFactory()
+	deadline := time.Now().Add(maxWait)
+	started := time.Now()
+
+	fmt.Fprintf(os.Stderr, "waiting for cell %s API endpoint to be reachable (up to %s)…\n", host, maxWait)
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		var reason string
+		if err == nil {
+			if resp.StatusCode == http.StatusOK {
+				_ = resp.Body.Close()
+				fmt.Fprintf(os.Stderr, "cell %s endpoint healthy (took %s)\n", host, time.Since(started).Round(time.Second))
+				return nil
+			}
+			_ = resp.Body.Close()
+			reason = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		} else {
+			// Truncate wordy net.OpError chains so the progress line stays readable.
+			reason = err.Error()
+			if len(reason) > 120 {
+				reason = reason[:117] + "..."
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("cell %s endpoint did not become healthy within %s (last: %s)", host, maxWait, reason)
+		}
+
+		fmt.Fprintf(os.Stderr, "  %s: %s (%s elapsed)\n", host, reason, time.Since(started).Round(time.Second))
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollEvery):
+		}
+	}
 }
 
 // removeCell drains the cell and removes it from the fleet ahead of teardown.
