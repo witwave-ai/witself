@@ -225,6 +225,22 @@ func RefreshToken(name, operatorToken string) error {
 	return nil
 }
 
+// SetEmail updates an existing binding's contact email — the local mirror of
+// a server-side email change.
+func SetEmail(name, email string) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	a, ok := cfg.Accounts[name]
+	if !ok {
+		return fmt.Errorf("no local account named %q", name)
+	}
+	a.Email = email
+	cfg.Accounts[name] = a
+	return write(cfg)
+}
+
 // Delete removes a named account's binding and token (used when it closes).
 func Delete(name string) error {
 	cfg, err := Load()

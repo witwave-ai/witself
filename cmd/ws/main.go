@@ -793,6 +793,8 @@ func accountCmd(args []string) int {
 		return accountStatus(args[1:])
 	case "resend-verification":
 		return accountResendVerification(args[1:])
+	case "change-email":
+		return accountChangeEmail(args[1:])
 	case "recover":
 		return accountRecover(args[1:])
 	case "close":
@@ -844,6 +846,55 @@ func accountList(args []string) int {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", name, a.ID, tabSafe(a.Email))
 	}
 	flush()
+	return 0
+}
+
+// accountChangeEmail moves the account's contact email: a confirmation code
+// proves the NEW inbox can receive, a notice warns the old one, and only the
+// owner may commit. Routine and authenticated — unlike recovery, nothing is
+// rotated.
+func accountChangeEmail(args []string) int {
+	fs := flag.NewFlagSet("account change-email", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	newEmail := fs.String("new-email", "", "the address to move the account to")
+	code := fs.String("code", "", "confirmation code from the new address (second step)")
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *newEmail == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account change-email --new-email EMAIL [--code CODE] [--account NAME]")
+		return 2
+	}
+	name, acct, tok, err := local.Resolve(*account)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	ctx := context.Background()
+	if *code == "" {
+		if err := client.RequestEmailChange(ctx, *endpoint, acct.ID, tok, *newEmail); err != nil {
+			// The request refuses if the alarm can't be delivered — the
+			// old-address notice is the counter-move channel, so a mail
+			// outage there fails the request rather than proceeding
+			// silently.
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "a confirmation code was emailed to %s (valid ~15 minutes); a warning notice went to the current address so you'd see it if this wasn't you.\nnext: ws account change-email --new-email %s --code CODE\n", *newEmail, *newEmail)
+		return 0
+	}
+	committed, err := client.RedeemEmailChange(ctx, *endpoint, acct.ID, tok, *newEmail, *code)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := local.SetEmail(name, committed); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: email changed to %s, but updating the local binding failed: %v\n", committed, err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "email changed to %s for account %q (%s)\n", committed, name, acct.ID)
 	return 0
 }
 
@@ -1292,6 +1343,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws account list         List this machine's local account names")
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
 	usageLine(w, "  ws account recover      Email a recovery code, redeem it for a fresh owner token")
+	usageLine(w, "  ws account change-email Move the account to a new address (code-confirmed)")
 	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")

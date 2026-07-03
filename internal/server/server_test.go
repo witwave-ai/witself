@@ -1130,3 +1130,68 @@ func TestActivateAccount(t *testing.T) {
 		t.Errorf("already-active response = %+v, want activated=false status=active", out)
 	}
 }
+
+// TestUpdateAccountEmail proves the email-change verb's contract: provision
+// token only, owner-only refusals pass through as 403, non-active as 409,
+// and the committed address echoes back normalized.
+func TestUpdateAccountEmail(t *testing.T) {
+	update := func(_ context.Context, accountID, operatorID, _ string) error {
+		switch {
+		case accountID == "acc_missing":
+			return ErrNotFound
+		case operatorID == "opr_member":
+			return ErrNotAccountOwner
+		case accountID == "acc_pending":
+			return ErrConflict
+		}
+		return nil
+	}
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:     "witself_prv_test",
+		ProvisionAccount:   provision,
+		UpdateAccountEmail: update,
+	}))
+	defer srv.Close()
+
+	do := func(id, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/accounts/"+id+":update-email", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer witself_prv_test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		id, body string
+		want     int
+	}{
+		{"acc_x", `{"operator_id":"opr_owner","new_email":"NEW@Example.com"}`, http.StatusOK},
+		{"acc_x", `{"operator_id":"opr_member","new_email":"n@e.c"}`, http.StatusForbidden},
+		{"acc_pending", `{"operator_id":"opr_owner","new_email":"n@e.c"}`, http.StatusConflict},
+		{"acc_missing", `{"operator_id":"opr_owner","new_email":"n@e.c"}`, http.StatusNotFound},
+		{"acc_x", `{"operator_id":"opr_owner","new_email":"not-an-email"}`, http.StatusBadRequest},
+		{"acc_x", `{"new_email":"n@e.c"}`, http.StatusBadRequest},
+	} {
+		resp := do(tc.id, tc.body)
+		if tc.want == http.StatusOK {
+			var out struct {
+				Email string `json:"email"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatal(err)
+			}
+			if out.Email != "new@example.com" {
+				t.Errorf("committed email = %q, want normalized new@example.com", out.Email)
+			}
+		}
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("update-email %s %s = %d, want %d", tc.id, tc.body, resp.StatusCode, tc.want)
+		}
+	}
+}

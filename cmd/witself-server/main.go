@@ -304,6 +304,28 @@ func serve() int {
 				}
 				return server.AccountRecord{ID: a.ID, Email: a.Email, Status: a.Status}, nil
 			}
+			cfg.UpdateAccountEmail = func(ctx context.Context, accountID, operatorID, newEmail string) error {
+				err := st.UpdateAccountEmail(ctx, accountID, operatorID, newEmail)
+				switch {
+				case errors.Is(err, store.ErrAccountNotFound):
+					return server.ErrNotFound
+				case errors.Is(err, store.ErrNotAccountOwner):
+					return server.ErrNotAccountOwner
+				case errors.Is(err, store.ErrAccountNotActive):
+					return server.ErrConflict
+				}
+				return err
+			}
+			cfg.UndoAccountEmail = func(ctx context.Context, accountID, expectedCurrent, newEmail string) error {
+				err := st.UndoAccountEmail(ctx, accountID, expectedCurrent, newEmail)
+				switch {
+				case errors.Is(err, store.ErrAccountNotFound):
+					return server.ErrNotFound
+				case errors.Is(err, store.ErrConflictingUndo):
+					return server.ErrEmailChangedSinceUndo
+				}
+				return err
+			}
 			cfg.RecoverAccount = func(ctx context.Context, accountID string) (server.ProvisionedAccount, error) {
 				p, err := st.RecoverAccount(ctx, accountID, provisionBootstrapTTL)
 				switch {

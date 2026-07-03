@@ -157,6 +157,39 @@ func RedeemRecovery(ctx context.Context, controlPlane, accountID, code string) (
 	return &out, nil
 }
 
+// RequestEmailChange asks the control plane to email a confirmation code to
+// the NEW address (proving it can receive) and a notice to the old one.
+// Operator-token authenticated — this is a routine change by a logged-in
+// owner, not a recovery.
+func RequestEmailChange(ctx context.Context, controlPlane, accountID, operatorToken, newEmail string) error {
+	body, err := json.Marshal(map[string]string{"new_email": newEmail})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":change-email"
+	return doJSON(ctx, http.MethodPost, url, operatorToken, body, nil)
+}
+
+// RedeemEmailChange commits the change with the emailed code and returns the
+// committed address.
+func RedeemEmailChange(ctx context.Context, controlPlane, accountID, operatorToken, newEmail, code string) (string, error) {
+	body, err := json.Marshal(map[string]string{"new_email": newEmail, "code": code})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Email string `json:"email"`
+	}
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":change-email"
+	if err := doJSON(ctx, http.MethodPost, url, operatorToken, body, &out); err != nil {
+		return "", err
+	}
+	if out.Email == "" {
+		return "", fmt.Errorf("control plane returned no email")
+	}
+	return out.Email, nil
+}
+
 // CloseAccount permanently closes an account via the control plane
 // (POST {controlPlane}/v1/accounts/{id}:close). The operator token is forwarded
 // to the account's cell, which authorizes (owner-only) and tombstones; the

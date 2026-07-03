@@ -90,6 +90,18 @@ and belong to `acc_01xyz`. On success the binding is saved like `ws account
 create` would: follow-up commands are just `--account shared-account`.
 `--name` is required; adopting never falls back to `default`.
 
+## Change the account email
+
+A confirmation code goes to the **new** address (proving it can receive), and
+a notice goes to the current one. Owner-only; nothing else changes — tokens,
+operators, and agents all keep working.
+
+```sh
+ws account change-email --new-email new@example.com
+# check the new address for the code, then:
+ws account change-email --new-email new@example.com --code 123-456-789
+```
+
 ## Close an account
 
 Closing is permanent: every credential is revoked and the account is retired

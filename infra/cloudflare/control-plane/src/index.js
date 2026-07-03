@@ -31,6 +31,11 @@
 //   recover:<account_id> -> {"code_hash","code_expires_at","attempts",
 //                           "emails_sent","last_email_at"} (KV TTL 24h)
 //                           recovery code + rate-limit state, phantom ids too
+//   emailchange:<account_id> -> {"code_hash","code_expires_at","new_email",
+//                           "attempts","emails_sent","last_email_at"} (KV TTL 24h)
+//                           pending email change + rate-limit state
+//   undoemail:<account_id> -> {"code_hash","old_email","new_email","expires_at"}
+//                           (KV TTL 48h) — undo window shipped in the notice
 //   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
 //                             "accepting","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
@@ -73,6 +78,8 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_CLOSE_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):close$/;
 const ACCOUNT_RESEND_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):resend-verification$/;
 const ACCOUNT_RECOVER_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):recover$/;
+const ACCOUNT_CHANGE_EMAIL_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):change-email$/;
+const UNDO_EMAIL_PATH = /^\/undo-email\/([0-9a-f]{64})$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -964,6 +971,303 @@ async function handleRecover(request, env, accountId) {
   });
 }
 
+// handleChangeEmail is POST /v1/accounts/{id}:change-email — a routine,
+// operator-authenticated move of the account's contact address. Two modes by
+// body: {new_email} sends a confirmation code to the NEW address (proving it
+// can receive) plus a warning notice to the current one; {new_email, code}
+// commits via the cell's owner-only :update-email. Unlike recovery nothing
+// rotates, and unlike recovery there is no anti-enumeration theater — the
+// caller is already authenticated.
+async function handleChangeEmail(request, env, accountId) {
+  const auth = request.headers.get("Authorization");
+  if (!auth) {
+    return err("operator token required", 401);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return err("invalid JSON body", 400);
+  }
+  const newEmail = String(body.new_email ?? "").trim().toLowerCase();
+  if (!newEmail || !newEmail.includes("@")) {
+    return err("valid new_email required", 400);
+  }
+  const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (!entry) {
+    return err("unknown account", 404);
+  }
+  // The caller must hold a live operator token for THIS account. cell.endpoint
+  // (live registry) is preferred over entry.endpoint (frozen at signup) so a
+  // rebuild/re-endpoint of the cell keeps working.
+  const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+  if (!cell?.endpoint || !cell?.provision_token) {
+    return err(`cell ${entry.cell} unavailable — try again shortly`, 502);
+  }
+  let account = null;
+  let operatorID = "";
+  try {
+    const resp = await fetch(`${cell.endpoint}/v1/account`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      return new Response(text, {
+        status: resp.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    account = (await resp.json()).account;
+    const who = await fetch(`${cell.endpoint}/v1/whoami`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (who.ok) {
+      operatorID = (await who.json()).principal?.operator_id ?? "";
+    }
+  } catch {
+    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+  }
+  if (!account?.id || account.id !== accountId) {
+    return err("token does not belong to this account", 403);
+  }
+  if (account.status !== "active") {
+    return err(`account is ${account.status} — email changes need an active account`, 409);
+  }
+  if (!operatorID) {
+    return err("could not identify the operator — try again shortly", 502);
+  }
+  // Owner-gate the request too, not just the commit. Non-owner tokens must
+  // not be able to burn the 5/24h quota or noise up the owner's inbox.
+  let operators = null;
+  try {
+    const list = await fetch(`${cell.endpoint}/v1/operators`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (list.ok) {
+      operators = (await list.json()).operators;
+    }
+  } catch {
+    operators = null;
+  }
+  const me = Array.isArray(operators)
+    ? operators.find((o) => o?.id === operatorID)
+    : null;
+  if (!me?.is_root && me?.role !== "account_owner") {
+    return err("only the account owner can change the email", 403);
+  }
+
+  if (!account.email) {
+    // No prior address = no counter-move channel. Refuse rather than
+    // silently move the anchor without an alarm path.
+    return err("this account has no email on file — recovery must run through support", 409);
+  }
+
+  const key = `emailchange:${accountId}`;
+  const state = (await env.DIRECTORY.get(key, { type: "json" })) ?? {};
+
+  if (!body.code) {
+    // ---- Request mode: code to the new address, notice to the old. ----
+    if ((state.emails_sent ?? 0) >= 5) {
+      return err("too many email-change requests for this account — try again tomorrow", 429);
+    }
+    if (state.last_email_at && Date.now() - Date.parse(state.last_email_at) < 2 * 60 * 1000) {
+      return err("a confirmation code was just sent — wait a couple of minutes", 429);
+    }
+    if (!env.EMAIL) {
+      return err("email sending is not configured", 502);
+    }
+    const raw = new Uint32Array(3);
+    crypto.getRandomValues(raw);
+    const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
+    try {
+      await env.EMAIL.send({
+        to: newEmail,
+        from: "no-reply@witwave.ai",
+        subject: "Confirm your new Witself account email",
+        text: `A request was made to move Witself account ${accountId} to this address.\n\nConfirmation code: ${code}\n\nIt expires in 15 minutes. Confirm with:\n\n  ws account change-email --new-email ${newEmail} --code ${code}\n\nIf you don't recognize this, ignore this email.\n`,
+        html: `<p>A request was made to move <strong>Witself</strong> account <code>${accountId}</code> to this address.</p><p>Confirmation code: <strong>${code}</strong></p><p>It expires in 15 minutes. Confirm with:</p><pre>ws account change-email --new-email ${newEmail} --code ${code}</pre><p>If you don't recognize this, ignore this email.</p>`,
+      });
+    } catch (e) {
+      console.log(`change-email: code to ${accountId}'s new address failed: ${e}`);
+      return err("could not send the confirmation email — try again shortly", 502);
+    }
+    // Persist only after the code actually left; a send failure must not
+    // burn quota or corrupt an issued code.
+    state.code_hash = await sha256hex(code.replaceAll("-", ""));
+    state.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    state.new_email = newEmail;
+    state.attempts = 0;
+    state.emails_sent = (state.emails_sent ?? 0) + 1;
+    state.last_email_at = new Date().toISOString();
+    await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+    // Alarm to the CURRENT address is REQUIRED — it is the only counter-move
+    // channel for the stolen-token threat. A send failure must fail the
+    // request; nothing has committed yet, and the caller can retry once
+    // outbound mail recovers.
+    if (account.email === newEmail) {
+      return json({
+        schema_version: "witself.v0",
+        account_id: accountId,
+        confirmation_email_sent: true,
+        notice_sent: false,
+        notice_status: "same_address",
+      });
+    }
+    try {
+      await env.EMAIL.send({
+        to: account.email,
+        from: "no-reply@witwave.ai",
+        subject: "Your Witself account email is being changed",
+        text: `A request was made to move Witself account ${accountId} from this address to ${newEmail}.\n\nIf this was you, nothing to do — confirm from the new inbox. If it was NOT you, someone may hold your operator token: run \`ws account recover\` right now to rotate the owner credentials before the change commits. After the change commits, an undo link stays live for 48 hours (delivered separately).\n`,
+        html: `<p>A request was made to move <strong>Witself</strong> account <code>${accountId}</code> from this address to <code>${newEmail}</code>.</p><p>If this was you, nothing to do — confirm from the new inbox. If it was <strong>not</strong> you, someone may hold your operator token: run <code>ws account recover</code> right now to rotate the owner credentials before the change commits. After the change commits, an undo link stays live for 48 hours (delivered separately).</p>`,
+      });
+    } catch (e) {
+      console.log(`change-email: notice to ${accountId}'s old address failed: ${e}`);
+      return err("could not deliver the alarm to your current address — try again shortly", 502);
+    }
+    return json({
+      schema_version: "witself.v0",
+      account_id: accountId,
+      confirmation_email_sent: true,
+      notice_sent: true,
+    });
+  }
+
+  // ---- Redeem mode: verify the code, then the cell commits. ----
+  if (!state.code_hash || !state.code_expires_at) {
+    return err("invalid or expired confirmation code", 401);
+  }
+  if ((state.attempts ?? 0) >= 5) {
+    return err("too many attempts — request a new code", 429);
+  }
+  state.attempts = (state.attempts ?? 0) + 1;
+  await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+  const presented = await sha256hex(String(body.code).replace(/[^0-9]/g, ""));
+  if (
+    presented !== state.code_hash ||
+    Date.parse(state.code_expires_at) < Date.now() ||
+    state.new_email !== newEmail
+  ) {
+    return err("invalid or expired confirmation code", 401);
+  }
+
+  const oldEmail = account.email;
+  let resp;
+  try {
+    resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:update-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({ operator_id: operatorID, new_email: newEmail }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+  }
+  let committed = null;
+  try {
+    committed = await resp.json();
+  } catch {
+    committed = null;
+  }
+  if (!resp.ok || committed?.email !== newEmail) {
+    if (resp.status === 403 && committed?.error) {
+      return err("only the account owner can change the email", 403);
+    }
+    return err("email change failed — try again shortly", resp.status === 409 ? 409 : 502);
+  }
+  // The anchor moved: any live recovery code was mailed to the OLD address,
+  // which may now be compromised. Kill it. Rate-limit counters do NOT need
+  // to survive an anchor move.
+  await env.DIRECTORY.delete(`recover:${accountId}`);
+  // Undo window: a link in the OLD inbox re-points the email for 48h,
+  // matched by hash — the raw token is only ever known to the recipient.
+  const undoRaw = new Uint8Array(32);
+  crypto.getRandomValues(undoRaw);
+  const undoTok = [...undoRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const undoTtl = 48 * 3600;
+  await env.DIRECTORY.put(
+    `undoemail:${await sha256hex(undoTok)}`,
+    JSON.stringify({
+      account_id: accountId,
+      cell: entry.cell,
+      old_email: oldEmail,
+      new_email: newEmail,
+      expires_at: new Date(Date.now() + undoTtl * 1000).toISOString(),
+    }),
+    { expirationTtl: undoTtl },
+  );
+  const undoLink = `${new URL(request.url).origin}/undo-email/${undoTok}`;
+  try {
+    await env.EMAIL.send({
+      to: oldEmail,
+      from: "no-reply@witwave.ai",
+      subject: "Your Witself account email was changed",
+      text: `Witself account ${accountId} was moved from this address to ${newEmail}.\n\nIf this was NOT you: open the link below within 48 hours to revert the change and re-point the account back to this address. After reverting, run \`ws account recover\` from your terminal to rotate the owner credentials.\n\n  ${undoLink}\n`,
+      html: `<p><strong>Witself</strong> account <code>${accountId}</code> was moved from this address to <code>${newEmail}</code>.</p><p>If this was <strong>not</strong> you: open the link below within 48 hours to revert the change and re-point the account back to this address. After reverting, run <code>ws account recover</code> from your terminal to rotate the owner credentials.</p><p><a href="${undoLink}">Revert the email change</a></p>`,
+    });
+  } catch (e) {
+    console.log(`change-email: undo link to ${accountId}'s old address failed: ${e}`);
+  }
+  await env.DIRECTORY.delete(key); // the code is spent
+  return json({
+    schema_version: "witself.v0",
+    account_id: accountId,
+    email: newEmail,
+  });
+}
+
+// handleUndoEmail is the human half of the undo window: GET /undo-email/<tok>
+// re-points the account back to the OLD address. Possession of the token IS
+// the authorization — it was only ever delivered to the old inbox — so the
+// worker calls the cell's undo variant of :update-email under the provision
+// token; the cell checks that the current email still matches the snapshot
+// so a stale link can't roll back a subsequent legitimate change.
+async function handleUndoEmail(env, token) {
+  const key = `undoemail:${await sha256hex(token)}`;
+  const undo = await env.DIRECTORY.get(key, { type: "json" });
+  if (!undo?.account_id || !undo?.old_email || !ACCOUNT_ID.test(undo.account_id)) {
+    return htmlPage(404, "Undo link invalid or expired", "This undo link is invalid or has already been used.");
+  }
+  const cell = await env.DIRECTORY.get(`cell:${undo.cell}`, { type: "json" });
+  if (!cell?.provision_token || !cell?.endpoint) {
+    return htmlPage(503, "Temporarily unavailable", "We couldn't reach your account's home just now. Please try the link again in a few minutes.");
+  }
+  let resp;
+  try {
+    resp = await fetch(`${cell.endpoint}/v1/accounts/${undo.account_id}:update-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({
+        undo: true,
+        expected_current: undo.new_email,
+        new_email: undo.old_email,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return htmlPage(503, "Temporarily unavailable", "The revert couldn't be applied just now. Please try the link again in a few minutes.");
+  }
+  const committed = await resp.json().catch(() => null);
+  if (resp.status === 409) {
+    return htmlPage(409, "Undo link is stale", "The account's email has changed again since this link was issued. If you didn't authorize either change, use <code>ws account recover</code> to rotate the owner credentials.");
+  }
+  if (!resp.ok || committed?.email !== undo.old_email) {
+    return htmlPage(503, "Temporarily unavailable", "The revert couldn't be applied just now. Please try the link again in a few minutes.");
+  }
+  await env.DIRECTORY.delete(key);
+  await env.DIRECTORY.delete(`recover:${undo.account_id}`);
+  return htmlPage(200, "Email change reverted", `The account's email is back to <code>${undo.old_email}</code>. Run <code>ws account recover</code> from your terminal now to rotate the owner credentials.`);
+}
+
 // handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's
 // entrance: born through the front door, closed through the front door. The
 // control plane holds no authority here — it forwards the caller's operator
@@ -1235,6 +1539,24 @@ export default {
         return err("method not allowed", 405);
       }
       return handleRecover(request, env, rcm[1]);
+    }
+
+    // Email change: operator-authenticated, new-inbox-confirmed.
+    const cem = url.pathname.match(ACCOUNT_CHANGE_EMAIL_PATH);
+    if (cem) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleChangeEmail(request, env, cem[1]);
+    }
+
+    // Undo an email change: the human half of the 48-hour revert window.
+    const uem = url.pathname.match(UNDO_EMAIL_PATH);
+    if (uem) {
+      if (request.method !== "GET") {
+        return err("method not allowed", 405);
+      }
+      return handleUndoEmail(env, uem[1]);
     }
 
     // Cold path: the Go container.

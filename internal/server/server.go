@@ -113,6 +113,16 @@ type Config struct {
 	// root tokens die and a fresh one-shot bootstrap token is returned.
 	// Only-if-active; ErrConflict otherwise.
 	RecoverAccount func(ctx context.Context, accountID string) (ProvisionedAccount, error)
+
+	// UpdateAccountEmail, when set (with the provisioning pair), enables POST
+	// /v1/accounts/{id}:update-email — the control plane committing an email
+	// change after proving the new inbox can receive. The acting operator id
+	// travels in the body; the store enforces owner-only and active-only.
+	// ErrNotAccountOwner -> 403, ErrConflict -> 409. Also serves the undo
+	// variant ({undo:true, expected_current, new_email}) — the control plane
+	// applies it after the 48-hour undo link is clicked.
+	UpdateAccountEmail func(ctx context.Context, accountID, operatorID, newEmail string) error
+	UndoAccountEmail   func(ctx context.Context, accountID, expectedCurrent, newEmail string) error
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -164,6 +174,11 @@ var ErrNotFound = errors.New("not found")
 
 // ErrNotAccountOwner signals an owner-only action attempted by a non-owner (-> 403).
 var ErrNotAccountOwner = errors.New("only the account owner may do this")
+
+// ErrEmailChangedSinceUndo signals a stale undo link — the current email no
+// longer matches what the undo token snapshotted (a subsequent legitimate
+// change ran first) so the revert must not roll back the newer state.
+var ErrEmailChangedSinceUndo = errors.New("email has changed since this undo was issued")
 
 // ErrAccountNotActive signals a store-level refusal to mint credentials for a
 // non-active account (-> 403). requireOperator normally refuses first; this
@@ -296,7 +311,7 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil {
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
@@ -636,6 +651,62 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"account_id":     rec.ID,
 				"email":          rec.Email,
 				"status":         rec.Status,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "update-email"); ok && cfg.UpdateAccountEmail != nil {
+			var req struct {
+				OperatorID      string `json:"operator_id"`
+				NewEmail        string `json:"new_email"`
+				Undo            bool   `json:"undo"`
+				ExpectedCurrent string `json:"expected_current"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			req.NewEmail = strings.TrimSpace(strings.ToLower(req.NewEmail))
+			req.ExpectedCurrent = strings.TrimSpace(strings.ToLower(req.ExpectedCurrent))
+			if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
+				writeJSONError(w, http.StatusBadRequest, "a valid new_email required")
+				return
+			}
+			var err error
+			if req.Undo {
+				if req.ExpectedCurrent == "" || cfg.UndoAccountEmail == nil {
+					writeJSONError(w, http.StatusBadRequest, "expected_current required for undo")
+					return
+				}
+				err = cfg.UndoAccountEmail(r.Context(), accountID, req.ExpectedCurrent, req.NewEmail)
+			} else {
+				if req.OperatorID == "" {
+					writeJSONError(w, http.StatusBadRequest, "operator_id required")
+					return
+				}
+				err = cfg.UpdateAccountEmail(r.Context(), accountID, req.OperatorID, req.NewEmail)
+			}
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrNotAccountOwner):
+				writeJSONError(w, http.StatusForbidden, "only the account owner can change the email")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account is not active")
+				return
+			case errors.Is(err, ErrEmailChangedSinceUndo):
+				writeJSONError(w, http.StatusConflict, "the email has changed since this undo link was issued")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not update email")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"email":          req.NewEmail,
 			})
 			return
 		}
