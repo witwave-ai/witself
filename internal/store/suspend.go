@@ -72,6 +72,59 @@ func (s *Store) SuspendAccountOwner(ctx context.Context, accountID, operatorID, 
 	return tx.Commit(ctx)
 }
 
+// SuspendAccountSystem freezes an account under a MACHINE authority — the
+// control plane acting for the fleet, not an operator. Only known categories
+// are accepted ("evacuation" today; migration/billing later), and owners
+// cannot resume these (ResumeAccountOwner's category check). Idempotent and
+// preserving: an already-suspended account keeps its ORIGINAL category — an
+// owner-suspended account being evacuated must come back owner-suspended.
+// Closed accounts are a no-op (their tombstones export as-is); pending
+// accounts refuse (the reaper clears them during drain).
+func (s *Store) SuspendAccountSystem(ctx context.Context, accountID, category, reason string) error {
+	if category != "evacuation" {
+		return fmt.Errorf("unknown suspension category %q", category)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	var isDefault bool
+	err = tx.QueryRow(ctx,
+		`SELECT status, is_default FROM accounts WHERE id = $1 FOR UPDATE`,
+		accountID).Scan(&status, &isDefault)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verify system suspend: %w", err)
+	}
+	if isDefault {
+		return ErrCannotCloseDefault
+	}
+	switch status {
+	case "suspended", "closed":
+		return nil // idempotent; existing category/tombstone preserved
+	case "active":
+	default:
+		return ErrAccountNotActive // pending — drain + reaper window clears these
+	}
+
+	var reasonValue any
+	if reason != "" {
+		reasonValue = reason
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET status = 'suspended', suspended_at = now(),
+		   suspended_for = $2, suspended_reason = $3
+		 WHERE id = $1`, accountID, category, reasonValue); err != nil {
+		return fmt.Errorf("system suspend account: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // ResumeAccountOwner un-suspends an owner-suspended account. Owner-only, and
 // crucially refuses to un-suspend a fleet-admin/migration/etc. suspension:
 // the authority that suspended is the authority that resumes.

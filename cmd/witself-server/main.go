@@ -282,6 +282,29 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.SuspendAccountSystem = func(ctx context.Context, accountID, category, reason string) error {
+			err := st.SuspendAccountSystem(ctx, accountID, category, reason)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrCannotCloseDefault):
+				return server.ErrCannotCloseDefault
+			case errors.Is(err, store.ErrAccountNotActive):
+				return server.ErrConflict
+			}
+			return err
+		}
+		cfg.StreamAccountExport = func(ctx context.Context, accountID string, w io.Writer) error {
+			cellName := os.Getenv("WITSELF_CELL_NAME")
+			err := st.ExportAccount(ctx, accountID, cellName, version.Version, w)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotExportable):
+				return server.ErrConflict
+			}
+			return err
+		}
 		cfg.ResumeAccountOwner = func(ctx context.Context, accountID, operatorID string) error {
 			err := st.ResumeAccountOwner(ctx, accountID, operatorID)
 			switch {

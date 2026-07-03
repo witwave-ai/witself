@@ -134,6 +134,20 @@ type Config struct {
 	// work). ErrConflict when the account is not active.
 	SuspendAccountOwner func(ctx context.Context, accountID, operatorID, reason string) error
 
+	// SuspendAccountSystem, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:suspend — machine-initiated suspension with a
+	// category ("evacuation"). Idempotent; preserves an existing suspension's
+	// category. ErrConflict for pending accounts.
+	SuspendAccountSystem func(ctx context.Context, accountID, category, reason string) error
+
+	// StreamAccountExport, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:export — streaming the account's complete
+	// logical archive. Refuses unless the account is suspended or closed
+	// (ErrConflict): the write freeze is what makes the snapshot consistent.
+	// Errors after the first byte can only be signaled in-stream; the
+	// archive's trailing checksums entry is the truncation detector.
+	StreamAccountExport func(ctx context.Context, accountID string, w io.Writer) error
+
 	// ResumeAccountOwner, when set, enables POST /v1/account:resume — the
 	// owner un-freezing a self-suspended account. Refuses to un-suspend a
 	// fleet-admin/migration/etc. suspension (ErrCannotSelfResume -> 403); a
@@ -338,7 +352,7 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil {
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
@@ -768,6 +782,58 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"schema_version": "witself.v0",
 				"account":        acct,
 			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "suspend"); ok && cfg.SuspendAccountSystem != nil {
+			var req struct {
+				For    string `json:"for"`
+				Reason string `json:"reason"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.For == "" {
+				writeJSONError(w, http.StatusBadRequest, "a suspension category (for) is required")
+				return
+			}
+			err := cfg.SuspendAccountSystem(r.Context(), accountID, req.For, strings.TrimSpace(req.Reason))
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrCannotCloseDefault):
+				writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be suspended")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account is pending — not suspendable")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not suspend account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"status":         "suspended",
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "export"); ok && cfg.StreamAccountExport != nil {
+			// Preconditions surface as JSON errors; once streaming begins,
+			// the archive's own trailing checksums are the integrity story.
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Witself-Export-Format", "1")
+			err := cfg.StreamAccountExport(r.Context(), accountID, w)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account must be suspended (or closed) to export")
+				return
+			case err != nil:
+				// Headers may already be sent; the truncated stream fails
+				// the trailing-checksum verification downstream.
+				return
+			}
 			return
 		}
 		// Deliberately distinct from the handlers' "account not found": the
