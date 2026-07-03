@@ -41,26 +41,53 @@ func lockAccountForMint(ctx context.Context, tx pgx.Tx, accountID string, allowP
 	return ErrAccountNotActive
 }
 
+// lockAccountForSafetyWrite is the same lock as lockAccountForMint but also
+// permits suspended accounts — used for writes that are HARM-REDUCING
+// regardless of the freeze: revoking a possibly-leaked token, closing, and
+// other lifecycle terminals. If suspend means "no state changes I'd regret
+// while frozen," these are the state changes an owner NEEDS in order to
+// protect the account, so they slip past the gate.
+func lockAccountForSafetyWrite(ctx context.Context, tx pgx.Tx, accountID string) error {
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT status FROM accounts WHERE id = $1 FOR SHARE`, accountID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock account: %w", err)
+	}
+	if status == "active" || status == "suspended" {
+		return nil
+	}
+	return ErrAccountNotActive
+}
+
 // Account is the stored view of an account's lifecycle record.
 type Account struct {
-	ID           string
-	Email        string
-	DisplayName  string
-	Status       string
-	CreatedAt    time.Time
-	ClosedAt     *time.Time
-	ClosedReason string
+	ID              string
+	Email           string
+	DisplayName     string
+	Status          string
+	CreatedAt       time.Time
+	ClosedAt        *time.Time
+	ClosedReason    string
+	SuspendedAt     *time.Time
+	SuspendedFor    string
+	SuspendedReason string
 }
 
 // GetAccount reads one account's lifecycle record. Closed accounts are
 // returned too — the record is a tombstone, not an absence.
 func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, error) {
 	var a Account
-	var email, closedReason *string
+	var email, closedReason, suspendedFor, suspendedReason *string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, display_name, status, created_at, closed_at, closed_reason
+		`SELECT id, email, display_name, status, created_at,
+		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason
 		 FROM accounts WHERE id = $1`, accountID).
-		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt, &a.ClosedAt, &closedReason)
+		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
+			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}
@@ -72,6 +99,12 @@ func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, erro
 	}
 	if closedReason != nil {
 		a.ClosedReason = *closedReason
+	}
+	if suspendedFor != nil {
+		a.SuspendedFor = *suspendedFor
+	}
+	if suspendedReason != nil {
+		a.SuspendedReason = *suspendedReason
 	}
 	return a, nil
 }

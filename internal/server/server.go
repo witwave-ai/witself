@@ -128,17 +128,31 @@ type Config struct {
 	// applies it after the 48-hour undo link is clicked.
 	UpdateAccountEmail func(ctx context.Context, accountID, operatorID, newEmail string) error
 	UndoAccountEmail   func(ctx context.Context, accountID, expectedCurrent, newEmail string) error
+
+	// SuspendAccountOwner, when set, enables POST /v1/account:suspend — the
+	// owner freezing every write on the account (reads and status still
+	// work). ErrConflict when the account is not active.
+	SuspendAccountOwner func(ctx context.Context, accountID, operatorID, reason string) error
+
+	// ResumeAccountOwner, when set, enables POST /v1/account:resume — the
+	// owner un-freezing a self-suspended account. Refuses to un-suspend a
+	// fleet-admin/migration/etc. suspension (ErrCannotSelfResume -> 403); a
+	// not-suspended account gets ErrConflict.
+	ResumeAccountOwner func(ctx context.Context, accountID, operatorID string) error
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
 type AccountRecord struct {
-	ID           string     `json:"id"`
-	Email        string     `json:"email,omitempty"`
-	DisplayName  string     `json:"display_name,omitempty"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	ClosedAt     *time.Time `json:"closed_at,omitempty"`
-	ClosedReason string     `json:"closed_reason,omitempty"`
+	ID              string     `json:"id"`
+	Email           string     `json:"email,omitempty"`
+	DisplayName     string     `json:"display_name,omitempty"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	ClosedReason    string     `json:"closed_reason,omitempty"`
+	SuspendedAt     *time.Time `json:"suspended_at,omitempty"`
+	SuspendedFor    string     `json:"suspended_for,omitempty"`
+	SuspendedReason string     `json:"suspended_reason,omitempty"`
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -184,6 +198,14 @@ var ErrNotAccountOwner = errors.New("only the account owner may do this")
 // longer matches what the undo token snapshotted (a subsequent legitimate
 // change ran first) so the revert must not roll back the newer state.
 var ErrEmailChangedSinceUndo = errors.New("email has changed since this undo was issued")
+
+// ErrAccountNotSuspended signals a resume attempt against an account that is
+// not currently suspended.
+var ErrAccountNotSuspended = errors.New("account is not suspended")
+
+// ErrCannotSelfResume signals the owner trying to un-suspend a suspension
+// they did not initiate (fleet-admin, migration, etc.).
+var ErrCannotSelfResume = errors.New("this suspension is not owner-resumable")
 
 // ErrAccountNotActive signals a store-level refusal to mint credentials for a
 // non-active account (-> 403). requireOperator normally refuses first; this
@@ -369,6 +391,12 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.RenameAccount != nil {
 			mux.HandleFunc("POST /v1/account:rename", renameAccountHandler(cfg.Authenticate, cfg.RenameAccount))
 		}
+		if cfg.SuspendAccountOwner != nil {
+			mux.HandleFunc("POST /v1/account:suspend", suspendAccountHandler(cfg.Authenticate, cfg.SuspendAccountOwner))
+		}
+		if cfg.ResumeAccountOwner != nil {
+			mux.HandleFunc("POST /v1/account:resume", resumeAccountHandler(cfg.Authenticate, cfg.ResumeAccountOwner))
+		}
 	}
 	return mux
 }
@@ -484,8 +512,11 @@ type principal struct {
 // requireOperator authenticates the bearer token and passes the principal to
 // h, or writes 401 (missing/invalid) / 500 (server fault). It also requires
 // the account to be ACTIVE (-> 403 otherwise): a pending account can do
-// nothing until its activation gates pass. The only exceptions — checking its
-// own status and closing itself — use requireOperatorAnyStatus instead.
+// nothing until its activation gates pass, and a suspended account can do
+// nothing until it resumes. The exceptions — check status, close, suspend,
+// resume — use requireOperatorAnyStatus instead. The refusal message names
+// the current status verbatim so a suspended owner sees "account is
+// suspended" and knows to reach for `ws account resume`.
 func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		if p.accountStatus != "active" {
@@ -498,8 +529,9 @@ func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, p
 }
 
 // requireOperatorAnyStatus authenticates without gating on account status. Use
-// only for the two endpoints a not-yet-active account must still reach:
-// checking its own status and closing itself.
+// only for the endpoints a not-yet-active or suspended account must still
+// reach: checking its own status, closing itself, and (owner-initiated)
+// suspending or resuming.
 func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
@@ -744,6 +776,76 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 		// burns a verification link or a reap candidate.
 		writeJSONError(w, http.StatusNotFound, "unknown account action")
 	}
+}
+
+// suspendAccountHandler freezes every write on the account at the owner's
+// request. Owner-only; the seeded default account is refused; only-if-active.
+// Reachable at any status the caller reaches with (a pending caller gets a
+// 409, not a 403) — the auth gate lets it through, the store adjudicates.
+func suspendAccountHandler(auth AuthFunc, suspend func(ctx context.Context, accountID, operatorID, reason string) error) http.HandlerFunc {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req) // body optional
+		err := suspend(r.Context(), p.accountID, p.operatorID, strings.TrimSpace(req.Reason))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner can suspend the account")
+			return
+		case errors.Is(err, ErrCannotCloseDefault):
+			writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be suspended")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusConflict, "account is not active — nothing to suspend")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not suspend account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"account_id":     p.accountID,
+			"status":         "suspended",
+		})
+	})
+}
+
+// resumeAccountHandler undoes an owner-initiated suspension. Owner-only, and
+// refuses to un-suspend a suspension initiated by a different authority
+// (fleet-admin, migration, ...) — the authority that suspended is the one
+// that resumes.
+func resumeAccountHandler(auth AuthFunc, resume func(ctx context.Context, accountID, operatorID string) error) http.HandlerFunc {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		err := resume(r.Context(), p.accountID, p.operatorID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner can resume the account")
+			return
+		case errors.Is(err, ErrCannotSelfResume):
+			writeJSONError(w, http.StatusForbidden, "this suspension was not initiated by you — the authority that suspended must resume")
+			return
+		case errors.Is(err, ErrAccountNotSuspended):
+			writeJSONError(w, http.StatusConflict, "account is not suspended")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not resume account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"account_id":     p.accountID,
+			"status":         "active",
+		})
+	})
 }
 
 // closeAccountHandler permanently closes the authenticated operator's account:

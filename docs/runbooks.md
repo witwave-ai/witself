@@ -177,6 +177,24 @@ local binding only (this never contacts the server):
 ws account forget --account default --yes
 ```
 
+## Suspend and resume an account
+
+Suspend freezes every write on the account while keeping reads and credentials
+alive — a reversible pause for time off, an audit, or a planned migration.
+
+```sh
+ws account suspend --yes                       # optionally --reason "on vacation"
+# every domain command now refuses:
+#   ws: account is suspended — this action requires an active account
+# status still works, and shows why:
+ws account status
+ws account resume
+```
+
+Only the owner can suspend or resume their own suspension. Future non-owner
+suspensions (planned: migration, fleet-admin, billing) will refuse `ws account
+resume` — the authority that suspended is the one that resumes.
+
 ## Close an account
 
 Closing is permanent: every credential is revoked and the account is retired

@@ -30,15 +30,25 @@ func (s *Store) CreateRealm(ctx context.Context, accountID, name string) (Realm,
 	if err != nil {
 		return Realm{}, err
 	}
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO realms (id, account_id, name) VALUES ($1, $2, $3)`,
-		realmID, accountID, name)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return Realm{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return Realm{}, err
+	}
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO realms (id, account_id, name) VALUES ($1, $2, $3)`,
+		realmID, accountID, name); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			return Realm{}, ErrRealmExists
 		}
 		return Realm{}, fmt.Errorf("create realm: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Realm{}, err
 	}
 	return Realm{ID: realmID, Name: name}, nil
 }
@@ -75,6 +85,9 @@ func (s *Store) DeleteRealm(ctx context.Context, accountID, realmID string) erro
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return err
+	}
 	var exists bool
 	err = tx.QueryRow(ctx,
 		`SELECT true FROM realms

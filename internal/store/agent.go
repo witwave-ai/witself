@@ -34,8 +34,16 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 	if err != nil {
 		return Agent{}, err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Agent{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return Agent{}, err
+	}
 	var returned string
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO agents (id, realm_id, name)
 		 SELECT $1, $2, $3
 		 WHERE EXISTS (
@@ -53,6 +61,9 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 			return Agent{}, ErrAgentExists
 		}
 		return Agent{}, fmt.Errorf("create agent: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Agent{}, err
 	}
 	return Agent{ID: agentID, Name: name}, nil
 }
@@ -90,6 +101,9 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return err
+	}
 	var exists bool
 	err = tx.QueryRow(ctx,
 		`SELECT true FROM agents a

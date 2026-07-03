@@ -37,7 +37,13 @@ func (s *Store) RecoverAccount(ctx context.Context, accountID string, bootstrapT
 	if err != nil {
 		return ProvisionedAccount{}, fmt.Errorf("verify recovery target: %w", err)
 	}
-	if status != "active" {
+	// Suspended is deliberately allowed: recovery is CREDENTIAL recovery, not
+	// account activation. Rotating the root token preserves the suspended
+	// status, so the recovered owner can only inspect/resume/close — the
+	// minimum path back. Pending and closed remain refused: a pending
+	// account has no root credential to rotate yet, and a closed one is a
+	// tombstone.
+	if status != "active" && status != "suspended" {
 		return ProvisionedAccount{}, ErrAccountNotActive
 	}
 

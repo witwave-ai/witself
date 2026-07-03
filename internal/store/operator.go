@@ -187,6 +187,9 @@ func (s *Store) DeleteOperator(ctx context.Context, accountID, actorOperatorID, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return err
+	}
 	var isRoot bool
 	err = tx.QueryRow(ctx,
 		`SELECT is_root FROM operators

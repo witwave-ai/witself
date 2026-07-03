@@ -21,14 +21,23 @@ func (s *Store) UndoAccountEmail(ctx context.Context, accountID, expectedCurrent
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var current *string
+	var status string
 	err = tx.QueryRow(ctx,
-		`SELECT email FROM accounts WHERE id = $1 FOR UPDATE`,
-		accountID).Scan(&current)
+		`SELECT email, status FROM accounts WHERE id = $1 FOR UPDATE`,
+		accountID).Scan(&current, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAccountNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("verify email undo: %w", err)
+	}
+	// No writes on a non-active account — same rule as the forward path
+	// (UpdateAccountEmail), which mattered less before suspend existed
+	// because closed accounts had their tokens revoked. Now it matters: the
+	// undo link is unauthenticated (possession-of-link = authorization) and
+	// bypasses the HTTP suspended gate.
+	if status != "active" {
+		return ErrAccountNotActive
 	}
 	if current == nil || *current != expectedCurrent {
 		return ErrConflictingUndo
@@ -55,13 +64,14 @@ func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operato
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var isOwner bool
+	var status string
 	err = tx.QueryRow(ctx,
-		`SELECT (o.is_root OR o.role = 'account_owner')
+		`SELECT a.status, (o.is_root OR o.role = 'account_owner')
 		 FROM accounts a
 		 JOIN operators o ON o.account_id = a.id
 		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
 		 FOR UPDATE OF a`,
-		accountID, operatorID).Scan(&isOwner)
+		accountID, operatorID).Scan(&status, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAccountNotFound
 	}
@@ -70,6 +80,9 @@ func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operato
 	}
 	if !isOwner {
 		return ErrNotAccountOwner
+	}
+	if status != "active" {
+		return ErrAccountNotActive
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE accounts SET display_name = $2 WHERE id = $1`, accountID, displayName); err != nil {

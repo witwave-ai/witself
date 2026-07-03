@@ -68,13 +68,16 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 
 // AccountRecord is an account's lifecycle record as served by its cell.
 type AccountRecord struct {
-	ID           string     `json:"id"`
-	Email        string     `json:"email,omitempty"`
-	DisplayName  string     `json:"display_name,omitempty"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	ClosedAt     *time.Time `json:"closed_at,omitempty"`
-	ClosedReason string     `json:"closed_reason,omitempty"`
+	ID              string     `json:"id"`
+	Email           string     `json:"email,omitempty"`
+	DisplayName     string     `json:"display_name,omitempty"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	ClosedReason    string     `json:"closed_reason,omitempty"`
+	SuspendedAt     *time.Time `json:"suspended_at,omitempty"`
+	SuspendedFor    string     `json:"suspended_for,omitempty"`
+	SuspendedReason string     `json:"suspended_reason,omitempty"`
 }
 
 // GetAccount reads the authenticated operator's account record from its cell

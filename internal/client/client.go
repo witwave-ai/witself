@@ -272,6 +272,23 @@ func RenameAccount(ctx context.Context, endpoint, token, displayName string) err
 	return doJSON(ctx, http.MethodPost, url, token, body, nil)
 }
 
+// SuspendAccount freezes every write on the account (owner-initiated). reason
+// is optional free-text metadata for the owner's bookkeeping.
+func SuspendAccount(ctx context.Context, endpoint, token, reason string) error {
+	body, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/account:suspend"
+	return doJSON(ctx, http.MethodPost, url, token, body, nil)
+}
+
+// ResumeAccount un-suspends an owner-initiated suspension.
+func ResumeAccount(ctx context.Context, endpoint, token string) error {
+	url := strings.TrimRight(endpoint, "/") + "/v1/account:resume"
+	return doJSON(ctx, http.MethodPost, url, token, []byte("{}"), nil)
+}
+
 // DeleteAgent soft-deletes an agent and revokes its tokens.
 func DeleteAgent(ctx context.Context, endpoint, token, realmID, agentID string) error {
 	return doJSON(ctx, http.MethodDelete, agentsURL(endpoint, realmID)+"/"+agentID, token, nil, nil)

@@ -248,7 +248,17 @@ func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string)
 // RevokeToken immediately invalidates a live operator or agent token in the
 // account. Bootstrap token consumption remains part of ExchangeBootstrap.
 func (s *Store) RevokeToken(ctx context.Context, accountID, tokenID string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Allowed during suspension: revoking a leaked token is safety-preserving,
+	// exactly the class of write the freeze must not block.
+	if err := lockAccountForSafetyWrite(ctx, tx, accountID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx,
 		`UPDATE tokens SET consumed_at = now()
 		 WHERE account_id = $1 AND id = $2
 		   AND kind IN ('operator', 'agent')
@@ -261,5 +271,5 @@ func (s *Store) RevokeToken(ctx context.Context, accountID, tokenID string) erro
 	if tag.RowsAffected() == 0 {
 		return ErrTokenNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }

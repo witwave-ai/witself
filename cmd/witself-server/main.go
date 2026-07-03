@@ -256,14 +256,45 @@ func serve() int {
 				return server.AccountRecord{}, err
 			}
 			return server.AccountRecord{
-				ID:           a.ID,
-				Email:        a.Email,
-				DisplayName:  a.DisplayName,
-				Status:       a.Status,
-				CreatedAt:    a.CreatedAt,
-				ClosedAt:     a.ClosedAt,
-				ClosedReason: a.ClosedReason,
+				ID:              a.ID,
+				Email:           a.Email,
+				DisplayName:     a.DisplayName,
+				Status:          a.Status,
+				CreatedAt:       a.CreatedAt,
+				ClosedAt:        a.ClosedAt,
+				ClosedReason:    a.ClosedReason,
+				SuspendedAt:     a.SuspendedAt,
+				SuspendedFor:    a.SuspendedFor,
+				SuspendedReason: a.SuspendedReason,
 			}, nil
+		}
+		cfg.SuspendAccountOwner = func(ctx context.Context, accountID, operatorID, reason string) error {
+			err := st.SuspendAccountOwner(ctx, accountID, operatorID, reason)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return server.ErrNotAccountOwner
+			case errors.Is(err, store.ErrCannotCloseDefault):
+				return server.ErrCannotCloseDefault
+			case errors.Is(err, store.ErrAccountNotActive):
+				return server.ErrAccountNotActive
+			}
+			return err
+		}
+		cfg.ResumeAccountOwner = func(ctx context.Context, accountID, operatorID string) error {
+			err := st.ResumeAccountOwner(ctx, accountID, operatorID)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return server.ErrNotAccountOwner
+			case errors.Is(err, store.ErrAccountNotSuspended):
+				return server.ErrAccountNotSuspended
+			case errors.Is(err, store.ErrCannotSelfResume):
+				return server.ErrCannotSelfResume
+			}
+			return err
 		}
 		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
 			// Account provisioning: the control-plane -> cell trust link. The
@@ -331,6 +362,8 @@ func serve() int {
 				switch {
 				case errors.Is(err, store.ErrAccountNotFound):
 					return server.ErrNotFound
+				case errors.Is(err, store.ErrAccountNotActive):
+					return server.ErrConflict
 				case errors.Is(err, store.ErrConflictingUndo):
 					return server.ErrEmailChangedSinceUndo
 				}

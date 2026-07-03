@@ -917,6 +917,10 @@ func accountCmd(args []string) int {
 		return accountChangeEmail(args[1:])
 	case "change-display-name":
 		return accountChangeDisplayName(args[1:])
+	case "suspend":
+		return accountSuspend(args[1:])
+	case "resume":
+		return accountResume(args[1:])
 	case "recover":
 		return accountRecover(args[1:])
 	case "close":
@@ -1048,6 +1052,63 @@ func accountChangeDisplayName(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "display name changed to %q\n", displayName)
+	return 0
+}
+
+// accountSuspend freezes an active account at the owner's request. Every
+// domain endpoint refuses with 403 until resume; reads and status still
+// work.
+func accountSuspend(args []string) int {
+	fs := flag.NewFlagSet("account suspend", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	reason := fs.String("reason", "", "optional free-text note for your own bookkeeping")
+	yes := fs.Bool("yes", false, "confirm suspension")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "ws: suspend freezes every write on the account until you resume. Re-run with --yes to confirm.")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.SuspendAccount(ctx, ep, tok, *reason); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "account suspended. Resume with `ws account resume`.")
+	return 0
+}
+
+// accountResume un-suspends an owner-initiated suspension. The store refuses
+// to resume anything the owner did not suspend themselves.
+func accountResume(args []string) int {
+	fs := flag.NewFlagSet("account resume", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.ResumeAccount(ctx, ep, tok); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "account resumed.")
 	return 0
 }
 
@@ -1224,10 +1285,26 @@ func accountStatus(args []string) int {
 	if rec.Status == "pending" {
 		fmt.Fprintln(os.Stderr, "pending: activation required before the account can be used")
 	}
+	if rec.Status == "suspended" && rec.SuspendedAt != nil {
+		fmt.Fprintf(os.Stderr, "suspended %s (%s)%s\n",
+			rec.SuspendedAt.UTC().Format(time.RFC3339),
+			suspendedForLabel(rec.SuspendedFor),
+			closedReasonSuffix(rec.SuspendedReason))
+		if rec.SuspendedFor == "owner_request" {
+			fmt.Fprintln(os.Stderr, "resume with: ws account resume")
+		}
+	}
 	if rec.ClosedAt != nil {
 		fmt.Fprintf(os.Stderr, "closed %s%s\n", rec.ClosedAt.UTC().Format(time.RFC3339), closedReasonSuffix(rec.ClosedReason))
 	}
 	return 0
+}
+
+func suspendedForLabel(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return strings.ReplaceAll(s, "_", " ")
 }
 
 func closedReasonSuffix(reason string) string {
@@ -1507,6 +1584,8 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws account recover      Email a recovery code, redeem it for a fresh owner token")
 	usageLine(w, "  ws account change-email Move the account to a new address (code-confirmed)")
 	usageLine(w, "  ws account change-display-name  Rename the account (owner only)")
+	usageLine(w, "  ws account suspend      Freeze every write on the account (owner only)")
+	usageLine(w, "  ws account resume       Un-freeze an owner-suspended account")
 	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")

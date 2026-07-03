@@ -1195,3 +1195,100 @@ func TestUpdateAccountEmail(t *testing.T) {
 		}
 	}
 }
+
+// TestSuspendedAccountIsGated proves the suspended contract: every domain
+// action is refused (403 with "account is suspended") while status, close,
+// and RESUME still work. The store adjudicates suspend/resume authority; the
+// dispatcher just lets the calls through.
+func TestSuspendedAccountIsGated(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		if tok == "suspended-token" {
+			return "opr_s", "acc_s", "suspended", true, nil
+		}
+		return "", "", "", false, nil
+	}
+	realmed := false
+	create := func(_ context.Context, _, name string) (Realm, error) {
+		realmed = true
+		return Realm{ID: "realm_x", Name: name}, nil
+	}
+	list := func(_ context.Context, _ string) ([]Realm, error) { return nil, nil }
+	get := func(_ context.Context, accountID string) (AccountRecord, error) {
+		return AccountRecord{ID: accountID, Status: "suspended", SuspendedFor: "owner_request"}, nil
+	}
+	resumed := false
+	resume := func(_ context.Context, _, _ string) error { resumed = true; return nil }
+	closed := false
+	closeFn := func(_ context.Context, _, _, _ string) error { closed = true; return nil }
+	srv := httptest.NewServer(apiMux(Config{
+		Authenticate:       auth,
+		CreateRealm:        create,
+		ListRealms:         list,
+		GetAccount:         get,
+		ResumeAccountOwner: resume,
+		CloseAccount:       closeFn,
+	}))
+	defer srv.Close()
+
+	do := func(method, path, body string) *http.Response {
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, srv.URL+path, rdr)
+		req.Header.Set("Authorization", "Bearer suspended-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// Domain endpoints must all 403 with "account is suspended" — the whole
+	// point of the freeze. Cover reads (list) AND writes (create) so any
+	// future endpoint added without the requireOperator gate breaks CI.
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/v1/realms", `{"name":"prod"}`},
+		{http.MethodGet, "/v1/realms", ""},
+	} {
+		resp := do(tc.method, tc.path, tc.body)
+		body, _ := io.ReadAll(resp.Body)
+		closeBody(t, resp)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s while suspended = %d, want 403", tc.method, tc.path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), "suspended") {
+			t.Errorf("%s %s refusal did not name the suspended status: %s", tc.method, tc.path, body)
+		}
+	}
+	if realmed {
+		t.Error("realm create ran despite suspended account")
+	}
+
+	// Reads and status pass through.
+	resp := do(http.MethodGet, "/v1/account", "")
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("account status while suspended = %d, want 200", resp.StatusCode)
+	}
+
+	// Resume passes through.
+	resp = do(http.MethodPost, "/v1/account:resume", "")
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("resume while suspended = %d, want 200", resp.StatusCode)
+	}
+	if !resumed {
+		t.Error("resume did not run")
+	}
+
+	// Close still works too — a suspended owner can decide to leave for good.
+	resp = do(http.MethodPost, "/v1/account:close", `{"reason":"abandoning"}`)
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("close while suspended = %d, want 200", resp.StatusCode)
+	}
+	if !closed {
+		t.Error("close did not run for suspended account")
+	}
+}
