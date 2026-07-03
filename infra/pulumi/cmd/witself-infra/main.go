@@ -107,12 +107,14 @@ flags:
   -state-dir      local Pulumi state backend dir (backend=local)
   -control-plane  fleet control plane URL, e.g. https://self.witwave.ai
                   up: registers the cell after provisioning
-                  destroy: drains + removes the cell first (refuses while
-                  accounts live on it). Omit = no fleet (self-host).
+                  destroy: drains the cell, evacuates every account to
+                  Cloudflare R2 archives, then removes the empty registry
+                  entry. Omit = no fleet (self-host).
   -fleet-token-file  fleet token file (default: WITSELF_FLEET_TOKEN env,
                   then ~/.witself/tokens/fleet.token)
-  -destroy-accounts  with destroy: also purge this cell's accounts from the
-                  control-plane directory (the data dies with the cell)
+  -destroy-accounts  with destroy: SKIP evacuation and force-purge this
+                  cell's accounts from the control-plane directory. The
+                  data dies with the cell — sandbox/development override
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -161,7 +163,7 @@ func run(args []string) error {
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
-	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: purge this cell's accounts from the control-plane directory")
+	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -395,8 +397,10 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 }
 
 // removeCell drains the cell and removes it from the fleet ahead of teardown.
-// Without -destroy-accounts it refuses while accounts live on the cell; with it,
-// the cell AND its directory entries are purged (the data dies with the cell).
+// Default flow (polite): evacuate every account on the cell into an R2
+// archive first, then remove the empty cell. With -destroy-accounts: skip
+// preservation and force-purge every directory entry (accounts die with the
+// cell — the sandbox / development override).
 func removeCell(ctx context.Context, controlPlane, fleetTokenFile, cellName string, destroyAccounts bool) error {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
@@ -417,14 +421,84 @@ func removeCell(ctx context.Context, controlPlane, fleetTokenFile, cellName stri
 		fmt.Fprintf(os.Stderr, "cell %s purged from fleet (%d account entries removed)\n", cellName, purged)
 		return nil
 	}
+	// Evacuate any accounts still routing to this cell into R2 before we
+	// try to remove the (empty) registry entry. Delete refuses while
+	// accounts point at the cell, so the loop must reach remaining=0.
+	if err := evacuateCell(ctx, cl, cellName); err != nil {
+		return err
+	}
 	if err := cl.Delete(ctx, cellName); err != nil {
 		if errors.Is(err, fleet.ErrAccountsLive) {
-			return fmt.Errorf("accounts still live on cell %s — migrate them first, or re-run with -destroy-accounts to acknowledge their destruction", cellName)
+			// A signup landing on the cell between the last evacuate call
+			// and Delete could produce this — although the cell was
+			// drained, so it shouldn't. Retry the evacuation once so the
+			// straggler catches up.
+			fmt.Fprintln(os.Stderr, "a straggler slipped past the evacuation loop; re-running…")
+			if err := evacuateCell(ctx, cl, cellName); err != nil {
+				return err
+			}
+			if err := cl.Delete(ctx, cellName); err != nil {
+				return fmt.Errorf("remove cell from fleet: %w", err)
+			}
+		} else {
+			return fmt.Errorf("remove cell from fleet: %w", err)
 		}
-		return fmt.Errorf("remove cell from fleet: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "cell %s removed from fleet\n", cellName)
 	return nil
+}
+
+// evacuateCell loops the control-plane's :evacuate batches until every
+// account on the cell is archived (remaining=0). Fails fast if any account
+// batch reports a failure — a stuck evacuation must not silently proceed to
+// destroying the cell's database.
+func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error {
+	const batch = 4
+	total := 0
+	// Track the LOWEST Remaining we've seen so we can detect the far more
+	// insidious stall: batches that report per-account success but the
+	// server's Remaining doesn't strictly decrease (a control-plane bug
+	// leaving acct: pointers behind would spin this loop forever otherwise).
+	prevRemaining := -1
+	for iter := 0; ; iter++ {
+		res, err := cl.Evacuate(ctx, cellName, batch)
+		if err != nil {
+			if errors.Is(err, fleet.ErrNotDrained) {
+				return fmt.Errorf("cell %s is not drained — cannot evacuate", cellName)
+			}
+			return fmt.Errorf("evacuate cell: %w", err)
+		}
+		for _, a := range res.Evacuated {
+			if !a.OK {
+				return fmt.Errorf("evacuation failed for %s on %s: %s", a.AccountID, cellName, a.Error)
+			}
+			total++
+			fmt.Fprintf(os.Stderr, "evacuated %s from %s\n", a.AccountID, cellName)
+		}
+		if res.Remaining == 0 {
+			if total == 0 && iter == 0 {
+				fmt.Fprintf(os.Stderr, "cell %s has no accounts to evacuate\n", cellName)
+			} else {
+				fmt.Fprintf(os.Stderr, "cell %s: %d accounts evacuated to Cloudflare R2\n", cellName, total)
+			}
+			return nil
+		}
+		if len(res.Evacuated) == 0 {
+			// The call reported remaining > 0 but did nothing — either
+			// nothing on the cell is currently evacuable, or something's
+			// stuck. Either way, silently looping is wrong.
+			return fmt.Errorf("evacuation stalled on cell %s with %d account(s) still routing", cellName, res.Remaining)
+		}
+		if prevRemaining != -1 && res.Remaining >= prevRemaining {
+			// A batch fired (accounts reported "ok") but the fleet's count
+			// didn't decrease. The archived: entry landed but the acct:
+			// pointer didn't retire, or the same accounts are being re-
+			// listed — a control-plane bug that would otherwise burn all
+			// day. Fail loudly; Pulumi destroy stays parked.
+			return fmt.Errorf("evacuation on cell %s is not making progress (%d accounts remaining after batch reported success)", cellName, res.Remaining)
+		}
+		prevRemaining = res.Remaining
+	}
 }
 
 func printOutputs(ctx context.Context, stack auto.Stack) error {

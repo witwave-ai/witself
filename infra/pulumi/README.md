@@ -130,14 +130,17 @@ that is the self-hosted path, same command.
 # The registered endpoint is the cell's apiHost output (api.<cell>.<domain>).
 witself-infra up -control-plane https://self.witwave.ai $F
 
-# destroy: DRAIN the cell (placement stops), REMOVE it from the fleet, then tear
-# down. Removal REFUSES while accounts still live on the cell:
+# destroy: DRAIN the cell (placement stops), EVACUATE every account to a
+# Cloudflare R2 archive (per-account file, integrity-checked), then REMOVE the
+# empty registry entry and tear down:
 witself-infra destroy -control-plane https://self.witwave.ai $F
-#   -> error: accounts still live on cell <name> — migrate them first, or
-#      re-run with -destroy-accounts to acknowledge their destruction
+#   evacuated acc_… from <cell>
+#   ...
+#   cell <cell>: N accounts evacuated to Cloudflare R2
+#   cell <cell> removed from fleet
 
-# teardown where the cell's data genuinely dies (dev/sandbox): also purge the
-# cell's account entries from the control-plane directory:
+# sandbox/dev teardown where the cell's data genuinely dies — SKIP evacuation
+# and force-purge account entries from the control plane:
 witself-infra destroy -control-plane https://self.witwave.ai -destroy-accounts $F
 ```
 
@@ -155,9 +158,9 @@ control plane forgets them.
 | Flag | Applies to | Effect |
 |---|---|---|
 | `-control-plane URL` | `up` | register the cell (upsert) after provisioning |
-| `-control-plane URL` | `destroy` | drain, then remove from the fleet before teardown; refuses while accounts live on the cell |
+| `-control-plane URL` | `destroy` | drain, evacuate every account to R2, then remove the cell from the fleet before teardown |
 | `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
-| `-destroy-accounts` | `destroy` | with `-control-plane`: purge the cell's directory entries too — explicit acknowledgment that the accounts die with the cell |
+| `-destroy-accounts` | `destroy` | with `-control-plane`: SKIP evacuation and force-purge accounts — sandbox/dev override, the data dies with the cell |
 
 ## Roadmap (one slice at a time)
 

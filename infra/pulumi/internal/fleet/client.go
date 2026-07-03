@@ -201,6 +201,84 @@ func (c *Client) Delete(ctx context.Context, name string) error {
 	}
 }
 
+// EvacuationResult reports one :evacuate call's outcome. Evacuated is the
+// per-account report for THIS batch (ok/error each); Remaining is what the
+// control plane still sees pointing at this cell — the caller loops until
+// it hits zero.
+type EvacuationResult struct {
+	Evacuated []EvacuatedAccount `json:"evacuated"`
+	Remaining int                `json:"remaining"`
+}
+
+// EvacuatedAccount is one line in an evacuation batch's report.
+type EvacuatedAccount struct {
+	AccountID string `json:"account_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// Evacuate asks the control plane to move a batch of the cell's accounts into
+// R2 archives (per-account file), retiring their acct: routing pointers. The
+// call is bounded in wall-clock by batch size; the caller loops until
+// Remaining is zero. Uses a longer HTTP timeout than the routine registry
+// endpoints because each account's archive can stream for a while.
+func (c *Client) Evacuate(ctx context.Context, name string, batch int) (EvacuationResult, error) {
+	body := map[string]int{"batch": batch}
+	rdr, err := marshalBody(body)
+	if err != nil {
+		return EvacuationResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/cells/"+name+":evacuate", rdr)
+	if err != nil {
+		return EvacuationResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	// Evacuation streams whole account archives to R2; the per-call ceiling
+	// needs to be well above the routine registry HTTP client's 30s.
+	hc := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return EvacuationResult{}, fmt.Errorf("control plane %s: %w", c.base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out EvacuationResult
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return EvacuationResult{}, fmt.Errorf("decode evacuate response: %w", err)
+		}
+		return out, nil
+	case http.StatusNotFound:
+		// 404 could mean "unknown cell" (JSON body from the fleet handler)
+		// OR "route missing" (control plane predates the :evacuate slice).
+		// The bodies differ; distinguishing keeps the operator error honest
+		// when they see it. Unknown-cell → ErrNotRegistered; anything else
+		// → the raw HTTP error so they know to upgrade the control plane.
+		if strings.Contains(string(raw), "unknown cell") {
+			return EvacuationResult{}, ErrNotRegistered
+		}
+		return EvacuationResult{}, fmt.Errorf("evacuate cell: HTTP 404: %s (control plane may be too old — upgrade, or re-run with -destroy-accounts)", strings.TrimSpace(string(raw)))
+	case http.StatusConflict:
+		return EvacuationResult{}, ErrNotDrained
+	default:
+		return EvacuationResult{}, fmt.Errorf("evacuate cell: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+}
+
+// marshalBody encodes body as JSON if non-nil.
+func marshalBody(body any) (io.Reader, error) {
+	if body == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(b), nil
+}
+
 // Purge force-removes the cell AND every directory entry pointing at it — for
 // teardowns where the cell's data is genuinely dying. Returns the number of
 // account entries removed.
