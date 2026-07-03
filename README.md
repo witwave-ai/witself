@@ -79,18 +79,20 @@ witself-infra destroy \
   -backend s3 \
   -cloud aws \
   -control-plane https://self.witwave.ai \
-  -destroy-accounts \
   -domain cells.witself.witwave.ai \
   -fleet-token-file ~/.witself/tokens/fleet.token \
   -region us-west-2 \
   -role dev
 ```
 
-With `-control-plane`, `destroy` first drains the cell (placement stops) and
-removes it from the fleet before tearing anything down. Removal refuses while
-accounts still live on the cell; `-destroy-accounts` is the explicit
-acknowledgment that those accounts die with the cell and purges their
-directory entries too. Without it, migrate the accounts off first.
+With `-control-plane`, `destroy` first drains the cell (placement stops),
+**evacuates every account into a per-account archive in Cloudflare R2**
+(suspend → export → verify → retire routing, looping until none remain), and
+only then removes the cell from the fleet and tears the infrastructure down.
+The accounts wait in R2 — "archived, awaiting placement" — until they are
+restored onto another cell. Add `-destroy-accounts` to skip preservation and
+purge the directory entries instead: the sandbox/dev override, an explicit
+acknowledgment that the accounts die with the cell.
 
 See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
 [.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps
