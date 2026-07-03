@@ -92,6 +92,7 @@ const UNDO_EMAIL_PATH = /^\/undo-email\/([0-9a-f]{64})$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const EVACUATE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):evacuate$/;
+const RESTORE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):restore$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const INVITE_PATH = /^\/v1\/invites\/([a-z0-9][a-z0-9-]{2,63})$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -1791,6 +1792,297 @@ async function evacuateAccount(env, cellName, cell, accountId) {
   await env.DIRECTORY.delete(`acct:${accountId}`);
 }
 
+// handleRestore is POST /v1/cells/{name}:restore — the mirror of :evacuate.
+// Iterates archived: pointers whose region matches the target cell's, and
+// for a bounded batch streams the R2 object into the cell's :import, calls
+// :resume, writes the new acct: pointer, then deletes both the archived:
+// KV entry and the R2 object. Each of the four steps is individually
+// re-safe (ready-check-then-act, deterministic keys), so a partial restore
+// resumes cleanly on the next call. Refuses to restore into a drained cell
+// (accepting=false): dumping accounts onto a cell that will not accept them
+// would just move the "awaiting placement" state to a place harder to see.
+async function handleRestore(request, env, cellName) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (!env.ARCHIVES) {
+    return err("R2 bucket not bound — witwave-archives is not configured", 501);
+  }
+  const cell = await env.DIRECTORY.get(`cell:${cellName}`, { type: "json" });
+  if (!cell) {
+    return err("unknown cell", 404);
+  }
+  if (cell.accepting === false) {
+    return err("cell is drained (accepting=false) — cannot restore into it", 409);
+  }
+  if (!cell.provision_token || !cell.endpoint) {
+    return err(`cell ${cellName} has no provision credential — cannot import`, 502);
+  }
+  if (!cell.region) {
+    return err(`cell ${cellName} has no region — cannot match archived accounts`, 502);
+  }
+
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // batch size defaults are fine
+  }
+  let batch = Number(body.batch);
+  if (!Number.isFinite(batch) || batch < 1) {
+    batch = 4;
+  }
+  batch = Math.min(Math.floor(batch), 10);
+
+  // Iterate archived: pointers, region-matching the target cell. Region is
+  // the user-facing placement axis: an archived account waits in R2 until a
+  // cell in its region can host it, so a us-west-2 archive never silently
+  // lands in eu-central-1.
+  const targets = [];
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.region === cell.region) {
+        targets.push({ accountId: k.name.slice("archived:".length), archived: entry });
+        if (targets.length >= batch) {
+          break;
+        }
+      }
+    }
+    if (targets.length >= batch) {
+      break;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  const progressKey = `restore:${cellName}`;
+  const progress = (await env.DIRECTORY.get(progressKey, { type: "json" })) ?? {
+    started_at: new Date().toISOString(),
+    done: 0,
+    failed: [],
+  };
+
+  const results = [];
+  for (const { accountId, archived } of targets) {
+    try {
+      await restoreAccount(env, cellName, cell, accountId, archived);
+      progress.done += 1;
+      results.push({ account_id: accountId, ok: true });
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      progress.failed = [
+        ...(progress.failed ?? []).filter((f) => f.account_id !== accountId),
+        { account_id: accountId, error: msg, at: new Date().toISOString() },
+      ];
+      results.push({ account_id: accountId, ok: false, error: msg });
+      console.log(`restore ${cellName}/${accountId} failed: ${msg}`);
+    }
+  }
+
+  // Count region-matched archived: pointers still awaiting placement.
+  // witself-infra loops until this reaches zero.
+  let remaining = 0;
+  let cursor2;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor: cursor2 });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.region === cell.region) {
+        remaining += 1;
+      }
+    }
+    cursor2 = page.list_complete ? undefined : page.cursor;
+  } while (cursor2);
+
+  progress.remaining = remaining;
+  if (remaining === 0) {
+    progress.finished_at = new Date().toISOString();
+  }
+  await env.DIRECTORY.put(progressKey, JSON.stringify(progress));
+
+  return json({
+    schema_version: "witself.v0",
+    cell: cellName,
+    region: cell.region,
+    restored: results,
+    remaining,
+    progress,
+  });
+}
+
+// restoreAccount runs the four-step restore for a single account. Each step
+// is idempotent under retry, and the ordering — import THEN resume THEN
+// route THEN clean — guarantees the account is never simultaneously
+// discoverable at two cells. Terminology mirrors evacuateAccount.
+//
+// Cross-cell race: two accepting cells in the same region CAN be targeted
+// simultaneously by two :restore callers (a driver plus a manual retry, two
+// operators, etc.). Both would list the same archived: pointer, both would
+// see acct: null, both would import into DIFFERENT cells — different
+// databases return no 409 collision — and last-writer-wins on the acct:
+// KV would leave the losing cell holding a ghost copy of the account with
+// no directory pointer. To prevent that, we take a `restoring:<accountId>`
+// claim up front and re-check acct: immediately before writing it. KV has
+// no CAS, so the defense is layered rather than atomic: the claim shrinks
+// the race window from indefinite to milliseconds, and the pre-put
+// re-check catches the residual case (throwing instead of silently
+// overwriting).
+async function restoreAccount(env, cellName, cell, accountId, archived) {
+  // Idempotency short-circuit: if an acct: pointer already names this cell
+  // for this account, a prior restore either finished or died between steps
+  // 3 and 4. Either way, ensure R2 + archived: are gone and stop.
+  const routed = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (routed?.cell === cellName) {
+    try {
+      await env.ARCHIVES.delete(archived.object);
+    } catch {
+      // ignore — R2 delete of a missing key is a 204
+    }
+    await env.DIRECTORY.delete(`archived:${accountId}`);
+    await env.DIRECTORY.delete(`restoring:${accountId}`);
+    return;
+  }
+  if (routed && routed.cell !== cellName) {
+    throw new Error(
+      `acct:${accountId} already routes to ${routed.cell} — refusing to route to ${cellName}`,
+    );
+  }
+
+  // Cross-cell claim: if another cell has an active restore in flight for
+  // this account, back off. TTL bounds how long a dead Worker can strand
+  // the claim (15 min covers the 5-min :import timeout plus retries).
+  const claimKey = `restoring:${accountId}`;
+  const existingClaim = await env.DIRECTORY.get(claimKey, { type: "json" });
+  if (existingClaim && existingClaim.cell !== cellName) {
+    throw new Error(
+      `${accountId} is already being restored to ${existingClaim.cell} (since ${existingClaim.started_at}) — skipping`,
+    );
+  }
+  await env.DIRECTORY.put(
+    claimKey,
+    JSON.stringify({ cell: cellName, started_at: new Date().toISOString() }),
+    { expirationTtl: 900 },
+  );
+  // Re-read to catch a same-instant twin claim from another cell. KV is
+  // eventually consistent, so this doesn't close the window completely,
+  // but a concurrent claim's write is likely to be visible within a
+  // handful of ms — small enough to make the residual race rare, and the
+  // pre-put acct: re-check below catches whatever slips through.
+  const reclaim = await env.DIRECTORY.get(claimKey, { type: "json" });
+  if (reclaim && reclaim.cell !== cellName) {
+    throw new Error(
+      `${accountId} was claimed by ${reclaim.cell} while we were writing our claim — backing off`,
+    );
+  }
+
+  // (1) Stream the R2 archive into the target cell's :import. The archive
+  // is committed in a single transaction on the cell side (see
+  // internal/store/import.go) — a mid-stream failure leaves the cell
+  // untouched, and the whole import re-runs on the next call.
+  const obj = await env.ARCHIVES.get(archived.object);
+  if (!obj || !obj.body) {
+    throw new Error(`archive ${archived.object} not in R2`);
+  }
+  const importResp = await fetch(
+    `${cell.endpoint}/v1/accounts/${accountId}:import`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cell.provision_token}`,
+        "Content-Type": "application/octet-stream",
+      },
+      body: obj.body,
+      signal: AbortSignal.timeout(300000), // 5 min per-account ceiling
+    },
+  );
+  if (!importResp.ok) {
+    // 409 with body "account already exists on this cell" means a prior
+    // attempt succeeded but died before step 3 — treat as success and
+    // continue to routing/cleanup. Anything else is a real failure.
+    const text = await importResp.text().catch(() => "");
+    if (importResp.status !== 409 || !text.includes("already exists")) {
+      throw new Error(`import ${importResp.status}: ${text.slice(0, 200)}`);
+    }
+  } else {
+    await importResp.text().catch(() => "");
+  }
+
+  // (2) Lift the evacuation suspension. Owner-suspended accounts stay
+  // owner-suspended — ResumeAccountSystem's category scoping guarantees the
+  // authority that suspended is the authority that resumes.
+  const resumeResp = await fetch(
+    `${cell.endpoint}/v1/accounts/${accountId}:resume`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({ for: "evacuation" }),
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  if (!resumeResp.ok) {
+    // 409 "account is not suspended" means the account came back
+    // suspended for something else (owner_request) — legitimate; the
+    // owner will lift it. 409 "category does not match" is the same
+    // reality with a more specific message. Either way, do not fail.
+    const text = await resumeResp.text().catch(() => "");
+    const benign =
+      resumeResp.status === 409 &&
+      (text.includes("not suspended") || text.includes("category"));
+    if (!benign) {
+      throw new Error(`resume ${resumeResp.status}: ${text.slice(0, 200)}`);
+    }
+  } else {
+    await resumeResp.text().catch(() => "");
+  }
+
+  // (3) Write the acct: pointer BEFORE deleting archived:, so a directory
+  // lookup during the tiny gap between the two KV writes always finds
+  // SOMETHING — never a false 404 for an account we already restored.
+  //
+  // Cross-cell race defense: re-read acct: immediately before writing. If
+  // another cell won the race between our claim and this moment (the
+  // claim's re-read isn't a real mutex), we imported successfully but our
+  // data on this cell is now the ghost copy. Refuse to overwrite the
+  // winner's routing pointer — the caller sees the error, the operator
+  // notices a divergence, and the ghost copy can be evacuated back into
+  // R2 on cleanup rather than silently accreting mutable state on two
+  // cells.
+  const finalCheck = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (finalCheck && finalCheck.cell !== cellName) {
+    throw new Error(
+      `${accountId} routes to ${finalCheck.cell} — our import on ${cellName} is a ghost; evacuate it`,
+    );
+  }
+  await env.DIRECTORY.put(
+    `acct:${accountId}`,
+    JSON.stringify({
+      cell: cellName,
+      endpoint: cell.endpoint,
+      region: cell.region,
+    }),
+  );
+
+  // (4) Retire the archived: pointer, then delete the R2 object. Order
+  // matters for observability: a directory reader that sees archived: gone
+  // but the R2 key still present would be transiently confusing, but a
+  // reader that sees archived: still present after the R2 key is gone
+  // would follow a dead pointer — much worse.
+  await env.DIRECTORY.delete(`archived:${accountId}`);
+  try {
+    await env.ARCHIVES.delete(archived.object);
+  } catch {
+    // ignore — R2 delete of a missing key is a 204; a genuine R2 outage
+    // just leaves an orphan we can sweep later, doesn't roll back the
+    // restore.
+  }
+  await env.DIRECTORY.delete(claimKey);
+}
+
 // streamToR2Multipart pipes an unknown-length ReadableStream into an R2
 // object using multipart uploads. It's the workhorse for the "no
 // Content-Length on cell exports" reality: R2's single-shot put() rejects
@@ -1916,6 +2208,18 @@ export default {
         return err("method not allowed", 405);
       }
       return handleEvacuate(request, env, em[1]);
+    }
+
+    // Cell restore: the mirror of :evacuate. Bounded batch of archived:
+    // accounts (region-matched to the target cell) get streamed from R2
+    // into the cell's :import, then :resume, then the archived: pointer
+    // is retired in favor of an acct: pointer at the new cell.
+    const rsm = url.pathname.match(RESTORE_PATH);
+    if (rsm) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleRestore(request, env, rsm[1]);
     }
 
     // Invite codes (fleet-token authorized).

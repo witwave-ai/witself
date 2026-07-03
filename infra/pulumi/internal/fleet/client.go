@@ -267,6 +267,73 @@ func (c *Client) Evacuate(ctx context.Context, name string, batch int) (Evacuati
 	}
 }
 
+// ErrCellDrained means the cell was registered with accepting=false, so the
+// control plane refused to route new accounts (whether from signups or
+// restores) into it. Re-register the cell as accepting=true and retry.
+var ErrCellDrained = errors.New("cell is drained — cannot restore accounts into it")
+
+// RestoreResult reports one :restore call's outcome. Restored is the
+// per-account report for THIS batch; Remaining is the number of archived:
+// pointers matching this cell's region still awaiting placement. The caller
+// loops until Remaining is zero.
+type RestoreResult struct {
+	Restored  []RestoredAccount `json:"restored"`
+	Remaining int               `json:"remaining"`
+	Region    string            `json:"region"`
+}
+
+// RestoredAccount is one line in a restore batch's report. Same shape as
+// EvacuatedAccount, distinct type so a caller cannot accidentally mix them.
+type RestoredAccount struct {
+	AccountID string `json:"account_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// Restore asks the control plane to pull a batch of archived accounts (whose
+// region matches the target cell's) from R2 and land them on the named cell.
+// The call is bounded in wall-clock by batch size; the caller loops until
+// Remaining is zero. Same longer HTTP timeout as Evacuate — each archive
+// streams from R2 through the Worker into the cell's :import.
+func (c *Client) Restore(ctx context.Context, name string, batch int) (RestoreResult, error) {
+	body := map[string]int{"batch": batch}
+	rdr, err := marshalBody(body)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/cells/"+name+":restore", rdr)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	hc := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("control plane %s: %w", c.base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out RestoreResult
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return RestoreResult{}, fmt.Errorf("decode restore response: %w", err)
+		}
+		return out, nil
+	case http.StatusNotFound:
+		// Same disambiguation as Evacuate: unknown cell vs missing route.
+		if strings.Contains(string(raw), "unknown cell") {
+			return RestoreResult{}, ErrNotRegistered
+		}
+		return RestoreResult{}, fmt.Errorf("restore cell: HTTP 404: %s (control plane may be too old — upgrade)", strings.TrimSpace(string(raw)))
+	case http.StatusConflict:
+		return RestoreResult{}, ErrCellDrained
+	default:
+		return RestoreResult{}, fmt.Errorf("restore cell: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+}
+
 // marshalBody encodes body as JSON if non-nil.
 func marshalBody(body any) (io.Reader, error) {
 	if body == nil {
