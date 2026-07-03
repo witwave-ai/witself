@@ -15,8 +15,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.79
-    imageTag: 0.0.79
+    chartVersion: 0.0.80
+    imageTag: 0.0.80
     backendKind: managed
     awsAlbIngress:
       enabled: true
@@ -66,11 +66,11 @@ platform:
         port: 80
   certManager:
     enabled: true
-    chartVersion: 0.0.79
+    chartVersion: 0.0.80
     namespace: cert-manager
   externalDNS:
     enabled: true
-    chartVersion: 0.0.79
+    chartVersion: 0.0.80
     namespace: external-dns
     serviceAccountName: external-dns
     domainFilters:
@@ -78,16 +78,16 @@ platform:
     txtOwnerId: aws-sandbox-usw2-dev
   externalSecrets:
     enabled: true
-    chartVersion: 0.0.79
+    chartVersion: 0.0.80
     namespace: external-secrets
     storeName: aws
     secretsManagerRegion: us-west-2
   keda:
     enabled: true
-    chartVersion: 0.0.79
+    chartVersion: 0.0.80
     namespace: keda
   metricsServer:
     enabled: true
-    chartVersion: 0.0.79
+    chartVersion: 0.0.80
     namespace: kube-system
     replicas: 2
