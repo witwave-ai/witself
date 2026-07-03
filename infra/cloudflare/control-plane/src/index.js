@@ -1207,11 +1207,11 @@ async function handleChangeEmail(request, env, accountId) {
       await env.EMAIL.send({
         to: account.email,
         from: "no-reply@witwave.ai",
-        subject: "Your Witself account email is being changed",
-        text: `A request was made to move a Witself account away from this address.\n\nAccount: ${accountId}\nMoving to: ${newEmail}\n\nIf this was you — nothing to do. Confirm from the new inbox to complete the change.\n\nIf this was NOT you: someone may hold your operator token. Run this at your terminal RIGHT NOW to rotate the owner credentials before the change commits:\n\n  ws account recover\n\nAfter the change commits, an undo link stays live for 48 hours (you'll get it separately).\n`,
+        subject: "Security alert: your Witself account email is being changed",
+        text: `A request was made to move a Witself account away from this address.\n\nAccount: ${accountId}\nMoving to: ${newEmail}\n\nIf this was you — nothing to do. Confirm from the new inbox to complete the change.\n\nIf this was NOT you, treat it as a compromise: someone else holds a working operator token for your account. Run this at your terminal right now — it rotates the owner credentials and stops the change:\n\n  ws account recover\n`,
         html: renderEmail({
           title: "Your account email is being changed",
-          preheader: "If this wasn't you, run ws account recover now — before it commits.",
+          preheader: "Not you? Someone holds your credentials — run ws account recover now.",
           body: `
             <p style="margin:0 0 20px;">A request was made to move a Witself account away from this address.</p>
             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:0 0 20px;">
@@ -1225,9 +1225,8 @@ async function handleChangeEmail(request, env, accountId) {
               </tr>
             </table>
             <p style="margin:0 0 16px;"><strong>If this was you</strong> — nothing to do. Confirm from the new inbox to complete the change.</p>
-            <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you</strong> — someone may hold your operator token. Run this at your terminal right now to rotate the owner credentials before the change commits:</p>
+            <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you, treat it as a compromise</strong> — someone else holds a working operator token for your account. Run this at your terminal right now; it rotates the owner credentials and stops the change:</p>
             ${cliBlock("ws account recover")}
-            <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After the change commits, an undo link stays live for 48 hours (you'll receive it separately).</p>
           `,
         }),
       });
@@ -1315,12 +1314,12 @@ async function handleChangeEmail(request, env, accountId) {
       to: oldEmail,
       from: "no-reply@witwave.ai",
       subject: "Your Witself account email was changed",
-      text: `A Witself account was moved away from this address.\n\nAccount: ${accountId}\nNow at:  ${newEmail}\n\nIf this was NOT you, revert within 48 hours by opening this link:\n\n  ${undoLink}\n\nAfter reverting, run \`ws account recover\` at your terminal to rotate the owner credentials.\n`,
+      text: `This is a confirmation: a Witself account has moved away from this address.\n\nAccount: ${accountId}\nNow at:  ${newEmail}\n\nIf the change was valid, no action is needed — this is the last email this address will receive for the account.\n\nIf the change was NOT valid, you can revert it. This link points the account back at this address and stays live for 48 hours:\n\n  ${undoLink}\n\nAfter reverting, run \`ws account recover\` at your terminal to rotate the owner credentials.\n`,
       html: renderEmail({
         title: "Your account email was changed",
-        preheader: "Not you? Revert within 48 hours — link inside.",
+        preheader: "If the change wasn't valid, you can revert it within 48 hours.",
         body: `
-          <p style="margin:0 0 20px;">A Witself account was moved away from this address.</p>
+          <p style="margin:0 0 20px;">This is a confirmation: a Witself account has moved away from this address.</p>
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:0 0 20px;">
             <tr>
               <td style="padding:12px 16px;background:${EMAIL_BG};border:1px solid ${EMAIL_BORDER};border-radius:6px;">
@@ -1331,8 +1330,8 @@ async function handleChangeEmail(request, env, accountId) {
               </td>
             </tr>
           </table>
-          <p style="margin:0 0 8px;"><strong>If this was you</strong> — nothing to do.</p>
-          <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you</strong> — revert within 48 hours:</p>
+          <p style="margin:0 0 16px;">If the change was valid, no action is needed — this is the last email this address will receive for the account.</p>
+          <p style="margin:0 0 8px;">If the change was <strong>not</strong> valid, you can revert it — this points the account back at this address and stays live for <strong>48 hours</strong>:</p>
           ${ctaButton({ href: undoLink, label: "Revert the change" })}
           <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After reverting, run <code style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;">ws account recover</code> at your terminal to rotate the owner credentials.</p>
         `,
