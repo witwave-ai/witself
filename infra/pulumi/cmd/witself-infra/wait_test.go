@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,6 +127,69 @@ func TestWaitForCellHealthy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWaitForCellHealthyTimeoutPreservesDiagnosticTail pins the fix for
+// the review's confirmed finding: the 120-char truncation used to eat
+// the diagnostically useful tail of every net/http error. On a real
+// hostname like api.aws-sandbox-usw2-dev.cells.witself.witwave.ai the
+// `Get "https://<host>/v1/version": ` prefix that net/http prepends is
+// 76 chars, leaving 44 for the actual failure — so "no such host",
+// "certificate has expired", "unknown authority", and similar diagnostic
+// markers all fell off the end of the timeout message. The fix strips
+// the redundant prefix and keeps the untruncated last-error for the
+// terminal timeout error (per-iteration progress lines still truncate).
+func TestWaitForCellHealthyTimeoutPreservesDiagnosticTail(t *testing.T) {
+	// Force every transport call to fail with a distinctive tail marker
+	// so we can assert it survives to the timeout error.
+	origClient := httpClientFactory
+	httpClientFactory = func() *http.Client {
+		return &http.Client{
+			Timeout: 100 * time.Millisecond,
+			Transport: failingTransport{err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: errNoSuchHost{name: "api.aws-sandbox-usw2-dev.cells.witself.witwave.ai"},
+			}},
+		}
+	}
+	defer func() { httpClientFactory = origClient }()
+
+	ctx := context.Background()
+	err := waitForCellHealthy(ctx,
+		"api.aws-sandbox-usw2-dev.cells.witself.witwave.ai",
+		50*time.Millisecond, 5*time.Millisecond)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no such host") {
+		t.Errorf("timeout error dropped the diagnostic tail — want 'no such host' in: %s", msg)
+	}
+	// The redundant `Get "<url>": ` prefix must NOT survive to the
+	// message (the host is already named up front).
+	if strings.Contains(msg, `Get "https://`) {
+		t.Errorf("timeout error still contains the redundant Get \"<url>\": prefix: %s", msg)
+	}
+}
+
+// failingTransport returns a fixed error for every request, so a test can
+// stand up any net/http error and observe how waitForCellHealthy handles it.
+type failingTransport struct{ err error }
+
+func (t failingTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
+// errNoSuchHost is what a real DNS-lookup failure produces — a wrapped
+// DNSError-shaped thing. We rebuild the minimal surface here so the test
+// doesn't depend on net's internal error types (which vary across Go
+// versions).
+type errNoSuchHost struct{ name string }
+
+func (e errNoSuchHost) Error() string {
+	return "lookup " + e.name + " on 169.254.169.253:53: no such host"
 }
 
 // rewritingTransport rewrites every outbound request's scheme to http and

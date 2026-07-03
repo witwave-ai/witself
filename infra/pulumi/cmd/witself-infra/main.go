@@ -457,13 +457,24 @@ func waitForCellHealthy(ctx context.Context, host string, maxWait, pollEvery tim
 
 	fmt.Fprintf(os.Stderr, "waiting for cell %s API endpoint to be reachable (up to %s)…\n", host, maxWait)
 
+	// urlPrefix is what net/http prepends to every transport error, e.g.
+	// `Get "https://api.<cell>.<domain>/v1/version": `. It's 60-80 chars
+	// of noise we already know (the host is in the log line) and it
+	// otherwise consumes the truncation budget where the actual
+	// diagnostic tail — "no such host", "certificate has expired",
+	// "unknown authority" — lives. Strip it before anything else.
+	urlPrefix := `Get "` + url + `": `
+
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
 		}
 		resp, err := client.Do(req)
-		var reason string
+		// fullReason keeps the untruncated last-seen problem for the
+		// terminal timeout message; shortReason is what per-iteration
+		// progress lines log so they stay readable.
+		var fullReason string
 		if err == nil {
 			if resp.StatusCode == http.StatusOK {
 				_ = resp.Body.Close()
@@ -471,20 +482,20 @@ func waitForCellHealthy(ctx context.Context, host string, maxWait, pollEvery tim
 				return nil
 			}
 			_ = resp.Body.Close()
-			reason = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			fullReason = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		} else {
-			// Truncate wordy net.OpError chains so the progress line stays readable.
-			reason = err.Error()
-			if len(reason) > 120 {
-				reason = reason[:117] + "..."
-			}
+			fullReason = strings.TrimPrefix(err.Error(), urlPrefix)
+		}
+		shortReason := fullReason
+		if len(shortReason) > 120 {
+			shortReason = shortReason[:117] + "..."
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("cell %s endpoint did not become healthy within %s (last: %s)", host, maxWait, reason)
+			return fmt.Errorf("cell %s endpoint did not become healthy within %s (last: %s)", host, maxWait, fullReason)
 		}
 
-		fmt.Fprintf(os.Stderr, "  %s: %s (%s elapsed)\n", host, reason, time.Since(started).Round(time.Second))
+		fmt.Fprintf(os.Stderr, "  %s: %s (%s elapsed)\n", host, shortReason, time.Since(started).Round(time.Second))
 
 		select {
 		case <-ctx.Done():
