@@ -129,6 +129,34 @@ func ResendVerification(ctx context.Context, controlPlane, accountID, operatorTo
 	return out.Email, nil
 }
 
+// RequestRecovery asks the control plane to email a recovery code for an
+// account whose credentials are lost (POST {controlPlane}/v1/accounts/{id}:recover
+// with an empty body). Unauthenticated by design; the answer is deliberately
+// the same whether the account exists or not.
+func RequestRecovery(ctx context.Context, controlPlane, accountID string) error {
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":recover"
+	return doJSON(ctx, http.MethodPost, url, "", []byte("{}"), nil)
+}
+
+// RedeemRecovery exchanges an emailed recovery code for a fresh root-bound
+// bootstrap token (same shape as signup — the ordinary claim exchange
+// finishes the job). Refusals (bad code, too many attempts) surface verbatim.
+func RedeemRecovery(ctx context.Context, controlPlane, accountID, code string) (*CreatedAccount, error) {
+	body, err := json.Marshal(map[string]string{"code": code})
+	if err != nil {
+		return nil, err
+	}
+	var out CreatedAccount
+	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":recover"
+	if err := doJSON(ctx, http.MethodPost, url, "", body, &out); err != nil {
+		return nil, err
+	}
+	if out.AccountID == "" || out.BootstrapToken == "" || out.Cell.Endpoint == "" {
+		return nil, fmt.Errorf("control plane returned an incomplete recovery response")
+	}
+	return &out, nil
+}
+
 // CloseAccount permanently closes an account via the control plane
 // (POST {controlPlane}/v1/accounts/{id}:close). The operator token is forwarded
 // to the account's cell, which authorizes (owner-only) and tombstones; the

@@ -197,6 +197,34 @@ func Save(name string, acct Account, operatorToken string) error {
 	return write(cfg)
 }
 
+// RefreshToken replaces the stored token for an EXISTING binding — the
+// recovery write path. Save refuses taken names; this is its counterpart.
+func RefreshToken(name, operatorToken string) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Accounts[name]; !ok {
+		return fmt.Errorf("no local account named %q", name)
+	}
+	tp, err := TokenPath(name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(tp), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tp, []byte(operatorToken+"\n"), 0o600); err != nil {
+		return err
+	}
+	// A legacy flat file would now be stale; reads prefer the new path, but
+	// clean it up anyway.
+	if lp, err := legacyTokenPath(name); err == nil {
+		_ = os.Remove(lp)
+	}
+	return nil
+}
+
 // Delete removes a named account's binding and token (used when it closes).
 func Delete(name string) error {
 	cfg, err := Load()

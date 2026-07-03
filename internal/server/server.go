@@ -100,6 +100,19 @@ type Config struct {
 	// (activated=false), ErrConflict when the account is closed or otherwise
 	// ineligible.
 	ActivateAccount func(ctx context.Context, accountID string) (activated bool, err error)
+
+	// AccountContact, when set (with the provisioning pair), enables POST
+	// /v1/accounts/{id}:contact — the control plane reading an account's
+	// contact email when no operator token exists (the recovery request).
+	// Read-only, machine-authorized.
+	AccountContact func(ctx context.Context, accountID string) (AccountRecord, error)
+
+	// RecoverAccount, when set (with the provisioning pair), enables POST
+	// /v1/accounts/{id}:recover — after the control plane verifies inbox
+	// control, the cell rotates the root operator's credentials: all live
+	// root tokens die and a fresh one-shot bootstrap token is returned.
+	// Only-if-active; ErrConflict otherwise.
+	RecoverAccount func(ctx context.Context, accountID string) (ProvisionedAccount, error)
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -283,8 +296,8 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil {
-			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg.ProvisionToken, cfg.ReapAccount, cfg.ActivateAccount))
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil {
+			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
 	if cfg.Authenticate != nil {
@@ -539,7 +552,7 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 }
 
 // accountLifecycleHandler serves the provision-token-authorized lifecycle
-// verbs on POST /v1/accounts/{id}:reap and /v1/accounts/{id}:activate —
+// verbs on POST /v1/accounts/{id}:reap|:activate|:contact|:recover —
 // instance-level authority, the same trust link as provisioning, so only the
 // control plane can call them.
 //
@@ -550,15 +563,21 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 // activate: 200 whether it activated just now or was already active (an
 // idempotent second click); 409 when the account is closed or otherwise
 // ineligible (the link outlived its account); 404 for an unknown id.
-func accountLifecycleHandler(provisionToken string, reap, activate func(ctx context.Context, accountID string) (bool, error)) http.HandlerFunc {
+//
+// contact: 200 with the account's email and status — the read the recovery
+// request needs when no operator token exists.
+//
+// recover: 200 with a fresh root-bound bootstrap token after rotating every
+// live root credential; 409 unless the account is active.
+func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
-		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.ProvisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap"); ok && reap != nil {
-			reaped, err := reap(r.Context(), accountID)
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap"); ok && cfg.ReapAccount != nil {
+			reaped, err := cfg.ReapAccount(r.Context(), accountID)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
@@ -579,8 +598,8 @@ func accountLifecycleHandler(provisionToken string, reap, activate func(ctx cont
 			})
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "activate"); ok && activate != nil {
-			activated, err := activate(r.Context(), accountID)
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "activate"); ok && cfg.ActivateAccount != nil {
+			activated, err := cfg.ActivateAccount(r.Context(), accountID)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
@@ -598,6 +617,45 @@ func accountLifecycleHandler(provisionToken string, reap, activate func(ctx cont
 				"account_id":     accountID,
 				"status":         "active",
 				"activated":      activated,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "contact"); ok && cfg.AccountContact != nil {
+			rec, err := cfg.AccountContact(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     rec.ID,
+				"email":          rec.Email,
+				"status":         rec.Status,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "recover"); ok && cfg.RecoverAccount != nil {
+			acct, err := cfg.RecoverAccount(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account is not active")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not recover account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account":        acct,
 			})
 			return
 		}

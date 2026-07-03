@@ -28,6 +28,9 @@
 //                           reap candidate; dropped on activation/close/reap
 //   verify:<sha256(token)> -> {"account_id","cell","created_at"}
 //                           email-verification token (hash only, KV TTL 7d)
+//   recover:<account_id> -> {"code_hash","code_expires_at","attempts",
+//                           "emails_sent","last_email_at"} (KV TTL 24h)
+//                           recovery code + rate-limit state, phantom ids too
 //   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
 //                             "accepting","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
@@ -69,6 +72,7 @@ const VERIFY_PATH = /^\/verify\/([0-9a-f]{64})$/;
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_CLOSE_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):close$/;
 const ACCOUNT_RESEND_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):resend-verification$/;
+const ACCOUNT_RECOVER_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):recover$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -810,6 +814,156 @@ async function handleResend(request, env, accountId) {
   });
 }
 
+// handleRecover is POST /v1/accounts/{id}:recover — lost-token recovery, the
+// one UNAUTHENTICATED account verb (the caller has nothing left to present).
+// Two modes by body: {} requests a code, {"code"} redeems it. Inbox control
+// is the proof: the code goes to the account's email (read from the cell via
+// :contact), and only a correct redeem makes the cell rotate the root
+// operator's credentials. Requesting never changes the account. Every answer
+// to the request mode is identical whether the account exists or not, and
+// rate-limit state is kept per-id in KV — for phantom ids too, so refusals
+// leak nothing.
+async function handleRecover(request, env, accountId) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // empty body = request mode
+  }
+  const rlKey = `recover:${accountId}`;
+  const rl = (await env.DIRECTORY.get(rlKey, { type: "json" })) ?? {};
+
+  if (!body.code) {
+    // ---- Request mode: maybe send a code; always answer the same. ----
+    // The generic answer must be indistinguishable across (phantom id, real
+    // id, cell down, email backend down) — in both response BODY and, as
+    // best a Worker can, response LATENCY. That means the cell round trip
+    // happens for phantom ids too, and rate-limit state advances only when
+    // an email actually left. The 429 cases are internal signals to a
+    // legitimate owner and use plain 429s that phantom ids never trigger.
+    const generic = () =>
+      json({
+        schema_version: "witself.v0",
+        message: "if the account exists and is active, a recovery code was emailed",
+      });
+    if ((rl.emails_sent ?? 0) >= 5) {
+      return err("too many recovery requests for this account — try again tomorrow", 429);
+    }
+    if (rl.last_email_at && Date.now() - Date.parse(rl.last_email_at) < 2 * 60 * 1000) {
+      return err("a recovery code was just sent — wait a couple of minutes", 429);
+    }
+
+    // Always fetch the cell, even for phantom ids: use the placement pool
+    // as a stand-in when there's no acct: pointer, so latency doesn't
+    // distinguish real from phantom. If nothing usable exists, skip.
+    const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+    let cell = entry
+      ? await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" })
+      : (await listCells(env)).find((c) => c.provision_token && c.endpoint) || null;
+    let contact = null;
+    if (cell?.provision_token && cell?.endpoint) {
+      try {
+        const resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:contact`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${cell.provision_token}` },
+          signal: AbortSignal.timeout(15000),
+        });
+        // Only trust the answer when we hit the REAL routing pointer's cell.
+        if (entry && resp.ok) {
+          contact = await resp.json();
+        } else {
+          await resp.text().catch(() => "");
+        }
+      } catch {
+        contact = null;
+      }
+    }
+    let sent = false;
+    if (contact?.email && contact.status === "active" && env.EMAIL) {
+      const raw = new Uint32Array(3);
+      crypto.getRandomValues(raw);
+      const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
+      try {
+        await env.EMAIL.send({
+          to: contact.email,
+          from: "no-reply@witwave.ai",
+          subject: "Your Witself recovery code",
+          text: `A recovery was requested for your Witself account (${accountId}).\n\nRecovery code: ${code}\n\nIt expires in 15 minutes. Redeem it with:\n\n  ws account recover --id ${accountId} --code ${code}\n\nIf you didn't request this, ignore this email — nothing changes until the code is used.\n`,
+          html: `<p>A recovery was requested for your <strong>Witself</strong> account (<code>${accountId}</code>).</p><p>Recovery code: <strong>${code}</strong></p><p>It expires in 15 minutes. Redeem it with:</p><pre>ws account recover --id ${accountId} --code ${code}</pre><p>If you didn't request this, ignore this email — nothing changes until the code is used.</p>`,
+        });
+        // Persist the fresh code only after successful send — otherwise a
+        // failed email would corrupt an already-issued code AND burn a
+        // quota slot on a real owner during a mail outage.
+        rl.code_hash = await sha256hex(code.replaceAll("-", ""));
+        rl.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        rl.attempts = 0;
+        rl.emails_sent = (rl.emails_sent ?? 0) + 1;
+        rl.last_email_at = new Date().toISOString();
+        sent = true;
+      } catch (e) {
+        console.log(`recover: email for ${accountId} failed: ${e}`);
+      }
+    }
+    if (sent) {
+      await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 24 * 3600 });
+    }
+    return generic();
+  }
+
+  // ---- Redeem mode: verify the code, then have the cell rotate. ----
+  if (!rl.code_hash || !rl.code_expires_at) {
+    return err("invalid or expired recovery code", 401);
+  }
+  if ((rl.attempts ?? 0) >= 5) {
+    return err("too many attempts — request a new code", 429);
+  }
+  // Count the attempt BEFORE comparing (fail closed on a crashed write).
+  rl.attempts = (rl.attempts ?? 0) + 1;
+  await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 24 * 3600 });
+  const presented = await sha256hex(String(body.code).replace(/[^0-9]/g, ""));
+  if (presented !== rl.code_hash || Date.parse(rl.code_expires_at) < Date.now()) {
+    return err("invalid or expired recovery code", 401);
+  }
+
+  const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (!entry) {
+    return err("unknown account", 404);
+  }
+  const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+  if (!cell?.provision_token || !cell?.endpoint) {
+    return err(`cell ${entry.cell} unavailable — try again shortly`, 502);
+  }
+  let resp;
+  try {
+    resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:recover`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cell.provision_token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+  }
+  let recovered = null;
+  try {
+    recovered = (await resp.json()).account;
+  } catch {
+    recovered = null;
+  }
+  if (!resp.ok || !recovered?.bootstrap_token || recovered.account_id !== accountId) {
+    return err("account cannot be recovered", resp.status === 409 ? 409 : 502);
+  }
+  await env.DIRECTORY.delete(rlKey); // the code is spent
+  return json({
+    schema_version: "witself.v0",
+    account_id: recovered.account_id,
+    operator_id: recovered.operator_id,
+    email: recovered.email,
+    status: recovered.status,
+    cell: { name: entry.cell, endpoint: cell.endpoint },
+    bootstrap_token: recovered.bootstrap_token,
+  });
+}
+
 // handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's
 // entrance: born through the front door, closed through the front door. The
 // control plane holds no authority here — it forwards the caller's operator
@@ -1072,6 +1226,15 @@ export default {
         return err("method not allowed", 405);
       }
       return handleResend(request, env, rm[1]);
+    }
+
+    // Recovery: the one unauthenticated account verb; inbox control is proof.
+    const rcm = url.pathname.match(ACCOUNT_RECOVER_PATH);
+    if (rcm) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleRecover(request, env, rcm[1]);
     }
 
     // Cold path: the Go container.

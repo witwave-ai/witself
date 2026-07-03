@@ -70,6 +70,27 @@ The token prints once — store it somewhere safe **off this machine**, like
 (`ws token revoke --account test-account-1 --token tok_ID --yes`), so a
 compromised one dies without touching the others.
 
+## Recover a lost owner token
+
+Recovery proves inbox control: a code goes to the account's email, and
+redeeming it rotates the owner's credentials — the old tokens die, agents and
+other operators are untouched. Requesting a code changes nothing by itself.
+
+```sh
+ws account recover --account test-account-1
+# check the account's email for the code (valid ~15 minutes), then:
+ws account recover --account test-account-1 --code 123-456-789
+```
+
+`ws account list` shows this machine's local names and account ids — handy
+when the token is gone but you need the id. From a machine with no binding,
+use `--id acc_...` (add `--name NAME` to save the recovered credential).
+
+Recovery revokes **every** token the owner holds — including a backup stored
+in a password manager — so re-mint the backup afterward. Tokens on other
+operators and agents survive; automation that must outlive a recovery belongs
+on its own operator.
+
 ## Close an account
 
 Closing is permanent: every credential is revoked and the account is retired

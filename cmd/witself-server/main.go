@@ -294,6 +294,34 @@ func serve() int {
 				}
 				return activated, err
 			}
+			cfg.AccountContact = func(ctx context.Context, accountID string) (server.AccountRecord, error) {
+				a, err := st.GetAccount(ctx, accountID)
+				if errors.Is(err, store.ErrAccountNotFound) {
+					return server.AccountRecord{}, server.ErrNotFound
+				}
+				if err != nil {
+					return server.AccountRecord{}, err
+				}
+				return server.AccountRecord{ID: a.ID, Email: a.Email, Status: a.Status}, nil
+			}
+			cfg.RecoverAccount = func(ctx context.Context, accountID string) (server.ProvisionedAccount, error) {
+				p, err := st.RecoverAccount(ctx, accountID, provisionBootstrapTTL)
+				switch {
+				case errors.Is(err, store.ErrAccountNotFound):
+					return server.ProvisionedAccount{}, server.ErrNotFound
+				case errors.Is(err, store.ErrAccountNotActive):
+					return server.ProvisionedAccount{}, server.ErrConflict
+				case err != nil:
+					return server.ProvisionedAccount{}, err
+				}
+				return server.ProvisionedAccount{
+					AccountID:      p.AccountID,
+					OperatorID:     p.OperatorID,
+					Email:          p.Email,
+					Status:         p.Status,
+					BootstrapToken: p.BootstrapToken,
+				}, nil
+			}
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
 		cfg.Ready = st.Ping

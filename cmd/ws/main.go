@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -778,7 +779,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|status|resend-verification|close|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|list|status|resend-verification|recover|close|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -786,10 +787,14 @@ func accountCmd(args []string) int {
 		return accountCreate(args[1:])
 	case "adopt":
 		return accountAdopt(args[1:])
+	case "list":
+		return accountList(args[1:])
 	case "status":
 		return accountStatus(args[1:])
 	case "resend-verification":
 		return accountResendVerification(args[1:])
+	case "recover":
+		return accountRecover(args[1:])
 	case "close":
 		return accountClose(args[1:])
 	case "forget":
@@ -798,6 +803,152 @@ func accountCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// accountList prints this machine's local account bindings — purely local,
+// zero network, works when every token is dead. Its main job is finding an
+// account id for recovery.
+func accountList(args []string) int {
+	fs := flag.NewFlagSet("account list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := local.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	names := make([]string, 0, len(cfg.Accounts))
+	for name := range cfg.Accounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if *jsonOut {
+		type row struct {
+			Name  string `json:"name"`
+			ID    string `json:"id"`
+			Email string `json:"email,omitempty"`
+		}
+		rows := make([]row, 0, len(names))
+		for _, name := range names {
+			a := cfg.Accounts[name]
+			rows = append(rows, row{Name: name, ID: a.ID, Email: a.Email})
+		}
+		return printJSON(map[string]any{"accounts": rows})
+	}
+	w, flush := tableWriter("name\tid\temail")
+	for _, name := range names {
+		a := cfg.Accounts[name]
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", name, a.ID, tabSafe(a.Email))
+	}
+	flush()
+	return 0
+}
+
+// accountRecover is lost-token recovery: request a code to the account's
+// email, then redeem it for a fresh owner credential. Requesting changes
+// nothing; redeeming rotates every live root token.
+func accountRecover(args []string) int {
+	fs := flag.NewFlagSet("account recover", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := fs.String("account", "", "local account name (its binding supplies the id)")
+	id := fs.String("id", "", "raw account id (acc_...) when no local binding exists")
+	code := fs.String("code", "", "recovery code from the email (second step)")
+	name := fs.String("name", "", "local name to save the recovered credential under (only with --id and no existing binding)")
+	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if (*account == "") == (*id == "") {
+		fmt.Fprintln(os.Stderr, "usage: ws account recover (--account NAME | --id acc_ID) [--code CODE] [--name NEWNAME]")
+		return 2
+	}
+
+	cfg, err := local.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	var accountID, targetName string
+	if *account != "" {
+		a, ok := cfg.Accounts[*account]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "ws: no local account named %q (try `ws account list`, or --id acc_ID)\n", *account)
+			return 1
+		}
+		accountID, targetName = a.ID, *account
+	} else {
+		if !strings.HasPrefix(*id, "acc_") {
+			fmt.Fprintln(os.Stderr, "ws: --id takes a raw account id (acc_...)")
+			return 2
+		}
+		accountID = *id
+		for n, a := range cfg.Accounts {
+			if a.ID == accountID {
+				targetName = n // an existing binding refreshes in place
+				break
+			}
+		}
+		if targetName == "" && *name != "" {
+			// New local name for this id — refuse a name that already binds
+			// a DIFFERENT account, exactly like `ws account create --name`.
+			if a, taken := cfg.Accounts[*name]; taken && a.ID != accountID {
+				fmt.Fprintf(os.Stderr, "ws: local name %q already binds %s — pick another --name\n", *name, a.ID)
+				return 1
+			}
+			targetName = *name
+		}
+	}
+
+	ctx := context.Background()
+	if *code == "" {
+		if err := client.RequestRecovery(ctx, *endpoint, accountID); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "if %s exists and is active, a recovery code was emailed to its address (valid ~15 minutes).\nnext: re-run with --code CODE\n", accountID)
+		return 0
+	}
+
+	acct, err := client.RedeemRecovery(ctx, *endpoint, accountID, *code)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	res, err := client.BootstrapLogin(ctx, acct.Cell.Endpoint, acct.BootstrapToken)
+	if err != nil {
+		// The recovery code is spent server-side, so we can't try again
+		// with it. Surface the bootstrap token so the user can finish the
+		// exchange by hand instead of burning another quota slot.
+		fmt.Fprintf(os.Stderr, "ws: recovered but login failed: %v\n"+
+			"    finish by hand with `ws auth login --endpoint %s --bootstrap-token-file FILE`\n"+
+			"    bootstrap token (expires soon, shown once):\n", err, acct.Cell.Endpoint)
+		fmt.Println(acct.BootstrapToken)
+		return 1
+	}
+	_, hasBinding := cfg.Accounts[targetName]
+	switch {
+	case targetName != "" && hasBinding:
+		if err := local.RefreshToken(targetName, res.OperatorToken); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: saving recovered token: %v\n", err)
+			fmt.Println(res.OperatorToken) // never strand the only credential
+			return 1
+		}
+	case targetName != "":
+		if err := local.Save(targetName, local.Account{ID: acct.AccountID, Email: acct.Email}, res.OperatorToken); err != nil {
+			fmt.Fprintf(os.Stderr, "ws: saving recovered token: %v\n", err)
+			fmt.Println(res.OperatorToken)
+			return 1
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "ws: no local binding for this id — pass --name to save the credential; printing it once:")
+		fmt.Println(res.OperatorToken)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "recovered — new owner token saved as %q; the old owner tokens are revoked\n", targetName)
+	return 0
 }
 
 // accountResendVerification emails a fresh verification link for a
@@ -1130,7 +1281,9 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  ws account create       Create a Witself Cloud account (invite required)")
 	usageLine(w, "  ws account adopt        Bind an existing account (id + token) to a local name")
+	usageLine(w, "  ws account list         List this machine's local account names")
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
+	usageLine(w, "  ws account recover      Email a recovery code, redeem it for a fresh owner token")
 	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")
