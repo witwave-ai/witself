@@ -2064,15 +2064,14 @@ async function restoreAccount(env, cellName, cell, accountId, archived) {
   // Cross-cell race defense: re-read acct: immediately before writing. If
   // another cell won the race between our claim and this moment (the
   // claim's re-read isn't a real mutex), we imported successfully but our
-  // data on this cell is now the ghost copy. Refuse to overwrite the
-  // winner's routing pointer — the caller sees the error, the operator
-  // notices a divergence, and the ghost copy can be evacuated back into
-  // R2 on cleanup rather than silently accreting mutable state on two
-  // cells.
+  // data on this cell is now a ghost copy. Refuse to overwrite the
+  // winner's routing pointer — the account correctly serves from the
+  // winning cell; the ghost rows on this cell need manual removal.
+  // Recovery is documented at docs/runbooks.md#clean-up-a-ghost-restore.
   const finalCheck = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
   if (finalCheck && finalCheck.cell !== cellName) {
     throw new Error(
-      `${accountId} routes to ${finalCheck.cell} — our import on ${cellName} is a ghost; evacuate it`,
+      `restore race: ${accountId} routes to ${finalCheck.cell} — imported rows on ${cellName} are a ghost; see docs/runbooks.md#clean-up-a-ghost-restore`,
     );
   }
   await env.DIRECTORY.put(

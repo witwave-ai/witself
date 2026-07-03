@@ -274,3 +274,67 @@ ready yet), the up command exits with the failure detail. Re-run `up
 so already-restored accounts short-circuit and only the remaining ones
 finish. The Cloudflare Worker's `restore:<cell>` KV entry tracks
 cross-invocation progress if you need to debug.
+
+## Clean up a ghost restore
+
+The restore path has a layered defense against two accepting cells in the
+same region racing to import the same archived account: a `restoring:` KV
+claim with a short TTL, and a re-check of `acct:` immediately before the
+Worker writes it. When the re-check catches a race it throws:
+
+```
+restore race: acc_… routes to <winning-cell> — imported rows on <losing-cell>
+are a ghost; see docs/runbooks.md#clean-up-a-ghost-restore
+```
+
+At this point the winning cell has the account and is serving it correctly.
+The losing cell has a full copy of the account's data but no directory
+pointer at it — a ghost. The ghost is unreachable through the fleet API
+(the directory answers with the winner's endpoint), but its rows are still
+sitting in the losing cell's database, so left in place they will show up
+in the losing cell's next `:evacuate` and re-archive on top of a fresh
+export from the winner. Left long enough, they diverge as mutable state
+(memories, agents, secrets) rotates on the winner but not on the loser.
+
+The manual recovery — until a per-account fleet-level evacuate verb exists
+(see [#20](https://github.com/witwave-ai/witself/issues/20)) — is direct
+Postgres cleanup on the losing cell. The account id, the losing cell name,
+and the winning cell name all appear in the error message.
+
+Before deleting anything, verify the account really is on both cells and
+`acct:` really names the winner:
+
+```sh
+curl https://self.witwave.ai/v1/directory/<account-id>
+# should return {cell: {cell: "<winning-cell>", ...}}
+```
+
+Then connect to the losing cell's database — the DSN is in the cell's
+Kubernetes secret (`witself-server` chart) or the AWS Secrets Manager
+entry `<cell>/db` published by `witself-infra`. In a single transaction,
+delete the ghost rows in FK-reverse order:
+
+```sql
+BEGIN;
+DELETE FROM tokens    WHERE account_id = '<account-id>';
+DELETE FROM agents    WHERE realm_id IN (SELECT id FROM realms WHERE account_id = '<account-id>');
+DELETE FROM realms    WHERE account_id = '<account-id>';
+DELETE FROM operators WHERE account_id = '<account-id>';
+DELETE FROM accounts  WHERE id = '<account-id>';
+COMMIT;
+```
+
+Confirm the account still routes correctly at the winning cell:
+
+```sh
+ws account status --account <local-name>          # should show "active" via the winner
+```
+
+The ghost is now gone; the winning cell continues serving the account
+unchanged.
+
+If the losing cell is small and about to be destroyed anyway, an easier
+route is `witself-infra destroy` on that whole cell — the ghost dies with
+it, and its evacuation loop just skips the account (its `acct:` pointer
+correctly names the winner, so evacuation finds nothing routing to the
+losing cell).
