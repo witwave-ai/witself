@@ -6,17 +6,15 @@ cell:
   role: dev
   domain: aws-sandbox-use1-dev.cells.witself.witwave.ai
   apiHost: api.aws-sandbox-use1-dev.cells.witself.witwave.ai
-
 gitops:
   repoURL: https://github.com/witwave-ai/witself
   targetRevision: main
-
 apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.57
-    imageTag: 0.0.57
+    chartVersion: 0.0.84
+    imageTag: 0.0.84
     backendKind: managed
     awsAlbIngress:
       enabled: true
@@ -53,7 +51,6 @@ apps:
         targetName: witself-provision
         tokenKey: token
         refreshInterval: 1h
-
 platform:
   awsAlbIngress:
     enabled: true
