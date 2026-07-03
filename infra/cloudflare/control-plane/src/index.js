@@ -597,6 +597,59 @@ async function sha256hex(s) {
 // hash (verify:<hash> -> {account_id, cell}, self-expiring), and emails the
 // link. Returns false when no EMAIL binding is configured — signup proceeds;
 // the account simply stays pending until some other activation path exists.
+// ---- Email presentation ----------------------------------------------------
+// Every account email lands through renderEmail so the visual identity stays
+// in one place. The template is table-based with fully inline styles because
+// email clients (Gmail, Outlook, Apple Mail, Yahoo) strip <style> blocks and
+// external CSS. System fonts only — web fonts don't load in most clients,
+// including desktop Outlook. Colors are deliberately restrained: one accent
+// (#4338ca) on white on a soft gray backdrop. Human-facing text passes
+// through escapeHTML at every interpolation site — the panel wanted that
+// discipline everywhere.
+
+const EMAIL_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,Cantarell,sans-serif";
+const EMAIL_ACCENT = "#4338ca";
+const EMAIL_TEXT = "#0f172a";
+const EMAIL_MUTED = "#64748b";
+const EMAIL_BG = "#f4f5f7";
+const EMAIL_CARD = "#ffffff";
+const EMAIL_BORDER = "#eef0f4";
+
+function escapeHTML(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// codeChip renders a large, mono, centered box for a code the user must type.
+function codeChip(code) {
+  return `<div style="background:${EMAIL_BG};border:1px solid ${EMAIL_BORDER};border-radius:8px;padding:20px;font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:24px;font-weight:600;letter-spacing:0.08em;color:${EMAIL_TEXT};text-align:center;margin:24px 0;">${escapeHTML(code)}</div>`;
+}
+
+// cliBlock renders a copyable command shown as a preformatted line.
+function cliBlock(cmd) {
+  return `<div style="background:${EMAIL_BG};border:1px solid ${EMAIL_BORDER};border-radius:6px;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:${EMAIL_TEXT};overflow-x:auto;margin:16px 0;">${escapeHTML(cmd)}</div>`;
+}
+
+// ctaButton is a bulletproof-ish button (nested table + inline styles) so it
+// renders on desktop Outlook too.
+function ctaButton({ href, label }) {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 8px;"><tr><td style="border-radius:6px;background:${EMAIL_ACCENT};"><a href="${escapeHTML(href)}" style="display:inline-block;padding:13px 30px;font-family:${EMAIL_FONT};font-size:15px;font-weight:500;color:#ffffff;text-decoration:none;border-radius:6px;">${escapeHTML(label)}</a></td></tr></table>`;
+}
+
+// renderEmail wraps the message body in Witself's shared identity. Callers
+// pass pre-formed HTML (already using the helpers above); the wrapper adds
+// header, footer, preheader (hidden inbox-preview text), and the page chrome.
+function renderEmail({ title, preheader, body }) {
+  const preheaderMarkup = preheader
+    ? `<div style="display:none;font-size:1px;color:${EMAIL_BG};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHTML(preheader)}</div>`
+    : "";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHTML(title)}</title></head><body style="margin:0;padding:0;background:${EMAIL_BG};">${preheaderMarkup}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${EMAIL_BG};padding:40px 12px;"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background:${EMAIL_CARD};border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.05);"><tr><td style="padding:28px 40px;border-bottom:1px solid ${EMAIL_BORDER};"><div style="font-family:${EMAIL_FONT};font-size:19px;font-weight:600;color:${EMAIL_TEXT};letter-spacing:-0.02em;">Witself</div></td></tr><tr><td style="padding:32px 40px;font-family:${EMAIL_FONT};font-size:15px;line-height:1.65;color:${EMAIL_TEXT};"><h1 style="margin:0 0 20px;font-size:22px;font-weight:600;letter-spacing:-0.01em;color:${EMAIL_TEXT};">${escapeHTML(title)}</h1>${body}</td></tr><tr><td style="padding:20px 40px 28px;border-top:1px solid ${EMAIL_BORDER};font-family:${EMAIL_FONT};font-size:13px;line-height:1.55;color:${EMAIL_MUTED};">Sent by Witself. If you didn't expect this email, you can safely ignore it.</td></tr></table></td></tr></table></body></html>`;
+}
+
 async function sendVerificationEmail(env, origin, email, accountId, cellName, opts = {}) {
   if (!env.EMAIL) {
     return false;
@@ -615,18 +668,26 @@ async function sendVerificationEmail(env, origin, email, accountId, cellName, op
   );
   const link = `${origin}/verify/${token}`;
   const deadline = await verificationDeadline(env, opts.windowStartedAt);
-  const greeting = opts.resend
+  const opening = opts.resend
     ? "Here is a fresh verification link for your Witself account."
-    : "Welcome to Witself.";
-  const greetingHTML = opts.resend
-    ? "Here is a fresh verification link for your <strong>Witself</strong> account."
-    : "Welcome to <strong>Witself</strong>.";
+    : "Welcome to Witself. One click to activate your account.";
+  const title = opts.resend ? "A fresh verification link" : "Verify your account";
+  const preheader = opts.resend
+    ? "A fresh link — your original verification window still applies."
+    : "One click to activate your account.";
+  const body = `
+    <p style="margin:0 0 16px;">${escapeHTML(opening)}</p>
+    <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account</p>
+    <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 4px;">${escapeHTML(accountId)}</div>
+    ${ctaButton({ href: link, label: "Verify my account" })}
+    <p style="margin:24px 0 0;color:${EMAIL_MUTED};font-size:14px;">${escapeHTML(deadline)}</p>
+  `;
   await env.EMAIL.send({
     to: email,
     from: "no-reply@witwave.ai",
     subject: "Verify your Witself account",
-    text: `${greeting}\n\nVerify your account (${accountId}) by opening this link:\n\n${link}\n\n${deadline} If you didn't sign up, ignore this email.\n`,
-    html: `<p>${greetingHTML}</p><p>Verify your account (<code>${accountId}</code>) by clicking the link below:</p><p><a href="${link}">Verify my account</a></p><p>${deadline} If you didn't sign up, ignore this email.</p>`,
+    text: `${opening}\n\nAccount: ${accountId}\n\nVerify by opening this link:\n\n  ${link}\n\n${deadline}\n\nIf you didn't sign up, you can ignore this email.\n`,
+    html: renderEmail({ title, preheader, body }),
   });
   return true;
 }
@@ -891,12 +952,25 @@ async function handleRecover(request, env, accountId) {
       crypto.getRandomValues(raw);
       const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
       try {
+        const cmd = `ws account recover --id ${accountId} --code ${code}`;
         await env.EMAIL.send({
           to: contact.email,
           from: "no-reply@witwave.ai",
           subject: "Your Witself recovery code",
-          text: `A recovery was requested for your Witself account (${accountId}).\n\nRecovery code: ${code}\n\nIt expires in 15 minutes. Redeem it with:\n\n  ws account recover --id ${accountId} --code ${code}\n\nIf you didn't request this, ignore this email — nothing changes until the code is used.\n`,
-          html: `<p>A recovery was requested for your <strong>Witself</strong> account (<code>${accountId}</code>).</p><p>Recovery code: <strong>${code}</strong></p><p>It expires in 15 minutes. Redeem it with:</p><pre>ws account recover --id ${accountId} --code ${code}</pre><p>If you didn't request this, ignore this email — nothing changes until the code is used.</p>`,
+          text: `A recovery was requested for your Witself account.\n\nAccount: ${accountId}\nCode:    ${code}\n\nIt expires in 15 minutes. Redeem it at your terminal:\n\n  ${cmd}\n\nIf you didn't request this, you can ignore this email — nothing changes until the code is used.\n`,
+          html: renderEmail({
+            title: "Recovery code",
+            preheader: "Redeem this code at your terminal within 15 minutes.",
+            body: `
+              <p style="margin:0 0 8px;">A recovery was requested for your Witself account.</p>
+              <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account</p>
+              <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 20px;">${escapeHTML(accountId)}</div>
+              ${codeChip(code)}
+              <p style="margin:0 0 8px;">Redeem the code at your terminal:</p>
+              ${cliBlock(cmd)}
+              <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">The code expires in 15 minutes. If you didn't request this, you can ignore this email — nothing changes until the code is used.</p>
+            `,
+          }),
         });
         // Persist the fresh code only after successful send — otherwise a
         // failed email would corrupt an already-issued code AND burn a
@@ -1083,12 +1157,25 @@ async function handleChangeEmail(request, env, accountId) {
     crypto.getRandomValues(raw);
     const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
     try {
+      const cmd = `ws account change-email --new-email ${newEmail} --code ${code}`;
       await env.EMAIL.send({
         to: newEmail,
         from: "no-reply@witwave.ai",
         subject: "Confirm your new Witself account email",
-        text: `A request was made to move Witself account ${accountId} to this address.\n\nConfirmation code: ${code}\n\nIt expires in 15 minutes. Confirm with:\n\n  ws account change-email --new-email ${newEmail} --code ${code}\n\nIf you don't recognize this, ignore this email.\n`,
-        html: `<p>A request was made to move <strong>Witself</strong> account <code>${accountId}</code> to this address.</p><p>Confirmation code: <strong>${code}</strong></p><p>It expires in 15 minutes. Confirm with:</p><pre>ws account change-email --new-email ${newEmail} --code ${code}</pre><p>If you don't recognize this, ignore this email.</p>`,
+        text: `A request was made to move a Witself account to this address.\n\nAccount: ${accountId}\nCode:    ${code}\n\nIt expires in 15 minutes. Type this code at your terminal:\n\n  ${cmd}\n\nIf you don't recognize this, you can ignore this email.\n`,
+        html: renderEmail({
+          title: "Confirm this address",
+          preheader: "Type this code at your terminal to move the account here.",
+          body: `
+            <p style="margin:0 0 8px;">A request was made to move a Witself account to this address.</p>
+            <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account</p>
+            <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 20px;">${escapeHTML(accountId)}</div>
+            ${codeChip(code)}
+            <p style="margin:0 0 8px;">Confirm at your terminal:</p>
+            ${cliBlock(cmd)}
+            <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">The code expires in 15 minutes. If you don't recognize this request, you can ignore this email.</p>
+          `,
+        }),
       });
     } catch (e) {
       console.log(`change-email: code to ${accountId}'s new address failed: ${e}`);
@@ -1121,8 +1208,28 @@ async function handleChangeEmail(request, env, accountId) {
         to: account.email,
         from: "no-reply@witwave.ai",
         subject: "Your Witself account email is being changed",
-        text: `A request was made to move Witself account ${accountId} from this address to ${newEmail}.\n\nIf this was you, nothing to do — confirm from the new inbox. If it was NOT you, someone may hold your operator token: run \`ws account recover\` right now to rotate the owner credentials before the change commits. After the change commits, an undo link stays live for 48 hours (delivered separately).\n`,
-        html: `<p>A request was made to move <strong>Witself</strong> account <code>${accountId}</code> from this address to <code>${newEmail}</code>.</p><p>If this was you, nothing to do — confirm from the new inbox. If it was <strong>not</strong> you, someone may hold your operator token: run <code>ws account recover</code> right now to rotate the owner credentials before the change commits. After the change commits, an undo link stays live for 48 hours (delivered separately).</p>`,
+        text: `A request was made to move a Witself account away from this address.\n\nAccount: ${accountId}\nMoving to: ${newEmail}\n\nIf this was you — nothing to do. Confirm from the new inbox to complete the change.\n\nIf this was NOT you: someone may hold your operator token. Run this at your terminal RIGHT NOW to rotate the owner credentials before the change commits:\n\n  ws account recover\n\nAfter the change commits, an undo link stays live for 48 hours (you'll get it separately).\n`,
+        html: renderEmail({
+          title: "Your account email is being changed",
+          preheader: "If this wasn't you, run ws account recover now — before it commits.",
+          body: `
+            <p style="margin:0 0 20px;">A request was made to move a Witself account away from this address.</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:0 0 20px;">
+              <tr>
+                <td style="padding:12px 16px;background:${EMAIL_BG};border:1px solid ${EMAIL_BORDER};border-radius:6px;">
+                  <div style="color:${EMAIL_MUTED};font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px;">Account</div>
+                  <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 12px;">${escapeHTML(accountId)}</div>
+                  <div style="color:${EMAIL_MUTED};font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px;">Moving to</div>
+                  <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};">${escapeHTML(newEmail)}</div>
+                </td>
+              </tr>
+            </table>
+            <p style="margin:0 0 16px;"><strong>If this was you</strong> — nothing to do. Confirm from the new inbox to complete the change.</p>
+            <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you</strong> — someone may hold your operator token. Run this at your terminal right now to rotate the owner credentials before the change commits:</p>
+            ${cliBlock("ws account recover")}
+            <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After the change commits, an undo link stays live for 48 hours (you'll receive it separately).</p>
+          `,
+        }),
       });
     } catch (e) {
       console.log(`change-email: notice to ${accountId}'s old address failed: ${e}`);
@@ -1208,8 +1315,28 @@ async function handleChangeEmail(request, env, accountId) {
       to: oldEmail,
       from: "no-reply@witwave.ai",
       subject: "Your Witself account email was changed",
-      text: `Witself account ${accountId} was moved from this address to ${newEmail}.\n\nIf this was NOT you: open the link below within 48 hours to revert the change and re-point the account back to this address. After reverting, run \`ws account recover\` from your terminal to rotate the owner credentials.\n\n  ${undoLink}\n`,
-      html: `<p><strong>Witself</strong> account <code>${accountId}</code> was moved from this address to <code>${newEmail}</code>.</p><p>If this was <strong>not</strong> you: open the link below within 48 hours to revert the change and re-point the account back to this address. After reverting, run <code>ws account recover</code> from your terminal to rotate the owner credentials.</p><p><a href="${undoLink}">Revert the email change</a></p>`,
+      text: `A Witself account was moved away from this address.\n\nAccount: ${accountId}\nNow at:  ${newEmail}\n\nIf this was NOT you, revert within 48 hours by opening this link:\n\n  ${undoLink}\n\nAfter reverting, run \`ws account recover\` at your terminal to rotate the owner credentials.\n`,
+      html: renderEmail({
+        title: "Your account email was changed",
+        preheader: "Not you? Revert within 48 hours — link inside.",
+        body: `
+          <p style="margin:0 0 20px;">A Witself account was moved away from this address.</p>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:0 0 20px;">
+            <tr>
+              <td style="padding:12px 16px;background:${EMAIL_BG};border:1px solid ${EMAIL_BORDER};border-radius:6px;">
+                <div style="color:${EMAIL_MUTED};font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px;">Account</div>
+                <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 12px;">${escapeHTML(accountId)}</div>
+                <div style="color:${EMAIL_MUTED};font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px;">Now at</div>
+                <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};">${escapeHTML(newEmail)}</div>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:0 0 8px;"><strong>If this was you</strong> — nothing to do.</p>
+          <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you</strong> — revert within 48 hours:</p>
+          ${ctaButton({ href: undoLink, label: "Revert the change" })}
+          <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After reverting, run <code style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;">ws account recover</code> at your terminal to rotate the owner credentials.</p>
+        `,
+      }),
     });
   } catch (e) {
     console.log(`change-email: undo link to ${accountId}'s old address failed: ${e}`);
