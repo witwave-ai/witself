@@ -18,10 +18,10 @@ import (
 // loop rather than spinning, and the empty-cell case is a no-op.
 func TestEvacuateCellLoop(t *testing.T) {
 	tests := []struct {
-		name       string
-		responses  []evacResponse // one per POST :evacuate call
-		wantErr    string         // substring; empty means expect no error
-		wantCalls  int
+		name      string
+		responses []evacResponse // one per POST :evacuate call
+		wantErr   string         // substring; empty means expect no error
+		wantCalls int
 	}{
 		{
 			name: "clean sweep terminates when remaining=0",
