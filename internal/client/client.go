@@ -98,6 +98,24 @@ func BootstrapLogin(ctx context.Context, endpoint, bootstrapToken string) (*Boot
 	return &BootstrapResult{OperatorToken: out.OperatorToken, OperatorID: out.OperatorID}, nil
 }
 
+// Whoami resolves an operator token to its principal ids via GET {endpoint}/v1/whoami.
+func Whoami(ctx context.Context, endpoint, token string) (operatorID, accountID string, err error) {
+	var out struct {
+		Principal struct {
+			OperatorID string `json:"operator_id"`
+			AccountID  string `json:"account_id"`
+		} `json:"principal"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/whoami"
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return "", "", err
+	}
+	if out.Principal.OperatorID == "" {
+		return "", "", fmt.Errorf("server returned no principal")
+	}
+	return out.Principal.OperatorID, out.Principal.AccountID, nil
+}
+
 // doJSON performs an authenticated JSON request and decodes the response into
 // out (if non-nil), mapping common statuses to friendly errors.
 func doJSON(ctx context.Context, method, url, token string, body []byte, out any) error {

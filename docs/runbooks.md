@@ -44,11 +44,24 @@ lock you out:
 ws token create --operator --name backup
 ```
 
-The token prints once — store it somewhere safe **off this machine**, like
-1Password or another password manager. A backup that lives beside
-`owner.token` disappears with it. Each token is independently revocable
-(`ws token revoke --token tok_ID --yes`), so a compromised one dies without
-touching the others.
+The token is written to
+`~/.witself/tokens/accounts/default/operators/backup.token`. Copy it into a
+password manager (1Password or similar) and delete the file — a backup that
+lives beside `owner.token` disappears with it. Add `--out -` to print to the
+screen instead, or `--out FILE` for a path of your choosing.
+
+## Revoke a token
+
+Each token dies independently — revoking one never touches the others:
+
+```sh
+ws token revoke --operator --name backup --yes
+```
+
+Revoking by name also removes the managed token file. Any token (an agent's,
+another operator's) can be revoked by id instead:
+`ws token revoke --token tok_ID --yes` — ids are in the last column of
+`ws operator list`.
 
 ## Recover a lost owner token
 

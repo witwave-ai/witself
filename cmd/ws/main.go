@@ -657,12 +657,32 @@ func tokenCreate(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
+	// Resolve the local account name early: named operator tokens default to
+	// its managed home (accounts/<name>/operators/<token-name>.token).
+	managedAccount := ""
+	if *tokenFile == "" {
+		if n, _, _, err := local.Resolve(*account); err == nil {
+			managedAccount = n
+		}
+	}
 	ep, op, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
 	if *operator {
+		dest := *out
+		if dest == "" && *name != "" && managedAccount != "" {
+			dest = managedOperatorTokenPath(managedAccount, *name)
+			if dest == "" {
+				fmt.Fprintf(os.Stderr, "ws: invalid token name %q for a file (use --out, or letters/digits/hyphens)\n", *name)
+				return 2
+			}
+			if _, err := os.Stat(dest); err == nil {
+				fmt.Fprintf(os.Stderr, "ws: %s already exists — revoke and remove it first, or pass --out\n", dest)
+				return 1
+			}
+		}
 		res, err := client.CreateOperatorToken(ctx, ep, op, *name, *ttl)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
@@ -671,12 +691,21 @@ func tokenCreate(args []string) int {
 		if res.TokenID != "" {
 			fmt.Fprintf(os.Stderr, "created operator token %s\n", res.TokenID)
 		}
-		if *out != "" {
-			if err := os.WriteFile(*out, []byte(res.OperatorToken+"\n"), 0o600); err != nil {
-				fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		if dest != "" && dest != "-" {
+			werr := os.MkdirAll(filepath.Dir(dest), 0o700)
+			if werr == nil {
+				werr = os.WriteFile(dest, []byte(res.OperatorToken+"\n"), 0o600)
+			}
+			if werr != nil {
+				// Never strand the only copy of a fresh credential.
+				fmt.Fprintf(os.Stderr, "ws: writing %s: %v — printing the token once instead:\n", dest, werr)
+				fmt.Println(res.OperatorToken)
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "wrote operator token for %s to %s\n", res.OperatorID, *out)
+			fmt.Fprintf(os.Stderr, "wrote operator token for %s to %s\n", res.OperatorID, dest)
+			if *name != "" && managedAccount != "" && *out == "" {
+				fmt.Fprintf(os.Stderr, "revoke it later by name: ws token revoke --operator --name %s --yes\n", *name)
+			}
 			return 0
 		}
 		fmt.Println(res.OperatorToken)
@@ -710,12 +739,15 @@ func tokenRevoke(args []string) int {
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	tokenID := fs.String("token", "", "token id to revoke")
+	operator := fs.Bool("operator", false, "select one of your own tokens by --name instead of --token")
+	name := fs.String("name", "", "display name of your token to revoke (with --operator)")
 	yes := fs.Bool("yes", false, "confirm token revocation")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *tokenID == "" {
-		fmt.Fprintln(os.Stderr, "usage: ws token revoke [--account NAME] --token TOKEN_ID --yes")
+	byName := *operator && *name != ""
+	if (*tokenID == "") == !byName { // exactly one selector
+		fmt.Fprintln(os.Stderr, "usage: ws token revoke [--account NAME] (--token TOKEN_ID | --operator --name NAME) --yes")
 		return 2
 	}
 	if !*yes {
@@ -723,17 +755,81 @@ func tokenRevoke(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
+	managedAccount := ""
+	if *tokenFile == "" {
+		if n, _, _, err := local.Resolve(*account); err == nil {
+			managedAccount = n
+		}
+	}
 	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if err := client.RevokeToken(ctx, ep, tok, *tokenID); err != nil {
+	target := *tokenID
+	if byName {
+		// Resolve the display name among the CALLER's own live tokens only —
+		// names aren't unique, and revoking someone else's token by name
+		// would be a surprise.
+		opID, _, err := client.Whoami(ctx, ep, tok)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		ops, err := client.ListOperators(ctx, ep, tok)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+			return 1
+		}
+		var matches []string
+		for _, op := range ops {
+			if op.ID != opID {
+				continue
+			}
+			for _, t := range op.Tokens {
+				if t.DisplayName == *name {
+					matches = append(matches, t.ID)
+				}
+			}
+		}
+		switch len(matches) {
+		case 0:
+			fmt.Fprintf(os.Stderr, "ws: no live token named %q on your operator\n", *name)
+			return 1
+		case 1:
+			target = matches[0]
+		default:
+			fmt.Fprintf(os.Stderr, "ws: %d live tokens named %q — disambiguate with --token (%s)\n", len(matches), *name, strings.Join(matches, ", "))
+			return 1
+		}
+	}
+	if err := client.RevokeToken(ctx, ep, tok, target); err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "revoked token %s\n", *tokenID)
+	fmt.Fprintf(os.Stderr, "revoked token %s\n", target)
+	if byName && managedAccount != "" {
+		if p := managedOperatorTokenPath(managedAccount, *name); p != "" {
+			if err := os.Remove(p); err == nil {
+				fmt.Fprintf(os.Stderr, "removed %s\n", p)
+			}
+		}
+	}
 	return 0
+}
+
+// managedOperatorTokenPath is the home for a named resident operator token:
+// accounts/<account>/operators/<token-name>.token. Empty when the name can't
+// be a safe filename.
+func managedOperatorTokenPath(accountName, tokenName string) string {
+	if !cellNamePattern.MatchString(tokenName) {
+		return ""
+	}
+	tp, err := local.TokenPath(accountName)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(tp), "operators", tokenName+".token")
 }
 
 func readToken(file string) (string, error) {
