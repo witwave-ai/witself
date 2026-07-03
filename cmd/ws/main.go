@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
@@ -216,6 +217,21 @@ func printJSON(v any) int {
 	return 0
 }
 
+// tableWriter picks where tabular rows go. On a terminal the columns are
+// elastically aligned — kubectl's approach (text/tabwriter with its
+// minwidth/tabwidth/padding tuning) — and the header joins the table. In a
+// pipe, rows stay pure TSV on stdout with the header on stderr, so `cut -f`
+// keeps working. Call flush after the last row.
+func tableWriter(header string) (w io.Writer, flush func()) {
+	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		tw := tabwriter.NewWriter(os.Stdout, 6, 4, 3, ' ', 0)
+		_, _ = fmt.Fprintln(tw, header)
+		return tw, func() { _ = tw.Flush() }
+	}
+	fmt.Fprintln(os.Stderr, header)
+	return os.Stdout, func() {}
+}
+
 func realmCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: ws realm create|list|delete [--account NAME]")
@@ -323,10 +339,11 @@ func realmList(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"realms": realms})
 	}
-	fmt.Fprintln(os.Stderr, "id\tname")
+	w, flush := tableWriter("id\tname")
 	for _, r := range realms {
-		fmt.Printf("%s\t%s\n", r.ID, r.Name)
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", r.ID, r.Name)
 	}
+	flush()
 	return 0
 }
 
@@ -410,10 +427,11 @@ func agentList(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"agents": agents})
 	}
-	fmt.Fprintln(os.Stderr, "id\tname")
+	w, flush := tableWriter("id\tname")
 	for _, a := range agents {
-		fmt.Printf("%s\t%s\n", a.ID, a.Name)
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", a.ID, a.Name)
 	}
+	flush()
 	return 0
 }
 
@@ -501,9 +519,9 @@ func operatorList(args []string) int {
 		}
 		return printJSON(map[string]any{"operators": operators})
 	}
-	fmt.Fprintln(os.Stderr, "id\tname\trole\troot\tcreated\tupdated\ttokens")
+	w, flush := tableWriter("id\tname\trole\troot\tcreated\tupdated\ttokens")
 	for _, op := range operators {
-		fmt.Printf("%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
 			op.ID,
 			tabSafe(op.DisplayName),
 			op.Role,
@@ -513,6 +531,7 @@ func operatorList(args []string) int {
 			operatorTokenSummary(op.Tokens),
 		)
 	}
+	flush()
 	return 0
 }
 
@@ -836,8 +855,9 @@ func accountStatus(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"account": rec})
 	}
-	fmt.Fprintln(os.Stderr, "id\tstatus\temail")
-	fmt.Printf("%s\t%s\t%s\n", rec.ID, rec.Status, tabSafe(rec.Email))
+	w, flush := tableWriter("id\tstatus\temail")
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", rec.ID, rec.Status, tabSafe(rec.Email))
+	flush()
 	if rec.Status == "pending" {
 		fmt.Fprintln(os.Stderr, "pending: activation required before the account can be used")
 	}
