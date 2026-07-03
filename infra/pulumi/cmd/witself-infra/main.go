@@ -115,6 +115,10 @@ flags:
   -destroy-accounts  with destroy: SKIP evacuation and force-purge this
                   cell's accounts from the control-plane directory. The
                   data dies with the cell — sandbox/development override
+  -restore-archives  with up: after the cell registers, restore every
+                  archived account whose region matches this cell's region
+                  from Cloudflare R2. Loops until none remain. Requires
+                  -control-plane.
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -164,6 +168,7 @@ func run(args []string) error {
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
+	restoreArchives := fs.Bool("restore-archives", false, "with up: pull every archived account in this cell's region from R2 after registration")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -185,6 +190,15 @@ func run(args []string) error {
 	*domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*domain)), ".")
 	if *domain != "" && !domainName.MatchString(*domain) {
 		return fmt.Errorf("-domain %q must be a DNS domain name like cells.example.com", *domain)
+	}
+	// Cross-flag rejects come BEFORE any cloud work — an operator who typed
+	// the wrong combination should learn it in milliseconds, not after
+	// 20 minutes of EKS provisioning.
+	if *restoreArchives && *controlPlane == "" {
+		return fmt.Errorf("-restore-archives requires -control-plane")
+	}
+	if *restoreArchives && cmd != "up" {
+		return fmt.Errorf("-restore-archives is only valid with `up`")
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
@@ -342,6 +356,13 @@ func run(args []string) error {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
 			err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
+			if err == nil && *restoreArchives {
+				var cl *fleet.Client
+				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
+				if err == nil {
+					err = restoreCell(ctx, cl, cellName)
+				}
+			}
 		}
 	case "preview":
 		_, err = stack.Preview(ctx, optpreview.ProgressStreams(os.Stdout))
@@ -496,6 +517,56 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 			// listed — a control-plane bug that would otherwise burn all
 			// day. Fail loudly; Pulumi destroy stays parked.
 			return fmt.Errorf("evacuation on cell %s is not making progress (%d accounts remaining after batch reported success)", cellName, res.Remaining)
+		}
+		prevRemaining = res.Remaining
+	}
+}
+
+// restoreCell loops the control-plane's :restore batches until every
+// region-matched archived account has landed on the cell (remaining=0). The
+// mirror of evacuateCell — same batch size, same stall guards. Fails fast on
+// per-account failure so a partial restore never proceeds silently.
+func restoreCell(ctx context.Context, cl *fleet.Client, cellName string) error {
+	const batch = 4
+	total := 0
+	prevRemaining := -1
+	for iter := 0; ; iter++ {
+		res, err := cl.Restore(ctx, cellName, batch)
+		if err != nil {
+			if errors.Is(err, fleet.ErrCellDrained) {
+				// The cell was just registered accepting=true, so this
+				// should never happen — but if the operator concurrently
+				// drained the cell, restore has no target.
+				return fmt.Errorf("cell %s is drained — cannot restore into it", cellName)
+			}
+			return fmt.Errorf("restore cell: %w", err)
+		}
+		for _, a := range res.Restored {
+			if !a.OK {
+				return fmt.Errorf("restore failed for %s onto %s: %s", a.AccountID, cellName, a.Error)
+			}
+			total++
+			fmt.Fprintf(os.Stderr, "restored %s onto %s\n", a.AccountID, cellName)
+		}
+		if res.Remaining == 0 {
+			if total == 0 && iter == 0 {
+				fmt.Fprintf(os.Stderr, "cell %s: no archived accounts awaiting placement in region %s\n", cellName, res.Region)
+			} else {
+				fmt.Fprintf(os.Stderr, "cell %s: %d accounts restored from Cloudflare R2\n", cellName, total)
+			}
+			return nil
+		}
+		if len(res.Restored) == 0 {
+			// Remaining > 0 but the batch reported nothing — the control
+			// plane sees archived accounts it will not hand us. Silent loop
+			// would be wrong.
+			return fmt.Errorf("restore stalled on cell %s with %d account(s) still awaiting placement in region", cellName, res.Remaining)
+		}
+		if prevRemaining != -1 && res.Remaining >= prevRemaining {
+			// A batch fired (per-account "ok") but the count didn't drop.
+			// The acct: pointer never landed, or the archived: entry
+			// wasn't retired — either way, spinning is the wrong answer.
+			return fmt.Errorf("restore on cell %s is not making progress (%d accounts remaining after batch reported success)", cellName, res.Remaining)
 		}
 		prevRemaining = res.Remaining
 	}

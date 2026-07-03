@@ -94,6 +94,13 @@ restored onto another cell. Add `-destroy-accounts` to skip preservation and
 purge the directory entries instead: the sandbox/dev override, an explicit
 acknowledgment that the accounts die with the cell.
 
+Pass `-restore-archives` to `up` to close the loop: after the new cell
+registers with the control plane, it pulls every archived account in the
+same region from R2 back onto the cell (import → resume → route → cleanup,
+looping until none remain). A fresh us-west-2 cell will inherit every
+us-west-2 account currently awaiting placement; nothing lands in a
+different region than the archived account was exported from.
+
 See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
 [.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps
 tree after `-argocd` is enabled.
