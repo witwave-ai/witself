@@ -1374,7 +1374,7 @@ func TestImportAccountArchive(t *testing.T) {
 // only, a category is required, and the authority-scoping refusals map to
 // 409s the control plane can tell apart from success.
 func TestResumeAccountSystem(t *testing.T) {
-	resume := func(_ context.Context, accountID, category string) error {
+	resume := func(_ context.Context, accountID, _ string) error {
 		switch accountID {
 		case "acc_owner_susp":
 			return ErrResumeWrongCategory

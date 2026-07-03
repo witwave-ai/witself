@@ -141,7 +141,7 @@ func TestReadOnManifestAborts(t *testing.T) {
 func TestReadAppliesUpgraders(t *testing.T) {
 	archive := buildArchive(t, 13, "acc_up")
 
-	upgraders[13] = func(table string, row map[string]any) (map[string]any, error) {
+	upgraders[13] = func(_ string, row map[string]any) (map[string]any, error) {
 		if i, ok := row["i"].(float64); ok && int(i) == 0 {
 			return nil, nil // drop row 0 — exercises the drop contract
 		}
@@ -153,7 +153,7 @@ func TestReadAppliesUpgraders(t *testing.T) {
 	var kept int
 	_, err := Read(context.Background(), bytes.NewReader(archive), ImportOptions{
 		CurrentSchema: 14,
-		Row: func(table string, row []byte) error {
+		Row: func(_ string, row []byte) error {
 			var obj map[string]any
 			if err := json.Unmarshal(row, &obj); err != nil {
 				return err
