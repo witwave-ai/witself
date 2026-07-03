@@ -853,7 +853,7 @@ func accountList(args []string) int {
 func accountRecover(args []string) int {
 	fs := flag.NewFlagSet("account recover", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	account := fs.String("account", "", "local account name (its binding supplies the id)")
+	account := fs.String("account", "", `local account name (default: WITSELF_ACCOUNT or "default"; its binding supplies the id)`)
 	id := fs.String("id", "", "raw account id (acc_...) when no local binding exists")
 	code := fs.String("code", "", "recovery code from the email (second step)")
 	name := fs.String("name", "", "local name to save the recovered credential under (only with --id and no existing binding)")
@@ -861,8 +861,8 @@ func accountRecover(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if (*account == "") == (*id == "") {
-		fmt.Fprintln(os.Stderr, "usage: ws account recover (--account NAME | --id acc_ID) [--code CODE] [--name NEWNAME]")
+	if *account != "" && *id != "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account recover [--account NAME | --id acc_ID] [--code CODE] [--name NEWNAME]")
 		return 2
 	}
 
@@ -872,13 +872,21 @@ func accountRecover(args []string) int {
 		return 1
 	}
 	var accountID, targetName string
-	if *account != "" {
-		a, ok := cfg.Accounts[*account]
+	if *id == "" {
+		// Standard reference resolution: flag, then env, then "default".
+		lookup := *account
+		if lookup == "" {
+			lookup = strings.TrimSpace(os.Getenv("WITSELF_ACCOUNT"))
+		}
+		if lookup == "" {
+			lookup = "default"
+		}
+		a, ok := cfg.Accounts[lookup]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "ws: no local account named %q (try `ws account list`, or --id acc_ID)\n", *account)
+			fmt.Fprintf(os.Stderr, "ws: no local account named %q (try `ws account list`, or --id acc_ID)\n", lookup)
 			return 1
 		}
-		accountID, targetName = a.ID, *account
+		accountID, targetName = a.ID, lookup
 	} else {
 		if !strings.HasPrefix(*id, "acc_") {
 			fmt.Fprintln(os.Stderr, "ws: --id takes a raw account id (acc_...)")

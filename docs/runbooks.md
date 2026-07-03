@@ -1,22 +1,79 @@
 # Runbooks
 
 Hand-testing recipes for what is actually built and running. Grown one entry at
-a time.
+a time. Commands here use the `default` account — the one every command picks
+when `--account` is omitted. To juggle several accounts, add `--name NAME` at
+create and `--account NAME` everywhere after.
 
 ## Create an account on Witself Cloud
 
 Requires an invite code.
 
 ```sh
-ws account create --email scott@witwave.ai --invite friends-2026 --name test-account-1
+ws account create --email scott@witwave.ai --invite friends-2026
 ```
 
-The account is remembered locally as `test-account-1` (binding in
-`~/.witself/config.json`, token under `~/.witself/tokens/accounts/`), so
-follow-up commands are just `--account test-account-1`.
+The account is remembered locally as `default` (binding in
+`~/.witself/config.json`, token under `~/.witself/tokens/accounts/`).
 
-Leave off `--name` and the account is saved as `default` — the name every
-command uses when `--account` is omitted.
+## Check account status
+
+New accounts start **pending**: nothing works until the emailed verification
+link is clicked (`ws account resend-verification` sends a fresh one). Watch
+for it to flip to `active`:
+
+```sh
+ws account status
+```
+
+## List operators
+
+Every account is born with one root operator, `owner` — the identity your
+local token authenticates as. Operators you add later appear alongside it:
+
+```sh
+ws operator list
+```
+
+## Create a backup operator token
+
+A second credential for the same operator, so losing `owner.token` doesn't
+lock you out:
+
+```sh
+ws token create --operator --name backup
+```
+
+The token prints once — store it somewhere safe **off this machine**, like
+1Password or another password manager. A backup that lives beside
+`owner.token` disappears with it. Each token is independently revocable
+(`ws token revoke --token tok_ID --yes`), so a compromised one dies without
+touching the others.
+
+## Recover a lost owner token
+
+Recovery proves inbox control: a code goes to the account's email, and
+redeeming it rotates the owner's credentials — the old tokens die, agents and
+other operators are untouched. Requesting a code changes nothing by itself.
+
+```sh
+ws account recover
+# check the account's email for the code (valid ~15 minutes), then:
+ws account recover --code 123-456-789
+```
+
+`ws account list` shows this machine's local names and account ids — handy
+when the token is gone but you need the id. From a machine with no binding,
+use `--id acc_...` (add `--name NAME` to save the recovered credential).
+
+Recovery revokes **every** token the owner holds — including a backup stored
+in a password manager — so re-mint the backup afterward. Tokens on other
+operators and agents survive; automation that must outlive a recovery belongs
+on its own operator.
+
+---
+
+The entries below are rarely needed.
 
 ## Adopt an existing account
 
@@ -33,71 +90,13 @@ and belong to `acc_01xyz`. On success the binding is saved like `ws account
 create` would: follow-up commands are just `--account shared-account`.
 `--name` is required; adopting never falls back to `default`.
 
-## Check account status
-
-New accounts start **pending**: nothing works until the emailed verification
-link is clicked (`ws account resend-verification` sends a fresh one). Watch
-for it to flip to `active`:
-
-```sh
-ws account status --account test-account-1
-```
-
-## List operators
-
-Every account is born with one root operator, `owner` — the identity your
-local token authenticates as. Operators you add later appear alongside it:
-
-```sh
-ws operator list --account test-account-1
-```
-
-One line per operator: id, display name, role, whether it is the root,
-timestamps, and its live tokens.
-
-## Create a backup operator token
-
-A second credential for the same operator, so losing `owner.token` doesn't
-lock you out:
-
-```sh
-ws token create --operator --name backup --account test-account-1
-```
-
-The token prints once — store it somewhere safe **off this machine**, like
-1Password or another password manager. A backup that lives beside
-`owner.token` disappears with it. Each token is independently revocable
-(`ws token revoke --account test-account-1 --token tok_ID --yes`), so a
-compromised one dies without touching the others.
-
-## Recover a lost owner token
-
-Recovery proves inbox control: a code goes to the account's email, and
-redeeming it rotates the owner's credentials — the old tokens die, agents and
-other operators are untouched. Requesting a code changes nothing by itself.
-
-```sh
-ws account recover --account test-account-1
-# check the account's email for the code (valid ~15 minutes), then:
-ws account recover --account test-account-1 --code 123-456-789
-```
-
-`ws account list` shows this machine's local names and account ids — handy
-when the token is gone but you need the id. From a machine with no binding,
-use `--id acc_...` (add `--name NAME` to save the recovered credential).
-
-Recovery revokes **every** token the owner holds — including a backup stored
-in a password manager — so re-mint the backup afterward. Tokens on other
-operators and agents survive; automation that must outlive a recovery belongs
-on its own operator.
-
 ## Close an account
 
 Closing is permanent: every credential is revoked and the account is retired
 (its record remains as a tombstone). On success the local name is removed too.
 
 ```sh
-ws account close --account test-account-1 --yes
+ws account close --yes
 ```
 
 Add `--reason TEXT` to record why.
