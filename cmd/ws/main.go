@@ -1268,6 +1268,33 @@ func accountStatus(args []string) int {
 	ctx := context.Background()
 	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
+		var arch *client.ErrAccountArchived
+		if errors.As(err, &arch) {
+			// The account exists in the fleet's memory but is not placed on
+			// a live cell — no round trip possible. Report from the
+			// directory's own answer.
+			name, acct, _, rerr := local.Resolve(*account)
+			id := ""
+			if rerr == nil {
+				id = acct.ID
+			}
+			if *jsonOut {
+				return printJSON(map[string]any{"account": map[string]any{
+					"id":              id,
+					"status":          "archived",
+					"archived_from":   arch.Cell,
+					"archived_region": arch.Region,
+					"archived_object": arch.Object,
+					"exported_at":     arch.ExportedAt,
+				}})
+			}
+			w, flush := tableWriter("id\tstatus\tarchived from")
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", id, "archived", tabSafe(arch.Cell))
+			flush()
+			fmt.Fprintf(os.Stderr, "archived %s (awaiting placement)\n", arch.ExportedAt.UTC().Format(time.RFC3339))
+			_ = name
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}

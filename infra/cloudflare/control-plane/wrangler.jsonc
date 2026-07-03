@@ -67,6 +67,15 @@
       "name": "EMAIL"
     }
   ],
+  // Account archives from cell evacuations. Bucket lives on Cloudflare;
+  // cells never see R2 credentials — the Worker streams from cell to R2
+  // (multipart, so bounded memory regardless of account size).
+  "r2_buckets": [
+    {
+      "binding": "ARCHIVES",
+      "bucket_name": "witself-archives"
+    }
+  ],
   "observability": {
     "enabled": true
   }

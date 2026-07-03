@@ -36,6 +36,15 @@
 //                           pending email change + rate-limit state
 //   undoemail:<account_id> -> {"code_hash","old_email","new_email","expires_at"}
 //                           (KV TTL 48h) — undo window shipped in the notice
+//   archived:<account_id> -> {"cell","region","object","exported_at","size",
+//                           "format_version"}
+//                           post-evacuation state; the directory answers
+//                           "archived — awaiting placement" for these. Only
+//                           {cell,region,exported_at} are returned to the
+//                           public directory route; the rest are fleet-only.
+//   evac:<cell>          -> {"started_at","done","failed"[],"remaining",
+//                           "finished_at"}
+//                           cross-batch progress for a cell-wide evacuation.
 //   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
 //                             "accepting","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
@@ -82,6 +91,7 @@ const ACCOUNT_CHANGE_EMAIL_PATH = /^\/v1\/accounts\/([A-Za-z0-9_-]{1,128}):chang
 const UNDO_EMAIL_PATH = /^\/undo-email\/([0-9a-f]{64})$/;
 const CELL_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64})$/;
 const PURGE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):purge$/;
+const EVACUATE_PATH = /^\/v1\/cells\/([a-z0-9-]{1,64}):evacuate$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const INVITE_PATH = /^\/v1\/invites\/([a-z0-9][a-z0-9-]{2,63})$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -1575,6 +1585,268 @@ async function reapExpiredPendings(env) {
   } while (cursor);
 }
 
+// handleEvacuate is POST /v1/cells/{name}:evacuate — the polite counterpart
+// to :purge. Bounded per-call (a small batch of accounts) so the Worker
+// respects request duration limits; witself-infra loops until {remaining:0}.
+// Idempotent by construction: each account's four steps (system-suspend,
+// stream-to-R2, write archived: entry, delete acct: pointer) are all
+// individually re-safe, and a partially-evacuated account resumes on the
+// next call. Refuses to evacuate an accepting cell (drain first): the same
+// safety rule as :delete.
+async function handleEvacuate(request, env, cellName) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (!env.ARCHIVES) {
+    return err("R2 bucket not bound — witwave-archives is not configured", 501);
+  }
+  const cell = await env.DIRECTORY.get(`cell:${cellName}`, { type: "json" });
+  if (!cell) {
+    return err("unknown cell", 404);
+  }
+  if (cell.accepting !== false) {
+    return err("cell must be drained first (re-register with accepting=false)", 409);
+  }
+  if (!cell.provision_token || !cell.endpoint) {
+    return err(`cell ${cellName} has no provision credential — cannot export`, 502);
+  }
+
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // batch size defaults are fine
+  }
+  // Coerce carefully — Number(undefined) is NaN, and NaN slips past
+  // Math.min/Math.max to become the loop limit. Anything non-finite falls
+  // back to the default, then we clamp.
+  let batch = Number(body.batch);
+  if (!Number.isFinite(batch) || batch < 1) {
+    batch = 4;
+  }
+  batch = Math.min(Math.floor(batch), 10);
+
+  // Iterate acct: entries pointing at this cell.
+  const targets = [];
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.cell === cellName) {
+        targets.push(k.name.slice("acct:".length));
+        if (targets.length >= batch) {
+          break;
+        }
+      }
+    }
+    if (targets.length >= batch) {
+      break;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  // Track cross-batch progress. This entry is best-effort; the true state of
+  // the world is the acct:/archived: pairs.
+  const progressKey = `evac:${cellName}`;
+  const progress = (await env.DIRECTORY.get(progressKey, { type: "json" })) ?? {
+    started_at: new Date().toISOString(),
+    done: 0,
+    failed: [],
+  };
+
+  const results = [];
+  for (const accountId of targets) {
+    try {
+      await evacuateAccount(env, cellName, cell, accountId);
+      progress.done += 1;
+      results.push({ account_id: accountId, ok: true });
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      progress.failed = [
+        ...(progress.failed ?? []).filter((f) => f.account_id !== accountId),
+        { account_id: accountId, error: msg, at: new Date().toISOString() },
+      ];
+      results.push({ account_id: accountId, ok: false, error: msg });
+      console.log(`evacuate ${cellName}/${accountId} failed: ${msg}`);
+    }
+  }
+
+  // How many remain? A remaining=0 lets witself-infra move to the
+  // deregister step (which still refuses via the existing zero-accounts
+  // guard until every acct: pointer is gone).
+  let remaining = 0;
+  let cursor2;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor: cursor2 });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.cell === cellName) {
+        remaining += 1;
+      }
+    }
+    cursor2 = page.list_complete ? undefined : page.cursor;
+  } while (cursor2);
+
+  progress.remaining = remaining;
+  if (remaining === 0) {
+    progress.finished_at = new Date().toISOString();
+  }
+  await env.DIRECTORY.put(progressKey, JSON.stringify(progress));
+
+  return json({
+    schema_version: "witself.v0",
+    cell: cellName,
+    evacuated: results,
+    remaining,
+    progress,
+  });
+}
+
+// evacuateAccount runs the four-step evacuation for a single account. The
+// R2 object key is DETERMINISTIC per account (not per attempt) — a retry
+// after any failure just overwrites, so no orphaned objects can accrete.
+// Multipart upload atomically finalizes the object only on complete(), so a
+// truncated stream aborts the upload and nothing is committed at the key.
+async function evacuateAccount(env, cellName, cell, accountId) {
+  // Idempotency short-circuit: if an archived: pointer already exists we
+  // just need to ensure acct: is retired (a failure between steps 3 and 4
+  // on a prior call is what leaves that gap). No R2 work — the archive is
+  // already there.
+  const already = await env.DIRECTORY.get(`archived:${accountId}`, {
+    type: "json",
+  });
+  if (already) {
+    await env.DIRECTORY.delete(`acct:${accountId}`);
+    return;
+  }
+
+  // (1) System-suspend under the "evacuation" category. Owner-suspended
+  // accounts keep their original category; closed tombstones are idempotent.
+  const suspendResp = await fetch(
+    `${cell.endpoint}/v1/accounts/${accountId}:suspend`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({ for: "evacuation", reason: "cell decommission" }),
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  if (!suspendResp.ok) {
+    throw new Error(`suspend ${suspendResp.status}`);
+  }
+  await suspendResp.text().catch(() => "");
+
+  // (2) Stream the archive from the cell into R2 as a MULTIPART upload:
+  // - Streaming exports have no Content-Length; single-shot put() rejects.
+  // - Multipart finalizes atomically only on complete() — a truncated
+  //   stream (cell errors mid-response, connection reset) throws when
+  //   reading the body, we hit the catch and abort() the upload, and
+  //   nothing lands at the key.
+  const exportResp = await fetch(
+    `${cell.endpoint}/v1/accounts/${accountId}:export`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cell.provision_token}` },
+      signal: AbortSignal.timeout(300000), // 5 min per-account ceiling
+    },
+  );
+  if (!exportResp.ok || !exportResp.body) {
+    const text = await exportResp.text().catch(() => "");
+    throw new Error(`export ${exportResp.status}: ${text.slice(0, 200)}`);
+  }
+  const objectKey = `archives/${accountId}.tar.gz`;
+  const nowISO = new Date().toISOString();
+  const size = await streamToR2Multipart(env.ARCHIVES, objectKey, exportResp.body, {
+    httpMetadata: {
+      contentType: "application/gzip",
+      contentDisposition: `attachment; filename="${accountId}.tar.gz"`,
+    },
+    customMetadata: {
+      account_id: accountId,
+      cell: cellName,
+      exported_at: nowISO,
+    },
+  });
+
+  // (3) Write the archived: pointer BEFORE removing acct:, so a directory
+  // read never briefly returns 404 for the archived account.
+  await env.DIRECTORY.put(
+    `archived:${accountId}`,
+    JSON.stringify({
+      cell: cellName,
+      region: cell.region ?? null,
+      object: objectKey,
+      exported_at: nowISO,
+      size,
+      format_version: 1,
+    }),
+  );
+
+  // (4) Retire the routing pointer. From this moment the account is
+  // "archived — awaiting placement" fleet-wide.
+  await env.DIRECTORY.delete(`acct:${accountId}`);
+}
+
+// streamToR2Multipart pipes an unknown-length ReadableStream into an R2
+// object using multipart uploads. It's the workhorse for the "no
+// Content-Length on cell exports" reality: R2's single-shot put() rejects
+// streams without a length, but createMultipartUpload streams cleanly.
+//
+// Any failure — read error mid-stream (truncation), R2 uploadPart error,
+// complete error — aborts the upload, so no object is committed at the key
+// until we know the whole stream landed. Part size 8 MiB (R2 minimum is 5
+// MiB except last).
+async function streamToR2Multipart(bucket, key, stream, opts) {
+  const upload = await bucket.createMultipartUpload(key, opts);
+  const parts = [];
+  const partSize = 8 * 1024 * 1024;
+  let totalBytes = 0;
+  try {
+    const reader = stream.getReader();
+    let buf = new Uint8Array(0);
+    let partNo = 1;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value && value.length > 0) {
+        const combined = new Uint8Array(buf.length + value.length);
+        combined.set(buf, 0);
+        combined.set(value, buf.length);
+        buf = combined;
+      }
+      // Emit parts as we cross the threshold. A final under-sized part is
+      // handled after the loop.
+      while (buf.length >= partSize) {
+        const chunk = buf.slice(0, partSize);
+        buf = buf.slice(partSize);
+        parts.push(await upload.uploadPart(partNo, chunk));
+        totalBytes += chunk.length;
+        partNo++;
+      }
+      if (done) break;
+    }
+    if (buf.length > 0) {
+      parts.push(await upload.uploadPart(partNo, buf));
+      totalBytes += buf.length;
+    }
+    if (parts.length === 0) {
+      throw new Error("export stream was empty");
+    }
+    await upload.complete(parts);
+    return totalBytes;
+  } catch (e) {
+    try {
+      await upload.abort();
+    } catch {
+      // ignore — R2 auto-cleans abandoned multipart uploads
+    }
+    throw e;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1585,18 +1857,47 @@ export default {
       if (request.method !== "GET") {
         return err("method not allowed", 405);
       }
+      // Shorter cache than the 300s original — evacuation flips acct:
+      // to archived: and the cache window is how long stale routing
+      // survives. 60s trades some KV read amplification for a much
+      // smaller post-evacuation confusion window.
       const entry = await env.DIRECTORY.get(`acct:${m[1]}`, {
         type: "json",
-        cacheTtl: 300,
+        cacheTtl: 60,
       });
-      if (!entry) {
-        return err("unknown account", 404);
+      if (entry) {
+        return json(
+          { schema_version: "witself.v0", account_id: m[1], cell: entry },
+          200,
+          { "Cache-Control": "max-age=60" },
+        );
       }
-      return json(
-        { schema_version: "witself.v0", account_id: m[1], cell: entry },
-        200,
-        { "Cache-Control": "max-age=60" },
-      );
+      // Second-chance lookup: archived accounts return a 200 with a
+      // distinct shape so the CLI can distinguish "gone" from "awaiting
+      // placement" — the whole point of not deleting on evacuation. The
+      // response deliberately EXCLUDES object key / sha256 / size — those
+      // are fleet-internal facts that would let an unauthenticated caller
+      // fingerprint archive layouts and per-tenant sizes.
+      const archived = await env.DIRECTORY.get(`archived:${m[1]}`, {
+        type: "json",
+        cacheTtl: 30,
+      });
+      if (archived) {
+        return json(
+          {
+            schema_version: "witself.v0",
+            account_id: m[1],
+            archived: {
+              cell: archived.cell,
+              region: archived.region ?? null,
+              exported_at: archived.exported_at,
+            },
+          },
+          200,
+          { "Cache-Control": "max-age=30" },
+        );
+      }
+      return err("unknown account", 404);
     }
 
     // Fleet registry (fleet-token authorized).
@@ -1606,6 +1907,15 @@ export default {
       PURGE_PATH.test(url.pathname)
     ) {
       return handleCells(request, env, url);
+    }
+
+    // Cell evacuation (fleet-token authorized).
+    const em = url.pathname.match(EVACUATE_PATH);
+    if (em) {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handleEvacuate(request, env, em[1]);
     }
 
     // Invite codes (fleet-token authorized).
