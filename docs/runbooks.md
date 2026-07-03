@@ -55,6 +55,21 @@ ws operator list --account test-account-1
 One line per operator: id, display name, role, whether it is the root,
 timestamps, and its live tokens.
 
+## Create a backup operator token
+
+A second credential for the same operator, so losing `owner.token` doesn't
+lock you out:
+
+```sh
+ws token create --operator --name backup --account test-account-1
+```
+
+The token prints once — store it somewhere safe **off this machine**, like
+1Password or another password manager. A backup that lives beside
+`owner.token` disappears with it. Each token is independently revocable
+(`ws token revoke --account test-account-1 --token tok_ID --yes`), so a
+compromised one dies without touching the others.
+
 ## Close an account
 
 Closing is permanent: every credential is revoked and the account is retired
