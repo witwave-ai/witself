@@ -35,11 +35,13 @@ The ids come from each command's output.
 ```sh
 ws realm create prod
 ws agent create --realm realm_01xyz my-agent
-ws token create --agent agt_01xyz --out my-agent.token
+ws token create --agent agt_01xyz
 ```
 
-Hand `my-agent.token` to the workload; `ws token revoke --token tok_ID --yes`
-kills it without touching anything else.
+The agent token is written to
+`~/.witself/tokens/accounts/default/agents/my-agent.token` — hand it to the
+workload; `ws token revoke --token tok_ID --yes` kills it without touching
+anything else.
 
 ## List operators
 

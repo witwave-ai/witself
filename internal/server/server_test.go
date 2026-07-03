@@ -252,11 +252,11 @@ func TestAgentTokenCreate(t *testing.T) {
 		}
 		return "", "", "", false, nil
 	}
-	create := func(_ context.Context, _, agentID string) (string, string, error) {
+	create := func(_ context.Context, _, agentID string) (string, string, string, error) {
 		if agentID == "missing" {
-			return "", "", ErrNotFound
+			return "", "", "", ErrNotFound
 		}
-		return "witself_agt_minted", "tok_agent", nil
+		return "witself_agt_minted", "tok_agent", "my-agent", nil
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgentToken: create}))
 	defer srv.Close()

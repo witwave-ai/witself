@@ -712,7 +712,7 @@ func tokenCreate(args []string) int {
 		return 0
 	}
 
-	agentTok, tokenID, err := client.CreateAgentToken(ctx, ep, op, *agent)
+	agentTok, tokenID, agentName, err := client.CreateAgentToken(ctx, ep, op, *agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
@@ -720,12 +720,36 @@ func tokenCreate(args []string) int {
 	if tokenID != "" {
 		fmt.Fprintf(os.Stderr, "created agent token %s\n", tokenID)
 	}
-	if *out != "" {
-		if err := os.WriteFile(*out, []byte(agentTok+"\n"), 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+	dest := *out
+	if dest == "" && managedAccount != "" {
+		// Managed home: agents/<agent-name>.token, falling back to the agent
+		// id when the name isn't filename-safe (or the cell predates the
+		// field) — both charsets are collision-free.
+		fileBase := agentName
+		if !cellNamePattern.MatchString(fileBase) {
+			fileBase = *agent
+		}
+		tp, perr := local.TokenPath(managedAccount)
+		if perr == nil {
+			dest = filepath.Join(filepath.Dir(tp), "agents", fileBase+".token")
+		}
+	}
+	if dest != "" && dest != "-" {
+		werr := os.MkdirAll(filepath.Dir(dest), 0o700)
+		if werr == nil {
+			if _, err := os.Stat(dest); err == nil && *out == "" {
+				werr = fmt.Errorf("%s already exists", dest)
+			} else {
+				werr = os.WriteFile(dest, []byte(agentTok+"\n"), 0o600)
+			}
+		}
+		if werr != nil {
+			// Never strand the only copy of a fresh credential.
+			fmt.Fprintf(os.Stderr, "ws: writing %s: %v — printing the token once instead:\n", dest, werr)
+			fmt.Println(agentTok)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "wrote agent token to %s\n", *out)
+		fmt.Fprintf(os.Stderr, "wrote agent token to %s\n", dest)
 		return 0
 	}
 	fmt.Println(agentTok)
@@ -875,7 +899,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|list|status|resend-verification|recover|close|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|list|status|resend-verification|change-email|change-display-name|recover|close|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -891,6 +915,8 @@ func accountCmd(args []string) int {
 		return accountResendVerification(args[1:])
 	case "change-email":
 		return accountChangeEmail(args[1:])
+	case "change-display-name":
+		return accountChangeDisplayName(args[1:])
 	case "recover":
 		return accountRecover(args[1:])
 	case "close":
@@ -991,6 +1017,37 @@ func accountChangeEmail(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "email changed to %s for account %q (%s)\n", committed, name, acct.ID)
+	return 0
+}
+
+// accountChangeDisplayName changes the account's server-side display name —
+// cosmetic, owner-only, no email ceremony (unlike change-email, it isn't a
+// security anchor). Local names are a different thing and live per-machine.
+func accountChangeDisplayName(args []string) int {
+	fs := flag.NewFlagSet("account change-display-name", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	displayName := strings.TrimSpace(fs.Arg(0))
+	if displayName == "" {
+		fmt.Fprintln(os.Stderr, `usage: ws account change-display-name [--account NAME] "New Display Name"`)
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if err := client.RenameAccount(ctx, ep, tok, displayName); err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "display name changed to %q\n", displayName)
 	return 0
 }
 
@@ -1449,6 +1506,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  ws account status       Show an account's lifecycle status")
 	usageLine(w, "  ws account recover      Email a recovery code, redeem it for a fresh owner token")
 	usageLine(w, "  ws account change-email Move the account to a new address (code-confirmed)")
+	usageLine(w, "  ws account change-display-name  Rename the account (owner only)")
 	usageLine(w, "  ws account resend-verification  Email a fresh verification link")
 	usageLine(w, "  ws account close        Permanently close an account (owner only)")
 	usageLine(w, "  ws account forget       Remove a local account binding (server untouched)")

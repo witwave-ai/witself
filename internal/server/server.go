@@ -55,8 +55,9 @@ type Config struct {
 	DeleteAgent func(ctx context.Context, accountID, realmID, agentID string) error
 
 	// CreateAgentToken, when set, enables POST /v1/agents/{agent}/tokens to mint a
-	// durable agent token (returned once).
-	CreateAgentToken func(ctx context.Context, accountID, agentID string) (token string, tokenID string, err error)
+	// durable agent token (returned once, with the agent's name for client-side
+	// file naming).
+	CreateAgentToken func(ctx context.Context, accountID, agentID string) (token, tokenID, agentName string, err error)
 
 	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
 	// an additional operator token for the authenticated operator (returned once).
@@ -78,6 +79,10 @@ type Config struct {
 	// operator's account lifecycle record. Reachable at any status: a pending
 	// account checks here whether its activation gates have passed.
 	GetAccount func(ctx context.Context, accountID string) (AccountRecord, error)
+
+	// RenameAccount, when set, enables POST /v1/account:rename — the
+	// owner-only change of the account's server-side display name.
+	RenameAccount func(ctx context.Context, accountID, operatorID, displayName string) error
 
 	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
 	// the control-plane -> cell trust link that creates a new (non-default)
@@ -360,6 +365,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.GetAccount != nil {
 			mux.HandleFunc("GET /v1/account", getAccountHandler(cfg.Authenticate, cfg.GetAccount))
+		}
+		if cfg.RenameAccount != nil {
+			mux.HandleFunc("POST /v1/account:rename", renameAccountHandler(cfg.Authenticate, cfg.RenameAccount))
 		}
 	}
 	return mux
@@ -788,6 +796,40 @@ func getAccountHandler(auth AuthFunc, get func(ctx context.Context, accountID st
 	})
 }
 
+// renameAccountHandler changes the account's server-side display name.
+// Owner-only, active-only (requireOperator's gate covers the latter).
+func renameAccountHandler(auth AuthFunc, rename func(ctx context.Context, accountID, operatorID, displayName string) error) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			DisplayName string `json:"display_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		req.DisplayName = strings.TrimSpace(req.DisplayName)
+		if req.DisplayName == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing display_name")
+			return
+		}
+		err := rename(r.Context(), p.accountID, p.operatorID, req.DisplayName)
+		switch {
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner can rename the account")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not rename account")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"account_id":     p.accountID,
+			"display_name":   req.DisplayName,
+		})
+	})
+}
+
 // whoamiHandler returns the authenticated operator principal, or 401.
 func whoamiHandler(auth AuthFunc) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, _ *http.Request, p principal) {
@@ -917,10 +959,10 @@ func deleteAgentHandler(auth AuthFunc, deleteAgent func(ctx context.Context, acc
 	})
 }
 
-func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, string, error)) http.HandlerFunc {
+func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, string, string, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		agentID := r.PathValue("agent")
-		tok, tokenID, err := create(r.Context(), p.accountID, agentID)
+		tok, tokenID, agentName, err := create(r.Context(), p.accountID, agentID)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
@@ -940,6 +982,7 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 			"agent_token":    tok,
 			"token_id":       tokenID,
 			"agent_id":       agentID,
+			"agent_name":     agentName,
 		})
 	})
 }

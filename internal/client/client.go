@@ -244,19 +244,32 @@ func agentsURL(endpoint, realmID string) string {
 }
 
 // CreateAgentToken mints an agent token via POST {endpoint}/v1/agents/{agent}/tokens.
-func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (string, string, error) {
+// agentName is empty when the cell predates the field.
+func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (agentToken, tokenID, agentName string, err error) {
 	var out struct {
 		AgentToken string `json:"agent_token"`
 		TokenID    string `json:"token_id"`
+		AgentName  string `json:"agent_name"`
 	}
 	url := strings.TrimRight(endpoint, "/") + "/v1/agents/" + agentID + "/tokens"
 	if err := doJSON(ctx, http.MethodPost, url, token, []byte("{}"), &out); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if out.AgentToken == "" {
-		return "", "", fmt.Errorf("server returned no token")
+		return "", "", "", fmt.Errorf("server returned no token")
 	}
-	return out.AgentToken, out.TokenID, nil
+	return out.AgentToken, out.TokenID, out.AgentName, nil
+}
+
+// RenameAccount changes the account's server-side display name (owner-only)
+// via POST {endpoint}/v1/account:rename.
+func RenameAccount(ctx context.Context, endpoint, token, displayName string) error {
+	body, err := json.Marshal(map[string]string{"display_name": displayName})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/account:rename"
+	return doJSON(ctx, http.MethodPost, url, token, body, nil)
 }
 
 // DeleteAgent soft-deletes an agent and revokes its tokens.

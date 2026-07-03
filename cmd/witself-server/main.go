@@ -163,15 +163,25 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, string, error) {
-			tok, tokenID, err := st.CreateAgentToken(ctx, accountID, agentID)
+		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, string, string, error) {
+			tok, tokenID, agentName, err := st.CreateAgentToken(ctx, accountID, agentID)
 			switch {
 			case errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotFound):
-				return "", "", server.ErrNotFound
+				return "", "", "", server.ErrNotFound
 			case errors.Is(err, store.ErrAccountNotActive):
-				return "", "", server.ErrAccountNotActive
+				return "", "", "", server.ErrAccountNotActive
 			}
-			return tok, tokenID, err
+			return tok, tokenID, agentName, err
+		}
+		cfg.RenameAccount = func(ctx context.Context, accountID, operatorID, displayName string) error {
+			err := st.UpdateAccountDisplayName(ctx, accountID, operatorID, displayName)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return server.ErrNotAccountOwner
+			}
+			return err
 		}
 		cfg.CreateOperatorToken = func(ctx context.Context, accountID, operatorID, displayName string, ttl *time.Duration) (string, string, *time.Time, error) {
 			tok, tokenID, expiresAt, err := st.CreateOperatorToken(ctx, accountID, operatorID, displayName, ttl)

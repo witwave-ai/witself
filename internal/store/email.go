@@ -44,6 +44,40 @@ func (s *Store) UndoAccountEmail(ctx context.Context, accountID, expectedCurrent
 // current email — i.e. a stale undo link after a subsequent legitimate change.
 var ErrConflictingUndo = errors.New("email has changed since this undo was issued")
 
+// UpdateAccountDisplayName changes the account's server-side display name —
+// cosmetic, but account-level, so it keeps the same owner-only tier as email
+// and close. (Local names are a per-machine concept and live in the CLI.)
+func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operatorID, displayName string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var isOwner bool
+	err = tx.QueryRow(ctx,
+		`SELECT (o.is_root OR o.role = 'account_owner')
+		 FROM accounts a
+		 JOIN operators o ON o.account_id = a.id
+		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
+		 FOR UPDATE OF a`,
+		accountID, operatorID).Scan(&isOwner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verify rename authority: %w", err)
+	}
+	if !isOwner {
+		return ErrNotAccountOwner
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET display_name = $2 WHERE id = $1`, accountID, displayName); err != nil {
+		return fmt.Errorf("rename account: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // UpdateAccountEmail changes an account's contact email. Owner-only (email is
 // account-level contact, same authority tier as close) and active-only — the
 // control plane calls this after proving the NEW inbox can receive (emailed
