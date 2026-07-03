@@ -13,8 +13,10 @@
 // The trailing checksums entry is the integrity contract: it is written after
 // everything it describes, so a truncated or corrupted stream is detectable
 // by any reader without out-of-band metadata. Import verifies it before a
-// single row lands. Memory stays bounded regardless of account size: rows
-// stream from database cursors, and only one chunk is buffered at a time.
+// single row is COMMITTED — rows stream into a transaction that only commits
+// once the trailer proves the archive whole. Memory stays bounded regardless
+// of account size: rows stream from database cursors, and only one chunk is
+// buffered at a time.
 package export
 
 import (

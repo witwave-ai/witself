@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
@@ -316,6 +317,38 @@ func serve() int {
 				return server.ErrAccountNotSuspended
 			case errors.Is(err, store.ErrCannotSelfResume):
 				return server.ErrCannotSelfResume
+			}
+			return err
+		}
+		cfg.ImportAccountArchive = func(ctx context.Context, accountID string, body io.Reader) (server.ImportSummary, error) {
+			m, err := st.ImportAccount(ctx, accountID, body)
+			switch {
+			case errors.Is(err, store.ErrAccountExists):
+				return server.ImportSummary{}, server.ErrConflict
+			case errors.Is(err, export.ErrArchiveTooNew):
+				return server.ImportSummary{}, server.ErrArchiveTooNew
+			case errors.Is(err, store.ErrArchiveAccountMismatch),
+				errors.Is(err, store.ErrArchiveContent),
+				errors.Is(err, export.ErrCorrupt):
+				return server.ImportSummary{}, server.ErrBadArchive
+			case err != nil:
+				return server.ImportSummary{}, err
+			}
+			return server.ImportSummary{
+				AccountID:     m.AccountID,
+				Status:        m.Status,
+				SchemaVersion: m.SchemaVersion,
+			}, nil
+		}
+		cfg.ResumeAccountSystem = func(ctx context.Context, accountID, category string) error {
+			err := st.ResumeAccountSystem(ctx, accountID, category)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotSuspended):
+				return server.ErrAccountNotSuspended
+			case errors.Is(err, store.ErrResumeWrongCategory):
+				return server.ErrResumeWrongCategory
 			}
 			return err
 		}

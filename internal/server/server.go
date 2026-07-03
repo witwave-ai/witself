@@ -153,6 +153,29 @@ type Config struct {
 	// fleet-admin/migration/etc. suspension (ErrCannotSelfResume -> 403); a
 	// not-suspended account gets ErrConflict.
 	ResumeAccountOwner func(ctx context.Context, accountID, operatorID string) error
+
+	// ImportAccountArchive, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:import — the restore half of the archive story:
+	// the request body streams a logical archive (the :export format), and
+	// the account lands in its exported state, suspended or closed. Refusals:
+	// ErrConflict when the account already exists here, ErrArchiveTooNew when
+	// the archive's schema outruns this cell, ErrBadArchive for anything
+	// structurally wrong (corrupt, truncated, or naming a different account).
+	ImportAccountArchive func(ctx context.Context, accountID string, body io.Reader) (ImportSummary, error)
+
+	// ResumeAccountSystem, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:resume — machine-initiated resume scoped by
+	// category, the mirror of SuspendAccountSystem: only the authority that
+	// suspended may resume. ErrResumeWrongCategory when the categories
+	// disagree, ErrAccountNotSuspended when there is nothing to lift.
+	ResumeAccountSystem func(ctx context.Context, accountID, category string) error
+}
+
+// ImportSummary is the API view of a completed archive restore.
+type ImportSummary struct {
+	AccountID     string `json:"account_id"`
+	Status        string `json:"status"`
+	SchemaVersion int    `json:"schema_version"` // the ARCHIVE's schema coordinate
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -225,6 +248,19 @@ var ErrCannotSelfResume = errors.New("this suspension is not owner-resumable")
 // non-active account (-> 403). requireOperator normally refuses first; this
 // surfaces the race where a close commits while the request is in flight.
 var ErrAccountNotActive = errors.New("account is not active")
+
+// ErrArchiveTooNew signals an import whose archive was written at a schema
+// version newer than this cell understands (-> 409): upgrade the cell, don't
+// downgrade the data.
+var ErrArchiveTooNew = errors.New("archive schema is newer than this cell")
+
+// ErrBadArchive signals a structurally unusable import stream — corrupt,
+// truncated, or naming a different account than the request (-> 400).
+var ErrBadArchive = errors.New("invalid archive")
+
+// ErrResumeWrongCategory signals a system resume whose category does not
+// match what the account is suspended for (-> 409).
+var ErrResumeWrongCategory = errors.New("suspension category does not match")
 
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
@@ -352,7 +388,7 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil {
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
@@ -621,9 +657,9 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 }
 
 // accountLifecycleHandler serves the provision-token-authorized lifecycle
-// verbs on POST /v1/accounts/{id}:reap|:activate|:contact|:recover —
-// instance-level authority, the same trust link as provisioning, so only the
-// control plane can call them.
+// verbs on POST /v1/accounts/{id}:reap|:activate|:contact|:update-email|
+// :recover|:suspend|:resume|:export|:import — instance-level authority, the
+// same trust link as provisioning, so only the control plane can call them.
 //
 // reap: 200 whether it reaped just now or found the account already closed
 // (idempotent); 409 when the account activated first (the sweep's view was
@@ -813,6 +849,62 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"schema_version": "witself.v0",
 				"account_id":     accountID,
 				"status":         "suspended",
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "resume"); ok && cfg.ResumeAccountSystem != nil {
+			var req struct {
+				For string `json:"for"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.For == "" {
+				writeJSONError(w, http.StatusBadRequest, "a suspension category (for) is required")
+				return
+			}
+			err := cfg.ResumeAccountSystem(r.Context(), accountID, req.For)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrAccountNotSuspended):
+				writeJSONError(w, http.StatusConflict, "account is not suspended")
+				return
+			case errors.Is(err, ErrResumeWrongCategory):
+				writeJSONError(w, http.StatusConflict, "suspension category does not match")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not resume account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"status":         "active",
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "import"); ok && cfg.ImportAccountArchive != nil {
+			sum, err := cfg.ImportAccountArchive(r.Context(), accountID, r.Body)
+			switch {
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account already exists on this cell")
+				return
+			case errors.Is(err, ErrArchiveTooNew):
+				writeJSONError(w, http.StatusConflict, "archive schema is newer than this cell — upgrade the cell first")
+				return
+			case errors.Is(err, ErrBadArchive):
+				writeJSONError(w, http.StatusBadRequest, "invalid or corrupt archive")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not import account")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version":         "witself.v0",
+				"account_id":             sum.AccountID,
+				"status":                 sum.Status,
+				"archive_schema_version": sum.SchemaVersion,
 			})
 			return
 		}

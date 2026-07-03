@@ -125,6 +125,55 @@ func (s *Store) SuspendAccountSystem(ctx context.Context, accountID, category, r
 	return tx.Commit(ctx)
 }
 
+// ErrResumeWrongCategory is returned when a system resume names a category
+// that does not match what the account is suspended for — the authority that
+// suspended is the authority that resumes, in both directions.
+var ErrResumeWrongCategory = errors.New("suspension category does not match")
+
+// ResumeAccountSystem lifts a MACHINE-authority suspension — the restore path
+// un-freezing an account after it lands on a new cell. Only known categories
+// are accepted, and only a suspension of that same category is lifted: an
+// owner-suspended account that was evacuated comes back owner-suspended, and
+// this call leaves it that way. Idempotent when already active.
+func (s *Store) ResumeAccountSystem(ctx context.Context, accountID, category string) error {
+	if category != "evacuation" {
+		return fmt.Errorf("unknown suspension category %q", category)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	var suspendedFor *string
+	err = tx.QueryRow(ctx,
+		`SELECT status, suspended_for FROM accounts WHERE id = $1 FOR UPDATE`,
+		accountID).Scan(&status, &suspendedFor)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verify system resume: %w", err)
+	}
+	if status == "active" {
+		return nil // idempotent — a retry after a lost response completes cleanly
+	}
+	if status != "suspended" {
+		return ErrAccountNotSuspended // pending or closed — nothing to lift
+	}
+	if suspendedFor == nil || *suspendedFor != category {
+		return ErrResumeWrongCategory
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET status = 'active', suspended_at = NULL,
+		   suspended_for = NULL, suspended_reason = NULL
+		 WHERE id = $1`, accountID); err != nil {
+		return fmt.Errorf("system resume account: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // ResumeAccountOwner un-suspends an owner-suspended account. Owner-only, and
 // crucially refuses to un-suspend a fleet-admin/migration/etc. suspension:
 // the authority that suspended is the authority that resumes.

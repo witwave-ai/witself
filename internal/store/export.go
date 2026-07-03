@@ -58,6 +58,10 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 		return ErrAccountNotExportable
 	}
 
+	// Tables stream in FOREIGN-KEY DEPENDENCY ORDER (tokens reference
+	// operators and agents; agents reference realms) so a streaming importer
+	// can insert every row the moment it arrives, no buffering, no deferred
+	// constraints.
 	sources := []export.RowSource{
 		&querySource{s: s, table: "accounts", q: `
 			SELECT jsonb_build_object(
@@ -73,13 +77,6 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'display_name', display_name, 'created_at', created_at,
 			  'updated_at', updated_at, 'deleted_at', deleted_at)
 			FROM operators WHERE account_id = $1 ORDER BY id`, arg: accountID},
-		&querySource{s: s, table: "tokens", q: `
-			SELECT jsonb_build_object(
-			  'id', id, 'account_id', account_id, 'operator_id', operator_id,
-			  'agent_id', agent_id, 'kind', kind, 'token_hash', token_hash,
-			  'display_name', display_name, 'created_at', created_at,
-			  'expires_at', expires_at, 'consumed_at', consumed_at)
-			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID},
 		&querySource{s: s, table: "realms", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'name', name,
@@ -93,6 +90,13 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		&querySource{s: s, table: "tokens", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'operator_id', operator_id,
+			  'agent_id', agent_id, 'kind', kind, 'token_hash', token_hash,
+			  'display_name', display_name, 'created_at', created_at,
+			  'expires_at', expires_at, 'consumed_at', consumed_at)
+			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID},
 	}
 
 	m := export.Manifest{

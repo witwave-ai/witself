@@ -1292,3 +1292,141 @@ func TestSuspendedAccountIsGated(t *testing.T) {
 		t.Error("close did not run for suspended account")
 	}
 }
+
+// TestImportAccountArchive proves the restore verb's contract: provision
+// token only, the body streams through untouched, and each refusal maps to
+// its own status — 409 exists, 409 too-new, 400 corrupt.
+func TestImportAccountArchive(t *testing.T) {
+	var gotBody []byte
+	imp := func(_ context.Context, accountID string, body io.Reader) (ImportSummary, error) {
+		b, _ := io.ReadAll(body)
+		gotBody = b
+		switch accountID {
+		case "acc_exists":
+			return ImportSummary{}, ErrConflict
+		case "acc_future":
+			return ImportSummary{}, ErrArchiveTooNew
+		case "acc_garbled":
+			return ImportSummary{}, ErrBadArchive
+		default:
+			return ImportSummary{AccountID: accountID, Status: "suspended", SchemaVersion: 13}, nil
+		}
+	}
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:       "witself_prv_test",
+		ProvisionAccount:     provision,
+		ImportAccountArchive: imp,
+	}))
+	defer srv.Close()
+
+	do := func(path, token, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token string
+		want        int
+	}{
+		{"/v1/accounts/acc_ok:import", "wrong", http.StatusUnauthorized},
+		{"/v1/accounts/acc_ok:import", "witself_prv_test", http.StatusOK},
+		{"/v1/accounts/acc_exists:import", "witself_prv_test", http.StatusConflict},
+		{"/v1/accounts/acc_future:import", "witself_prv_test", http.StatusConflict},
+		{"/v1/accounts/acc_garbled:import", "witself_prv_test", http.StatusBadRequest},
+	} {
+		resp := do(tc.path, tc.token, "tar-bytes")
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s (token %q) = %d, want %d", tc.path, tc.token, resp.StatusCode, tc.want)
+		}
+	}
+	if string(gotBody) != "tar-bytes" {
+		t.Errorf("body reaching the import func = %q, want the raw stream", gotBody)
+	}
+
+	// The success body carries the archive's coordinates.
+	resp := do("/v1/accounts/acc_ok:import", "witself_prv_test", "tar-bytes")
+	var out struct {
+		AccountID     string `json:"account_id"`
+		Status        string `json:"status"`
+		SchemaVersion int    `json:"archive_schema_version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if out.AccountID != "acc_ok" || out.Status != "suspended" || out.SchemaVersion != 13 {
+		t.Errorf("import response = %+v", out)
+	}
+}
+
+// TestResumeAccountSystem proves the machine-resume verb: provision token
+// only, a category is required, and the authority-scoping refusals map to
+// 409s the control plane can tell apart from success.
+func TestResumeAccountSystem(t *testing.T) {
+	resume := func(_ context.Context, accountID, category string) error {
+		switch accountID {
+		case "acc_owner_susp":
+			return ErrResumeWrongCategory
+		case "acc_active":
+			return nil // idempotent
+		case "acc_closed":
+			return ErrAccountNotSuspended
+		case "acc_missing":
+			return ErrNotFound
+		default:
+			return nil
+		}
+	}
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:      "witself_prv_test",
+		ProvisionAccount:    provision,
+		ResumeAccountSystem: resume,
+	}))
+	defer srv.Close()
+
+	do := func(path, token, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token, body string
+		want              int
+	}{
+		{"/v1/accounts/acc_evac:resume", "wrong", `{"for":"evacuation"}`, http.StatusUnauthorized},
+		{"/v1/accounts/acc_evac:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusOK},
+		{"/v1/accounts/acc_evac:resume", "witself_prv_test", `{}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:resume", "witself_prv_test", ``, http.StatusBadRequest},
+		{"/v1/accounts/acc_owner_susp:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusConflict},
+		{"/v1/accounts/acc_closed:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusConflict},
+		{"/v1/accounts/acc_active:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusOK},
+		{"/v1/accounts/acc_missing:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusNotFound},
+	} {
+		resp := do(tc.path, tc.token, tc.body)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s body %q = %d, want %d", tc.path, tc.body, resp.StatusCode, tc.want)
+		}
+	}
+}
