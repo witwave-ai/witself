@@ -76,6 +76,36 @@
       "bucket_name": "witself-archives"
     }
   ],
+  // Edge rate limiter for the recovery endpoint (issue #23). Enforced at
+  // the Cloudflare edge BEFORE the request reaches the Worker — so a
+  // concurrent burst (curl -P N) is blocked by the platform instead of
+  // racing the KV read-modify-write. The Worker's per-IP KV counter
+  // (#14 partial fix) still guards the longer-term 4h quota; this
+  // binding just prevents the burst that defeats the KV race. Keyed
+  // per (IP, account) in the caller so an attacker who rotates
+  // account_ids doesn't reset it.
+  //
+  // Namespace_id is an arbitrary integer that identifies the limiter
+  // instance (not a Cloudflare-side id). Limit is deliberately very
+  // tight (1 per 10s) because legitimate owners always wait ≥2 min
+  // between attempts (the KV cooldown check enforces that) — the
+  // edge limiter's only job is to shield the KV RMW from concurrent
+  // bursts. Live probes show Cloudflare's rate limit binding is not
+  // strictly atomic across concurrent requests hitting one edge PoP;
+  // a small burst can leak. Tighter limits shrink that leak.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RECOVER_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": {
+          "limit": 1,
+          "period": 10
+        }
+      }
+    ]
+  },
   "observability": {
     "enabled": true
   }

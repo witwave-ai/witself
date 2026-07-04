@@ -926,23 +926,31 @@ async function handleRecover(request, env, accountId) {
   } catch {
     // empty body = request mode
   }
+  const sourceIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  // Edge rate limit fires FIRST — before any KV read, before the cell
+  // round-trip, before anything the Worker does. Cloudflare enforces
+  // this atomically at the datacenter level, so a concurrent burst
+  // (curl -P N) sees the platform's counter serialize the increments;
+  // the request never reaches the Worker's KV-based logic which has
+  // no CAS. See #23 for the follow-up context; #14 for what the KV
+  // counter still handles (4h quota, fail-open on infra failure).
+  // Only applied to request mode — redeem mode carries a code that
+  // was already gated by a real email send.
+  if (!body.code && env.RECOVER_LIMITER) {
+    const { success } = await env.RECOVER_LIMITER.limit({
+      key: `${sourceIp}:${accountId}`,
+    });
+    if (!success) {
+      return err("too many recovery requests — try again later", 429);
+    }
+  }
   const rlKey = `recover:${accountId}`;
   const rl = (await env.DIRECTORY.get(rlKey, { type: "json" })) ?? {};
-  // Per-(account, source-IP) counter so a single attacker on one IP can
-  // only exhaust their OWN quota against a given account — not the
-  // owner's. CF-Connecting-IP is set by Cloudflare after termination,
-  // clients can't forge it. Missing header falls back to "unknown"
-  // (one shared bucket for anything without an IP header).
-  //
-  // Race caveat: Workers KV get()/put() has no compare-and-swap, so a
-  // concurrent burst from one IP (curl -P N) can leak up to N-1 emails
-  // past the intended cap between the read and write below. This is
-  // fundamentally unsolvable at the KV layer; strict enforcement needs
-  // Cloudflare Rate Limiting at the edge OR a Durable Object counter.
-  // Filed as follow-up. The pre-op write below shrinks the race window
-  // from the ~15s cell round-trip to microseconds so single-shot
-  // attackers see the cap enforced.
-  const sourceIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  // Per-(account, source-IP) 4-hour quota (KV-backed). The edge
+  // limiter above handles burst enforcement; this handles the
+  // longer-term "one attacker can't send more than 3 emails per 4
+  // hours per account from their IP" bound. Missing CF-Connecting-IP
+  // falls back to "unknown" (one shared bucket).
   const rlPerIpKey = `recover-ip:${accountId}:${sourceIp}`;
   const rlPerIp = (await env.DIRECTORY.get(rlPerIpKey, { type: "json" })) ?? {};
 
