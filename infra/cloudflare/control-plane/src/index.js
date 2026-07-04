@@ -581,6 +581,8 @@ async function handleSignup(request, env) {
       `pending:${provisioned.account_id}`,
       JSON.stringify(pendingEntry),
     );
+    await logCellEvent(cell, provisioned.account_id, "account.email.verify.sent",
+      "control_plane", { to_masked: maskEmail(provisioned.email) });
   }
 
   return json(
@@ -886,6 +888,20 @@ async function handleResend(request, env, accountId) {
       last_email_at: new Date().toISOString(),
     }),
   );
+  // Look up the cell so we can post the audit event. The KV read is
+  // wrapped because THIS handler already emailed the user and burned a
+  // rate-limit slot; letting a transient KV error crash the response
+  // with a 500 would make the user re-request and hit the cooldown for
+  // an email that DID go out. audit is best-effort — the request
+  // succeeded even without the event landing.
+  let resendCell = null;
+  try {
+    resendCell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+  } catch (e) {
+    console.log(`resend: audit cell lookup for ${accountId} failed: ${e}`);
+  }
+  await logCellEvent(resendCell, accountId, "account.email.verify.sent",
+    "control_plane", { to_masked: maskEmail(account.email) });
   return json({
     schema_version: "witself.v0",
     account_id: accountId,
@@ -960,6 +976,13 @@ async function handleRecover(request, env, accountId) {
     }
     let sent = false;
     if (contact?.email && contact.status === "active" && env.EMAIL) {
+      // recovery.requested lands regardless of email outcome — someone
+      // asked for a recovery, that's audit-worthy even if the email
+      // backend blew up moments later. Only fires on REAL routing (the
+      // enclosing `if entry && contact` shape prevents phantom-id
+      // recovery events from leaking cell state).
+      await logCellEvent(cell, accountId, "recovery.requested",
+        "control_plane", { email_masked: maskEmail(contact.email) });
       const raw = new Uint32Array(3);
       crypto.getRandomValues(raw);
       const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
@@ -993,6 +1016,8 @@ async function handleRecover(request, env, accountId) {
         rl.emails_sent = (rl.emails_sent ?? 0) + 1;
         rl.last_email_at = new Date().toISOString();
         sent = true;
+        await logCellEvent(cell, accountId, "account.email.recovery.sent",
+          "control_plane", { to_masked: maskEmail(contact.email) });
       } catch (e) {
         console.log(`recover: email for ${accountId} failed: ${e}`);
       }
@@ -1165,6 +1190,12 @@ async function handleChangeEmail(request, env, accountId) {
     if (!env.EMAIL) {
       return err("email sending is not configured", 502);
     }
+    // change.initiated lands the moment we accept the request (owner
+    // authenticated, has a prior anchor). The dispatches (change.sent,
+    // to both new and old addresses) log after their respective
+    // env.EMAIL.send succeeds.
+    await logCellEvent(cell, accountId, "account.email.change.initiated",
+      "control_plane", { new_masked: maskEmail(newEmail) });
     const raw = new Uint32Array(3);
     crypto.getRandomValues(raw);
     const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
@@ -1193,6 +1224,8 @@ async function handleChangeEmail(request, env, accountId) {
       console.log(`change-email: code to ${accountId}'s new address failed: ${e}`);
       return err("could not send the confirmation email — try again shortly", 502);
     }
+    await logCellEvent(cell, accountId, "account.email.change.sent",
+      "control_plane", { to_masked: maskEmail(newEmail) });
     // Persist only after the code actually left; a send failure must not
     // burn quota or corrupt an issued code.
     state.code_hash = await sha256hex(code.replaceAll("-", ""));
@@ -1246,6 +1279,8 @@ async function handleChangeEmail(request, env, accountId) {
       console.log(`change-email: notice to ${accountId}'s old address failed: ${e}`);
       return err("could not deliver the alarm to your current address — try again shortly", 502);
     }
+    await logCellEvent(cell, accountId, "account.email.change.sent",
+      "control_plane", { to_masked: maskEmail(account.email) });
     return json({
       schema_version: "witself.v0",
       account_id: accountId,
@@ -1349,6 +1384,8 @@ async function handleChangeEmail(request, env, accountId) {
         `,
       }),
     });
+    await logCellEvent(cell, accountId, "account.email.undo.sent",
+      "control_plane", { to_masked: maskEmail(oldEmail) });
   } catch (e) {
     console.log(`change-email: undo link to ${accountId}'s old address failed: ${e}`);
   }
@@ -1709,6 +1746,70 @@ async function handleEvacuate(request, env, cellName) {
   });
 }
 
+// logCellEvent records a control-plane-originated event on the tenant's
+// cell via the provision-token :events endpoint. Best-effort: an audit
+// failure NEVER aborts the caller's flow. A dropped event is worse than
+// a failed operation only when the operation would otherwise succeed;
+// the operation succeeding without an audit entry is what we'd rather
+// have than a spurious operation failure because the audit couldn't be
+// written. Logs to the Cloudflare Worker console on error so operators
+// can spot systemic drift.
+async function logCellEvent(cell, accountId, verb, actorKind, metadata) {
+  if (!cell?.endpoint || !cell?.provision_token) {
+    console.log(`event ${verb} for ${accountId}: no cell endpoint available`);
+    return;
+  }
+  try {
+    const resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:events`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify({
+        verb,
+        actor_kind: actorKind,
+        metadata: metadata ?? {},
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      console.log(`event ${verb} for ${accountId}: HTTP ${resp.status}: ${text.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.log(`event ${verb} for ${accountId}: ${String(e?.message ?? e)}`);
+  }
+}
+
+// cellForAccount is a small helper used by handlers that already have an
+// accountId but not the cell record. Looks up acct: to find the cell name,
+// then reads the cell: entry to get endpoint + provision_token. Returns
+// null when the account is unrouted (evacuated / never provisioned).
+async function cellForAccount(env, accountId) {
+  const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+  if (!entry?.cell) return null;
+  const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+  return cell ?? null;
+}
+
+// maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
+// metadata. Mirrors the cell-side MaskEmail exactly (internal/store/
+// events.go) so the same shape lands on both sides of the trust link.
+function maskEmail(addr) {
+  const s = (addr ?? "").trim();
+  if (!s) return "";
+  const at = s.lastIndexOf("@");
+  if (at <= 0 || at === s.length - 1) return "***";
+  const local = s.slice(0, at);
+  const domain = s.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  const domainMasked = dot > 0
+    ? domain[0] + "***" + domain.slice(dot)
+    : domain[0] + "***";
+  return local[0] + "***@" + domainMasked;
+}
+
 // evacuateAccount runs the four-step evacuation for a single account. The
 // R2 object key is DETERMINISTIC per account (not per attempt) — a retry
 // after any failure just overwrites, so no orphaned objects can accrete.
@@ -1804,6 +1905,20 @@ async function evacuateAccount(env, cellName, cell, accountId) {
       format_version: 1,
     }),
   );
+
+  // (3a) Audit the evacuation ONCE per successful attempt. Firing after
+  // archived: is written (step 3) means:
+  // - a retry after a mid-export failure short-circuits at the top of
+  //   the function (archived: exists → return without re-logging)
+  // - the event lands durably on the cell before step 4 retires
+  //   routing, and before the cell is eventually torn down
+  // The event does NOT survive the arc (the archive was streamed to
+  // R2 in step 2 before this row existed) — that's fine, because the
+  // matching account.restored event on the new cell is what carries
+  // the migration signal for owners viewing history post-restore.
+  // actor_kind=system: fleet-level operation, not a principal action.
+  await logCellEvent(cell, accountId, "account.evacuated",
+    "system", { cell: cellName });
 
   // (4) Retire the routing pointer. From this moment the account is
   // "archived — awaiting placement" fleet-wide.
@@ -2083,6 +2198,14 @@ async function restoreAccount(env, cellName, cell, accountId, archived) {
       region: cell.region,
     }),
   );
+
+  // Audit the arrival on the new cell's ledger. account.evacuated was
+  // preserved through the archive (streamed in during :import), so an
+  // owner reading their trail after restore sees the evacuation and
+  // restore as a matched pair. actor_kind=system: fleet-level operation,
+  // not a principal action. archived.cell names the source cell.
+  await logCellEvent(cell, accountId, "account.restored",
+    "system", { from_cell: archived.cell });
 
   // (4) Retire the archived: pointer, then delete the R2 object. Order
   // matters for observability: a directory reader that sees archived: gone
