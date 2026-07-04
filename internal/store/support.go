@@ -654,6 +654,447 @@ func (s *Store) ChangeTicketState(ctx context.Context, in ChangeTicketStateInput
 	return t, nil
 }
 
+// adminHandleRE mirrors the Cloudflare Worker's ADMIN_HANDLE regex. The
+// store trusts the CP to have authenticated the caller; the pattern
+// check here is just a shape guard so a malformed handle never lands
+// in author_id or account_events.metadata.
+var adminHandleRE = mustSimpleRE(`^[a-z][a-z0-9_-]{1,31}$`)
+
+// mustSimpleRE compiles a small handle-shape regex; centralised so the
+// admin call sites don't each pull "regexp" as a top-level import.
+func mustSimpleRE(pat string) *simpleHandleMatcher {
+	return &simpleHandleMatcher{pat: pat}
+}
+
+// simpleHandleMatcher accepts only the ADMIN_HANDLE shape without a
+// regexp dependency: first byte is a-z; length 2..32; every byte is
+// a-z, 0-9, '_' or '-'. Keeping the check inline avoids importing
+// "regexp" just for one call site.
+type simpleHandleMatcher struct{ pat string }
+
+func (m *simpleHandleMatcher) MatchString(s string) bool {
+	if len(s) < 2 || len(s) > 32 {
+		return false
+	}
+	first := s[0]
+	if first < 'a' || first > 'z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// ListTicketsAdmin returns every support ticket on the account, newest
+// activity first. Unlike the tenant ListTickets, there is no operator
+// membership check: the caller has already been authenticated by the
+// control plane (provision-token at the server boundary; admin token at
+// the CP). Empty slice for an unknown account — the CP distinguishes
+// "no such account" via the existing :contact route.
+func (s *Store) ListTicketsAdmin(ctx context.Context, accountID string) ([]Ticket, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, account_id, opened_at, opened_by_kind, opened_by_id,
+		        subject, category, state, priority,
+		        first_response_at, resolved_at, closed_at,
+		        last_activity_at, COALESCE(last_message_id, ''),
+		        correlation, metadata
+		 FROM support_tickets
+		 WHERE account_id = $1
+		 ORDER BY last_activity_at DESC, id DESC`,
+		accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list support_tickets (admin): %w", err)
+	}
+	defer rows.Close()
+	out := make([]Ticket, 0)
+	for rows.Next() {
+		var t Ticket
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.OpenedAt,
+			&t.OpenedByKind, &t.OpenedByID, &t.Subject, &t.Category,
+			&t.State, &t.Priority, &t.FirstResponseAt, &t.ResolvedAt,
+			&t.ClosedAt, &t.LastActivityAt, &t.LastMessageID,
+			&t.Correlation, &t.Metadata); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// GetTicketAdmin returns one ticket + its full message thread. Same
+// contract as the tenant GetTicket but without an operator-membership
+// check. ErrTicketNotFound when no such ticket on the account.
+func (s *Store) GetTicketAdmin(ctx context.Context, accountID, ticketID string) (Ticket, []TicketMessage, error) {
+	var t Ticket
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, account_id, opened_at, opened_by_kind, opened_by_id,
+		        subject, category, state, priority,
+		        first_response_at, resolved_at, closed_at,
+		        last_activity_at, COALESCE(last_message_id, ''),
+		        correlation, metadata
+		 FROM support_tickets
+		 WHERE account_id = $1 AND id = $2`,
+		accountID, ticketID).Scan(&t.ID, &t.AccountID, &t.OpenedAt,
+		&t.OpenedByKind, &t.OpenedByID, &t.Subject, &t.Category,
+		&t.State, &t.Priority, &t.FirstResponseAt, &t.ResolvedAt,
+		&t.ClosedAt, &t.LastActivityAt, &t.LastMessageID,
+		&t.Correlation, &t.Metadata)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Ticket{}, nil, ErrTicketNotFound
+	}
+	if err != nil {
+		return Ticket{}, nil, fmt.Errorf("get support_ticket (admin): %w", err)
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, ticket_id, account_id, posted_at,
+		        author_kind, COALESCE(author_id, ''),
+		        body, attachments, metadata
+		 FROM support_ticket_messages
+		 WHERE account_id = $1 AND ticket_id = $2
+		 ORDER BY posted_at, id`,
+		accountID, ticketID)
+	if err != nil {
+		return Ticket{}, nil, fmt.Errorf("list ticket messages (admin): %w", err)
+	}
+	defer rows.Close()
+	messages := make([]TicketMessage, 0)
+	for rows.Next() {
+		var m TicketMessage
+		if err := rows.Scan(&m.ID, &m.TicketID, &m.AccountID, &m.PostedAt,
+			&m.AuthorKind, &m.AuthorID, &m.Body, &m.Attachments,
+			&m.Metadata); err != nil {
+			return Ticket{}, nil, err
+		}
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		return Ticket{}, nil, err
+	}
+	return t, messages, nil
+}
+
+// ReplyAdminInput carries the payload for ReplyAdminTicket. AdminHandle
+// must match ADMIN_HANDLE — the store does not re-authenticate but does
+// reject malformed handles as ErrTicketInputInvalid (defense in depth
+// against a compromised CP-side check).
+type ReplyAdminInput struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	Body        string
+}
+
+// ReplyAdminTicket appends a message from a fleet admin. Ticket state
+// swings to awaiting_customer (the mirror of the tenant reply's
+// awaiting_admin); resolved_at clears if the admin is implicitly
+// reopening a resolved ticket. Sets first_response_at on the first
+// admin reply (the SLA slice will consume this).
+func (s *Store) ReplyAdminTicket(ctx context.Context, in ReplyAdminInput) (TicketMessage, error) {
+	if !adminHandleRE.MatchString(in.AdminHandle) {
+		return TicketMessage{}, fmt.Errorf("%w: invalid admin_handle", ErrTicketInputInvalid)
+	}
+	body := strings.TrimSpace(in.Body)
+	if body == "" {
+		return TicketMessage{}, fmt.Errorf("%w: body required", ErrTicketInputInvalid)
+	}
+	if len(body) > maxSupportBodyBytes {
+		return TicketMessage{}, fmt.Errorf("%w: body exceeds %d bytes", ErrTicketInputInvalid, maxSupportBodyBytes)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TicketMessage{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// No status gate: an admin can reply on suspended/pending accounts —
+	// support continuity beats tenant-write status here. Closed accounts
+	// still get replies; the account row itself just needs to exist.
+	var accountExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT true FROM accounts WHERE id = $1`, in.AccountID,
+	).Scan(&accountExists); errors.Is(err, pgx.ErrNoRows) {
+		return TicketMessage{}, ErrAccountNotFound
+	} else if err != nil {
+		return TicketMessage{}, fmt.Errorf("verify admin-reply account: %w", err)
+	}
+
+	var currentState string
+	err = tx.QueryRow(ctx,
+		`SELECT state FROM support_tickets
+		 WHERE account_id = $1 AND id = $2
+		 FOR UPDATE`,
+		in.AccountID, in.TicketID).Scan(&currentState)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TicketMessage{}, ErrTicketNotFound
+	}
+	if err != nil {
+		return TicketMessage{}, fmt.Errorf("lock ticket for admin reply: %w", err)
+	}
+	if currentState == TicketStateClosed {
+		return TicketMessage{}, fmt.Errorf("%w: ticket is closed", ErrTicketStateInvalid)
+	}
+
+	msgID, err := id.New("tkm")
+	if err != nil {
+		return TicketMessage{}, err
+	}
+
+	var m TicketMessage
+	// author_id carries the handle directly per the migration comment
+	// ("When author_kind is 'fleet_admin', author_id is the admin's
+	// chosen HANDLE"). The store also asserts it in metadata for
+	// symmetry with the audit event.
+	metaJSON := fmt.Sprintf(`{"admin_handle":%q}`, in.AdminHandle)
+	err = tx.QueryRow(ctx,
+		`INSERT INTO support_ticket_messages
+		   (id, ticket_id, account_id, author_kind, author_id, body, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+		 RETURNING id, ticket_id, account_id, posted_at, author_kind,
+		           COALESCE(author_id, ''), body, attachments, metadata`,
+		msgID, in.TicketID, in.AccountID, MessageAuthorFleetAdmin, in.AdminHandle, body, metaJSON,
+	).Scan(&m.ID, &m.TicketID, &m.AccountID, &m.PostedAt, &m.AuthorKind,
+		&m.AuthorID, &m.Body, &m.Attachments, &m.Metadata)
+	if err != nil {
+		return TicketMessage{}, fmt.Errorf("insert admin reply message: %w", err)
+	}
+
+	// State transition: any non-closed → awaiting_customer. Clear
+	// resolved_at (implicit reopen from resolved). Fill
+	// first_response_at on the FIRST admin reply — SLA foundation.
+	if _, err := tx.Exec(ctx,
+		`UPDATE support_tickets
+		 SET state = $3, last_activity_at = now(), last_message_id = $4,
+		     resolved_at = NULL,
+		     first_response_at = COALESCE(first_response_at, now())
+		 WHERE account_id = $1 AND id = $2`,
+		in.AccountID, in.TicketID, TicketStateAwaitingCustomer, msgID); err != nil {
+		return TicketMessage{}, fmt.Errorf("advance ticket state (admin reply): %w", err)
+	}
+
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: in.AccountID,
+		ActorKind: ActorControlPlane,
+		Verb:      VerbSupportTicketReplied,
+		Metadata: map[string]any{
+			"ticket_id":    in.TicketID,
+			"admin_handle": in.AdminHandle,
+		},
+	}); err != nil {
+		return TicketMessage{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TicketMessage{}, err
+	}
+	return m, nil
+}
+
+// ChangeAdminStateInput carries the payload for ChangeAdminTicketState.
+type ChangeAdminStateInput struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	NewState    string
+}
+
+// ChangeAdminTicketState is the admin mirror of ChangeTicketState. Same
+// legality map, same resolved_at / closed_at rules; the actor on the
+// audit event is control_plane with admin_handle in metadata, and
+// there is no operator-membership check.
+func (s *Store) ChangeAdminTicketState(ctx context.Context, in ChangeAdminStateInput) (Ticket, error) {
+	if !adminHandleRE.MatchString(in.AdminHandle) {
+		return Ticket{}, fmt.Errorf("%w: invalid admin_handle", ErrTicketInputInvalid)
+	}
+	if !isKnownTicketState(in.NewState) {
+		return Ticket{}, fmt.Errorf("%w: unknown state %q", ErrTicketStateInvalid, in.NewState)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Ticket{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var accountExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT true FROM accounts WHERE id = $1`, in.AccountID,
+	).Scan(&accountExists); errors.Is(err, pgx.ErrNoRows) {
+		return Ticket{}, ErrAccountNotFound
+	} else if err != nil {
+		return Ticket{}, fmt.Errorf("verify admin-state account: %w", err)
+	}
+
+	var currentState string
+	err = tx.QueryRow(ctx,
+		`SELECT state FROM support_tickets
+		 WHERE account_id = $1 AND id = $2
+		 FOR UPDATE`,
+		in.AccountID, in.TicketID).Scan(&currentState)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Ticket{}, ErrTicketNotFound
+	}
+	if err != nil {
+		return Ticket{}, fmt.Errorf("lock ticket for admin state change: %w", err)
+	}
+	if currentState == in.NewState {
+		t, err := readTicketRow(ctx, tx, in.AccountID, in.TicketID)
+		if err != nil {
+			return Ticket{}, err
+		}
+		return t, tx.Commit(ctx)
+	}
+	allowed, ok := legalTransitions[currentState]
+	if !ok || !slices.Contains(allowed, in.NewState) {
+		return Ticket{}, fmt.Errorf("%w: %s → %s", ErrTicketStateInvalid, currentState, in.NewState)
+	}
+
+	setResolvedAt := "resolved_at"
+	switch in.NewState {
+	case TicketStateResolved:
+		setResolvedAt = "COALESCE(resolved_at, now())"
+	case TicketStateAwaitingAdmin, TicketStateAwaitingCustomer, TicketStateOpen:
+		setResolvedAt = "NULL"
+	}
+	setClosedAt := "closed_at"
+	if in.NewState == TicketStateClosed {
+		setClosedAt = "COALESCE(closed_at, now())"
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(
+		`UPDATE support_tickets
+		 SET state = $3, last_activity_at = now(),
+		     resolved_at = %s, closed_at = %s
+		 WHERE account_id = $1 AND id = $2`,
+		setResolvedAt, setClosedAt,
+	), in.AccountID, in.TicketID, in.NewState); err != nil {
+		return Ticket{}, fmt.Errorf("update ticket state (admin): %w", err)
+	}
+
+	var verb string
+	meta := map[string]any{
+		"ticket_id":    in.TicketID,
+		"admin_handle": in.AdminHandle,
+	}
+	if in.NewState == TicketStateClosed {
+		verb = VerbSupportTicketClosed
+	} else {
+		verb = VerbSupportTicketStateChanged
+		meta["state_from"] = currentState
+		meta["state_to"] = in.NewState
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: in.AccountID,
+		ActorKind: ActorControlPlane,
+		Verb:      verb,
+		Metadata:  meta,
+	}); err != nil {
+		return Ticket{}, err
+	}
+	t, err := readTicketRow(ctx, tx, in.AccountID, in.TicketID)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Ticket{}, err
+	}
+	return t, nil
+}
+
+// ListAdminAllInput filters ListTicketsAdminAll (the cell-wide list
+// endpoint the CP calls once per cell during fan-out).
+type ListAdminAllInput struct {
+	States    []string
+	Since     *time.Time
+	Limit     int
+	PageToken string
+}
+
+// ListAdminAllResult carries a page of tickets + the opaque continuation
+// token. Empty NextPageToken means the page fully drained the cell.
+type ListAdminAllResult struct {
+	Tickets       []Ticket
+	NextPageToken string
+}
+
+// ListTicketsAdminAll returns tickets across every account on this cell,
+// newest activity first, cursor-paginated on (last_activity_at, id).
+// Filters are optional; unset states means "any state".
+func (s *Store) ListTicketsAdminAll(ctx context.Context, in ListAdminAllInput) (ListAdminAllResult, error) {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	for _, st := range in.States {
+		if !isKnownTicketState(st) {
+			return ListAdminAllResult{}, fmt.Errorf("%w: unknown state %q", ErrTicketStateInvalid, st)
+		}
+	}
+	cursorTS, cursorID, err := decodeEventCursor(in.PageToken)
+	if in.PageToken != "" && err != nil {
+		return ListAdminAllResult{}, fmt.Errorf("%w: %v", ErrBadEventCursor, err)
+	}
+
+	q := `SELECT id, account_id, opened_at, opened_by_kind, opened_by_id,
+	             subject, category, state, priority,
+	             first_response_at, resolved_at, closed_at,
+	             last_activity_at, COALESCE(last_message_id, ''),
+	             correlation, metadata
+	      FROM support_tickets
+	      WHERE ($1::text[] IS NULL OR state = ANY($1::text[]))
+	        AND ($2::timestamptz IS NULL OR last_activity_at >= $2)
+	        AND ($3::timestamptz IS NULL
+	             OR (last_activity_at, id) < ($3, $4))
+	      ORDER BY last_activity_at DESC, id DESC
+	      LIMIT $5`
+
+	var cursorArg any
+	var cursorIDArg any
+	if in.PageToken != "" {
+		cursorArg = cursorTS
+		cursorIDArg = cursorID
+	}
+	var statesArg any
+	if len(in.States) > 0 {
+		statesArg = in.States
+	}
+	rows, err := s.pool.Query(ctx, q, statesArg, in.Since, cursorArg, cursorIDArg, limit+1)
+	if err != nil {
+		return ListAdminAllResult{}, fmt.Errorf("list support_tickets (admin all): %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]Ticket, 0, limit)
+	for rows.Next() {
+		var t Ticket
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.OpenedAt,
+			&t.OpenedByKind, &t.OpenedByID, &t.Subject, &t.Category,
+			&t.State, &t.Priority, &t.FirstResponseAt, &t.ResolvedAt,
+			&t.ClosedAt, &t.LastActivityAt, &t.LastMessageID,
+			&t.Correlation, &t.Metadata); err != nil {
+			return ListAdminAllResult{}, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return ListAdminAllResult{}, err
+	}
+	// Cursor pagination reuses the account_events cursor codec (same
+	// (timestamp, id) shape); the client sees an opaque token either way.
+	var next string
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeEventCursor(last.LastActivityAt, last.ID)
+		out = out[:limit]
+	}
+	return ListAdminAllResult{Tickets: out, NextPageToken: next}, nil
+}
+
 func isKnownTicketState(s string) bool {
 	switch s {
 	case TicketStateOpen, TicketStateAwaitingAdmin, TicketStateAwaitingCustomer,

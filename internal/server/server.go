@@ -197,6 +197,57 @@ type Config struct {
 	GetSupportTicket         func(ctx context.Context, accountID, operatorID, ticketID string) (SupportTicket, []SupportTicketMessage, error)
 	ReplySupportTicket       func(ctx context.Context, accountID, operatorID, ticketID, body string) (SupportTicketMessage, error)
 	ChangeSupportTicketState func(ctx context.Context, in ChangeTicketStateRequest) (SupportTicket, error)
+
+	// ListAdminTickets / GetAdminTicket / ReplyAdminTicket /
+	// ChangeAdminTicketState / ListAdminTicketsAll, when set (with the
+	// provisioning pair), enable the admin-side counterparts of the
+	// support-ticket endpoints. Provision-token authorized: the caller
+	// is the control plane, which has already authenticated the admin
+	// against its own credential store. admin_handle travels on every
+	// request body and is validated shape-only at the store.
+	//
+	// The first four hang off /v1/accounts/{id}/admin:{action} —
+	// account-scoped mirrors of the tenant flow. The fifth serves
+	// /v1/support/admin:list-tickets which is cell-wide (no account
+	// id) and cursor-paginated — the CP fans this call out to every
+	// cell in parallel to build the fleet-wide admin queue.
+	ListAdminTickets       func(ctx context.Context, accountID string) ([]SupportTicket, error)
+	GetAdminTicket         func(ctx context.Context, accountID, ticketID string) (SupportTicket, []SupportTicketMessage, error)
+	ReplyAdminTicket       func(ctx context.Context, in ReplyAdminTicketRequest) (SupportTicketMessage, error)
+	ChangeAdminTicketState func(ctx context.Context, in ChangeAdminTicketStateRequest) (SupportTicket, error)
+	ListAdminTicketsAll    func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)
+}
+
+// ReplyAdminTicketRequest is the payload for the admin reply hook.
+type ReplyAdminTicketRequest struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	Body        string
+}
+
+// ChangeAdminTicketStateRequest is the payload for the admin state hook.
+type ChangeAdminTicketStateRequest struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	NewState    string
+}
+
+// ListAdminTicketsAllRequest constrains the cell-wide admin list. All
+// fields optional. Limit is clamped to [1, 500] at the store.
+type ListAdminTicketsAllRequest struct {
+	States    []string
+	Since     *time.Time
+	Limit     int
+	PageToken string
+}
+
+// ListAdminTicketsAllResult carries a page of tickets + the opaque
+// continuation cursor.
+type ListAdminTicketsAllResult struct {
+	Tickets       []SupportTicket
+	NextPageToken string
 }
 
 // OpenTicketRequest is the input to the OpenSupportTicket Config hook.
@@ -595,6 +646,14 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ChangeSupportTicketState != nil {
 			mux.HandleFunc("PATCH /v1/support/tickets/{ticket}/state", changeSupportTicketStateHandler(cfg.Authenticate, cfg.ChangeSupportTicketState))
 		}
+	}
+	// Provision-token-authorized cell-wide admin ticket list (feeds
+	// the CP's fan-out for /v1/admin/tickets). Mounted independently of
+	// the tenant support endpoints — a self-hosted cell without a
+	// provision token never sees it.
+	if cfg.ProvisionToken != "" && cfg.ListAdminTicketsAll != nil {
+		mux.HandleFunc("POST /v1/support/admin:list-tickets",
+			supportAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminTicketsAll))
 	}
 	return mux
 }
@@ -1113,11 +1172,258 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			}
 			return
 		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:list-tickets"); ok && cfg.ListAdminTickets != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			tickets, err := cfg.ListAdminTickets(r.Context(), accountID)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not list support tickets")
+				return
+			}
+			if tickets == nil {
+				tickets = []SupportTicket{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"tickets":        tickets,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:get-ticket"); ok && cfg.GetAdminTicket != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+				TicketID    string `json:"ticket_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(req.TicketID) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing ticket_id")
+				return
+			}
+			ticket, messages, err := cfg.GetAdminTicket(r.Context(), accountID, req.TicketID)
+			switch {
+			case errors.Is(err, ErrTicketNotFound):
+				writeJSONError(w, http.StatusNotFound, "ticket not found")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read support ticket")
+				return
+			}
+			if messages == nil {
+				messages = []SupportTicketMessage{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"ticket":         ticket,
+				"messages":       messages,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:reply-ticket"); ok && cfg.ReplyAdminTicket != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+				TicketID    string `json:"ticket_id"`
+				Body        string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(req.TicketID) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing ticket_id")
+				return
+			}
+			msg, err := cfg.ReplyAdminTicket(r.Context(), ReplyAdminTicketRequest{
+				AccountID:   accountID,
+				AdminHandle: req.AdminHandle,
+				TicketID:    req.TicketID,
+				Body:        req.Body,
+			})
+			switch {
+			case errors.Is(err, ErrTicketInputInvalid):
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			case errors.Is(err, ErrTicketNotFound):
+				writeJSONError(w, http.StatusNotFound, "ticket not found")
+				return
+			case errors.Is(err, ErrTicketStateInvalid):
+				writeJSONError(w, http.StatusConflict, err.Error())
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not reply to support ticket")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"message":        msg,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:change-ticket-state"); ok && cfg.ChangeAdminTicketState != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+				TicketID    string `json:"ticket_id"`
+				State       string `json:"state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(req.TicketID) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing ticket_id")
+				return
+			}
+			if strings.TrimSpace(req.State) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing state")
+				return
+			}
+			ticket, err := cfg.ChangeAdminTicketState(r.Context(), ChangeAdminTicketStateRequest{
+				AccountID:   accountID,
+				AdminHandle: req.AdminHandle,
+				TicketID:    req.TicketID,
+				NewState:    strings.TrimSpace(req.State),
+			})
+			switch {
+			case errors.Is(err, ErrTicketStateInvalid):
+				writeJSONError(w, http.StatusConflict, err.Error())
+				return
+			case errors.Is(err, ErrTicketNotFound):
+				writeJSONError(w, http.StatusNotFound, "ticket not found")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not change ticket state")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"ticket":         ticket,
+			})
+			return
+		}
 		// Deliberately distinct from the handlers' "account not found": the
 		// control plane treats that exact string as authoritative and this
 		// one as retryable, so a cell that doesn't serve an action yet never
 		// burns a verification link or a reap candidate.
 		writeJSONError(w, http.StatusNotFound, "unknown account action")
+	}
+}
+
+// validateAdminHandle checks that s matches the ADMIN_HANDLE shape the
+// control plane uses when minting an admin. Cell-side is defense in
+// depth; the CP already runs the same check.
+func validateAdminHandle(s string) error {
+	if len(s) < 2 || len(s) > 32 {
+		return errors.New("invalid admin_handle (2-32 chars)")
+	}
+	if s[0] < 'a' || s[0] > 'z' {
+		return errors.New("invalid admin_handle (must start with a lowercase letter)")
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+		if !ok {
+			return errors.New("invalid admin_handle (letters/digits/underscore/hyphen only)")
+		}
+	}
+	return nil
+}
+
+// supportAdminCellHandler serves POST /v1/support/admin:list-tickets —
+// the cell-wide admin ticket list used by the control-plane fan-out.
+// Provision-token authorized like the other admin routes; body carries
+// optional filters (states, since, limit) and a page_token for cursor
+// pagination.
+func supportAdminCellHandler(provisionToken string, list func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		var req struct {
+			AdminHandle string   `json:"admin_handle"`
+			States      []string `json:"states"`
+			Since       string   `json:"since"`
+			Limit       int      `json:"limit"`
+			PageToken   string   `json:"page_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if err := validateAdminHandle(req.AdminHandle); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var since *time.Time
+		if s := strings.TrimSpace(req.Since); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "since must be RFC3339")
+				return
+			}
+			since = &t
+		}
+		result, err := list(r.Context(), ListAdminTicketsAllRequest{
+			States:    req.States,
+			Since:     since,
+			Limit:     req.Limit,
+			PageToken: req.PageToken,
+		})
+		switch {
+		case errors.Is(err, ErrTicketStateInvalid):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not list support tickets")
+			return
+		}
+		if result.Tickets == nil {
+			result.Tickets = []SupportTicket{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":  "witself.v0",
+			"tickets":         result.Tickets,
+			"next_page_token": result.NextPageToken,
+		})
 	}
 }
 

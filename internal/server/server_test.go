@@ -1504,3 +1504,34 @@ func TestResumeAccountSystem(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateAdminHandle pins the shape guard the /v1/accounts/{id}/admin:*
+// handlers apply before delegating to the store. The same regex lives in
+// the Cloudflare Worker (ADMIN_HANDLE) and in the store (adminHandleRE);
+// all three must agree, so any drift here shows up as an integration bug.
+func TestValidateAdminHandle(t *testing.T) {
+	tests := map[string]bool{
+		"sarah":                true,
+		"s2":                   true,
+		"sarah_jones":          true,
+		"a-b":                  true,
+		"abcdefghijklmnopqrst": true,
+		"":                     false,
+		"a":                    false,
+		"S":                    false,
+		"1abc":                 false,
+		"-abc":                 false,
+		"has space":            false,
+		"has.dot":              false,
+		"has/slash":            false,
+		"UPPER":                false,
+		"way_too_long_way_too_long_beyond_32_chars": false,
+	}
+	for h, wantOK := range tests {
+		err := validateAdminHandle(h)
+		gotOK := err == nil
+		if gotOK != wantOK {
+			t.Errorf("validateAdminHandle(%q): ok=%v want %v (err=%v)", h, gotOK, wantOK, err)
+		}
+	}
+}

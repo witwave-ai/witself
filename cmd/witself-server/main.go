@@ -406,6 +406,71 @@ func serve() int {
 			}
 			return toServerTicket(t), nil
 		}
+		cfg.ListAdminTickets = func(ctx context.Context, accountID string) ([]server.SupportTicket, error) {
+			ts, err := st.ListTicketsAdmin(ctx, accountID)
+			if err := mapSupportError(err); err != nil {
+				return nil, err
+			}
+			out := make([]server.SupportTicket, len(ts))
+			for i, t := range ts {
+				out[i] = toServerTicket(t)
+			}
+			return out, nil
+		}
+		cfg.GetAdminTicket = func(ctx context.Context, accountID, ticketID string) (server.SupportTicket, []server.SupportTicketMessage, error) {
+			t, ms, err := st.GetTicketAdmin(ctx, accountID, ticketID)
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, nil, err
+			}
+			out := make([]server.SupportTicketMessage, len(ms))
+			for i, m := range ms {
+				out[i] = toServerMessage(m)
+			}
+			return toServerTicket(t), out, nil
+		}
+		cfg.ReplyAdminTicket = func(ctx context.Context, in server.ReplyAdminTicketRequest) (server.SupportTicketMessage, error) {
+			m, err := st.ReplyAdminTicket(ctx, store.ReplyAdminInput{
+				AccountID:   in.AccountID,
+				AdminHandle: in.AdminHandle,
+				TicketID:    in.TicketID,
+				Body:        in.Body,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicketMessage{}, err
+			}
+			return toServerMessage(m), nil
+		}
+		cfg.ChangeAdminTicketState = func(ctx context.Context, in server.ChangeAdminTicketStateRequest) (server.SupportTicket, error) {
+			t, err := st.ChangeAdminTicketState(ctx, store.ChangeAdminStateInput{
+				AccountID:   in.AccountID,
+				AdminHandle: in.AdminHandle,
+				TicketID:    in.TicketID,
+				NewState:    in.NewState,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, err
+			}
+			return toServerTicket(t), nil
+		}
+		cfg.ListAdminTicketsAll = func(ctx context.Context, in server.ListAdminTicketsAllRequest) (server.ListAdminTicketsAllResult, error) {
+			res, err := st.ListTicketsAdminAll(ctx, store.ListAdminAllInput{
+				States:    in.States,
+				Since:     in.Since,
+				Limit:     in.Limit,
+				PageToken: in.PageToken,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.ListAdminTicketsAllResult{}, err
+			}
+			out := make([]server.SupportTicket, len(res.Tickets))
+			for i, t := range res.Tickets {
+				out[i] = toServerTicket(t)
+			}
+			return server.ListAdminTicketsAllResult{
+				Tickets:       out,
+				NextPageToken: res.NextPageToken,
+			}, nil
+		}
 		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
 			err := st.LogEvent(ctx, store.EventInput{
 				AccountID: accountID,
@@ -678,6 +743,10 @@ func mapSupportError(err error) error {
 		return server.ErrNotAccountOwner
 	case errors.Is(err, store.ErrAccountNotActive):
 		return server.ErrAccountNotActive
+	case errors.Is(err, store.ErrAccountNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrBadEventCursor):
+		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
 	}
 	return err
 }
