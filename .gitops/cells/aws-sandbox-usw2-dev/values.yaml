@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.87
-    imageTag: 0.0.87
+    chartVersion: 0.0.88
+    imageTag: 0.0.88
     backendKind: managed
     awsAlbIngress:
       enabled: true
