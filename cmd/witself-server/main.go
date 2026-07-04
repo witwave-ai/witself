@@ -351,6 +351,61 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.OpenSupportTicket = func(ctx context.Context, in server.OpenTicketRequest) (server.SupportTicket, server.SupportTicketMessage, error) {
+			t, m, err := st.OpenTicket(ctx, store.OpenTicketInput{
+				AccountID:  in.AccountID,
+				OperatorID: in.OperatorID,
+				Subject:    in.Subject,
+				Category:   in.Category,
+				Priority:   in.Priority,
+				Body:       in.Body,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, server.SupportTicketMessage{}, err
+			}
+			return toServerTicket(t), toServerMessage(m), nil
+		}
+		cfg.ListSupportTickets = func(ctx context.Context, accountID, operatorID string) ([]server.SupportTicket, error) {
+			ts, err := st.ListTickets(ctx, accountID, operatorID)
+			if err := mapSupportError(err); err != nil {
+				return nil, err
+			}
+			out := make([]server.SupportTicket, len(ts))
+			for i, t := range ts {
+				out[i] = toServerTicket(t)
+			}
+			return out, nil
+		}
+		cfg.GetSupportTicket = func(ctx context.Context, accountID, operatorID, ticketID string) (server.SupportTicket, []server.SupportTicketMessage, error) {
+			t, ms, err := st.GetTicket(ctx, accountID, operatorID, ticketID)
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, nil, err
+			}
+			out := make([]server.SupportTicketMessage, len(ms))
+			for i, m := range ms {
+				out[i] = toServerMessage(m)
+			}
+			return toServerTicket(t), out, nil
+		}
+		cfg.ReplySupportTicket = func(ctx context.Context, accountID, operatorID, ticketID, body string) (server.SupportTicketMessage, error) {
+			m, err := st.ReplyToTicket(ctx, accountID, operatorID, ticketID, body)
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicketMessage{}, err
+			}
+			return toServerMessage(m), nil
+		}
+		cfg.ChangeSupportTicketState = func(ctx context.Context, in server.ChangeTicketStateRequest) (server.SupportTicket, error) {
+			t, err := st.ChangeTicketState(ctx, store.ChangeTicketStateInput{
+				AccountID:  in.AccountID,
+				OperatorID: in.OperatorID,
+				TicketID:   in.TicketID,
+				NewState:   in.NewState,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, err
+			}
+			return toServerTicket(t), nil
+		}
 		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
 			err := st.LogEvent(ctx, store.EventInput{
 				AccountID: accountID,
@@ -602,4 +657,79 @@ func usage(w io.Writer) {
 
 func usageLine(w io.Writer, args ...any) {
 	_, _ = fmt.Fprintln(w, args...)
+}
+
+// mapSupportError translates the store's support-ticket sentinels into
+// the server package's sentinels so the HTTP layer can pick the right
+// status code without importing the store package.
+func mapSupportError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrSupportDisabled):
+		return wrapAsSentinel(server.ErrSupportDisabled, store.ErrSupportDisabled, err)
+	case errors.Is(err, store.ErrTicketNotFound):
+		return server.ErrTicketNotFound
+	case errors.Is(err, store.ErrTicketStateInvalid):
+		return wrapAsSentinel(server.ErrTicketStateInvalid, store.ErrTicketStateInvalid, err)
+	case errors.Is(err, store.ErrTicketInputInvalid):
+		return wrapAsSentinel(server.ErrTicketInputInvalid, store.ErrTicketInputInvalid, err)
+	case errors.Is(err, store.ErrNotAccountOwner):
+		return server.ErrNotAccountOwner
+	case errors.Is(err, store.ErrAccountNotActive):
+		return server.ErrAccountNotActive
+	}
+	return err
+}
+
+// wrapAsSentinel returns an error whose errors.Is matches the server
+// sentinel but whose Error() reads as "<server-sentinel>: <detail>",
+// where detail is inner's text with the store sentinel's message
+// stripped off. This avoids the double-print you get from
+// fmt.Errorf("%w: %v", server.ErrX, inner) when server.ErrX and the
+// store sentinel share the same Error() string — the previous form
+// produced messages like "invalid support ticket input: invalid
+// support ticket input: subject required".
+func wrapAsSentinel(serverSentinel, storeSentinel, inner error) error {
+	detail := strings.TrimPrefix(inner.Error(), storeSentinel.Error())
+	detail = strings.TrimPrefix(detail, ": ")
+	if detail == "" {
+		return serverSentinel
+	}
+	return fmt.Errorf("%w: %s", serverSentinel, detail)
+}
+
+func toServerTicket(t store.Ticket) server.SupportTicket {
+	return server.SupportTicket{
+		ID:              t.ID,
+		AccountID:       t.AccountID,
+		OpenedAt:        t.OpenedAt,
+		OpenedByKind:    t.OpenedByKind,
+		OpenedByID:      t.OpenedByID,
+		Subject:         t.Subject,
+		Category:        t.Category,
+		State:           t.State,
+		Priority:        t.Priority,
+		FirstResponseAt: t.FirstResponseAt,
+		ResolvedAt:      t.ResolvedAt,
+		ClosedAt:        t.ClosedAt,
+		LastActivityAt:  t.LastActivityAt,
+		LastMessageID:   t.LastMessageID,
+		Correlation:     t.Correlation,
+		Metadata:        t.Metadata,
+	}
+}
+
+func toServerMessage(m store.TicketMessage) server.SupportTicketMessage {
+	return server.SupportTicketMessage{
+		ID:          m.ID,
+		TicketID:    m.TicketID,
+		AccountID:   m.AccountID,
+		PostedAt:    m.PostedAt,
+		AuthorKind:  m.AuthorKind,
+		AuthorID:    m.AuthorID,
+		Body:        m.Body,
+		Attachments: m.Attachments,
+		Metadata:    m.Metadata,
+	}
 }

@@ -80,6 +80,17 @@ const (
 	VerbAccountRestored          = "account.restored"
 	VerbAccountReaped            = "account.reaped"
 	VerbAccountClosed            = "account.closed"
+
+	// Support-ticket lifecycle. Every ticket mutation lands both a
+	// support_tickets state change AND an account_events row so the
+	// owner's audit ledger surfaces "you filed a ticket / support
+	// replied / ticket closed" without the owner having to know about
+	// two separate views. The metadata carries the ticket id + a short
+	// human summary; the full body lives on support_ticket_messages.
+	VerbSupportTicketOpened       = "support.ticket.opened"
+	VerbSupportTicketReplied      = "support.ticket.replied"
+	VerbSupportTicketStateChanged = "support.ticket.state_changed"
+	VerbSupportTicketClosed       = "support.ticket.closed"
 )
 
 // ErrUnknownVerb is returned when a caller tries to log a verb not in the
@@ -237,6 +248,34 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbAccountClosed: {
 		allowedKeys:   []string{"reason"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorSystem},
+	},
+
+	// Support-ticket verbs. ticket_id is required on all four so the
+	// owner can correlate an audit entry back to the ticket. subject
+	// is a short human string carried on opened/closed so the audit
+	// view has meaningful text without pulling the ticket. state_from
+	// / state_to on state_changed give a compact transition record.
+	// admin_handle appears on replies/closes originated by fleet admins
+	// (matches the tenant-visible handle shape).
+	VerbSupportTicketOpened: {
+		requiredKeys:  []string{"ticket_id", "subject"},
+		allowedKeys:   []string{"ticket_id", "subject", "category"},
+		allowedActors: []string{ActorOwner, ActorOperator},
+	},
+	VerbSupportTicketReplied: {
+		requiredKeys:  []string{"ticket_id"},
+		allowedKeys:   []string{"ticket_id", "admin_handle"},
+		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
+	},
+	VerbSupportTicketStateChanged: {
+		requiredKeys:  []string{"ticket_id", "state_from", "state_to"},
+		allowedKeys:   []string{"ticket_id", "state_from", "state_to", "admin_handle"},
+		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
+	},
+	VerbSupportTicketClosed: {
+		requiredKeys:  []string{"ticket_id"},
+		allowedKeys:   []string{"ticket_id", "subject", "admin_handle"},
+		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
 	},
 }
 

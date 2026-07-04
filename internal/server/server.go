@@ -184,6 +184,71 @@ type Config struct {
 	// suspended may resume. ErrResumeWrongCategory when the categories
 	// disagree, ErrAccountNotSuspended when there is nothing to lift.
 	ResumeAccountSystem func(ctx context.Context, accountID, category string) error
+
+	// OpenSupportTicket / ListSupportTickets / GetSupportTicket /
+	// ReplySupportTicket / ChangeSupportTicketState, when set (with
+	// Authenticate), enable /v1/support/tickets. Any operator on the
+	// account may open, list, read, reply, and transition; the account
+	// owner's audit trail (via ListAccountEvents) shows who did what.
+	// ErrSupportDisabled -> 409, ErrTicketNotFound -> 404,
+	// ErrTicketStateInvalid -> 409, ErrTicketInputInvalid -> 400.
+	OpenSupportTicket        func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)
+	ListSupportTickets       func(ctx context.Context, accountID, operatorID string) ([]SupportTicket, error)
+	GetSupportTicket         func(ctx context.Context, accountID, operatorID, ticketID string) (SupportTicket, []SupportTicketMessage, error)
+	ReplySupportTicket       func(ctx context.Context, accountID, operatorID, ticketID, body string) (SupportTicketMessage, error)
+	ChangeSupportTicketState func(ctx context.Context, in ChangeTicketStateRequest) (SupportTicket, error)
+}
+
+// OpenTicketRequest is the input to the OpenSupportTicket Config hook.
+type OpenTicketRequest struct {
+	AccountID  string
+	OperatorID string
+	Subject    string
+	Category   string
+	Priority   string
+	Body       string
+}
+
+// ChangeTicketStateRequest is the input to the ChangeSupportTicketState hook.
+type ChangeTicketStateRequest struct {
+	AccountID  string
+	OperatorID string
+	TicketID   string
+	NewState   string
+}
+
+// SupportTicket is the API view of one support ticket. Shape mirrors the
+// store row so wiring is a straight-through copy.
+type SupportTicket struct {
+	ID              string          `json:"id"`
+	AccountID       string          `json:"account_id"`
+	OpenedAt        time.Time       `json:"opened_at"`
+	OpenedByKind    string          `json:"opened_by_kind"`
+	OpenedByID      string          `json:"opened_by_id"`
+	Subject         string          `json:"subject"`
+	Category        string          `json:"category"`
+	State           string          `json:"state"`
+	Priority        string          `json:"priority"`
+	FirstResponseAt *time.Time      `json:"first_response_at,omitempty"`
+	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
+	ClosedAt        *time.Time      `json:"closed_at,omitempty"`
+	LastActivityAt  time.Time       `json:"last_activity_at"`
+	LastMessageID   string          `json:"last_message_id,omitempty"`
+	Correlation     json.RawMessage `json:"correlation"`
+	Metadata        json.RawMessage `json:"metadata"`
+}
+
+// SupportTicketMessage is the API view of one support_ticket_messages row.
+type SupportTicketMessage struct {
+	ID          string          `json:"id"`
+	TicketID    string          `json:"ticket_id"`
+	AccountID   string          `json:"account_id"`
+	PostedAt    time.Time       `json:"posted_at"`
+	AuthorKind  string          `json:"author_kind"`
+	AuthorID    string          `json:"author_id,omitempty"`
+	Body        string          `json:"body"`
+	Attachments json.RawMessage `json:"attachments"`
+	Metadata    json.RawMessage `json:"metadata"`
 }
 
 // ImportSummary is the API view of a completed archive restore.
@@ -314,6 +379,22 @@ var ErrBadInput = errors.New("bad input")
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
 var ErrCannotCloseDefault = errors.New("the default account cannot be closed")
+
+// ErrSupportDisabled signals that the account's support_policy blocks new
+// ticket creation (-> 409). Existing threads remain readable.
+var ErrSupportDisabled = errors.New("support is not enabled for this account")
+
+// ErrTicketNotFound signals a ticket read/mutate against an id that does
+// not exist on the caller's account (-> 404).
+var ErrTicketNotFound = errors.New("ticket not found")
+
+// ErrTicketStateInvalid signals a rejected state transition or a reply
+// against a closed ticket (-> 409).
+var ErrTicketStateInvalid = errors.New("invalid ticket state transition")
+
+// ErrTicketInputInvalid signals a caller-side input violation (empty
+// subject, oversized body, unknown category, etc.) (-> 400).
+var ErrTicketInputInvalid = errors.New("invalid support ticket input")
 
 // Agent is the API view of an agent.
 type Agent struct {
@@ -498,6 +579,21 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.ResumeAccountOwner != nil {
 			mux.HandleFunc("POST /v1/account:resume", resumeAccountHandler(cfg.Authenticate, cfg.ResumeAccountOwner))
+		}
+		if cfg.OpenSupportTicket != nil {
+			mux.HandleFunc("POST /v1/support/tickets", openSupportTicketHandler(cfg.Authenticate, cfg.OpenSupportTicket))
+		}
+		if cfg.ListSupportTickets != nil {
+			mux.HandleFunc("GET /v1/support/tickets", listSupportTicketsHandler(cfg.Authenticate, cfg.ListSupportTickets))
+		}
+		if cfg.GetSupportTicket != nil {
+			mux.HandleFunc("GET /v1/support/tickets/{ticket}", getSupportTicketHandler(cfg.Authenticate, cfg.GetSupportTicket))
+		}
+		if cfg.ReplySupportTicket != nil {
+			mux.HandleFunc("POST /v1/support/tickets/{ticket}/messages", replySupportTicketHandler(cfg.Authenticate, cfg.ReplySupportTicket))
+		}
+		if cfg.ChangeSupportTicketState != nil {
+			mux.HandleFunc("PATCH /v1/support/tickets/{ticket}/state", changeSupportTicketStateHandler(cfg.Authenticate, cfg.ChangeSupportTicketState))
 		}
 	}
 	return mux
@@ -1587,6 +1683,203 @@ func pathActionID(path, prefix, action string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// Support-ticket handlers. Every one runs behind requireOperator so the
+// account membership + active-status check happens up front. Ticket
+// visibility is any-operator (locked with the product decision) so no
+// extra role guard is needed here.
+
+func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			Subject  string `json:"subject"`
+			Category string `json:"category"`
+			Priority string `json:"priority"`
+			Body     string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		ticket, msg, err := open(r.Context(), OpenTicketRequest{
+			AccountID:  p.accountID,
+			OperatorID: p.operatorID,
+			Subject:    req.Subject,
+			Category:   req.Category,
+			Priority:   req.Priority,
+			Body:       req.Body,
+		})
+		switch {
+		case errors.Is(err, ErrTicketInputInvalid):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrSupportDisabled):
+			writeJSONError(w, http.StatusConflict, "support is not enabled for this account")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			// Store returns this when the operator no longer belongs
+			// to the account (race with a delete). It's not truly an
+			// owner-only rule here, just a membership check.
+			writeJSONError(w, http.StatusForbidden, "operator is not a member of this account")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not open support ticket")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":  "witself.v0",
+			"ticket":          ticket,
+			"initial_message": msg,
+		})
+	})
+}
+
+func listSupportTicketsHandler(auth AuthFunc, list func(ctx context.Context, accountID, operatorID string) ([]SupportTicket, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		tickets, err := list(r.Context(), p.accountID, p.operatorID)
+		switch {
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "operator is not a member of this account")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not list support tickets")
+			return
+		}
+		if tickets == nil {
+			tickets = []SupportTicket{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"tickets":        tickets,
+		})
+	})
+}
+
+func getSupportTicketHandler(auth AuthFunc, get func(ctx context.Context, accountID, operatorID, ticketID string) (SupportTicket, []SupportTicketMessage, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		ticketID := r.PathValue("ticket")
+		if ticketID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing ticket id")
+			return
+		}
+		ticket, messages, err := get(r.Context(), p.accountID, p.operatorID, ticketID)
+		switch {
+		case errors.Is(err, ErrTicketNotFound):
+			writeJSONError(w, http.StatusNotFound, "ticket not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "operator is not a member of this account")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read support ticket")
+			return
+		}
+		if messages == nil {
+			messages = []SupportTicketMessage{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"ticket":         ticket,
+			"messages":       messages,
+		})
+	})
+}
+
+func replySupportTicketHandler(auth AuthFunc, reply func(ctx context.Context, accountID, operatorID, ticketID, body string) (SupportTicketMessage, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		ticketID := r.PathValue("ticket")
+		if ticketID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing ticket id")
+			return
+		}
+		var req struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		msg, err := reply(r.Context(), p.accountID, p.operatorID, ticketID, req.Body)
+		switch {
+		case errors.Is(err, ErrTicketInputInvalid):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrTicketNotFound):
+			writeJSONError(w, http.StatusNotFound, "ticket not found")
+			return
+		case errors.Is(err, ErrTicketStateInvalid):
+			writeJSONError(w, http.StatusConflict, err.Error())
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "operator is not a member of this account")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not reply to support ticket")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"message":        msg,
+		})
+	})
+}
+
+func changeSupportTicketStateHandler(auth AuthFunc, changeState func(ctx context.Context, in ChangeTicketStateRequest) (SupportTicket, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		ticketID := r.PathValue("ticket")
+		if ticketID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing ticket id")
+			return
+		}
+		var req struct {
+			State string `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.State) == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing state")
+			return
+		}
+		ticket, err := changeState(r.Context(), ChangeTicketStateRequest{
+			AccountID:  p.accountID,
+			OperatorID: p.operatorID,
+			TicketID:   ticketID,
+			NewState:   strings.TrimSpace(req.State),
+		})
+		switch {
+		case errors.Is(err, ErrTicketStateInvalid):
+			writeJSONError(w, http.StatusConflict, err.Error())
+			return
+		case errors.Is(err, ErrTicketNotFound):
+			writeJSONError(w, http.StatusNotFound, "ticket not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "operator is not a member of this account")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not change ticket state")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"ticket":         ticket,
+		})
+	})
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {

@@ -142,6 +142,54 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: false, want: "does not match manifest",
 		},
 		{
+			name:  "support_tickets row scoped to the manifest account is accepted and recorded",
+			table: "support_tickets",
+			row: map[string]any{
+				"id": "tkt_1", "account_id": acc,
+				"opened_by_kind": "owner", "opened_by_id": "op_1",
+				"subject": "help", "state": "awaiting_admin",
+			},
+			wantOK: true,
+		},
+		{
+			name:  "support_tickets row for a different account is refused",
+			table: "support_tickets",
+			row: map[string]any{
+				"id": "tkt_1", "account_id": "acc_victim",
+				"opened_by_kind": "owner", "opened_by_id": "op_1",
+				"subject": "help", "state": "open",
+			},
+			wantOK: false, want: "does not match manifest",
+		},
+		{
+			name:  "support_ticket_messages row for a ticket that arrived earlier is accepted",
+			table: "support_ticket_messages",
+			row: map[string]any{
+				"id": "tkm_1", "account_id": acc, "ticket_id": "tkt_ok",
+				"author_kind": "owner", "author_id": "op_1", "body": "hi",
+			},
+			setup:  func(ic *importCtx) { ic.tickets["tkt_ok"] = true },
+			wantOK: true,
+		},
+		{
+			name:  "support_ticket_messages row grafting onto a foreign ticket is refused",
+			table: "support_ticket_messages",
+			row: map[string]any{
+				"id": "tkm_1", "account_id": acc, "ticket_id": "tkt_victim",
+				"author_kind": "fleet_admin", "author_id": "sarah", "body": "gotcha",
+			},
+			wantOK: false, want: "not present in this archive",
+		},
+		{
+			name:  "support_ticket_messages row missing ticket_id is refused",
+			table: "support_ticket_messages",
+			row: map[string]any{
+				"id": "tkm_1", "account_id": acc,
+				"author_kind": "owner", "author_id": "op_1", "body": "hi",
+			},
+			wantOK: false, want: "missing ticket_id",
+		},
+		{
 			name:   "unknown table is refused",
 			table:  "audit_log",
 			row:    map[string]any{"id": "audit_1", "account_id": acc},
@@ -199,12 +247,26 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	feed("tokens", map[string]any{
 		"id": "tok_agent", "account_id": acc, "agent_id": "agt_1", "kind": "agent",
 	})
+	// Support tickets stream after account_events; messages FK-depend on
+	// tickets recorded here.
+	feed("support_tickets", map[string]any{
+		"id": "tkt_1", "account_id": acc,
+		"opened_by_kind": "owner", "opened_by_id": "op_root",
+		"subject": "help", "state": "awaiting_admin",
+	})
+	feed("support_ticket_messages", map[string]any{
+		"id": "tkm_1", "ticket_id": "tkt_1", "account_id": acc,
+		"author_kind": "owner", "author_id": "op_root", "body": "please",
+	})
 
 	if ic.accounts != 1 {
 		t.Errorf("accounts count = %d, want 1", ic.accounts)
 	}
 	if !ic.operators["op_root"] || !ic.realms["rlm_default"] || !ic.agents["agt_1"] {
 		t.Error("ids not recorded across a legal stream")
+	}
+	if !ic.tickets["tkt_1"] {
+		t.Error("support ticket id not recorded across a legal stream")
 	}
 }
 

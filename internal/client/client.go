@@ -447,3 +447,135 @@ func RevokeToken(ctx context.Context, endpoint, token, tokenID string) error {
 func operatorsURL(endpoint string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/operators"
 }
+
+// SupportTicket is the API view of a support_tickets row returned by the
+// tenant-side endpoints. Field shape matches the server's
+// server.SupportTicket exactly so callers can render it directly.
+type SupportTicket struct {
+	ID              string          `json:"id"`
+	AccountID       string          `json:"account_id"`
+	OpenedAt        time.Time       `json:"opened_at"`
+	OpenedByKind    string          `json:"opened_by_kind"`
+	OpenedByID      string          `json:"opened_by_id"`
+	Subject         string          `json:"subject"`
+	Category        string          `json:"category"`
+	State           string          `json:"state"`
+	Priority        string          `json:"priority"`
+	FirstResponseAt *time.Time      `json:"first_response_at,omitempty"`
+	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
+	ClosedAt        *time.Time      `json:"closed_at,omitempty"`
+	LastActivityAt  time.Time       `json:"last_activity_at"`
+	LastMessageID   string          `json:"last_message_id,omitempty"`
+	Correlation     json.RawMessage `json:"correlation"`
+	Metadata        json.RawMessage `json:"metadata"`
+}
+
+// SupportTicketMessage is the API view of a support_ticket_messages row.
+type SupportTicketMessage struct {
+	ID          string          `json:"id"`
+	TicketID    string          `json:"ticket_id"`
+	AccountID   string          `json:"account_id"`
+	PostedAt    time.Time       `json:"posted_at"`
+	AuthorKind  string          `json:"author_kind"`
+	AuthorID    string          `json:"author_id,omitempty"`
+	Body        string          `json:"body"`
+	Attachments json.RawMessage `json:"attachments"`
+	Metadata    json.RawMessage `json:"metadata"`
+}
+
+// OpenTicketInput is the request payload for OpenSupportTicket. Category
+// and Priority default server-side to "other" and "normal" when empty.
+type OpenTicketInput struct {
+	Subject  string `json:"subject"`
+	Category string `json:"category,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	Body     string `json:"body"`
+}
+
+// OpenTicketResult is the response from POST /v1/support/tickets: the
+// new ticket AND the opener's initial message (server has already
+// stored the description as the first message row).
+type OpenTicketResult struct {
+	Ticket         SupportTicket        `json:"ticket"`
+	InitialMessage SupportTicketMessage `json:"initial_message"`
+}
+
+// OpenSupportTicket creates a new ticket on the caller's account.
+func OpenSupportTicket(ctx context.Context, endpoint, token string, in OpenTicketInput) (*OpenTicketResult, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/support/tickets"
+	var out OpenTicketResult
+	if err := doJSON(ctx, http.MethodPost, url, token, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListSupportTickets returns every ticket on the caller's account,
+// newest activity first.
+func ListSupportTickets(ctx context.Context, endpoint, token string) ([]SupportTicket, error) {
+	url := strings.TrimRight(endpoint, "/") + "/v1/support/tickets"
+	var out struct {
+		Tickets []SupportTicket `json:"tickets"`
+	}
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tickets, nil
+}
+
+// GetSupportTicketResult carries a ticket plus its full message thread.
+type GetSupportTicketResult struct {
+	Ticket   SupportTicket          `json:"ticket"`
+	Messages []SupportTicketMessage `json:"messages"`
+}
+
+// GetSupportTicket reads one ticket + all its messages in
+// chronological order.
+func GetSupportTicket(ctx context.Context, endpoint, token, ticketID string) (*GetSupportTicketResult, error) {
+	url := strings.TrimRight(endpoint, "/") + "/v1/support/tickets/" + ticketID
+	var out GetSupportTicketResult
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReplyToSupportTicket appends a message from the authenticated
+// operator; the ticket state transitions back to awaiting_admin
+// server-side.
+func ReplyToSupportTicket(ctx context.Context, endpoint, token, ticketID, body string) (*SupportTicketMessage, error) {
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return nil, err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/support/tickets/" + ticketID + "/messages"
+	var out struct {
+		Message SupportTicketMessage `json:"message"`
+	}
+	if err := doJSON(ctx, http.MethodPost, url, token, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out.Message, nil
+}
+
+// ChangeSupportTicketState transitions the ticket to newState. The
+// legal set is enforced server-side; an unknown/unreachable state
+// returns 409.
+func ChangeSupportTicketState(ctx context.Context, endpoint, token, ticketID, newState string) (*SupportTicket, error) {
+	body, err := json.Marshal(map[string]string{"state": newState})
+	if err != nil {
+		return nil, err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/support/tickets/" + ticketID + "/state"
+	var out struct {
+		Ticket SupportTicket `json:"ticket"`
+	}
+	if err := doJSON(ctx, http.MethodPatch, url, token, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Ticket, nil
+}

@@ -892,6 +892,24 @@ func tabSafe(s string) string {
 	return s
 }
 
+// safeText strips C0 control characters and DEL from operator- or
+// admin-supplied strings before we print them, so a malicious ticket
+// body or subject can't smuggle ANSI/OSC escapes into a reader's
+// terminal (screen clear, window-title spoof, cursor jumps). Keeps \t
+// and \n so plain multi-line text and tab-indented content survive; use
+// tabSafe on top for single-line contexts.
+func safeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' {
+			return r
+		}
+		if r < 0x20 || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // defaultControlPlane is the Witself Cloud front door: the one address a Cloud
 // user ever needs. Self-hosted deployments never contact it.
 const defaultControlPlane = "https://self.witwave.ai"
@@ -899,7 +917,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `ws account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|list|status|resend-verification|change-email|change-display-name|recover|close|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: ws account create|adopt|list|status|resend-verification|change-email|change-display-name|recover|close|events|support|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -927,11 +945,293 @@ func accountCmd(args []string) int {
 		return accountClose(args[1:])
 	case "events":
 		return accountEvents(args[1:])
+	case "support":
+		return accountSupportCmd(args[1:])
 	case "forget":
 		return accountForget(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
 		return 2
+	}
+}
+
+// accountSupportCmd is the ws-side support-ticket entry point. Slice 1a
+// covers the tenant half — an operator can open, list, show, reply,
+// and close their own tickets. The admin side (list-across-accounts,
+// answer-as-admin) is slice 1b.
+func accountSupportCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ws account support open|list|show|reply|close ...")
+		return 2
+	}
+	switch args[0] {
+	case "open":
+		return accountSupportOpen(args[1:])
+	case "list":
+		return accountSupportList(args[1:])
+	case "show":
+		return accountSupportShow(args[1:])
+	case "reply":
+		return accountSupportReply(args[1:])
+	case "close":
+		return accountSupportClose(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ws account support: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func accountSupportOpen(args []string) int {
+	fs := flag.NewFlagSet("account support open", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	subject := fs.String("subject", "", "one-line ticket title (required)")
+	category := fs.String("category", "", "technical|billing|security|other (default: other)")
+	priority := fs.String("priority", "", "low|normal|high|urgent (default: normal)")
+	// Body sources: --body inline, --body-file @path, or stdin when --stdin.
+	body := fs.String("body", "", "ticket description (required unless --body-file or --stdin)")
+	bodyFile := fs.String("body-file", "", "read description from FILE ('-' means stdin)")
+	stdin := fs.Bool("stdin", false, "read description from stdin")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*subject) == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account support open --subject TEXT (--body TEXT|--body-file FILE|--stdin)")
+		return 2
+	}
+	text, err := readBodyFromFlags(*body, *bodyFile, *stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Fprintln(os.Stderr, "ws: description body is required (use --body, --body-file, or --stdin)")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	res, err := client.OpenSupportTicket(ctx, ep, tok, client.OpenTicketInput{
+		Subject:  *subject,
+		Category: *category,
+		Priority: *priority,
+		Body:     text,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(res)
+	}
+	fmt.Printf("opened ticket %s (%s / %s)\n  subject: %s\n",
+		res.Ticket.ID, res.Ticket.Category, res.Ticket.State, tabSafe(safeText(res.Ticket.Subject)))
+	return 0
+}
+
+func accountSupportList(args []string) int {
+	fs := flag.NewFlagSet("account support list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	tickets, err := client.ListSupportTickets(ctx, ep, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"tickets": tickets})
+	}
+	if len(tickets) == 0 {
+		fmt.Fprintln(os.Stderr, "no support tickets on this account")
+		return 0
+	}
+	w, flush := tableWriter("last_activity\tstate\tpriority\tid\tsubject")
+	for _, t := range tickets {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			t.LastActivityAt.UTC().Format(time.RFC3339),
+			t.State, t.Priority, t.ID, tabSafe(safeText(t.Subject)))
+	}
+	flush()
+	return 0
+}
+
+func accountSupportShow(args []string) int {
+	fs := flag.NewFlagSet("account support show", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	ticketID := fs.String("ticket", "", "ticket id (required)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*ticketID) == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account support show --ticket TKT_ID")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	res, err := client.GetSupportTicket(ctx, ep, tok, *ticketID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(res)
+	}
+	fmt.Printf("ticket %s (%s / %s / %s)\n  subject: %s\n  opened:  %s by %s:%s\n",
+		res.Ticket.ID, res.Ticket.Category, res.Ticket.State, res.Ticket.Priority,
+		tabSafe(safeText(res.Ticket.Subject)),
+		res.Ticket.OpenedAt.UTC().Format(time.RFC3339),
+		res.Ticket.OpenedByKind, safeText(res.Ticket.OpenedByID))
+	fmt.Println()
+	for _, m := range res.Messages {
+		who := m.AuthorKind
+		if m.AuthorID != "" {
+			who = m.AuthorKind + ":" + safeText(m.AuthorID)
+		}
+		fmt.Printf("--- %s  %s ---\n%s\n\n",
+			m.PostedAt.UTC().Format(time.RFC3339), who, safeText(m.Body))
+	}
+	return 0
+}
+
+func accountSupportReply(args []string) int {
+	fs := flag.NewFlagSet("account support reply", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	ticketID := fs.String("ticket", "", "ticket id (required)")
+	body := fs.String("body", "", "reply body (required unless --body-file or --stdin)")
+	bodyFile := fs.String("body-file", "", "read reply from FILE ('-' means stdin)")
+	stdin := fs.Bool("stdin", false, "read reply from stdin")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*ticketID) == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account support reply --ticket TKT_ID (--body TEXT|--body-file FILE|--stdin)")
+		return 2
+	}
+	text, err := readBodyFromFlags(*body, *bodyFile, *stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Fprintln(os.Stderr, "ws: reply body is required (use --body, --body-file, or --stdin)")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	msg, err := client.ReplyToSupportTicket(ctx, ep, tok, *ticketID, text)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"message": msg})
+	}
+	fmt.Printf("posted reply on %s (message %s)\n", *ticketID, msg.ID)
+	return 0
+}
+
+func accountSupportClose(args []string) int {
+	fs := flag.NewFlagSet("account support close", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	ticketID := fs.String("ticket", "", "ticket id (required)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*ticketID) == "" {
+		fmt.Fprintln(os.Stderr, "usage: ws account support close --ticket TKT_ID")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	// Only 'resolved' → 'closed' is a legal customer-facing final step.
+	// The store rejects other transitions with 409, so we surface the
+	// server's message verbatim.
+	ticket, err := client.ChangeSupportTicketState(ctx, ep, tok, *ticketID, "closed")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"ticket": ticket})
+	}
+	fmt.Printf("closed ticket %s\n", ticket.ID)
+	return 0
+}
+
+// readBodyFromFlags resolves the description text from the three
+// mutually-exclusive body sources shared by open + reply. Only one
+// source may be set.
+func readBodyFromFlags(inline, file string, stdin bool) (string, error) {
+	sources := 0
+	if strings.TrimSpace(inline) != "" {
+		sources++
+	}
+	if strings.TrimSpace(file) != "" {
+		sources++
+	}
+	if stdin {
+		sources++
+	}
+	if sources > 1 {
+		return "", fmt.Errorf("only one of --body, --body-file, or --stdin may be set")
+	}
+	switch {
+	case stdin, file == "-":
+		buf, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		return string(buf), nil
+	case file != "":
+		buf, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read --body-file: %w", err)
+		}
+		return string(buf), nil
+	default:
+		return inline, nil
 	}
 }
 

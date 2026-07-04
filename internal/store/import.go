@@ -42,6 +42,7 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "is_default": true, "display_name": true, "email": true,
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
+		"support_policy": true,
 	},
 	"operators": {
 		"id": true, "account_id": true, "role": true, "is_root": true,
@@ -65,6 +66,19 @@ var importColumns = map[string]map[string]bool{
 		"actor_kind": true, "actor_id": true,
 		"verb": true, "metadata": true, "retain_until": true,
 	},
+	"support_tickets": {
+		"id": true, "account_id": true, "opened_at": true,
+		"opened_by_kind": true, "opened_by_id": true,
+		"subject": true, "category": true, "state": true,
+		"priority": true, "first_response_at": true, "resolved_at": true,
+		"closed_at": true, "last_activity_at": true, "last_message_id": true,
+		"correlation": true, "metadata": true, "retain_until": true,
+	},
+	"support_ticket_messages": {
+		"id": true, "ticket_id": true, "account_id": true, "posted_at": true,
+		"author_kind": true, "author_id": true,
+		"body": true, "attachments": true, "metadata": true,
+	},
 }
 
 // importCtx accumulates per-import state: how many accounts rows we have seen
@@ -78,6 +92,7 @@ type importCtx struct {
 	operators map[string]bool
 	realms    map[string]bool
 	agents    map[string]bool
+	tickets   map[string]bool
 }
 
 func newImportCtx(accountID string) *importCtx {
@@ -86,6 +101,7 @@ func newImportCtx(accountID string) *importCtx {
 		operators: map[string]bool{},
 		realms:    map[string]bool{},
 		agents:    map[string]bool{},
+		tickets:   map[string]bool{},
 	}
 }
 
@@ -102,7 +118,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// for realms this archive itself just wrote, so the realm_id check
 	// below is the FK-safety boundary for that table.
 	switch table {
-	case "operators", "realms", "tokens", "account_events":
+	case "operators", "realms", "tokens", "account_events",
+		"support_tickets", "support_ticket_messages":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
 			return badf("%s row missing account_id", table)
@@ -159,6 +176,24 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		// contract was enforced when the event was created and doesn't
 		// need to be re-enforced at import time (an old cell may have
 		// written events under a schema this cell no longer knows).
+	case "support_tickets":
+		// Record the ticket id so incoming support_ticket_messages
+		// rows can be FK-validated against this-archive tickets only.
+		if id, ok := stringField(obj, "id"); ok {
+			ic.tickets[id] = true
+		}
+	case "support_ticket_messages":
+		// FK-scope check: the ticket_id must belong to a ticket this
+		// same archive already inserted. Cross-tenant grafting is
+		// blocked the same way agents.realm_id is checked against
+		// ic.realms.
+		ticketID, err := requireStringField(obj, "ticket_id")
+		if err != nil {
+			return badf("support_ticket_messages row missing ticket_id")
+		}
+		if !ic.tickets[ticketID] {
+			return badf("support_ticket_messages row references ticket %q not present in this archive", ticketID)
+		}
 	default:
 		return badf("table %q is not importable", table)
 	}

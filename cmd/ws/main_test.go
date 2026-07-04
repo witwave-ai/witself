@@ -359,3 +359,27 @@ func TestAccountAdoptRefusesTakenName(t *testing.T) {
 		t.Fatalf("existing binding disturbed: tok=%q err=%v", tok, err)
 	}
 }
+
+// TestSafeTextStripsTerminalEscapes pins the sanitizer the support-
+// ticket renderers wrap every operator- or admin-supplied string in.
+// Without it, a malicious ticket body containing an ANSI/OSC sequence
+// would hijack the reader operators screen the moment they run
+// `ws account support show` — clearing the screen, spoofing the
+// window title, or moving the cursor so subsequent lines land
+// wherever the attacker chose.
+func TestSafeTextStripsTerminalEscapes(t *testing.T) {
+	tests := map[string]string{
+		"\x1b[2J\x1b[Hyou have been pwned":                "[2J[Hyou have been pwned",
+		"\x1b]0;URGENT: account suspended\x07":            "]0;URGENT: account suspended",
+		"before\x08\x08\x08\x08after":                      "beforeafter",
+		"\x7fDEL":                                         "DEL",
+		"plain ASCII stays":                              "plain ASCII stays",
+		"tabs\tand\nnewlines\tare kept":                    "tabs\tand\nnewlines\tare kept",
+		"unicode π survives":                            "unicode π survives",
+	}
+	for in, want := range tests {
+		if got := safeText(in); got != want {
+			t.Errorf("safeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

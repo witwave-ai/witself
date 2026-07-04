@@ -69,7 +69,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'email', email, 'status', status, 'created_at', created_at,
 			  'closed_at', closed_at, 'closed_reason', closed_reason,
 			  'suspended_at', suspended_at, 'suspended_for', suspended_for,
-			  'suspended_reason', suspended_reason)
+			  'suspended_reason', suspended_reason,
+			  'support_policy', support_policy)
 			FROM accounts WHERE id = $1`, arg: accountID},
 		&querySource{s: s, table: "operators", q: `
 			SELECT jsonb_build_object(
@@ -109,6 +110,31 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'verb', verb, 'metadata', metadata, 'retain_until', retain_until)
 			FROM account_events WHERE account_id = $1
 			ORDER BY occurred_at, id`, arg: accountID},
+		// support_tickets + messages stream after account_events because
+		// messages FK-depend on tickets AND on accounts; the importCtx
+		// FK-validation reads ic.tickets which the tickets query
+		// populates. Both queries emit every column of the base
+		// migration so the round-trip preserves the shape exactly.
+		&querySource{s: s, table: "support_tickets", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'opened_at', opened_at,
+			  'opened_by_kind', opened_by_kind, 'opened_by_id', opened_by_id,
+			  'subject', subject, 'category', category, 'state', state,
+			  'priority', priority, 'first_response_at', first_response_at,
+			  'resolved_at', resolved_at, 'closed_at', closed_at,
+			  'last_activity_at', last_activity_at, 'last_message_id', last_message_id,
+			  'correlation', correlation, 'metadata', metadata,
+			  'retain_until', retain_until)
+			FROM support_tickets WHERE account_id = $1
+			ORDER BY opened_at, id`, arg: accountID},
+		&querySource{s: s, table: "support_ticket_messages", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'ticket_id', ticket_id, 'account_id', account_id,
+			  'posted_at', posted_at,
+			  'author_kind', author_kind, 'author_id', author_id,
+			  'body', body, 'attachments', attachments, 'metadata', metadata)
+			FROM support_ticket_messages WHERE account_id = $1
+			ORDER BY posted_at, id`, arg: accountID},
 	}
 
 	m := export.Manifest{

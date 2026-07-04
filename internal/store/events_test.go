@@ -51,6 +51,9 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAccountSuspendedBySystem, VerbAccountResumedBySystem,
 		VerbAccountEvacuated, VerbAccountRestored,
 		VerbAccountReaped, VerbAccountClosed,
+
+		VerbSupportTicketOpened, VerbSupportTicketReplied,
+		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
 	}
 	for _, v := range verbs {
 		if _, ok := verbMetadataSchema[v]; !ok {
