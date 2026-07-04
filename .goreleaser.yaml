@@ -41,6 +41,23 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
+  - id: witwave-admin
+    main: ./cmd/witwave-admin
+    binary: witwave-admin
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
+
   # witself-infra lives in its own nested Go module (infra/pulumi) so its large
   # Pulumi/provider dependency tree never touches the lean ws / witself-server
   # binaries. `dir` builds it from that module; `main` is relative to `dir`.
@@ -72,6 +89,12 @@ archives:
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: witwave-admin
+    ids:
+      - witwave-admin
+    formats:
+      - tar.gz
+    name_template: "witwave-admin_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: witself-infra
     ids:
       - witself-infra
@@ -244,3 +267,19 @@ brews:
       bin.install "witself-infra"
     test: |
       system "#{bin}/witself-infra", "help"
+
+  - name: witwave-admin
+    ids:
+      - witwave-admin
+    directory: Formula
+    repository:
+      owner: witwave-ai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/witwave-ai/witself"
+    description: "Witwave fleet-admin CLI (talks only to the Witself control plane)"
+    license: "FSL-1.1-ALv2"
+    install: |
+      bin.install "witwave-admin"
+    test: |
+      system "#{bin}/witwave-admin", "version"
