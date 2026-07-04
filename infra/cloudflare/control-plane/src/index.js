@@ -100,6 +100,34 @@ const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const REGION_NAME = /^[a-z0-9-]{2,32}$/;
 const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 
+// Admin identity: the audit trail only ever records a first-name handle
+// (author_id on support_ticket_messages when author_kind='fleet_admin',
+// admin_handle on account_events metadata). The credential itself lives
+// in DIRECTORY KV under three prefixes:
+//   admin:{admin_id}                  — canonical record
+//   admintok:{sha256_hex(raw_token)}  — O(1) auth-lookup index
+//   adminh:{handle}                   — uniqueness index (kept even after
+//                                       revoke so the handle stays reserved
+//                                       through the audit window)
+// Raw admin token format: "wsa_" + base32 body. Only the sha256 is
+// persisted; the raw token is shown exactly once at mint time.
+const ADMIN_ID = /^adm_[a-z0-9]{20}$/;
+const ADMIN_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20})$/;
+const ADMIN_REVOKE_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20}):revoke$/;
+const ADMIN_HANDLE = /^[a-z][a-z0-9_-]{1,31}$/;
+// Handles that would collide with an existing actor_kind or role name
+// (owner / operator / control_plane / system). Reserved so a rogue mint
+// can't forge audit rows that read like a system-emitted event.
+const RESERVED_HANDLES = new Set([
+  "system",
+  "control_plane",
+  "root",
+  "admin",
+  "fleet",
+  "owner",
+  "operator",
+]);
+
 function timingSafeEqual(a, b) {
   const enc = new TextEncoder();
   const ab = enc.encode(a);
@@ -113,6 +141,87 @@ function fleetAuthorized(request, env) {
   const h = request.headers.get("Authorization") || "";
   if (!h.startsWith("Bearer ")) return false;
   return timingSafeEqual(h.slice(7).trim(), env.FLEET_TOKEN);
+}
+
+// sha256Hex returns the lowercase hex digest of s. Used to index admin
+// tokens: only the hash is persisted, so a KV leak can't be traded for
+// a working admin token (mirrors the recovery-code and email-verification
+// hashing pattern already in this file).
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// adminAuthorized resolves an "Authorization: Bearer wsa_..." header to
+// { admin_id, handle } or null (unauth / revoked / unknown). Used by the
+// admin-side fan-out routes in 1b.iii; landed here so it lives next to
+// the KV shape it queries.
+async function adminAuthorized(request, env) {
+  const h = request.headers.get("Authorization") || "";
+  if (!h.startsWith("Bearer wsa_")) return null;
+  const raw = h.slice(7).trim();
+  const hash = await sha256Hex(raw);
+  const idx = await env.DIRECTORY.get(`admintok:${hash}`, { type: "json" });
+  if (!idx?.admin_id) return null;
+  const rec = await env.DIRECTORY.get(`admin:${idx.admin_id}`, { type: "json" });
+  if (!rec || rec.disabled_at) return null;
+  return { admin_id: rec.admin_id, handle: rec.handle };
+}
+
+// genAdminID returns an "adm_" + 20 lowercase-base32 identifier. Uses
+// crypto.getRandomValues (12 bytes → 20 base32 chars after padding-strip
+// & lowercase). Collision probability at fleet scale is negligible.
+function genAdminID() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  // RFC 4648 base32 without padding, lowercased. 12 bytes → 20 chars,
+  // matching ADMIN_ID's fixed length so the router regex is exact.
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return `adm_${out.slice(0, 20)}`;
+}
+
+// genAdminToken returns a fresh "wsa_" + 40 base32 chars secret. 25
+// random bytes → 40 chars keeps the token length fixed for log-friendly
+// pattern matching.
+function genAdminToken() {
+  const bytes = new Uint8Array(25);
+  crypto.getRandomValues(bytes);
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return `wsa_${out.slice(0, 40)}`;
+}
+
+// publicAdmin strips the token_hash from a record before it leaves the
+// control plane. Everything else in the record is safe for a fleet-token
+// holder to read.
+function publicAdmin(rec) {
+  const { token_hash: _omitted, ...rest } = rec;
+  return { ...rest, disabled: Boolean(rec.disabled_at) };
 }
 
 // listCells returns raw registry entries INCLUDING the per-cell provision
@@ -266,6 +375,160 @@ async function handleInvites(request, env, url) {
       return err("unknown invite", 404);
     }
     await env.DIRECTORY.delete(key);
+    return new Response(null, { status: 204 });
+  }
+
+  return err("method not allowed", 405);
+}
+
+// handleAdmins is the fleet-token-gated admin credential registry. It
+// serves four verbs — mint, list, revoke, delete — that maintain the
+// admin: / admintok: / adminh: KV prefixes. The credentials it mints
+// are what the witwave-admin CLI carries when it hits the CP's admin-
+// side fan-out routes; adminAuthorized() is the reader half.
+//
+// Handle uniqueness (adminh:{handle}) is enforced by get-then-put with
+// no CAS — acceptable because mint is fleet-token-authorized (low rate,
+// single-writer via the CLI). A concurrent double-mint race would leave
+// both admin records in place but with only one owning the adminh index;
+// the loser's token still works until manually revoked. Acceptable at
+// slice-1b fleet scale.
+async function handleAdmins(request, env, url) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+
+  if (url.pathname === "/v1/admins" && request.method === "GET") {
+    const out = [];
+    let cursor;
+    do {
+      const page = await env.DIRECTORY.list({ prefix: "admin:", cursor });
+      for (const k of page.keys) {
+        // Only match admin:{id} — not admintok: or adminh: (list is
+        // prefix-scoped, so those aren't matched, but this comment
+        // documents the intent for a future reader).
+        const rec = await env.DIRECTORY.get(k.name, { type: "json" });
+        if (rec) out.push(publicAdmin(rec));
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    return json({ schema_version: "witself.v0", admins: out });
+  }
+
+  if (url.pathname === "/v1/admins" && request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return err("invalid JSON body", 400);
+    }
+    const handle = String(body.handle ?? "").toLowerCase().trim();
+    if (!ADMIN_HANDLE.test(handle)) {
+      return err(
+        "invalid handle (2-32 lowercase chars; must start with a letter; letters/digits/underscore/hyphen only)",
+        400
+      );
+    }
+    if (RESERVED_HANDLES.has(handle)) {
+      return err(`handle "${handle}" is reserved`, 400);
+    }
+    const note = body.note == null ? undefined : String(body.note).trim();
+    if (note !== undefined && note.length > 200) {
+      return err("note too long (max 200 characters)", 400);
+    }
+    const existingIdx = await env.DIRECTORY.get(`adminh:${handle}`, {
+      type: "json",
+    });
+    if (existingIdx?.admin_id) {
+      // The uniqueness index survives revoke on purpose — see file
+      // header. A caller who wants the handle back must delete the
+      // revoked record first (DELETE /v1/admins/{id}), which cleans
+      // adminh too.
+      return err("handle already in use", 409);
+    }
+    const adminID = genAdminID();
+    const rawToken = genAdminToken();
+    const tokenHash = await sha256Hex(rawToken);
+    const now = new Date().toISOString();
+    const rec = {
+      admin_id: adminID,
+      handle,
+      token_hash: tokenHash,
+      ...(note ? { note } : {}),
+      created_at: now,
+      created_by: "fleet_token",
+    };
+    // Best-effort three-write commit: canonical record first, then the
+    // two indexes. If the last two fail, log and continue — a stale
+    // admin:{id} without an adminh index just means the handle can be
+    // re-claimed after DELETE. A stale record without admintok is
+    // effectively already revoked (adminAuthorized returns null).
+    await env.DIRECTORY.put(`admin:${adminID}`, JSON.stringify(rec));
+    try {
+      await env.DIRECTORY.put(
+        `admintok:${tokenHash}`,
+        JSON.stringify({ admin_id: adminID })
+      );
+      await env.DIRECTORY.put(
+        `adminh:${handle}`,
+        JSON.stringify({ admin_id: adminID })
+      );
+    } catch (e) {
+      console.log(`admin-mint index-write failed for ${adminID}: ${String(e)}`);
+    }
+    return json(
+      {
+        schema_version: "witself.v0",
+        admin_token: rawToken,
+        admin: publicAdmin(rec),
+      },
+      201
+    );
+  }
+
+  const revokeMatch = url.pathname.match(ADMIN_REVOKE_PATH);
+  if (revokeMatch && request.method === "POST") {
+    const adminID = revokeMatch[1];
+    const rec = await env.DIRECTORY.get(`admin:${adminID}`, { type: "json" });
+    if (!rec) return err("unknown admin", 404);
+    if (rec.disabled_at) return err("already revoked", 409);
+    const now = new Date().toISOString();
+    const updated = { ...rec, disabled_at: now };
+    await env.DIRECTORY.put(`admin:${adminID}`, JSON.stringify(updated));
+    // The important step: killing the auth-lookup index. adminh:{handle}
+    // is deliberately left in place — the handle stays reserved through
+    // the audit window so historical events retain a distinguishable
+    // author.
+    if (rec.token_hash) {
+      await env.DIRECTORY.delete(`admintok:${rec.token_hash}`);
+    }
+    return json({ schema_version: "witself.v0", admin: publicAdmin(updated) });
+  }
+
+  const idMatch = url.pathname.match(ADMIN_PATH);
+  if (idMatch && request.method === "GET") {
+    const rec = await env.DIRECTORY.get(`admin:${idMatch[1]}`, {
+      type: "json",
+    });
+    if (!rec) return err("unknown admin", 404);
+    return json({ schema_version: "witself.v0", admin: publicAdmin(rec) });
+  }
+  if (idMatch && request.method === "DELETE") {
+    const adminID = idMatch[1];
+    const rec = await env.DIRECTORY.get(`admin:${adminID}`, { type: "json" });
+    if (!rec) return err("unknown admin", 404);
+    if (!rec.disabled_at) {
+      // Two-step deletion protects against fat-fingered revoke of an
+      // active admin. Matches the "revoke before delete" rhythm.
+      return err("revoke before delete", 409);
+    }
+    await env.DIRECTORY.delete(`admin:${adminID}`);
+    if (rec.token_hash) {
+      await env.DIRECTORY.delete(`admintok:${rec.token_hash}`);
+    }
+    if (rec.handle) {
+      await env.DIRECTORY.delete(`adminh:${rec.handle}`);
+    }
     return new Response(null, { status: 204 });
   }
 
@@ -2548,6 +2811,17 @@ export default {
     // Invite codes (fleet-token authorized).
     if (url.pathname === "/v1/invites" || INVITE_PATH.test(url.pathname)) {
       return handleInvites(request, env, url);
+    }
+
+    // Admin credential registry (fleet-token authorized). The credentials
+    // this mints are what the witwave-admin CLI carries against the
+    // admin-side fan-out routes (slice 1b.iii).
+    if (
+      url.pathname === "/v1/admins" ||
+      ADMIN_PATH.test(url.pathname) ||
+      ADMIN_REVOKE_PATH.test(url.pathname)
+    ) {
+      return handleAdmins(request, env, url);
     }
 
     // Fleet-wide placement strategy (fleet-token authorized).
