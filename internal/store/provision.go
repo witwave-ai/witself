@@ -73,6 +73,19 @@ func (s *Store) ProvisionAccount(ctx context.Context, email, displayName string,
 		tokID, acctID, oprID, hashToken(bootTok), time.Now().UTC().Add(bootstrapTTL)); err != nil {
 		return ProvisionedAccount{}, fmt.Errorf("bind bootstrap token: %w", err)
 	}
+	// The signup that just created this account is the first entry in
+	// its audit trail. Email is stored masked — plaintext never lands
+	// in the ledger (see MaskEmail + verb registry).
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: acctID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountProvisioned,
+		Metadata: map[string]any{
+			"email_masked": MaskEmail(email),
+			"operator_id":  oprID,
+		},
+	}); err != nil {
+		return ProvisionedAccount{}, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return ProvisionedAccount{}, err

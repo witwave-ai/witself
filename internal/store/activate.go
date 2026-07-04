@@ -48,6 +48,14 @@ func (s *Store) ActivateAccount(ctx context.Context, accountID string) (activate
 		`UPDATE accounts SET status = 'active' WHERE id = $1`, accountID); err != nil {
 		return false, fmt.Errorf("activate account: %w", err)
 	}
+	// The idempotent short-circuit above returned before touching state,
+	// so we only fire the event on a genuine pending→active transition.
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountActivated, Metadata: map[string]any{},
+	}); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}

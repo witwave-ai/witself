@@ -82,6 +82,18 @@ func (s *Store) RecoverAccount(ctx context.Context, accountID string, bootstrapT
 		tokID, accountID, rootID, hashToken(bootTok), time.Now().UTC().Add(bootstrapTTL)); err != nil {
 		return ProvisionedAccount{}, fmt.Errorf("mint recovery bootstrap: %w", err)
 	}
+	// The root-token rotation IS the audit event. Every prior root
+	// credential died and a fresh bootstrap was minted; the operator id
+	// stays the same (recovery is credential rotation, not identity
+	// replacement) but the audit trail records the new bootstrap's
+	// operator_id so the owner can trace the recovery back.
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb:     VerbRecoveryCompleted,
+		Metadata: map[string]any{"new_operator_id": rootID},
+	}); err != nil {
+		return ProvisionedAccount{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ProvisionedAccount{}, err
 	}

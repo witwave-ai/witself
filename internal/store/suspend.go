@@ -132,6 +132,19 @@ func (s *Store) SuspendAccountSystem(ctx context.Context, accountID, category, r
 		 WHERE id = $1`, accountID, category, reasonValue); err != nil {
 		return fmt.Errorf("system suspend account: %w", err)
 	}
+	// Idempotent short-circuits above (status='suspended'/'closed') already
+	// returned nil without touching the row, so we only reach here on a
+	// genuine active→suspended transition — no duplicate events.
+	eventMeta := map[string]any{"category": category}
+	if reason != "" {
+		eventMeta["reason"] = reason
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountSuspendedBySystem, Metadata: eventMeta,
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -180,6 +193,12 @@ func (s *Store) ResumeAccountSystem(ctx context.Context, accountID, category str
 		   suspended_for = NULL, suspended_reason = NULL
 		 WHERE id = $1`, accountID); err != nil {
 		return fmt.Errorf("system resume account: %w", err)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountResumedBySystem, Metadata: map[string]any{"category": category},
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
