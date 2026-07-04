@@ -928,26 +928,74 @@ async function handleRecover(request, env, accountId) {
   }
   const rlKey = `recover:${accountId}`;
   const rl = (await env.DIRECTORY.get(rlKey, { type: "json" })) ?? {};
+  // Per-(account, source-IP) counter so a single attacker on one IP can
+  // only exhaust their OWN quota against a given account — not the
+  // owner's. CF-Connecting-IP is set by Cloudflare after termination,
+  // clients can't forge it. Missing header falls back to "unknown"
+  // (one shared bucket for anything without an IP header).
+  //
+  // Race caveat: Workers KV get()/put() has no compare-and-swap, so a
+  // concurrent burst from one IP (curl -P N) can leak up to N-1 emails
+  // past the intended cap between the read and write below. This is
+  // fundamentally unsolvable at the KV layer; strict enforcement needs
+  // Cloudflare Rate Limiting at the edge OR a Durable Object counter.
+  // Filed as follow-up. The pre-op write below shrinks the race window
+  // from the ~15s cell round-trip to microseconds so single-shot
+  // attackers see the cap enforced.
+  const sourceIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const rlPerIpKey = `recover-ip:${accountId}:${sourceIp}`;
+  const rlPerIp = (await env.DIRECTORY.get(rlPerIpKey, { type: "json" })) ?? {};
 
   if (!body.code) {
     // ---- Request mode: maybe send a code; always answer the same. ----
     // The generic answer must be indistinguishable across (phantom id, real
     // id, cell down, email backend down) — in both response BODY and, as
     // best a Worker can, response LATENCY. That means the cell round trip
-    // happens for phantom ids too, and rate-limit state advances only when
-    // an email actually left. The 429 cases are internal signals to a
-    // legitimate owner and use plain 429s that phantom ids never trigger.
+    // happens for phantom ids too, and rate-limit state advances even for
+    // phantom probes so an attacker can't scan account-ids for free.
     const generic = () =>
       json({
         schema_version: "witself.v0",
         message: "if the account exists and is active, a recovery code was emailed",
       });
-    if ((rl.emails_sent ?? 0) >= 5) {
-      return err("too many recovery requests for this account — try again tomorrow", 429);
+    // Both 429 error responses use the SAME string so the difference
+    // between "your IP is capped" and "your account is capped" isn't
+    // an oracle an attacker can use to fingerprint which accounts are
+    // under attack from which networks.
+    const rateLimited = () =>
+      err("too many recovery requests — try again later", 429);
+    // Per-IP cap fires FIRST. Attacker on one IP burns 3 emails, then
+    // sees 429 while any DIFFERENT IP still has full quota.
+    if ((rlPerIp.emails_sent ?? 0) >= 3) {
+      return rateLimited();
+    }
+    // Per-account cap is the backstop against distributed attacks.
+    // Raised from 5 to 10 to accommodate legitimate owners retrying
+    // from home/office/mobile; distributed attacks still lock out but
+    // the resulting spam is a very visible signal.
+    if ((rl.emails_sent ?? 0) >= 10) {
+      return rateLimited();
     }
     if (rl.last_email_at && Date.now() - Date.parse(rl.last_email_at) < 2 * 60 * 1000) {
       return err("a recovery code was just sent — wait a couple of minutes", 429);
     }
+    // Reserve the slots BEFORE the expensive cell round-trip and email
+    // send. This shrinks the KV read-modify-write race window from
+    // ~15s (the full cell-fetch + send time) to the microseconds
+    // between get() and put(). Fail-closed on infra failures (see the
+    // send-failure branch below) restores the slots so the owner isn't
+    // punished for a mail outage. TTL is 4h so an owner who hits the
+    // cap during an incident recovers within a working day, and a
+    // burst attack's blast radius is bounded to hours not a full day.
+    const now = new Date().toISOString();
+    rl.emails_sent = (rl.emails_sent ?? 0) + 1;
+    rl.last_email_at = now;
+    rlPerIp.emails_sent = (rlPerIp.emails_sent ?? 0) + 1;
+    rlPerIp.last_email_at = now;
+    await Promise.all([
+      env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 4 * 3600 }),
+      env.DIRECTORY.put(rlPerIpKey, JSON.stringify(rlPerIp), { expirationTtl: 4 * 3600 }),
+    ]);
 
     // Always fetch the cell, even for phantom ids: use the placement pool
     // as a stand-in when there's no acct: pointer, so latency doesn't
@@ -1007,23 +1055,30 @@ async function handleRecover(request, env, accountId) {
             `,
           }),
         });
-        // Persist the fresh code only after successful send — otherwise a
-        // failed email would corrupt an already-issued code AND burn a
-        // quota slot on a real owner during a mail outage.
+        // Persist the fresh code shape — the slot counters were already
+        // written above (fail-closed reserve pattern), so this only
+        // stores the code_hash + expiration alongside them.
         rl.code_hash = await sha256hex(code.replaceAll("-", ""));
         rl.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
         rl.attempts = 0;
-        rl.emails_sent = (rl.emails_sent ?? 0) + 1;
-        rl.last_email_at = new Date().toISOString();
+        await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 4 * 3600 });
         sent = true;
         await logCellEvent(cell, accountId, "account.email.recovery.sent",
           "control_plane", { to_masked: maskEmail(contact.email) });
       } catch (e) {
         console.log(`recover: email for ${accountId} failed: ${e}`);
+        // Fail-open on infrastructure failures: mail delivery blew up,
+        // that's not the owner's fault. Roll the slots back so a
+        // subsequent retry has room. Racy against concurrent
+        // increments but the direction stays consistent — the
+        // decrement compensates for the reservation we did above.
+        rl.emails_sent = Math.max(0, (rl.emails_sent ?? 1) - 1);
+        rlPerIp.emails_sent = Math.max(0, (rlPerIp.emails_sent ?? 1) - 1);
+        await Promise.all([
+          env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 4 * 3600 }),
+          env.DIRECTORY.put(rlPerIpKey, JSON.stringify(rlPerIp), { expirationTtl: 4 * 3600 }),
+        ]);
       }
-    }
-    if (sent) {
-      await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 24 * 3600 });
     }
     return generic();
   }
