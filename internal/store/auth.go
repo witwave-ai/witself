@@ -194,6 +194,22 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, 
 		tokID, accountID, operatorID, hashToken(opTok), expiresValue, displayName); err != nil {
 		return "", "", nil, fmt.Errorf("store operator token: %w", err)
 	}
+	// Audit: minting an operator token is a security event the owner
+	// needs to see. Metadata carries the token's server-side id (not the
+	// plaintext) so future queries can correlate with tokens.
+	eventMeta := map[string]any{"token_id": tokID, "operator_id": operatorID}
+	if displayName != "" {
+		eventMeta["display_name"] = displayName
+	}
+	if expiresAt != nil {
+		eventMeta["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
+		Verb: VerbOperatorTokenMinted, Metadata: eventMeta,
+	}); err != nil {
+		return "", "", nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", nil, err
 	}

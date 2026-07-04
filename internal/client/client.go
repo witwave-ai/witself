@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -205,6 +207,65 @@ func DeleteRealm(ctx context.Context, endpoint, token, realmID string) error {
 
 func realmsURL(endpoint string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/realms"
+}
+
+// Event is the API view of one account_events row.
+type Event struct {
+	ID         string          `json:"id"`
+	AccountID  string          `json:"account_id"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	ActorKind  string          `json:"actor_kind"`
+	ActorID    string          `json:"actor_id,omitempty"`
+	Verb       string          `json:"verb"`
+	Metadata   json.RawMessage `json:"metadata"`
+}
+
+// EventsPage is the response shape of GET /v1/account/events.
+type EventsPage struct {
+	Events     []Event `json:"events"`
+	NextCursor string  `json:"next_cursor,omitempty"`
+}
+
+// EventsQuery constrains a ListAccountEvents call. All fields are
+// optional. Empty verb means any verb; zero Limit uses the server's
+// default (50); empty Cursor starts from the newest event.
+type EventsQuery struct {
+	Since  *time.Time
+	Until  *time.Time
+	Verb   string
+	Limit  int
+	Cursor string
+}
+
+// ListAccountEvents fetches one page of the owner's audit trail.
+// Non-owner tokens are refused with a 403; the caller must be the owner
+// of the account behind the token.
+func ListAccountEvents(ctx context.Context, endpoint, token string, q EventsQuery) (EventsPage, error) {
+	url := strings.TrimRight(endpoint, "/") + "/v1/account/events"
+	params := neturl.Values{}
+	if q.Since != nil {
+		params.Set("since", q.Since.UTC().Format(time.RFC3339))
+	}
+	if q.Until != nil {
+		params.Set("until", q.Until.UTC().Format(time.RFC3339))
+	}
+	if q.Verb != "" {
+		params.Set("verb", q.Verb)
+	}
+	if q.Limit > 0 {
+		params.Set("limit", strconv.Itoa(q.Limit))
+	}
+	if q.Cursor != "" {
+		params.Set("after", q.Cursor)
+	}
+	if len(params) > 0 {
+		url += "?" + params.Encode()
+	}
+	var page EventsPage
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &page); err != nil {
+		return EventsPage{}, err
+	}
+	return page, nil
 }
 
 // Agent is the API view of an agent.

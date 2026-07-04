@@ -69,6 +69,16 @@ func (s *Store) SuspendAccountOwner(ctx context.Context, accountID, operatorID, 
 		 WHERE id = $1`, accountID, reasonValue); err != nil {
 		return fmt.Errorf("suspend account: %w", err)
 	}
+	eventMeta := map[string]any{}
+	if reason != "" {
+		eventMeta["reason"] = reason
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
+		Verb: VerbAccountSuspendedByMe, Metadata: eventMeta,
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -214,6 +224,12 @@ func (s *Store) ResumeAccountOwner(ctx context.Context, accountID, operatorID st
 		   suspended_for = NULL, suspended_reason = NULL
 		 WHERE id = $1`, accountID); err != nil {
 		return fmt.Errorf("resume account: %w", err)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
+		Verb: VerbAccountResumedByMe, Metadata: map[string]any{},
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

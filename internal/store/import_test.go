@@ -119,6 +119,29 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// Regression: slice 1 of the audit-log feature initially
+			// left account_events out of the second switch, so every
+			// export/import broke on the first event row. This case
+			// pins that gap closed.
+			name:  "account_events row with account_id matching manifest is accepted",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_1", "account_id": acc, "actor_kind": "owner",
+				"actor_id": "op_1", "verb": "account.suspended.owner",
+				"metadata": map[string]any{},
+			},
+			wantOK: true,
+		},
+		{
+			name:  "account_events row for a different account is refused",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_1", "account_id": "acc_victim", "actor_kind": "owner",
+				"actor_id": "op_1", "verb": "account.suspended.owner",
+			},
+			wantOK: false, want: "does not match manifest",
+		},
+		{
 			name:   "unknown table is refused",
 			table:  "audit_log",
 			row:    map[string]any{"id": "audit_1", "account_id": acc},

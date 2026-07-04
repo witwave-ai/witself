@@ -31,11 +31,17 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 	var isDefault bool
 	var status string
 	var isOwner bool
+	// FOR UPDATE OF a locks the accounts row so a concurrent close
+	// serializes rather than racing: two callers both reading
+	// status='active' would each fire the audit event, producing a
+	// duplicate account.closed record. Locking makes the status check
+	// authoritative — the loser sees 'closed' and skips the event.
 	err = tx.QueryRow(ctx,
 		`SELECT a.is_default, a.status, (o.is_root OR o.role = 'account_owner')
 		 FROM accounts a
 		 JOIN operators o ON o.account_id = a.id
-		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL`,
+		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
+		 FOR UPDATE OF a`,
 		accountID, operatorID).Scan(&isDefault, &status, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotAccountOwner // operator not on this account at all
@@ -65,6 +71,21 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 		`UPDATE tokens SET consumed_at = now()
 		 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 		return fmt.Errorf("revoke account tokens: %w", err)
+	}
+	// Only record the audit event if this call was the one that actually
+	// closed the account (status != "closed" branch above). A no-op
+	// second close mustn't produce a fresh closure event.
+	if status != "closed" {
+		eventMeta := map[string]any{}
+		if reason != "" {
+			eventMeta["reason"] = reason
+		}
+		if err := logEventTx(ctx, tx, EventInput{
+			AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
+			Verb: VerbAccountClosed, Metadata: eventMeta,
+		}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

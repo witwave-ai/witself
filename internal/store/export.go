@@ -97,6 +97,18 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'display_name', display_name, 'created_at', created_at,
 			  'expires_at', expires_at, 'consumed_at', consumed_at)
 			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		// account_events streams last because it has no outbound FKs
+		// beyond account_id, and it is the append-only ledger — its rows
+		// point AT the state changes recorded above, not the other way
+		// around, so ordering it here keeps the restore side inserting
+		// in the natural read order.
+		&querySource{s: s, table: "account_events", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'occurred_at', occurred_at,
+			  'actor_kind', actor_kind, 'actor_id', actor_id,
+			  'verb', verb, 'metadata', metadata, 'retain_until', retain_until)
+			FROM account_events WHERE account_id = $1
+			ORDER BY occurred_at, id`, arg: accountID},
 	}
 
 	m := export.Manifest{

@@ -925,6 +925,8 @@ func accountCmd(args []string) int {
 		return accountRecover(args[1:])
 	case "close":
 		return accountClose(args[1:])
+	case "events":
+		return accountEvents(args[1:])
 	case "forget":
 		return accountForget(args[1:])
 	default:
@@ -1403,6 +1405,78 @@ func accountClose(args []string) int {
 }
 
 // accountForget removes a LOCAL account binding — the config.json entry and
+// accountEvents prints the owner's audit trail — every security-relevant
+// mutation on the account, filterable and paginated. Owner-only: a
+// non-owner operator token is refused with 403.
+func accountEvents(args []string) int {
+	fs := flag.NewFlagSet("account events", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	since := fs.String("since", "", "only events at or after this RFC3339 timestamp (e.g. 2026-01-02T00:00:00Z)")
+	until := fs.String("until", "", "only events at or before this RFC3339 timestamp")
+	verb := fs.String("verb", "", "filter by exact verb (e.g. account.email.changed)")
+	limit := fs.Int("limit", 50, "max events per page (1-500)")
+	after := fs.String("after", "", "opaque cursor from a previous page's next_cursor")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	q := client.EventsQuery{Verb: *verb, Limit: *limit, Cursor: *after}
+	if *since != "" {
+		t, err := time.Parse(time.RFC3339, *since)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: --since must be RFC3339: %v\n", err)
+			return 2
+		}
+		q.Since = &t
+	}
+	if *until != "" {
+		t, err := time.Parse(time.RFC3339, *until)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ws: --until must be RFC3339: %v\n", err)
+			return 2
+		}
+		q.Until = &t
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	page, err := client.ListAccountEvents(ctx, ep, tok, q)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(page)
+	}
+	if len(page.Events) == 0 {
+		fmt.Fprintln(os.Stderr, "no events matching your filter")
+		return 0
+	}
+	// Human-readable table: time / verb / actor / metadata as one line.
+	// Sorted newest-first (server returns in that order).
+	fmt.Println("occurred_at\tverb\tactor\tmetadata")
+	for _, e := range page.Events {
+		actor := e.ActorKind
+		if e.ActorID != "" {
+			actor = e.ActorKind + ":" + e.ActorID
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n",
+			e.OccurredAt.UTC().Format(time.RFC3339),
+			e.Verb, actor, string(e.Metadata))
+	}
+	if page.NextCursor != "" {
+		fmt.Fprintf(os.Stderr, "\n%d events shown; more available. Continue with:\n  ws account events --after %s\n",
+			len(page.Events), page.NextCursor)
+	}
+	return 0
+}
+
 // the token file — without ever contacting a server. It exists for stranded
 // names: when the control plane closes an account the CLI didn't see close
 // (the pending-account reaper, a torn-down cell), the credentials are already

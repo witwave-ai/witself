@@ -60,6 +60,11 @@ var importColumns = map[string]map[string]bool{
 		"kind": true, "token_hash": true, "display_name": true,
 		"created_at": true, "expires_at": true, "consumed_at": true,
 	},
+	"account_events": {
+		"id": true, "account_id": true, "occurred_at": true,
+		"actor_kind": true, "actor_id": true,
+		"verb": true, "metadata": true, "retain_until": true,
+	},
 }
 
 // importCtx accumulates per-import state: how many accounts rows we have seen
@@ -97,7 +102,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// for realms this archive itself just wrote, so the realm_id check
 	// below is the FK-safety boundary for that table.
 	switch table {
-	case "operators", "realms", "tokens":
+	case "operators", "realms", "tokens", "account_events":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
 			return badf("%s row missing account_id", table)
@@ -147,6 +152,13 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if agID, present := optionalStringField(obj, "agent_id"); present && !ic.agents[agID] {
 			return badf("tokens row references agent %q not present in this archive", agID)
 		}
+	case "account_events":
+		// The account_id scoping check already ran in the first switch;
+		// no downstream table references account_events, so nothing to
+		// record here. Metadata is opaque JSONB — the write-time verb
+		// contract was enforced when the event was created and doesn't
+		// need to be re-enforced at import time (an old cell may have
+		// written events under a schema this cell no longer knows).
 	default:
 		return badf("table %q is not importable", table)
 	}

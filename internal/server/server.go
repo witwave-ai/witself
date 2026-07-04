@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +155,12 @@ type Config struct {
 	// not-suspended account gets ErrConflict.
 	ResumeAccountOwner func(ctx context.Context, accountID, operatorID string) error
 
+	// ListAccountEvents, when set, enables GET /v1/account/events — the
+	// owner's audit trail for their own account. Non-owner operators are
+	// refused with ErrNotAccountOwner (-> 403). Paginated with an opaque
+	// cursor, filterable by since/until/verb.
+	ListAccountEvents func(ctx context.Context, accountID, operatorID string, filter EventFilter) (EventPage, error)
+
 	// ImportAccountArchive, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:import — the restore half of the archive story:
 	// the request body streams a logical archive (the :export format), and
@@ -176,6 +183,35 @@ type ImportSummary struct {
 	AccountID     string `json:"account_id"`
 	Status        string `json:"status"`
 	SchemaVersion int    `json:"schema_version"` // the ARCHIVE's schema coordinate
+}
+
+// Event is the server-visible shape of one account_events row. Same
+// wire fields as the store's row, JSON-serialized straight through.
+type Event struct {
+	ID         string          `json:"id"`
+	AccountID  string          `json:"account_id"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	ActorKind  string          `json:"actor_kind"`
+	ActorID    string          `json:"actor_id,omitempty"`
+	Verb       string          `json:"verb"`
+	Metadata   json.RawMessage `json:"metadata"`
+}
+
+// EventFilter constrains ListAccountEvents queries. All fields optional.
+// Limit is clamped to [1, 500] in the store.
+type EventFilter struct {
+	Since  *time.Time
+	Until  *time.Time
+	Verb   string
+	Limit  int
+	Cursor string
+}
+
+// EventPage is one page of ListAccountEvents results plus an opaque
+// NextCursor. Empty cursor means the last page.
+type EventPage struct {
+	Events     []Event `json:"events"`
+	NextCursor string  `json:"next_cursor,omitempty"`
 }
 
 // AccountRecord is the API view of an account's lifecycle record.
@@ -261,6 +297,11 @@ var ErrBadArchive = errors.New("invalid archive")
 // ErrResumeWrongCategory signals a system resume whose category does not
 // match what the account is suspended for (-> 409).
 var ErrResumeWrongCategory = errors.New("suspension category does not match")
+
+// ErrBadInput signals a client-side input error the caller can fix
+// (malformed pagination cursor, out-of-range parameter, unparseable
+// filter). Maps to 400.
+var ErrBadInput = errors.New("bad input")
 
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
@@ -419,6 +460,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.CreateOperatorToken != nil {
 			mux.HandleFunc("POST /v1/operators/self/tokens", createOperatorTokenHandler(cfg.Authenticate, cfg.CreateOperatorToken))
+		}
+		if cfg.ListAccountEvents != nil {
+			mux.HandleFunc("GET /v1/account/events", listAccountEventsHandler(cfg.Authenticate, cfg.ListAccountEvents))
 		}
 		if cfg.ListOperators != nil {
 			mux.HandleFunc("GET /v1/operators", listOperatorsHandler(cfg.Authenticate, cfg.ListOperators))
@@ -1126,6 +1170,67 @@ func createRealmHandler(auth AuthFunc, create func(ctx context.Context, accountI
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "realm": realm})
+	})
+}
+
+// listAccountEventsHandler serves the owner's audit trail. Query params
+// (all optional): since, until (RFC3339), verb (exact), limit (default
+// 50, capped at 500 in the store), after (opaque cursor from a previous
+// page's next_cursor). Non-owner operators are refused with 403 —
+// audit visibility is an owner-tier privilege, not a general operator
+// one.
+func listAccountEventsHandler(auth AuthFunc, list func(ctx context.Context, accountID, operatorID string, filter EventFilter) (EventPage, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		q := r.URL.Query()
+		filter := EventFilter{
+			Verb:   q.Get("verb"),
+			Cursor: q.Get("after"),
+		}
+		if s := q.Get("since"); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "since must be RFC3339 (e.g. 2026-01-02T15:04:05Z)")
+				return
+			}
+			filter.Since = &t
+		}
+		if s := q.Get("until"); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "until must be RFC3339 (e.g. 2026-01-02T15:04:05Z)")
+				return
+			}
+			filter.Until = &t
+		}
+		if s := q.Get("limit"); s != "" {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 1 {
+				writeJSONError(w, http.StatusBadRequest, "limit must be a positive integer")
+				return
+			}
+			filter.Limit = n
+		}
+		page, err := list(r.Context(), p.accountID, p.operatorID, filter)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrNotAccountOwner):
+				writeJSONError(w, http.StatusForbidden, "only the account owner may view the audit trail")
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeJSONError(w, http.StatusInternalServerError, "could not list account events")
+			}
+			return
+		}
+		if page.Events == nil {
+			page.Events = []Event{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"events":         page.Events,
+			"next_cursor":    page.NextCursor,
+		})
 	})
 }
 

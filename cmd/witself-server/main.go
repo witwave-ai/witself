@@ -194,6 +194,37 @@ func serve() int {
 			}
 			return tok, tokenID, expiresAt, err
 		}
+		cfg.ListAccountEvents = func(ctx context.Context, accountID, operatorID string, filter server.EventFilter) (server.EventPage, error) {
+			page, err := st.ListAccountEvents(ctx, accountID, operatorID, store.EventFilter{
+				Since:  filter.Since,
+				Until:  filter.Until,
+				Verb:   filter.Verb,
+				Limit:  filter.Limit,
+				Cursor: filter.Cursor,
+			})
+			if errors.Is(err, store.ErrNotAccountOwner) {
+				return server.EventPage{}, server.ErrNotAccountOwner
+			}
+			if errors.Is(err, store.ErrBadEventCursor) {
+				return server.EventPage{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
+			}
+			if err != nil {
+				return server.EventPage{}, err
+			}
+			out := make([]server.Event, len(page.Events))
+			for i, e := range page.Events {
+				out[i] = server.Event{
+					ID:         e.ID,
+					AccountID:  e.AccountID,
+					OccurredAt: e.OccurredAt,
+					ActorKind:  e.ActorKind,
+					ActorID:    e.ActorID,
+					Verb:       e.Verb,
+					Metadata:   e.Metadata,
+				}
+			}
+			return server.EventPage{Events: out, NextCursor: page.NextCursor}, nil
+		}
 		cfg.ListOperators = func(ctx context.Context, accountID string) ([]server.Operator, error) {
 			ops, err := st.ListOperators(ctx, accountID)
 			if err != nil {
