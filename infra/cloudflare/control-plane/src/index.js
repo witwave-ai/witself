@@ -115,6 +115,18 @@ const ADMIN_ID = /^adm_[a-z0-9]{20}$/;
 const ADMIN_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20})$/;
 const ADMIN_REVOKE_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20}):revoke$/;
 const ADMIN_HANDLE = /^[a-z][a-z0-9_-]{1,31}$/;
+// Admin-side fan-out paths (all admin-token authorized via adminAuthorized).
+// /v1/admin/whoami        — cheap round-trip that also verifies the token.
+// /v1/admin/tickets       — fleet-wide list; CP fans out to every cell.
+// /v1/admin/accounts/{a}/tickets/{t}          — GET single ticket + thread.
+// /v1/admin/accounts/{a}/tickets/{t}/messages — POST admin reply.
+// /v1/admin/accounts/{a}/tickets/{t}/state    — PATCH state transition.
+const ADMIN_ACCOUNT_TICKET_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)$/;
+const ADMIN_ACCOUNT_TICKET_MSGS_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/messages$/;
+const ADMIN_ACCOUNT_TICKET_STATE_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/state$/;
 // Handles that would collide with an existing actor_kind or role name
 // (owner / operator / control_plane / system). Reserved so a rogue mint
 // can't forge audit rows that read like a system-emitted event.
@@ -156,19 +168,48 @@ async function sha256Hex(s) {
 
 // adminAuthorized resolves an "Authorization: Bearer wsa_..." header to
 // { admin_id, handle } or null (unauth / revoked / unknown). Used by the
-// admin-side fan-out routes in 1b.iii; landed here so it lives next to
-// the KV shape it queries.
+// admin-side fan-out routes; landed here so it lives next to the KV
+// shape it queries.
+//
+// Revocation freshness: KV has per-PoP edge caching (min 60s) and
+// eventual global consistency (up to 60s). Without the adminrev:{hash}
+// tombstone check below, a PoP that had cached `admin:{id}` with no
+// disabled_at + `admintok:{hash}` before revoke would keep authenticating
+// the revoked token for up to two cache-TTL windows. The tombstone lets
+// revoke assert "denied" as a positive fact — a PoP fetching the
+// tombstone freshly (or after its own null-cache TTL expires) blocks
+// the token even if its cached admintok/admin still say the token is
+// live. The residual worst-case tail on a PoP that just cached a null
+// tombstone read pre-revoke is one KV cache TTL (~60s); the fleet-token
+// holder should treat "revoke effective" as "within ~60s" not "on the
+// next request", and rotate the fleet token as well if hard cutoff
+// matters (e.g. suspected compromise).
 async function adminAuthorized(request, env) {
   const h = request.headers.get("Authorization") || "";
   if (!h.startsWith("Bearer wsa_")) return null;
   const raw = h.slice(7).trim();
   const hash = await sha256Hex(raw);
+  // Tombstone check FIRST. A revoked token has adminrev:{hash} set;
+  // even if this PoP's admintok/admin records are still stale-cached
+  // as live, the tombstone denies. Cheap KV get on the hot path.
+  const revoked = await env.DIRECTORY.get(`adminrev:${hash}`, {
+    type: "json",
+  });
+  if (revoked) return null;
   const idx = await env.DIRECTORY.get(`admintok:${hash}`, { type: "json" });
   if (!idx?.admin_id) return null;
   const rec = await env.DIRECTORY.get(`admin:${idx.admin_id}`, { type: "json" });
   if (!rec || rec.disabled_at) return null;
   return { admin_id: rec.admin_id, handle: rec.handle };
 }
+
+// Revocation-tombstone TTL. Covers the KV worst-case (60s cross-region
+// propagation + 60s edge cache) with plenty of margin — after this
+// window the deleted admintok:{hash} entry has definitively propagated
+// to every PoP, so the tombstone can safely expire. A hard-deleted
+// admin's tombstone stays live for the same window; replay of the same
+// raw token after that returns null on the admintok lookup either way.
+const ADMIN_REVOKE_TOMBSTONE_TTL_SEC = 3600;
 
 // genAdminID returns an "adm_" + 20 lowercase-base32 identifier. Uses
 // crypto.getRandomValues (12 bytes → 20 base32 chars after padding-strip
@@ -495,8 +536,21 @@ async function handleAdmins(request, env, url) {
     const now = new Date().toISOString();
     const updated = { ...rec, disabled_at: now };
     await env.DIRECTORY.put(`admin:${adminID}`, JSON.stringify(updated));
-    // The important step: killing the auth-lookup index. adminh:{handle}
-    // is deliberately left in place — the handle stays reserved through
+    // Tombstone FIRST — adminAuthorized checks this before its normal
+    // KV lookups, so a PoP with stale-cached admintok/admin records
+    // still denies the revoked token on the next request (once its
+    // own tombstone cache line is fresh). Written BEFORE the admintok
+    // delete so there is no window where a PoP sees the deleted
+    // admintok as still-present AND no tombstone yet.
+    if (rec.token_hash) {
+      await env.DIRECTORY.put(
+        `adminrev:${rec.token_hash}`,
+        JSON.stringify({ admin_id: adminID, revoked_at: now }),
+        { expirationTtl: ADMIN_REVOKE_TOMBSTONE_TTL_SEC }
+      );
+    }
+    // Second: kill the auth-lookup index. adminh:{handle} is
+    // deliberately left in place — the handle stays reserved through
     // the audit window so historical events retain a distinguishable
     // author.
     if (rec.token_hash) {
@@ -524,6 +578,16 @@ async function handleAdmins(request, env, url) {
     }
     await env.DIRECTORY.delete(`admin:${adminID}`);
     if (rec.token_hash) {
+      // Refresh the tombstone alongside the admintok delete. Delete
+      // is only reachable after revoke (guarded above), so the
+      // tombstone should already be present — but a fresh write
+      // resets the TTL clock, covering the case where delete follows
+      // a long-idle revoke by many minutes.
+      await env.DIRECTORY.put(
+        `adminrev:${rec.token_hash}`,
+        JSON.stringify({ admin_id: adminID, revoked_at: rec.disabled_at }),
+        { expirationTtl: ADMIN_REVOKE_TOMBSTONE_TTL_SEC }
+      );
       await env.DIRECTORY.delete(`admintok:${rec.token_hash}`);
     }
     if (rec.handle) {
@@ -533,6 +597,203 @@ async function handleAdmins(request, env, url) {
   }
 
   return err("method not allowed", 405);
+}
+
+// fanoutCells calls the same POST path on every cell that has a
+// provision token, in parallel, with a 15-second per-cell timeout. Never
+// throws — a broken cell surfaces as an error entry in the returned
+// array so the caller can render "3 of 4 cells reported" instead of
+// silently dropping half the fleet. Result shape per cell:
+//   { cell, status: "ok"|"error"|"timeout", http?, body?, error? }
+async function fanoutCells(env, path, jsonBody) {
+  const cells = (await listCells(env)).filter(
+    (c) => c.provision_token && c.endpoint
+  );
+  return Promise.all(
+    cells.map(async (c) => {
+      try {
+        const r = await fetch(`${c.endpoint}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${c.provision_token}`,
+          },
+          body: JSON.stringify(jsonBody),
+          signal: AbortSignal.timeout(15000),
+        });
+        const text = await r.text();
+        let parsed = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // response wasn't JSON — fall through
+        }
+        return {
+          cell: c.name,
+          status: r.ok ? "ok" : "error",
+          http: r.status,
+          body: parsed,
+          error: r.ok
+            ? undefined
+            : parsed?.error || text.slice(0, 200) || `HTTP ${r.status}`,
+        };
+      } catch (e) {
+        // AbortSignal.timeout throws a DOMException("TimeoutError") on
+        // deadline; other network errors throw TypeError. Both surface
+        // as "timeout" here because the caller doesn't distinguish.
+        return {
+          cell: c.name,
+          status: "timeout",
+          error: String(e?.message ?? e),
+        };
+      }
+    })
+  );
+}
+
+// Aggregate cap for fleet-wide fan-out result sets. Bounds the Worker
+// response size in the pathological "10 cells × 500 tickets each" case.
+// Callers get an "aggregate_capped: true" flag when we trim.
+const FANOUT_AGG_CAP = 500;
+
+// handleAdminTickets serves the admin-token-authorized fan-out routes.
+// Every route re-runs adminAuthorized so a revoked admin's live tokens
+// stop working on the next request.
+async function handleAdminTickets(request, env, url) {
+  const admin = await adminAuthorized(request, env);
+  if (!admin) return err("unauthorized", 401);
+
+  // whoami: cheap round-trip that lets the CLI verify a token without
+  // any KV list scan.
+  if (url.pathname === "/v1/admin/whoami" && request.method === "GET") {
+    return json({
+      schema_version: "witself.v0",
+      admin_id: admin.admin_id,
+      handle: admin.handle,
+    });
+  }
+
+  // Fleet-wide list. Query params (all optional):
+  //   state=<comma-list>   filter by ticket state
+  //   since=<ISO>          last_activity_at >= since
+  //   limit=<n>            per-cell limit (defaults to 100, capped at 500)
+  if (url.pathname === "/v1/admin/tickets" && request.method === "GET") {
+    const states = url.searchParams.get("state");
+    const since = url.searchParams.get("since");
+    const limit = Number.parseInt(
+      url.searchParams.get("limit") || "100",
+      10
+    );
+    const body = {
+      admin_handle: admin.handle,
+      states: states ? states.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
+      since: since || undefined,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 100,
+    };
+    const perCell = await fanoutCells(
+      env,
+      "/v1/support/admin:list-tickets",
+      body
+    );
+    // Interleave tickets from every ok cell, tag each with its cell,
+    // sort newest-activity first.
+    let tickets = [];
+    for (const c of perCell) {
+      if (c.status !== "ok" || !c.body?.tickets) continue;
+      for (const t of c.body.tickets) {
+        tickets.push({ ...t, cell: c.cell });
+      }
+    }
+    tickets.sort((a, b) =>
+      (b.last_activity_at || "").localeCompare(a.last_activity_at || "")
+    );
+    const aggregateCapped = tickets.length > FANOUT_AGG_CAP;
+    if (aggregateCapped) tickets = tickets.slice(0, FANOUT_AGG_CAP);
+    return json({
+      schema_version: "witself.v0",
+      tickets,
+      cells: perCell.map((c) => ({
+        name: c.cell,
+        status: c.status,
+        count: c.status === "ok" ? c.body?.tickets?.length ?? 0 : 0,
+        ...(c.error ? { error: c.error } : {}),
+      })),
+      ...(aggregateCapped ? { aggregate_capped: true } : {}),
+    });
+  }
+
+  // Per-account fan-in routes: resolve the account -> cell first, then
+  // proxy to that cell's admin endpoint. Return 409 with a "restore
+  // first" hint for archived accounts (slice 1b defers cross-cell
+  // chase; a follow-up slice can transparently restore-then-retry).
+  const routes = [
+    { rx: ADMIN_ACCOUNT_TICKET_PATH, method: "GET", action: "get-ticket" },
+    { rx: ADMIN_ACCOUNT_TICKET_MSGS_PATH, method: "POST", action: "reply-ticket" },
+    { rx: ADMIN_ACCOUNT_TICKET_STATE_PATH, method: "PATCH", action: "change-ticket-state" },
+  ];
+  for (const route of routes) {
+    const m = url.pathname.match(route.rx);
+    if (!m) continue;
+    if (request.method !== route.method) {
+      return err("method not allowed", 405);
+    }
+    const accountID = m[1];
+    const ticketID = m[2];
+    // archived: accounts have no live cell to talk to; a later slice
+    // can transparently restore-then-retry. For 1b: predictable 409.
+    const archived = await env.DIRECTORY.get(`archived:${accountID}`, {
+      type: "json",
+    });
+    if (archived) {
+      return err("account is archived — restore before support actions", 409);
+    }
+    const cell = await cellForAccount(env, accountID);
+    if (!cell) {
+      return err("unknown account", 404);
+    }
+    let clientBody = {};
+    if (route.method !== "GET") {
+      try {
+        clientBody = (await request.json()) ?? {};
+      } catch {
+        return err("invalid JSON body", 400);
+      }
+    }
+    const cellBody = {
+      admin_handle: admin.handle,
+      ticket_id: ticketID,
+    };
+    if (route.action === "reply-ticket") {
+      cellBody.body = clientBody.body ?? "";
+    } else if (route.action === "change-ticket-state") {
+      cellBody.state = clientBody.state ?? "";
+    }
+    try {
+      const cellRes = await fetch(
+        `${cell.endpoint}/v1/accounts/${accountID}/admin:${route.action}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${cell.provision_token}`,
+          },
+          body: JSON.stringify(cellBody),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+      const text = await cellRes.text();
+      // Pass status + parsed JSON through verbatim. The cell already
+      // shapes errors the CLI can render; the Worker just relays.
+      return new Response(text, {
+        status: cellRes.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      return err(`cell unreachable: ${String(e?.message ?? e)}`, 502);
+    }
+  }
+
+  return err("not found", 404);
 }
 
 // handlePlacement is the fleet-wide default placement strategy: GET returns it
@@ -2822,6 +3083,19 @@ export default {
       ADMIN_REVOKE_PATH.test(url.pathname)
     ) {
       return handleAdmins(request, env, url);
+    }
+
+    // Admin-side fan-out routes (admin-token authorized). Fleet-wide
+    // ticket list + per-account thread/reply/state. The Worker is the
+    // only door — the CLI never touches a cell directly.
+    if (
+      url.pathname === "/v1/admin/whoami" ||
+      url.pathname === "/v1/admin/tickets" ||
+      ADMIN_ACCOUNT_TICKET_PATH.test(url.pathname) ||
+      ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(url.pathname) ||
+      ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname)
+    ) {
+      return handleAdminTickets(request, env, url);
     }
 
     // Fleet-wide placement strategy (fleet-token authorized).
