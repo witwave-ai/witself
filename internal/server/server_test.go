@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -252,7 +253,17 @@ func TestAgentTokenCreate(t *testing.T) {
 		}
 		return "", "", "", false, nil
 	}
-	create := func(_ context.Context, _, agentID string) (string, string, string, error) {
+	create := func(_ context.Context, accountID, actorOperatorID, agentID string) (string, string, string, error) {
+		// Same shape as the sibling tests (create-operator, revoke-
+		// token): assert the handler passes the AUTHENTICATED principal
+		// through as the actor, so a future arg-swap that fires the
+		// audit event with the wrong id is caught here.
+		if accountID != "acc_y" {
+			return "", "", "", fmt.Errorf("create accountID = %q, want acc_y", accountID)
+		}
+		if actorOperatorID != "opr_x" {
+			return "", "", "", fmt.Errorf("create actorOperatorID = %q, want opr_x", actorOperatorID)
+		}
 		if agentID == "missing" {
 			return "", "", "", ErrNotFound
 		}
@@ -466,7 +477,10 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 		}
 		return operators, nil
 	}
-	create := func(_ context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+	create := func(_ context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+		if actorOperatorID != "opr_root" {
+			t.Fatalf("create actorOperatorID = %q, want opr_root", actorOperatorID)
+		}
 		if accountID != "acc_y" || displayName != "deploy bot" || tokenDisplayName != "deploy token" {
 			t.Fatalf("create args account=%q display=%q tokenDisplay=%q", accountID, displayName, tokenDisplayName)
 		}
@@ -625,9 +639,12 @@ func TestDeleteAndRevokeRoutes(t *testing.T) {
 		deletedAgent = agentID
 		return nil
 	}
-	revoke := func(_ context.Context, accountID, tokenID string) error {
+	revoke := func(_ context.Context, accountID, actorOperatorID, tokenID string) error {
 		if accountID != "acc_y" {
 			t.Fatalf("revoke account = %q", accountID)
+		}
+		if actorOperatorID != "opr_x" {
+			t.Fatalf("revoke actorOperatorID = %q, want opr_x", actorOperatorID)
 		}
 		revokedToken = tokenID
 		return nil

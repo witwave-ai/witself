@@ -218,8 +218,9 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, 
 
 // CreateAgentToken mints a durable agent token bound to an agent that belongs to
 // the account, and returns the plaintext (shown once). ErrAgentNotFound if the
-// agent is not in the account.
-func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string) (tok, tokenID, agentName string, err error) {
+// agent is not in the account. actorOperatorID names the owner performing the
+// mint — recorded as the audit-trail actor of the agent.token.minted event.
+func (s *Store) CreateAgentToken(ctx context.Context, accountID, actorOperatorID, agentID string) (tok, tokenID, agentName string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", "", "", err
@@ -255,6 +256,17 @@ func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string)
 		tokID, accountID, agentID, hashToken(agtTok)); err != nil {
 		return "", "", "", fmt.Errorf("store agent token: %w", err)
 	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbAgentTokenMinted,
+		Metadata: map[string]any{
+			"token_id":   tokID,
+			"agent_id":   agentID,
+			"agent_name": agentName,
+		},
+	}); err != nil {
+		return "", "", "", err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", "", err
 	}
@@ -263,7 +275,10 @@ func (s *Store) CreateAgentToken(ctx context.Context, accountID, agentID string)
 
 // RevokeToken immediately invalidates a live operator or agent token in the
 // account. Bootstrap token consumption remains part of ExchangeBootstrap.
-func (s *Store) RevokeToken(ctx context.Context, accountID, tokenID string) error {
+// actorOperatorID names the owner performing the revoke — recorded as the
+// audit-trail actor of the token.revoked event so the owner can see who
+// killed which token when.
+func (s *Store) RevokeToken(ctx context.Context, accountID, actorOperatorID, tokenID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -274,18 +289,47 @@ func (s *Store) RevokeToken(ctx context.Context, accountID, tokenID string) erro
 	if err := lockAccountForSafetyWrite(ctx, tx, accountID); err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx,
-		`UPDATE tokens SET consumed_at = now()
+	// Read the token's kind + operator/agent id BEFORE consuming it so the
+	// audit metadata carries useful context. Skipping is fine — a missing
+	// row just means the revoke will 404 below.
+	var kind string
+	var opID, agID *string
+	err = tx.QueryRow(ctx,
+		`SELECT kind, operator_id, agent_id FROM tokens
 		 WHERE account_id = $1 AND id = $2
 		   AND kind IN ('operator', 'agent')
 		   AND consumed_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())`,
+		accountID, tokenID).Scan(&kind, &opID, &agID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lookup token: %w", err)
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE tokens SET consumed_at = now()
+		 WHERE account_id = $1 AND id = $2
+		   AND consumed_at IS NULL`,
 		accountID, tokenID)
 	if err != nil {
 		return fmt.Errorf("revoke token: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrTokenNotFound
+	}
+	revMeta := map[string]any{"token_id": tokenID, "kind": kind}
+	if opID != nil {
+		revMeta["operator_id"] = *opID
+	}
+	if agID != nil {
+		revMeta["agent_id"] = *agID
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbTokenRevoked, Metadata: revMeta,
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

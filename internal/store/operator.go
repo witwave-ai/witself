@@ -108,8 +108,10 @@ func (s *Store) ListOperators(ctx context.Context, accountID string) ([]Operator
 }
 
 // CreateOperator creates a non-root operator and mints its first token. The raw
-// token is returned once; only its hash is stored.
-func (s *Store) CreateOperator(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+// token is returned once; only its hash is stored. actorOperatorID names the
+// owner performing the create — recorded in the audit trail as the actor of
+// the operator.created + operator.token.minted events.
+func (s *Store) CreateOperator(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Operator{}, "", nil, err
@@ -172,6 +174,40 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, displayName, toke
 		ExpiresAt:   expiresAt,
 	}}
 
+	// Two audit rows land with the state change: the new operator being
+	// added, and the first token minted for them. Both share the same
+	// actor (the owner performing the create) so the owner's audit
+	// query correlates them by (actor_id, occurred_at).
+	createdMeta := map[string]any{
+		"operator_id": operatorID,
+		"role":        defaultOperatorRole,
+	}
+	if displayName != "" {
+		createdMeta["display_name"] = displayName
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbOperatorCreated, Metadata: createdMeta,
+	}); err != nil {
+		return Operator{}, "", nil, err
+	}
+	mintedMeta := map[string]any{
+		"token_id":    tokenID,
+		"operator_id": operatorID,
+	}
+	if tokenDisplayName != "" {
+		mintedMeta["display_name"] = tokenDisplayName
+	}
+	if expiresAt != nil {
+		mintedMeta["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbOperatorTokenMinted, Metadata: mintedMeta,
+	}); err != nil {
+		return Operator{}, "", nil, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return Operator{}, "", nil, err
 	}
@@ -231,6 +267,12 @@ func (s *Store) DeleteOperator(ctx context.Context, accountID, actorOperatorID, 
 		 WHERE account_id = $1 AND id = $2 AND deleted_at IS NULL`,
 		accountID, targetOperatorID); err != nil {
 		return fmt.Errorf("delete operator: %w", err)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbOperatorDeleted, Metadata: map[string]any{"operator_id": targetOperatorID},
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

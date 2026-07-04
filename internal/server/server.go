@@ -58,7 +58,7 @@ type Config struct {
 	// CreateAgentToken, when set, enables POST /v1/agents/{agent}/tokens to mint a
 	// durable agent token (returned once, with the agent's name for client-side
 	// file naming).
-	CreateAgentToken func(ctx context.Context, accountID, agentID string) (token, tokenID, agentName string, err error)
+	CreateAgentToken func(ctx context.Context, accountID, actorOperatorID, agentID string) (token, tokenID, agentName string, err error)
 
 	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
 	// an additional operator token for the authenticated operator (returned once).
@@ -66,11 +66,11 @@ type Config struct {
 
 	// Operator lifecycle endpoints manage named operator principals.
 	ListOperators  func(ctx context.Context, accountID string) ([]Operator, error)
-	CreateOperator func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)
+	CreateOperator func(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)
 	DeleteOperator func(ctx context.Context, accountID, actorOperatorID, targetOperatorID string) error
 
 	// RevokeToken, when set, enables POST /v1/tokens/{token}:revoke.
-	RevokeToken func(ctx context.Context, accountID, tokenID string) error
+	RevokeToken func(ctx context.Context, accountID, actorOperatorID, tokenID string) error
 
 	// CloseAccount, when set, enables POST /v1/account:close — the permanent,
 	// owner-only tombstone of the authenticated operator's account.
@@ -1324,10 +1324,10 @@ func deleteAgentHandler(auth AuthFunc, deleteAgent func(ctx context.Context, acc
 	})
 }
 
-func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, agentID string) (string, string, string, error)) http.HandlerFunc {
+func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, accountID, actorOperatorID, agentID string) (string, string, string, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		agentID := r.PathValue("agent")
-		tok, tokenID, agentName, err := create(r.Context(), p.accountID, agentID)
+		tok, tokenID, agentName, err := create(r.Context(), p.accountID, p.operatorID, agentID)
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
@@ -1423,7 +1423,7 @@ func listOperatorsHandler(auth AuthFunc, list func(ctx context.Context, accountI
 	})
 }
 
-func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)) http.HandlerFunc {
+func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
 			DisplayName      string `json:"display_name"`
@@ -1454,7 +1454,7 @@ func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accou
 			ttl = &d
 		}
 
-		operator, token, expiresAt, err := create(r.Context(), p.accountID, displayName, tokenDisplayName, ttl)
+		operator, token, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, tokenDisplayName, ttl)
 		if errors.Is(err, ErrAccountNotActive) {
 			writeJSONError(w, http.StatusForbidden, "account is not active")
 			return
@@ -1502,14 +1502,14 @@ func deleteOperatorHandler(auth AuthFunc, deleteOperator func(ctx context.Contex
 	})
 }
 
-func revokeTokenHandler(auth AuthFunc, revoke func(ctx context.Context, accountID, tokenID string) error) http.HandlerFunc {
+func revokeTokenHandler(auth AuthFunc, revoke func(ctx context.Context, accountID, actorOperatorID, tokenID string) error) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		tokenID, ok := tokenActionID(r.URL.Path, "revoke")
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "token not found")
 			return
 		}
-		err := revoke(r.Context(), p.accountID, tokenID)
+		err := revoke(r.Context(), p.accountID, p.operatorID, tokenID)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "token not found")

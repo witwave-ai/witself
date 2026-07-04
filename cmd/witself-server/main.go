@@ -164,8 +164,8 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.CreateAgentToken = func(ctx context.Context, accountID, agentID string) (string, string, string, error) {
-			tok, tokenID, agentName, err := st.CreateAgentToken(ctx, accountID, agentID)
+		cfg.CreateAgentToken = func(ctx context.Context, accountID, actorOperatorID, agentID string) (string, string, string, error) {
+			tok, tokenID, agentName, err := st.CreateAgentToken(ctx, accountID, actorOperatorID, agentID)
 			switch {
 			case errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotFound):
 				return "", "", "", server.ErrNotFound
@@ -236,8 +236,8 @@ func serve() int {
 			}
 			return out, nil
 		}
-		cfg.CreateOperator = func(ctx context.Context, accountID, displayName, tokenDisplayName string, ttl *time.Duration) (server.Operator, string, *time.Time, error) {
-			op, tok, expiresAt, err := st.CreateOperator(ctx, accountID, displayName, tokenDisplayName, ttl)
+		cfg.CreateOperator = func(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (server.Operator, string, *time.Time, error) {
+			op, tok, expiresAt, err := st.CreateOperator(ctx, accountID, actorOperatorID, displayName, tokenDisplayName, ttl)
 			if errors.Is(err, store.ErrAccountNotActive) {
 				return server.Operator{}, "", nil, server.ErrAccountNotActive
 			}
@@ -261,8 +261,8 @@ func serve() int {
 				return err
 			}
 		}
-		cfg.RevokeToken = func(ctx context.Context, accountID, tokenID string) error {
-			err := st.RevokeToken(ctx, accountID, tokenID)
+		cfg.RevokeToken = func(ctx context.Context, accountID, actorOperatorID, tokenID string) error {
+			err := st.RevokeToken(ctx, accountID, actorOperatorID, tokenID)
 			if errors.Is(err, store.ErrTokenNotFound) {
 				return server.ErrNotFound
 			}
