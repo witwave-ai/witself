@@ -5,13 +5,15 @@
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
 #   # witself-infra:
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
+#   # witwave-admin:
+#   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witwave-admin
 #
 # Downloads the selected binary for your OS/arch from the GitHub releases,
 # verifies its SHA-256 checksum, and installs it on your PATH.
 #
 # Usage:
 #   sh                 install latest ws
-#   sh -s BINARY       install latest ws, witself-infra, or witself-server
+#   sh -s BINARY       install latest ws, witself-infra, witself-server, or witwave-admin
 #   sh -s BINARY VER   install a specific binary version
 #   sh -s VER          install a specific ws version
 #
@@ -39,7 +41,7 @@ case "${1:-}" in
   "")
     [ "$#" -eq 0 ] || err "empty binary/version argument"
     ;;
-  ws | witself-infra | witself-server)
+  ws | witself-infra | witself-server | witwave-admin)
     BINARY="$1"
     version="${2:-${WS_VERSION:-}}"
     [ "$#" -le 2 ] || err "too many arguments (usage: sh -s [BINARY] [VERSION])"
@@ -51,8 +53,8 @@ case "${1:-}" in
 esac
 
 case "$BINARY" in
-  ws | witself-infra | witself-server) ;;
-  *) err "unknown binary \"${BINARY}\" (want ws|witself-infra|witself-server)" ;;
+  ws | witself-infra | witself-server | witwave-admin) ;;
+  *) err "unknown binary \"${BINARY}\" (want ws|witself-infra|witself-server|witwave-admin)" ;;
 esac
 
 download() { # url dest
