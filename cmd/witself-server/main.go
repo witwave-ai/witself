@@ -298,6 +298,7 @@ func serve() int {
 				SuspendedAt:     a.SuspendedAt,
 				SuspendedFor:    a.SuspendedFor,
 				SuspendedReason: a.SuspendedReason,
+				SupportPolicy:   a.SupportPolicy,
 			}, nil
 		}
 		cfg.SuspendAccountOwner = func(ctx context.Context, accountID, operatorID, reason string) error {

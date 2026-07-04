@@ -75,6 +75,7 @@ type Account struct {
 	SuspendedAt     *time.Time
 	SuspendedFor    string
 	SuspendedReason string
+	SupportPolicy   string
 }
 
 // GetAccount reads one account's lifecycle record. Closed accounts are
@@ -84,10 +85,12 @@ func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, erro
 	var email, closedReason, suspendedFor, suspendedReason *string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, email, display_name, status, created_at,
-		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason
+		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason,
+		        support_policy
 		 FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
-			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason)
+			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason,
+			&a.SupportPolicy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}

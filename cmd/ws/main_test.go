@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
 )
 
@@ -380,6 +381,46 @@ func TestSafeTextStripsTerminalEscapes(t *testing.T) {
 	for in, want := range tests {
 		if got := safeText(in); got != want {
 			t.Errorf("safeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSummarizeSupport pins the exact wording shown in `ws account
+// status` when support is enabled. The line is a UX contract with
+// operators — scripts and docs quote it — so any drift is worth
+// flagging.
+func TestSummarizeSupport(t *testing.T) {
+	tk := func(state string) client.SupportTicket {
+		return client.SupportTicket{State: state}
+	}
+	tests := []struct {
+		name string
+		in   []client.SupportTicket
+		want string
+	}{
+		{"no tickets", nil, "no open tickets"},
+		{"closed only",
+			[]client.SupportTicket{tk("closed"), tk("closed")},
+			"no open tickets"},
+		{"one awaiting_admin",
+			[]client.SupportTicket{tk("awaiting_admin")},
+			"1 open ticket"},
+		{"three awaiting_admin",
+			[]client.SupportTicket{tk("awaiting_admin"), tk("awaiting_admin"), tk("resolved")},
+			"3 open tickets"},
+		{"one awaiting_customer",
+			[]client.SupportTicket{tk("awaiting_customer")},
+			"1 open ticket (awaiting your reply)"},
+		{"mix — 2 open, 1 awaiting_customer",
+			[]client.SupportTicket{tk("awaiting_customer"), tk("awaiting_admin")},
+			"2 open tickets (1 awaiting your reply)"},
+		{"closed doesn't count as open",
+			[]client.SupportTicket{tk("awaiting_customer"), tk("closed")},
+			"1 open ticket (awaiting your reply)"},
+	}
+	for _, tc := range tests {
+		if got := summarizeSupport(tc.in); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

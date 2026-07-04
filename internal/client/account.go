@@ -78,6 +78,7 @@ type AccountRecord struct {
 	SuspendedAt     *time.Time `json:"suspended_at,omitempty"`
 	SuspendedFor    string     `json:"suspended_for,omitempty"`
 	SuspendedReason string     `json:"suspended_reason,omitempty"`
+	SupportPolicy   string     `json:"support_policy,omitempty"`
 }
 
 // GetAccount reads the authenticated operator's account record from its cell

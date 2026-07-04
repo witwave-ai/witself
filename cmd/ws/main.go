@@ -1575,7 +1575,7 @@ func accountStatus(args []string) int {
 			// The account exists in the fleet's memory but is not placed on
 			// a live cell — no round trip possible. Report from the
 			// directory's own answer.
-			name, acct, _, rerr := local.Resolve(*account)
+			_, acct, _, rerr := local.Resolve(*account)
 			id := ""
 			if rerr == nil {
 				id = acct.ID
@@ -1590,11 +1590,13 @@ func accountStatus(args []string) int {
 					"exported_at":     arch.ExportedAt,
 				}})
 			}
-			w, flush := tableWriter("id\tstatus\tarchived from")
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", id, "archived", tabSafe(arch.Cell))
-			flush()
-			fmt.Fprintf(os.Stderr, "archived %s (awaiting placement)\n", arch.ExportedAt.UTC().Format(time.RFC3339))
-			_ = name
+			printStatusPairs([][2]string{
+				{"account", id},
+				{"status", "archived"},
+				{"archived from", tabSafe(safeText(arch.Cell))},
+				{"exported at", arch.ExportedAt.UTC().Format(time.RFC3339)},
+			})
+			fmt.Fprintln(os.Stderr, "\narchived — awaiting placement on a new cell")
 			return 0
 		}
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
@@ -1605,17 +1607,44 @@ func accountStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "ws: %v\n", err)
 		return 1
 	}
-	if *jsonOut {
-		return printJSON(map[string]any{"account": rec})
+	// Support summary is a second call, only made when the account's
+	// support_policy actually enables it. Free-tier / enterprise-off
+	// accounts skip the roundtrip entirely.
+	var supportLine string
+	if rec.SupportPolicy == "enabled" && rec.Status == "active" {
+		tickets, terr := client.ListSupportTickets(ctx, ep, tok)
+		if terr == nil {
+			supportLine = summarizeSupport(tickets)
+		}
+		// Silent failure is deliberate here — a broken support listing
+		// must not hide the account status the operator asked for.
 	}
-	w, flush := tableWriter("id\tstatus\temail")
-	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", rec.ID, rec.Status, tabSafe(rec.Email))
-	flush()
+	if *jsonOut {
+		out := map[string]any{"account": rec}
+		if supportLine != "" {
+			out["support_summary"] = supportLine
+		}
+		return printJSON(out)
+	}
+	pairs := [][2]string{
+		{"account", rec.ID},
+		{"status", rec.Status},
+	}
+	if rec.DisplayName != "" {
+		pairs = append(pairs, [2]string{"name", tabSafe(safeText(rec.DisplayName))})
+	}
+	if rec.Email != "" {
+		pairs = append(pairs, [2]string{"email", tabSafe(safeText(rec.Email))})
+	}
+	if supportLine != "" {
+		pairs = append(pairs, [2]string{"support", supportLine})
+	}
+	printStatusPairs(pairs)
 	if rec.Status == "pending" {
-		fmt.Fprintln(os.Stderr, "pending: activation required before the account can be used")
+		fmt.Fprintln(os.Stderr, "\npending: activation required before the account can be used")
 	}
 	if rec.Status == "suspended" && rec.SuspendedAt != nil {
-		fmt.Fprintf(os.Stderr, "suspended %s (%s)%s\n",
+		fmt.Fprintf(os.Stderr, "\nsuspended %s (%s)%s\n",
 			rec.SuspendedAt.UTC().Format(time.RFC3339),
 			suspendedForLabel(rec.SuspendedFor),
 			closedReasonSuffix(rec.SuspendedReason))
@@ -1624,9 +1653,56 @@ func accountStatus(args []string) int {
 		}
 	}
 	if rec.ClosedAt != nil {
-		fmt.Fprintf(os.Stderr, "closed %s%s\n", rec.ClosedAt.UTC().Format(time.RFC3339), closedReasonSuffix(rec.ClosedReason))
+		fmt.Fprintf(os.Stderr, "\nclosed %s%s\n", rec.ClosedAt.UTC().Format(time.RFC3339), closedReasonSuffix(rec.ClosedReason))
 	}
 	return 0
+}
+
+// printStatusPairs renders a describe-style key/value list to stdout.
+// Column-aligned with two spaces after the colon; keeps single-record
+// output readable without pretending to be a table (a single row
+// through tableWriter looks like an accident).
+func printStatusPairs(pairs [][2]string) {
+	max := 0
+	for _, p := range pairs {
+		if n := len(p[0]); n > max {
+			max = n
+		}
+	}
+	for _, p := range pairs {
+		fmt.Printf("%-*s  %s\n", max+1, p[0]+":", p[1])
+	}
+}
+
+// summarizeSupport returns the "N open (K awaiting your reply)" line
+// the status command shows when the account's support_policy is
+// enabled. K counts tickets awaiting_customer — that's the "ball is
+// in your court" bucket — so the operator knows at a glance whether
+// support is actually waiting on them.
+func summarizeSupport(tickets []client.SupportTicket) string {
+	open, awaitingCustomer := 0, 0
+	for _, t := range tickets {
+		if t.State == "closed" {
+			continue
+		}
+		open++
+		if t.State == "awaiting_customer" {
+			awaitingCustomer++
+		}
+	}
+	if open == 0 {
+		return "no open tickets"
+	}
+	if awaitingCustomer == 0 {
+		if open == 1 {
+			return "1 open ticket"
+		}
+		return fmt.Sprintf("%d open tickets", open)
+	}
+	if open == 1 {
+		return "1 open ticket (awaiting your reply)"
+	}
+	return fmt.Sprintf("%d open tickets (%d awaiting your reply)", open, awaitingCustomer)
 }
 
 func suspendedForLabel(s string) string {
