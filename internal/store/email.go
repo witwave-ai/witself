@@ -46,6 +46,17 @@ func (s *Store) UndoAccountEmail(ctx context.Context, accountID, expectedCurrent
 		`UPDATE accounts SET email = $2 WHERE id = $1`, accountID, newEmail); err != nil {
 		return fmt.Errorf("undo email change: %w", err)
 	}
+	// The undo link was verified by the control plane (possession of the
+	// old-inbox link), so the actor is control_plane. Only the restored
+	// address goes on the record — the "current" was already logged when
+	// the forward change happened.
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb:     VerbAccountEmailUndone,
+		Metadata: map[string]any{"restored_masked": MaskEmail(newEmail)},
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -88,6 +99,13 @@ func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operato
 		`UPDATE accounts SET display_name = $2 WHERE id = $1`, accountID, displayName); err != nil {
 		return fmt.Errorf("rename account: %w", err)
 	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
+		Verb:     VerbAccountRenamed,
+		Metadata: map[string]any{"display_name": displayName},
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -105,13 +123,14 @@ func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, n
 
 	var status string
 	var isOwner bool
+	var currentEmail *string
 	err = tx.QueryRow(ctx,
-		`SELECT a.status, (o.is_root OR o.role = 'account_owner')
+		`SELECT a.status, a.email, (o.is_root OR o.role = 'account_owner')
 		 FROM accounts a
 		 JOIN operators o ON o.account_id = a.id
 		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
 		 FOR UPDATE OF a`,
-		accountID, operatorID).Scan(&status, &isOwner)
+		accountID, operatorID).Scan(&status, &currentEmail, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAccountNotFound
 	}
@@ -127,6 +146,26 @@ func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, n
 	if _, err := tx.Exec(ctx,
 		`UPDATE accounts SET email = $2 WHERE id = $1`, accountID, newEmail); err != nil {
 		return fmt.Errorf("update account email: %w", err)
+	}
+	// The Worker calls this after verifying the new-inbox code, so the
+	// actor is control_plane even though ownership is enforced above —
+	// the operator id gates authority, not authorship. Both addresses
+	// go on the record MASKED via MaskEmail so no plaintext ever lands.
+	oldMasked := ""
+	if currentEmail != nil {
+		oldMasked = MaskEmail(*currentEmail)
+	} else {
+		oldMasked = "***" // seeded default account starts with null email
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountEmailChanged,
+		Metadata: map[string]any{
+			"old_masked": oldMasked,
+			"new_masked": MaskEmail(newEmail),
+		},
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

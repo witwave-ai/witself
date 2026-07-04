@@ -161,6 +161,14 @@ type Config struct {
 	// cursor, filterable by since/until/verb.
 	ListAccountEvents func(ctx context.Context, accountID, operatorID string, filter EventFilter) (EventPage, error)
 
+	// LogAccountEvent, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:events — the Worker records events on the
+	// tenant's cell for actions that have no store mutation of their
+	// own (email dispatched, recovery form submitted). Provision-token
+	// authorized. verb, actor_kind, and metadata are validated by the
+	// store's verb registry before the row lands.
+	LogAccountEvent func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error
+
 	// ImportAccountArchive, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:import — the restore half of the archive story:
 	// the request body streams a logical archive (the :export format), and
@@ -429,7 +437,7 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil {
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
@@ -702,8 +710,9 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 
 // accountLifecycleHandler serves the provision-token-authorized lifecycle
 // verbs on POST /v1/accounts/{id}:reap|:activate|:contact|:update-email|
-// :recover|:suspend|:resume|:export|:import — instance-level authority, the
-// same trust link as provisioning, so only the control plane can call them.
+// :recover|:suspend|:resume|:export|:import|:events — instance-level authority,
+// the same trust link as provisioning, so only the control plane can call
+// them.
 //
 // reap: 200 whether it reaped just now or found the account already closed
 // (idempotent); 409 when the account activated first (the sweep's view was
@@ -949,6 +958,42 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"account_id":             sum.AccountID,
 				"status":                 sum.Status,
 				"archive_schema_version": sum.SchemaVersion,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "events"); ok && cfg.LogAccountEvent != nil {
+			var req struct {
+				Verb      string         `json:"verb"`
+				ActorKind string         `json:"actor_kind"`
+				Metadata  map[string]any `json:"metadata"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if req.Verb == "" || req.ActorKind == "" {
+				writeJSONError(w, http.StatusBadRequest, "verb and actor_kind are required")
+				return
+			}
+			err := cfg.LogAccountEvent(r.Context(), accountID, req.Verb, req.ActorKind, req.Metadata)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrBadInput):
+				// verb/actor/metadata mismatch — the caller has to fix
+				// the caller, not swallow the error.
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not record account event")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"logged":         "true",
 			})
 			return
 		}

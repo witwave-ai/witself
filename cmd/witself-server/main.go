@@ -351,6 +351,22 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
+			err := st.LogEvent(ctx, store.EventInput{
+				AccountID: accountID,
+				ActorKind: actorKind,
+				Verb:      verb,
+				Metadata:  metadata,
+			})
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrUnknownVerb),
+				errors.Is(err, store.ErrBadEventMetadata):
+				return fmt.Errorf("%w: %v", server.ErrBadInput, err)
+			}
+			return err
+		}
 		cfg.ImportAccountArchive = func(ctx context.Context, accountID string, body io.Reader) (server.ImportSummary, error) {
 			m, err := st.ImportAccount(ctx, accountID, body)
 			switch {

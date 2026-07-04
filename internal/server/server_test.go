@@ -1387,6 +1387,63 @@ func TestImportAccountArchive(t *testing.T) {
 	}
 }
 
+// TestLogAccountEvent proves the :events verb's contract: provision token
+// only, verb + actor_kind required, ErrBadInput → 400 for
+// registry-refused shapes, ErrNotFound → 404 for missing accounts.
+func TestLogAccountEvent(t *testing.T) {
+	log := func(_ context.Context, accountID, verb, actorKind string, _ map[string]any) error {
+		switch accountID {
+		case "acc_missing":
+			return ErrNotFound
+		case "acc_baddata":
+			return fmt.Errorf("%w: verb %s: unknown verb", ErrBadInput, verb)
+		default:
+			_ = actorKind
+			return nil
+		}
+	}
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:   "witself_prv_test",
+		ProvisionAccount: provision,
+		LogAccountEvent:  log,
+	}))
+	defer srv.Close()
+
+	do := func(path, token, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token, body string
+		want              int
+	}{
+		{"/v1/accounts/acc_x:events", "wrong", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{"email_masked":"s***@w***.ai"}}`, http.StatusUnauthorized},
+		{"/v1/accounts/acc_x:events", "witself_prv_test", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{"email_masked":"s***@w***.ai"}}`, http.StatusOK},
+		{"/v1/accounts/acc_x:events", "witself_prv_test", `{}`, http.StatusBadRequest}, // missing verb + actor_kind
+		{"/v1/accounts/acc_x:events", "witself_prv_test", `{"verb":"recovery.requested"}`, http.StatusBadRequest}, // missing actor_kind
+		{"/v1/accounts/acc_x:events", "witself_prv_test", ``, http.StatusBadRequest}, // invalid JSON
+		{"/v1/accounts/acc_missing:events", "witself_prv_test", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{}}`, http.StatusNotFound},
+		{"/v1/accounts/acc_baddata:events", "witself_prv_test", `{"verb":"sneaky.action","actor_kind":"control_plane","metadata":{}}`, http.StatusBadRequest},
+	} {
+		resp := do(tc.path, tc.token, tc.body)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s body %q = %d, want %d", tc.path, tc.body, resp.StatusCode, tc.want)
+		}
+	}
+}
+
 // TestResumeAccountSystem proves the machine-resume verb: provision token
 // only, a category is required, and the authority-scoping refusals map to
 // 409s the control plane can tell apart from success.

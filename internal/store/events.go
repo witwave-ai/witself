@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/id"
 )
@@ -348,6 +349,16 @@ func logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
 		`INSERT INTO account_events (id, account_id, actor_kind, actor_id, verb, metadata)
 		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
 		eventID, in.AccountID, in.ActorKind, actorID, in.Verb, metaJSON); err != nil {
+		// FK violation on account_id means the account doesn't exist.
+		// Distinguish from a generic DB error so the server layer can
+		// return 404 instead of 500 — critical for out-of-tx callers
+		// (Store.LogEvent from the :events endpoint) where "unknown
+		// account" is a permanent client error the Worker mustn't
+		// retry against.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" && strings.Contains(pgErr.ConstraintName, "account_events_account_id") {
+			return ErrAccountNotFound
+		}
 		return fmt.Errorf("insert account_events: %w", err)
 	}
 	return nil
