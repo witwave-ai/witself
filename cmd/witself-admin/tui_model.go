@@ -135,10 +135,14 @@ type model struct {
 	// upgradeReadyTag is set once a newer binary is INSTALLED on disk
 	// (relaunch deferred while composing); relaunch non-nil tells
 	// main() to re-exec after bubbletea releases the terminal.
+	// upgradePhase drives the persistent footer light:
+	// "" (no update) → "installing" → "ready" | "channel-wait".
 	binPath         string
 	installVia      string
 	currentVersion  string
 	upgradeReadyTag string
+	upgradePhase    string
+	upgradeTag      string
 	relaunch        *resumeState
 
 	// resume carries the pre-upgrade view to restore; consumed once.
@@ -483,18 +487,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case upgradeAvailableMsg:
+		m.upgradePhase, m.upgradeTag = "installing", msg.tag
 		m.status = "installing update " + msg.tag + " in the background…"
 		return m, m.applyUpgrade(msg.tag)
 
 	case upgradeAppliedMsg:
 		if msg.err != nil {
+			m.upgradePhase, m.upgradeTag = "", ""
 			m.status = "self-upgrade failed: " + msg.err.Error()
 			return m, nil
 		}
 		if msg.noop {
 			// The channel hasn't caught up to the tag yet (brew tap
 			// publish lag). No restart — the next periodic check
-			// retries through the normal path.
+			// retries through the normal path; the footer light stays
+			// on so the operator knows an update is pending.
+			m.upgradePhase = "channel-wait"
 			m.status = "update " + msg.tag + " published but not yet available via " + m.installVia + " — will retry"
 			return m, nil
 		}
@@ -505,6 +513,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// subprocess and lose the action. relaunchIfReady fires
 			// on compose-exit and on actionDoneMsg.
 			m.upgradeReadyTag = msg.tag
+			m.upgradePhase = "ready"
 			m.status = "update " + msg.tag + " installed — restarting when current work settles"
 			return m, nil
 		}
@@ -744,6 +753,9 @@ func (m model) View() string {
 		b.WriteString(m.composer.View())
 		b.WriteString("\n" + styDim.Render("ctrl+d send · esc cancel"))
 	}
+	if badge := m.upgradeBadge(); badge != "" {
+		b.WriteString("\n" + badge)
+	}
 	if m.status != "" {
 		// The status line carries raw subprocess stderr / server error
 		// text — hostile bytes must not reach the terminal, and a
@@ -751,6 +763,23 @@ func (m model) View() string {
 		b.WriteString("\n" + styDim.Render(oneLine(m.status)))
 	}
 	return b.String()
+}
+
+// upgradeBadge is the persistent "upgrade light" pinned to the bottom
+// of every view — unlike the transient status line, it stays lit for
+// as long as an update is in flight, waiting on its channel, or
+// installed-and-deferring, so the operator always knows the dashboard
+// is (or is about to be) mid-upgrade.
+func (m model) upgradeBadge() string {
+	switch m.upgradePhase {
+	case "installing":
+		return styWarn.Render("●") + styDim.Render(" upgrade "+m.upgradeTag+" installing…")
+	case "channel-wait":
+		return styWarn.Render("●") + styDim.Render(" upgrade "+m.upgradeTag+" available — waiting for "+m.installVia)
+	case "ready":
+		return styOK.Render("●") + styDim.Render(" upgrade "+m.upgradeTag+" ready — restarts when idle")
+	}
+	return ""
 }
 
 // viewList is the master fullscreen dashboard: two bordered windows on

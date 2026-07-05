@@ -475,3 +475,48 @@ func TestViewListRendersPanes(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradeBadgeLifecycle pins the footer upgrade light: lit yellow
+// while installing or waiting on a lagging channel, green when
+// installed-and-deferred, dark otherwise, and reflected in View().
+func TestUpgradeBadgeLifecycle(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m = m.withSelfUpgrade("/usr/local/bin/witself-admin", "0.0.96")
+	m.loading = false
+	if m.upgradeBadge() != "" {
+		t.Fatal("badge must be dark with no update in flight")
+	}
+
+	// Check found a newer tag → installing.
+	next, _ := m.Update(upgradeAvailableMsg{tag: "v0.0.97"})
+	m2 := next.(model)
+	if !strings.Contains(m2.upgradeBadge(), "installing") {
+		t.Fatalf("installing badge: %q", m2.upgradeBadge())
+	}
+	if !strings.Contains(m2.View(), "installing") {
+		t.Fatal("badge must render in View()")
+	}
+
+	// Channel lag → waiting light stays on.
+	next, _ = m2.Update(upgradeAppliedMsg{tag: "v0.0.97", noop: true})
+	m3 := next.(model)
+	if !strings.Contains(m3.upgradeBadge(), "waiting for") {
+		t.Fatalf("channel-wait badge: %q", m3.upgradeBadge())
+	}
+
+	// Installed while composing → green "restarts when idle".
+	m4 := m2
+	m4.mode = modeCompose
+	next, _ = m4.Update(upgradeAppliedMsg{tag: "v0.0.97"})
+	m5 := next.(model)
+	if !strings.Contains(m5.upgradeBadge(), "restarts when idle") {
+		t.Fatalf("ready badge: %q", m5.upgradeBadge())
+	}
+
+	// Failure → light goes dark (status line carries the error).
+	next, _ = m2.Update(upgradeAppliedMsg{tag: "v0.0.97", err: errFake})
+	m6 := next.(model)
+	if m6.upgradeBadge() != "" {
+		t.Fatalf("badge must clear on failure: %q", m6.upgradeBadge())
+	}
+}
