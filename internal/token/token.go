@@ -37,6 +37,11 @@ const (
 	// to a cell to create accounts (the control-plane -> cell trust link). Unset
 	// on a cell = account provisioning inert (the self-hosted posture).
 	KindProvision Kind = "prv"
+	// KindAdmin is a fleet-admin token, authenticated by the control plane
+	// against its admin registry (DIRECTORY KV). Minted by the Cloudflare
+	// Worker (not this package) — registered here so the prefix namespace
+	// has one canonical home. See infra/cloudflare/control-plane.
+	KindAdmin Kind = "adm"
 )
 
 // New mints a fresh opaque token of the given kind: witself_<kind>_<random>.

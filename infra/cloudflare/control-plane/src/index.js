@@ -109,7 +109,9 @@ const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 //   adminh:{handle}                   — uniqueness index (kept even after
 //                                       revoke so the handle stays reserved
 //                                       through the audit window)
-// Raw admin token format: "wsa_" + base32 body. Only the sha256 is
+// Raw admin token format: "witself_adm_" + base32 body — the same
+// witself_<kind>_<body> shape as every other Witself credential (see
+// internal/token). Only the sha256 is
 // persisted; the raw token is shown exactly once at mint time.
 const ADMIN_ID = /^adm_[a-z0-9]{20}$/;
 const ADMIN_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20})$/;
@@ -171,7 +173,7 @@ async function sha256Hex(s) {
     .join("");
 }
 
-// adminAuthorized resolves an "Authorization: Bearer wsa_..." header to
+// adminAuthorized resolves an "Authorization: Bearer witself_adm_..." header to
 // { admin_id, handle } or null (unauth / revoked / unknown). Used by the
 // admin-side fan-out routes; landed here so it lives next to the KV
 // shape it queries.
@@ -191,7 +193,7 @@ async function sha256Hex(s) {
 // matters (e.g. suspected compromise).
 async function adminAuthorized(request, env) {
   const h = request.headers.get("Authorization") || "";
-  if (!h.startsWith("Bearer wsa_")) return null;
+  if (!h.startsWith("Bearer witself_adm_")) return null;
   const raw = h.slice(7).trim();
   const hash = await sha256Hex(raw);
   // Tombstone check FIRST. A revoked token has adminrev:{hash} set;
@@ -240,7 +242,7 @@ function genAdminID() {
   return `adm_${out.slice(0, 20)}`;
 }
 
-// genAdminToken returns a fresh "wsa_" + 40 base32 chars secret. 25
+// genAdminToken returns a fresh "witself_adm_" + 40 base32 chars secret. 25
 // random bytes → 40 chars keeps the token length fixed for log-friendly
 // pattern matching.
 function genAdminToken() {
@@ -259,7 +261,7 @@ function genAdminToken() {
     }
   }
   if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
-  return `wsa_${out.slice(0, 40)}`;
+  return `witself_adm_${out.slice(0, 40)}`;
 }
 
 // publicAdmin strips the token_hash from a record before it leaves the
