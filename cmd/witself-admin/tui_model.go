@@ -1166,11 +1166,20 @@ func (m model) View() string {
 // border row to make room. The status text carries raw subprocess
 // stderr / server error text — hostile bytes must not reach the
 // terminal, and a stray newline must not break the footer layout.
+//
+// The status ALWAYS falls back to the fleet summary — an empty
+// footer would blink out when a transient message clears (a ticket
+// drill-down finishing, a refresh landing) and reappear on the next
+// auto-tick, which reads as "the footer disappeared."
 func (m model) footerExtra() string {
 	badge := m.upgradeBadge()
+	text := m.status
+	if text == "" {
+		text = m.fleetSummary()
+	}
 	status := ""
-	if m.status != "" {
-		status = styDim.Render(oneLine(m.status))
+	if text != "" {
+		status = styDim.Render(oneLine(text))
 	}
 	switch {
 	case badge != "" && status != "":
@@ -1180,6 +1189,16 @@ func (m model) footerExtra() string {
 	default:
 		return status
 	}
+}
+
+// fleetSummary is the persistent one-line health baseline shown when
+// no transient status is active. Same wording ticketsLoadedMsg uses —
+// derived so a stale value can't linger past a re-sync.
+func (m model) fleetSummary() string {
+	if m.loading || len(m.tickets)+len(m.cells) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d tickets · %s", len(m.tickets), cellSummary(m.cells))
 }
 
 // upgradeBadge is the persistent "upgrade light" pinned to the bottom

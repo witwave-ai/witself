@@ -237,3 +237,43 @@ func TestComposeFitsSmallTerminal(t *testing.T) {
 		t.Fatal("ticket head must stay visible while composing")
 	}
 }
+
+// TestFooterSurvivesDrilldown pins the fix for "the footer disappears
+// after entering a dialog and never comes back": the status line at
+// the bottom of the dashboard is the fleet summary by default, so a
+// transient message clearing (loading→loaded, esc→list) can never
+// leave a blank row that stays blank until the next auto-refresh.
+func TestFooterSurvivesDrilldown(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.status = "" // baseline: no transient status, only the summary should show
+	m.now = func() time.Time { return t0 }
+	m.width, m.height = 120, 40
+	m.tickets = []client.AdminTicket{mkTicket("tkt_1", "awaiting_admin", t0)}
+	m.cells = []client.AdminCellStatus{{Name: "aws-sandbox-usw2-dev", Status: "ok"}}
+	m.fleetCells = []client.AdminCell{{Name: "aws-sandbox-usw2-dev", Version: "0.0.106"}}
+
+	summary := "1 tickets · 1/1 cells ok"
+
+	// Baseline: list view shows the summary as the footer.
+	if v := m.View(); !strings.Contains(v, summary) {
+		t.Fatal("baseline list view must show the fleet-summary footer")
+	}
+
+	// Enter a ticket → threadLoadedMsg → esc. Legacy behavior blanked
+	// m.status on both success and esc; the footer must survive both.
+	m.threadAccount, m.threadTicket = "acc_1", "tkt_1"
+	next, _ := m.Update(threadLoadedMsg{res: client.GetSupportTicketResult{
+		Ticket: client.SupportTicket{ID: "tkt_1", Subject: "s", State: "awaiting_admin", OpenedAt: t0, LastActivityAt: t0},
+	}})
+	m2 := next.(model)
+	if v := m2.View(); !strings.Contains(v, summary) {
+		t.Fatal("modal view must show the fleet-summary footer while the dialog is open")
+	}
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m3 := next.(model)
+	if v := m3.View(); !strings.Contains(v, summary) {
+		t.Fatal("after esc back to list, the footer must still show the fleet summary")
+	}
+}
