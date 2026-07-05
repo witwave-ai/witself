@@ -11,7 +11,7 @@
       "usage_billed": false,
       "limits": { "agents": 25, "realms": 1 },
       "features": ["memory", "facts"],
-      "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm."
+      "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm. No support included."
     },
     {
       "id": "standard",
@@ -40,8 +40,8 @@
       "available": false,
       "usage_billed": true,
       "limits": null,
-      "features": [],
-      "summary": "Coming soon. Minimum commitment plus usage; details to follow."
+      "features": ["support"],
+      "summary": "Coming soon. Minimum commitment plus usage; support included; details to follow."
     }
   ]
 }
