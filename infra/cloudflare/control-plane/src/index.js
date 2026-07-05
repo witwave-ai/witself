@@ -661,10 +661,193 @@ async function fanoutCells(env, path, jsonBody) {
 // Callers get an "aggregate_capped: true" flag when we trim.
 const FANOUT_AGG_CAP = 500;
 
+// Customer-facing support notification. Fired inside handleAdminTickets
+// via ctx.waitUntil() after a successful cell proxy for reply /
+// state=resolved / state=closed. Idempotency dedups honest CLI retries
+// on the same message-id; a throttle window coalesces bursts (e.g. an
+// admin firing three replies in ten seconds → one email).
+//
+// The customer's contact address comes from the cell via the existing
+// /v1/accounts/{id}:contact route (same one the recovery flow uses),
+// so we honour whatever email the tenant has confirmed with the cell.
+// Failure to fetch contact => silent skip; a broken cell is not the
+// customer's problem, and the admin's action already committed.
+async function fireSupportNotification(env, params) {
+  const { action, accountID, cell, ticketID, admin, clientBody, parsed } = params;
+  if (!env.EMAIL) return; // no email backend configured — dev / self-host
+  // What kind of email is this, if any? For state changes we email
+  // only on the two customer-visible transitions.
+  let kind = null;
+  if (action === "reply-ticket") kind = "reply";
+  else if (action === "change-ticket-state") {
+    const newState = String(clientBody?.state ?? "");
+    if (newState === "resolved") kind = "resolved";
+    else if (newState === "closed") kind = "closed";
+  }
+  if (!kind) return; // e.g. state → awaiting_customer: silent
+
+  // Idempotency key: the message id (reply) or the ticket+state pair
+  // (state change). An honest retry produces the same key and
+  // short-circuits the send.
+  let dedupKey;
+  if (kind === "reply") {
+    const msgID = parsed?.message?.id;
+    if (!msgID) return; // response shape unexpected — silent skip
+    dedupKey = `notify_dedup:reply:${msgID}`;
+  } else {
+    dedupKey = `notify_dedup:${kind}:${ticketID}`;
+  }
+  // Throttle window: at most one email per (account, ticket) per 5
+  // minutes, regardless of kind. Bursts (reply→resolve→close within
+  // seconds) coalesce; the customer sees the FIRST admin action,
+  // then a quiet window, then whatever admin did next.
+  const throttleKey = `notify_throttle:${accountID}:${ticketID}`;
+
+  // Read both gates in parallel — narrows the check-time window
+  // against a concurrent burst.
+  const [dedupHit, throttleHit] = await Promise.all([
+    env.DIRECTORY.get(dedupKey),
+    env.DIRECTORY.get(throttleKey),
+  ]);
+  if (dedupHit || throttleHit) return;
+
+  // RESERVE dedup + throttle BEFORE the slow work (contact fetch +
+  // EMAIL.send, jointly hundreds of ms). This is what actually makes
+  // the anti-burst guarantee stick: a CLI retry of a failed reply
+  // (cell inserts a fresh message id — not idempotent — but the
+  // throttleKey is msgID-independent) reads the throttle mid-flight
+  // and short-circuits before firing a second email.
+  //
+  // Fail-safe direction on KV write error: DON'T send. Better to
+  // miss one notification than to send two. Promise.all keeps the
+  // two puts close together so a mid-put isolate-tear leaves at
+  // most one reserved slot instead of a stuck dedup with no
+  // throttle (which would weaken burst protection for the next 5m).
+  //
+  // Residual race: two admin actions arriving within a few ms of
+  // each other can both pass the check + both write the reserve +
+  // both send. That window is now bounded by KV write latency, not
+  // send latency, so it's shrunk from hundreds of ms to a handful.
+  // Truly-concurrent-burst elimination would need a Durable Object
+  // per (account, ticket) — deferred to a later slice, since the
+  // realistic burst pattern (an admin firing sequential CLI
+  // commands) is now closed.
+  try {
+    await Promise.all([
+      env.DIRECTORY.put(dedupKey, "1", { expirationTtl: 24 * 3600 }),
+      env.DIRECTORY.put(throttleKey, "1", { expirationTtl: 5 * 60 }),
+    ]);
+  } catch (e) {
+    console.log(
+      `support-notify KV reserve failed for ${accountID}/${ticketID} (${kind}): ${String(
+        e?.message ?? e
+      )}`
+    );
+    return;
+  }
+
+  const contact = await fetchAccountContact(env, cell, accountID);
+  if (!contact?.email || contact.status !== "active") return;
+
+  const body = kind === "reply" ? String(parsed?.message?.body ?? "") : "";
+  const emailArgs = renderSupportEmail(kind, {
+    accountID,
+    ticketID,
+    adminHandle: admin.handle,
+    body,
+  });
+  await env.EMAIL.send({
+    to: contact.email,
+    from: "no-reply@witwave.ai",
+    ...emailArgs,
+  });
+}
+
+// fetchAccountContact wraps the tenant :contact route. Provision-token
+// authenticated; short 15s timeout matches the other cell proxies.
+async function fetchAccountContact(env, cell, accountID) {
+  try {
+    const resp = await fetch(`${cell.endpoint}/v1/accounts/${accountID}:contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cell.provision_token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) {
+      await resp.text().catch(() => "");
+      return null;
+    }
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+// renderSupportEmail returns { subject, text, html } for one of the
+// three support notifications. Kept declarative — one object per kind
+// so wording drifts are visible in a single place.
+function renderSupportEmail(kind, params) {
+  const { accountID, ticketID, adminHandle, body } = params;
+  const showCmd = `ws account support show --ticket ${ticketID}`;
+  const replyCmd = `ws account support reply --ticket ${ticketID} --stdin`;
+  const openCmd = `ws account support open`;
+
+  const preview = (() => {
+    if (!body) return "";
+    const clean = body.replace(/\s+/g, " ").trim();
+    if (clean.length <= 400) return clean;
+    return clean.slice(0, 400) + "…";
+  })();
+
+  const variants = {
+    reply: {
+      title: "Support replied to your ticket",
+      subject: `Support replied to your ticket ${ticketID}`,
+      opening: `${adminHandle} from Witself support replied to your ticket.`,
+      cta: replyCmd,
+      ctaLabel: "Reply",
+    },
+    resolved: {
+      title: "Your support ticket was marked resolved",
+      subject: `Ticket ${ticketID} marked resolved`,
+      opening: `${adminHandle} from Witself support marked your ticket as resolved.`,
+      cta: `ws account support close --ticket ${ticketID}`,
+      ctaLabel: "Close it out",
+    },
+    closed: {
+      title: "Your support ticket was closed",
+      subject: `Ticket ${ticketID} closed`,
+      opening: `${adminHandle} from Witself support closed your ticket.`,
+      cta: openCmd,
+      ctaLabel: "Open a new ticket",
+    },
+  };
+  const v = variants[kind];
+  const previewHTML = preview
+    ? `<blockquote style="margin:0 0 20px;padding:12px 16px;border-left:3px solid ${EMAIL_BORDER};color:${EMAIL_MUTED};font-size:14px;">${escapeHTML(preview)}</blockquote>`
+    : "";
+  const html = renderEmail({
+    title: v.title,
+    preheader: v.opening,
+    body: `
+      <p style="margin:0 0 16px;">${escapeHTML(v.opening)}</p>
+      <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account · Ticket</p>
+      <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 20px;">${escapeHTML(accountID)} · ${escapeHTML(ticketID)}</div>
+      ${previewHTML}
+      <p style="margin:0 0 8px;">View the full thread:</p>
+      ${cliBlock(showCmd)}
+      <p style="margin:20px 0 8px;">${escapeHTML(v.ctaLabel)}:</p>
+      ${cliBlock(v.cta)}
+    `,
+  });
+  const textPreview = preview ? `\n\n> ${preview}\n` : "";
+  const text = `${v.opening}\n\nAccount: ${accountID}\nTicket:  ${ticketID}${textPreview}\n\nView the thread:\n\n  ${showCmd}\n\n${v.ctaLabel}:\n\n  ${v.cta}\n`;
+  return { subject: v.subject, text, html };
+}
+
 // handleAdminTickets serves the admin-token-authorized fan-out routes.
 // Every route re-runs adminAuthorized so a revoked admin's live tokens
 // stop working on the next request.
-async function handleAdminTickets(request, env, url) {
+async function handleAdminTickets(request, env, ctx, url) {
   const admin = await adminAuthorized(request, env);
   if (!admin) return err("unauthorized", 401);
 
@@ -787,6 +970,35 @@ async function handleAdminTickets(request, env, url) {
         }
       );
       const text = await cellRes.text();
+      // Fire-and-forget customer email on a successful admin action.
+      // waitUntil() lets the worker finish the email even after the
+      // admin's response has flushed — the notification is a
+      // best-effort side channel, never in the admin's critical path.
+      if (cellRes.ok && ctx?.waitUntil) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // no notification if the cell body wasn't JSON
+        }
+        if (parsed) {
+          ctx.waitUntil(
+            fireSupportNotification(env, {
+              action: route.action,
+              accountID,
+              cell,
+              ticketID,
+              admin,
+              clientBody,
+              parsed,
+            }).catch((e) =>
+              console.log(
+                `support-notify ${route.action} ${accountID}/${ticketID}: ${String(e?.message ?? e)}`
+              )
+            )
+          );
+        }
+      }
       // Pass status + parsed JSON through verbatim. The cell already
       // shapes errors the CLI can render; the Worker just relays.
       return new Response(text, {
@@ -3035,7 +3247,7 @@ async function streamToR2Multipart(bucket, key, stream, opts) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // Hot path: directory lookups from KV, never the container.
@@ -3157,7 +3369,7 @@ export default {
       ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_SUPPORT_POLICY_PATH.test(url.pathname)
     ) {
-      return handleAdminTickets(request, env, url);
+      return handleAdminTickets(request, env, ctx, url);
     }
 
     // Fleet-wide placement strategy (fleet-token authorized).
