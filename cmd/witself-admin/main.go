@@ -212,15 +212,17 @@ func tableWriter(header string) (io.Writer, func()) {
 	return os.Stdout, func() {}
 }
 
-// safeText strips ASCII/C0 control characters + DEL, matching the ws
-// CLI helper. Applied to any operator- or admin-supplied string before
+// safeText strips C0 control characters, DEL, and the C1 range
+// (U+0080–U+009F), matching the witself CLI helper. C1 matters:
+// U+009B is a single-rune CSI executed like ESC-[ by C1-honoring
+// terminals. Applied to any operator- or admin-supplied string before
 // it hits a terminal, so a hostile ticket body can't hijack the screen.
 func safeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' || r == '\n' {
 			return r
 		}
-		if r < 0x20 || r == 0x7F {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			return -1
 		}
 		return r

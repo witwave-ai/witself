@@ -892,18 +892,20 @@ func tabSafe(s string) string {
 	return s
 }
 
-// safeText strips C0 control characters and DEL from operator- or
-// admin-supplied strings before we print them, so a malicious ticket
-// body or subject can't smuggle ANSI/OSC escapes into a reader's
-// terminal (screen clear, window-title spoof, cursor jumps). Keeps \t
-// and \n so plain multi-line text and tab-indented content survive; use
-// tabSafe on top for single-line contexts.
+// safeText strips C0 control characters, DEL, and the C1 range
+// (U+0080–U+009F) from operator- or admin-supplied strings before we
+// print them, so a malicious ticket body or subject can't smuggle
+// ANSI/OSC escapes into a reader's terminal (screen clear, window-title
+// spoof, cursor jumps). C1 matters: U+009B is a single-rune CSI that
+// C1-honoring terminals execute exactly like ESC-[. Keeps \t and \n so
+// plain multi-line text and tab-indented content survive; use tabSafe
+// on top for single-line contexts.
 func safeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' || r == '\n' {
 			return r
 		}
-		if r < 0x20 || r == 0x7F {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			return -1
 		}
 		return r

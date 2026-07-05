@@ -377,6 +377,10 @@ func TestSafeTextStripsTerminalEscapes(t *testing.T) {
 		"plain ASCII stays":                    "plain ASCII stays",
 		"tabs\tand\nnewlines\tare kept":        "tabs\tand\nnewlines\tare kept",
 		"unicode π survives":                   "unicode π survives",
+		// C1 controls: U+009B is a single-rune CSI (ESC-[ equivalent),
+		// U+009D a single-rune OSC — C1-honoring terminals execute them.
+		"\u009b0mreset smuggled":    "0mreset smuggled",
+		"\u009d0;title spoof\u009c": "0;title spoof",
 	}
 	for in, want := range tests {
 		if got := safeText(in); got != want {

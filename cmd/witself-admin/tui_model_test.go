@@ -7,6 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/witwave-ai/witself/internal/client"
 )
@@ -169,9 +171,9 @@ func TestWatchUpdateFlow(t *testing.T) {
 // TestSanitizeText pins the terminal-injection defense in the thread
 // renderer — the same contract the CLIs enforce.
 func TestSanitizeText(t *testing.T) {
-	in := "\x1b[2J\x1b[Hpwned\x07 but\ttabs\nand newlines live"
+	in := "\x1b[2J\x1b[Hpwned\x07 but\ttabs\nand newlines live\u009b0m"
 	got := sanitizeText(in)
-	if strings.ContainsAny(got, "\x1b\x07") {
+	if strings.ContainsAny(got, "\x1b\x07\u009b") {
 		t.Fatalf("escape chars survived: %q", got)
 	}
 	if !strings.Contains(got, "\t") || !strings.Contains(got, "\n") {
@@ -455,19 +457,24 @@ func mkEvent(id, verb string, at time.Time) client.AdminEvent {
 func TestAppendEvent(t *testing.T) {
 	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	var tail []client.AdminEvent
-	tail = appendEvent(tail, mkEvent("evt_1", "account.activated", t0))
-	tail = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
+	tail, _ = appendEvent(tail, mkEvent("evt_1", "account.activated", t0))
+	tail, _ = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
 	if len(tail) != 2 || tail[1].ID != "evt_2" {
 		t.Fatalf("order: %v", tail)
 	}
-	// Duplicate dropped.
-	tail = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
-	if len(tail) != 2 {
-		t.Fatalf("duplicate not dropped: %d entries", len(tail))
+	// Duplicate dropped — and reported as NOT added.
+	var added bool
+	tail, added = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
+	if len(tail) != 2 || added {
+		t.Fatalf("duplicate not dropped: %d entries, added=%v", len(tail), added)
 	}
-	// Cap rolls the OLDEST off.
+	// Cap rolls the OLDEST off — and genuinely-new events still report
+	// added=true at the cap (the rate counters depend on it).
 	for i := 0; i < eventTailCap+10; i++ {
-		tail = appendEvent(tail, mkEvent(fmt.Sprintf("evt_x%d", i), "account.activated", t0.Add(time.Duration(i)*time.Second)))
+		tail, added = appendEvent(tail, mkEvent(fmt.Sprintf("evt_x%d", i), "account.activated", t0.Add(time.Duration(i)*time.Second)))
+		if !added {
+			t.Fatalf("new event %d at the cap must report added=true", i)
+		}
 	}
 	if len(tail) != eventTailCap {
 		t.Fatalf("cap: %d entries, want %d", len(tail), eventTailCap)
@@ -859,5 +866,65 @@ func TestVersionInFooter(t *testing.T) {
 	m2.width, m2.height = 120, 40
 	if !strings.Contains(m2.viewList(), "witself-admin vdev") {
 		t.Fatal("dev build must stamp vdev")
+	}
+}
+
+// TestSelectionHighlightFollowsFocus pins the pane-consistency rule
+// the operator flagged: a pane shows its selection ONLY while
+// focused. The cursor persists (tab back = same spot), but the
+// highlight goes quiet when focus moves on.
+func TestSelectionHighlightFollowsFocus(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m.tickets = []client.AdminTicket{mkTicket("tkt_1", "awaiting_admin", t0)}
+
+	if !m.supportRowHighlighted(0) {
+		t.Fatal("focused support pane must highlight its selection")
+	}
+	// Tab to events: support keeps its cursor but drops the highlight.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m2 := next.(model)
+	if m2.focus != paneEvents {
+		t.Fatalf("focus = %v", m2.focus)
+	}
+	if m2.supportRowHighlighted(0) {
+		t.Fatal("unfocused support pane must not highlight")
+	}
+	if m2.cursor != 0 {
+		t.Fatal("cursor must persist for tab-back")
+	}
+}
+
+// TestSelectedLineSpansPane pins the full-width selection bar: the
+// reverse-video highlight pads out to the pane edge instead of
+// stopping at the last character, and stays one unbroken SGR run —
+// an embedded reset would cut the bar short mid-line.
+func TestSelectedLineSpansPane(t *testing.T) {
+	// go test has no TTY, so lipgloss strips ANSI unless a profile is
+	// forced — without this the reverse-video assertions are vacuous.
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+	for _, tc := range []struct {
+		name  string
+		in    string
+		width int
+	}{
+		{"short row pads out", "abc", 24},
+		{"exact fit", strings.Repeat("x", 24), 24},
+		{"over-long truncates", strings.Repeat("y", 80), 24},
+		{"wide runes measured by cell", "日本語チケット", 24},
+	} {
+		got := selectedLine(tc.in, tc.width)
+		if w := lipgloss.Width(got); w != tc.width {
+			t.Errorf("%s: width = %d, want %d", tc.name, w, tc.width)
+		}
+		if !strings.HasPrefix(got, "\x1b[7m") {
+			t.Errorf("%s: not reverse-video: %q", tc.name, got)
+		}
+		if body := strings.TrimSuffix(got, "\x1b[0m"); strings.Contains(body, "\x1b[0m") {
+			t.Errorf("%s: embedded reset cuts the bar short: %q", tc.name, got)
+		}
 	}
 }

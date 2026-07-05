@@ -30,6 +30,7 @@ const (
 	modeEventDetail  // drill-down on one audit event
 	modeCellDetail   // drill-down on one fleet cell
 	modeTicketDetail // drill-down on one ticket's full record (i)
+	modeHealth       // fleet health charts (H)
 )
 
 // Dashboard panes, in tab-cycle order. The focused pane carries the
@@ -196,6 +197,13 @@ type model struct {
 	loading bool
 	now     func() time.Time // injectable clock for age rendering in tests
 
+	// Session-local health history feeding the fleet strip and the H
+	// drill-down: one sample per completed refresh cycle. eventsSeen
+	// counts live watch arrivals cumulatively; per-sample deltas give
+	// the event rate.
+	samples    []healthSample
+	eventsSeen int
+
 	// Self-upgrade state. binPath/installVia are resolved at startup;
 	// upgradeReadyTag is set once a newer binary is INSTALLED on disk
 	// (relaunch deferred while composing); relaunch non-nil tells
@@ -255,6 +263,18 @@ func (m model) withResume(r *resumeState) model {
 	m.resume = r
 	if r != nil && r.ThreadAccount != "" {
 		m.threadAccount, m.threadTicket = r.ThreadAccount, r.ThreadTicket
+	}
+	// The health view has no load dependency — restore it directly and
+	// CONSUME the resume. Leaving it armed would let a much-later
+	// thread load replay the stale cursor and a bogus "upgraded"
+	// status (the one-shot consumer lives on the thread-load path,
+	// which a health restore never triggers).
+	if r != nil && r.Mode == "health" {
+		m.mode = modeHealth
+		if r.UpgradedTo != "" {
+			m.status = "upgraded to " + r.UpgradedTo + " ✓"
+		}
+		m.resume = nil
 	}
 	return m
 }
@@ -342,8 +362,16 @@ func (m model) snapshotView(tag string) *resumeState {
 	case modeCompose:
 		r.Mode = "compose"
 		r.Draft = m.composer.Value()
+	case modeHealth:
+		r.Mode = "health"
 	}
-	r.ThreadAccount, r.ThreadTicket = m.threadAccount, m.threadTicket
+	// Thread coordinates ride along only when a thread is actually on
+	// screen — esc-from-detail leaves them set, and carrying the stale
+	// pair through a health-view upgrade would reload that old thread
+	// on restore and clobber the health view with modeDetail.
+	if r.Mode != "health" {
+		r.ThreadAccount, r.ThreadTicket = m.threadAccount, m.threadTicket
+	}
 	return r
 }
 
@@ -423,18 +451,22 @@ const eventTailCap = 200
 
 // appendEvent adds a live event to the tail (newest last), dropping
 // duplicates by id (the watch stream can re-emit around its
-// high-water mark) and rolling the oldest off past the cap.
-func appendEvent(events []client.AdminEvent, e client.AdminEvent) []client.AdminEvent {
+// high-water mark) and rolling the oldest off past the cap. The added
+// flag says whether e was genuinely new — callers must NOT infer that
+// from length growth, which stops at the cap and would freeze both the
+// event-rate counters and the paused-scroll anchor exactly when the
+// fleet is busiest.
+func appendEvent(events []client.AdminEvent, e client.AdminEvent) ([]client.AdminEvent, bool) {
 	for i := range events {
 		if events[i].ID == e.ID {
-			return events
+			return events, false
 		}
 	}
 	events = append(events, e)
 	if len(events) > eventTailCap {
 		events = events[len(events)-eventTailCap:]
 	}
-	return events
+	return events, true
 }
 
 // stateRank orders the support pane by lifecycle stage: what needs the
@@ -527,6 +559,14 @@ func (m model) selectedEvent() *client.AdminEvent {
 	}
 	idx := len(m.events) - 1 - minInt(m.eventScroll, len(m.events)-1)
 	return &m.events[idx]
+}
+
+// supportRowHighlighted mirrors the cells/events rule: a pane shows
+// its selection ONLY while it holds focus. The cursor itself persists
+// so tabbing back lands where you left off — it just goes visually
+// quiet when another window is active.
+func (m model) supportRowHighlighted(i int) bool {
+	return i == m.cursor && m.focus == paneSupport
 }
 
 // selectedID names the ticket currently under the cursor ("" when the
@@ -684,9 +724,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tickets = upsertTicket(m.tickets, msg.ticket)
 		m.anchorCursor(anchor)
 		m.status = fmt.Sprintf("activity on %s (%s)", msg.ticket.ID, msg.ticket.State)
-		// If the updated ticket is open in detail, refresh the thread.
+		// If the updated ticket is open in detail (or behind the
+		// composer), refresh the thread. Only THOSE modes — the old
+		// `mode != modeList` proxy also matched the health/event/cell
+		// views, whose stale thread coordinates would then reload and
+		// yank the operator into modeDetail without a keystroke.
 		var cmds []tea.Cmd
-		if m.mode != modeList && msg.ticket.ID == m.threadTicket {
+		if (m.mode == modeDetail || m.mode == modeCompose) && msg.ticket.ID == m.threadTicket {
 			cmds = append(cmds, m.loadThread(m.threadAccount, m.threadTicket))
 		}
 		cmds = append(cmds, m.awaitWatch())
@@ -703,6 +747,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.fleetCells = msg.cells
+		// One health sample per refresh cycle. Cells and tickets load
+		// in the same batch, so the ticket counts here are at worst one
+		// message behind — fine for a trend line. But NOT before the
+		// first ticket load lands (m.loading): sampling open=0 then
+		// would fabricate a ticket surge in the strip sparkline.
+		if !m.loading {
+			open, _ := openTicketCounts(m.tickets)
+			m.samples = appendSample(m.samples, healthSample{
+				at:       m.now(),
+				accounts: totalAccounts(msg.cells),
+				open:     open,
+				events:   m.eventsSeen,
+			})
+		}
 		return m, nil
 
 	case eventsSeedMsg:
@@ -722,11 +780,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case watchEventMsg:
-		before := len(m.events)
-		m.events = appendEvent(m.events, msg.event)
+		var added bool
+		m.events, added = appendEvent(m.events, msg.event)
+		if added {
+			m.eventsSeen++
+		}
 		// A paused (scrolled-up) tail holds its view steady while new
 		// events arrive below — classic tail -f pause semantics.
-		if m.eventScroll > 0 && len(m.events) > before {
+		if m.eventScroll > 0 && added {
 			m.eventScroll = minInt(m.eventScroll+1, len(m.events)-1)
 		}
 		return m, m.awaitEventWatch()
@@ -900,6 +961,10 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.mode = modeCellDetail
 			}
 		}
+	case "H":
+		if m.mode == modeList {
+			m.mode = modeHealth
+		}
 	case "esc":
 		switch m.mode {
 		case modeDetail:
@@ -915,6 +980,8 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case modeTicketDetail:
 			m.mode = m.ticketInfoReturn
 			m.detailTicket = nil
+		case modeHealth:
+			m.mode = modeList
 		}
 	case "i":
 		// Inspect the ticket RECORD (timestamps, category, SLA fields,
@@ -999,13 +1066,25 @@ func (m *model) relaunchIfReady() tea.Cmd {
 }
 
 // actionTarget resolves which ticket a state-change key applies to:
-// the open thread in detail mode, else the selected row.
+// the ticket ON SCREEN, or nothing. The old fallback to the last
+// opened thread meant R/C/O in the health/event/cell views could
+// silently mutate a ticket the operator wasn't looking at.
 func (m model) actionTarget() (accountID, ticketID string) {
-	if m.mode != modeList && m.threadAccount != "" {
-		return m.threadAccount, m.threadTicket
-	}
-	if t := m.selected(); t != nil {
-		return t.AccountID, t.ID
+	switch m.mode {
+	case modeList:
+		if t := m.selected(); t != nil {
+			return t.AccountID, t.ID
+		}
+	case modeDetail, modeCompose:
+		if m.threadAccount != "" {
+			return m.threadAccount, m.threadTicket
+		}
+	case modeTicketDetail:
+		// The record inspector shows detailTicket — act on THAT, not
+		// on whatever thread happened to be open earlier.
+		if m.detailTicket != nil {
+			return m.detailTicket.AccountID, m.detailTicket.ID
+		}
 	}
 	return "", ""
 }
@@ -1032,6 +1111,9 @@ func (m model) View() string {
 	case modeTicketDetail:
 		b.WriteString(m.viewTicketDetail())
 		b.WriteString("\n" + styDim.Render("esc back · q quit"))
+	case modeHealth:
+		b.WriteString(m.viewHealth())
+		b.WriteString("\n" + styDim.Render("esc back · g refresh · q quit"))
 	}
 	if badge := m.upgradeBadge(); badge != "" {
 		b.WriteString("\n" + badge)
@@ -1082,6 +1164,13 @@ func (m model) viewList() string {
 	footerH := 2
 	eventRows := maxInt((h-footerH)/4, 4)
 	topRows := maxInt(h-footerH-eventRows-6 /* 2×(border rows) + 2×(title) */, 4)
+	// Fleet health strip: 4 rows (2 border + title + one line).
+	// Auto-hides on short terminals — the working panes keep priority,
+	// same spirit as the footer's version-over-hints rule.
+	showStrip := topRows >= 12
+	if showStrip {
+		topRows -= 4
+	}
 
 	// Width budget: cells window ~1/3 (clamped), support the rest.
 	// paneBox outer width = content + 2 border + 2 padding.
@@ -1104,6 +1193,10 @@ func (m model) viewList() string {
 	// placement/version, counts. Anything denser overflows the narrow
 	// cells window and fitLine silently truncates the tail.
 	const cellPaneLines = 3
+	fleetMax := 0
+	for _, c := range m.fleetCells {
+		fleetMax = maxInt(fleetMax, c.AccountCount)
+	}
 	for i, c := range m.fleetCells {
 		dot := styOK.Render("●") // accepting
 		if !c.Accepting {
@@ -1115,11 +1208,16 @@ func (m model) viewList() string {
 		}
 		nameLine := fitLine(dot+" "+oneLine(c.Name), cellsW)
 		if m.focus == paneCells && i == m.cellCursor {
-			nameLine = stySelected.Render(fitLine("● "+oneLine(c.Name), cellsW))
+			nameLine = selectedLine("● "+oneLine(c.Name), cellsW)
 		}
 		countLine := "  " + styTitle.Render(fmt.Sprintf("%d accounts", c.AccountCount))
 		if c.ArchivedCount > 0 {
 			countLine += styWarn.Render(fmt.Sprintf(" · %d archived", c.ArchivedCount))
+		}
+		if fleetMax > 0 {
+			// Load gauge relative to the fleet's biggest cell — imbalance
+			// visible without reading the numbers.
+			countLine += " " + styDim.Render(barGauge(c.AccountCount, fleetMax, 8))
 		}
 		cellLines = append(cellLines,
 			nameLine,
@@ -1127,10 +1225,16 @@ func (m model) viewList() string {
 			fitLine(countLine, cellsW),
 		)
 	}
-	// Keep the selected cell in the window for fleets taller than the
-	// frame.
-	if selTop := m.cellCursor * cellPaneLines; selTop+cellPaneLines > topRows {
-		cellLines = cellLines[selTop+cellPaneLines-topRows:]
+	// Clip to the frame HERE, keeping the selected cell's block in
+	// view — paneBox clips overflow from the TOP, which would drop the
+	// highlight whenever the cursor sits near the top of a fleet list
+	// taller than the window (same rule as the support pane below).
+	if len(cellLines) > topRows {
+		lo := minInt(
+			maxInt(m.cellCursor*cellPaneLines+cellPaneLines-topRows, 0),
+			len(cellLines)-topRows,
+		)
+		cellLines = cellLines[lo : lo+topRows]
 	}
 
 	// ── support window ────────────────────────────────────
@@ -1158,6 +1262,7 @@ func (m model) viewList() string {
 		if start > 0 {
 			prevRank = stateRank(vis[start-1].State)
 		}
+		cursorLine := 0 // index of the cursor's row within supLines
 		for i := start; i < len(vis) && i < start+topRows; i++ {
 			t := vis[i]
 			// Stage boundary marker when a new group begins (skipped
@@ -1167,13 +1272,16 @@ func (m model) viewList() string {
 			}
 			prevRank = stateRank(t.State)
 			if i == m.cursor {
+				cursorLine = len(supLines)
+			}
+			if m.supportRowHighlighted(i) {
 				plain := fmt.Sprintf("%s %-6s %-18s %s %s",
 					plainStateBadge(t.State), t.Priority,
 					truncate(t.ID, 18),
 					truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
 					humanAge(m.now().Sub(t.LastActivityAt)),
 				)
-				supLines = append(supLines, stySelected.Render(fitLine(plain, supportW)))
+				supLines = append(supLines, selectedLine(plain, supportW))
 				continue
 			}
 			line := fmt.Sprintf("%s %-6s %-18s %s %s",
@@ -1184,6 +1292,17 @@ func (m model) viewList() string {
 				styDim.Render(humanAge(m.now().Sub(t.LastActivityAt))),
 			)
 			supLines = append(supLines, fitLine(line, supportW))
+		}
+		// Clip to the frame HERE, keeping the cursor's row in view:
+		// separator lines inflate the count past topRows, and paneBox's
+		// own clip-from-top would drop the topmost rows — including the
+		// selection itself when the cursor sits near the top.
+		if len(supLines) > topRows {
+			lo := 0
+			if cursorLine >= topRows {
+				lo = cursorLine - topRows + 1
+			}
+			supLines = supLines[lo : lo+topRows]
 		}
 	}
 
@@ -1204,7 +1323,7 @@ func (m model) viewList() string {
 		for i := start; i < end; i++ {
 			line := fitLine(renderEventLine(m.events[i], eventsW), eventsW)
 			if m.focus == paneEvents && i == selIdx {
-				line = stySelected.Render(fitLine(plainEventLine(m.events[i]), eventsW))
+				line = selectedLine(plainEventLine(m.events[i]), eventsW)
 			}
 			evLines = append(evLines, line)
 		}
@@ -1227,7 +1346,7 @@ func (m model) viewList() string {
 	eventsBox := paneBox(eventsTitle, evLines, eventsW, eventRows, m.focus == paneEvents)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsBox, supportBox)
-	hints := "tab focus · j/k move · enter open · i inspect · f filter · R resolve · C close · g refresh · q quit"
+	hints := "tab focus · j/k move · enter open · i inspect · f filter · H health · R resolve · C close · g refresh · q quit"
 	ver := m.versionTag()
 	// Version sits right-aligned in the corner — subdued, always
 	// visible. If the terminal is too narrow for both, the version
@@ -1239,7 +1358,12 @@ func (m model) viewList() string {
 	} else {
 		footer = fitLine(hints, maxInt(w-lipgloss.Width(ver)-1, 10)) + " " + ver
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, styDim.Render(footer))
+	rows := make([]string, 0, 4)
+	if showStrip {
+		rows = append(rows, paneBox("fleet", []string{m.healthStripLine(w - 4)}, w-4, 1, false))
+	}
+	rows = append(rows, top, eventsBox, styDim.Render(footer))
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 // versionTag is the subdued running-version stamp pinned to the
@@ -1283,6 +1407,18 @@ func fitLine(s string, width int) string {
 		return ""
 	}
 	return reflowtrunc.StringWithTail(s, uint(width), "…")
+}
+
+// selectedLine renders a row in reverse video padded out to the full
+// pane width, so the highlight reads as a solid bar to the panel edge
+// instead of stopping at the last character. Input must be plain text
+// (no ANSI) — an embedded SGR reset would cut the reverse short.
+func selectedLine(plain string, width int) string {
+	line := fitLine(plain, width)
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	return stySelected.Render(line)
 }
 
 // renderEventLine renders one audit event for the tail pane. Verb is
@@ -1501,15 +1637,18 @@ func renderThread(res client.GetSupportTicketResult, width int) string {
 	return b.String()
 }
 
-// sanitizeText strips C0 control chars + DEL (keeps \n, \t) — the same
-// terminal-injection defense the CLIs apply. A hostile ticket body must
-// not be able to redraw the TUI.
+// sanitizeText strips C0 control chars, DEL, and the C1 range (keeps
+// \n, \t) — the terminal-injection defense for everything
+// customer-controlled. C1 matters: U+009B is a single-rune CSI that
+// C1-honoring terminals execute exactly like ESC-[, so filtering only
+// C0 leaves the door open. A hostile ticket body must not be able to
+// redraw the TUI or cut a reverse-video run short.
 func sanitizeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
 		}
-		if r < 0x20 || r == 0x7F {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			return -1
 		}
 		return r
