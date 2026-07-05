@@ -283,3 +283,4 @@ brews:
       bin.install "witself-admin"
     test: |
       system "#{bin}/witself-admin", "version"
+

@@ -63,6 +63,8 @@ func run(args []string) int {
 		return ticketCmd(args[1:])
 	case "account":
 		return accountCmd(args[1:])
+	case "dashboard", "tui":
+		return dashboardCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself-admin: unknown command %q\n\n", args[0])
 		usage(os.Stderr)
@@ -80,6 +82,8 @@ func usage(w io.Writer) {
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
 	usageLine(w, "                                (support-policy)")
+	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (live support pane;")
+	usageLine(w, "                                self-upgrades and resumes its view)")
 	usageLine(w, "  witself-admin version       Print version information")
 	usageLine(w)
 	usageLine(w, "Tokens (managed dir first; env vars and flags override):")

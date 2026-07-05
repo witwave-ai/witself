@@ -14,6 +14,7 @@ brew install witwave-ai/tap/witself-infra
 
 # Fleet-admin CLI (talks to the control plane; not needed for tenants)
 brew install witwave-ai/tap/witself-admin
+# (the fullscreen operator dashboard ships inside it: `witself-admin dashboard`)
 
 # or curl | sh (verifies the SHA-256 checksum; installs ws by default)
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
