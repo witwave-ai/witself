@@ -953,3 +953,27 @@ func TestSelectedLineSpansPane(t *testing.T) {
 		}
 	}
 }
+
+// TestSupportRowColumnsAlign pins the fixed-width table layout of the
+// support pane: state/age/priority/id line up across rows, subject
+// fills the tail, and the age column right-aligns.
+func TestSupportRowColumnsAlign(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	a := mkTicket("tkt_aaaaaaaaaaaaaaaa", "awaiting_admin", t0.Add(-2*time.Hour))
+	a.Priority = "urgent"
+	b := mkTicket("tkt_bbbbbbbbbbbbbbbb", "resolved", t0.Add(-45*time.Minute))
+	b.Priority = "low"
+	ageA, prioA, idA, _ := supportCols(a, t0, 80)
+	ageB, prioB, idB, _ := supportCols(b, t0, 80)
+	if len(ageA) != len(ageB) || len(prioA) != len(prioB) || len(idA) != len(idB) {
+		t.Fatalf("column widths drift: %q/%q %q/%q %q/%q", ageA, ageB, prioA, prioB, idA, idB)
+	}
+	if ageA != "  2h" || ageB != " 45m" {
+		t.Fatalf("age right-align: %q %q", ageA, ageB)
+	}
+	// Subject budget shrinks with the pane but never below the floor.
+	_, _, _, subj := supportCols(a, t0, 50)
+	if len(subj) == 0 {
+		t.Fatal("subject must survive narrow panes")
+	}
+}

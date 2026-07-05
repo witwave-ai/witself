@@ -1274,23 +1274,22 @@ func (m model) viewList() string {
 			if i == m.cursor {
 				cursorLine = len(supLines)
 			}
+			age, prio, id, subject := supportCols(t, m.now(), supportW)
 			if m.supportRowHighlighted(i) {
-				plain := fmt.Sprintf("%s %-6s %-18s %s %s",
-					plainStateBadge(t.State), t.Priority,
-					truncate(t.ID, 18),
-					truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
-					humanAge(m.now().Sub(t.LastActivityAt)),
-				)
+				plain := fmt.Sprintf("%s  %s  %s  %s  %s",
+					plainStateBadge(t.State), age, prio, id, subject)
 				supLines = append(supLines, selectedLine(plain, supportW))
 				continue
 			}
-			line := fmt.Sprintf("%s %-6s %-18s %s %s",
-				stateBadge(t.State),
-				t.Priority,
-				truncate(t.ID, 18),
-				truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
-				styDim.Render(humanAge(m.now().Sub(t.LastActivityAt))),
-			)
+			prioStyled := prio
+			switch t.Priority {
+			case "urgent":
+				prioStyled = styErr.Render(prio)
+			case "high":
+				prioStyled = styWarn.Render(prio)
+			}
+			line := fmt.Sprintf("%s  %s  %s  %s  %s",
+				stateBadge(t.State), styDim.Render(age), prioStyled, id, subject)
 			supLines = append(supLines, fitLine(line, supportW))
 		}
 		// Clip to the frame HERE, keeping the cursor's row in view:
@@ -1419,6 +1418,26 @@ func selectedLine(plain string, width int) string {
 		line += strings.Repeat(" ", pad)
 	}
 	return stySelected.Render(line)
+}
+
+// Support-pane column widths — fixed, most relevant on the LEFT:
+// state(5) age(4) priority(6) id(20), then the subject fills whatever
+// width remains. Age is right-aligned so "2h" and "45m" line up.
+const (
+	supAgeW   = 4
+	supPrioW  = 6
+	supIDW    = 20
+	supFixedW = 5 + supAgeW + supPrioW + supIDW + 4*2 // + column gaps
+)
+
+// supportCols builds one ticket row's fixed-width column values,
+// shared by the styled and reverse-video renders so the selection can
+// never drift out of alignment with its neighbors.
+func supportCols(t client.AdminTicket, now time.Time, width int) (age, prio, id, subject string) {
+	return fmt.Sprintf("%*s", supAgeW, humanAge(now.Sub(t.LastActivityAt))),
+		fmt.Sprintf("%-*s", supPrioW, truncate(oneLine(t.Priority), supPrioW)),
+		fmt.Sprintf("%-*s", supIDW, truncate(t.ID, supIDW)),
+		truncate(oneLine(t.Subject), maxInt(width-supFixedW, 10))
 }
 
 // Event-tail column widths — fixed, so the pane reads as a table
