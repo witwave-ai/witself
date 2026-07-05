@@ -35,8 +35,21 @@ func (s *Store) CreateRealm(ctx context.Context, accountID, name string) (Realm,
 		return Realm{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+	// The plan-gate lock subsumes the mint lock's status check and also
+	// serializes concurrent creates, so the count below cannot race past the
+	// account's realm cap.
+	plan, limits, err := lockAccountForPlanGate(ctx, tx, accountID)
+	if err != nil {
 		return Realm{}, err
+	}
+	if _, capped := limits["realms"]; capped {
+		n, err := countLiveRealms(ctx, tx, accountID)
+		if err != nil {
+			return Realm{}, err
+		}
+		if err := checkPlanLimit(plan, limits, "realms", n); err != nil {
+			return Realm{}, err
+		}
 	}
 	if _, err = tx.Exec(ctx,
 		`INSERT INTO realms (id, account_id, name) VALUES ($1, $2, $3)`,

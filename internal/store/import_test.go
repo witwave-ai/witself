@@ -358,3 +358,83 @@ func (r *recordingExec) Exec(_ context.Context, sql string, _ ...any) (pgconn.Co
 	r.lastSQL = sql
 	return pgconn.CommandTag{}, r.err
 }
+
+// TestValidateAndRecordPlanShapes: the plan snapshot columns are decoded into
+// typed Go values on every read, so a malformed archive value would import
+// cleanly and then poison the account (every read and every gated create
+// fails). Content-hostile streams must land nothing — the shapes are refused
+// at validate time. Absent keys stay legal: archives from before migration
+// 0017 fall back to the column defaults.
+func TestValidateAndRecordPlanShapes(t *testing.T) {
+	const acc = "acc_target"
+	tests := []struct {
+		name   string
+		row    map[string]any
+		wantOK bool
+		want   string
+	}{
+		{
+			name: "well-formed snapshot is accepted",
+			row: map[string]any{"id": acc, "plan": "standard",
+				"plan_limits":   map[string]any{"agents": float64(250), "realms": float64(10)},
+				"plan_features": []any{"memory", "facts", "secrets"}},
+			wantOK: true,
+		},
+		{
+			name:   "absent plan keys are accepted (pre-0017 archives)",
+			row:    map[string]any{"id": acc, "status": "suspended"},
+			wantOK: true,
+		},
+		{
+			name:   "plan must be a string",
+			row:    map[string]any{"id": acc, "plan": 7},
+			wantOK: false, want: "plan must be a string",
+		},
+		{
+			name:   "null plan_limits is refused (NOT NULL column)",
+			row:    map[string]any{"id": acc, "plan_limits": nil},
+			wantOK: false, want: "plan_limits must be an object",
+		},
+		{
+			name:   "plan_limits must be an object",
+			row:    map[string]any{"id": acc, "plan_limits": "junk"},
+			wantOK: false, want: "plan_limits must be an object",
+		},
+		{
+			name:   "plan_limits values must be integers",
+			row:    map[string]any{"id": acc, "plan_limits": map[string]any{"agents": 2.5}},
+			wantOK: false, want: `plan_limits["agents"] must be an integer`,
+		},
+		{
+			name:   "plan_features must be an array",
+			row:    map[string]any{"id": acc, "plan_features": map[string]any{"x": true}},
+			wantOK: false, want: "plan_features must be an array",
+		},
+		{
+			name:   "plan_features entries must be strings",
+			row:    map[string]any{"id": acc, "plan_features": []any{"memory", 3}},
+			wantOK: false, want: "entries must be strings",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := newImportCtx(acc)
+			err := ic.validateAndRecord("accounts", tc.row)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("wantOK, got err = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("wanted error containing %q, got nil", tc.want)
+			}
+			if !errors.Is(err, ErrArchiveContent) {
+				t.Errorf("error not wrapped in ErrArchiveContent: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}

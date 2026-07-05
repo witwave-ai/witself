@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -76,6 +77,12 @@ type Account struct {
 	SuspendedFor    string
 	SuspendedReason string
 	SupportPolicy   string
+	// Plan snapshot, as applied by the control plane (see migration 0017):
+	// the plan label, the resolved account-wide limits (missing key =
+	// unlimited), and the included features.
+	Plan         string
+	PlanLimits   map[string]int64
+	PlanFeatures []string
 }
 
 // GetAccount reads one account's lifecycle record. Closed accounts are
@@ -83,19 +90,26 @@ type Account struct {
 func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, error) {
 	var a Account
 	var email, closedReason, suspendedFor, suspendedReason *string
+	var planLimits, planFeatures []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, email, display_name, status, created_at,
 		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason,
-		        support_policy
+		        support_policy, plan, plan_limits, plan_features
 		 FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
 			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason,
-			&a.SupportPolicy)
+			&a.SupportPolicy, &a.Plan, &planLimits, &planFeatures)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}
 	if err != nil {
 		return Account{}, fmt.Errorf("get account: %w", err)
+	}
+	if err := json.Unmarshal(planLimits, &a.PlanLimits); err != nil {
+		return Account{}, fmt.Errorf("decode plan limits: %w", err)
+	}
+	if err := json.Unmarshal(planFeatures, &a.PlanFeatures); err != nil {
+		return Account{}, fmt.Errorf("decode plan features: %w", err)
 	}
 	if email != nil {
 		a.Email = *email

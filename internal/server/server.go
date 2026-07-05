@@ -185,6 +185,22 @@ type Config struct {
 	// disagree, ErrAccountNotSuspended when there is nothing to lift.
 	ResumeAccountSystem func(ctx context.Context, accountID, category string) error
 
+	// SetAccountPlan, when set (with the provisioning pair), enables
+	// POST /v1/accounts/{id}:plan — the control plane applying a plan
+	// SNAPSHOT (plan label + resolved account-wide limits + feature list) to
+	// the account. The cell stores and enforces the snapshot exactly as
+	// computed — it never consults a plan catalog, so comped and
+	// custom-limit accounts need nothing special here. A missing limits key
+	// means unlimited. ErrNotFound for unknown accounts.
+	SetAccountPlan func(ctx context.Context, accountID, plan string, limits map[string]int64, features []string) error
+
+	// PlanInfo, when set, surfaces the deployment account's applied plan in
+	// GET /v1/capabilities: the plan label on the account block, the limits
+	// snapshot in "limits", and the feature list. Single-account backends
+	// wire this to the default account's record; without it capabilities
+	// reports no plan (self-host default).
+	PlanInfo func(ctx context.Context) (plan string, limits map[string]int64, features []string, err error)
+
 	// OpenSupportTicket / ListSupportTickets / GetSupportTicket /
 	// ReplySupportTicket / ChangeSupportTicketState, when set (with
 	// Authenticate), enable /v1/support/tickets. Any operator on the
@@ -384,6 +400,11 @@ type AccountRecord struct {
 	SuspendedFor    string     `json:"suspended_for,omitempty"`
 	SuspendedReason string     `json:"suspended_reason,omitempty"`
 	SupportPolicy   string     `json:"support_policy,omitempty"`
+	// Plan snapshot as applied by the control plane (empty = never applied:
+	// the self-host / pre-provisioning default, unlimited).
+	Plan         string           `json:"plan,omitempty"`
+	PlanLimits   map[string]int64 `json:"plan_limits,omitempty"`
+	PlanFeatures []string         `json:"plan_features,omitempty"`
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -480,6 +501,12 @@ var ErrTicketStateInvalid = errors.New("invalid ticket state transition")
 // ErrTicketInputInvalid signals a caller-side input violation (empty
 // subject, oversized body, unknown category, etc.) (-> 400).
 var ErrTicketInputInvalid = errors.New("invalid support ticket input")
+
+// ErrPlanLimit signals that creating a resource would exceed the account's
+// plan-limit snapshot (-> 403). The wrapped message carries the detail
+// ("plan limit reached: agents 25/25 on the free plan") and is surfaced
+// verbatim so the refusal explains itself and names the upgrade path.
+var ErrPlanLimit = errors.New("plan limit reached")
 
 // Agent is the API view of an agent.
 type Agent struct {
@@ -597,13 +624,13 @@ func apiMux(cfg Config) http.Handler {
 		_, _ = fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID))
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
 	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
 		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil {
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 	}
@@ -760,6 +787,9 @@ type feature struct {
 // when no database is configured.
 type accountInfo struct {
 	ID string `json:"id"`
+	// Plan snapshot surfaced from the account record (empty = none applied).
+	Plan         string   `json:"plan,omitempty"`
+	PlanFeatures []string `json:"plan_features,omitempty"`
 }
 
 type capabilities struct {
@@ -769,10 +799,22 @@ type capabilities struct {
 	Principal     any                `json:"principal"` // null until token auth exists
 	Features      map[string]feature `json:"features"`
 	Limits        map[string]any     `json:"limits"`
+	Billing       billingInfo        `json:"billing"`
 }
 
-func capabilitiesHandler(accountID string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+// billingInfo is the CLI's discovery block for plan/billing verbs: where to
+// send them (the control plane) or why they are unavailable. The value comes
+// from deployment CONFIG (WITSELF_BILLING_ENDPOINT), never from a billing
+// provider — cells stay billing-ignorant; they only advertise what their
+// deployment told them.
+type billingInfo struct {
+	Supported bool   `json:"supported"`
+	Endpoint  string `json:"endpoint,omitempty"` // the control plane's API base
+	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
+}
+
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		caps := capabilities{
 			SchemaVersion: "witself.v0",
@@ -790,10 +832,27 @@ func capabilitiesHandler(accountID string) http.HandlerFunc {
 				"messaging":       notImpl,
 				"audit":           notImpl,
 			},
-			Limits: map[string]any{},
+			Limits:  map[string]any{},
+			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
+		}
+		if ep := envOr("WITSELF_BILLING_ENDPOINT", ""); ep != "" {
+			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
 		}
 		if accountID != "" {
 			caps.Account = &accountInfo{ID: accountID}
+		}
+		if planInfo != nil && caps.Account != nil {
+			// Best-effort: capabilities is a discovery document, not a health
+			// probe — a store hiccup degrades to "no plan surfaced".
+			if plan, limits, features, err := planInfo(r.Context()); err == nil && plan != "" {
+				caps.Account.Plan = plan
+				for k, v := range limits {
+					caps.Limits[k] = v
+				}
+				if len(features) > 0 {
+					caps.Account.PlanFeatures = features
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(caps)
@@ -1065,6 +1124,35 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.v0",
 				"account":        acct,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.SetAccountPlan != nil {
+			var req struct {
+				Plan     string           `json:"plan"`
+				Limits   map[string]int64 `json:"limits"`
+				Features []string         `json:"features"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Plan) == "" {
+				writeJSONError(w, http.StatusBadRequest, "a plan is required")
+				return
+			}
+			err := cfg.SetAccountPlan(r.Context(), accountID, strings.TrimSpace(req.Plan), req.Limits, req.Features)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not set account plan")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"plan":           strings.TrimSpace(req.Plan),
+				"limits":         req.Limits,
+				"features":       req.Features,
 			})
 			return
 		}
@@ -1789,6 +1877,12 @@ func createRealmHandler(auth AuthFunc, create func(ctx context.Context, accountI
 			writeJSONError(w, http.StatusConflict, "realm already exists")
 			return
 		}
+		if errors.Is(err, ErrPlanLimit) {
+			// The message names the cap and the plan; pass it through so the
+			// refusal explains itself.
+			writeJSONError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "could not create realm")
 			return
@@ -1909,6 +2003,11 @@ func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountI
 			return
 		case errors.Is(err, ErrConflict):
 			writeJSONError(w, http.StatusConflict, "agent already exists")
+			return
+		case errors.Is(err, ErrPlanLimit):
+			// The message names the cap and the plan; pass it through so the
+			// refusal explains itself.
+			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not create agent")

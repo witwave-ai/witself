@@ -39,8 +39,36 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		return Agent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+	// The plan-gate lock subsumes the mint lock's status check and also
+	// serializes concurrent creates, so the count below cannot race past the
+	// account's agent cap (account-wide across realms).
+	plan, limits, err := lockAccountForPlanGate(ctx, tx, accountID)
+	if err != nil {
 		return Agent{}, err
+	}
+	// Resolve the realm BEFORE the plan gate: a bad realm id must stay a 404
+	// even when the account sits at its agent cap — a plan-limit refusal
+	// there would misdiagnose the failure and steer the caller toward an
+	// upgrade that cannot fix the request.
+	var realmOK bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM realms
+		   WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL
+		 )`, realmID, accountID).Scan(&realmOK); err != nil {
+		return Agent{}, fmt.Errorf("check realm: %w", err)
+	}
+	if !realmOK {
+		return Agent{}, ErrRealmNotFound
+	}
+	if _, capped := limits["agents"]; capped {
+		n, err := countLiveAgents(ctx, tx, accountID)
+		if err != nil {
+			return Agent{}, err
+		}
+		if err := checkPlanLimit(plan, limits, "agents", n); err != nil {
+			return Agent{}, err
+		}
 	}
 	var returned string
 	err = tx.QueryRow(ctx,

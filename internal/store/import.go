@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -43,6 +44,7 @@ var importColumns = map[string]map[string]bool{
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
 		"support_policy": true,
+		"plan":           true, "plan_limits": true, "plan_features": true,
 	},
 	"operators": {
 		"id": true, "account_id": true, "role": true, "is_root": true,
@@ -137,6 +139,41 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if v, ok := obj["is_default"]; ok {
 			if b, _ := v.(bool); b {
 				return badf("accounts row claims is_default=true")
+			}
+		}
+		// Plan-snapshot shape checks: these jsonb columns are decoded into
+		// typed Go values on every read (map[string]int64 / []string), so a
+		// malformed value would import fine and then poison the account —
+		// every GetAccount and every gated create fails until the control
+		// plane re-applies a snapshot. Content-hostile streams must land
+		// nothing, so refuse the shapes here (absent keys are fine: archives
+		// from before migration 0017 fall back to the column defaults).
+		if v, present := obj["plan"]; present {
+			if _, ok := v.(string); !ok {
+				return badf("accounts row plan must be a string")
+			}
+		}
+		if v, present := obj["plan_limits"]; present {
+			m, ok := v.(map[string]any)
+			if !ok {
+				return badf("accounts row plan_limits must be an object of integer limits")
+			}
+			for key, raw := range m {
+				f, ok := raw.(float64)
+				if !ok || f != math.Trunc(f) {
+					return badf("accounts row plan_limits[%q] must be an integer", key)
+				}
+			}
+		}
+		if v, present := obj["plan_features"]; present {
+			fs, ok := v.([]any)
+			if !ok {
+				return badf("accounts row plan_features must be an array of strings")
+			}
+			for _, raw := range fs {
+				if _, ok := raw.(string); !ok {
+					return badf("accounts row plan_features entries must be strings")
+				}
 			}
 		}
 		ic.accounts++

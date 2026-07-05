@@ -107,6 +107,9 @@ func serve() int {
 			if errors.Is(err, store.ErrRealmExists) {
 				return server.Realm{}, server.ErrConflict
 			}
+			if errors.Is(err, store.ErrPlanLimitReached) {
+				return server.Realm{}, planLimitError(err)
+			}
 			if err != nil {
 				return server.Realm{}, err
 			}
@@ -141,6 +144,8 @@ func serve() int {
 				return server.Agent{}, server.ErrNotFound
 			case errors.Is(err, store.ErrAgentExists):
 				return server.Agent{}, server.ErrConflict
+			case errors.Is(err, store.ErrPlanLimitReached):
+				return server.Agent{}, planLimitError(err)
 			case err != nil:
 				return server.Agent{}, err
 			}
@@ -299,6 +304,9 @@ func serve() int {
 				SuspendedFor:    a.SuspendedFor,
 				SuspendedReason: a.SuspendedReason,
 				SupportPolicy:   a.SupportPolicy,
+				Plan:            a.Plan,
+				PlanLimits:      a.PlanLimits,
+				PlanFeatures:    a.PlanFeatures,
 			}, nil
 		}
 		cfg.SuspendAccountOwner = func(ctx context.Context, accountID, operatorID, reason string) error {
@@ -570,6 +578,23 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.SetAccountPlan = func(ctx context.Context, accountID, plan string, limits map[string]int64, features []string) error {
+			err := st.SetAccountPlan(ctx, accountID, plan, limits, features)
+			if errors.Is(err, store.ErrAccountNotFound) {
+				return server.ErrNotFound
+			}
+			return err
+		}
+		// Surface the deployment account's applied plan in /v1/capabilities.
+		if acctID := cfg.AccountID; acctID != "" {
+			cfg.PlanInfo = func(ctx context.Context) (string, map[string]int64, []string, error) {
+				a, err := st.GetAccount(ctx, acctID)
+				if err != nil {
+					return "", nil, nil, err
+				}
+				return a.Plan, a.PlanLimits, a.PlanFeatures, nil
+			}
+		}
 		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
 			// Account provisioning: the control-plane -> cell trust link. The
 			// bootstrap tokens minted per signup are short-lived — the CLI
@@ -838,6 +863,14 @@ func toServerTicket(t store.Ticket) server.SupportTicket {
 		Correlation:     t.Correlation,
 		Metadata:        t.Metadata,
 	}
+}
+
+// planLimitError translates the store's plan-limit refusal into the server
+// sentinel while keeping the store's human-readable detail ("realms 1/1 on
+// the free plan") — the HTTP layer surfaces the message verbatim.
+func planLimitError(err error) error {
+	detail := strings.TrimPrefix(err.Error(), store.ErrPlanLimitReached.Error()+": ")
+	return fmt.Errorf("%w: %s", server.ErrPlanLimit, detail)
 }
 
 func toServerMessage(m store.TicketMessage) server.SupportTicketMessage {

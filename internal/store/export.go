@@ -70,7 +70,9 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'closed_at', closed_at, 'closed_reason', closed_reason,
 			  'suspended_at', suspended_at, 'suspended_for', suspended_for,
 			  'suspended_reason', suspended_reason,
-			  'support_policy', support_policy)
+			  'support_policy', support_policy,
+			  'plan', plan, 'plan_limits', plan_limits,
+			  'plan_features', plan_features)
 			FROM accounts WHERE id = $1`, arg: accountID},
 		&querySource{s: s, table: "operators", q: `
 			SELECT jsonb_build_object(
