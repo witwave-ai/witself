@@ -49,16 +49,47 @@ func (a *recApplier) last(t *testing.T) applyCall {
 	return a.calls[len(a.calls)-1]
 }
 
-type fitStub struct{ violations []string }
+type fitStub struct {
+	mu         sync.Mutex
+	violations []string
+}
 
-func (f fitStub) Fit(context.Context, string, plans.Plan) ([]string, error) {
+func (f *fitStub) set(v []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.violations = v
+}
+
+func (f *fitStub) Fit(context.Context, string, plans.Plan) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.violations, nil
+}
+
+// hookStore interposes on Put to deterministically interleave a competing
+// writer inside another operation's read-decide-write window.
+type hookStore struct {
+	Store
+	mu        sync.Mutex
+	beforePut func(Record)
+}
+
+func (h *hookStore) Put(ctx context.Context, r Record) error {
+	h.mu.Lock()
+	f := h.beforePut
+	h.beforePut = nil
+	h.mu.Unlock()
+	if f != nil {
+		f(r)
+	}
+	return h.Store.Put(ctx, r)
 }
 
 type harness struct {
 	m       *Manager
 	fake    *fake.Fake
 	store   *MemStore
+	hooked  *hookStore
 	applier *recApplier
 	ck      *clock
 	fit     *fitStub
@@ -73,16 +104,17 @@ func newHarness(t *testing.T, interactive bool) *harness {
 	ck := &clock{t: time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)}
 	f := fake.New(fake.Config{Prices: catalog.Prices(), Interactive: interactive, Now: ck.now})
 	st := NewMemStore()
+	hooked := &hookStore{Store: st}
 	ap := &recApplier{}
 	fit := &fitStub{}
 	m, err := NewManager(Config{
 		Catalog: catalog, Providers: map[string]billing.Provider{"fake": f}, Default: "fake",
-		Store: st, Applier: ap, Fit: fit, Now: ck.now,
+		Store: hooked, Applier: ap, Fit: fit, Now: ck.now,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	return &harness{m: m, fake: f, store: st, applier: ap, ck: ck, fit: fit}
+	return &harness{m: m, fake: f, store: st, hooked: hooked, applier: ap, ck: ck, fit: fit}
 }
 
 func (h *harness) record(t *testing.T, accountID string) Record {
@@ -94,7 +126,7 @@ func (h *harness) record(t *testing.T, accountID string) Record {
 	return r
 }
 
-func TestStatusDefaultsFree(t *testing.T) {
+func TestStatusIsReadOnly(t *testing.T) {
 	h := newHarness(t, false)
 	r, err := h.m.Status(context.Background(), "acct_1", "s@example.com")
 	if err != nil {
@@ -102,6 +134,10 @@ func TestStatusDefaultsFree(t *testing.T) {
 	}
 	if r.Entitled != plans.Free || r.Applied != plans.Free || r.Pending != nil || r.CustomerID != "" {
 		t.Fatalf("fresh record = %+v; want free/free, no pending, no customer", r)
+	}
+	// Probing an account id must not create phantom rows.
+	if all, _ := h.store.List(context.Background()); len(all) != 0 {
+		t.Fatalf("Status persisted %d record(s); reads must not write", len(all))
 	}
 }
 
@@ -147,6 +183,7 @@ func TestInteractiveUpgradeFlow(t *testing.T) {
 	}
 
 	// The payer completes checkout; the provider's events arrive (webhook).
+	h.ck.t = h.ck.t.Add(time.Minute)
 	events, err := h.fake.Complete(r.CustomerID)
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
@@ -241,7 +278,7 @@ func TestDowngradeFitBlocked(t *testing.T) {
 		t.Fatalf("RequestUpgrade: %v", err)
 	}
 
-	h.fit.violations = []string{"agents 112 > 25", "3 realms > 1", "14 secrets in use"}
+	h.fit.set([]string{"agents 112 > 25", "3 realms > 1", "14 secrets in use"})
 	_, err := h.m.RequestDowngrade(ctx, "acct_1", "s@example.com", "free")
 	if err == nil || !strings.Contains(err.Error(), "agents 112 > 25") {
 		t.Fatalf("blocked downgrade error = %v; want the violation report", err)
@@ -409,6 +446,7 @@ func TestProviderCutover(t *testing.T) {
 	if rOld.CustomerID != rNew.CustomerID {
 		t.Fatalf("test premise: expected colliding customer ids, got %q vs %q", rOld.CustomerID, rNew.CustomerID)
 	}
+	ck.t = ck.t.Add(time.Minute)
 	ev := []billing.Event{{Type: billing.EventSubscriptionCanceled, CustomerID: rOld.CustomerID, At: ck.t}}
 	if err := m2.OnEvents(ctx, "stripe", ev); err != nil {
 		t.Fatalf("OnEvents: %v", err)
@@ -418,5 +456,196 @@ func TestProviderCutover(t *testing.T) {
 	}
 	if r, _, _ := st.Get(ctx, "acct_new"); r.Entitled != plans.Free {
 		t.Fatalf("the stripe-scoped event should have reached the stripe-pinned record; entitled = %q", r.Entitled)
+	}
+}
+
+// TestCancelRacingActivation reproduces the review's HIGH finding: the payer
+// completes checkout in exactly the window between CancelPending's read and
+// its write. Without CAS the stale write landed last and the customer paid
+// for a plan the record denied; with CAS the cancel loses, re-reads, and
+// reports "nothing is pending" while the paid entitlement stands.
+func TestCancelRacingActivation(t *testing.T) {
+	h := newHarness(t, true)
+	ctx := context.Background()
+
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+
+	// Arm the interleave: inside CancelPending's write window, the checkout
+	// completes and its activation webhook is fully processed.
+	h.hooked.beforePut = func(Record) {
+		h.ck.t = h.ck.t.Add(time.Minute)
+		events, err := h.fake.Complete(r.CustomerID)
+		if err != nil {
+			t.Errorf("Complete: %v", err)
+		}
+		if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+			t.Errorf("OnEvents: %v", err)
+		}
+	}
+	err := h.m.CancelPending(ctx, "acct_1")
+	if err == nil || !strings.Contains(err.Error(), "nothing is pending") {
+		t.Fatalf("CancelPending racing activation = %v; want 'nothing is pending'", err)
+	}
+	final := h.record(t, "acct_1")
+	if final.Entitled != "standard" || final.Applied != "standard" {
+		t.Fatalf("record = %+v; the paid entitlement must survive the racing cancel", final)
+	}
+}
+
+// TestStaleCancelDropped reproduces the review's redelivery finding: a
+// cancellation whose partner timestamp predates the current entitlement (a
+// redelivered or out-of-order webhook) must be dropped, not clobber a newer
+// paid subscription.
+func TestStaleCancelDropped(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+
+	// Dunning cancels the subscription at T1...
+	t1 := h.ck.t.Add(time.Hour)
+	cancel := []billing.Event{{Type: billing.EventSubscriptionCanceled, CustomerID: r.CustomerID, At: t1}}
+	if err := h.m.OnEvents(ctx, "fake", cancel); err != nil {
+		t.Fatalf("OnEvents: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.Entitled != plans.Free {
+		t.Fatalf("entitled = %q after cancel; want free", r.Entitled)
+	}
+
+	// ...the customer re-subscribes at T2 > T1...
+	h.ck.t = t1.Add(time.Hour)
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("re-upgrade: %v", err)
+	}
+
+	// ...and the T1 cancellation is REDELIVERED (ack was lost). It is stale
+	// against the T2 entitlement and must be dropped.
+	if err := h.m.OnEvents(ctx, "fake", cancel); err != nil {
+		t.Fatalf("OnEvents redelivery: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.Entitled != "standard" || r.Applied != "standard" {
+		t.Fatalf("record = %+v; a stale redelivered cancel clobbered a newer paid subscription", r)
+	}
+}
+
+// TestApplyTimeFitCheck reproduces the review's missing-authoritative-check
+// finding: usage grows past the target's caps during the 30-day wait, so the
+// period-end downgrade must NOT be applied to the cell — the gap stays
+// visible (Entitled != Applied, ApplyBlocked) until the account fits.
+func TestApplyTimeFitCheck(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	periodEnd := h.ck.t.AddDate(0, 0, 30)
+	if _, err := h.m.RequestDowngrade(ctx, "acct_1", "s@example.com", "free"); err != nil {
+		t.Fatalf("RequestDowngrade: %v", err) // fits at request time
+	}
+
+	// Usage grows during the wait; at period end billing cancels regardless.
+	h.fit.set([]string{"agents 112 > 25"})
+	h.ck.t = periodEnd.Add(time.Hour)
+	if err := h.m.OnEvents(ctx, "fake", h.fake.ApplyDue()); err != nil {
+		t.Fatalf("OnEvents: %v", err)
+	}
+	r := h.record(t, "acct_1")
+	if r.Entitled != plans.Free {
+		t.Fatalf("entitled = %q; billing did end the subscription", r.Entitled)
+	}
+	if r.Applied != "standard" || !strings.Contains(r.ApplyBlocked, "agents 112 > 25") {
+		t.Fatalf("record = %+v; the cell must keep the old plan and the block must be visible", r)
+	}
+	if call := h.applier.last(t); call.plan != "standard" {
+		t.Fatalf("a free snapshot was pushed despite the failed fit check: %+v", call)
+	}
+
+	// The account is pruned; the next sweep converges.
+	h.fit.set(nil)
+	if err := h.m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	r = h.record(t, "acct_1")
+	if r.Applied != plans.Free || r.ApplyBlocked != "" {
+		t.Fatalf("record = %+v; want applied free with the block cleared", r)
+	}
+}
+
+// TestReplacingPendingCancelsProviderSide reproduces the review's finding
+// that replacing a pending change must also cancel it at the provider — a
+// "replaced" scheduled downgrade must not fire at period end.
+func TestReplacingPendingCancelsProviderSide(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	periodEnd := h.ck.t.AddDate(0, 0, 30)
+	if _, err := h.m.RequestDowngrade(ctx, "acct_1", "s@example.com", "free"); err != nil {
+		t.Fatalf("RequestDowngrade: %v", err)
+	}
+	// The customer changes their mind toward enterprise: the lead replaces
+	// the scheduled downgrade — INCLUDING at the provider.
+	if out, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "enterprise"); err != nil || out.Kind != "contact" {
+		t.Fatalf("RequestUpgrade enterprise = %+v, %v", out, err)
+	}
+
+	h.ck.t = periodEnd.Add(time.Hour)
+	if events := h.fake.ApplyDue(); len(events) != 0 {
+		t.Fatalf("the replaced downgrade still fired at the provider: %+v", events)
+	}
+	r := h.record(t, "acct_1")
+	if r.Entitled != "standard" || r.Pending == nil || r.Pending.Kind != PendingContact {
+		t.Fatalf("record = %+v; want standard entitlement with the enterprise lead pending", r)
+	}
+}
+
+// TestUnknownPlanEventSkipped: an activation for a plan the catalog does not
+// know must not corrupt entitlement.
+func TestUnknownPlanEventSkipped(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+
+	bogus := []billing.Event{{Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID, Plan: "mystery", At: h.ck.t.Add(time.Hour)}}
+	if err := h.m.OnEvents(ctx, "fake", bogus); err != nil {
+		t.Fatalf("OnEvents: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.Entitled != "standard" {
+		t.Fatalf("entitled = %q; an unknown-plan activation must be skipped", r.Entitled)
+	}
+}
+
+// TestCancelClearsPastDue: terminal dunning ends with a cancellation — the
+// account lands on free, not on free-and-eternally-past-due.
+func TestCancelClearsPastDue(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+
+	events := []billing.Event{
+		{Type: billing.EventPaymentFailed, CustomerID: r.CustomerID, At: h.ck.t.Add(time.Hour)},
+		{Type: billing.EventSubscriptionCanceled, CustomerID: r.CustomerID, At: h.ck.t.Add(2 * time.Hour)},
+	}
+	if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+		t.Fatalf("OnEvents: %v", err)
+	}
+	r = h.record(t, "acct_1")
+	if r.Entitled != plans.Free || r.PastDueSince != nil {
+		t.Fatalf("record = %+v; want free with PastDueSince cleared", r)
 	}
 }

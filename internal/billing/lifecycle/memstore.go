@@ -6,7 +6,8 @@ import (
 )
 
 // MemStore is the in-memory Store: the dev/test registry until the control
-// plane grows a database, and the reference for what a real Store must do.
+// plane grows a database, and the reference for what a real Store must do —
+// including the compare-and-swap contract on Record.Version.
 type MemStore struct {
 	mu     sync.Mutex
 	byAcct map[string]Record
@@ -43,10 +44,21 @@ func (s *MemStore) ByCustomer(_ context.Context, provider, customerID string) (R
 	return Record{}, false, nil
 }
 
-// Put implements Store.
+// Put implements Store with compare-and-swap on Version: a Put whose Version
+// does not match the stored record's fails with ErrStale (Version zero is
+// create-only), and a successful Put increments the stored Version — so a
+// writer holding a stale read can never silently clobber a newer write.
 func (s *MemStore) Put(_ context.Context, r Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	current, exists := s.byAcct[r.AccountID]
+	switch {
+	case !exists && r.Version != 0:
+		return ErrStale
+	case exists && current.Version != r.Version:
+		return ErrStale
+	}
+	r.Version++
 	s.byAcct[r.AccountID] = clone(r)
 	return nil
 }
