@@ -124,13 +124,18 @@ func run() int {
 //	WITSELF_CP_R2_ACCESS_KEY     R2 S3 credentials (Object Read & Write)
 //	WITSELF_CP_R2_SECRET_KEY
 //	WITSELF_CP_R2_PREFIX         key prefix (default "registry/")
-//	WITSELF_CP_DEV_TOKEN         INTERIM auth: the one bearer the plan verbs
-//	                             accept, for any account. Dev-only until the
-//	                             cell-introspection AuthFunc lands (the CP
-//	                             validating operator tokens against the
-//	                             account's cell via the directory). Refuses
-//	                             to start billing without it — there is no
-//	                             default-open mode.
+//	WITSELF_CP_CELL_ENDPOINT         production auth+apply: the single cell
+//	WITSELF_CP_CELL_PROVISION_TOKEN  the CP presents to the cell for :plan;
+//	                                 also introspects operator tokens via GET
+//	                                 /v1/whoami — the plan verbs authorize
+//	                                 only when the token's account matches
+//	                                 the request's. (Directory-backed
+//	                                 resolver replaces this when the fleet
+//	                                 grows past one cell.)
+//	WITSELF_CP_DEV_TOKEN         interim single-token auth for smoke tests
+//	                             without a cell — refused when a cell is
+//	                             configured (no dual-mode). One of these two
+//	                             is required — there is no default-open.
 //	WITSELF_CP_RECONCILE         sweep interval (Go duration, default 1m)
 func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	providerName := os.Getenv("WITSELF_CP_BILLING_PROVIDER")
@@ -152,7 +157,11 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		// The dev token doubles as the fake's webhook signature: the route
 		// is public, and an unsigned fake would accept forged entitlement
 		// events from anonymous callers.
-		provider = fake.New(fake.Config{Prices: catalog.Prices(), WebhookSecret: os.Getenv("WITSELF_CP_DEV_TOKEN")})
+		webhookSecret := os.Getenv("WITSELF_CP_DEV_TOKEN")
+		if webhookSecret == "" {
+			webhookSecret = os.Getenv("WITSELF_CP_CELL_PROVISION_TOKEN")
+		}
+		provider = fake.New(fake.Config{Prices: catalog.Prices(), WebhookSecret: webhookSecret})
 	default:
 		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: fake)", providerName)
 	}
@@ -172,9 +181,25 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		prefix = "registry/"
 	}
 
-	devToken := os.Getenv("WITSELF_CP_DEV_TOKEN")
-	if devToken == "" {
-		return errors.New("WITSELF_CP_DEV_TOKEN is required while billing is enabled (interim auth until cell introspection lands)")
+	// Single-cell fleet for now: one env-configured endpoint + provision
+	// token serves every account. The account->cell directory takes over
+	// when the fleet grows past one — same CellResolver seam.
+	var applier lifecycle.Applier = unwiredApplier{}
+	var authenticate cpserver.AuthFunc
+	cellEndpoint := os.Getenv("WITSELF_CP_CELL_ENDPOINT")
+	cellProvisionToken := os.Getenv("WITSELF_CP_CELL_PROVISION_TOKEN")
+	if cellEndpoint != "" && cellProvisionToken != "" {
+		resolve := cpserver.StaticCell(cellEndpoint, cellProvisionToken)
+		applier = cpserver.NewCellApplier(resolve)
+		authenticate = cpserver.CellAuthenticate(resolve)
+	} else {
+		devToken := os.Getenv("WITSELF_CP_DEV_TOKEN")
+		if devToken == "" {
+			return errors.New("billing needs either a cell (WITSELF_CP_CELL_ENDPOINT + WITSELF_CP_CELL_PROVISION_TOKEN) or the interim WITSELF_CP_DEV_TOKEN")
+		}
+		authenticate = func(_ context.Context, _ string, bearer string) (bool, error) {
+			return subtle.ConstantTimeCompare([]byte(bearer), []byte(devToken)) == 1, nil
+		}
 	}
 
 	manager, err := lifecycle.NewManager(lifecycle.Config{
@@ -182,18 +207,16 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		Providers: providers,
 		Default:   providerName,
 		Store:     lifecycle.NewR2Store(blobClient, prefix),
-		Applier:   unwiredApplier{},
+		Applier:   applier,
 	})
 	if err != nil {
 		return err
 	}
 	if err := cpserver.Register(mux, cpserver.Config{
-		Manager:   manager,
-		Catalog:   catalog,
-		Providers: providers,
-		Authenticate: func(_ context.Context, _ string, bearer string) (bool, error) {
-			return subtle.ConstantTimeCompare([]byte(bearer), []byte(devToken)) == 1, nil
-		},
+		Manager:      manager,
+		Catalog:      catalog,
+		Providers:    providers,
+		Authenticate: authenticate,
 	}); err != nil {
 		return err
 	}
