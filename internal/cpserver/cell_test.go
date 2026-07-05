@@ -131,3 +131,23 @@ func TestCellAuthenticateGranularity(t *testing.T) {
 		t.Fatal("invalid token was authorized")
 	}
 }
+
+// TestCellAuthenticateDistinguishesTransportFromAuth: a cell blip must not
+// present as a 403 fleet-wide auth incident — transport/5xx errors bubble up
+// (→ 500), only real auth denial reads as unauthorized.
+func TestCellAuthenticateDistinguishesTransportFromAuth(t *testing.T) {
+	// Point the resolver at a black hole to force a transport error.
+	auth := CellAuthenticate(StaticCell("http://127.0.0.1:1", "witself_prv_test"))
+	_, err := auth(context.Background(), "acct_1", "opr_x")
+	if err == nil {
+		t.Fatal("transport failure must propagate as an error (→ 500), not silently 403")
+	}
+
+	// A real 401 from the cell reads as "not authorized" (false, nil).
+	_, url := newFakeCell(t, "witself_prv_test", map[string]string{}) // no operators known
+	auth = CellAuthenticate(StaticCell(url, "witself_prv_test"))
+	ok, err := auth(context.Background(), "acct_1", "bogus")
+	if err != nil || ok {
+		t.Fatalf("invalid token = (%v, %v); want (false, nil)", ok, err)
+	}
+}

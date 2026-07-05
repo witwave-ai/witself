@@ -784,3 +784,71 @@ func TestRefusalSentinel(t *testing.T) {
 		t.Fatalf("nothing-pending = %v; want ErrRefusal", err)
 	}
 }
+
+// TestApplyIsSerializedPerAccount: concurrent apply() calls for the SAME
+// account must not overlap — otherwise a stale snapshot could reach the
+// cell after a fresher one. The mutex in Manager.apply is what enforces it.
+func TestApplyIsSerializedPerAccount(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+
+	// A slow applier that reports overlap if a second call enters while it
+	// is in flight.
+	var (
+		mu       sync.Mutex
+		inFlight int
+		overlap  bool
+	)
+	h.applier.calls = nil
+	slow := &slowApplier{onApply: func(string) {
+		mu.Lock()
+		inFlight++
+		if inFlight > 1 {
+			overlap = true
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}}
+	// Rebuild the Manager with the slow applier.
+	catalog, _ := plans.Load()
+	m, err := NewManager(Config{
+		Catalog: catalog, Providers: map[string]billing.Provider{"fake": h.fake}, Default: "fake",
+		Store: h.store, Applier: slow, Now: h.ck.now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+
+	// Fire two Reconciles concurrently — both would touch acct_1's apply().
+	// With per-account serialization they must NOT overlap.
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.Reconcile(ctx)
+		}()
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if overlap {
+		t.Fatal("concurrent apply for the same account overlapped — Apply must be serialized per account")
+	}
+}
+
+type slowApplier struct {
+	onApply func(accountID string)
+}
+
+func (s *slowApplier) Apply(_ context.Context, accountID, plan string, _ map[string]int64, _ []string) error {
+	_ = plan
+	s.onApply(accountID)
+	return nil
+}

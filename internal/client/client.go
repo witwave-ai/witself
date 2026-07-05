@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,11 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrUnauthorized wraps 401 responses so callers can distinguish invalid-auth
+// (this) from transport failure or 5xx (bare errors from doJSON). Reliable
+// discrimination via errors.Is — status-based, not message-based.
+var ErrUnauthorized = errors.New("unauthorized")
 
 // BootstrapResult is the outcome of a bootstrap login.
 type BootstrapResult struct {
@@ -151,7 +157,7 @@ func doJSONWithHeaders(ctx context.Context, method, url, token string, headers m
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return responseError(resp, "not authorized (check the token)")
+		return fmt.Errorf("%w: %w", ErrUnauthorized, responseError(resp, "not authorized (check the token)"))
 	case resp.StatusCode == http.StatusConflict:
 		return responseError(resp, "conflict")
 	case resp.StatusCode == http.StatusNotFound:

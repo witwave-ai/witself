@@ -157,10 +157,8 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		// The dev token doubles as the fake's webhook signature: the route
 		// is public, and an unsigned fake would accept forged entitlement
 		// events from anonymous callers.
+		// See the fake+cell refusal below (after cell config is read).
 		webhookSecret := os.Getenv("WITSELF_CP_DEV_TOKEN")
-		if webhookSecret == "" {
-			webhookSecret = os.Getenv("WITSELF_CP_CELL_PROVISION_TOKEN")
-		}
 		provider = fake.New(fake.Config{Prices: catalog.Prices(), WebhookSecret: webhookSecret})
 	default:
 		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: fake)", providerName)
@@ -188,6 +186,14 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	var authenticate cpserver.AuthFunc
 	cellEndpoint := os.Getenv("WITSELF_CP_CELL_ENDPOINT")
 	cellProvisionToken := os.Getenv("WITSELF_CP_CELL_PROVISION_TOKEN")
+	// The fake is dev-only. Refuse fake+cell: reusing the cell provision
+	// token as the fake's webhook signature would transmit that secret in a
+	// request header on every legit webhook delivery, and any intermediary
+	// logging headers (CF Worker access log, ingress) would capture a
+	// fleet-wide plan-mint credential.
+	if providerName == "fake" && cellEndpoint != "" {
+		return errors.New("WITSELF_CP_BILLING_PROVIDER=fake refused with a cell configured — the fake is dev-only; wire a real provider or run without a cell")
+	}
 	if cellEndpoint != "" && cellProvisionToken != "" {
 		resolve := cpserver.StaticCell(cellEndpoint, cellProvisionToken)
 		applier = cpserver.NewCellApplier(resolve)

@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/billing"
@@ -208,6 +209,17 @@ type Config struct {
 // Manager runs the plan state machine.
 type Manager struct {
 	cfg Config
+
+	// applyMu serializes apply() PER ACCOUNT. The state machine's own
+	// concurrency (CAS on Record.Version) prevents lost writes, but the
+	// PUSH to the cell is an unconditional POST — two concurrent applies
+	// for the same account (a webhook fold + a Reconcile sweep) could
+	// reach the cell out of order, and the cell has no idempotency token
+	// to reject the stale one. Serialization here keeps the local order
+	// authoritative. Multi-replica CPs would need a per-account lease
+	// (registry object with TTL), which lands with the fleet.
+	applyMuMap sync.Mutex
+	applyMu    map[string]*sync.Mutex
 }
 
 // NewManager validates cfg and returns a Manager.
@@ -230,7 +242,20 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg}, nil
+	return &Manager{cfg: cfg, applyMu: map[string]*sync.Mutex{}}, nil
+}
+
+// perAccountApplyMu returns (creating on demand) the mutex serializing apply
+// calls for accountID.
+func (m *Manager) perAccountApplyMu(accountID string) *sync.Mutex {
+	m.applyMuMap.Lock()
+	defer m.applyMuMap.Unlock()
+	mu, ok := m.applyMu[accountID]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.applyMu[accountID] = mu
+	}
+	return mu
 }
 
 // providerFor resolves the record's pinned provider, or the default when the
@@ -665,6 +690,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // Push failures are likewise left for Reconcile — the one state that never
 // rests. Errors are deliberately not returned: convergence is eventual.
 func (m *Manager) apply(ctx context.Context, accountID string) {
+	// Serialize per account. See applyMuMap on Manager.
+	mu := m.perAccountApplyMu(accountID)
+	mu.Lock()
+	defer mu.Unlock()
 	r, err := m.load(ctx, accountID, "")
 	if err != nil || r.Version == 0 || r.Entitled == r.Applied {
 		return

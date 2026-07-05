@@ -2,6 +2,7 @@ package cpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
@@ -49,6 +50,11 @@ func (a cellApplier) Apply(ctx context.Context, accountID, plan string, limits m
 // introspects the bearer against the account's cell — GET /v1/whoami with the
 // caller's own token — and authorizes only when the token resolves to the
 // SAME account the request targets.
+//
+// Failure classification: a token the cell rejects as invalid reads as "not
+// authorized" (false, nil → HTTP 403); transport failures and cell 5xx
+// propagate as errors (→ HTTP 500), so a cell blip does not present to every
+// user in the cell as a fleet-wide auth incident.
 func CellAuthenticate(resolve CellResolver) AuthFunc {
 	return func(ctx context.Context, accountID, bearer string) (bool, error) {
 		endpoint, _, err := resolve(ctx, accountID)
@@ -57,10 +63,10 @@ func CellAuthenticate(resolve CellResolver) AuthFunc {
 		}
 		_, tokenAccount, err := client.Whoami(ctx, endpoint, bearer)
 		if err != nil {
-			// An invalid token reads as "not authorized", not a server fault:
-			// whoami's 401 arrives here as an error either way, and refusing
-			// is the safe shape for both.
-			return false, nil
+			if errors.Is(err, client.ErrUnauthorized) {
+				return false, nil // invalid operator token
+			}
+			return false, err // transport / cell 5xx / timeout — bubble up
 		}
 		return tokenAccount == accountID, nil
 	}
