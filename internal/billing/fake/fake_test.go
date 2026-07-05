@@ -197,6 +197,14 @@ func TestHandleWebhook(t *testing.T) {
 	if _, err := f.HandleWebhook(r); err == nil {
 		t.Fatal("HandleWebhook without customer_id should error")
 	}
+
+	// Un-normalized types must be rejected, not passed through: the four
+	// EventType constants are the only facts a Provider may emit.
+	r = httptest.NewRequest("POST", "/v1/billing/webhook",
+		strings.NewReader(`{"customer_id":"`+id+`","type":"invoice.paid"}`))
+	if _, err := f.HandleWebhook(r); err == nil {
+		t.Fatal("HandleWebhook should reject event types outside the normalized four")
+	}
 }
 
 func TestErrors(t *testing.T) {
@@ -214,5 +222,18 @@ func TestErrors(t *testing.T) {
 	}
 	if _, err := f.Complete(id); err == nil {
 		t.Fatal("Complete with nothing pending should error")
+	}
+
+	// A typo'd downgrade target must error, not silently become free — that
+	// would cancel a paid subscription at period end. And a pricier target is
+	// not a downgrade.
+	if _, err := f.Subscribe(ctx, id, "standard"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if _, err := f.ScheduleDowngrade(ctx, id, "standrad"); err == nil {
+		t.Fatal("downgrade to an unknown plan should error, not silently mean free")
+	}
+	if _, err := f.ScheduleDowngrade(ctx, id, "team"); err == nil {
+		t.Fatal("downgrade to a pricier plan should error")
 	}
 }

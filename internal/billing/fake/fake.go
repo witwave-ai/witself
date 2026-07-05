@@ -232,6 +232,16 @@ func (f *Fake) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 	if body.CustomerID == "" || body.Type == "" {
 		return nil, fmt.Errorf("fake webhook: customer_id and type are required")
 	}
+	// Enforce the normalized-events contract: the four EventType constants are
+	// the only billing facts a Provider may emit. Rejecting unknown types here
+	// surfaces mis-mapped events as errors instead of letting them silently
+	// fall through the control plane's switch.
+	switch billing.EventType(body.Type) {
+	case billing.EventSubscriptionActivated, billing.EventPaymentFailed,
+		billing.EventPaymentRecovered, billing.EventSubscriptionCanceled:
+	default:
+		return nil, fmt.Errorf("fake webhook: unknown event type %q", body.Type)
+	}
 	return []billing.Event{{
 		Type:       billing.EventType(body.Type),
 		CustomerID: body.CustomerID,
