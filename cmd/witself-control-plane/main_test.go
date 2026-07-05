@@ -29,3 +29,22 @@ func TestSetupBillingRefusesFakeWithCell(t *testing.T) {
 		t.Fatalf("err = %v; want a message naming both fake and cell", err)
 	}
 }
+
+// TestSetupBillingRequiresStripeWebhookSecret pins the review's finding: a
+// stripe deploy without WITSELF_CP_STRIPE_WEBHOOK_SECRET boots cleanly, mints
+// checkout links, takes payments — and refuses every webhook delivery, so
+// paid activations are silently lost after Stripe's ~3-day retry horizon.
+// The refusal must fire before any Stripe API call (hermetic).
+func TestSetupBillingRequiresStripeWebhookSecret(t *testing.T) {
+	t.Setenv("WITSELF_CP_BILLING_PROVIDER", "stripe")
+	t.Setenv("WITSELF_CP_STRIPE_SECRET_KEY", "sk_test_hermetic")
+	t.Setenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET", "")
+
+	err := setupBilling(context.Background(), http.NewServeMux())
+	if err == nil {
+		t.Fatal("stripe without a webhook secret must be refused at boot")
+	}
+	if !strings.Contains(err.Error(), "WITSELF_CP_STRIPE_WEBHOOK_SECRET") {
+		t.Fatalf("err = %v; want a message naming the missing env var", err)
+	}
+}

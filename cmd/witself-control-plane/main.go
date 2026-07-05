@@ -24,6 +24,7 @@ import (
 	"github.com/witwave-ai/witself/internal/billing"
 	"github.com/witwave-ai/witself/internal/billing/fake"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
+	stripeprovider "github.com/witwave-ai/witself/internal/billing/stripe"
 	"github.com/witwave-ai/witself/internal/blob"
 	"github.com/witwave-ai/witself/internal/cpserver"
 	"github.com/witwave-ai/witself/internal/plans"
@@ -118,7 +119,11 @@ func run() int {
 // setupBilling wires the plan lifecycle when WITSELF_CP_BILLING_PROVIDER is
 // set. Configuration (all env, 12-factor):
 //
-//	WITSELF_CP_BILLING_PROVIDER  "fake" (Stripe lands as "stripe" later)
+//	WITSELF_CP_BILLING_PROVIDER  "fake" or "stripe"
+//	WITSELF_CP_STRIPE_SECRET_KEY      sk_live_/sk_test_ API key   (stripe)
+//	WITSELF_CP_STRIPE_WEBHOOK_SECRET  whsec_ signing secret       (stripe)
+//	WITSELF_CP_STRIPE_SUCCESS_URL     optional checkout return URLs
+//	WITSELF_CP_STRIPE_CANCEL_URL
 //	WITSELF_CP_R2_ENDPOINT       https://<account>.r2.cloudflarestorage.com
 //	WITSELF_CP_R2_BUCKET         registry bucket (witself-control-plane)
 //	WITSELF_CP_R2_ACCESS_KEY     R2 S3 credentials (Object Read & Write)
@@ -149,7 +154,31 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	}
 
 	var provider billing.Provider
+	var bootstrap func(context.Context) error
 	switch providerName {
+	case "stripe":
+		// The webhook secret is mandatory: without it the binary would boot
+		// cleanly, mint checkout links, take payments — and refuse every
+		// webhook delivery, silently losing paid activations once Stripe's
+		// ~3-day retry horizon passes. Fail at boot instead.
+		webhookSecret := os.Getenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET")
+		if webhookSecret == "" {
+			return errors.New("WITSELF_CP_STRIPE_WEBHOOK_SECRET is required with the stripe provider (whsec_...): without it webhooks are refused and paid activations are lost")
+		}
+		sp, err := stripeprovider.New(stripeprovider.Config{
+			SecretKey:     os.Getenv("WITSELF_CP_STRIPE_SECRET_KEY"),
+			WebhookSecret: webhookSecret,
+			Catalog:       catalog,
+			SuccessURL:    os.Getenv("WITSELF_CP_STRIPE_SUCCESS_URL"),
+			CancelURL:     os.Getenv("WITSELF_CP_STRIPE_CANCEL_URL"),
+		})
+		if err != nil {
+			return err
+		}
+		provider = sp
+		// Self-provision the catalog's products/prices (by lookup_key) so a
+		// plans.json change needs no dashboard clicks.
+		bootstrap = sp.EnsurePrices
 	case "fake":
 		// Headless dev provider: every action completes instantly, no
 		// partner account required. The Stripe provider replaces this by
@@ -161,7 +190,14 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		webhookSecret := os.Getenv("WITSELF_CP_DEV_TOKEN")
 		provider = fake.New(fake.Config{Prices: catalog.Prices(), WebhookSecret: webhookSecret})
 	default:
-		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: fake)", providerName)
+		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: fake, stripe)", providerName)
+	}
+	if bootstrap != nil {
+		// Best-effort: prices also resolve lazily on first checkout, so a
+		// provider outage at boot must not crash-loop the whole CP.
+		if err := bootstrap(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-control-plane: price bootstrap failed (will resolve lazily): %v\n", err)
+		}
 	}
 	providers := map[string]billing.Provider{providerName: provider}
 
