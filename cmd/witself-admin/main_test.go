@@ -78,14 +78,29 @@ func TestCpEndpointPrecedence(t *testing.T) {
 	}
 }
 
-// TestResolveAdminToken pins the flag > file > env order and the
-// friendly-error path when none is set.
+// TestResolveAdminToken pins the flag > file > env > managed-dir order
+// and the friendly-error path when nothing is set anywhere.
 func TestResolveAdminToken(t *testing.T) {
+	// Isolate from the developer's real ~/.witself — the managed-dir
+	// fallback would otherwise leak a genuine admin.token into the
+	// "no sources" case.
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
 	t.Setenv("WITSELF_ADMIN_TOKEN", "")
 	if _, err := resolveAdminToken("", ""); err == nil {
 		t.Error("no sources should error")
 	}
-	// env picked up when nothing else set.
+	// Managed file picked up when nothing else set.
+	if err := os.MkdirAll(filepath.Join(home, "tokens"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "tokens", "admin.token"), []byte("from-managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveAdminToken("", ""); err != nil || got != "from-managed" {
+		t.Errorf("managed dir: got %q err=%v", got, err)
+	}
+	// env beats the managed file.
 	t.Setenv("WITSELF_ADMIN_TOKEN", "from-env")
 	if got, err := resolveAdminToken("", ""); err != nil || got != "from-env" {
 		t.Errorf("env: got %q err=%v", got, err)
@@ -102,6 +117,33 @@ func TestResolveAdminToken(t *testing.T) {
 	}
 	if got, err := resolveAdminToken("", fp); err != nil || got != "from-file" {
 		t.Errorf("file beats env: got %q err=%v", got, err)
+	}
+}
+
+// TestResolveFleetToken pins the same ladder for the fleet secret:
+// flag > env > managed ~/.witself/tokens/fleet.token.
+func TestResolveFleetToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+	t.Setenv("WITSELF_FLEET_TOKEN", "")
+	if _, err := resolveFleetToken(""); err == nil {
+		t.Error("no sources should error")
+	}
+	if err := os.MkdirAll(filepath.Join(home, "tokens"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "tokens", "fleet.token"), []byte("fleet-managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveFleetToken(""); err != nil || got != "fleet-managed" {
+		t.Errorf("managed dir: got %q err=%v", got, err)
+	}
+	t.Setenv("WITSELF_FLEET_TOKEN", "fleet-env")
+	if got, err := resolveFleetToken(""); err != nil || got != "fleet-env" {
+		t.Errorf("env beats managed: got %q err=%v", got, err)
+	}
+	if got, err := resolveFleetToken("fleet-flag"); err != nil || got != "fleet-flag" {
+		t.Errorf("flag beats env: got %q err=%v", got, err)
 	}
 }
 

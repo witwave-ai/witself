@@ -1663,14 +1663,14 @@ func accountStatus(args []string) int {
 // output readable without pretending to be a table (a single row
 // through tableWriter looks like an accident).
 func printStatusPairs(pairs [][2]string) {
-	max := 0
+	width := 0
 	for _, p := range pairs {
-		if n := len(p[0]); n > max {
-			max = n
+		if n := len(p[0]); n > width {
+			width = n
 		}
 	}
 	for _, p := range pairs {
-		fmt.Printf("%-*s  %s\n", max+1, p[0]+":", p[1])
+		fmt.Printf("%-*s  %s\n", width+1, p[0]+":", p[1])
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -70,21 +71,28 @@ func run(args []string) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "witself-admin — the Witself fleet-admin CLI")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  witself-admin whoami        Verify an admin token and print its identity")
-	fmt.Fprintln(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
-	fmt.Fprintln(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
-	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close|states)")
-	fmt.Fprintln(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	fmt.Fprintln(w, "                                (support-policy)")
-	fmt.Fprintln(w, "  witself-admin version       Print version information")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Environment:")
-	fmt.Fprintln(w, "  WITSELF_CONTROL_PLANE   control-plane URL (default https://self.witwave.ai)")
-	fmt.Fprintln(w, "  WITSELF_ADMIN_TOKEN     admin bearer token for `whoami` and `ticket` commands")
-	fmt.Fprintln(w, "  WITSELF_FLEET_TOKEN     fleet-level shared secret for `admin` commands")
+	usageLine(w, "witself-admin — the Witself fleet-admin CLI")
+	usageLine(w)
+	usageLine(w, "Usage:")
+	usageLine(w, "  witself-admin whoami        Verify an admin token and print its identity")
+	usageLine(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
+	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
+	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
+	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
+	usageLine(w, "                                (support-policy)")
+	usageLine(w, "  witself-admin version       Print version information")
+	usageLine(w)
+	usageLine(w, "Tokens (managed dir first; env vars and flags override):")
+	usageLine(w, "  admin: ~/.witself/tokens/admin.token, WITSELF_ADMIN_TOKEN, --token-file, --token")
+	usageLine(w, "  fleet: ~/.witself/tokens/fleet.token, WITSELF_FLEET_TOKEN, --fleet-token")
+	usageLine(w)
+	usageLine(w, "Environment:")
+	usageLine(w, "  WITSELF_CONTROL_PLANE   control-plane URL (default https://self.witwave.ai)")
+	usageLine(w, "  WITSELF_HOME            managed dir root (default ~/.witself)")
+}
+
+func usageLine(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
 }
 
 // cpEndpoint resolves the control-plane URL: --endpoint > env > default.
@@ -98,8 +106,27 @@ func cpEndpoint(flagValue string) string {
 	return defaultControlPlane
 }
 
-// resolveAdminToken picks the admin token, in order: --token, --token-file,
-// WITSELF_ADMIN_TOKEN. Returns a friendly error when none is set.
+// managedTokenPath returns the token file's home in the managed
+// directory — same WITSELF_HOME-overridable ~/.witself root the ws
+// CLI uses, tokens live under tokens/. The zero-config daily-driver
+// path: `witself-admin admin mint` defaults --out here, and every
+// command reads it back without an env var or flag.
+func managedTokenPath(name string) (string, error) {
+	root := os.Getenv("WITSELF_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(home, ".witself")
+	}
+	return filepath.Join(root, "tokens", name), nil
+}
+
+// resolveAdminToken picks the admin token, in order: --token,
+// --token-file, WITSELF_ADMIN_TOKEN, then the managed file
+// (~/.witself/tokens/admin.token). Explicit sources override the
+// managed fallback so scripts can pin a different credential.
 func resolveAdminToken(tokenFlag, tokenFileFlag string) (string, error) {
 	if t := strings.TrimSpace(tokenFlag); t != "" {
 		return t, nil
@@ -110,11 +137,17 @@ func resolveAdminToken(tokenFlag, tokenFileFlag string) (string, error) {
 	if t := strings.TrimSpace(os.Getenv("WITSELF_ADMIN_TOKEN")); t != "" {
 		return t, nil
 	}
-	return "", fmt.Errorf("no admin token — set WITSELF_ADMIN_TOKEN, --token-file FILE, or --token TOKEN")
+	if p, err := managedTokenPath("admin.token"); err == nil {
+		if tok, err := readTokenFile(p); err == nil {
+			return tok, nil
+		}
+	}
+	return "", fmt.Errorf("no admin token — mint one with `witself-admin admin mint` (writes ~/.witself/tokens/admin.token), or set WITSELF_ADMIN_TOKEN / --token-file / --token")
 }
 
 // resolveFleetToken picks the fleet-level shared secret, in order:
-// --fleet-token, WITSELF_FLEET_TOKEN.
+// --fleet-token, WITSELF_FLEET_TOKEN, then the managed file
+// (~/.witself/tokens/fleet.token).
 func resolveFleetToken(tokenFlag string) (string, error) {
 	if t := strings.TrimSpace(tokenFlag); t != "" {
 		return t, nil
@@ -122,7 +155,12 @@ func resolveFleetToken(tokenFlag string) (string, error) {
 	if t := strings.TrimSpace(os.Getenv("WITSELF_FLEET_TOKEN")); t != "" {
 		return t, nil
 	}
-	return "", fmt.Errorf("no fleet token — set WITSELF_FLEET_TOKEN or --fleet-token TOKEN")
+	if p, err := managedTokenPath("fleet.token"); err == nil {
+		if tok, err := readTokenFile(p); err == nil {
+			return tok, nil
+		}
+	}
+	return "", fmt.Errorf("no fleet token — expected ~/.witself/tokens/fleet.token, WITSELF_FLEET_TOKEN, or --fleet-token TOKEN")
 }
 
 func readTokenFile(path string) (string, error) {
@@ -265,12 +303,31 @@ func adminMint(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
-	if *out != "" {
-		if err := os.WriteFile(*out, []byte(res.AdminToken+"\n"), 0o600); err != nil {
+	// Default destination is the managed dir — the same place
+	// resolveAdminToken reads back from, so mint-then-use needs no
+	// flags or env vars at all. --out overrides for a second admin's
+	// token you're handing to someone else.
+	dest := strings.TrimSpace(*out)
+	if dest == "" {
+		if p, err := managedTokenPath("admin.token"); err == nil {
+			if _, statErr := os.Stat(p); statErr == nil {
+				// Never silently clobber an existing credential —
+				// the old token would keep authenticating until
+				// revoked, orphaned with no local copy.
+				fmt.Fprintf(os.Stderr, "witself-admin: %s already exists — not overwriting; pass --out FILE for this token\n", p)
+			} else {
+				dest = p
+			}
+		}
+	}
+	if dest != "" {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-admin: could not create token dir: %v\n", err)
+		} else if err := os.WriteFile(dest, []byte(res.AdminToken+"\n"), 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "witself-admin: wrote admin but could not save token file: %v\n", err)
 			// Don't lose the token — fall through and print it too.
 		} else {
-			fmt.Fprintf(os.Stderr, "wrote admin token to %s (mode 0600)\n", *out)
+			fmt.Fprintf(os.Stderr, "wrote admin token to %s (mode 0600)\n", dest)
 		}
 	}
 	if *jsonOut {
@@ -588,7 +645,6 @@ func ticketWatch(args []string) int {
 	ep := cpEndpoint(*endpoint)
 	var hwm time.Time
 	first := true
-	stderr := os.Stderr
 
 	tick := func() {
 		f := filter
@@ -601,7 +657,7 @@ func ticketWatch(args []string) int {
 			// Don't die on a transient. Log to stderr and let the
 			// next tick try again — TUI parsers can filter their
 			// input to lines that parse as JSON.
-			fmt.Fprintf(stderr, "witself-admin: watch tick failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself-admin: watch tick failed: %v\n", err)
 			return
 		}
 		if first {
@@ -658,8 +714,7 @@ func emitWatchedTicket(t client.AdminTicket, jsonMode bool) {
 		if err != nil {
 			return
 		}
-		os.Stdout.Write(buf)
-		os.Stdout.Write([]byte("\n"))
+		_, _ = os.Stdout.Write(append(buf, '\n'))
 		return
 	}
 	fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
