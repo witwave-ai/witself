@@ -209,7 +209,7 @@ func whoamiCmd(args []string) int {
 		return 1
 	}
 	if *jsonOut {
-		return printJSON(me)
+		return printJSON(whoamiJSONMap(me))
 	}
 	fmt.Printf("%s\t%s\n", me.AdminID, me.Handle)
 	return 0
@@ -846,6 +846,28 @@ func readBodyFromFlags(inline, file string, stdin bool) (string, error) {
 	}
 }
 
+// JSON envelope builders. Every --json output the witwave-admin CLI
+// emits for a single- or multi-resource response uses one of these,
+// so the wrapped-envelope convention (documented in #27) is enforced
+// in exactly one place. Extracting these tiny helpers lets unit tests
+// pin the shape without needing to spin up the full CLI.
+//
+// Rule: single-resource responses go under a named envelope key that
+// names the KIND of resource (not just its fields). A TUI or agent
+// can route on the key alone without shape-sniffing.
+
+func whoamiJSONMap(me *client.AdminWhoami) map[string]any {
+	return map[string]any{"admin": me}
+}
+
+func supportPolicyReadJSONMap(res *client.SupportPolicyRead) map[string]any {
+	return map[string]any{"support_policy": res}
+}
+
+func supportPolicyChangeJSONMap(res *client.SupportPolicyChange) map[string]any {
+	return map[string]any{"support_policy_change": res}
+}
+
 // accountCmd handles `witwave-admin account ...`. Slice 1b.iv seeds
 // it with support-policy; future admin-only per-account settings hang
 // off the same tree.
@@ -897,7 +919,7 @@ func accountSupportPolicy(args []string) int {
 			return 1
 		}
 		if *jsonOut {
-			return printJSON(res)
+			return printJSON(supportPolicyReadJSONMap(res))
 		}
 		fmt.Printf("%s: %s\n", res.AccountID, res.SupportPolicy)
 		return 0
@@ -908,7 +930,7 @@ func accountSupportPolicy(args []string) int {
 		return 1
 	}
 	if *jsonOut {
-		return printJSON(res)
+		return printJSON(supportPolicyChangeJSONMap(res))
 	}
 	if res.PolicyFrom == res.PolicyTo {
 		fmt.Printf("%s: already %s (no change)\n", res.AccountID, res.PolicyTo)

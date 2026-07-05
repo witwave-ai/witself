@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,88 @@ func TestResolveAdminToken(t *testing.T) {
 	if got, err := resolveAdminToken("", fp); err != nil || got != "from-file" {
 		t.Errorf("file beats env: got %q err=%v", got, err)
 	}
+}
+
+// TestJSONEnvelopes pins the top-level wrapped-envelope shape for
+// every --json output witwave-admin emits, per #27. Drift here is a
+// UX-contract break for TUI (#29) and AI-agent consumers — they
+// route on the envelope key, so a renamed key silently drops every
+// downstream parser. This test asserts:
+//   - the top-level JSON is an object (never a bare struct/array/string)
+//   - the expected envelope key is present
+//   - no unexpected top-level keys appear
+func TestJSONEnvelopes(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    map[string]any
+		wantKeys []string
+	}{
+		{
+			name:     "whoami",
+			value:    whoamiJSONMap(&client.AdminWhoami{AdminID: "adm_abcd1234", Handle: "sarah"}),
+			wantKeys: []string{"admin"},
+		},
+		{
+			name: "support-policy read",
+			value: supportPolicyReadJSONMap(&client.SupportPolicyRead{
+				AccountID: "acc_1", SupportPolicy: "enabled",
+			}),
+			wantKeys: []string{"support_policy"},
+		},
+		{
+			name: "support-policy set",
+			value: supportPolicyChangeJSONMap(&client.SupportPolicyChange{
+				AccountID: "acc_1", PolicyFrom: "enabled", PolicyTo: "disabled",
+			}),
+			wantKeys: []string{"support_policy_change"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(buf, &got); err != nil {
+				t.Fatalf("unmarshal: %v — expected top-level object, got %s", err, string(buf))
+			}
+			if len(got) != len(tc.wantKeys) {
+				t.Errorf("top-level key count = %d, want %d (got keys: %v)",
+					len(got), len(tc.wantKeys), keys(got))
+			}
+			for _, k := range tc.wantKeys {
+				if _, ok := got[k]; !ok {
+					t.Errorf("missing envelope key %q; got keys: %v", k, keys(got))
+				}
+			}
+			// The domain fields must sit UNDER the envelope, not
+			// alongside it. If a caller collapsed the envelope, the
+			// domain fields would appear at top level.
+			for _, forbidden := range []string{"admin_id", "handle", "account_id", "support_policy", "policy_from", "policy_to"} {
+				if _, ok := got[forbidden]; ok && !contains(tc.wantKeys, forbidden) {
+					t.Errorf("domain field %q leaked to top level — envelope collapsed", forbidden)
+				}
+			}
+		})
+	}
+}
+
+func keys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // TestNewestActivity pins the pure high-water-mark advancement rule
