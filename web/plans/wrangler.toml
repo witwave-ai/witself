@@ -1,0 +1,5 @@
+# Cloudflare Worker serving the public Witself plan catalog (plans.json).
+# Deploy: npx wrangler deploy   (from this directory; CLOUDFLARE_API_TOKEN auth)
+name = "witself-plans"
+main = "index.js"
+compatibility_date = "2026-06-01"

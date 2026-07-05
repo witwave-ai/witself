@@ -1,0 +1,47 @@
+{
+  "schema_version": "witself.plans.v0",
+  "updated": "2026-07-04",
+  "currency": "USD",
+  "plans": [
+    {
+      "id": "free",
+      "name": "Free",
+      "price_monthly": 0,
+      "available": true,
+      "usage_billed": false,
+      "limits": { "agents": 25, "realms": 1 },
+      "features": ["agent-memory-limited"],
+      "summary": "Limited and capped. Agent memory for up to 25 agents in one realm."
+    },
+    {
+      "id": "standard",
+      "name": "Standard",
+      "price_monthly": 30,
+      "available": true,
+      "usage_billed": false,
+      "limits": { "agents": 250, "realms": 10 },
+      "features": ["agent-memory", "support"],
+      "summary": "Capped. 250 agents across 10 realms, support included."
+    },
+    {
+      "id": "team",
+      "name": "Team",
+      "price_monthly": 250,
+      "available": false,
+      "usage_billed": true,
+      "limits": null,
+      "features": [],
+      "summary": "Coming soon. Base price plus usage; details to follow."
+    },
+    {
+      "id": "enterprise",
+      "name": "Enterprise",
+      "price_monthly_min": 4000,
+      "available": false,
+      "usage_billed": true,
+      "limits": null,
+      "features": [],
+      "summary": "Coming soon. Minimum commitment plus usage; details to follow."
+    }
+  ]
+}
