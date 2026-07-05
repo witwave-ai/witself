@@ -10,7 +10,11 @@ DEV_OPERATOR  := .dev/operator.token
 DEV_PROVISION := witself_prv_dev-local-only
 ENDPOINT      := http://localhost:8080
 
-.PHONY: help db-up db-down db-reset serve login test build
+# Pin golangci-lint to the same version ci.yml installs so `make check`
+# and CI can never disagree about what clean means.
+GOLANGCI_LINT_VERSION := v2.12.2
+
+.PHONY: help db-up db-down db-reset serve login test build check
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -45,3 +49,14 @@ build: ## Build every ./cmd/... binary into ./bin (ws, witself-server, witself-c
 
 test: ## Run the Go tests
 	go test ./...
+
+check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lint) — run before every push
+	@unformatted="$$(gofmt -l .)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needs to run on:"; echo "$$unformatted"; exit 1; \
+	fi
+	go vet ./...
+	go build ./...
+	go test ./... -race
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	@echo "check: all gates green"
