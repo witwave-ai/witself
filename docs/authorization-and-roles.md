@@ -450,17 +450,17 @@ paths, same resulting role:
 2. **Self-hosted.** `witself-server bootstrap token` (or an equivalent deployment
    command, e.g. a Kubernetes admin Job) mints a **one-time, single-use, quickly-
    expiring, audited** bootstrap token with NO default admin password;
-   `ws setup --endpoint URL --bootstrap-token-file PATH` redeems it to create the
+   `witself setup --endpoint URL --bootstrap-token-file PATH` redeems it to create the
    first operator (`account_owner`), the account, realm(s), agents, and durable token
    files.
-3. **Local dev.** `ws realm init` creates the local realm and the first
+3. **Local dev.** `witself realm init` creates the local realm and the first
    local operator/admin context (`account_owner`-equivalent) when the realm is empty,
    able to create agents and write token files. When the sealed plane is enabled, local
    dev uses the `local-dev` KMS provider for envelope keys (see
    [key-hierarchy.md](key-hierarchy.md)); an open-plane-only deployment needs no KMS.
 
 After the first operator exists, ordinary account/realm/agent/token management flows
-through the public `ws` CLI under normal authz.
+through the public `witself` CLI under normal authz.
 
 **Least-privilege defaults.** Account invites land in `account_member` (account-read
 only); realm invites land in `realm:member`; agent tokens issue with the default agent

@@ -18,7 +18,7 @@ carve-out is the other (see [memory-model.md](memory-model.md) and
 
 Witself uses a hybrid encryption model for the sealed plane. Client-side decrypt
 is the default for clients that can hold or derive key material (the `ws`
-CLI, local `ws mcp serve`, `ws run`, local dev, and self-hosted/BYOK).
+CLI, local `witself mcp serve`, `witself run`, local dev, and self-hosted/BYOK).
 Managed token-only ephemeral pods hold only a bearer token and cannot unwrap a key
 locally, so their reveal/TOTP path runs over the capability-gated
 `server_side_decrypt` exception — which, for that deployment shape, is the everyday
@@ -31,9 +31,9 @@ Managed Witself Cloud and production self-hosted deployments store encrypted
 secret blobs remotely. The default secret-use path decrypts in the trusted client
 runtime:
 
-- `ws` CLI.
-- `ws mcp serve` when running locally beside an agent.
-- Local agent runtime performing `ws run`.
+- `witself` CLI.
+- `witself mcp serve` when running locally beside an agent.
+- Local agent runtime performing `witself run`.
 - Local development adapter after the local realm is unlocked.
 
 The backend authorizes access, returns encrypted material and required metadata,
@@ -67,7 +67,7 @@ Default sensitive field reveal:
 3. Backend records an audit event (`secret.reveal`) for the reveal request.
 4. Backend returns encrypted field material plus metadata needed by the client.
 5. CLI or local MCP runtime decrypts the field value.
-6. Only the explicit `ws secret reveal` command prints or returns the
+6. Only the explicit `witself secret reveal` command prints or returns the
    plaintext value.
 
 Default TOTP code generation:
@@ -77,9 +77,9 @@ Default TOTP code generation:
 3. Backend records an audit event (`totp.code`) for the TOTP request.
 4. Backend returns encrypted TOTP seed material plus TOTP metadata.
 5. CLI or local MCP runtime decrypts the seed and generates the current code.
-6. The generated code is returned only by the explicit `ws totp code` flow.
+6. The generated code is returned only by the explicit `witself totp code` flow.
 
-For client-side-decrypt clients (CLI, local `mcp serve`, `ws run`, BYOK) this
+For client-side-decrypt clients (CLI, local `mcp serve`, `witself run`, BYOK) this
 keeps the backend from seeing plaintext passwords, API keys, TOTP seeds, or
 generated TOTP codes. For managed token-only pods the same flows run server-mediated
 (`server_side_decrypt`): the server transiently sees the DEK and plaintext in
@@ -171,7 +171,7 @@ Clients that decrypt secret material must:
   (`witself://secret/<path>/<field>`), or runtime injection flows.
 - Avoid logging plaintext.
 - Avoid placing plaintext in errors.
-- Prefer `ws run` or reference resolution over printing secrets when a
+- Prefer `witself run` or reference resolution over printing secrets when a
   subprocess can consume them directly.
 - Mask injected values from stdout/stderr where practical.
 - Keep decrypted values in memory only as long as needed.

@@ -11,7 +11,7 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 )
 
-// TestSafeTextStripsTerminalEscapes pins parity with the ws CLI's
+// TestSafeTextStripsTerminalEscapes pins parity with the witself CLI's
 // safeText: any operator- or admin-controlled string that reaches this
 // binary's stdout must have C0 control chars + DEL stripped so a
 // malicious ticket body can't hijack the admin's terminal.

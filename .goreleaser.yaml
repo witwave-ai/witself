@@ -1,15 +1,15 @@
 version: 2
 
-project_name: ws
+project_name: witself
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: ws
-    main: ./cmd/ws
-    binary: ws
+  - id: witself
+    main: ./cmd/witself
+    binary: witself
     env:
       - CGO_ENABLED=0
     goos:
@@ -77,12 +77,12 @@ builds:
       - -s -w
 
 archives:
-  - id: ws
+  - id: witself
     ids:
-      - ws
+      - witself
     formats:
       - tar.gz
-    name_template: "ws_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "witself_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: witself-server
     ids:
       - witself-server
@@ -132,34 +132,34 @@ signs:
 # Dockerfiles only COPY the prebuilt binaries, so cross-arch builds need no Go
 # compilation or emulation.
 dockers:
-  - id: ws-amd64
+  - id: witself-amd64
     ids:
-      - ws
+      - witself
     goos: linux
     goarch: amd64
-    dockerfile: images/ws/Dockerfile
+    dockerfile: images/witself/Dockerfile
     use: buildx
     image_templates:
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
     build_flag_templates:
       - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=ws"
+      - "--label=org.opencontainers.image.title=witself"
       - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
-  - id: ws-arm64
+  - id: witself-arm64
     ids:
-      - ws
+      - witself
     goos: linux
     goarch: arm64
-    dockerfile: images/ws/Dockerfile
+    dockerfile: images/witself/Dockerfile
     use: buildx
     image_templates:
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
     build_flag_templates:
       - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=ws"
+      - "--label=org.opencontainers.image.title=witself"
       - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -198,14 +198,14 @@ dockers:
       - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
 
 docker_manifests:
-  - name_template: "ghcr.io/witwave-ai/images/ws:{{ .Version }}"
+  - name_template: "ghcr.io/witwave-ai/images/witself:{{ .Version }}"
     image_templates:
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/witwave-ai/images/ws:latest"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/witwave-ai/images/witself:latest"
     image_templates:
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/ws:{{ .Version }}-arm64"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
+      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
   - name_template: "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}"
     image_templates:
       - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
@@ -228,9 +228,9 @@ docker_signs:
     output: true
 
 brews:
-  - name: ws
+  - name: witself
     ids:
-      - ws
+      - witself
     directory: Formula
     repository:
       owner: witwave-ai
@@ -241,12 +241,14 @@ brews:
       # e.g. HOMEBREW_TAP_TOKEN="$(gh auth token)".
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/witwave-ai/witself"
-    description: "Witself CLI (ws)"
+    description: "Witself CLI"
     license: "FSL-1.1-ALv2"
     install: |
-      bin.install "ws"
+      bin.install "witself"
+      # Muscle-memory alias: `ws` keeps working forever.
+      bin.install_symlink "witself" => "ws"
     test: |
-      system "#{bin}/ws", "version"
+      system "#{bin}/witself", "version"
 
   - name: witself-infra
     ids:

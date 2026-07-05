@@ -796,9 +796,9 @@ async function fetchAccountContact(env, cell, accountID) {
 // so wording drifts are visible in a single place.
 function renderSupportEmail(kind, params) {
   const { accountID, ticketID, adminHandle, body } = params;
-  const showCmd = `ws account support show --ticket ${ticketID}`;
-  const replyCmd = `ws account support reply --ticket ${ticketID} --stdin`;
-  const openCmd = `ws account support open`;
+  const showCmd = `witself account support show --ticket ${ticketID}`;
+  const replyCmd = `witself account support reply --ticket ${ticketID} --stdin`;
+  const openCmd = `witself account support open`;
 
   const preview = (() => {
     if (!body) return "";
@@ -819,7 +819,7 @@ function renderSupportEmail(kind, params) {
       title: "Your support ticket was marked resolved",
       subject: `Ticket ${ticketID} marked resolved`,
       opening: `${adminHandle} from Witself support marked your ticket as resolved.`,
-      cta: `ws account support close --ticket ${ticketID}`,
+      cta: `witself account support close --ticket ${ticketID}`,
       ctaLabel: "Close it out",
     },
     closed: {
@@ -1650,7 +1650,7 @@ async function handleVerify(env, token) {
   const key = `verify:${await sha256hex(token)}`;
   const entry = await env.DIRECTORY.get(key, { type: "json" });
   if (!entry?.account_id || !entry?.cell || !ACCOUNT_ID.test(entry.account_id)) {
-    return htmlPage(404, "Link invalid or expired", "This verification link is invalid or has expired. If you already verified, your account is active — <code>ws account status</code> will confirm it. If the account was closed for missing the verification window, simply sign up again.");
+    return htmlPage(404, "Link invalid or expired", "This verification link is invalid or has expired. If you already verified, your account is active — <code>witself account status</code> will confirm it. If the account was closed for missing the verification window, simply sign up again.");
   }
   const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
   if (!cell?.provision_token || !cell?.endpoint) {
@@ -1680,9 +1680,9 @@ async function handleVerify(env, token) {
     await env.DIRECTORY.delete(`pending:${entry.account_id}`); // the reaper stands down
     if (body.activated === false) {
       // Any later link (a resent email, a second click) lands here.
-      return htmlPage(200, "Already verified", `Your account <code>${entry.account_id}</code> was already verified — nothing more to do. Back in your terminal, <code>ws account status</code> will show it active.`);
+      return htmlPage(200, "Already verified", `Your account <code>${entry.account_id}</code> was already verified — nothing more to do. Back in your terminal, <code>witself account status</code> will show it active.`);
     }
-    return htmlPage(200, "Account verified", `Your account <code>${entry.account_id}</code> is active. Back in your terminal, <code>ws account status</code> will confirm it — you're ready to create realms and agents.`);
+    return htmlPage(200, "Account verified", `Your account <code>${entry.account_id}</code> is active. Back in your terminal, <code>witself account status</code> will confirm it — you're ready to create realms and agents.`);
   }
   // Dead-link arms match the cell handler's EXACT error strings: an old cell
   // whose dispatcher predates :activate answers 404 with a DIFFERENT JSON
@@ -1957,7 +1957,7 @@ async function handleRecover(request, env, accountId) {
       crypto.getRandomValues(raw);
       const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
       try {
-        const cmd = `ws account recover --id ${accountId} --code ${code}`;
+        const cmd = `witself account recover --id ${accountId} --code ${code}`;
         await env.EMAIL.send({
           to: contact.email,
           from: "no-reply@witwave.ai",
@@ -2177,7 +2177,7 @@ async function handleChangeEmail(request, env, accountId) {
     crypto.getRandomValues(raw);
     const code = [...raw].map((n) => String(n % 1000).padStart(3, "0")).join("-");
     try {
-      const cmd = `ws account change-email --new-email ${newEmail} --code ${code}`;
+      const cmd = `witself account change-email --new-email ${newEmail} --code ${code}`;
       await env.EMAIL.send({
         to: newEmail,
         from: "no-reply@witwave.ai",
@@ -2230,10 +2230,10 @@ async function handleChangeEmail(request, env, accountId) {
         to: account.email,
         from: "no-reply@witwave.ai",
         subject: "Security alert: your Witself account email is being changed",
-        text: `A request was made to move a Witself account away from this address.\n\nAccount: ${accountId}\nMoving to: ${newEmail}\n\nIf this was you — nothing to do. Confirm from the new inbox to complete the change.\n\nIf this was NOT you, treat it as a compromise: someone else holds a working operator token for your account. Run this at your terminal right now — it rotates the owner credentials and stops the change:\n\n  ws account recover\n`,
+        text: `A request was made to move a Witself account away from this address.\n\nAccount: ${accountId}\nMoving to: ${newEmail}\n\nIf this was you — nothing to do. Confirm from the new inbox to complete the change.\n\nIf this was NOT you, treat it as a compromise: someone else holds a working operator token for your account. Run this at your terminal right now — it rotates the owner credentials and stops the change:\n\n  witself account recover\n`,
         html: renderEmail({
           title: "Your account email is being changed",
-          preheader: "Not you? Someone holds your credentials — run ws account recover now.",
+          preheader: "Not you? Someone holds your credentials — run witself account recover now.",
           body: `
             <p style="margin:0 0 20px;">A request was made to move a Witself account away from this address.</p>
             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:0 0 20px;">
@@ -2248,7 +2248,7 @@ async function handleChangeEmail(request, env, accountId) {
             </table>
             <p style="margin:0 0 16px;"><strong>If this was you</strong> — nothing to do. Confirm from the new inbox to complete the change.</p>
             <p style="margin:0 0 8px;"><strong>If this was <span style="color:#b91c1c;">not</span> you, treat it as a compromise</strong> — someone else holds a working operator token for your account. Run this at your terminal right now; it rotates the owner credentials and stops the change:</p>
-            ${cliBlock("ws account recover")}
+            ${cliBlock("witself account recover")}
           `,
         }),
       });
@@ -2338,7 +2338,7 @@ async function handleChangeEmail(request, env, accountId) {
       to: oldEmail,
       from: "no-reply@witwave.ai",
       subject: "Your Witself account email was changed",
-      text: `This is a confirmation: a Witself account has moved away from this address.\n\nAccount: ${accountId}\nNow at:  ${newEmail}\n\nIf the change was valid, no action is needed — this is the last email this address will receive for the account.\n\nIf the change was NOT valid, you can revert it. This link points the account back at this address and stays live for 48 hours:\n\n  ${undoLink}\n\nAfter reverting, run \`ws account recover\` at your terminal to rotate the owner credentials.\n`,
+      text: `This is a confirmation: a Witself account has moved away from this address.\n\nAccount: ${accountId}\nNow at:  ${newEmail}\n\nIf the change was valid, no action is needed — this is the last email this address will receive for the account.\n\nIf the change was NOT valid, you can revert it. This link points the account back at this address and stays live for 48 hours:\n\n  ${undoLink}\n\nAfter reverting, run \`witself account recover\` at your terminal to rotate the owner credentials.\n`,
       html: renderEmail({
         title: "Your account email was changed",
         preheader: "If the change wasn't valid, you can revert it within 48 hours.",
@@ -2357,7 +2357,7 @@ async function handleChangeEmail(request, env, accountId) {
           <p style="margin:0 0 16px;">If the change was valid, no action is needed — this is the last email this address will receive for the account.</p>
           <p style="margin:0 0 8px;">If the change was <strong>not</strong> valid, you can revert it — this points the account back at this address and stays live for <strong>48 hours</strong>:</p>
           ${ctaButton({ href: undoLink, label: "Revert the change" })}
-          <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After reverting, run <code style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;">ws account recover</code> at your terminal to rotate the owner credentials.</p>
+          <p style="margin:20px 0 0;color:${EMAIL_MUTED};font-size:14px;">After reverting, run <code style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;">witself account recover</code> at your terminal to rotate the owner credentials.</p>
         `,
       }),
     });
@@ -2410,14 +2410,14 @@ async function handleUndoEmail(env, token) {
   }
   const committed = await resp.json().catch(() => null);
   if (resp.status === 409) {
-    return htmlPage(409, "Undo link is stale", "The account's email has changed again since this link was issued. If you didn't authorize either change, use <code>ws account recover</code> to rotate the owner credentials.");
+    return htmlPage(409, "Undo link is stale", "The account's email has changed again since this link was issued. If you didn't authorize either change, use <code>witself account recover</code> to rotate the owner credentials.");
   }
   if (!resp.ok || committed?.email !== undo.old_email) {
     return htmlPage(503, "Temporarily unavailable", "The revert couldn't be applied just now. Please try the link again in a few minutes.");
   }
   await env.DIRECTORY.delete(key);
   await env.DIRECTORY.delete(`recover:${undo.account_id}`);
-  return htmlPage(200, "Email change reverted", `The account's email is back to <code>${undo.old_email}</code>. Run <code>ws account recover</code> from your terminal now to rotate the owner credentials.`);
+  return htmlPage(200, "Email change reverted", `The account's email is back to <code>${undo.old_email}</code>. Run <code>witself account recover</code> from your terminal now to rotate the owner credentials.`);
 }
 
 // handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's

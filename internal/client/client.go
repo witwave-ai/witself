@@ -1,4 +1,4 @@
-// Package client is the witself-server HTTP client used by the ws CLI. It is a
+// Package client is the witself-server HTTP client used by the witself CLI. It is a
 // thin wrapper over the /v1 API; this first slice covers the bootstrap login.
 package client
 

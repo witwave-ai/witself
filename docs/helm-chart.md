@@ -49,7 +49,7 @@ The chart is named after the component it deploys (`witself-server`), 1:1 with
 *umbrella* chart that aggregates components (`witself-server`, plus any later
 deployables such as a cross-realm relay) so `helm install witself` can stand up
 the whole product. MCP is intentionally **not** a separate chart: it is a
-frontend on the one core — served client-side by `ws mcp serve` next to the
+frontend on the one core — served client-side by `witself mcp serve` next to the
 agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
 `witself-server` (a values toggle, not a new deployable).
 

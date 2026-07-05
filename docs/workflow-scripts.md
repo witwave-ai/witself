@@ -21,14 +21,14 @@ values and TOTP seeds are never embedded, never recalled, never in the
 self-digest, never ingested, and never plaintext-exported. Plaintext leaves the
 sealed plane only through the explicit, audited value-returning operations
 (`secret reveal`, `totp code`, value-returning reference resolution, and
-`ws run`). See [secret-model.md](secret-model.md).
+`witself run`). See [secret-model.md](secret-model.md).
 
 ## 1. Install The CLI
 
 Homebrew:
 
 ```sh
-brew install witwave-ai/tap/ws
+brew install witwave-ai/tap/witself
 ws version
 ```
 
@@ -54,10 +54,10 @@ ws capabilities --json
 Expected behavior:
 
 - Install should not require a web dashboard.
-- `ws version` should work without auth.
-- `ws capabilities` should show the default managed Witself Cloud endpoint
+- `witself version` should work without auth.
+- `witself capabilities` should show the default managed Witself Cloud endpoint
   when no endpoint/profile is configured.
-- `ws capabilities` should report the active embedding provider, model, and
+- `witself capabilities` should report the active embedding provider, model, and
   vector dimensionality, and whether semantic recall is degraded.
 
 ## 2. First Managed Account, Realm, Agents, Promo Code, And Checkout
@@ -112,7 +112,7 @@ ws agent list
 
 Expected behavior:
 
-- `ws setup` defaults to managed Witself Cloud.
+- `witself setup` defaults to managed Witself Cloud.
 - Account, realm, and agent creation are idempotent by name.
 - Token files are owner-only and are not overwritten unless reuse or rotation
   was explicitly requested.
@@ -169,7 +169,7 @@ Expected behavior:
 
 - The CLI never accepts raw card numbers, bank credentials, wallet private keys,
   wallet seed phrases, or raw wallet credentials.
-- Hosted flows are resumable through `ws billing sessions show`.
+- Hosted flows are resumable through `witself billing sessions show`.
 - Crypto payment is a payment rail, not a Witself utility-token requirement.
 
 ## 4. Agent Runtime Starts From A Token File
@@ -502,7 +502,7 @@ ws message read msg_123 --json
 ws message ack msg_123 --json
 ```
 
-An agent loop drains its mailbox each turn — `ws message listen` blocks for new
+An agent loop drains its mailbox each turn — `witself message listen` blocks for new
 messages (with a timeout) so a long-running agent receives without busy-polling:
 
 ```sh
@@ -700,7 +700,7 @@ Expected behavior:
 
 ## 13. Generate A Password Without Storing It
 
-`ws password generate` produces credentials with consumer-grade controls and
+`witself password generate` produces credentials with consumer-grade controls and
 does not persist them. Generated values appear only in the command's output, never
 in logs, audit rows, or errors.
 
@@ -720,9 +720,9 @@ Expected behavior:
   `witself.password.generate`.
 - Generated values follow the same redaction rules as revealed secrets.
 
-## 14. Inject Secret References Into A Subprocess With `ws run`
+## 14. Inject Secret References Into A Subprocess With `witself run`
 
-`ws run` resolves `witself://secret/...` references and injects plaintext
+`witself run` resolves `witself://secret/...` references and injects plaintext
 into a child process's environment without printing it to stdout, so an agent uses
 a credential without ever surfacing it in context, memory, or logs. Each injected
 reference is authorized exactly like a reveal and is audited (`secret.reveal`) and
@@ -1033,17 +1033,17 @@ spec:
   guardrails.
 - `message send` must derive `from` from the token only, and reject any attempt
   to set the sender via input.
-- `ws export`/`ws import` need `--dry-run`, `--include-history`,
+- `witself export`/`witself import` need `--dry-run`, `--include-history`,
   `--include-sensitive` (with `--reason`), `--remap`, and dangling-reference
   reporting to be round-trippable.
-- Promo codes need to be first-class on `ws setup`, `ws account
-  create`, and `ws billing subscribe`.
-- Hosted provider flows need `--open`/`--no-open` and a generic `ws billing
+- Promo codes need to be first-class on `witself setup`, `witself account
+  create`, and `witself billing subscribe`.
+- Hosted provider flows need `--open`/`--no-open` and a generic `witself billing
   sessions show` command so the CLI owns browser handoff without a dashboard.
 - Token-file conflicts must remain explicit; setup should not overwrite token
   files during reruns unless token rotation was chosen.
 - `secret reveal` and `totp code` must be the only value-returning sealed-plane
-  ops besides `ws run` and the value-returning MCP `reference.resolve`, each
+  ops besides `witself run` and the value-returning MCP `reference.resolve`, each
   requiring `secret:reveal`/`totp:code` (or a grant/realm role), an audit
   `--reason` for cross-agent use, and a `secret.reveal`/`totp.code` audit event.
 - `secret create` needs flag/file/stdin field inputs (`--field`, `--field-file`,

@@ -48,7 +48,7 @@ These hold for every secret and every TOTP seed, with no per-deployment toggle:
   emit and the self-digest. See [context-hydration.md](context-hydration.md).
 - **Never ingested.** Secrets are not created by `CLAUDE.md`/`AGENTS.md` ingest.
   Importing identity context can never produce a secret.
-- **Never plaintext-exported.** `ws export` excludes the sealed plane.
+- **Never plaintext-exported.** `witself export` excludes the sealed plane.
   Secret backup is encrypted-only (envelope + KMS key identity, never plaintext);
   see [backup-and-recovery.md](backup-and-recovery.md).
 - **No plaintext at rest.** Sensitive values live only in envelope columns. Base64
@@ -57,7 +57,7 @@ These hold for every secret and every TOTP seed, with no per-deployment toggle:
 
 Plaintext leaves the sealed plane only through the explicit, audited
 value-returning operations: `secret reveal`, `totp code`, value-returning
-reference resolution, and `ws run` injection.
+reference resolution, and `witself run` injection.
 
 ## Secret Shape
 
@@ -287,7 +287,7 @@ leaving metadata reads available; `--read-only` disables all mutations. See
 ## Secret References
 
 A reference is a stable pointer to a sensitive (or non-sensitive) field that lets
-scripts, config files, MCP tools, and `ws run` name a value **without
+scripts, config files, MCP tools, and `witself run` name a value **without
 embedding plaintext**. Secret references use the `witself://secret/...` family.
 
 Reference forms:
@@ -315,7 +315,7 @@ Reference rules:
 
 - A reference is resolvable without exposing its value (it is safe to store in
   config and logs). It resolves to plaintext only through an explicit,
-  value-returning operation: `secret reveal`, `totp code`, `ws run`, or an
+  value-returning operation: `secret reveal`, `totp code`, `witself run`, or an
   authorized MCP `reference.resolve` (disabled under `--no-value-tools`).
 - A reference can never cross an owner boundary unless the authenticated principal
   holds permission (grant or realm role) for that owner. The `agent/` and `group/`
@@ -325,7 +325,7 @@ Reference rules:
 
 ## Password Generation
 
-`ws password generate` produces credentials without storing them, with
+`witself password generate` produces credentials without storing them, with
 consumer-grade controls:
 
 - Length, character classes, special-character inclusion, ambiguous-character
@@ -339,9 +339,9 @@ they appear only in the generating command's output, never in logs, audit rows,
 or errors. A common flow is generate → create/update a sensitive field in one
 authorized step so the value is enveloped immediately.
 
-## Runtime Injection (`ws run`)
+## Runtime Injection (`witself run`)
 
-`ws run` resolves `witself://` references and injects plaintext into a child
+`witself run` resolves `witself://` references and injects plaintext into a child
 process's environment or argv **without printing it to stdout**, so an agent can
 use a credential without ever surfacing it in context, memory, or logs:
 

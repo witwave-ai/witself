@@ -339,7 +339,7 @@ These are **decided** invariants for the collaboration substrate.
   requirement.
 - **Agent-directive `listen` instruction.** Agents are told to listen in their
   **agent directive** — the context-hydration teaching stanza gains an
-  instruction equivalent to: *"to hear, call the `ws listen` tool each
+  instruction equivalent to: *"to hear, call the `witself listen` tool each
   loop."* See [context-hydration.md](context-hydration.md).
 
 ## Surfaces
@@ -350,10 +350,10 @@ land in the follow-up contract pass; the surface deltas are:
 
 ### CLI — the `message` group gains `listen`
 
-- `ws message listen [--timeout <sec>] [--conversation <id>] [--json]` —
+- `witself message listen [--timeout <sec>] [--conversation <id>] [--json]` —
   long-poll: block up to `--timeout` seconds, return inbound messages, drain the
   mailbox. Sits next to the existing `message send` / `list` / `read` / `ack`.
-- `ws message send` extends `--to` to accept a realm-qualified
+- `witself message send` extends `--to` to accept a realm-qualified
   `witself://<realm-handle>/agent/<name>` (and `/group/<name>`); absent realm is
   local, unchanged.
 - Cross-realm sends and channel fan-out honor `--dry-run` (validate recipient,
@@ -432,7 +432,7 @@ Documented, not resolved in this pass.
 - [context-hydration.md](context-hydration.md) — the agent directive carrying the
   `listen` instruction.
 - [requirements.md](requirements.md) — master spec; addressing, scopes, naming
-  (incl. the `ws` CLI-command decision).
+  (incl. the `witself` CLI-command decision).
 - [post-v0-roadmap.md](post-v0-roadmap.md) — collaboration as the first post-v0
   epic and its sequencing.
 - [json-contracts.md](json-contracts.md), [api-contract.md](api-contract.md),

@@ -163,7 +163,7 @@ jobs:
           set -euo pipefail
 
           version="${GITHUB_REF_NAME#v}"
-          for image_name in ws witself-server; do
+          for image_name in witself witself-server; do
             image="ghcr.io/witwave-ai/images/${image_name}"
             sbom="$RUNNER_TEMP/${image_name}-${version}.spdx.json"
 

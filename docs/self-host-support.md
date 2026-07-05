@@ -39,7 +39,7 @@ plaintext export; reveal is the only audited value-returning path. See
 
 Notes:
 
-- Local development covers `ws realm init`, `ws setup --local`, and a
+- Local development covers `witself realm init`, `witself setup --local`, and a
   future `witself-server serve --dev` running the `local-dev` embedding
   provider. It is scaffolding, not a production mode.
 - Self-host preview covers the public `witself-server` image, Helm chart, and
@@ -273,7 +273,7 @@ only to the sealed plane; an open-plane-only deployment skips this section.
 
 ### Reveal and value-returning surfaces
 
-- `ws secret reveal` and `ws totp code` are the only audited,
+- `witself secret reveal` and `witself totp code` are the only audited,
   value-returning sealed-plane operations and run the reveal ceremony; the open
   plane has no reveal because memories and facts are plainly readable. Operators
   own the `secret:reveal` / `totp:code` scope assignments and realm-role grants.
@@ -306,7 +306,7 @@ billing or charging runs against it; operators wire any billing they want
 themselves. See [deployment-cells.md](deployment-cells.md).
 
 The CLI should surface unavailable self-hosted features through
-`ws capabilities` and deterministic `unsupported_operation` errors. The
+`witself capabilities` and deterministic `unsupported_operation` errors. The
 capability contract also reports the active embedding provider, model, and vector
 dimensionality so callers can detect degraded or unconfigured recall before
 running an operation.

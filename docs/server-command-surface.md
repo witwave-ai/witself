@@ -10,7 +10,7 @@ managed and self-hosted backend API deployments.
 - `ws` is for humans, agents, and MCP usage.
 - `witself-server` is for running and operating the backend API service.
 
-There should not be a public `ws server` subcommand for production service
+There should not be a public `witself server` subcommand for production service
 operation. Keeping the server process separate makes service packaging,
 container images, process permissions, and self-hosting documentation clearer.
 
@@ -274,7 +274,7 @@ deployments.
 
 ### `witself-server bootstrap token`
 
-Create a short-lived, single-use token that lets `ws setup --endpoint`
+Create a short-lived, single-use token that lets `witself setup --endpoint`
 create the first operator context.
 
 ```sh
@@ -341,7 +341,7 @@ sensitive config.
   on `ws`.
 - Do not turn `witself-server` into a sealed-plane value surface. The server
   process wraps and unwraps key material via KMS to operate the sealed plane, but
-  the audited secret-reveal ceremony, TOTP code generation, and `ws run`
+  the audited secret-reveal ceremony, TOTP code generation, and `witself run`
   runtime injection live exclusively on `ws`; sealed-plane values are never
   emitted by any `witself-server` command. See [secret-model.md](secret-model.md)
   and [totp-2fa.md](totp-2fa.md).

@@ -283,7 +283,7 @@ func Resolve(explicit string) (name string, acct Account, operatorToken string, 
 	}
 	a, ok := cfg.Accounts[name]
 	if !ok {
-		return "", Account{}, "", fmt.Errorf("no local account named %q (create one with `ws account create --name %s …`, or pass --endpoint/--token-file)", name, name)
+		return "", Account{}, "", fmt.Errorf("no local account named %q (create one with `witself account create --name %s …`, or pass --endpoint/--token-file)", name, name)
 	}
 	raw, tp, err := readTokenFile(name)
 	if err != nil {

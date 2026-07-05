@@ -60,7 +60,7 @@ not the production model.
 - Product name: Witself.
 - Avoid spelling the product as WitSelf.
 - Module path: `github.com/witwave-ai/witself`.
-- Binaries: `ws` (CLI and `ws mcp serve`) and `witself-server` (backend
+- Binaries: `ws` (CLI and `witself mcp serve`) and `witself-server` (backend
   API). There is no `server` subcommand on the main CLI.
 - CLI command name: the invoked command is `ws`. The backend binary stays
   `witself-server`. The `witself://` reference scheme is unaffected and never
@@ -155,7 +155,7 @@ gate, and the embedding provider is degradable.
 
 Sealed credential plane (a defined v0 slice, may stage after the core). The
 secret data model and lifecycle, secret references, TOTP/2FA, password generation,
-runtime injection (`ws run`), two-tier envelope encryption (CMK → per-realm
+runtime injection (`witself run`), two-tier envelope encryption (CMK → per-realm
 KEK → per-secret/field DEK), the reveal ceremony, secret grants and realm roles,
 and the sealed-plane carve-outs. This slice adds a **KMS dependency** that is a
 readiness gate only when the sealed plane is enabled (see
@@ -513,13 +513,13 @@ memory/fact core — never a bypass of validation, limits, scopes, or audit):
   prose paragraphs become memories, everything tagged `source=import:<file>`, with
   dedup/upsert preventing re-import duplication. This makes Witself a good citizen
   of the `AGENTS.md` ecosystem, not a competitor to it.
-- `bootstrap-instructions` — prints the paste-able teaching stanza; `ws setup
+- `bootstrap-instructions` — prints the paste-able teaching stanza; `witself setup
   --write-agents-md` installs it into the project `AGENTS.md`.
 
 Teaching layer (three reinforcing surfaces that all say the same thing, because a
 service the agent forgets to call is worthless):
 
-1. **MCP server `instructions` field** — returned on connect by `ws mcp
+1. **MCP server `instructions` field** — returned on connect by `witself mcp
    serve`. This is the canonical standing protocol (pinned verbatim in
    [mcp-tools.md](mcp-tools.md) and [context-hydration.md](context-hydration.md)):
    call `self show` and `memory recall` before acting; `remember` after learning a
@@ -783,14 +783,14 @@ stance. Export/import is tracked in [backup-and-recovery.md](backup-and-recovery
 
 Export posture:
 
-- `ws export` produces a structured, human-readable, plaintext export of an
+- `witself export` produces a structured, human-readable, plaintext export of an
   agent's self: all memories (with content, kind, tags, source, salience, links,
   timestamps, and **edit history**), all facts (with values, `primary` flags,
   `sensitive` flags, format hints, and edit history), and the agent's identity
   anchors.
 - For operators, export can include realm-level context: policies, security-group
   membership, and group-owned memories and facts.
-- Export is round-trippable: `ws import` restores an exported self into the
+- Export is round-trippable: `witself import` restores an exported self into the
   same or a different agent/realm, preserving primary flags, sensitive markers,
   links, and (where chosen) edit history.
 - Export defaults to JSON using the `witself.v0` schema version; a directory/file
@@ -802,7 +802,7 @@ Export posture:
 - Identity references (`witself://…`) are preserved on export and re-resolved on
   import; dangling references are reported, not silently dropped.
 
-Sealed-plane carve-out (#2): `ws export` excludes the sealed plane. Secret
+Sealed-plane carve-out (#2): `witself export` excludes the sealed plane. Secret
 field values and TOTP seeds are **never** present in the plaintext export, the
 self-digest, `digest emit`, or `ingest`. Secret backup is a separate,
 encrypted-only path (envelope ciphertext + KMS key identity, never plaintext)
@@ -844,7 +844,7 @@ Reference rules:
   reference resolves only when policy permits.
 - References used in memory `links[]` are validated at write time and re-checked at
   resolve time.
-- `ws reference parse` and `ws reference resolve` (CLI and MCP) expose
+- `witself reference parse` and `witself reference resolve` (CLI and MCP) expose
   reference handling deterministically.
 - Sealed-plane secret references are a separate, value-gated family with their own
   forms and resolution rules; see [Secret References](#secret-references). Open
@@ -867,7 +867,7 @@ secret material must honor all of them.
   `ingest` from `CLAUDE.md`/`AGENTS.md`/`GEMINI.md`. Credentials in those files are
   ignored, not absorbed. (Carve-out #4; see
   [context-hydration.md](context-hydration.md).)
-- **Never plaintext-exported.** `ws export` excludes the sealed plane.
+- **Never plaintext-exported.** `witself export` excludes the sealed plane.
   Identity (memory + fact) plaintext export stays the headline feature; secret
   backup is encrypted-only (envelope ciphertext + KMS key identity, never
   plaintext) behind an explicit, audited, separate flag. The self-digest, `digest
@@ -875,8 +875,8 @@ secret material must honor all of them.
   [Backup, Export, And Recovery](#backup-export-and-recovery) and
   [backup-and-recovery.md](backup-and-recovery.md).)
 - **Reveal-gated values.** Secret field values and TOTP codes are returned only by
-  the explicit, audited value-returning operations (`ws secret reveal`,
-  `ws totp code`, and value-returning `reference resolve`) under the reveal
+  the explicit, audited value-returning operations (`witself secret reveal`,
+  `witself totp code`, and value-returning `reference resolve`) under the reveal
   ceremony. The "no reveal ceremony / data is plainly readable" stance applies to
   the OPEN plane only; memories and facts have no reveal, secrets do. (Carve-out
   #3; see [Reveal and Value-Returning Operations](#reveal-and-value-returning-operations).)
@@ -973,7 +973,7 @@ require confirmation and an audit `--reason`.
 ### Secret References
 
 Witself supports stable sealed-plane references so scripts, config files, MCP
-tools, and `ws run` can point at a secret field without embedding plaintext.
+tools, and `witself run` can point at a secret field without embedding plaintext.
 The scheme is `witself://` (the rename of the former Witpass `wp://`), kept
 distinct from open-plane identity references by the `secret` segment.
 
@@ -995,7 +995,7 @@ Examples:
 Reference rules:
 
 - References resolve only through explicit value-returning paths — `secret reveal`,
-  `totp code`, `ws run`, or an authorized MCP `reference.resolve` — and
+  `totp code`, `witself run`, or an authorized MCP `reference.resolve` — and
   resolution is audited as a secret read.
 - Resolution enforces the same authorization as a direct reveal: a cross-agent or
   group reference resolves only when a grant or realm role permits it.
@@ -1036,14 +1036,14 @@ workflows. The generator supports length, character classes, special-character
 inclusion, ambiguous-character avoidance, human-readable passphrase-style
 generation, and machine-readable JSON output for unattended use.
 
-- Surface: `ws password generate` (CLI) and `witself.password.generate` (MCP,
+- Surface: `witself password generate` (CLI) and `witself.password.generate` (MCP,
   where policy allows).
 - Generated material is offered for storage as a sealed secret field; the
   generator does not write a plaintext value into the open plane.
 
-### Runtime Injection (`ws run`)
+### Runtime Injection (`witself run`)
 
-`ws run` resolves sealed-plane secret references and injects the resolved
+`witself run` resolves sealed-plane secret references and injects the resolved
 values into a child process's environment or arguments without printing plaintext.
 
 - It resolves `witself://secret/…` references the same way `secret reveal` does,
@@ -1125,9 +1125,9 @@ analysis, v0 crypto subset, and BYOK/per-realm-CMK deferrals are in
 Decision: the sealed plane has an explicit, audited reveal ceremony; the open
 plane does not. This is carve-out #3.
 
-- The value-returning operations are `ws secret reveal` (one sensitive field),
-  `ws totp code` (a current code), value-returning `reference resolve`, and
-  `ws run` injection. Each is explicit, audited, and metered (`secret_read`,
+- The value-returning operations are `witself secret reveal` (one sensitive field),
+  `witself totp code` (a current code), value-returning `reference resolve`, and
+  `witself run` injection. Each is explicit, audited, and metered (`secret_read`,
   `totp_code`, `runtime_injection`).
 - The reveal ceremony requires the `secret:reveal` (or `totp:code`) scope, honors
   grants and realm roles, records a `secret.reveal` / `totp.code` audit event, and
@@ -1254,7 +1254,7 @@ Self-hosted backend requirements:
 
 The local mock/development backend should be pushed upstream into this
 architecture as a real adapter behind the same backend interface. It can power
-tests, demos, `ws setup --local`, and a future `witself-server serve --dev`
+tests, demos, `witself setup --local`, and a future `witself-server serve --dev`
 mode, but it should remain clearly labeled as local development scaffolding.
 
 ### Observability And Operations
@@ -1326,8 +1326,8 @@ Backup and recovery posture:
   migration version, embedding-provider/model identity, and server configuration
   needed to reconnect to storage and the embedding provider.
 - Identity export is a supported plaintext feature, not a forbidden one (see
-  [Identity Export and Import](#identity-export-and-import)). `ws export`
-  produces structured, round-trippable identity data; `ws import` restores
+  [Identity Export and Import](#identity-export-and-import)). `witself export`
+  produces structured, round-trippable identity data; `witself import` restores
   it.
 - Self-hosted operators are responsible for backing up Postgres (including vector
   data), object/blob storage when used, Terraform state, deployment configuration,
@@ -1397,7 +1397,7 @@ The remote bootstrap flow is the canonical product flow. It bootstraps the
 managed-service customer account or self-hosted operator context, remote realm,
 named agents, and token files.
 
-`ws setup` should default to managed Witself Cloud when no target flag is
+`witself setup` should default to managed Witself Cloud when no target flag is
 provided. `--endpoint` should target a specific remote managed, staging, private,
 or self-hosted endpoint. `--local` should be reserved for local mock/development
 mode and should not be presented as a production setup path.
@@ -1464,7 +1464,7 @@ Sealed plane:
 - Stored secrets (`stored_secret`).
 - Secret reads (`secret_read`, covering reveal and reference resolution).
 - TOTP code generation (`totp_code`).
-- Runtime injection (`runtime_injection`, via `ws run`).
+- Runtime injection (`runtime_injection`, via `witself run`).
 - Encrypted storage size (`encrypted_storage_byte`).
 
 Platform:
@@ -1733,7 +1733,7 @@ Module and dependency requirements:
 - Use Go modules only; do not rely on GOPATH mode.
 - Start with one Go module for the repository unless a real build or ownership
   boundary justifies multiple modules.
-- Build the `ws` CLI, `ws mcp serve`, the separate `witself-server`
+- Build the `witself` CLI, `witself mcp serve`, the separate `witself-server`
   backend API binary, and shared core from the same module so command behavior
   does not drift across frontends.
 - Commit `go.mod` and `go.sum`.
@@ -1915,7 +1915,7 @@ Local backend requirements:
 - Restrict local file permissions where the OS supports it.
 - Keep tokens out of config files by default.
 - Support export/import for test fixtures, demos, backup, and migration (using the
-  same `ws export`/`ws import` paths).
+  same `witself export`/`witself import` paths).
 - Use the `local-dev` embedding provider so semantic recall can be exercised
   offline without a paid provider.
 
@@ -1926,11 +1926,11 @@ architecture.
 
 Local bootstrap decision:
 
-- `ws realm init` creates the local store and the first local operator/admin
+- `witself realm init` creates the local store and the first local operator/admin
   context when the store is empty.
 - The first local operator can create named agents and write token files for local
   development runtimes.
-- Recommended agent bootstrap: `ws agent create NAME --token-out PATH`.
+- Recommended agent bootstrap: `witself agent create NAME --token-out PATH`.
 - Local agent token files can be passed to Witself through `WITSELF_TOKEN_FILE`.
 
 ### Managed Cloud Backend
@@ -2080,7 +2080,7 @@ Requirements:
 - A documented verification path for install scripts and binaries.
 - A GitHub Actions release workflow from the beginning of the project.
 - Shell completions.
-- Stable `ws version` output.
+- Stable `witself version` output.
 - Machine-readable release metadata where practical.
 
 Homebrew install path:
@@ -2105,7 +2105,7 @@ Container image requirements:
 - Tags should include immutable release versions and `latest`.
 - Images should run as a non-root user where practical.
 - The CLI/MCP image entrypoint should be the `ws` binary so it can run both
-  normal CLI commands and `ws mcp serve`.
+  normal CLI commands and `witself mcp serve`.
 - The backend image entrypoint should be the separate `witself-server` process.
 - Image builds must not require private base images or private package registries.
 - Container images should be signed before publication.

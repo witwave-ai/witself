@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh — universal installer for Witself release binaries.
 #
-#   # ws (default):
+#   # witself (default):
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
 #   # witself-infra:
 #   curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
@@ -12,10 +12,10 @@
 # verifies its SHA-256 checksum, and installs it on your PATH.
 #
 # Usage:
-#   sh                 install latest ws
-#   sh -s BINARY       install latest ws, witself-infra, witself-server, or witself-admin
+#   sh                 install latest witself
+#   sh -s BINARY       install latest witself, witself-infra, witself-server, or witself-admin
 #   sh -s BINARY VER   install a specific binary version
-#   sh -s VER          install a specific ws version
+#   sh -s VER          install a specific witself version
 #
 # Environment:
 #   WITSELF_BINARY   back-compat binary selector; positional BINARY wins
@@ -34,14 +34,14 @@ err() { printf 'install: %s\n' "$1" >&2; exit 1; }
 info() { printf '%s\n' "$1" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-BINARY="${WITSELF_BINARY:-ws}"
+BINARY="${WITSELF_BINARY:-witself}"
 version="${WS_VERSION:-}"
 
 case "${1:-}" in
   "")
     [ "$#" -eq 0 ] || err "empty binary/version argument"
     ;;
-  ws | witself-infra | witself-server | witself-admin)
+  witself | ws | witself-infra | witself-server | witself-admin)
     BINARY="$1"
     version="${2:-${WS_VERSION:-}}"
     [ "$#" -le 2 ] || err "too many arguments (usage: sh -s [BINARY] [VERSION])"
@@ -52,9 +52,12 @@ case "${1:-}" in
     ;;
 esac
 
+# "ws" is the muscle-memory alias for the renamed tenant CLI.
+[ "$BINARY" = "ws" ] && BINARY="witself"
+
 case "$BINARY" in
-  ws | witself-infra | witself-server | witself-admin) ;;
-  *) err "unknown binary \"${BINARY}\" (want ws|witself-infra|witself-server|witself-admin)" ;;
+  witself | witself-infra | witself-server | witself-admin) ;;
+  *) err "unknown binary \"${BINARY}\" (want witself|witself-infra|witself-server|witself-admin)" ;;
 esac
 
 download() { # url dest
@@ -132,6 +135,14 @@ elif install_to "$HOME/.local/bin"; then dest="$HOME/.local/bin"; info "Installe
 else err "could not install to ${INSTALL_DIR} or ~/.local/bin"; fi
 
 info "Installed ${BINARY} to ${dest}/${BINARY}"
+
+# The tenant CLI also gets its muscle-memory alias (brew does the same).
+if [ "$BINARY" = "witself" ]; then
+  if [ -w "$dest" ]; then ln -sf "witself" "${dest}/ws" && info "Aliased ${dest}/ws -> witself"
+  elif have sudo; then sudo ln -sf "witself" "${dest}/ws" && info "Aliased ${dest}/ws -> witself"
+  fi
+fi
+
 case "$BINARY" in
   witself-infra)
     "${dest}/${BINARY}" help >/dev/null 2>&1 || err "installed ${BINARY} failed to run"

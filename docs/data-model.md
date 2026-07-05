@@ -998,7 +998,7 @@ per-ciphertext envelope from [key-hierarchy.md](key-hierarchy.md) — multiple
 at-rest columns alongside `ciphertext`, field-per-row (one envelope per
 `secret_fields` / `totp_enrollments` row). These are at-rest columns, NOT public
 response fields; the public contract redacts by default and a value is returned
-only through the audited reveal ceremony (`ws secret reveal` / `ws totp
+only through the audited reveal ceremony (`witself secret reveal` / `witself totp
 code`; see [encryption-model.md](encryption-model.md)).
 
 The **wrapped DEK lives only in [`secret_deks`](#secret_deks)** and is referenced
@@ -1415,7 +1415,7 @@ Realm is the single isolation/billing/key-separation scope. The rule:
 ## Migrations
 
 Migrations use **Goose**, owned by the separate `witself-server` binary (the
-public `ws` CLI MUST NOT manage migrations). SQL migrations live in the
+public `witself` CLI MUST NOT manage migrations). SQL migrations live in the
 public repo. See [storage.md](storage.md) and
 [server-command-surface.md](server-command-surface.md).
 

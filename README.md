@@ -1,13 +1,13 @@
 # Witself
 
-Status: pre-implementation draft. The `ws` CLI ships incrementally; v0.0.1 (the
-`version` command) is installable today.
+Status: pre-implementation draft. The `witself` CLI ships incrementally (with
+`ws` kept as a short alias).
 
 ## Install
 
 ```sh
-# Homebrew
-brew install witwave-ai/tap/ws
+# Homebrew (installs the `witself` binary plus a `ws` alias)
+brew install witwave-ai/tap/witself
 
 # Optional infrastructure provisioner
 brew install witwave-ai/tap/witself-infra
@@ -16,7 +16,7 @@ brew install witwave-ai/tap/witself-infra
 brew install witwave-ai/tap/witself-admin
 # (the fullscreen operator dashboard ships inside it: `witself-admin dashboard`)
 
-# or curl | sh (verifies the SHA-256 checksum; installs ws by default)
+# or curl | sh (verifies the SHA-256 checksum; installs witself by default)
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
 
 # Optional infrastructure provisioner
@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh 
 # Fleet-admin CLI
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-admin
 
-ws version
+witself version
 ```
 
 ## Infrastructure Example
@@ -145,7 +145,7 @@ and billing apparatus — but take deliberately opposite postures on the payload
   never plaintext-exported. They surface only through explicit, audited reveal.
 
 Witself consolidates the former Witpass credential vault and authenticator into
-the sealed plane: one product, one `ws` CLI, one backend, one account and
+the sealed plane: one product, one `witself` CLI, one backend, one account and
 agent model.
 
 The product goal is a CLI-first agent durable-state service spanning both planes:
@@ -192,7 +192,7 @@ support path once hardening docs and operational guidance are real.
 ## Repository Status
 
 This repository is pre-v0 and still docs-led, but implementation is now landing
-incrementally. The `ws` CLI, `witself-server`, Helm chart, GitOps tree, release
+incrementally. The `witself` CLI, `witself-server`, Helm chart, GitOps tree, release
 workflows, and Pulumi-based `witself-infra` module are built in this repo.
 
 ## Docs

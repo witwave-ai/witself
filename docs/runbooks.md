@@ -19,7 +19,7 @@ The account is remembered locally as `default` (binding in
 ## Check account status
 
 New accounts start **pending**: nothing works until the emailed verification
-link is clicked (`ws account resend-verification` sends a fresh one). Watch
+link is clicked (`witself account resend-verification` sends a fresh one). Watch
 for it to flip to `active`:
 
 ```sh
@@ -40,7 +40,7 @@ ws token create --agent agt_01xyz
 
 The agent token is written to
 `~/.witself/tokens/accounts/default/agents/my-agent.token` — hand it to the
-workload; `ws token revoke --token tok_ID --yes` kills it without touching
+workload; `witself token revoke --token tok_ID --yes` kills it without touching
 anything else.
 
 ## List operators
@@ -78,8 +78,8 @@ ws token revoke --operator --name backup --yes
 
 Revoking by name also removes the managed token file (revoking by id leaves
 files alone). Any token (an agent's, another operator's) can be revoked by id
-instead: `ws token revoke --token tok_ID --yes` — ids are in the last column
-of `ws operator list`.
+instead: `witself token revoke --token tok_ID --yes` — ids are in the last column
+of `witself operator list`.
 
 ## Recover a lost owner token
 
@@ -93,7 +93,7 @@ ws account recover
 ws account recover --code 123-456-789
 ```
 
-`ws account list` shows this machine's local names and account ids — handy
+`witself account list` shows this machine's local names and account ids — handy
 when the token is gone but you need the id. From a machine with no binding,
 use `--id acc_...` (add `--name NAME` to save the recovered credential).
 
@@ -117,7 +117,7 @@ ws account adopt --id acc_01xyz --token-file teammate.token --name shared-accoun
 ```
 
 The token is verified against the account's cell first — it must authenticate
-and belong to `acc_01xyz`. On success the binding is saved like `ws account
+and belong to `acc_01xyz`. On success the binding is saved like `witself account
 create` would: follow-up commands are just `--account shared-account`.
 `--name` is required; adopting never falls back to `default`.
 
@@ -128,7 +128,7 @@ working. Three emails tell the story:
 
 1. **New address**: a confirmation code (proves the inbox can receive).
 2. **Old address, immediately**: a warning that a change was requested — if it
-   wasn't you, `ws account recover` rotates the owner credentials before the
+   wasn't you, `witself account recover` rotates the owner credentials before the
    change can commit.
 3. **Old address, after the commit**: a revert link valid for **48 hours**.
    Clicking it points the account back at the old address and kills any
@@ -152,25 +152,25 @@ ws operator create --name "Alice" --token-name alice-bootstrap --ttl 24h --out a
 ```
 
 — then send Alice two things over a channel you trust: the `alice.token` file
-and this command (fill in your account id from `ws account list`):
+and this command (fill in your account id from `witself account list`):
 
 ```sh
 ws account adopt --id acc_01xyz --token-file alice.token --name work
 ```
 
 Her side: the adopt binds the account on her machine, then
-`ws token create --operator --name laptop` mints her own durable token into
+`witself token create --operator --name laptop` mints her own durable token into
 her managed path — a credential only she has ever seen. The transfer token
 expires within 24 hours on its own.
 
-`ws operator delete --yes opr_ID` retires an operator and revokes everything
+`witself operator delete --yes opr_ID` retires an operator and revokes everything
 it holds.
 
 ## Forget a stranded local name
 
 When an account is closed out from under the CLI — the verification window
 expired and the reaper took it — the local name lives on with a dead token,
-and `ws account close` can no longer authenticate to clean it up. Drop the
+and `witself account close` can no longer authenticate to clean it up. Drop the
 local binding only (this never contacts the server):
 
 ```sh
@@ -192,7 +192,7 @@ ws account resume
 ```
 
 Only the owner can suspend or resume their own suspension. Future non-owner
-suspensions (planned: migration, fleet-admin, billing) will refuse `ws account
+suspensions (planned: migration, fleet-admin, billing) will refuse `witself account
 resume` — the authority that suspended is the one that resumes.
 
 ## Close an account

@@ -813,7 +813,7 @@ type principal struct {
 // nothing until it resumes. The exceptions — check status, close, suspend,
 // resume — use requireOperatorAnyStatus instead. The refusal message names
 // the current status verbatim so a suspended owner sees "account is
-// suspended" and knows to reach for `ws account resume`.
+// suspended" and knows to reach for `witself account resume`.
 func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		if p.accountStatus != "active" {

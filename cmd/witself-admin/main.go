@@ -185,7 +185,7 @@ func readTokenFile(path string) (string, error) {
 	return tok, nil
 }
 
-// jsonFlag adds --json to a FlagSet — same convention as the ws CLI.
+// jsonFlag adds --json to a FlagSet — same convention as the witself CLI.
 func jsonFlag(fs *flag.FlagSet) *bool {
 	return fs.Bool("json", false, "emit output as JSON instead of a table")
 }
@@ -200,7 +200,7 @@ func printJSON(v any) int {
 	return 0
 }
 
-// tableWriter mirrors the ws CLI helper: elastic alignment on a TTY,
+// tableWriter mirrors the witself CLI helper: elastic alignment on a TTY,
 // header routed to stderr on a pipe so scripts don't consume it as data.
 func tableWriter(header string) (io.Writer, func()) {
 	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
@@ -881,7 +881,7 @@ func ticketState(args []string, forceState string) int {
 }
 
 // readBodyFromFlags resolves the reply text from the three mutually-
-// exclusive body sources — same rule the ws CLI uses.
+// exclusive body sources — same rule the witself CLI uses.
 func readBodyFromFlags(inline, file string, stdin bool) (string, error) {
 	sources := 0
 	if strings.TrimSpace(inline) != "" {

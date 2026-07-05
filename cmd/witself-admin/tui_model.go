@@ -1227,8 +1227,30 @@ func (m model) viewList() string {
 	eventsBox := paneBox(eventsTitle, evLines, eventsW, eventRows, m.focus == paneEvents)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsBox, supportBox)
-	footer := styDim.Render("tab focus · j/k move · enter open · i inspect · f filter · R resolve · C close · g refresh · q quit")
-	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, footer)
+	hints := "tab focus · j/k move · enter open · i inspect · f filter · R resolve · C close · g refresh · q quit"
+	ver := m.versionTag()
+	// Version sits right-aligned in the corner — subdued, always
+	// visible. If the terminal is too narrow for both, the version
+	// wins over the hint tail (hints are re-learnable; "am I current?"
+	// is the question the stamp exists to answer).
+	var footer string
+	if pad := w - lipgloss.Width(hints) - lipgloss.Width(ver); pad >= 1 {
+		footer = hints + strings.Repeat(" ", pad) + ver
+	} else {
+		footer = fitLine(hints, maxInt(w-lipgloss.Width(ver)-1, 10)) + " " + ver
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, styDim.Render(footer))
+}
+
+// versionTag is the subdued running-version stamp pinned to the
+// dashboard footer — the at-a-glance answer to "am I on the latest?"
+// alongside the upgrade light (dark light + current tag = yes).
+func (m model) versionTag() string {
+	v := m.currentVersion
+	if v == "" {
+		v = "dev"
+	}
+	return "witself-admin v" + v
 }
 
 // paneBox frames one dashboard window with a thick border, a bold

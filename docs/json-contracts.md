@@ -304,7 +304,7 @@ The token lifecycle is tracked in [token-lifecycle.md](token-lifecycle.md).
 
 ## Capability Result
 
-Used by `ws capabilities` and `/v1/capabilities`.
+Used by `witself capabilities` and `/v1/capabilities`.
 
 The HTTP `GET /v1/capabilities` response is **bare/flat**: a top-level
 `schema_version` sits alongside `backend`, `principal`, `features`, and `limits`,
@@ -1781,7 +1781,7 @@ The audit retention model is tracked in
 
 ## Reference Parse and Resolve
 
-Used by `ws reference parse`/`ws reference resolve` and the
+Used by `witself reference parse`/`witself reference resolve` and the
 `witself.reference.parse`/`witself.reference.resolve` MCP tools. References use
 the `witself://` scheme (never `ws://`, which collides with WebSocket).
 

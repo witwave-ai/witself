@@ -297,7 +297,7 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   recall degrades to keyword/tag/kind/time ranking and the response surfaces the
   degraded state through `warnings`.
 - `POST /v1/memories:consolidate` is the guarded garbage-collection verb
-  (`ws memory consolidate`). It merges near-duplicate memories, supersedes
+  (`witself memory consolidate`). It merges near-duplicate memories, supersedes
   stale ones, surfaces (never auto-resolves) conflicting facts, and trims the
   digest index. It defaults to `dry_run=true`, is audited as
   `memory.consolidated`, respects `source` provenance so human-/import-authored
@@ -322,7 +322,7 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
 - `POST /v1/tokens/{token_id}:revoke` immediately invalidates a live operator
   or agent token by token ID. It never requires or returns the raw token value.
 - `POST /v1/secrets/{secret_id}:reveal` is the explicit, audited value-returning
-  op (`ws secret reveal`). It runs the reveal ceremony, requires the
+  op (`witself secret reveal`). It runs the reveal ceremony, requires the
   `secret:reveal` scope, and is audited as `secret.reveal`. The field selector
   and audit reason travel in the request body, never the path. The response is
   either the client-decryptable envelope or, for token-only pods, the
@@ -364,13 +364,13 @@ support `dry_run`; see [api-contract.md](api-contract.md).
 
 Some CLI commands map onto these routes without a dedicated path:
 
-- `ws agent rename` is plain CRUD over `PATCH /v1/agents/{agent_id}`; its
+- `witself agent rename` is plain CRUD over `PATCH /v1/agents/{agent_id}`; its
   `--rotate-tokens` option composes the existing token `:rotate` action.
-- `ws memory adjust` and `ws fact set` are plain CRUD over
+- `witself memory adjust` and `witself fact set` are plain CRUD over
   `PATCH /v1/memories/{memory_id}` and `POST`/`PATCH` on `/v1/facts`; the
   `--primary` option composes the `:primary` action.
-- `ws auth login` uses `POST /v1/auth/sessions` and `ws whoami` uses
-  `GET /v1/whoami`, but `ws auth status` and `ws auth logout` are
+- `witself auth login` uses `POST /v1/auth/sessions` and `witself whoami` uses
+  `GET /v1/whoami`, but `witself auth status` and `witself auth logout` are
   local-only client operations over cached credentials and have no server
   route.
 
@@ -401,7 +401,7 @@ GET  /.well-known/witself-card.json
   transport — a dropped connection loses no state, and the next `:listen` (or a
   plain `GET /v1/messages`) drains whatever has arrived. The timeout and
   optional `conversation_id` filter travel in the request body. This is the HTTP
-  surface for the CLI/MCP `listen`/`recv` verb (`ws message listen`,
+  surface for the CLI/MCP `listen`/`recv` verb (`witself message listen`,
   `witself.message.listen`); it honors `--read-only`. Local and cross-realm
   inbound arrive on the same route — a cross-realm message carries no authority
   and still resolves against a standing receive policy in this realm.
@@ -454,16 +454,16 @@ POST /v1/sessions:end
 POST /v1/memories:consolidate
 ```
 
-- `GET /v1/self` returns the bounded self-digest (`ws self show`): primary
+- `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
   facts first, then top-N salient memories, then a one-line index of
   kinds/tags/counts. It is cheap, never requires the embedding provider, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
   `:recall` rather than silently truncating. Query parameters select what to
   include (facts, salient memories, salient limit, byte cap). Passing `?format=`
   renders the digest as a CLAUDE.md/AGENTS.md/Markdown fragment with witself
-  provenance comments — this is the HTTP surface for `ws digest emit`; no
+  provenance comments — this is the HTTP surface for `witself digest emit`; no
   separate emit resource exists.
-- `POST /v1/remember` is the convenience capture path (`ws remember`). It
+- `POST /v1/remember` is the convenience capture path (`witself remember`). It
   auto-routes: a clear name→value assertion upserts a fact, anything else adds a
   verbatim memory with dedup/supersede. It never bypasses validation or limits,
   composes the same create paths as `POST /v1/facts` and `POST /v1/memories`, and
@@ -471,21 +471,21 @@ POST /v1/memories:consolidate
   `duplicate_of` when merged). It emits no event of its own; it routes to the
   existing `fact.created`/`fact.updated`/`memory.added` events.
 - `POST /v1/sessions:start` hydrates identity, open goals, and last progress in
-  one round-trip (`ws session start`), audited as `session.started`.
+  one round-trip (`witself session start`), audited as `session.started`.
 - `POST /v1/sessions:end` persists a progress memory (kind `session`) and updates
-  open goals (`ws session end`); the summary and open goals travel in the
+  open goals (`witself session end`); the summary and open goals travel in the
   request body, audited as `session.ended`.
 
-`ws ingest` has no dedicated route: it composes the existing
+`witself ingest` has no dedicated route: it composes the existing
 `POST /v1/facts` (kv-shaped lines → upserted facts) and `POST /v1/memories`
 (prose → memories) create paths, tagging records `source=import:<file>` with
 dedup/upsert, and is audited as `fact.imported` / `memory.imported`.
-`ws bootstrap-instructions` is a local client operation that prints the
+`witself bootstrap-instructions` is a local client operation that prints the
 paste-able teaching stanza and has no server route.
 
 ## Account Routes
 
-The `/v1/accounts` resource backs the `ws account` CLI noun: the
+The `/v1/accounts` resource backs the `witself account` CLI noun: the
 managed-service customer account, its human operators/admins, billing ownership,
 and account closure. Account operations are operator/admin-only.
 
@@ -501,21 +501,21 @@ POST /v1/accounts/{account_id}:close
 ```
 
 - `POST /v1/accounts` creates a managed-service customer account
-  (`ws account create`); `GET`/`PATCH /v1/accounts/{account_id}` back
-  `ws account show` and `ws account update`.
+  (`witself account create`); `GET`/`PATCH /v1/accounts/{account_id}` back
+  `witself account show` and `witself account update`.
 - `GET /v1/accounts/{account_id}/members` lists human operators/admins
-  (`ws account members`).
+  (`witself account members`).
 - `POST /v1/accounts/{account_id}/members:invite` invites a human
-  operator/admin (`ws account invite`); the invite email travels in the
+  operator/admin (`witself account invite`); the invite email travels in the
   request body, never the path.
 - `DELETE /v1/accounts/{account_id}/members/{principal}` removes a member
-  (`ws account remove`);
+  (`witself account remove`);
   `POST /v1/accounts/{account_id}/members/{principal}:set-role` changes a
-  member's account-level role (`ws account set-role`).
+  member's account-level role (`witself account set-role`).
 - `POST /v1/accounts/{account_id}:close` closes the account
-  (`ws account close`). It is audited and supports `dry_run`.
+  (`witself account close`). It is audited and supports `dry_run`.
 
-`ws account export` is an account-scoped export job served by the
+`witself account export` is an account-scoped export job served by the
 `/v1/exports` resource, not a dedicated account route.
 
 ## Ownership Routes
@@ -594,7 +594,7 @@ Identity export and import are first-class Witself resources: the open plane
 The sealed plane is carved out — `POST /v1/exports` never includes secret values
 or TOTP seeds; secret backup is encrypted-only (envelope plus KMS key identity)
 behind an explicit, separate, audited flag, and is never part of the plaintext
-identity export. The routes back `ws export` and `ws import`:
+identity export. The routes back `witself export` and `witself import`:
 
 - `POST /v1/exports` starts a structured/plaintext identity export (memories
   with edit history, facts with primary and sensitive flags, and, for

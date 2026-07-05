@@ -76,7 +76,7 @@ deployments. Operators point the CLI at their deployment with `--endpoint` or
 `WITSELF_ENDPOINT`.
 
 Because managed Witself Cloud is the default setup target, self-hosted bootstrap
-should always be explicit through `ws setup --endpoint URL` or an
+should always be explicit through `witself setup --endpoint URL` or an
 equivalent stored profile/environment configuration. `--local` is reserved for
 local mock/development mode and is not a production setup path.
 
@@ -261,8 +261,8 @@ plane. The storage and provider decisions are tracked in
 
 The sealed plane (secrets + TOTP) is the confidentiality counterpart to the open
 plane. When an operator enables it, self-hosted deployments must honor the same
-secret, reveal, and TOTP contracts as managed Witself Cloud — `ws secret`,
-`ws secret reveal`, `ws totp code`, and value-returning reference
+secret, reveal, and TOTP contracts as managed Witself Cloud — `witself secret`,
+`witself secret reveal`, `witself totp code`, and value-returning reference
 resolution behave identically; only the backing KMS provider changes.
 
 Self-hosted sealed-plane posture:
@@ -282,7 +282,7 @@ Self-hosted sealed-plane posture:
   contract advertises which modes the deployment supports, and reveals/codes
   carry the `server_side_decrypt` flag in the audit record (see
   [audit-retention.md](audit-retention.md)).
-- `ws secret reveal` and `ws totp code` are the explicit, audited,
+- `witself secret reveal` and `witself totp code` are the explicit, audited,
   value-returning operations with the reveal ceremony. MCP exposure can be
   narrowed with `--no-value-tools`; the operations are gated by the
   `secret:reveal` and `totp:code` scopes (see
@@ -396,7 +396,7 @@ KMS provider changes. Agent-facing behavior should not change because the backen
 is self-hosted.
 
 The CLI should surface unsupported managed-only features through
-`ws capabilities` and `unsupported_operation` errors instead of vague
+`witself capabilities` and `unsupported_operation` errors instead of vague
 provider or route failures.
 
 Self-hosted deployments may expose local policy limits without Witself-managed

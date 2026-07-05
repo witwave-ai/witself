@@ -46,7 +46,7 @@ The expected login flow:
 - Agent retrieves or fills the username (a secret field — see
   [secret-model.md](secret-model.md)).
 - Agent retrieves or fills the password (a secret field).
-- Agent requests a current 2FA code from Witself (`ws totp code`).
+- Agent requests a current 2FA code from Witself (`witself totp code`).
 - Witself returns the current generated code through the authorized CLI, MCP, or
   API path, never the seed.
 
@@ -56,7 +56,7 @@ secret.
 
 ## Enroll
 
-`ws totp enroll NAME` enrolls TOTP setup material into an existing or new
+`witself totp enroll NAME` enrolls TOTP setup material into an existing or new
 secret. Enrollment is the **privileged seed path** and requires the `totp:enroll`
 scope.
 
@@ -102,7 +102,7 @@ The non-sensitive metadata is stored as ordinary columns. Enrollment emits
 
 ## Code generation
 
-`ws totp code NAME` generates the current one-time code. This is an
+`witself totp code NAME` generates the current one-time code. This is an
 explicit, audited, value-returning op gated by the `totp:code` scope.
 
 ```sh
@@ -147,7 +147,7 @@ generation emits `totp.code` and meters the `totp_code` dimension (see
 
 ## Show metadata
 
-`ws totp show NAME` returns the non-sensitive TOTP metadata — issuer,
+`witself totp show NAME` returns the non-sensitive TOTP metadata — issuer,
 account label, algorithm, digits, period — **with the seed redacted**. This is
 the safe inspection path and does not unwrap the envelope.
 
@@ -171,7 +171,7 @@ distinct from those carve-outs.
 
 ## Delete
 
-`ws totp delete NAME` removes the TOTP setup material from a secret. The
+`witself totp delete NAME` removes the TOTP setup material from a secret. The
 secret and its other fields are untouched.
 
 Flags:

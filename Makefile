@@ -30,7 +30,7 @@ db-reset: ## Stop the dev Postgres and wipe its data volume
 
 serve: db-up ## Run witself-server against the dev DB (mints a fresh bootstrap token)
 	@mkdir -p .dev
-	@go run ./cmd/ws gen-bootstrap-token --out $(DEV_TOKEN)
+	@go run ./cmd/witself gen-bootstrap-token --out $(DEV_TOKEN)
 	@echo "bootstrap token written to $(DEV_TOKEN); run 'make login' in another terminal"
 	@echo "account provisioning enabled with dev token: $(DEV_PROVISION)"
 	WITSELF_DATABASE_URL="$(DEV_DSN)" WITSELF_BOOTSTRAP_TOKEN="$$(cat $(DEV_TOKEN))" \
@@ -38,12 +38,12 @@ serve: db-up ## Run witself-server against the dev DB (mints a fresh bootstrap t
 		go run ./cmd/witself-server serve
 
 login: ## Exchange the dev bootstrap token for an operator token (saved to .dev/operator.token)
-	go run ./cmd/ws auth login --endpoint $(ENDPOINT) --bootstrap-token-file $(DEV_TOKEN) --out $(DEV_OPERATOR)
+	go run ./cmd/witself auth login --endpoint $(ENDPOINT) --bootstrap-token-file $(DEV_TOKEN) --out $(DEV_OPERATOR)
 
 psql: ## Open psql against the dev database
 	docker compose exec postgres psql -U witself -d witself
 
-build: ## Build every ./cmd/... binary into ./bin (ws, witself-server, witself-control-plane, witself-admin)
+build: ## Build every ./cmd/... binary into ./bin (witself, witself-server, witself-control-plane, witself-admin)
 	@mkdir -p bin
 	go build -o bin/ ./cmd/...
 

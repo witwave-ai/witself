@@ -842,3 +842,22 @@ func TestTicketRecordInspector(t *testing.T) {
 		t.Fatalf("esc must return to the thread: mode=%v", m5.mode)
 	}
 }
+
+// TestVersionInFooter pins the subdued version stamp on the dashboard
+// footer — the operator's at-a-glance "am I current?" check.
+func TestVersionInFooter(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m = m.withSelfUpgrade("/usr/local/bin/witself-admin", "0.0.101")
+	m.loading = false
+	m.width, m.height = 120, 40
+	if !strings.Contains(m.viewList(), "witself-admin v0.0.101") {
+		t.Fatal("running version missing from the dashboard footer")
+	}
+	// Source builds say dev rather than pretending.
+	m2 := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m2.loading = false
+	m2.width, m2.height = 120, 40
+	if !strings.Contains(m2.viewList(), "witself-admin vdev") {
+		t.Fatal("dev build must stamp vdev")
+	}
+}

@@ -80,11 +80,11 @@ storage keeps only the `token_hash` and metadata.
 
 Raw bootstrap and operator tokens use their own `witself_boot_` and
 `witself_opr_` prefixes. Bootstrap tokens are not normal operator credentials:
-they are adopted by the server, consumed once by `ws auth login`, and exchanged
+they are adopted by the server, consumed once by `witself auth login`, and exchanged
 for an operator token.
 
 No JSON wrapper is required for v0 agent runtime use. Metadata is available
-through `ws token list`, `ws token show`, or equivalent API results.
+through `witself token list`, `witself token show`, or equivalent API results.
 
 Why plain text:
 
@@ -325,7 +325,7 @@ Scope rules:
   `secret:reveal`/`secret:grant` never bypass ownership/grants; they only make a
   token *eligible* for the gated action, which still requires the object check.
 - A token's scopes are recorded in token metadata and are reported by
-  `ws whoami` and `ws token show`.
+  `witself whoami` and `witself token show`.
 
 ## Rotation
 
@@ -339,7 +339,7 @@ Rotation should support:
 - Audit reason.
 - Dry run.
 
-`ws setup` should not silently rotate or reuse existing token material.
+`witself setup` should not silently rotate or reuse existing token material.
 When setup detects an existing token file or active token for a requested agent,
 the caller must choose `--reuse-existing-token` or `--rotate-existing-tokens`.
 This keeps setup idempotent for resources (account, realm, agent) without making
@@ -378,9 +378,9 @@ Revocation only invalidates the credential, not the self it authenticated.
 
 The current self-hosted API revokes live operator and agent tokens with
 `POST /v1/tokens/{token_id}:revoke`; the CLI wrapper is
-`ws token revoke --token TOKEN_ID --yes`. Raw token values are never used for
+`witself token revoke --token TOKEN_ID --yes`. Raw token values are never used for
 revocation. Token IDs are returned in token create responses, and operator token
-IDs are also visible through `ws operator list`.
+IDs are also visible through `witself operator list`.
 
 ## Agent Disable And Delete
 
@@ -407,7 +407,7 @@ Identity-data interaction:
   memberships, are evaluated against the agent's deleted/tombstoned state and
   reported in `policy test`.
 
-The current self-hosted implementation uses `ws agent delete --yes` as a
+The current self-hosted implementation uses `witself agent delete --yes` as a
 soft-delete/tombstone operation and immediately revokes that agent's live tokens.
 
 ## Token Metadata

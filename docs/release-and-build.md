@@ -14,7 +14,7 @@ requirements before code exists.
 - Start from the scaffold boundary in [docs/scaffold-readiness.md](scaffold-readiness.md).
 - Keep the project on the latest stable Go release that is practical at the time
   implementation or release work happens.
-- Ship the `ws` binary with CLI commands and `ws mcp serve`.
+- Ship the `ws` binary with CLI commands and `witself mcp serve`.
 - Ship a separate `witself-server` binary from the same public repository once
   backend implementation starts.
 - Support Homebrew and universal `curl | sh` installation from the beginning.
@@ -311,7 +311,7 @@ Required release checks once the API exists:
   `federation`, and `agent_card` flags as capability-gated and off by default
   until cross-realm collaboration ships. Realm-local `messaging` is in v0; only
   the cross-realm surface is deferred.
-- CLI `ws capabilities --json` smoke test.
+- CLI `witself capabilities --json` smoke test.
 - MCP `witself.capabilities` schema check.
 - Deterministic `unsupported_operation` checks for unavailable backend
   features, including capability-gated embeddings, cross-agent access policy,
@@ -408,7 +408,7 @@ Image requirements:
 - Support `linux/amd64` and `linux/arm64`.
 - Avoid embedding tokens, passphrases, store files, identity exports,
   embedding-provider credentials, or test fixtures.
-- Smoke test `ws version` in the CLI/MCP image before publishing.
+- Smoke test `witself version` in the CLI/MCP image before publishing.
 - Smoke test `witself-server version` and `witself-server healthcheck` in the
   backend image before publishing.
 - Sign published images.
@@ -445,7 +445,7 @@ Homebrew release smoke tests should verify:
 
 - `brew tap witwave-ai/tap`
 - `brew install witwave-ai/tap/ws`
-- `ws version`
+- `witself version`
 - `brew install witwave-ai/tap/witself-infra`
 - `witself-infra help`
 
@@ -512,5 +512,5 @@ Installer requirements:
     when those artifacts exist.
 19. Verify Terraform modules and example stacks are formatted, validated,
     linted, and secret-scanned.
-20. Verify `ws version` and `witself-server version` report the expected
+20. Verify `witself version` and `witself-server version` report the expected
     version and build metadata.

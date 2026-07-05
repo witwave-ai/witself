@@ -15,7 +15,7 @@ This doc governs the **sealed plane only** (secrets and TOTP seeds). The open pl
 (memories + facts) is ordinary data-at-rest and is never wrapped in this hierarchy. Sealed
 material in this hierarchy is **never embedded, never returned by semantic recall, never in
 the self-digest, never plaintext-exported, and never ingested** from CLAUDE.md/AGENTS.md;
-the only value-returning paths are the audited `ws secret reveal` / `ws totp code`
+the only value-returning paths are the audited `witself secret reveal` / `witself totp code`
 ceremonies described under [Reconciliation](#reconciliation-with-the-reveal-totp-contract).
 
 ## Why pure client-side decrypt is not achievable everywhere
@@ -54,7 +54,7 @@ behind one capability switch:
 - Managed token-only-pod path = server-mediated unwrap (Option A mechanics), advertised
   honestly as `server_side_decrypt`. Returns `field.value` + `value_encoding: "plain"`,
   matching the existing reveal contract.
-- CLI / local `ws mcp serve` / `ws run` / self-hosted-BYOK path = true
+- CLI / local `witself mcp serve` / `witself run` / self-hosted-BYOK path = true
   client-held-key decrypt (Option B mechanics), advertised as `client_side_decrypt`. Returns
   ciphertext + envelope metadata + the material the client needs to obtain the KEK and unwrap
   the DEK (see [Reconciliation](#reconciliation-with-the-reveal-totp-contract)), no plaintext.
@@ -355,7 +355,7 @@ over-the-wire client-held contract.
 
 | Aspect | `client_side_decrypt` (default) | `server_side_decrypt` (exception) |
 | --- | --- | --- |
-| Who unwraps DEK / runs AEAD | client (CLI, `mcp serve`, `ws run`, BYOK operator) | `witself-server` via deployment IAM identity |
+| Who unwraps DEK / runs AEAD | client (CLI, `mcp serve`, `witself run`, BYOK operator) | `witself-server` via deployment IAM identity |
 | Reveal response | `ciphertext` + envelope metadata (`nonce`, `aead_algorithm`, `dek_version`, `dek_id`, `aad_context`) + the wrapped DEK and KEK-delivery material below; no plaintext | `field.value` + `value_encoding: "plain"` (current shape) |
 | KEK delivery (client-held) | `wrapped_dek` + `wrapped_kek` + `kms_key_ref` + the KMS encryption-context inputs (`realm_id` + purpose + `kek_id`/`key_version`), either inline on the reveal response or fetched once via a capabilities/key-material endpoint keyed by `kek_id` and cached | n/a (server holds KEK-unwrap authority) |
 | TOTP `code` response | client fetches/holds the same KEK material, decrypts the seed, generates code | server decrypts seed, returns generated `code` |
@@ -407,7 +407,7 @@ into the docs named below.
   the default managed backend never sees plaintext passwords, API keys, TOTP seeds, or codes is
   no longer true for the token-only ephemeral-pod path, which is the dominant managed shape.
   Reframe: client-side decrypt remains the structurally enforced default for clients that
-  hold/derive key material (CLI, local `mcp serve`, `ws run`, local-dev-after-unlock,
+  hold/derive key material (CLI, local `mcp serve`, `witself run`, local-dev-after-unlock,
   self-hosted/BYOK). For managed token-only pods, reveal/TOTP run over `server_side_decrypt`;
   the server transiently sees the DEK and plaintext in memory, and the guarantee narrows to
   "plaintext is transient, never persisted, never logged, redacted, always audited." Finalize
