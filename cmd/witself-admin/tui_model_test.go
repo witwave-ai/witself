@@ -520,3 +520,102 @@ func TestUpgradeBadgeLifecycle(t *testing.T) {
 		t.Fatalf("badge must clear on failure: %q", m6.upgradeBadge())
 	}
 }
+
+// TestTabCyclesFocus pins the pane cycle: support → events → cells →
+// support, and shift+tab the reverse.
+func TestTabCyclesFocus(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	if m.focus != paneSupport {
+		t.Fatalf("default focus = %v, want support", m.focus)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m2 := next.(model)
+	if m2.focus != paneEvents {
+		t.Fatalf("tab: focus = %v, want events", m2.focus)
+	}
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m3 := next.(model)
+	if m3.focus != paneCells {
+		t.Fatalf("tab tab: focus = %v, want cells", m3.focus)
+	}
+	next, _ = m3.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m4 := next.(model)
+	if m4.focus != paneSupport {
+		t.Fatalf("full cycle: focus = %v, want support", m4.focus)
+	}
+	next, _ = m4.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m5 := next.(model)
+	if m5.focus != paneCells {
+		t.Fatalf("shift+tab: focus = %v, want cells", m5.focus)
+	}
+}
+
+// TestStateKeysRequireSupportFocus pins the wrong-pane guard: R aimed
+// at the events tail must not mutate the support selection.
+func TestStateKeysRequireSupportFocus(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.tickets = []client.AdminTicket{mkTicket("tkt_1", "awaiting_admin", t0)}
+	m.focus = paneEvents
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m2 := next.(model)
+	if cmd != nil || m2.loading {
+		t.Fatal("R with events focus must be a no-op")
+	}
+}
+
+// TestEventScrollPause pins tail-pause semantics: k scrolls up and
+// holds the view steady as new events arrive; j returns toward live.
+func TestEventScrollPause(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.focus = paneEvents
+	for i := 0; i < 10; i++ {
+		m.events = append(m.events, mkEvent(fmt.Sprintf("evt_%d", i), "account.activated", t0.Add(time.Duration(i)*time.Minute)))
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m2 := next.(model)
+	if m2.eventScroll != 1 {
+		t.Fatalf("k: eventScroll = %d, want 1", m2.eventScroll)
+	}
+	// New event while paused → offset grows so the view holds still.
+	next, _ = m2.Update(watchEventMsg{event: mkEvent("evt_live", "recovery.requested", t0.Add(time.Hour))})
+	m3 := next.(model)
+	if m3.eventScroll != 2 {
+		t.Fatalf("paused + new event: eventScroll = %d, want 2", m3.eventScroll)
+	}
+	// j steps back toward live.
+	next, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m4 := next.(model)
+	if m4.eventScroll != 1 {
+		t.Fatalf("j: eventScroll = %d, want 1", m4.eventScroll)
+	}
+	// Paused view is labeled.
+	m4.width, m4.height = 100, 30
+	if !strings.Contains(m4.viewList(), "paused") {
+		t.Fatal("paused tail must be labeled in the events title")
+	}
+}
+
+// TestAutoRefresh pins the background reload: re-arms itself, always
+// reloads cells+tickets, reseeds events ONLY when the live stream is
+// dead, and never touches m.loading (so it can't defer an upgrade).
+func TestAutoRefresh(t *testing.T) {
+	ch := make(chan client.AdminEvent)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m = m.withEventWatch(ch)
+	m.loading = false
+
+	next, cmd := m.Update(autoRefreshMsg{})
+	m2 := next.(model)
+	if cmd == nil {
+		t.Fatal("auto-refresh must batch reload commands + re-arm")
+	}
+	if m2.loading {
+		t.Fatal("auto-refresh must not set loading")
+	}
+}

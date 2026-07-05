@@ -27,6 +27,23 @@ const (
 	modeCompose
 )
 
+// Dashboard panes, in tab-cycle order. The focused pane carries the
+// accent border and receives j/k.
+type paneID int
+
+const (
+	paneCells paneID = iota
+	paneSupport
+	paneEvents
+	paneCount // sentinel for modular cycling
+)
+
+// autoRefreshInterval drives the background reload of everything the
+// watch streams don't cover (cell account counts, fan-out health) and
+// re-seeds any pane whose live stream has died. Manual g still works
+// and is instant; this just means nobody HAS to press it.
+const autoRefreshInterval = 60 * time.Second
+
 // Styles — one palette, defined once. Kept minimal so the TUI renders
 // sanely on both dark and light terminals.
 var (
@@ -83,6 +100,7 @@ type (
 	}
 	watchEventMsg         struct{ event client.AdminEvent }
 	eventsWatchStoppedMsg struct{}
+	autoRefreshMsg        struct{}
 
 	// Self-upgrade lifecycle: periodic check → newer tag found →
 	// background install → re-exec with resume state. noop means the
@@ -118,6 +136,14 @@ type model struct {
 	// support in the middle, events tail on the bottom).
 	fleetCells []client.AdminCell
 	events     []client.AdminEvent // newest LAST — renders like tail -f
+
+	// Pane focus + per-pane scroll state. eventScroll counts lines UP
+	// from the live tail (0 = pinned live; >0 = paused, holding the
+	// view steady as new events arrive). cellScroll is a plain line
+	// offset for fleets taller than the window.
+	focus       paneID
+	eventScroll int
+	cellScroll  int
 
 	// Detail state.
 	thread        *client.GetSupportTicketResult
@@ -158,6 +184,7 @@ func newModel(ctx context.Context, cli *adminCLI, watch <-chan client.AdminTicke
 		ctx:      ctx,
 		watch:    watch,
 		mode:     modeList,
+		focus:    paneSupport,
 		composer: ta,
 		now:      time.Now,
 		loading:  true,
@@ -194,7 +221,11 @@ func (m model) withResume(r *resumeState) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.loadTickets(), m.awaitWatch(), m.loadCells(), m.seedEvents(), m.awaitEventWatch()}
+	cmds := []tea.Cmd{
+		m.loadTickets(), m.awaitWatch(),
+		m.loadCells(), m.seedEvents(), m.awaitEventWatch(),
+		tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshMsg{} }),
+	}
 	if m.upgradeEligible() {
 		// First check shortly after startup (don't block first paint),
 		// then every upgradeCheckInterval.
@@ -585,13 +616,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case watchEventMsg:
+		before := len(m.events)
 		m.events = appendEvent(m.events, msg.event)
+		// A paused (scrolled-up) tail holds its view steady while new
+		// events arrive below — classic tail -f pause semantics.
+		if m.eventScroll > 0 && len(m.events) > before {
+			m.eventScroll = minInt(m.eventScroll+1, len(m.events)-1)
+		}
 		return m, m.awaitEventWatch()
 
 	case eventsWatchStoppedMsg:
 		m.eventWatch = nil
-		m.status = "event stream stopped — press g to refresh"
+		m.status = "event stream stopped — auto-refresh covers the tail"
 		return m, nil
+
+	case autoRefreshMsg:
+		// Background refresh of everything the watch streams don't
+		// carry: cell account counts + fan-out health always; ticket
+		// list re-sync; events re-seed ONLY when the live stream is
+		// dead (a reseed would clobber the tail the stream maintains).
+		// Deliberately does not touch m.loading — an auto tick must
+		// never defer an installed upgrade or dim the UI.
+		cmds := []tea.Cmd{
+			m.loadCells(),
+			m.loadTickets(),
+			tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshMsg{} }),
+		}
+		if m.eventWatch == nil {
+			cmds = append(cmds, m.seedEvents())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -655,16 +709,50 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.status = "refreshing…"
 		return m, tea.Batch(m.loadTickets(), m.loadCells(), m.seedEvents())
+	case "tab", "shift+tab":
+		if m.mode == modeList {
+			step := 1
+			if key.String() == "shift+tab" {
+				step = int(paneCount) - 1
+			}
+			m.focus = paneID((int(m.focus) + step) % int(paneCount))
+		}
 	case "j", "down":
-		if m.mode == modeList && m.cursor < len(m.tickets)-1 {
-			m.cursor++
+		if m.mode == modeList {
+			switch m.focus {
+			case paneSupport:
+				if m.cursor < len(m.tickets)-1 {
+					m.cursor++
+				}
+			case paneEvents:
+				if m.eventScroll > 0 {
+					m.eventScroll-- // toward live; 0 = pinned to tail
+				}
+			case paneCells:
+				if m.cellScroll > 0 {
+					m.cellScroll--
+				}
+			}
 		}
 	case "k", "up":
-		if m.mode == modeList && m.cursor > 0 {
-			m.cursor--
+		if m.mode == modeList {
+			switch m.focus {
+			case paneSupport:
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case paneEvents:
+				if m.eventScroll < len(m.events)-1 {
+					m.eventScroll++
+				}
+			case paneCells:
+				if m.cellScroll < maxInt(len(m.fleetCells)*2-1, 0) {
+					m.cellScroll++
+				}
+			}
 		}
 	case "enter":
-		if m.mode == modeList {
+		if m.mode == modeList && m.focus == paneSupport {
 			if t := m.selected(); t != nil {
 				m.threadAccount, m.threadTicket = t.AccountID, t.ID
 				m.loading = true
@@ -690,6 +778,13 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textarea.Blink
 		}
 	case "R", "C", "O":
+		// In the master view, state keys act on the SUPPORT selection —
+		// refuse when another pane holds focus so a keystroke aimed at
+		// the events tail can't mutate a ticket the operator isn't
+		// looking at.
+		if m.mode == modeList && m.focus != paneSupport {
+			return m, nil
+		}
 		target := map[string]string{
 			"R": "resolved", "C": "closed", "O": "awaiting_admin",
 		}[key.String()]
@@ -863,13 +958,24 @@ func (m model) viewList() string {
 
 	// ── events window (full width, bottom) ────────────────
 	var evLines []string
+	eventsTitle := "events"
 	if len(m.events) == 0 {
 		evLines = append(evLines, styDim.Render("(quiet)"))
 	} else {
-		start := maxInt(len(m.events)-eventRows, 0)
-		for _, e := range m.events[start:] {
+		end := len(m.events) - minInt(m.eventScroll, len(m.events)-1)
+		start := maxInt(end-eventRows, 0)
+		for _, e := range m.events[start:end] {
 			evLines = append(evLines, fitLine(renderEventLine(e, eventsW), eventsW))
 		}
+		if m.eventScroll > 0 {
+			eventsTitle = fmt.Sprintf("events · paused (%d newer — j to resume)", m.eventScroll)
+		}
+	}
+
+	// Cells window respects its scroll offset for fleets taller than
+	// the frame.
+	if m.cellScroll > 0 && m.cellScroll < len(cellLines) {
+		cellLines = cellLines[m.cellScroll:]
 	}
 
 	cellsTitle := fmt.Sprintf("cells · %d", len(m.fleetCells))
@@ -877,12 +983,12 @@ func (m model) viewList() string {
 		// Fan-out health from the last ticket refresh, when we have it.
 		cellsTitle = "cells · " + cellSummary(m.cells)
 	}
-	cellsBox := paneBox(cellsTitle, cellLines, cellsW, topRows, false)
-	supportBox := paneBox(fmt.Sprintf("support · %d tickets", len(m.tickets)), supLines, supportW, topRows, true)
-	eventsBox := paneBox("events", evLines, eventsW, eventRows, false)
+	cellsBox := paneBox(cellsTitle, cellLines, cellsW, topRows, m.focus == paneCells)
+	supportBox := paneBox(fmt.Sprintf("support · %d tickets", len(m.tickets)), supLines, supportW, topRows, m.focus == paneSupport)
+	eventsBox := paneBox(eventsTitle, evLines, eventsW, eventRows, m.focus == paneEvents)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsBox, supportBox)
-	footer := styDim.Render("enter open · j/k move · R resolve · C close · g refresh · q quit")
+	footer := styDim.Render("tab focus · j/k move · enter open · R resolve · C close · g refresh · q quit")
 	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, footer)
 }
 
