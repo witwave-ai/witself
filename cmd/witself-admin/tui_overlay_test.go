@@ -277,3 +277,40 @@ func TestFooterSurvivesDrilldown(t *testing.T) {
 		t.Fatal("after esc back to list, the footer must still show the fleet summary")
 	}
 }
+
+// TestHintsRenderInsideDialogBox pins the ask: event, cell, and
+// ticket-record dialogs put their key hints INSIDE the paneBox — one
+// dialog, one contained frame — matching the ticket-thread dialog.
+// Everything renders once (no duplicate hint on the outside).
+func TestHintsRenderInsideDialogBox(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.now = func() time.Time { return t0 }
+	m.width, m.height = 120, 40
+
+	e := mkEvent("evt_1", "recovery.requested", t0)
+	m.detailEvent = &e
+	m.mode = modeEventDetail
+	v := m.View()
+	// The hint text is in the dialog exactly once (no leftover outside
+	// copy), and it's inside the framed dialog block — the border
+	// visually contains it — checked by counting the "esc close" copies.
+	if got := strings.Count(v, "esc close · q quit"); got != 1 {
+		t.Fatalf("event: hint should render exactly once, got %d", got)
+	}
+
+	c := client.AdminCell{Name: "aws-sandbox-usw2-dev", Cloud: "aws", Region: "us-west-2", Accepting: true, AccountCount: 4, Version: "0.0.107"}
+	m.detailCell = &c
+	m.mode = modeCellDetail
+	if got := strings.Count(m.View(), "esc close · q quit"); got != 1 {
+		t.Fatalf("cell: hint should render exactly once, got %d", got)
+	}
+
+	tk := mkTicket("tkt_1", "awaiting_admin", t0)
+	m.detailTicket = &tk
+	m.mode = modeTicketDetail
+	if got := strings.Count(m.View(), "esc close"); got != 1 {
+		t.Fatalf("ticket record: hint should render exactly once, got %d", got)
+	}
+}

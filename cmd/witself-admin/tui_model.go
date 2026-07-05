@@ -1143,13 +1143,10 @@ func (m model) View() string {
 		b.WriteString("\n" + styDim.Render("ctrl+d send · esc cancel"))
 	case modeEventDetail:
 		b.WriteString(m.viewEventDetail())
-		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	case modeCellDetail:
 		b.WriteString(m.viewCellDetail())
-		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	case modeTicketDetail:
 		b.WriteString(m.viewTicketDetail())
-		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	case modeHealth:
 		b.WriteString(m.viewHealth())
 		b.WriteString("\n" + styDim.Render("esc back · g refresh · q quit"))
@@ -1605,8 +1602,16 @@ func (m model) viewEventDetail() string {
 		lines = append(lines, fitLine("  "+ln, contentW))
 	}
 	title := "event · " + oneLine(e.Verb)
-	lines = clipLines(lines, m.detailMaxContent(), contentW)
+	lines = clipLines(lines, m.detailMaxContent()-2, contentW)
+	lines = appendHint(lines, "esc close · q quit", contentW)
 	return paneBox(title, lines, contentW, maxInt(len(lines), 8), true)
+}
+
+// appendHint pins a key-hint line INSIDE a detail box, matching the
+// ticket-thread dialog's look — a subdued spacer then the hint. Kept
+// inside the frame so the box reads as a self-contained dialog.
+func appendHint(lines []string, hint string, contentW int) []string {
+	return append(lines, "", styDim.Render(fitLine(hint, contentW)))
 }
 
 // viewTicketDetail is the drill-down on one ticket's RECORD — every
@@ -1646,7 +1651,8 @@ func (m model) viewTicketDetail() string {
 		lines = append(lines, "", styDim.Render("metadata"))
 		lines = append(lines, prettyJSONLines(t.Metadata, contentW)...)
 	}
-	lines = clipLines(lines, m.detailMaxContent(), contentW)
+	lines = clipLines(lines, m.detailMaxContent()-2, contentW)
+	lines = appendHint(lines, "esc close · R resolve · C close · O reopen · q quit", contentW)
 	return paneBox("ticket · "+oneLine(t.ID), lines, contentW, maxInt(len(lines), 8), true)
 }
 
@@ -1693,6 +1699,7 @@ func (m model) viewCellDetail() string {
 		fitLine(styDim.Render("accounts      ")+styTitle.Render(fmt.Sprintf("%d", c.AccountCount)), contentW),
 		fitLine(styDim.Render("archived      ")+fmt.Sprintf("%d (evacuated from this cell, awaiting placement)", c.ArchivedCount), contentW),
 	}
+	lines = appendHint(lines, "esc close · q quit", contentW)
 	return paneBox("cell · "+oneLine(c.Name), lines, contentW, maxInt(len(lines), 6), true)
 }
 

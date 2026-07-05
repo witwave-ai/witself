@@ -123,14 +123,13 @@ func (m model) modalDialog() string {
 	if !m.modalEligible() {
 		return ""
 	}
-	closeHint := styDim.Render("esc close · q quit")
 	switch m.mode {
 	case modeEventDetail:
-		return m.viewEventDetail() + "\n" + closeHint
+		return m.viewEventDetail()
 	case modeCellDetail:
-		return m.viewCellDetail() + "\n" + closeHint
+		return m.viewCellDetail()
 	case modeTicketDetail:
-		return m.viewTicketDetail() + "\n" + closeHint
+		return m.viewTicketDetail()
 	case modeDetail, modeCompose:
 		return m.threadDialog()
 	}
