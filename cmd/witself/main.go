@@ -246,7 +246,7 @@ func realmCmd(args []string) int {
 	case "delete":
 		return realmDelete(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws realm: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself realm: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -361,7 +361,7 @@ func agentCmd(args []string) int {
 	case "delete":
 		return agentDelete(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws agent: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself agent: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -483,7 +483,7 @@ func operatorCmd(args []string) int {
 	case "delete":
 		return operatorDelete(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws operator: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself operator: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -625,7 +625,7 @@ func tokenCmd(args []string) int {
 	case "revoke":
 		return tokenRevoke(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws token: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself token: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -704,7 +704,7 @@ func tokenCreate(args []string) int {
 			}
 			fmt.Fprintf(os.Stderr, "wrote operator token for %s to %s\n", res.OperatorID, dest)
 			if *name != "" && managedAccount != "" && *out == "" {
-				fmt.Fprintf(os.Stderr, "revoke it later by name: ws token revoke --operator --name %s --yes\n", *name)
+				fmt.Fprintf(os.Stderr, "revoke it later by name: witself token revoke --operator --name %s --yes\n", *name)
 			}
 			return 0
 		}
@@ -950,7 +950,7 @@ func accountCmd(args []string) int {
 	case "forget":
 		return accountForget(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws account: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself account: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -976,7 +976,7 @@ func accountSupportCmd(args []string) int {
 	case "close":
 		return accountSupportClose(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ws account support: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself account support: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -1310,7 +1310,7 @@ func accountChangeEmail(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "a confirmation code was emailed to %s (valid ~15 minutes); a warning notice went to the current address so you'd see it if this wasn't you.\nnext: ws account change-email --new-email %s --code CODE\n", *newEmail, *newEmail)
+		fmt.Fprintf(os.Stderr, "a confirmation code was emailed to %s (valid ~15 minutes); a warning notice went to the current address so you'd see it if this wasn't you.\nnext: witself account change-email --new-email %s --code CODE\n", *newEmail, *newEmail)
 		return 0
 	}
 	committed, err := client.RedeemEmailChange(ctx, *endpoint, acct.ID, tok, *newEmail, *code)
@@ -1498,7 +1498,7 @@ func accountRecover(args []string) int {
 		// with it. Surface the bootstrap token so the user can finish the
 		// exchange by hand instead of burning another quota slot.
 		fmt.Fprintf(os.Stderr, "witself: recovered but login failed: %v\n"+
-			"    finish by hand with `ws auth login --endpoint %s --bootstrap-token-file FILE`\n"+
+			"    finish by hand with `witself auth login --endpoint %s --bootstrap-token-file FILE`\n"+
 			"    bootstrap token (expires soon, shown once):\n", err, acct.Cell.Endpoint)
 		fmt.Println(acct.BootstrapToken)
 		return 1
@@ -1898,7 +1898,7 @@ func accountForget(args []string) int {
 // operator token. The control plane places the account on a cell; the CLI then
 // claims it with the ordinary bootstrap exchange — the same path a self-hosted
 // bootstrap uses — and remembers it under a local name so later commands are
-// just `ws realm create --account NAME ...`.
+// just `witself realm create --account NAME ...`.
 func accountCreate(args []string) int {
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -1942,8 +1942,8 @@ func accountCreate(args []string) int {
 		// of abandoning a freshly provisioned account to the reaper.
 		fmt.Fprintf(os.Stderr, "witself: account created but login failed: %v\n"+
 			"    finish by hand: (1) save the token below to a file, then\n"+
-			"    (2) ws auth login --endpoint %s --bootstrap-token-file FILE --out op.token\n"+
-			"    (3) ws account adopt --id %s --token-file op.token --name %s\n"+
+			"    (2) witself auth login --endpoint %s --bootstrap-token-file FILE --out op.token\n"+
+			"    (3) witself account adopt --id %s --token-file op.token --name %s\n"+
 			"    bootstrap token (expires in ~1 hour, shown once):\n",
 			err, acct.Cell.Endpoint, acct.AccountID, localName)
 		fmt.Println(acct.BootstrapToken)
@@ -1972,11 +1972,11 @@ func accountCreate(args []string) int {
 	}
 	switch {
 	case acct.Status == "active":
-		fmt.Fprintf(os.Stderr, "next: ws realm create%s NAME\n", accountRef)
+		fmt.Fprintf(os.Stderr, "next: witself realm create%s NAME\n", accountRef)
 	case acct.EmailSent:
-		fmt.Fprintf(os.Stderr, "account is %s — a verification link was emailed to %s\nafter clicking it: ws account status%s\n", acct.Status, acct.Email, accountRef)
+		fmt.Fprintf(os.Stderr, "account is %s — a verification link was emailed to %s\nafter clicking it: witself account status%s\n", acct.Status, acct.Email, accountRef)
 	default:
-		fmt.Fprintf(os.Stderr, "account is %s — activation required before use\nnext: ws account status%s\n", acct.Status, accountRef)
+		fmt.Fprintf(os.Stderr, "account is %s — activation required before use\nnext: witself account status%s\n", acct.Status, accountRef)
 	}
 	return 0
 }
@@ -2048,12 +2048,12 @@ func accountAdopt(args []string) int {
 }
 
 func usage(w io.Writer) {
-	usageLine(w, "ws — the Witself CLI")
+	usageLine(w, "witself — the Witself CLI (alias: ws)")
 	usageLine(w)
 	usageLine(w, "Usage:")
-	usageLine(w, "  ws version              Print version information")
-	usageLine(w, "  ws gen-bootstrap-token  Generate an operator bootstrap token")
-	usageLine(w, "  ws auth login           Exchange a bootstrap token for an operator token")
+	usageLine(w, "  witself version              Print version information")
+	usageLine(w, "  witself gen-bootstrap-token  Generate an operator bootstrap token")
+	usageLine(w, "  witself auth login           Exchange a bootstrap token for an operator token")
 	usageLine(w, "  witself account create       Create a Witself Cloud account (invite required)")
 	usageLine(w, "  witself account adopt        Bind an existing account (id + token) to a local name")
 	usageLine(w, "  witself account list         List this machine's local account names")
@@ -2066,11 +2066,11 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself account resend-verification  Email a fresh verification link")
 	usageLine(w, "  witself account close        Permanently close an account (owner only)")
 	usageLine(w, "  witself account forget       Remove a local account binding (server untouched)")
-	usageLine(w, "  ws realm create|list|delete")
-	usageLine(w, "  ws agent create|list|delete")
-	usageLine(w, "  ws operator list|create|delete")
-	usageLine(w, "  ws token create|revoke  Mint or revoke agent/operator tokens")
-	usageLine(w, "  ws help                 Show this help")
+	usageLine(w, "  witself realm create|list|delete")
+	usageLine(w, "  witself agent create|list|delete")
+	usageLine(w, "  witself operator list|create|delete")
+	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
+	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)
 	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")
 	usageLine(w, `WITSELF_ACCOUNT or "default"). Self-hosted: --endpoint URL --token-file FILE.`)
