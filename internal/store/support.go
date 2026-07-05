@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/supportstates"
 )
 
 // Ticket is the API view of a support_tickets row.
@@ -57,12 +58,16 @@ type TicketMessage struct {
 //
 // The transition legality is enforced in changeTicketStateTx; callers can't
 // jump straight from open to closed without going through resolved.
+// State names alias the canonical values in the supportstates package
+// so the store's enforcement, the CLIs' rendering, and any future TUI
+// share exactly one source of truth. Changing a state name is a
+// single-package operation.
 const (
-	TicketStateOpen              = "open"
-	TicketStateAwaitingAdmin     = "awaiting_admin"
-	TicketStateAwaitingCustomer  = "awaiting_customer"
-	TicketStateResolved          = "resolved"
-	TicketStateClosed            = "closed"
+	TicketStateOpen              = supportstates.StateOpen
+	TicketStateAwaitingAdmin     = supportstates.StateAwaitingAdmin
+	TicketStateAwaitingCustomer  = supportstates.StateAwaitingCustomer
+	TicketStateResolved          = supportstates.StateResolved
+	TicketStateClosed            = supportstates.StateClosed
 )
 
 // Support-ticket categories. Coarse taxonomy in slice 1; fine-grained tags
@@ -130,15 +135,11 @@ var legalPriorities = []string{
 	TicketPriorityHigh, TicketPriorityUrgent,
 }
 
-// legalTransitions maps a current state to the set of legal target
-// states. Transitions not listed here return ErrTicketStateInvalid.
-var legalTransitions = map[string][]string{
-	TicketStateOpen:              {TicketStateAwaitingAdmin, TicketStateAwaitingCustomer, TicketStateResolved, TicketStateClosed},
-	TicketStateAwaitingAdmin:     {TicketStateAwaitingCustomer, TicketStateResolved, TicketStateClosed},
-	TicketStateAwaitingCustomer:  {TicketStateAwaitingAdmin, TicketStateResolved, TicketStateClosed},
-	TicketStateResolved:          {TicketStateAwaitingAdmin, TicketStateClosed},
-	TicketStateClosed:            {},
-}
+// legalTransitions is sourced from the supportstates package so the
+// CLI's `witwave-admin ticket states` render and the store's
+// enforcement can never drift. Graph well-formedness is locked by
+// supportstates.TestGraphWellFormed.
+var legalTransitions = supportstates.LegalTransitions()
 
 // OpenTicketInput is the payload OpenTicket takes. Kept as a struct so
 // future optional fields (correlation, initial priority, category, etc.)

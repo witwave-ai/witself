@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/supportstates"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
@@ -73,7 +74,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  witwave-admin whoami        Verify an admin token and print its identity")
 	fmt.Fprintln(w, "  witwave-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
 	fmt.Fprintln(w, "  witwave-admin ticket ...    Read/reply/transition support tickets across the fleet")
-	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close)")
+	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	fmt.Fprintln(w, "  witwave-admin version       Print version information")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Environment:")
@@ -381,7 +382,7 @@ func adminDelete(args []string) int {
 // ticketCmd handles `witwave-admin ticket ...`.
 func ticketCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket list|watch|show|reply|state|resolve|close ...")
+		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket list|watch|show|reply|state|resolve|close|states ...")
 		return 2
 	}
 	switch args[0] {
@@ -399,10 +400,51 @@ func ticketCmd(args []string) int {
 		return ticketState(args[1:], "resolved")
 	case "close":
 		return ticketState(args[1:], "closed")
+	case "states":
+		return ticketStates(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witwave-admin ticket: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// ticketStates renders the support-ticket state graph. Two audiences:
+// a human running `witwave-admin ticket states` on a terminal (table
+// output), and a TUI or AI agent piping `--json` into a state machine
+// or decision policy. Source of truth is internal/supportstates, so
+// this render can never drift from what the store actually enforces.
+func ticketStates(args []string) int {
+	fs := flag.NewFlagSet("ticket states", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	states := supportstates.States()
+	transitions := supportstates.LegalTransitions()
+	terminal := supportstates.TerminalStates()
+
+	if *jsonOut {
+		return printJSON(map[string]any{
+			"schema_version": "witself.v0",
+			"states":         states,
+			"transitions":    transitions,
+			"terminal":       terminal,
+		})
+	}
+	// Human render: aligned "from -> [targets]" per row, in the
+	// natural lifecycle order so an operator reads it top-down.
+	w, flush := tableWriter("state\tlegal transitions to")
+	for _, s := range states {
+		targets := transitions[s]
+		if len(targets) == 0 {
+			_, _ = fmt.Fprintf(w, "%s\t(terminal)\n", s)
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", s, strings.Join(targets, ", "))
+	}
+	flush()
+	return 0
 }
 
 func ticketList(args []string) int {
