@@ -136,7 +136,7 @@ var legalPriorities = []string{
 }
 
 // legalTransitions is sourced from the supportstates package so the
-// CLI's `witwave-admin ticket states` render and the store's
+// CLI's `witself-admin ticket states` render and the store's
 // enforcement can never drift. Graph well-formedness is locked by
 // supportstates.TestGraphWellFormed.
 var legalTransitions = supportstates.LegalTransitions()

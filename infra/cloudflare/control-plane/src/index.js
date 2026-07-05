@@ -430,7 +430,7 @@ async function handleInvites(request, env, url) {
 // handleAdmins is the fleet-token-gated admin credential registry. It
 // serves four verbs — mint, list, revoke, delete — that maintain the
 // admin: / admintok: / adminh: KV prefixes. The credentials it mints
-// are what the witwave-admin CLI carries when it hits the CP's admin-
+// are what the witself-admin CLI carries when it hits the CP's admin-
 // side fan-out routes; adminAuthorized() is the reader half.
 //
 // Handle uniqueness (adminh:{handle}) is enforced by get-then-put with
@@ -3136,7 +3136,7 @@ export default {
     }
 
     // Admin credential registry (fleet-token authorized). The credentials
-    // this mints are what the witwave-admin CLI carries against the
+    // this mints are what the witself-admin CLI carries against the
     // admin-side fan-out routes (slice 1b.iii).
     if (
       url.pathname === "/v1/admins" ||

@@ -3,7 +3,7 @@
 // enforces transitions on write) and the CLIs (which render the
 // graph so a TUI can decide which buttons to show and an AI agent
 // can decide "can I move this forward"). By living in its own
-// pgx-free package, it's cheap for the witwave-admin binary to
+// pgx-free package, it's cheap for the witself-admin binary to
 // import — no server-only deps get dragged in.
 package supportstates
 

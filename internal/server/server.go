@@ -220,7 +220,7 @@ type Config struct {
 	// GetAdminSupportPolicy / SetAdminSupportPolicy, when set (with
 	// the provisioning pair), enable admin-side reads and writes of
 	// the account's support_policy. This is what the CP calls when a
-	// fleet admin runs `witwave-admin account support-policy [--set]`.
+	// fleet admin runs `witself-admin account support-policy [--set]`.
 	// SetAdminSupportPolicy emits VerbAccountSupportPolicyChanged on
 	// a genuine transition; idempotent no-op when the target policy
 	// equals the current one.

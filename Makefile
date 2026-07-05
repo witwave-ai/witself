@@ -39,7 +39,7 @@ login: ## Exchange the dev bootstrap token for an operator token (saved to .dev/
 psql: ## Open psql against the dev database
 	docker compose exec postgres psql -U witself -d witself
 
-build: ## Build every ./cmd/... binary into ./bin (ws, witself-server, witself-control-plane, witwave-admin)
+build: ## Build every ./cmd/... binary into ./bin (ws, witself-server, witself-control-plane, witself-admin)
 	@mkdir -p bin
 	go build -o bin/ ./cmd/...
 

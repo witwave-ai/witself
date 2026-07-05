@@ -41,9 +41,9 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
-  - id: witwave-admin
-    main: ./cmd/witwave-admin
-    binary: witwave-admin
+  - id: witself-admin
+    main: ./cmd/witself-admin
+    binary: witself-admin
     env:
       - CGO_ENABLED=0
     goos:
@@ -89,12 +89,12 @@ archives:
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-  - id: witwave-admin
+  - id: witself-admin
     ids:
-      - witwave-admin
+      - witself-admin
     formats:
       - tar.gz
-    name_template: "witwave-admin_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "witself-admin_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: witself-infra
     ids:
       - witself-infra
@@ -268,18 +268,18 @@ brews:
     test: |
       system "#{bin}/witself-infra", "help"
 
-  - name: witwave-admin
+  - name: witself-admin
     ids:
-      - witwave-admin
+      - witself-admin
     directory: Formula
     repository:
       owner: witwave-ai
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/witwave-ai/witself"
-    description: "Witwave fleet-admin CLI (talks only to the Witself control plane)"
+    description: "Witself fleet-admin CLI (talks only to the Witself control plane)"
     license: "FSL-1.1-ALv2"
     install: |
-      bin.install "witwave-admin"
+      bin.install "witself-admin"
     test: |
-      system "#{bin}/witwave-admin", "version"
+      system "#{bin}/witself-admin", "version"

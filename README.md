@@ -13,7 +13,7 @@ brew install witwave-ai/tap/ws
 brew install witwave-ai/tap/witself-infra
 
 # Fleet-admin CLI (talks to the control plane; not needed for tenants)
-brew install witwave-ai/tap/witwave-admin
+brew install witwave-ai/tap/witself-admin
 
 # or curl | sh (verifies the SHA-256 checksum; installs ws by default)
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh 
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
 
 # Fleet-admin CLI
-curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witwave-admin
+curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-admin
 
 ws version
 ```

@@ -81,12 +81,12 @@ func TestCpEndpointPrecedence(t *testing.T) {
 // TestResolveAdminToken pins the flag > file > env order and the
 // friendly-error path when none is set.
 func TestResolveAdminToken(t *testing.T) {
-	t.Setenv("WITWAVE_ADMIN_TOKEN", "")
+	t.Setenv("WITSELF_ADMIN_TOKEN", "")
 	if _, err := resolveAdminToken("", ""); err == nil {
 		t.Error("no sources should error")
 	}
 	// env picked up when nothing else set.
-	t.Setenv("WITWAVE_ADMIN_TOKEN", "from-env")
+	t.Setenv("WITSELF_ADMIN_TOKEN", "from-env")
 	if got, err := resolveAdminToken("", ""); err != nil || got != "from-env" {
 		t.Errorf("env: got %q err=%v", got, err)
 	}
@@ -106,7 +106,7 @@ func TestResolveAdminToken(t *testing.T) {
 }
 
 // TestJSONEnvelopes pins the top-level wrapped-envelope shape for
-// every --json output witwave-admin emits, per #27. Drift here is a
+// every --json output witself-admin emits, per #27. Drift here is a
 // UX-contract break for TUI (#29) and AI-agent consumers — they
 // route on the envelope key, so a renamed key silently drops every
 // downstream parser. This test asserts:

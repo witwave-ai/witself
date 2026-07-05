@@ -39,7 +39,7 @@ type MintAdminResult struct {
 }
 
 // MintAdmin creates a new fleet-admin credential. Requires the shared
-// fleet token (WITWAVE_FLEET_TOKEN in the CLI).
+// fleet token (WITSELF_FLEET_TOKEN in the CLI).
 func MintAdmin(ctx context.Context, cpEndpoint, fleetToken string, in MintAdminInput) (*MintAdminResult, error) {
 	body, err := json.Marshal(in)
 	if err != nil {

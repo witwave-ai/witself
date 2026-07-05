@@ -1,17 +1,17 @@
-// Command witwave-admin is the Witwave fleet-admin CLI. It always talks
+// Command witself-admin is the Witself fleet-admin CLI. It always talks
 // to the control plane (never a cell directly) so fleet-wide queries
 // like "show me every open support ticket" fan out CP → all cells in
 // parallel.
 //
 // Two credential surfaces live in this binary:
 //
-//   - Fleet token (WITWAVE_FLEET_TOKEN / --fleet-token) authorizes the
+//   - Fleet token (WITSELF_FLEET_TOKEN / --fleet-token) authorizes the
 //     admin registry: mint, list, revoke, delete admins. It is the same
 //     shared secret used by every other fleet-level operation.
 //
-//   - Admin token (WITWAVE_ADMIN_TOKEN / --token / --token-file)
+//   - Admin token (WITSELF_ADMIN_TOKEN / --token / --token-file)
 //     authenticates a specific admin against the ticket routes. Minted
-//     once by `witwave-admin admin mint` and shown once.
+//     once by `witself-admin admin mint` and shown once.
 //
 // Split intentionally: an admin who lost their fleet-token access can
 // still work tickets, and a compromised admin token doesn't grant the
@@ -49,7 +49,7 @@ func run(args []string) int {
 	}
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Println(version.String("witwave-admin"))
+		fmt.Println(version.String("witself-admin"))
 		return 0
 	case "help", "--help", "-h":
 		usage(os.Stdout)
@@ -63,28 +63,28 @@ func run(args []string) int {
 	case "account":
 		return accountCmd(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "witwave-admin: unknown command %q\n\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself-admin: unknown command %q\n\n", args[0])
 		usage(os.Stderr)
 		return 2
 	}
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "witwave-admin — the Witwave fleet-admin CLI")
+	fmt.Fprintln(w, "witself-admin — the Witself fleet-admin CLI")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  witwave-admin whoami        Verify an admin token and print its identity")
-	fmt.Fprintln(w, "  witwave-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
-	fmt.Fprintln(w, "  witwave-admin ticket ...    Read/reply/transition support tickets across the fleet")
+	fmt.Fprintln(w, "  witself-admin whoami        Verify an admin token and print its identity")
+	fmt.Fprintln(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
+	fmt.Fprintln(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close|states)")
-	fmt.Fprintln(w, "  witwave-admin account ...   Read/set per-account fleet settings")
+	fmt.Fprintln(w, "  witself-admin account ...   Read/set per-account fleet settings")
 	fmt.Fprintln(w, "                                (support-policy)")
-	fmt.Fprintln(w, "  witwave-admin version       Print version information")
+	fmt.Fprintln(w, "  witself-admin version       Print version information")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Environment:")
 	fmt.Fprintln(w, "  WITSELF_CONTROL_PLANE   control-plane URL (default https://self.witwave.ai)")
-	fmt.Fprintln(w, "  WITWAVE_ADMIN_TOKEN     admin bearer token for `whoami` and `ticket` commands")
-	fmt.Fprintln(w, "  WITWAVE_FLEET_TOKEN     fleet-level shared secret for `admin` commands")
+	fmt.Fprintln(w, "  WITSELF_ADMIN_TOKEN     admin bearer token for `whoami` and `ticket` commands")
+	fmt.Fprintln(w, "  WITSELF_FLEET_TOKEN     fleet-level shared secret for `admin` commands")
 }
 
 // cpEndpoint resolves the control-plane URL: --endpoint > env > default.
@@ -99,7 +99,7 @@ func cpEndpoint(flagValue string) string {
 }
 
 // resolveAdminToken picks the admin token, in order: --token, --token-file,
-// WITWAVE_ADMIN_TOKEN. Returns a friendly error when none is set.
+// WITSELF_ADMIN_TOKEN. Returns a friendly error when none is set.
 func resolveAdminToken(tokenFlag, tokenFileFlag string) (string, error) {
 	if t := strings.TrimSpace(tokenFlag); t != "" {
 		return t, nil
@@ -107,22 +107,22 @@ func resolveAdminToken(tokenFlag, tokenFileFlag string) (string, error) {
 	if f := strings.TrimSpace(tokenFileFlag); f != "" {
 		return readTokenFile(f)
 	}
-	if t := strings.TrimSpace(os.Getenv("WITWAVE_ADMIN_TOKEN")); t != "" {
+	if t := strings.TrimSpace(os.Getenv("WITSELF_ADMIN_TOKEN")); t != "" {
 		return t, nil
 	}
-	return "", fmt.Errorf("no admin token — set WITWAVE_ADMIN_TOKEN, --token-file FILE, or --token TOKEN")
+	return "", fmt.Errorf("no admin token — set WITSELF_ADMIN_TOKEN, --token-file FILE, or --token TOKEN")
 }
 
 // resolveFleetToken picks the fleet-level shared secret, in order:
-// --fleet-token, WITWAVE_FLEET_TOKEN.
+// --fleet-token, WITSELF_FLEET_TOKEN.
 func resolveFleetToken(tokenFlag string) (string, error) {
 	if t := strings.TrimSpace(tokenFlag); t != "" {
 		return t, nil
 	}
-	if t := strings.TrimSpace(os.Getenv("WITWAVE_FLEET_TOKEN")); t != "" {
+	if t := strings.TrimSpace(os.Getenv("WITSELF_FLEET_TOKEN")); t != "" {
 		return t, nil
 	}
-	return "", fmt.Errorf("no fleet token — set WITWAVE_FLEET_TOKEN or --fleet-token TOKEN")
+	return "", fmt.Errorf("no fleet token — set WITSELF_FLEET_TOKEN or --fleet-token TOKEN")
 }
 
 func readTokenFile(path string) (string, error) {
@@ -146,7 +146,7 @@ func printJSON(v any) int {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	return 0
@@ -187,12 +187,12 @@ func tabSafe(s string) string {
 	return s
 }
 
-// whoamiCmd: witwave-admin whoami
+// whoamiCmd: witself-admin whoami
 func whoamiCmd(args []string) int {
 	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	endpoint := fs.String("endpoint", "", "control-plane URL")
-	token := fs.String("token", "", "admin token (prefer --token-file / WITWAVE_ADMIN_TOKEN)")
+	token := fs.String("token", "", "admin token (prefer --token-file / WITSELF_ADMIN_TOKEN)")
 	tokenFile := fs.String("token-file", "", "file containing the admin token")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
@@ -200,12 +200,12 @@ func whoamiCmd(args []string) int {
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	me, err := client.GetAdminWhoami(context.Background(), cpEndpoint(*endpoint), tok)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -215,10 +215,10 @@ func whoamiCmd(args []string) int {
 	return 0
 }
 
-// adminCmd handles `witwave-admin admin ...`.
+// adminCmd handles `witself-admin admin ...`.
 func adminCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin admin mint|list|revoke|delete ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin admin mint|list|revoke|delete ...")
 		return 2
 	}
 	switch args[0] {
@@ -231,7 +231,7 @@ func adminCmd(args []string) int {
 	case "delete":
 		return adminDelete(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "witwave-admin admin: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself-admin admin: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -240,7 +240,7 @@ func adminMint(args []string) int {
 	fs := flag.NewFlagSet("admin mint", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	endpoint := fs.String("endpoint", "", "control-plane URL")
-	fleetToken := fs.String("fleet-token", "", "fleet shared secret (prefer WITWAVE_FLEET_TOKEN)")
+	fleetToken := fs.String("fleet-token", "", "fleet shared secret (prefer WITSELF_FLEET_TOKEN)")
 	handle := fs.String("handle", "", "admin handle, e.g. sarah (required)")
 	note := fs.String("note", "", "optional bookkeeping note (max 200 chars)")
 	jsonOut := jsonFlag(fs)
@@ -249,12 +249,12 @@ func adminMint(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*handle) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin admin mint --handle NAME [--note TEXT] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin admin mint --handle NAME [--note TEXT] [--out FILE]")
 		return 2
 	}
 	ft, err := resolveFleetToken(*fleetToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	res, err := client.MintAdmin(context.Background(), cpEndpoint(*endpoint), ft, client.MintAdminInput{
@@ -262,12 +262,12 @@ func adminMint(args []string) int {
 		Note:   *note,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(res.AdminToken+"\n"), 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "witwave-admin: wrote admin but could not save token file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself-admin: wrote admin but could not save token file: %v\n", err)
 			// Don't lose the token — fall through and print it too.
 		} else {
 			fmt.Fprintf(os.Stderr, "wrote admin token to %s (mode 0600)\n", *out)
@@ -295,12 +295,12 @@ func adminList(args []string) int {
 	}
 	ft, err := resolveFleetToken(*fleetToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	admins, err := client.ListAdmins(context.Background(), cpEndpoint(*endpoint), ft)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -332,17 +332,17 @@ func adminRevoke(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*adminID) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin admin revoke --id ADMIN_ID")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin admin revoke --id ADMIN_ID")
 		return 2
 	}
 	ft, err := resolveFleetToken(*fleetToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	admin, err := client.RevokeAdmin(context.Background(), cpEndpoint(*endpoint), ft, *adminID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -363,30 +363,30 @@ func adminDelete(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*adminID) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin admin delete --id ADMIN_ID --yes")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin admin delete --id ADMIN_ID --yes")
 		return 2
 	}
 	if !*yes {
-		fmt.Fprintln(os.Stderr, "witwave-admin: delete is destructive; re-run with --yes to confirm.")
+		fmt.Fprintln(os.Stderr, "witself-admin: delete is destructive; re-run with --yes to confirm.")
 		return 2
 	}
 	ft, err := resolveFleetToken(*fleetToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	if err := client.DeleteAdmin(context.Background(), cpEndpoint(*endpoint), ft, *adminID); err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	fmt.Printf("deleted %s\n", *adminID)
 	return 0
 }
 
-// ticketCmd handles `witwave-admin ticket ...`.
+// ticketCmd handles `witself-admin ticket ...`.
 func ticketCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket list|watch|show|reply|state|resolve|close|states ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket list|watch|show|reply|state|resolve|close|states ...")
 		return 2
 	}
 	switch args[0] {
@@ -407,13 +407,13 @@ func ticketCmd(args []string) int {
 	case "states":
 		return ticketStates(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "witwave-admin ticket: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself-admin ticket: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
 
 // ticketStates renders the support-ticket state graph. Two audiences:
-// a human running `witwave-admin ticket states` on a terminal (table
+// a human running `witself-admin ticket states` on a terminal (table
 // output), and a TUI or AI agent piping `--json` into a state machine
 // or decision policy. Source of truth is internal/supportstates, so
 // this render can never drift from what the store actually enforces.
@@ -466,7 +466,7 @@ func ticketList(args []string) int {
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	filter := client.AdminTicketFilter{Limit: *limit}
@@ -480,14 +480,14 @@ func ticketList(args []string) int {
 	if s := strings.TrimSpace(*sinceStr); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "witwave-admin: --since must be RFC3339: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself-admin: --since must be RFC3339: %v\n", err)
 			return 2
 		}
 		filter.Since = &t
 	}
 	res, err := client.ListAdminTickets(context.Background(), cpEndpoint(*endpoint), tok, filter)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -562,7 +562,7 @@ func ticketWatch(args []string) int {
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	filter := client.AdminTicketFilter{Limit: *limit}
@@ -601,7 +601,7 @@ func ticketWatch(args []string) int {
 			// Don't die on a transient. Log to stderr and let the
 			// next tick try again — TUI parsers can filter their
 			// input to lines that parse as JSON.
-			fmt.Fprintf(stderr, "witwave-admin: watch tick failed: %v\n", err)
+			fmt.Fprintf(stderr, "witself-admin: watch tick failed: %v\n", err)
 			return
 		}
 		if first {
@@ -681,17 +681,17 @@ func ticketShow(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*account) == "" || strings.TrimSpace(*ticket) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket show --account ACCOUNT_ID --ticket TKT_ID")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket show --account ACCOUNT_ID --ticket TKT_ID")
 		return 2
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	res, err := client.GetAdminTicket(context.Background(), cpEndpoint(*endpoint), tok, *account, *ticket)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -731,26 +731,26 @@ func ticketReply(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*account) == "" || strings.TrimSpace(*ticket) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket reply --account ACCOUNT_ID --ticket TKT_ID (--body TEXT|--body-file FILE|--stdin)")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket reply --account ACCOUNT_ID --ticket TKT_ID (--body TEXT|--body-file FILE|--stdin)")
 		return 2
 	}
 	text, err := readBodyFromFlags(*body, *bodyFile, *stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	if strings.TrimSpace(text) == "" {
-		fmt.Fprintln(os.Stderr, "witwave-admin: reply body is required")
+		fmt.Fprintln(os.Stderr, "witself-admin: reply body is required")
 		return 2
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	msg, err := client.ReplyAdminTicket(context.Background(), cpEndpoint(*endpoint), tok, *account, *ticket, text)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -784,7 +784,7 @@ func ticketState(args []string, forceState string) int {
 		target = strings.TrimSpace(*stateFlag)
 	}
 	if strings.TrimSpace(*account) == "" || strings.TrimSpace(*ticket) == "" || target == "" {
-		fmt.Fprintf(os.Stderr, "usage: witwave-admin %s --account ACCOUNT_ID --ticket TKT_ID%s\n",
+		fmt.Fprintf(os.Stderr, "usage: witself-admin %s --account ACCOUNT_ID --ticket TKT_ID%s\n",
 			name,
 			func() string {
 				if forceState == "" {
@@ -797,12 +797,12 @@ func ticketState(args []string, forceState string) int {
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	t, err := client.ChangeAdminTicketState(context.Background(), cpEndpoint(*endpoint), tok, *account, *ticket, target)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
@@ -846,7 +846,7 @@ func readBodyFromFlags(inline, file string, stdin bool) (string, error) {
 	}
 }
 
-// JSON envelope builders. Every --json output the witwave-admin CLI
+// JSON envelope builders. Every --json output the witself-admin CLI
 // emits for a single- or multi-resource response uses one of these,
 // so the wrapped-envelope convention (documented in #27) is enforced
 // in exactly one place. Extracting these tiny helpers lets unit tests
@@ -868,19 +868,19 @@ func supportPolicyChangeJSONMap(res *client.SupportPolicyChange) map[string]any 
 	return map[string]any{"support_policy_change": res}
 }
 
-// accountCmd handles `witwave-admin account ...`. Slice 1b.iv seeds
+// accountCmd handles `witself-admin account ...`. Slice 1b.iv seeds
 // it with support-policy; future admin-only per-account settings hang
 // off the same tree.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin account support-policy ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account support-policy ...")
 		return 2
 	}
 	switch args[0] {
 	case "support-policy":
 		return accountSupportPolicy(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "witwave-admin account: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "witself-admin account: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
@@ -902,12 +902,12 @@ func accountSupportPolicy(args []string) int {
 		return 2
 	}
 	if strings.TrimSpace(*account) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin account support-policy --account ACCOUNT_ID [--set enabled|disabled]")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account support-policy --account ACCOUNT_ID [--set enabled|disabled]")
 		return 2
 	}
 	tok, err := resolveAdminToken(*token, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 2
 	}
 	ep := cpEndpoint(*endpoint)
@@ -915,7 +915,7 @@ func accountSupportPolicy(args []string) int {
 	if strings.TrimSpace(*set) == "" {
 		res, err := client.GetAdminSupportPolicy(context.Background(), ep, tok, *account)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 			return 1
 		}
 		if *jsonOut {
@@ -926,7 +926,7 @@ func accountSupportPolicy(args []string) int {
 	}
 	res, err := client.SetAdminSupportPolicy(context.Background(), ep, tok, *account, *set)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
