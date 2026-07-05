@@ -370,13 +370,13 @@ func TestAccountAdoptRefusesTakenName(t *testing.T) {
 // wherever the attacker chose.
 func TestSafeTextStripsTerminalEscapes(t *testing.T) {
 	tests := map[string]string{
-		"\x1b[2J\x1b[Hyou have been pwned":                "[2J[Hyou have been pwned",
-		"\x1b]0;URGENT: account suspended\x07":            "]0;URGENT: account suspended",
-		"before\x08\x08\x08\x08after":                      "beforeafter",
-		"\x7fDEL":                                         "DEL",
-		"plain ASCII stays":                              "plain ASCII stays",
-		"tabs\tand\nnewlines\tare kept":                    "tabs\tand\nnewlines\tare kept",
-		"unicode π survives":                            "unicode π survives",
+		"\x1b[2J\x1b[Hyou have been pwned":     "[2J[Hyou have been pwned",
+		"\x1b]0;URGENT: account suspended\x07": "]0;URGENT: account suspended",
+		"before\x08\x08\x08\x08after":          "beforeafter",
+		"\x7fDEL":                              "DEL",
+		"plain ASCII stays":                    "plain ASCII stays",
+		"tabs\tand\nnewlines\tare kept":        "tabs\tand\nnewlines\tare kept",
+		"unicode π survives":                   "unicode π survives",
 	}
 	for in, want := range tests {
 		if got := safeText(in); got != want {

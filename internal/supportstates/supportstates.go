@@ -11,11 +11,11 @@ package supportstates
 // the store's TicketStateXxx constants alias these strings so a
 // downstream refactor of either side stays consistent.
 const (
-	StateOpen              = "open"
-	StateAwaitingAdmin     = "awaiting_admin"
-	StateAwaitingCustomer  = "awaiting_customer"
-	StateResolved          = "resolved"
-	StateClosed            = "closed"
+	StateOpen             = "open"
+	StateAwaitingAdmin    = "awaiting_admin"
+	StateAwaitingCustomer = "awaiting_customer"
+	StateResolved         = "resolved"
+	StateClosed           = "closed"
 )
 
 // States returns the full state set in the natural lifecycle order:
@@ -56,11 +56,11 @@ func TerminalStates() []string {
 // implicit in this graph.
 func LegalTransitions() map[string][]string {
 	src := map[string][]string{
-		StateOpen:              {StateAwaitingAdmin, StateAwaitingCustomer, StateResolved, StateClosed},
-		StateAwaitingAdmin:     {StateAwaitingCustomer, StateResolved, StateClosed},
-		StateAwaitingCustomer:  {StateAwaitingAdmin, StateResolved, StateClosed},
-		StateResolved:          {StateAwaitingAdmin, StateClosed},
-		StateClosed:            {},
+		StateOpen:             {StateAwaitingAdmin, StateAwaitingCustomer, StateResolved, StateClosed},
+		StateAwaitingAdmin:    {StateAwaitingCustomer, StateResolved, StateClosed},
+		StateAwaitingCustomer: {StateAwaitingAdmin, StateResolved, StateClosed},
+		StateResolved:         {StateAwaitingAdmin, StateClosed},
+		StateClosed:           {},
 	}
 	out := make(map[string][]string, len(src))
 	for k, v := range src {

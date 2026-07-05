@@ -1430,9 +1430,9 @@ func TestLogAccountEvent(t *testing.T) {
 	}{
 		{"/v1/accounts/acc_x:events", "wrong", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{"email_masked":"s***@w***.ai"}}`, http.StatusUnauthorized},
 		{"/v1/accounts/acc_x:events", "witself_prv_test", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{"email_masked":"s***@w***.ai"}}`, http.StatusOK},
-		{"/v1/accounts/acc_x:events", "witself_prv_test", `{}`, http.StatusBadRequest}, // missing verb + actor_kind
+		{"/v1/accounts/acc_x:events", "witself_prv_test", `{}`, http.StatusBadRequest},                            // missing verb + actor_kind
 		{"/v1/accounts/acc_x:events", "witself_prv_test", `{"verb":"recovery.requested"}`, http.StatusBadRequest}, // missing actor_kind
-		{"/v1/accounts/acc_x:events", "witself_prv_test", ``, http.StatusBadRequest}, // invalid JSON
+		{"/v1/accounts/acc_x:events", "witself_prv_test", ``, http.StatusBadRequest},                              // invalid JSON
 		{"/v1/accounts/acc_missing:events", "witself_prv_test", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{}}`, http.StatusNotFound},
 		{"/v1/accounts/acc_baddata:events", "witself_prv_test", `{"verb":"sneaky.action","actor_kind":"control_plane","metadata":{}}`, http.StatusBadRequest},
 	} {

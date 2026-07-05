@@ -15,13 +15,13 @@ import (
 // by the control-plane admin registry). The raw token is only present
 // on MintAdminResult — it's shown once, never persisted here.
 type Admin struct {
-	AdminID     string     `json:"admin_id"`
-	Handle      string     `json:"handle"`
-	Note        string     `json:"note,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	CreatedBy   string     `json:"created_by,omitempty"`
-	Disabled    bool       `json:"disabled"`
-	DisabledAt  *time.Time `json:"disabled_at,omitempty"`
+	AdminID    string     `json:"admin_id"`
+	Handle     string     `json:"handle"`
+	Note       string     `json:"note,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	CreatedBy  string     `json:"created_by,omitempty"`
+	Disabled   bool       `json:"disabled"`
+	DisabledAt *time.Time `json:"disabled_at,omitempty"`
 }
 
 // MintAdminInput is the payload for MintAdmin. Note is optional

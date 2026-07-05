@@ -63,15 +63,15 @@ const (
 
 	// Control-plane forwarded (Worker calls the cell's :events endpoint
 	// with these).
-	VerbAccountProvisioned         = "account.provisioned"
-	VerbAccountActivated           = "account.activated"
-	VerbRecoveryRequested          = "recovery.requested"
-	VerbRecoveryCompleted          = "recovery.completed"
-	VerbAccountEmailChangeStarted  = "account.email.change.initiated"
-	VerbAccountEmailVerifySent     = "account.email.verify.sent"
-	VerbAccountEmailRecoverySent   = "account.email.recovery.sent"
-	VerbAccountEmailChangeSent     = "account.email.change.sent"
-	VerbAccountEmailUndoSent       = "account.email.undo.sent"
+	VerbAccountProvisioned        = "account.provisioned"
+	VerbAccountActivated          = "account.activated"
+	VerbRecoveryRequested         = "recovery.requested"
+	VerbRecoveryCompleted         = "recovery.completed"
+	VerbAccountEmailChangeStarted = "account.email.change.initiated"
+	VerbAccountEmailVerifySent    = "account.email.verify.sent"
+	VerbAccountEmailRecoverySent  = "account.email.recovery.sent"
+	VerbAccountEmailChangeSent    = "account.email.change.sent"
+	VerbAccountEmailUndoSent      = "account.email.undo.sent"
 
 	// System state transitions.
 	VerbAccountSuspendedBySystem = "account.suspended.system"
@@ -135,43 +135,43 @@ type verbSpec struct {
 var verbMetadataSchema = map[string]verbSpec{
 	// Owner-initiated.
 	VerbOperatorCreated: {
-		requiredKeys: []string{"operator_id", "role"},
-		allowedKeys:  []string{"operator_id", "role", "display_name"},
+		requiredKeys:  []string{"operator_id", "role"},
+		allowedKeys:   []string{"operator_id", "role", "display_name"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbOperatorDeleted: {
-		requiredKeys: []string{"operator_id"},
-		allowedKeys:  []string{"operator_id", "role"},
+		requiredKeys:  []string{"operator_id"},
+		allowedKeys:   []string{"operator_id", "role"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbOperatorTokenMinted: {
-		requiredKeys: []string{"token_id", "operator_id"},
-		allowedKeys:  []string{"token_id", "operator_id", "display_name", "expires_at"},
+		requiredKeys:  []string{"token_id", "operator_id"},
+		allowedKeys:   []string{"token_id", "operator_id", "display_name", "expires_at"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbAgentTokenMinted: {
-		requiredKeys: []string{"token_id", "agent_id"},
-		allowedKeys:  []string{"token_id", "agent_id", "agent_name"},
+		requiredKeys:  []string{"token_id", "agent_id"},
+		allowedKeys:   []string{"token_id", "agent_id", "agent_name"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbTokenRevoked: {
-		requiredKeys: []string{"token_id"},
-		allowedKeys:  []string{"token_id", "operator_id", "agent_id", "kind"},
+		requiredKeys:  []string{"token_id"},
+		allowedKeys:   []string{"token_id", "operator_id", "agent_id", "kind"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbAccountRenamed: {
-		requiredKeys: []string{"display_name"},
-		allowedKeys:  []string{"display_name"},
+		requiredKeys:  []string{"display_name"},
+		allowedKeys:   []string{"display_name"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbAccountEmailChanged: {
-		requiredKeys: []string{"old_masked", "new_masked"},
-		allowedKeys:  []string{"old_masked", "new_masked"},
+		requiredKeys:  []string{"old_masked", "new_masked"},
+		allowedKeys:   []string{"old_masked", "new_masked"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
 	},
 	VerbAccountEmailUndone: {
-		requiredKeys: []string{"restored_masked"},
-		allowedKeys:  []string{"restored_masked"},
+		requiredKeys:  []string{"restored_masked"},
+		allowedKeys:   []string{"restored_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountSuspendedByMe: {
@@ -185,8 +185,8 @@ var verbMetadataSchema = map[string]verbSpec{
 
 	// Control-plane forwarded.
 	VerbAccountProvisioned: {
-		requiredKeys: []string{"email_masked"},
-		allowedKeys:  []string{"email_masked", "operator_id"},
+		requiredKeys:  []string{"email_masked"},
+		allowedKeys:   []string{"email_masked", "operator_id"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountActivated: {
@@ -194,50 +194,50 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbRecoveryRequested: {
-		requiredKeys: []string{"email_masked"},
-		allowedKeys:  []string{"email_masked"},
+		requiredKeys:  []string{"email_masked"},
+		allowedKeys:   []string{"email_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbRecoveryCompleted: {
-		requiredKeys: []string{"new_operator_id"},
-		allowedKeys:  []string{"new_operator_id"},
+		requiredKeys:  []string{"new_operator_id"},
+		allowedKeys:   []string{"new_operator_id"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountEmailChangeStarted: {
-		requiredKeys: []string{"new_masked"},
-		allowedKeys:  []string{"new_masked"},
+		requiredKeys:  []string{"new_masked"},
+		allowedKeys:   []string{"new_masked"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
 	},
 	VerbAccountEmailVerifySent: {
-		requiredKeys: []string{"to_masked"},
-		allowedKeys:  []string{"to_masked"},
+		requiredKeys:  []string{"to_masked"},
+		allowedKeys:   []string{"to_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountEmailRecoverySent: {
-		requiredKeys: []string{"to_masked"},
-		allowedKeys:  []string{"to_masked"},
+		requiredKeys:  []string{"to_masked"},
+		allowedKeys:   []string{"to_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountEmailChangeSent: {
-		requiredKeys: []string{"to_masked"},
-		allowedKeys:  []string{"to_masked"},
+		requiredKeys:  []string{"to_masked"},
+		allowedKeys:   []string{"to_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountEmailUndoSent: {
-		requiredKeys: []string{"to_masked"},
-		allowedKeys:  []string{"to_masked"},
+		requiredKeys:  []string{"to_masked"},
+		allowedKeys:   []string{"to_masked"},
 		allowedActors: []string{ActorControlPlane},
 	},
 
 	// System.
 	VerbAccountSuspendedBySystem: {
-		requiredKeys: []string{"category"},
-		allowedKeys:  []string{"category", "reason"},
+		requiredKeys:  []string{"category"},
+		allowedKeys:   []string{"category", "reason"},
 		allowedActors: []string{ActorSystem, ActorControlPlane},
 	},
 	VerbAccountResumedBySystem: {
-		requiredKeys: []string{"category"},
-		allowedKeys:  []string{"category"},
+		requiredKeys:  []string{"category"},
+		allowedKeys:   []string{"category"},
 		allowedActors: []string{ActorSystem, ActorControlPlane},
 	},
 	VerbAccountEvacuated: {
@@ -593,4 +593,3 @@ func decodeEventCursor(cursor string) (time.Time, string, error) {
 	}
 	return time.Unix(0, ns).UTC(), cursor[i+1:], nil
 }
-

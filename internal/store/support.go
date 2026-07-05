@@ -63,11 +63,11 @@ type TicketMessage struct {
 // share exactly one source of truth. Changing a state name is a
 // single-package operation.
 const (
-	TicketStateOpen              = supportstates.StateOpen
-	TicketStateAwaitingAdmin     = supportstates.StateAwaitingAdmin
-	TicketStateAwaitingCustomer  = supportstates.StateAwaitingCustomer
-	TicketStateResolved          = supportstates.StateResolved
-	TicketStateClosed            = supportstates.StateClosed
+	TicketStateOpen             = supportstates.StateOpen
+	TicketStateAwaitingAdmin    = supportstates.StateAwaitingAdmin
+	TicketStateAwaitingCustomer = supportstates.StateAwaitingCustomer
+	TicketStateResolved         = supportstates.StateResolved
+	TicketStateClosed           = supportstates.StateClosed
 )
 
 // Support-ticket categories. Coarse taxonomy in slice 1; fine-grained tags
