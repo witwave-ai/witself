@@ -48,6 +48,8 @@ func run(args []string) int {
 		return realmCmd(args[1:])
 	case "agent":
 		return agentCmd(args[1:])
+	case "plan":
+		return planCmd(args[1:])
 	case "operator":
 		return operatorCmd(args[1:])
 	case "token":
