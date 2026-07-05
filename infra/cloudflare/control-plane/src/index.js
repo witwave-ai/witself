@@ -127,6 +127,11 @@ const ADMIN_ACCOUNT_TICKET_MSGS_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/messages$/;
 const ADMIN_ACCOUNT_TICKET_STATE_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/state$/;
+// Support-policy read/write per account. GET returns current policy,
+// PATCH flips it. Both proxy to the cell's admin: routes and inherit
+// the archived-account 409 / unknown-account 404 rules.
+const ADMIN_ACCOUNT_SUPPORT_POLICY_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/support-policy$/;
 // Handles that would collide with an existing actor_kind or role name
 // (owner / operator / control_plane / system). Reserved so a rogue mint
 // can't forge audit rows that read like a system-emitted event.
@@ -784,6 +789,62 @@ async function handleAdminTickets(request, env, url) {
       const text = await cellRes.text();
       // Pass status + parsed JSON through verbatim. The cell already
       // shapes errors the CLI can render; the Worker just relays.
+      return new Response(text, {
+        status: cellRes.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      return err(`cell unreachable: ${String(e?.message ?? e)}`, 502);
+    }
+  }
+
+  // Support-policy read/write. GET returns the current value; PATCH
+  // flips it. Both are per-account and inherit the archived-first
+  // and unknown-account handling from the ticket routes above.
+  const spMatch = url.pathname.match(ADMIN_ACCOUNT_SUPPORT_POLICY_PATH);
+  if (spMatch) {
+    const method = request.method;
+    if (method !== "GET" && method !== "PATCH") {
+      return err("method not allowed", 405);
+    }
+    const accountID = spMatch[1];
+    const archived = await env.DIRECTORY.get(`archived:${accountID}`, {
+      type: "json",
+    });
+    if (archived) {
+      return err("account is archived — restore before support actions", 409);
+    }
+    const cell = await cellForAccount(env, accountID);
+    if (!cell) {
+      return err("unknown account", 404);
+    }
+    let clientBody = {};
+    if (method === "PATCH") {
+      try {
+        clientBody = (await request.json()) ?? {};
+      } catch {
+        return err("invalid JSON body", 400);
+      }
+    }
+    const action = method === "GET" ? "get-support-policy" : "set-support-policy";
+    const cellBody = { admin_handle: admin.handle };
+    if (method === "PATCH") {
+      cellBody.policy = clientBody.policy ?? "";
+    }
+    try {
+      const cellRes = await fetch(
+        `${cell.endpoint}/v1/accounts/${accountID}/admin:${action}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${cell.provision_token}`,
+          },
+          body: JSON.stringify(cellBody),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+      const text = await cellRes.text();
       return new Response(text, {
         status: cellRes.status,
         headers: { "Content-Type": "application/json" },
@@ -3093,7 +3154,8 @@ export default {
       url.pathname === "/v1/admin/tickets" ||
       ADMIN_ACCOUNT_TICKET_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(url.pathname) ||
-      ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname)
+      ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname) ||
+      ADMIN_ACCOUNT_SUPPORT_POLICY_PATH.test(url.pathname)
     ) {
       return handleAdminTickets(request, env, url);
     }

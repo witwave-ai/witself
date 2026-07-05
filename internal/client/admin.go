@@ -186,6 +186,50 @@ func ReplyAdminTicket(ctx context.Context, cpEndpoint, adminToken, accountID, ti
 	return &out.Message, nil
 }
 
+// SupportPolicyRead is the response shape from
+// GET /v1/admin/accounts/{a}/support-policy.
+type SupportPolicyRead struct {
+	AccountID     string `json:"account_id"`
+	SupportPolicy string `json:"support_policy"`
+}
+
+// GetAdminSupportPolicy reads the current support_policy on account.
+func GetAdminSupportPolicy(ctx context.Context, cpEndpoint, adminToken, accountID string) (*SupportPolicyRead, error) {
+	url := fmt.Sprintf("%s/v1/admin/accounts/%s/support-policy",
+		strings.TrimRight(cpEndpoint, "/"), accountID)
+	var out SupportPolicyRead
+	if err := doJSON(ctx, http.MethodGet, url, adminToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SupportPolicyChange is the response shape from
+// PATCH /v1/admin/accounts/{a}/support-policy — reports the old and
+// new value so a caller can render "flipped enabled -> disabled".
+type SupportPolicyChange struct {
+	AccountID  string `json:"account_id"`
+	PolicyFrom string `json:"policy_from"`
+	PolicyTo   string `json:"policy_to"`
+}
+
+// SetAdminSupportPolicy flips an account's support_policy to newPolicy.
+// Idempotent — same-value calls return {policy_from == policy_to}
+// without an audit event.
+func SetAdminSupportPolicy(ctx context.Context, cpEndpoint, adminToken, accountID, newPolicy string) (*SupportPolicyChange, error) {
+	body, err := json.Marshal(map[string]string{"policy": newPolicy})
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/v1/admin/accounts/%s/support-policy",
+		strings.TrimRight(cpEndpoint, "/"), accountID)
+	var out SupportPolicyChange
+	if err := doJSON(ctx, http.MethodPatch, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ChangeAdminTicketState transitions a ticket to newState.
 func ChangeAdminTicketState(ctx context.Context, cpEndpoint, adminToken, accountID, ticketID, newState string) (*SupportTicket, error) {
 	body, err := json.Marshal(map[string]string{"state": newState})

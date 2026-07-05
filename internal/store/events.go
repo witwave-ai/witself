@@ -91,6 +91,13 @@ const (
 	VerbSupportTicketReplied      = "support.ticket.replied"
 	VerbSupportTicketStateChanged = "support.ticket.state_changed"
 	VerbSupportTicketClosed       = "support.ticket.closed"
+
+	// Fleet-admin flipped the account's support_policy on or off.
+	// policy_from / policy_to carry the transition; admin_handle
+	// attributes the actor to a specific admin (audit-trail
+	// requirement). Only control_plane may emit this — a compromised
+	// operator token cannot forge a plan-tier change.
+	VerbAccountSupportPolicyChanged = "account.support_policy_changed"
 )
 
 // ErrUnknownVerb is returned when a caller tries to log a verb not in the
@@ -276,6 +283,11 @@ var verbMetadataSchema = map[string]verbSpec{
 		requiredKeys:  []string{"ticket_id"},
 		allowedKeys:   []string{"ticket_id", "subject", "admin_handle"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
+	},
+	VerbAccountSupportPolicyChanged: {
+		requiredKeys:  []string{"policy_from", "policy_to", "admin_handle"},
+		allowedKeys:   []string{"policy_from", "policy_to", "admin_handle"},
+		allowedActors: []string{ActorControlPlane},
 	},
 }
 

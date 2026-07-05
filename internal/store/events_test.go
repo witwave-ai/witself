@@ -54,6 +54,8 @@ func TestVerbRegistryCoverage(t *testing.T) {
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
+
+		VerbAccountSupportPolicyChanged,
 	}
 	for _, v := range verbs {
 		if _, ok := verbMetadataSchema[v]; !ok {

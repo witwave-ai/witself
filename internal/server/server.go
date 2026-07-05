@@ -216,6 +216,31 @@ type Config struct {
 	ReplyAdminTicket       func(ctx context.Context, in ReplyAdminTicketRequest) (SupportTicketMessage, error)
 	ChangeAdminTicketState func(ctx context.Context, in ChangeAdminTicketStateRequest) (SupportTicket, error)
 	ListAdminTicketsAll    func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)
+
+	// GetAdminSupportPolicy / SetAdminSupportPolicy, when set (with
+	// the provisioning pair), enable admin-side reads and writes of
+	// the account's support_policy. This is what the CP calls when a
+	// fleet admin runs `witwave-admin account support-policy [--set]`.
+	// SetAdminSupportPolicy emits VerbAccountSupportPolicyChanged on
+	// a genuine transition; idempotent no-op when the target policy
+	// equals the current one.
+	GetAdminSupportPolicy func(ctx context.Context, accountID string) (string, error)
+	SetAdminSupportPolicy func(ctx context.Context, in SetAdminSupportPolicyRequest) (SetAdminSupportPolicyResult, error)
+}
+
+// SetAdminSupportPolicyRequest is the payload for the admin
+// support-policy write hook.
+type SetAdminSupportPolicyRequest struct {
+	AccountID   string
+	AdminHandle string
+	NewPolicy   string
+}
+
+// SetAdminSupportPolicyResult reports the transition.
+type SetAdminSupportPolicyResult struct {
+	AccountID  string
+	PolicyFrom string
+	PolicyTo   string
 }
 
 // ReplyAdminTicketRequest is the payload for the admin reply hook.
@@ -1332,6 +1357,76 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.v0",
 				"ticket":         ticket,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:get-support-policy"); ok && cfg.GetAdminSupportPolicy != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			policy, err := cfg.GetAdminSupportPolicy(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read support_policy")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"support_policy": policy,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:set-support-policy"); ok && cfg.SetAdminSupportPolicy != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+				Policy      string `json:"policy"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(req.Policy) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing policy")
+				return
+			}
+			result, err := cfg.SetAdminSupportPolicy(r.Context(), SetAdminSupportPolicyRequest{
+				AccountID:   accountID,
+				AdminHandle: req.AdminHandle,
+				NewPolicy:   strings.TrimSpace(req.Policy),
+			})
+			switch {
+			case errors.Is(err, ErrTicketInputInvalid):
+				// Reused: store returns ErrTicketInputInvalid for
+				// unknown policy strings — same "bad input" bucket.
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not set support_policy")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     result.AccountID,
+				"policy_from":    result.PolicyFrom,
+				"policy_to":      result.PolicyTo,
 			})
 			return
 		}

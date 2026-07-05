@@ -1128,3 +1128,123 @@ func readTicketRow(ctx context.Context, tx pgx.Tx, accountID, ticketID string) (
 	}
 	return t, err
 }
+
+// Support-policy values. Currently binary; when tiered support arrives
+// (basic/priority/enterprise-24h) we add named tiers and keep enabled
+// as an alias for the lowest tier that permits opening tickets.
+const (
+	SupportPolicyEnabled  = "enabled"
+	SupportPolicyDisabled = "disabled"
+)
+
+var legalSupportPolicies = []string{SupportPolicyEnabled, SupportPolicyDisabled}
+
+// SetSupportPolicyAdminInput carries the payload for
+// SetSupportPolicyAdmin. AdminHandle attributes the change; the
+// store validates its shape but trusts the control plane's identity
+// check.
+type SetSupportPolicyAdminInput struct {
+	AccountID   string
+	AdminHandle string
+	NewPolicy   string
+}
+
+// SetSupportPolicyAdminResult reports the transition — the previous
+// policy value is what the caller needs to render "flipped to
+// disabled" style messages without a second round-trip.
+type SetSupportPolicyAdminResult struct {
+	AccountID  string
+	PolicyFrom string
+	PolicyTo   string
+}
+
+// SetSupportPolicyAdmin flips an account's support_policy on behalf
+// of a fleet admin. Idempotent — setting the same value twice is a
+// no-op that commits without an audit event (no state change). A
+// real transition emits VerbAccountSupportPolicyChanged so the
+// tenant's audit ledger records the fleet-side decision.
+func (s *Store) SetSupportPolicyAdmin(ctx context.Context, in SetSupportPolicyAdminInput) (SetSupportPolicyAdminResult, error) {
+	if !adminHandleRE.MatchString(in.AdminHandle) {
+		return SetSupportPolicyAdminResult{}, fmt.Errorf("%w: invalid admin_handle", ErrTicketInputInvalid)
+	}
+	if !slices.Contains(legalSupportPolicies, in.NewPolicy) {
+		return SetSupportPolicyAdminResult{}, fmt.Errorf("%w: unknown support_policy %q (want enabled|disabled)", ErrTicketInputInvalid, in.NewPolicy)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SetSupportPolicyAdminResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// FOR UPDATE serialises the transition against a concurrent
+	// admin flip on the same account. Two admins racing get a clean
+	// serial order.
+	var currentPolicy string
+	err = tx.QueryRow(ctx,
+		`SELECT support_policy FROM accounts WHERE id = $1 FOR UPDATE`,
+		in.AccountID).Scan(&currentPolicy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SetSupportPolicyAdminResult{}, ErrAccountNotFound
+	}
+	if err != nil {
+		return SetSupportPolicyAdminResult{}, fmt.Errorf("lock account for support-policy change: %w", err)
+	}
+
+	if currentPolicy == in.NewPolicy {
+		// Idempotent no-op. Commit the (empty) tx so callers can rely
+		// on Begin/Commit balance, and skip the audit event so the
+		// ledger doesn't accrue no-op noise.
+		if err := tx.Commit(ctx); err != nil {
+			return SetSupportPolicyAdminResult{}, err
+		}
+		return SetSupportPolicyAdminResult{
+			AccountID:  in.AccountID,
+			PolicyFrom: currentPolicy,
+			PolicyTo:   in.NewPolicy,
+		}, nil
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET support_policy = $2 WHERE id = $1`,
+		in.AccountID, in.NewPolicy); err != nil {
+		return SetSupportPolicyAdminResult{}, fmt.Errorf("update support_policy: %w", err)
+	}
+
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: in.AccountID,
+		ActorKind: ActorControlPlane,
+		Verb:      VerbAccountSupportPolicyChanged,
+		Metadata: map[string]any{
+			"policy_from":  currentPolicy,
+			"policy_to":    in.NewPolicy,
+			"admin_handle": in.AdminHandle,
+		},
+	}); err != nil {
+		return SetSupportPolicyAdminResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SetSupportPolicyAdminResult{}, err
+	}
+	return SetSupportPolicyAdminResult{
+		AccountID:  in.AccountID,
+		PolicyFrom: currentPolicy,
+		PolicyTo:   in.NewPolicy,
+	}, nil
+}
+
+// GetSupportPolicyAdmin reads the current support_policy for an
+// account. Admin path — no operator-membership check. 404 for an
+// unknown account so the CP can render a distinguishable message.
+func (s *Store) GetSupportPolicyAdmin(ctx context.Context, accountID string) (string, error) {
+	var policy string
+	err := s.pool.QueryRow(ctx,
+		`SELECT support_policy FROM accounts WHERE id = $1`, accountID).Scan(&policy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrAccountNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get support_policy (admin): %w", err)
+	}
+	return policy, nil
+}

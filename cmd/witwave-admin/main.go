@@ -60,6 +60,8 @@ func run(args []string) int {
 		return adminCmd(args[1:])
 	case "ticket":
 		return ticketCmd(args[1:])
+	case "account":
+		return accountCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witwave-admin: unknown command %q\n\n", args[0])
 		usage(os.Stderr)
@@ -75,6 +77,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  witwave-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
 	fmt.Fprintln(w, "  witwave-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close|states)")
+	fmt.Fprintln(w, "  witwave-admin account ...   Read/set per-account fleet settings")
+	fmt.Fprintln(w, "                                (support-policy)")
 	fmt.Fprintln(w, "  witwave-admin version       Print version information")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Environment:")
@@ -840,4 +844,76 @@ func readBodyFromFlags(inline, file string, stdin bool) (string, error) {
 	default:
 		return inline, nil
 	}
+}
+
+// accountCmd handles `witwave-admin account ...`. Slice 1b.iv seeds
+// it with support-policy; future admin-only per-account settings hang
+// off the same tree.
+func accountCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witwave-admin account support-policy ...")
+		return 2
+	}
+	switch args[0] {
+	case "support-policy":
+		return accountSupportPolicy(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witwave-admin account: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+// accountSupportPolicy reads or writes an account's support_policy.
+// Without --set, reads and prints the current value. With --set,
+// PATCHes to the new value and prints the transition. Idempotent
+// server-side (no-op audit event) so re-running is safe.
+func accountSupportPolicy(args []string) int {
+	fs := flag.NewFlagSet("account support-policy", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	set := fs.String("set", "", "flip policy to this value (enabled|disabled)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*account) == "" {
+		fmt.Fprintln(os.Stderr, "usage: witwave-admin account support-policy --account ACCOUNT_ID [--set enabled|disabled]")
+		return 2
+	}
+	tok, err := resolveAdminToken(*token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		return 2
+	}
+	ep := cpEndpoint(*endpoint)
+
+	if strings.TrimSpace(*set) == "" {
+		res, err := client.GetAdminSupportPolicy(context.Background(), ep, tok, *account)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return printJSON(res)
+		}
+		fmt.Printf("%s: %s\n", res.AccountID, res.SupportPolicy)
+		return 0
+	}
+	res, err := client.SetAdminSupportPolicy(context.Background(), ep, tok, *account, *set)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(res)
+	}
+	if res.PolicyFrom == res.PolicyTo {
+		fmt.Printf("%s: already %s (no change)\n", res.AccountID, res.PolicyTo)
+	} else {
+		fmt.Printf("%s: %s → %s\n", res.AccountID, res.PolicyFrom, res.PolicyTo)
+	}
+	return 0
 }

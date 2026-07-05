@@ -472,6 +472,28 @@ func serve() int {
 				NextPageToken: res.NextPageToken,
 			}, nil
 		}
+		cfg.GetAdminSupportPolicy = func(ctx context.Context, accountID string) (string, error) {
+			p, err := st.GetSupportPolicyAdmin(ctx, accountID)
+			if err := mapSupportError(err); err != nil {
+				return "", err
+			}
+			return p, nil
+		}
+		cfg.SetAdminSupportPolicy = func(ctx context.Context, in server.SetAdminSupportPolicyRequest) (server.SetAdminSupportPolicyResult, error) {
+			res, err := st.SetSupportPolicyAdmin(ctx, store.SetSupportPolicyAdminInput{
+				AccountID:   in.AccountID,
+				AdminHandle: in.AdminHandle,
+				NewPolicy:   in.NewPolicy,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SetAdminSupportPolicyResult{}, err
+			}
+			return server.SetAdminSupportPolicyResult{
+				AccountID:  res.AccountID,
+				PolicyFrom: res.PolicyFrom,
+				PolicyTo:   res.PolicyTo,
+			}, nil
+		}
 		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
 			err := st.LogEvent(ctx, store.EventInput{
 				AccountID: accountID,
