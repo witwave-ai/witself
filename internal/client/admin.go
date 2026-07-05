@@ -186,6 +186,81 @@ func ReplyAdminTicket(ctx context.Context, cpEndpoint, adminToken, accountID, ti
 	return &out.Message, nil
 }
 
+// AdminCell is one fleet cell as the dashboard sees it: the public
+// registry entry plus the CP-directory account count.
+type AdminCell struct {
+	Name              string `json:"name"`
+	Cloud             string `json:"cloud,omitempty"`
+	Region            string `json:"region,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	Accepting         bool   `json:"accepting"`
+	HasProvisionToken bool   `json:"has_provision_token"`
+	AccountCount      int    `json:"account_count"`
+}
+
+// ListAdminCells returns the fleet registry with per-cell account
+// counts (admin-token authorized).
+func ListAdminCells(ctx context.Context, cpEndpoint, adminToken string) ([]AdminCell, error) {
+	url := strings.TrimRight(cpEndpoint, "/") + "/v1/admin/cells"
+	var out struct {
+		Cells []AdminCell `json:"cells"`
+	}
+	if err := doJSON(ctx, http.MethodGet, url, adminToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Cells, nil
+}
+
+// AdminEvent is one audit-ledger row annotated with its origin cell.
+type AdminEvent struct {
+	ID         string          `json:"id"`
+	AccountID  string          `json:"account_id"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	ActorKind  string          `json:"actor_kind"`
+	ActorID    string          `json:"actor_id,omitempty"`
+	Verb       string          `json:"verb"`
+	Metadata   json.RawMessage `json:"metadata"`
+	Cell       string          `json:"cell"`
+}
+
+// AdminEventFilter constrains ListAdminEvents. Zero Limit is the
+// server default (50, per-cell).
+type AdminEventFilter struct {
+	Since *time.Time
+	Verb  string
+	Limit int
+}
+
+// AdminEventList is the fleet-wide fan-out result.
+type AdminEventList struct {
+	Events          []AdminEvent      `json:"events"`
+	Cells           []AdminCellStatus `json:"cells"`
+	AggregateCapped bool              `json:"aggregate_capped,omitempty"`
+}
+
+// ListAdminEvents fetches the fleet-wide audit-event tail.
+func ListAdminEvents(ctx context.Context, cpEndpoint, adminToken string, f AdminEventFilter) (*AdminEventList, error) {
+	url := strings.TrimRight(cpEndpoint, "/") + "/v1/admin/events"
+	params := neturl.Values{}
+	if f.Since != nil {
+		params.Set("since", f.Since.UTC().Format(time.RFC3339))
+	}
+	if f.Verb != "" {
+		params.Set("verb", f.Verb)
+	}
+	if f.Limit > 0 {
+		params.Set("limit", strconv.Itoa(f.Limit))
+	}
+	if len(params) > 0 {
+		url += "?" + params.Encode()
+	}
+	var out AdminEventList
+	if err := doJSON(ctx, http.MethodGet, url, adminToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SupportPolicyRead is the response shape from
 // GET /v1/admin/accounts/{a}/support-policy.
 type SupportPolicyRead struct {

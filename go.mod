@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/muesli/reflow v0.3.0
 	github.com/pressly/goose/v3 v3.27.1
 )
 

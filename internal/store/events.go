@@ -567,6 +567,90 @@ func (s *Store) ListAccountEvents(ctx context.Context, accountID, operatorID str
 	return EventPage{Events: events, NextCursor: next}, nil
 }
 
+// ListEventsAdminAll returns a page of events across EVERY account on
+// this cell, newest first — the fleet-admin tail behind `witself-admin
+// events list|watch` and the dashboard's events pane. Provision-token
+// authorized at the server boundary (the CP authenticated the admin);
+// no per-account owner gate applies, which is exactly the point:
+// this is the operator's fleet-wide view. Uses the account_events_by_
+// time index from migration 0016. Same filter semantics + opaque
+// cursor codec as the owner view.
+func (s *Store) ListEventsAdminAll(ctx context.Context, filter EventFilter) (EventPage, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	if filter.Limit > 500 {
+		filter.Limit = 500
+	}
+	var (
+		afterTime *time.Time
+		afterID   string
+	)
+	if filter.Cursor != "" {
+		t, i, err := decodeEventCursor(filter.Cursor)
+		if err != nil {
+			return EventPage{}, fmt.Errorf("%w: %v", ErrBadEventCursor, err)
+		}
+		afterTime = &t
+		afterID = i
+	}
+
+	args := []any{}
+	q := &strings.Builder{}
+	q.WriteString(`SELECT id, account_id, occurred_at, actor_kind, actor_id, verb, metadata
+		FROM account_events
+		WHERE true`)
+	if filter.Since != nil {
+		args = append(args, *filter.Since)
+		fmt.Fprintf(q, " AND occurred_at >= $%d", len(args))
+	}
+	if filter.Until != nil {
+		args = append(args, *filter.Until)
+		fmt.Fprintf(q, " AND occurred_at <= $%d", len(args))
+	}
+	if filter.Verb != "" {
+		args = append(args, filter.Verb)
+		fmt.Fprintf(q, " AND verb = $%d", len(args))
+	}
+	if afterTime != nil {
+		args = append(args, *afterTime, afterID)
+		fmt.Fprintf(q, " AND (occurred_at, id) < ($%d, $%d)", len(args)-1, len(args))
+	}
+	args = append(args, filter.Limit+1)
+	fmt.Fprintf(q, " ORDER BY occurred_at DESC, id DESC LIMIT $%d", len(args))
+
+	rows, err := s.pool.Query(ctx, q.String(), args...)
+	if err != nil {
+		return EventPage{}, fmt.Errorf("query account_events (admin all): %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]Event, 0, filter.Limit)
+	for rows.Next() {
+		var e Event
+		var actorID *string
+		var meta []byte
+		if err := rows.Scan(&e.ID, &e.AccountID, &e.OccurredAt, &e.ActorKind, &actorID, &e.Verb, &meta); err != nil {
+			return EventPage{}, fmt.Errorf("scan account_events (admin all): %w", err)
+		}
+		if actorID != nil {
+			e.ActorID = *actorID
+		}
+		e.Metadata = json.RawMessage(meta)
+		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		return EventPage{}, err
+	}
+	var next string
+	if len(events) > filter.Limit {
+		cursorRow := events[filter.Limit-1]
+		next = encodeEventCursor(cursorRow.OccurredAt, cursorRow.ID)
+		events = events[:filter.Limit]
+	}
+	return EventPage{Events: events, NextCursor: next}, nil
+}
+
 func encodeEventCursor(t time.Time, id string) string {
 	return fmt.Sprintf("%d:%s", t.UnixNano(), id)
 }

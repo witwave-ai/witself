@@ -472,6 +472,34 @@ func serve() int {
 				NextPageToken: res.NextPageToken,
 			}, nil
 		}
+		cfg.ListAdminEventsAll = func(ctx context.Context, filter server.EventFilter) (server.EventPage, error) {
+			page, err := st.ListEventsAdminAll(ctx, store.EventFilter{
+				Since:  filter.Since,
+				Until:  filter.Until,
+				Verb:   filter.Verb,
+				Limit:  filter.Limit,
+				Cursor: filter.Cursor,
+			})
+			if errors.Is(err, store.ErrBadEventCursor) {
+				return server.EventPage{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
+			}
+			if err != nil {
+				return server.EventPage{}, err
+			}
+			out := make([]server.Event, len(page.Events))
+			for i, e := range page.Events {
+				out[i] = server.Event{
+					ID:         e.ID,
+					AccountID:  e.AccountID,
+					OccurredAt: e.OccurredAt,
+					ActorKind:  e.ActorKind,
+					ActorID:    e.ActorID,
+					Verb:       e.Verb,
+					Metadata:   e.Metadata,
+				}
+			}
+			return server.EventPage{Events: out, NextCursor: page.NextCursor}, nil
+		}
 		cfg.GetAdminSupportPolicy = func(ctx context.Context, accountID string) (string, error) {
 			p, err := st.GetSupportPolicyAdmin(ctx, accountID)
 			if err := mapSupportError(err); err != nil {

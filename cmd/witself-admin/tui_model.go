@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	reflowtrunc "github.com/muesli/reflow/truncate"
 
 	"github.com/witwave-ai/witself/internal/client"
 )
@@ -71,6 +72,18 @@ type (
 	watchTicketMsg  struct{ ticket client.AdminTicket }
 	watchStoppedMsg struct{}
 
+	// Fleet panes: cells strip + events tail.
+	cellsLoadedMsg struct {
+		cells []client.AdminCell
+		err   error
+	}
+	eventsSeedMsg struct {
+		events []client.AdminEvent
+		err    error
+	}
+	watchEventMsg         struct{ event client.AdminEvent }
+	eventsWatchStoppedMsg struct{}
+
 	// Self-upgrade lifecycle: periodic check → newer tag found →
 	// background install → re-exec with resume state. noop means the
 	// channel reported success without actually delivering the target
@@ -89,9 +102,10 @@ type (
 // over it (bubbletea's Elm shape), which is what makes the keyboard
 // behavior unit-testable without a terminal.
 type model struct {
-	cli   *adminCLI
-	ctx   context.Context
-	watch <-chan client.AdminTicket
+	cli        *adminCLI
+	ctx        context.Context
+	watch      <-chan client.AdminTicket
+	eventWatch <-chan client.AdminEvent
 
 	mode    uiMode
 	width   int
@@ -99,6 +113,11 @@ type model struct {
 	tickets []client.AdminTicket
 	cells   []client.AdminCellStatus
 	cursor  int
+
+	// Fleet panes (list mode is the master view: cells strip on top,
+	// support in the middle, events tail on the bottom).
+	fleetCells []client.AdminCell
+	events     []client.AdminEvent // newest LAST — renders like tail -f
 
 	// Detail state.
 	thread        *client.GetSupportTicketResult
@@ -142,6 +161,13 @@ func newModel(ctx context.Context, cli *adminCLI, watch <-chan client.AdminTicke
 	}
 }
 
+// withEventWatch attaches the live fleet-event stream feeding the
+// events tail pane.
+func (m model) withEventWatch(ch <-chan client.AdminEvent) model {
+	m.eventWatch = ch
+	return m
+}
+
 // withSelfUpgrade arms the periodic release check. binPath is the
 // running executable; ver the ldflags-injected version.
 func (m model) withSelfUpgrade(binPath, ver string) model {
@@ -164,7 +190,7 @@ func (m model) withResume(r *resumeState) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.loadTickets(), m.awaitWatch()}
+	cmds := []tea.Cmd{m.loadTickets(), m.awaitWatch(), m.loadCells(), m.seedEvents(), m.awaitEventWatch()}
 	if m.upgradeEligible() {
 		// First check shortly after startup (don't block first paint),
 		// then every upgradeCheckInterval.
@@ -265,6 +291,41 @@ func (m model) loadThread(accountID, ticketID string) tea.Cmd {
 	}
 }
 
+// loadCells refreshes the fleet-cells strip.
+func (m model) loadCells() tea.Cmd {
+	cli, ctx := m.cli, m.ctx
+	return func() tea.Msg {
+		cells, err := cli.cells(ctx)
+		return cellsLoadedMsg{cells: cells, err: err}
+	}
+}
+
+// seedEvents primes the events tail with the most recent fleet
+// activity; live updates then append via the event watch stream.
+func (m model) seedEvents() tea.Cmd {
+	cli, ctx := m.cli, m.ctx
+	return func() tea.Msg {
+		events, err := cli.eventsSeed(ctx, 30)
+		return eventsSeedMsg{events: events, err: err}
+	}
+}
+
+// awaitEventWatch pumps the fleet-event stream — same idiom as
+// awaitWatch below.
+func (m model) awaitEventWatch() tea.Cmd {
+	ch := m.eventWatch
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		e, ok := <-ch
+		if !ok {
+			return eventsWatchStoppedMsg{}
+		}
+		return watchEventMsg{event: e}
+	}
+}
+
 // awaitWatch blocks on the next live update from the watch stream.
 // Re-issued after every received message — the bubbletea idiom for
 // pumping a channel.
@@ -280,6 +341,26 @@ func (m model) awaitWatch() tea.Cmd {
 		}
 		return watchTicketMsg{ticket: t}
 	}
+}
+
+// eventTailCap bounds the in-memory events tail. Old entries roll off
+// the top exactly like a terminal scrollback.
+const eventTailCap = 200
+
+// appendEvent adds a live event to the tail (newest last), dropping
+// duplicates by id (the watch stream can re-emit around its
+// high-water mark) and rolling the oldest off past the cap.
+func appendEvent(events []client.AdminEvent, e client.AdminEvent) []client.AdminEvent {
+	for i := range events {
+		if events[i].ID == e.ID {
+			return events
+		}
+	}
+	events = append(events, e)
+	if len(events) > eventTailCap {
+		events = events[len(events)-eventTailCap:]
+	}
+	return events
 }
 
 // upsertTicket merges a live watch update into the list, keeping the
@@ -470,6 +551,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "live watch stopped — press g to refresh manually"
 		return m, nil
 
+	case cellsLoadedMsg:
+		if msg.err != nil {
+			m.status = "cells load failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.fleetCells = msg.cells
+		return m, nil
+
+	case eventsSeedMsg:
+		if msg.err != nil {
+			// Non-fatal: the pane just stays empty until the watch
+			// stream (or a refresh) fills it.
+			m.status = "events load failed: " + msg.err.Error()
+			return m, nil
+		}
+		// Seed arrives newest-first; the tail renders oldest-first
+		// (newest at the bottom, like tail -f), so reverse.
+		evs := make([]client.AdminEvent, len(msg.events))
+		for i, e := range msg.events {
+			evs[len(msg.events)-1-i] = e
+		}
+		m.events = evs
+		return m, nil
+
+	case watchEventMsg:
+		m.events = appendEvent(m.events, msg.event)
+		return m, m.awaitEventWatch()
+
+	case eventsWatchStoppedMsg:
+		m.eventWatch = nil
+		m.status = "event stream stopped — press g to refresh"
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -531,7 +645,7 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.loading = true
 		m.status = "refreshing…"
-		return m, m.loadTickets()
+		return m, tea.Batch(m.loadTickets(), m.loadCells(), m.seedEvents())
 	case "j", "down":
 		if m.mode == modeList && m.cursor < len(m.tickets)-1 {
 			m.cursor++
@@ -639,44 +753,167 @@ func (m model) View() string {
 	return b.String()
 }
 
+// viewList is the master fullscreen dashboard: two bordered windows on
+// top (cells | support) and the significant-event tail spanning the
+// full width along the bottom (display-only, renders like tail -f:
+// newest at the bottom). Support is the interactive window — cursor,
+// drill-down, state keys — and carries the highlighted border.
 func (m model) viewList() string {
-	var b strings.Builder
-	b.WriteString(styTitle.Render("witself — support") + "  " + styDim.Render(cellSummary(m.cells)) + "\n\n")
+	w, h := m.width, m.height
+	if w < 60 {
+		w = 100 // degenerate/unknown terminal — render something sane
+	}
+	if h < 15 {
+		h = 30
+	}
+
+	// Height budget: every paneBox adds 2 border rows + 1 title row.
+	// footer (hints + status) = 2. Events get about a quarter of the
+	// screen; the top row gets the rest.
+	footerH := 2
+	eventRows := maxInt((h-footerH)/4, 4)
+	topRows := maxInt(h-footerH-eventRows-6 /* 2×(border rows) + 2×(title) */, 4)
+
+	// Width budget: cells window ~1/3 (clamped), support the rest.
+	// paneBox outer width = content + 2 border + 2 padding.
+	cellsOuter := w / 3
+	if cellsOuter < 30 {
+		cellsOuter = 30
+	}
+	if cellsOuter > 46 {
+		cellsOuter = 46
+	}
+	supportOuter := maxInt(w-cellsOuter, 40)
+	cellsW, supportW, eventsW := cellsOuter-4, supportOuter-4, w-4
+
+	// ── cells window ──────────────────────────────────────
+	var cellLines []string
+	if len(m.fleetCells) == 0 {
+		cellLines = append(cellLines, styDim.Render("(no cells reported yet)"))
+	}
+	for _, c := range m.fleetCells {
+		accepting := styOK.Render("accepting")
+		if !c.Accepting {
+			accepting = styWarn.Render("draining")
+		}
+		cellLines = append(cellLines,
+			fitLine(fmt.Sprintf("%s %s/%s", oneLine(c.Name), c.Cloud, c.Region), cellsW),
+			fitLine(fmt.Sprintf("  %s · %s", accepting,
+				styTitle.Render(fmt.Sprintf("%d accounts", c.AccountCount))), cellsW),
+		)
+	}
+
+	// ── support window ────────────────────────────────────
+	var supLines []string
 	if len(m.tickets) == 0 {
 		if m.loading {
-			b.WriteString(styDim.Render("  loading…"))
+			supLines = append(supLines, styDim.Render("loading…"))
 		} else {
-			b.WriteString(styDim.Render("  no open tickets across the fleet 🎉"))
+			supLines = append(supLines, styDim.Render("no open tickets across the fleet 🎉"))
 		}
-		b.WriteString("\n\n" + styDim.Render("g refresh · q quit"))
-		return b.String()
-	}
-	rows := m.height - 6
-	if rows < 3 {
-		rows = len(m.tickets)
-	}
-	start := 0
-	if m.cursor >= rows {
-		start = m.cursor - rows + 1
-	}
-	for i := start; i < len(m.tickets) && i < start+rows; i++ {
-		t := m.tickets[i]
-		line := fmt.Sprintf(" %s %-8s %-22s %-14s %s",
-			stateBadge(t.State),
-			t.Priority,
-			truncate(t.ID, 22),
-			truncate(t.Cell, 14),
-			truncate(oneLine(t.Subject), maxInt(m.width-56, 12)),
-		)
-		age := styDim.Render(" " + humanAge(m.now().Sub(t.LastActivityAt)))
-		if i == m.cursor {
-			b.WriteString(stySelected.Render(line) + age + "\n")
-		} else {
-			b.WriteString(line + age + "\n")
+	} else {
+		start := 0
+		if m.cursor >= topRows {
+			start = m.cursor - topRows + 1
+		}
+		for i := start; i < len(m.tickets) && i < start+topRows; i++ {
+			t := m.tickets[i]
+			line := fmt.Sprintf("%s %-6s %-18s %s %s",
+				stateBadge(t.State),
+				t.Priority,
+				truncate(t.ID, 18),
+				truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
+				styDim.Render(humanAge(m.now().Sub(t.LastActivityAt))),
+			)
+			if i == m.cursor {
+				line = stySelected.Render(fitLine(line, supportW))
+			}
+			supLines = append(supLines, fitLine(line, supportW))
 		}
 	}
-	b.WriteString("\n" + styDim.Render("enter open · j/k move · R resolve · C close · g refresh · q quit"))
-	return b.String()
+
+	// ── events window (full width, bottom) ────────────────
+	var evLines []string
+	if len(m.events) == 0 {
+		evLines = append(evLines, styDim.Render("(quiet)"))
+	} else {
+		start := maxInt(len(m.events)-eventRows, 0)
+		for _, e := range m.events[start:] {
+			evLines = append(evLines, fitLine(renderEventLine(e, eventsW), eventsW))
+		}
+	}
+
+	cellsTitle := fmt.Sprintf("cells · %d", len(m.fleetCells))
+	if len(m.cells) > 0 {
+		// Fan-out health from the last ticket refresh, when we have it.
+		cellsTitle = "cells · " + cellSummary(m.cells)
+	}
+	cellsBox := paneBox(cellsTitle, cellLines, cellsW, topRows, false)
+	supportBox := paneBox(fmt.Sprintf("support · %d tickets", len(m.tickets)), supLines, supportW, topRows, true)
+	eventsBox := paneBox("events", evLines, eventsW, eventRows, false)
+
+	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsBox, supportBox)
+	footer := styDim.Render("enter open · j/k move · R resolve · C close · g refresh · q quit")
+	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, footer)
+}
+
+// paneBox frames one dashboard window with a thick border, a bold
+// title row, and a fixed content size (lines clipped to the newest /
+// padded with blanks so the frame never jitters as data flows).
+// focused windows get the accent border color.
+func paneBox(title string, lines []string, contentW, contentH int, focused bool) string {
+	if len(lines) > contentH {
+		lines = lines[len(lines)-contentH:]
+	}
+	for len(lines) < contentH {
+		lines = append(lines, "")
+	}
+	body := styTitle.Render(fitLine(title, contentW)) + "\n" + strings.Join(lines, "\n")
+	st := lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		Padding(0, 1).
+		Width(contentW + 2)
+	if focused {
+		st = st.BorderForeground(lipgloss.Color("6"))
+	}
+	return st.Render(body)
+}
+
+// fitLine truncates a (possibly styled) line to the window's content
+// width, ANSI-aware, so an over-long row can never wrap and shear the
+// border frame.
+func fitLine(s string, width int) string {
+	if width <= 1 {
+		return ""
+	}
+	return reflowtrunc.StringWithTail(s, uint(width), "…")
+}
+
+// renderEventLine renders one audit event for the tail pane. Verb is
+// the loud part; security-relevant verbs get the error color so a
+// recovery attempt or suspension jumps out of the stream.
+func renderEventLine(e client.AdminEvent, width int) string {
+	verb := e.Verb
+	styled := styInfo.Render(verb)
+	if strings.HasPrefix(verb, "recovery.") ||
+		strings.HasPrefix(verb, "account.suspended") ||
+		verb == "token.revoked" ||
+		verb == "account.email.changed" ||
+		verb == "account.support_policy_changed" {
+		styled = styErr.Render(verb)
+	}
+	actor := e.ActorKind
+	if e.ActorID != "" {
+		actor += ":" + oneLine(e.ActorID)
+	}
+	meta := truncate(oneLine(string(e.Metadata)), maxInt(width-70, 10))
+	return fmt.Sprintf(" %s %s %-14s %s %s",
+		styDim.Render(e.OccurredAt.UTC().Format("15:04:05")),
+		styled,
+		truncate(oneLine(e.AccountID), 14),
+		styDim.Render(actor),
+		styDim.Render(meta),
+	)
 }
 
 func (m model) viewDetail() string {

@@ -382,3 +382,96 @@ func TestRenderThreadSanitizesAuthor(t *testing.T) {
 
 // errFake is a reusable sentinel for failure-path tests.
 var errFake = fmt.Errorf("subprocess exploded")
+
+func mkEvent(id, verb string, at time.Time) client.AdminEvent {
+	return client.AdminEvent{
+		ID: id, AccountID: "acc_1", OccurredAt: at,
+		ActorKind: "control_plane", Verb: verb,
+		Metadata: []byte(`{"k":"v"}`), Cell: "aws-sandbox-usw2-dev",
+	}
+}
+
+// TestAppendEvent pins the events-tail semantics: newest last (tail -f
+// order), duplicate ids dropped (the watch stream re-emits around its
+// high-water mark), oldest rolled off past the cap.
+func TestAppendEvent(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	var tail []client.AdminEvent
+	tail = appendEvent(tail, mkEvent("evt_1", "account.activated", t0))
+	tail = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
+	if len(tail) != 2 || tail[1].ID != "evt_2" {
+		t.Fatalf("order: %v", tail)
+	}
+	// Duplicate dropped.
+	tail = appendEvent(tail, mkEvent("evt_2", "recovery.requested", t0.Add(time.Minute)))
+	if len(tail) != 2 {
+		t.Fatalf("duplicate not dropped: %d entries", len(tail))
+	}
+	// Cap rolls the OLDEST off.
+	for i := 0; i < eventTailCap+10; i++ {
+		tail = appendEvent(tail, mkEvent(fmt.Sprintf("evt_x%d", i), "account.activated", t0.Add(time.Duration(i)*time.Second)))
+	}
+	if len(tail) != eventTailCap {
+		t.Fatalf("cap: %d entries, want %d", len(tail), eventTailCap)
+	}
+	if tail[0].ID == "evt_1" {
+		t.Fatal("oldest entry survived past the cap")
+	}
+}
+
+// TestEventsSeedReversal pins that the newest-first seed renders as a
+// tail (newest LAST) so live appends continue the same direction.
+func TestEventsSeedReversal(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	seed := []client.AdminEvent{ // newest first, as the server returns
+		mkEvent("evt_new", "recovery.requested", t0.Add(time.Hour)),
+		mkEvent("evt_old", "account.activated", t0),
+	}
+	next, _ := m.Update(eventsSeedMsg{events: seed})
+	m2 := next.(model)
+	if len(m2.events) != 2 || m2.events[0].ID != "evt_old" || m2.events[1].ID != "evt_new" {
+		t.Fatalf("seed order: %v", m2.events)
+	}
+	// A live append lands after the seed's newest.
+	next, _ = m2.Update(watchEventMsg{event: mkEvent("evt_live", "token.revoked", t0.Add(2*time.Hour))})
+	m3 := next.(model)
+	if m3.events[len(m3.events)-1].ID != "evt_live" {
+		t.Fatalf("live append order: %v", m3.events)
+	}
+}
+
+// TestRenderEventLineSanitizes pins injection defense on the event
+// tail — actor ids and metadata are server-side strings.
+func TestRenderEventLineSanitizes(t *testing.T) {
+	e := mkEvent("evt_1", "recovery.requested", time.Now())
+	e.ActorID = "mal\x1b[2Jlory"
+	e.Metadata = []byte("{\"x\":\"\x07bell\"}")
+	out := renderEventLine(e, 120)
+	if strings.Contains(out, "\x1b[2J") || strings.Contains(out, "\x07") {
+		t.Fatalf("escape survived event line: %q", out)
+	}
+}
+
+// TestViewListRendersPanes smoke-tests the master view: all three pane
+// headers present, ticket + cell + event content rendered.
+func TestViewListRendersPanes(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 120, 40
+	m.fleetCells = []client.AdminCell{{
+		Name: "aws-sandbox-usw2-dev", Cloud: "aws", Region: "us-west-2",
+		Accepting: true, AccountCount: 12,
+	}}
+	m.tickets = []client.AdminTicket{mkTicket("tkt_1", "awaiting_admin", t0)}
+	m.events = []client.AdminEvent{mkEvent("evt_1", "recovery.requested", t0)}
+	m.now = func() time.Time { return t0.Add(time.Minute) }
+
+	out := m.viewList()
+	for _, want := range []string{"cells", "support", "events", "12 accounts", "tkt_1", "recovery.requested"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view missing %q", want)
+		}
+	}
+}

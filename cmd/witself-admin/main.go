@@ -63,6 +63,10 @@ func run(args []string) int {
 		return ticketCmd(args[1:])
 	case "account":
 		return accountCmd(args[1:])
+	case "cells":
+		return cellsCmd(args[1:])
+	case "events":
+		return eventsCmd(args[1:])
 	case "dashboard", "tui":
 		return dashboardCmd(args[1:])
 	default:
@@ -82,8 +86,10 @@ func usage(w io.Writer) {
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
 	usageLine(w, "                                (support-policy)")
-	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (live support pane;")
-	usageLine(w, "                                self-upgrades and resumes its view)")
+	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
+	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
+	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")
+	usageLine(w, "                                events; self-upgrades and resumes its view)")
 	usageLine(w, "  witself-admin version       Print version information")
 	usageLine(w)
 	usageLine(w, "Tokens (managed dir first; env vars and flags override):")

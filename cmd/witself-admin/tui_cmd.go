@@ -47,15 +47,22 @@ func dashboardCmd(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Live watch is best-effort: if the stream can't start, the
+	// Live watches are best-effort: if a stream can't start, the
 	// dashboard still works on manual refresh.
 	watch, err := cli.watch(ctx, *interval)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-admin: live watch unavailable (%v); manual refresh only\n", err)
+		fmt.Fprintf(os.Stderr, "witself-admin: live ticket watch unavailable (%v); manual refresh only\n", err)
 		watch = nil
 	}
+	eventWatch, err := cli.watchEvents(ctx, *interval)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: live event stream unavailable (%v); manual refresh only\n", err)
+		eventWatch = nil
+	}
 
-	m := newModel(ctx, cli, watch).withSelfUpgrade(cli.bin, version.Version)
+	m := newModel(ctx, cli, watch).
+		withEventWatch(eventWatch).
+		withSelfUpgrade(cli.bin, version.Version)
 	if *resumeEnc != "" {
 		if r, err := decodeResumeState(*resumeEnc); err == nil {
 			m = m.withResume(&r)

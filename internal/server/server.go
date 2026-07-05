@@ -226,6 +226,14 @@ type Config struct {
 	// equals the current one.
 	GetAdminSupportPolicy func(ctx context.Context, accountID string) (string, error)
 	SetAdminSupportPolicy func(ctx context.Context, in SetAdminSupportPolicyRequest) (SetAdminSupportPolicyResult, error)
+
+	// ListAdminEventsAll, when set (with the provisioning pair),
+	// enables POST /v1/events/admin:list — the cell-wide audit-event
+	// tail (every account, newest first, cursor-paginated) behind the
+	// fleet dashboard's events pane and `witself-admin events`. Same
+	// filter + cursor semantics as the owner's per-account view; the
+	// fleet-wide scope is exactly the point.
+	ListAdminEventsAll func(ctx context.Context, filter EventFilter) (EventPage, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -680,6 +688,12 @@ func apiMux(cfg Config) http.Handler {
 	if cfg.ProvisionToken != "" && cfg.ListAdminTicketsAll != nil {
 		mux.HandleFunc("POST /v1/support/admin:list-tickets",
 			supportAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminTicketsAll))
+	}
+	// Cell-wide audit tail for the fleet dashboard (provision-token
+	// authorized, same pattern as the ticket fan-out source above).
+	if cfg.ProvisionToken != "" && cfg.ListAdminEventsAll != nil {
+		mux.HandleFunc("POST /v1/events/admin:list",
+			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
 	return mux
 }
@@ -1435,6 +1449,75 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 		// one as retryable, so a cell that doesn't serve an action yet never
 		// burns a verification link or a reap candidate.
 		writeJSONError(w, http.StatusNotFound, "unknown account action")
+	}
+}
+
+// eventsAdminCellHandler serves POST /v1/events/admin:list — the
+// cell-wide audit-event tail the control plane fans out to for the
+// fleet dashboard's events pane. Body carries optional filters
+// (since, until, verb, limit) and a page_token cursor.
+func eventsAdminCellHandler(provisionToken string, list func(ctx context.Context, filter EventFilter) (EventPage, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		var req struct {
+			AdminHandle string `json:"admin_handle"`
+			Since       string `json:"since"`
+			Until       string `json:"until"`
+			Verb        string `json:"verb"`
+			Limit       int    `json:"limit"`
+			PageToken   string `json:"page_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if err := validateAdminHandle(req.AdminHandle); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		filter := EventFilter{
+			Verb:   req.Verb,
+			Limit:  req.Limit,
+			Cursor: req.PageToken,
+		}
+		if s := strings.TrimSpace(req.Since); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "since must be RFC3339")
+				return
+			}
+			filter.Since = &t
+		}
+		if s := strings.TrimSpace(req.Until); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "until must be RFC3339")
+				return
+			}
+			filter.Until = &t
+		}
+		page, err := list(r.Context(), filter)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not list events")
+			return
+		}
+		if page.Events == nil {
+			page.Events = []Event{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":  "witself.v0",
+			"events":          page.Events,
+			"next_page_token": page.NextCursor,
+		})
 	}
 }
 

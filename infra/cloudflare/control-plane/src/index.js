@@ -663,6 +663,13 @@ async function fanoutCells(env, path, jsonBody) {
 // Callers get an "aggregate_capped: true" flag when we trim.
 const FANOUT_AGG_CAP = 500;
 
+// parseTS turns an RFC3339 timestamp into epoch millis for sorting;
+// unparseable/missing values sort oldest.
+function parseTS(s) {
+  const n = Date.parse(s || "");
+  return Number.isNaN(n) ? 0 : n;
+}
+
 // Customer-facing support notification. Fired inside handleAdminTickets
 // via ctx.waitUntil() after a successful cell proxy for reply /
 // state=resolved / state=closed. Idempotency dedups honest CLI retries
@@ -863,6 +870,76 @@ async function handleAdminTickets(request, env, ctx, url) {
     });
   }
 
+  // Fleet cells with per-cell account counts — the dashboard's cells
+  // pane. Counts come from the CP's own directory (acct: pointers),
+  // which is authoritative for placement; an O(accounts) KV scan is
+  // fine at current fleet scale (same tradeoff cellHasAccounts makes,
+  // and the same DO-counter upgrade path applies when it stops being
+  // fine). provision tokens never leave the CP (publicCell).
+  if (url.pathname === "/v1/admin/cells" && request.method === "GET") {
+    const cells = await listCells(env);
+    const counts = new Map();
+    let cursor;
+    do {
+      const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+      for (const k of page.keys) {
+        const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+        if (entry?.cell) {
+          counts.set(entry.cell, (counts.get(entry.cell) ?? 0) + 1);
+        }
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    return json({
+      schema_version: "witself.v0",
+      cells: cells.map((c) => ({
+        ...publicCell(c),
+        account_count: counts.get(c.name) ?? 0,
+      })),
+    });
+  }
+
+  // Fleet-wide audit-event tail — the dashboard's events pane. Fans
+  // out to every cell's /v1/events/admin:list, merges newest-first.
+  // Same partial-failure honesty as /v1/admin/tickets: a broken cell
+  // shows up in cells[], never as silently missing events.
+  if (url.pathname === "/v1/admin/events" && request.method === "GET") {
+    const since = url.searchParams.get("since");
+    const verb = url.searchParams.get("verb");
+    const limit = Number.parseInt(url.searchParams.get("limit") || "50", 10);
+    const body = {
+      admin_handle: admin.handle,
+      since: since || undefined,
+      verb: verb || undefined,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 50,
+    };
+    const perCell = await fanoutCells(env, "/v1/events/admin:list", body);
+    let events = [];
+    for (const c of perCell) {
+      if (c.status !== "ok" || !c.body?.events) continue;
+      for (const e of c.body.events) {
+        events.push({ ...e, cell: c.cell });
+      }
+    }
+    // Numeric compare, NOT lexicographic: Go trims trailing fractional
+    // zeros from RFC3339 timestamps, so string order misranks
+    // same-second events ('...00Z' > '...00.5Z' as strings).
+    events.sort((a, b) => parseTS(b.occurred_at) - parseTS(a.occurred_at));
+    const aggregateCapped = events.length > FANOUT_AGG_CAP;
+    if (aggregateCapped) events = events.slice(0, FANOUT_AGG_CAP);
+    return json({
+      schema_version: "witself.v0",
+      events,
+      cells: perCell.map((c) => ({
+        name: c.cell,
+        status: c.status,
+        count: c.status === "ok" ? (c.body?.events?.length ?? 0) : 0,
+        ...(c.error ? { error: c.error } : {}),
+      })),
+      ...(aggregateCapped ? { aggregate_capped: true } : {}),
+    });
+  }
+
   // Fleet-wide list. Query params (all optional):
   //   state=<comma-list>   filter by ticket state
   //   since=<ISO>          last_activity_at >= since
@@ -894,8 +971,10 @@ async function handleAdminTickets(request, env, ctx, url) {
         tickets.push({ ...t, cell: c.cell });
       }
     }
-    tickets.sort((a, b) =>
-      (b.last_activity_at || "").localeCompare(a.last_activity_at || "")
+    // Numeric compare — see the events merge for why lexicographic
+    // ordering is wrong for Go's variable-precision timestamps.
+    tickets.sort(
+      (a, b) => parseTS(b.last_activity_at) - parseTS(a.last_activity_at)
     );
     const aggregateCapped = tickets.length > FANOUT_AGG_CAP;
     if (aggregateCapped) tickets = tickets.slice(0, FANOUT_AGG_CAP);
@@ -3365,6 +3444,8 @@ export default {
     // only door — the CLI never touches a cell directly.
     if (
       url.pathname === "/v1/admin/whoami" ||
+      url.pathname === "/v1/admin/cells" ||
+      url.pathname === "/v1/admin/events" ||
       url.pathname === "/v1/admin/tickets" ||
       ADMIN_ACCOUNT_TICKET_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(url.pathname) ||

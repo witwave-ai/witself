@@ -94,6 +94,56 @@ func (a *adminCLI) setState(ctx context.Context, accountID, ticketID, state stri
 		"ticket", "state", "--account", accountID, "--ticket", ticketID, "--state", state, "--json")
 }
 
+// cells fetches the fleet registry with per-cell account counts —
+// the dashboard's cells pane.
+func (a *adminCLI) cells(ctx context.Context) ([]client.AdminCell, error) {
+	var res struct {
+		Cells []client.AdminCell `json:"cells"`
+	}
+	err := a.run(ctx, &res, "", "cells", "list", "--json")
+	return res.Cells, err
+}
+
+// eventsSeed fetches the most recent fleet events to prime the tail.
+func (a *adminCLI) eventsSeed(ctx context.Context, limit int) ([]client.AdminEvent, error) {
+	var res client.AdminEventList
+	err := a.run(ctx, &res, "", "events", "list", "--json", "--limit", fmt.Sprintf("%d", limit))
+	return res.Events, err
+}
+
+// watchEvents starts the long-running fleet-event ndjson stream —
+// same lifecycle contract as watch() below.
+func (a *adminCLI) watchEvents(ctx context.Context, interval string) (<-chan client.AdminEvent, error) {
+	cmd := exec.CommandContext(ctx, a.bin,
+		"events", "watch", "--json", "--interval", interval)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	ch := make(chan client.AdminEvent, 16)
+	go func() {
+		defer close(ch)
+		defer func() { _ = cmd.Wait() }()
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			var e client.AdminEvent
+			if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+				continue
+			}
+			select {
+			case ch <- e:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch, nil
+}
+
 // watch starts the long-running ndjson stream and forwards each updated
 // ticket on the returned channel. The subprocess dies with the context;
 // stream errors close the channel (the TUI shows a "watch stopped"
