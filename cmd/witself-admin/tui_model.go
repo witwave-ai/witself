@@ -600,9 +600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.threadView.Width = msg.Width
-		m.threadView.Height = maxInt(msg.Height-6, 3)
-		m.composer.SetWidth(msg.Width - 2)
+		m.syncThreadFrame()
 		return m, nil
 
 	case ticketsLoadedMsg:
@@ -630,7 +628,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.thread = &msg.res
-		m.threadView.SetContent(renderThread(msg.res, m.width))
+		m.threadView.SetContent(renderThread(msg.res, m.threadView.Width))
 		m.threadView.GotoBottom()
 		// A live-watch refresh must not yank the operator out of the
 		// composer (or discard a draft) — only promote to detail from
@@ -653,6 +651,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.resume = nil
 		}
+		// Re-sync AFTER the mode settled (compose reserves more rows in
+		// the full-screen fallback) and keep the newest message in view.
+		m.syncThreadFrame()
+		m.threadView.GotoBottom()
 		return m, nil
 
 	case upgradeCheckMsg:
@@ -840,6 +842,7 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// reflexive ctrl+d.
 			m.composer.Reset()
 			m.mode = modeDetail
+			m.syncThreadFrame()
 			m.status = "reply discarded"
 			return m, m.relaunchIfReady()
 		case "ctrl+d":
@@ -847,12 +850,14 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if body == "" {
 				m.status = "empty reply not sent"
 				m.mode = modeDetail
+				m.syncThreadFrame()
 				return m, m.relaunchIfReady()
 			}
 			cli, ctx := m.cli, m.ctx
 			acct, tkt := m.threadAccount, m.threadTicket
 			m.composer.Reset()
 			m.mode = modeDetail
+			m.syncThreadFrame()
 			m.loading = true
 			m.status = "sending reply…"
 			send := func() tea.Msg {
@@ -1017,6 +1022,7 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// through this handler.)
 			m.composer.Reset()
 			m.mode = modeCompose
+			m.syncThreadFrame()
 			m.composer.Focus()
 			return m, textarea.Blink
 		}
@@ -1050,6 +1056,28 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// syncThreadFrame sizes the thread viewport + composer to the frame
+// they render in: a centered dialog on roomy terminals (budget
+// reserves ~12 rows for head, composer, and hints in either mode),
+// the full screen on small ones — where compose mode must reserve the
+// composer block's rows or the ticket head shears off the top while
+// the operator types. Called on resize and on every detail/compose
+// mode flip.
+func (m *model) syncThreadFrame() {
+	frameW := m.detailFrameW()
+	m.threadView.Width = frameW - 4
+	m.composer.SetWidth(frameW - 6)
+	if m.modalEligible() {
+		m.threadView.Height = maxInt(m.detailMaxContent()-12, 3)
+		return
+	}
+	h := maxInt(m.height-6, 3)
+	if m.mode == modeCompose {
+		h = maxInt(m.height-14, 3)
+	}
+	m.threadView.Height = h
 }
 
 // relaunchIfReady triggers the deferred post-upgrade restart once the
@@ -1090,6 +1118,17 @@ func (m model) actionTarget() (accountID, ticketID string) {
 }
 
 func (m model) View() string {
+	// Drill-downs float over the live dashboard when the terminal has
+	// room; the full-screen switch below is the fallback. The safety
+	// valve: a dialog taller than the screen can't be centered — fall
+	// through instead of shearing it.
+	if dialog := m.modalDialog(); dialog != "" && lipgloss.Height(dialog) <= m.height-1 {
+		base := m.viewList()
+		if extra := m.footerExtra(); extra != "" {
+			base += "\n" + extra
+		}
+		return overlayCenter(base, dialog, m.width)
+	}
 	var b strings.Builder
 	switch m.mode {
 	case modeList:
@@ -1115,16 +1154,32 @@ func (m model) View() string {
 		b.WriteString(m.viewHealth())
 		b.WriteString("\n" + styDim.Render("esc back · g refresh · q quit"))
 	}
-	if badge := m.upgradeBadge(); badge != "" {
-		b.WriteString("\n" + badge)
-	}
-	if m.status != "" {
-		// The status line carries raw subprocess stderr / server error
-		// text — hostile bytes must not reach the terminal, and a
-		// stray newline must not break the footer layout.
-		b.WriteString("\n" + styDim.Render(oneLine(m.status)))
+	if extra := m.footerExtra(); extra != "" {
+		b.WriteString("\n" + extra)
 	}
 	return b.String()
+}
+
+// footerExtra is the badge+status footer — ONE line, not two. The
+// list view already fills the screen; a second appended row pushes
+// the frame past the terminal height and bubbletea shears the TOP
+// border row to make room. The status text carries raw subprocess
+// stderr / server error text — hostile bytes must not reach the
+// terminal, and a stray newline must not break the footer layout.
+func (m model) footerExtra() string {
+	badge := m.upgradeBadge()
+	status := ""
+	if m.status != "" {
+		status = styDim.Render(oneLine(m.status))
+	}
+	switch {
+	case badge != "" && status != "":
+		return badge + "  " + status
+	case badge != "":
+		return badge
+	default:
+		return status
+	}
 }
 
 // upgradeBadge is the persistent "upgrade light" pinned to the bottom
@@ -1507,11 +1562,7 @@ func (m model) viewEventDetail() string {
 	if e == nil {
 		return styDim.Render("no event selected")
 	}
-	w := m.width
-	if w < 60 {
-		w = 100
-	}
-	contentW := w - 4
+	contentW := m.detailFrameW() - 4
 
 	actor := e.ActorKind
 	if e.ActorID != "" {
@@ -1535,6 +1586,7 @@ func (m model) viewEventDetail() string {
 		lines = append(lines, fitLine("  "+ln, contentW))
 	}
 	title := "event · " + oneLine(e.Verb)
+	lines = clipLines(lines, m.detailMaxContent(), contentW)
 	return paneBox(title, lines, contentW, maxInt(len(lines), 8), true)
 }
 
@@ -1546,11 +1598,7 @@ func (m model) viewTicketDetail() string {
 	if t == nil {
 		return styDim.Render("no ticket selected")
 	}
-	w := m.width
-	if w < 60 {
-		w = 100
-	}
-	contentW := w - 4
+	contentW := m.detailFrameW() - 4
 	ts := func(p *time.Time) string {
 		if p == nil {
 			return styDim.Render("—")
@@ -1579,6 +1627,7 @@ func (m model) viewTicketDetail() string {
 		lines = append(lines, "", styDim.Render("metadata"))
 		lines = append(lines, prettyJSONLines(t.Metadata, contentW)...)
 	}
+	lines = clipLines(lines, m.detailMaxContent(), contentW)
 	return paneBox("ticket · "+oneLine(t.ID), lines, contentW, maxInt(len(lines), 8), true)
 }
 
@@ -1603,11 +1652,7 @@ func (m model) viewCellDetail() string {
 	if c == nil {
 		return styDim.Render("no cell selected")
 	}
-	w := m.width
-	if w < 60 {
-		w = 100
-	}
-	contentW := w - 4
+	contentW := m.detailFrameW() - 4
 	accepting := "accepting new accounts"
 	if !c.Accepting {
 		accepting = "draining (not accepting)"

@@ -323,19 +323,14 @@ func (m model) viewHealth() string {
 	lines = append(lines, "", styTitle.Render("software"))
 	lines = append(lines, fitLine("  "+versionSummary(m.fleetCells), contentW))
 
-	// Height budget: bubbletea's altscreen truncates an over-tall
-	// frame from the TOP — shearing the title and border — so clip the
-	// content ourselves and say what was cut. 6 = 2 border + title
-	// inside the box, hint + status below it.
+	// Height budget: 6 = 2 border + title inside the box, hint +
+	// status below it. Health is a full-screen page by design, so it
+	// budgets against the whole terminal.
 	h := m.height
 	if h < 15 {
 		h = 30
 	}
 	contentH := maxInt(h-6, 6)
-	if len(lines) > contentH {
-		dropped := len(lines) - contentH + 1
-		lines = append(lines[:contentH-1],
-			styDim.Render(fitLine(fmt.Sprintf("… %d more lines — enlarge the terminal", dropped), contentW)))
-	}
+	lines = clipLines(lines, contentH, contentW)
 	return paneBox("fleet health", lines, contentW, maxInt(len(lines), minInt(10, contentH)), true)
 }
