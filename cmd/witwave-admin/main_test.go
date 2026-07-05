@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/witwave-ai/witself/internal/client"
 )
 
 // TestSafeTextStripsTerminalEscapes pins parity with the ws CLI's
@@ -99,4 +102,90 @@ func TestResolveAdminToken(t *testing.T) {
 	if got, err := resolveAdminToken("", fp); err != nil || got != "from-file" {
 		t.Errorf("file beats env: got %q err=%v", got, err)
 	}
+}
+
+// TestNewestActivity pins the pure high-water-mark advancement rule
+// that `ticket watch` relies on to know what's new between polls.
+// Off-by-one here would either drop tickets (bad, silent) or re-emit
+// them forever (loud, annoying) — both break the TUI + agent contract.
+func TestNewestActivity(t *testing.T) {
+	mk := func(rfc string) time.Time {
+		v, err := time.Parse(time.RFC3339, rfc)
+		if err != nil {
+			t.Fatalf("bad time %q: %v", rfc, err)
+		}
+		return v
+	}
+	fallback := mk("2026-07-04T12:00:00Z")
+
+	t.Run("empty tickets returns fallback", func(t *testing.T) {
+		got := newestActivity(nil, fallback)
+		if !got.Equal(fallback) {
+			t.Errorf("got %v, want %v", got, fallback)
+		}
+	})
+	t.Run("all older than fallback returns fallback", func(t *testing.T) {
+		ts := []client.AdminTicket{
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T11:00:00Z")}},
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T11:30:00Z")}},
+		}
+		got := newestActivity(ts, fallback)
+		if !got.Equal(fallback) {
+			t.Errorf("got %v, want %v", got, fallback)
+		}
+	})
+	t.Run("newer ticket advances the mark", func(t *testing.T) {
+		newer := mk("2026-07-04T13:00:00Z")
+		ts := []client.AdminTicket{
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T11:00:00Z")}},
+			{SupportTicket: client.SupportTicket{LastActivityAt: newer}},
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T12:30:00Z")}},
+		}
+		got := newestActivity(ts, fallback)
+		if !got.Equal(newer) {
+			t.Errorf("got %v, want %v", got, newer)
+		}
+	})
+	t.Run("simulated two-tick advancement", func(t *testing.T) {
+		// Tick 1: fallback is an early baseline; tickets are newer,
+		// so hwm should advance to the newest ticket.
+		earlyBaseline := mk("2026-07-04T09:00:00Z")
+		t1 := []client.AdminTicket{
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T10:00:00Z")}},
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T10:05:00Z")}},
+		}
+		hwm := newestActivity(t1, earlyBaseline)
+		if !hwm.Equal(mk("2026-07-04T10:05:00Z")) {
+			t.Fatalf("first-tick hwm = %v, want 10:05:00Z", hwm)
+		}
+		// Tick 2: server returns a fresh update. hwm advances to it.
+		t2 := []client.AdminTicket{
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T10:10:00Z")}},
+		}
+		hwm = newestActivity(t2, hwm)
+		if !hwm.Equal(mk("2026-07-04T10:10:00Z")) {
+			t.Errorf("second-tick hwm = %v, want 10:10:00Z", hwm)
+		}
+		// Tick 3: empty. hwm stays put.
+		hwm = newestActivity(nil, hwm)
+		if !hwm.Equal(mk("2026-07-04T10:10:00Z")) {
+			t.Errorf("third-tick hwm should not regress: got %v", hwm)
+		}
+	})
+
+	t.Run("baseline case: fallback wins when all tickets are older", func(t *testing.T) {
+		// The initial baseline pattern in ticket watch: fallback is
+		// "now - small buffer" from the client. Any pre-existing
+		// ticket last_activity_at older than that must NOT advance
+		// hwm past client-now — otherwise tick 2 could miss a new
+		// ticket that landed between tick 1's fetch and now.
+		ts := []client.AdminTicket{
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T11:00:00Z")}},
+			{SupportTicket: client.SupportTicket{LastActivityAt: mk("2026-07-04T11:30:00Z")}},
+		}
+		got := newestActivity(ts, fallback) // fallback = 12:00
+		if !got.Equal(fallback) {
+			t.Errorf("baseline: got %v, want fallback %v", got, fallback)
+		}
+	})
 }

@@ -25,7 +25,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -71,6 +73,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  witwave-admin whoami        Verify an admin token and print its identity")
 	fmt.Fprintln(w, "  witwave-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
 	fmt.Fprintln(w, "  witwave-admin ticket ...    Read/reply/transition support tickets across the fleet")
+	fmt.Fprintln(w, "                                (list|watch|show|reply|state|resolve|close)")
 	fmt.Fprintln(w, "  witwave-admin version       Print version information")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Environment:")
@@ -378,12 +381,14 @@ func adminDelete(args []string) int {
 // ticketCmd handles `witwave-admin ticket ...`.
 func ticketCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket list|show|reply|state|resolve|close ...")
+		fmt.Fprintln(os.Stderr, "usage: witwave-admin ticket list|watch|show|reply|state|resolve|close ...")
 		return 2
 	}
 	switch args[0] {
 	case "list":
 		return ticketList(args[1:])
+	case "watch":
+		return ticketWatch(args[1:])
 	case "show":
 		return ticketShow(args[1:])
 	case "reply":
@@ -475,6 +480,146 @@ func ticketList(args []string) int {
 		fmt.Fprintln(os.Stderr, "\nresult was capped at 500 tickets — use --since or --state to narrow the query.")
 	}
 	return 0
+}
+
+// ticketWatch polls /v1/admin/tickets on --interval, tracks a
+// server-authoritative high-water mark on last_activity_at, and emits
+// only tickets whose activity is newer than the previous tick. Powers
+// the support pane in the follow-up TUI (#29) and any AI-agent
+// reactive workflow that needs to know "what just happened."
+//
+// First tick emits nothing — it baselines the high-water mark from
+// the newest ticket the server currently has. Subsequent ticks emit
+// as they happen. Ctrl-C or SIGTERM exits cleanly. --json emits ndjson
+// (one object per line, flushed) so a subprocess consumer (TUI or
+// agent) can parse it as a stream.
+//
+// Errors from a single tick log to stderr and continue — a transient
+// network blip must not kill a long-running dashboard.
+func ticketWatch(args []string) int {
+	fs := flag.NewFlagSet("ticket watch", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	interval := fs.Duration("interval", 30*time.Second, "poll cadence (minimum 5s)")
+	states := fs.String("state", "", "comma-separated ticket states (default: all non-closed)")
+	limit := fs.Int("limit", 100, "per-cell page size (1-500)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *interval < 5*time.Second {
+		// Guard against a tight loop that would hammer the fan-out
+		// across every cell every second. 5s is already aggressive.
+		*interval = 5 * time.Second
+	}
+	tok, err := resolveAdminToken(*token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witwave-admin: %v\n", err)
+		return 2
+	}
+	filter := client.AdminTicketFilter{Limit: *limit}
+	if s := strings.TrimSpace(*states); s != "" {
+		for _, part := range strings.Split(s, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				filter.States = append(filter.States, p)
+			}
+		}
+	}
+
+	// Clean shutdown on Ctrl-C or SIGTERM. The current in-flight call
+	// still gets to complete (context is passed through) — we don't
+	// tear the connection out from under a mid-fetch state.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Human-readable header once, before the first tick's output.
+	if !*jsonOut {
+		fmt.Fprintf(os.Stderr, "watching every %s. ctrl-c to stop.\n", *interval)
+	}
+
+	ep := cpEndpoint(*endpoint)
+	var hwm time.Time
+	first := true
+	stderr := os.Stderr
+
+	tick := func() {
+		f := filter
+		if !first {
+			since := hwm
+			f.Since = &since
+		}
+		res, err := client.ListAdminTickets(ctx, ep, tok, f)
+		if err != nil {
+			// Don't die on a transient. Log to stderr and let the
+			// next tick try again — TUI parsers can filter their
+			// input to lines that parse as JSON.
+			fmt.Fprintf(stderr, "witwave-admin: watch tick failed: %v\n", err)
+			return
+		}
+		if first {
+			hwm = newestActivity(res.Tickets, time.Now().UTC().Add(-1*time.Second))
+			first = false
+			return
+		}
+		for _, t := range res.Tickets {
+			if !t.LastActivityAt.After(hwm) {
+				continue
+			}
+			emitWatchedTicket(t, *jsonOut)
+		}
+		hwm = newestActivity(res.Tickets, hwm)
+	}
+
+	tick()
+	if ctx.Err() != nil {
+		return 0
+	}
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-ticker.C:
+			tick()
+		}
+	}
+}
+
+// newestActivity returns the newest LastActivityAt across tickets, or
+// fallback if the slice is empty / all timestamps are before fallback.
+// Extracted for testability — the polling loop's hwm advance is what
+// the unit test pins.
+func newestActivity(tickets []client.AdminTicket, fallback time.Time) time.Time {
+	newest := fallback
+	for _, t := range tickets {
+		if t.LastActivityAt.After(newest) {
+			newest = t.LastActivityAt
+		}
+	}
+	return newest
+}
+
+// emitWatchedTicket prints one ticket to stdout. jsonMode emits a
+// single JSON object per line (ndjson — trailing newline required
+// so consumers can split on '\n'). Human mode prints a
+// safeText/tabSafe single-line summary.
+func emitWatchedTicket(t client.AdminTicket, jsonMode bool) {
+	if jsonMode {
+		buf, err := json.Marshal(t)
+		if err != nil {
+			return
+		}
+		os.Stdout.Write(buf)
+		os.Stdout.Write([]byte("\n"))
+		return
+	}
+	fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		t.LastActivityAt.UTC().Format(time.RFC3339),
+		t.Cell, t.State, t.Priority, t.AccountID, t.ID,
+		tabSafe(safeText(t.Subject)))
 }
 
 func ticketShow(args []string) int {
