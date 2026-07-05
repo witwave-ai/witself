@@ -187,7 +187,8 @@ func ReplyAdminTicket(ctx context.Context, cpEndpoint, adminToken, accountID, ti
 }
 
 // AdminCell is one fleet cell as the dashboard sees it: the public
-// registry entry plus the CP-directory account count.
+// registry entry plus the CP-directory account count and the software
+// version the cell reported at fan-out time (empty = unreachable).
 type AdminCell struct {
 	Name              string `json:"name"`
 	Cloud             string `json:"cloud,omitempty"`
@@ -196,6 +197,8 @@ type AdminCell struct {
 	Accepting         bool   `json:"accepting"`
 	HasProvisionToken bool   `json:"has_provision_token"`
 	AccountCount      int    `json:"account_count"`
+	ArchivedCount     int    `json:"archived_count"`
+	Version           string `json:"version,omitempty"`
 }
 
 // ListAdminCells returns the fleet registry with per-cell account

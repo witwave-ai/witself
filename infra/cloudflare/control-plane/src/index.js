@@ -890,11 +890,47 @@ async function handleAdminTickets(request, env, ctx, url) {
       }
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
+    // Archived accounts (evacuated to R2, awaiting placement) counted
+    // by the cell they came FROM — they're not live anywhere, but the
+    // origin cell is where an operator would go looking for them.
+    const archivedCounts = new Map();
+    cursor = undefined;
+    do {
+      const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
+      for (const k of page.keys) {
+        const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+        if (entry?.cell) {
+          archivedCounts.set(entry.cell, (archivedCounts.get(entry.cell) ?? 0) + 1);
+        }
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    // Running software version per cell, straight from each cell's
+    // public /v1/version (parallel, short timeout). null = the cell
+    // didn't answer — the dashboard renders that as unreachable
+    // rather than hiding the row.
+    const versions = await Promise.all(
+      cells.map(async (c) => {
+        if (!c.endpoint) return null;
+        try {
+          const r = await fetch(`${c.endpoint}/v1/version`, {
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!r.ok) return null;
+          const b = await r.json();
+          return typeof b?.version === "string" ? b.version : null;
+        } catch {
+          return null;
+        }
+      })
+    );
     return json({
       schema_version: "witself.v0",
-      cells: cells.map((c) => ({
+      cells: cells.map((c, i) => ({
         ...publicCell(c),
         account_count: counts.get(c.name) ?? 0,
+        archived_count: archivedCounts.get(c.name) ?? 0,
+        ...(versions[i] ? { version: versions[i] } : {}),
       })),
     });
   }

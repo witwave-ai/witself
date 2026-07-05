@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,6 +27,8 @@ const (
 	modeList uiMode = iota
 	modeDetail
 	modeCompose
+	modeEventDetail // drill-down on one audit event
+	modeCellDetail  // drill-down on one fleet cell
 )
 
 // Dashboard panes, in tab-cycle order. The focused pane carries the
@@ -137,13 +141,20 @@ type model struct {
 	fleetCells []client.AdminCell
 	events     []client.AdminEvent // newest LAST — renders like tail -f
 
-	// Pane focus + per-pane scroll state. eventScroll counts lines UP
-	// from the live tail (0 = pinned live; >0 = paused, holding the
-	// view steady as new events arrive). cellScroll is a plain line
-	// offset for fleets taller than the window.
+	// Pane focus + per-pane selection. eventScroll doubles as the
+	// events SELECTION, counted UP from the live tail (0 = newest,
+	// pinned live; >0 = an older event is selected and the view is
+	// paused, holding steady as new events arrive). cellCursor selects
+	// a cell. The focused pane renders its selection highlighted;
+	// enter drills into whatever is selected.
 	focus       paneID
 	eventScroll int
-	cellScroll  int
+	cellCursor  int
+
+	// Drill-down targets (copies — the live tail keeps moving under
+	// them, the detail view must not).
+	detailEvent *client.AdminEvent
+	detailCell  *client.AdminCell
 
 	// Detail state.
 	thread        *client.GetSupportTicketResult
@@ -423,6 +434,16 @@ func (m model) selected() *client.AdminTicket {
 		return nil
 	}
 	return &m.tickets[m.cursor]
+}
+
+// selectedEvent resolves the events-pane selection: eventScroll counts
+// up from the live tail, so 0 = newest. nil when the tail is empty.
+func (m model) selectedEvent() *client.AdminEvent {
+	if len(m.events) == 0 {
+		return nil
+	}
+	idx := len(m.events) - 1 - minInt(m.eventScroll, len(m.events)-1)
+	return &m.events[idx]
 }
 
 // selectedID names the ticket currently under the cursor ("" when the
@@ -726,11 +747,11 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			case paneEvents:
 				if m.eventScroll > 0 {
-					m.eventScroll-- // toward live; 0 = pinned to tail
+					m.eventScroll-- // toward live; 0 = newest selected
 				}
 			case paneCells:
-				if m.cellScroll > 0 {
-					m.cellScroll--
+				if m.cellCursor < len(m.fleetCells)-1 {
+					m.cellCursor++
 				}
 			}
 		}
@@ -746,25 +767,48 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.eventScroll++
 				}
 			case paneCells:
-				if m.cellScroll < maxInt(len(m.fleetCells)*2-1, 0) {
-					m.cellScroll++
+				if m.cellCursor > 0 {
+					m.cellCursor--
 				}
 			}
 		}
 	case "enter":
-		if m.mode == modeList && m.focus == paneSupport {
+		if m.mode != modeList {
+			break
+		}
+		switch m.focus {
+		case paneSupport:
 			if t := m.selected(); t != nil {
 				m.threadAccount, m.threadTicket = t.AccountID, t.ID
 				m.loading = true
 				m.status = "loading thread…"
 				return m, m.loadThread(t.AccountID, t.ID)
 			}
+		case paneEvents:
+			if e := m.selectedEvent(); e != nil {
+				cp := *e
+				m.detailEvent = &cp
+				m.mode = modeEventDetail
+			}
+		case paneCells:
+			if m.cellCursor >= 0 && m.cellCursor < len(m.fleetCells) {
+				cp := m.fleetCells[m.cellCursor]
+				m.detailCell = &cp
+				m.mode = modeCellDetail
+			}
 		}
 	case "esc":
-		if m.mode == modeDetail {
+		switch m.mode {
+		case modeDetail:
 			m.mode = modeList
 			m.thread = nil
 			m.status = ""
+		case modeEventDetail:
+			m.mode = modeList
+			m.detailEvent = nil
+		case modeCellDetail:
+			m.mode = modeList
+			m.detailCell = nil
 		}
 	case "r":
 		if m.mode == modeDetail {
@@ -847,6 +891,12 @@ func (m model) View() string {
 		b.WriteString("\n" + styTitle.Render("Reply as fleet admin") + "\n")
 		b.WriteString(m.composer.View())
 		b.WriteString("\n" + styDim.Render("ctrl+d send · esc cancel"))
+	case modeEventDetail:
+		b.WriteString(m.viewEventDetail())
+		b.WriteString("\n" + styDim.Render("esc back · q quit"))
+	case modeCellDetail:
+		b.WriteString(m.viewCellDetail())
+		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	}
 	if badge := m.upgradeBadge(); badge != "" {
 		b.WriteString("\n" + badge)
@@ -915,16 +965,37 @@ func (m model) viewList() string {
 	if len(m.fleetCells) == 0 {
 		cellLines = append(cellLines, styDim.Render("(no cells reported yet)"))
 	}
-	for _, c := range m.fleetCells {
-		accepting := styOK.Render("accepting")
+	// Three lines per cell: name (with accepting/draining dot),
+	// placement/version, counts. Anything denser overflows the narrow
+	// cells window and fitLine silently truncates the tail.
+	const cellPaneLines = 3
+	for i, c := range m.fleetCells {
+		dot := styOK.Render("●") // accepting
 		if !c.Accepting {
-			accepting = styWarn.Render("draining")
+			dot = styWarn.Render("●") // draining
+		}
+		version := styErr.Render("unreachable")
+		if c.Version != "" {
+			version = styDim.Render("v" + oneLine(c.Version))
+		}
+		nameLine := fitLine(dot+" "+oneLine(c.Name), cellsW)
+		if m.focus == paneCells && i == m.cellCursor {
+			nameLine = stySelected.Render(fitLine("● "+oneLine(c.Name), cellsW))
+		}
+		countLine := "  " + styTitle.Render(fmt.Sprintf("%d accounts", c.AccountCount))
+		if c.ArchivedCount > 0 {
+			countLine += styWarn.Render(fmt.Sprintf(" · %d archived", c.ArchivedCount))
 		}
 		cellLines = append(cellLines,
-			fitLine(fmt.Sprintf("%s %s/%s", oneLine(c.Name), c.Cloud, c.Region), cellsW),
-			fitLine(fmt.Sprintf("  %s · %s", accepting,
-				styTitle.Render(fmt.Sprintf("%d accounts", c.AccountCount))), cellsW),
+			nameLine,
+			fitLine(fmt.Sprintf("  %s/%s · %s", c.Cloud, c.Region, version), cellsW),
+			fitLine(countLine, cellsW),
 		)
+	}
+	// Keep the selected cell in the window for fleets taller than the
+	// frame.
+	if selTop := m.cellCursor * cellPaneLines; selTop+cellPaneLines > topRows {
+		cellLines = cellLines[selTop+cellPaneLines-topRows:]
 	}
 
 	// ── support window ────────────────────────────────────
@@ -962,20 +1033,24 @@ func (m model) viewList() string {
 	if len(m.events) == 0 {
 		evLines = append(evLines, styDim.Render("(quiet)"))
 	} else {
-		end := len(m.events) - minInt(m.eventScroll, len(m.events)-1)
+		selIdx := len(m.events) - 1 - minInt(m.eventScroll, len(m.events)-1)
+		end := selIdx + 1
+		if tail := len(m.events) - end; tail < eventRows-1 {
+			// Keep the selection visible but let the window fill with
+			// newer lines below it when there's room.
+			end = minInt(len(m.events), selIdx+eventRows)
+		}
 		start := maxInt(end-eventRows, 0)
-		for _, e := range m.events[start:end] {
-			evLines = append(evLines, fitLine(renderEventLine(e, eventsW), eventsW))
+		for i := start; i < end; i++ {
+			line := fitLine(renderEventLine(m.events[i], eventsW), eventsW)
+			if m.focus == paneEvents && i == selIdx {
+				line = stySelected.Render(fitLine(plainEventLine(m.events[i]), eventsW))
+			}
+			evLines = append(evLines, line)
 		}
 		if m.eventScroll > 0 {
 			eventsTitle = fmt.Sprintf("events · paused (%d newer — j to resume)", m.eventScroll)
 		}
-	}
-
-	// Cells window respects its scroll offset for fleets taller than
-	// the frame.
-	if m.cellScroll > 0 && m.cellScroll < len(cellLines) {
-		cellLines = cellLines[m.cellScroll:]
 	}
 
 	cellsTitle := fmt.Sprintf("cells · %d", len(m.fleetCells))
@@ -1049,6 +1124,96 @@ func renderEventLine(e client.AdminEvent, width int) string {
 		styDim.Render(actor),
 		styDim.Render(meta),
 	)
+}
+
+// plainEventLine is renderEventLine without per-field styling, for the
+// reverse-video selection row (reverse over embedded color codes
+// renders inconsistently across terminals).
+func plainEventLine(e client.AdminEvent) string {
+	actor := e.ActorKind
+	if e.ActorID != "" {
+		actor += ":" + oneLine(e.ActorID)
+	}
+	return fmt.Sprintf(" %s %s %-14s %s %s",
+		e.OccurredAt.UTC().Format("15:04:05"),
+		e.Verb,
+		truncate(oneLine(e.AccountID), 14),
+		actor,
+		oneLine(string(e.Metadata)),
+	)
+}
+
+// viewEventDetail is the drill-down on one audit event: every field
+// plus pretty-printed metadata, in a full-width framed window.
+func (m model) viewEventDetail() string {
+	e := m.detailEvent
+	if e == nil {
+		return styDim.Render("no event selected")
+	}
+	w := m.width
+	if w < 60 {
+		w = 100
+	}
+	contentW := w - 4
+
+	actor := e.ActorKind
+	if e.ActorID != "" {
+		actor += ":" + oneLine(e.ActorID)
+	}
+	lines := []string{
+		fitLine(styDim.Render("id        ")+oneLine(e.ID), contentW),
+		fitLine(styDim.Render("occurred  ")+e.OccurredAt.UTC().Format(time.RFC3339Nano), contentW),
+		fitLine(styDim.Render("cell      ")+oneLine(e.Cell), contentW),
+		fitLine(styDim.Render("account   ")+oneLine(e.AccountID), contentW),
+		fitLine(styDim.Render("actor     ")+actor, contentW),
+		"",
+		styDim.Render("metadata"),
+	}
+	pretty := &bytes.Buffer{}
+	if err := json.Indent(pretty, []byte(e.Metadata), "", "  "); err != nil {
+		pretty.Reset()
+		pretty.WriteString(string(e.Metadata))
+	}
+	for _, ln := range strings.Split(sanitizeText(pretty.String()), "\n") {
+		lines = append(lines, fitLine("  "+ln, contentW))
+	}
+	title := "event · " + oneLine(e.Verb)
+	return paneBox(title, lines, contentW, maxInt(len(lines), 8), true)
+}
+
+// viewCellDetail is the drill-down on one fleet cell.
+func (m model) viewCellDetail() string {
+	c := m.detailCell
+	if c == nil {
+		return styDim.Render("no cell selected")
+	}
+	w := m.width
+	if w < 60 {
+		w = 100
+	}
+	contentW := w - 4
+	accepting := "accepting new accounts"
+	if !c.Accepting {
+		accepting = "draining (not accepting)"
+	}
+	version := "unreachable"
+	if c.Version != "" {
+		version = "v" + oneLine(c.Version)
+	}
+	provision := "not linked to the control plane"
+	if c.HasProvisionToken {
+		provision = "provision token on file"
+	}
+	lines := []string{
+		fitLine(styDim.Render("cloud/region  ")+fmt.Sprintf("%s / %s", c.Cloud, c.Region), contentW),
+		fitLine(styDim.Render("endpoint      ")+oneLine(c.Endpoint), contentW),
+		fitLine(styDim.Render("software      ")+version, contentW),
+		fitLine(styDim.Render("placement     ")+accepting, contentW),
+		fitLine(styDim.Render("trust link    ")+provision, contentW),
+		fitLine(styDim.Render("accounts      ")+styTitle.Render(fmt.Sprintf("%d", c.AccountCount)), contentW),
+		fitLine(styDim.Render("archived      ")+fmt.Sprintf("%d (evacuated from this cell, awaiting placement)", c.ArchivedCount), contentW),
+	}
+	return paneBox("cell · "+oneLine(c.Name), lines, contentW, maxInt(len(lines), 6), true)
 }
 
 func (m model) viewDetail() string {

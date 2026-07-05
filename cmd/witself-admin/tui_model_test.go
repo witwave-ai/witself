@@ -619,3 +619,125 @@ func TestAutoRefresh(t *testing.T) {
 		t.Fatal("auto-refresh must not set loading")
 	}
 }
+
+// TestCellsPaneShowsVersion pins the running-software column: reported
+// versions render (sanitized), unreachable cells say so loudly.
+func TestCellsPaneShowsVersion(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 120, 40
+	m.fleetCells = []client.AdminCell{
+		{Name: "cell-a", Cloud: "aws", Region: "us-west-2", Accepting: true, AccountCount: 3, Version: "0.0.98"},
+		{Name: "cell-b", Cloud: "aws", Region: "eu-west-1", Accepting: true, AccountCount: 1},
+	}
+	out := m.viewList()
+	if !strings.Contains(out, "v0.0.98") {
+		t.Fatal("reported version missing from cells pane")
+	}
+	if !strings.Contains(out, "unreachable") {
+		t.Fatal("unreachable cell must be labeled")
+	}
+}
+
+// TestEventDrillDown pins the events-pane drill-down: enter on the
+// selection opens a detail view with pretty-printed metadata; esc
+// returns to the dashboard. The detail is a COPY — the live tail
+// moving underneath must not change what the operator is reading.
+func TestEventDrillDown(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.focus = paneEvents
+	m.events = []client.AdminEvent{
+		mkEvent("evt_old", "account.activated", t0),
+		mkEvent("evt_new", "recovery.requested", t0.Add(time.Minute)),
+	}
+
+	// k selects the older event, enter drills in.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m2 := next.(model)
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m3 := next.(model)
+	if m3.mode != modeEventDetail || m3.detailEvent == nil {
+		t.Fatalf("enter must open event detail: mode=%v", m3.mode)
+	}
+	if m3.detailEvent.ID != "evt_old" {
+		t.Fatalf("detail = %s, want the selected evt_old", m3.detailEvent.ID)
+	}
+	view := m3.View()
+	for _, want := range []string{"evt_old", "account.activated", `"k": "v"`} {
+		if !strings.Contains(view, want) {
+			t.Errorf("detail view missing %q", want)
+		}
+	}
+	// Live tail moves — detail must not.
+	next, _ = m3.Update(watchEventMsg{event: mkEvent("evt_live", "token.revoked", t0.Add(time.Hour))})
+	m4 := next.(model)
+	if m4.detailEvent.ID != "evt_old" {
+		t.Fatal("live tail mutated the open detail")
+	}
+	// esc returns.
+	next, _ = m4.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m5 := next.(model)
+	if m5.mode != modeList || m5.detailEvent != nil {
+		t.Fatalf("esc must return to list: mode=%v", m5.mode)
+	}
+}
+
+// TestCellDrillDown pins the cells-pane drill-down and its content.
+func TestCellDrillDown(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.focus = paneCells
+	m.fleetCells = []client.AdminCell{{
+		Name: "aws-sandbox-usw2-dev", Cloud: "aws", Region: "us-west-2",
+		Endpoint: "https://api.example", Accepting: true,
+		HasProvisionToken: true, AccountCount: 3, Version: "0.0.98",
+	}}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := next.(model)
+	if m2.mode != modeCellDetail || m2.detailCell == nil {
+		t.Fatalf("enter must open cell detail: mode=%v", m2.mode)
+	}
+	view := m2.View()
+	for _, want := range []string{"aws-sandbox-usw2-dev", "https://api.example", "v0.0.98", "3"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("cell detail missing %q", want)
+		}
+	}
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m3 := next.(model)
+	if m3.mode != modeList || m3.detailCell != nil {
+		t.Fatalf("esc must return to list: mode=%v", m3.mode)
+	}
+}
+
+// TestCellsPaneShowsArchived pins the archived-count display: shown in
+// the pane stat line when non-zero, always present in cell detail.
+func TestCellsPaneShowsArchived(t *testing.T) {
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 120, 40
+	m.fleetCells = []client.AdminCell{{
+		Name: "cell-a", Cloud: "aws", Region: "us-west-2",
+		Accepting: true, AccountCount: 12, ArchivedCount: 2, Version: "0.0.99",
+	}}
+	if !strings.Contains(m.viewList(), "2 archived") {
+		t.Fatal("archived count missing from cells pane")
+	}
+	// Zero archived stays quiet in the pane…
+	m.fleetCells[0].ArchivedCount = 0
+	if strings.Contains(m.viewList(), "archived") {
+		t.Fatal("zero archived should not clutter the pane")
+	}
+	// …but the drill-down always states it.
+	cp := m.fleetCells[0]
+	m.detailCell = &cp
+	m.mode = modeCellDetail
+	if !strings.Contains(m.View(), "archived") {
+		t.Fatal("cell detail must always show the archived row")
+	}
+}
