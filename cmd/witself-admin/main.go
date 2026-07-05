@@ -873,7 +873,10 @@ func ticketState(args []string, forceState string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"ticket": t})
 	}
-	fmt.Printf("%s: %s → %s\n", t.ID, t.State, target)
+	// The server returns the POST-transition ticket — the prior state
+	// isn't on the wire, so print only where it landed (an earlier
+	// version printed "resolved → resolved").
+	fmt.Printf("%s is now %s\n", t.ID, t.State)
 	return 0
 }
 

@@ -27,8 +27,9 @@ const (
 	modeList uiMode = iota
 	modeDetail
 	modeCompose
-	modeEventDetail // drill-down on one audit event
-	modeCellDetail  // drill-down on one fleet cell
+	modeEventDetail  // drill-down on one audit event
+	modeCellDetail   // drill-down on one fleet cell
+	modeTicketDetail // drill-down on one ticket's full record (i)
 )
 
 // Dashboard panes, in tab-cycle order. The focused pane carries the
@@ -73,6 +74,23 @@ func stateBadge(state string) string {
 		return styDim.Render("CLOSD")
 	default:
 		return styWarn.Render("OPEN ")
+	}
+}
+
+// plainStateBadge is stateBadge without color codes, for the selected
+// row's reverse-video render.
+func plainStateBadge(state string) string {
+	switch state {
+	case "awaiting_admin":
+		return "ADMIN"
+	case "awaiting_customer":
+		return "CUST "
+	case "resolved":
+		return "RESLV"
+	case "closed":
+		return "CLOSD"
+	default:
+		return "OPEN "
 	}
 }
 
@@ -136,6 +154,12 @@ type model struct {
 	cells   []client.AdminCellStatus
 	cursor  int
 
+	// stateFilter narrows the support pane: "" (everything) →
+	// "active" (open/awaiting_*) → "resolved" → "closed". Cycled
+	// with f; the cursor and all actions operate on the FILTERED
+	// view.
+	stateFilter string
+
 	// Fleet panes (list mode is the master view: cells strip on top,
 	// support in the middle, events tail on the bottom).
 	fleetCells []client.AdminCell
@@ -152,9 +176,13 @@ type model struct {
 	cellCursor  int
 
 	// Drill-down targets (copies — the live tail keeps moving under
-	// them, the detail view must not).
-	detailEvent *client.AdminEvent
-	detailCell  *client.AdminCell
+	// them, the detail view must not). ticketInfoReturn remembers
+	// whether the ticket-record inspector was opened from the list or
+	// from inside the thread, so esc goes back to the right place.
+	detailEvent      *client.AdminEvent
+	detailCell       *client.AdminCell
+	detailTicket     *client.AdminTicket
+	ticketInfoReturn uiMode
 
 	// Detail state.
 	thread        *client.GetSupportTicketResult
@@ -409,8 +437,40 @@ func appendEvent(events []client.AdminEvent, e client.AdminEvent) []client.Admin
 	return events
 }
 
+// stateRank orders the support pane by lifecycle stage: what needs the
+// admin's attention floats to the top, finished work sinks to the
+// bottom. Within a stage, newest activity first.
+func stateRank(state string) int {
+	switch state {
+	case "awaiting_admin":
+		return 0 // the ball is in our court — top
+	case "open":
+		return 1
+	case "awaiting_customer":
+		return 2
+	case "resolved":
+		return 3
+	case "closed":
+		return 4 // terminal — bottom
+	default:
+		return 5
+	}
+}
+
+// sortTickets applies the pane order: stage first, then newest
+// activity within the stage.
+func sortTickets(tickets []client.AdminTicket) {
+	sort.SliceStable(tickets, func(i, j int) bool {
+		ri, rj := stateRank(tickets[i].State), stateRank(tickets[j].State)
+		if ri != rj {
+			return ri < rj
+		}
+		return tickets[i].LastActivityAt.After(tickets[j].LastActivityAt)
+	})
+}
+
 // upsertTicket merges a live watch update into the list, keeping the
-// newest-activity-first order the list view promises.
+// stage-grouped, newest-activity order the list view promises.
 func upsertTicket(tickets []client.AdminTicket, t client.AdminTicket) []client.AdminTicket {
 	replaced := false
 	for i := range tickets {
@@ -423,17 +483,40 @@ func upsertTicket(tickets []client.AdminTicket, t client.AdminTicket) []client.A
 	if !replaced {
 		tickets = append(tickets, t)
 	}
-	sort.SliceStable(tickets, func(i, j int) bool {
-		return tickets[i].LastActivityAt.After(tickets[j].LastActivityAt)
-	})
+	sortTickets(tickets)
 	return tickets
 }
 
+// visibleTickets is the support pane's working set: the full list
+// narrowed by the stage filter, order preserved (stage-grouped,
+// newest first). The cursor, selection, and all actions index THIS
+// slice — filtering must never let a keystroke land on a hidden row.
+func (m model) visibleTickets() []client.AdminTicket {
+	if m.stateFilter == "" {
+		return m.tickets
+	}
+	var out []client.AdminTicket
+	for _, t := range m.tickets {
+		switch m.stateFilter {
+		case "active":
+			if t.State != "resolved" && t.State != "closed" {
+				out = append(out, t)
+			}
+		case "resolved", "closed":
+			if t.State == m.stateFilter {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
+}
+
 func (m model) selected() *client.AdminTicket {
-	if m.cursor < 0 || m.cursor >= len(m.tickets) {
+	vis := m.visibleTickets()
+	if m.cursor < 0 || m.cursor >= len(vis) {
 		return nil
 	}
-	return &m.tickets[m.cursor]
+	return &vis[m.cursor]
 }
 
 // selectedEvent resolves the events-pane selection: eventScroll counts
@@ -456,19 +539,20 @@ func (m model) selectedID() string {
 }
 
 // anchorCursor re-points the cursor at the ticket id it was on before a
-// re-sort/refresh; falls back to clamping the raw index when the ticket
-// vanished from the list.
+// re-sort/refresh/filter change; falls back to clamping the raw index
+// when the ticket vanished from the (filtered) view.
 func (m *model) anchorCursor(id string) {
+	vis := m.visibleTickets()
 	if id != "" {
-		for i := range m.tickets {
-			if m.tickets[i].ID == id {
+		for i := range vis {
+			if vis[i].ID == id {
 				m.cursor = i
 				return
 			}
 		}
 	}
-	if m.cursor >= len(m.tickets) {
-		m.cursor = maxInt(len(m.tickets)-1, 0)
+	if m.cursor >= len(vis) {
+		m.cursor = maxInt(len(vis)-1, 0)
 	}
 }
 
@@ -489,6 +573,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		anchor := m.selectedID()
 		m.tickets = msg.list.Tickets
+		sortTickets(m.tickets)
 		m.cells = msg.list.Cells
 		m.anchorCursor(anchor)
 		m.status = fmt.Sprintf("%d tickets · %s", len(m.tickets), cellSummary(m.cells))
@@ -738,11 +823,29 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.focus = paneID((int(m.focus) + step) % int(paneCount))
 		}
+	case "f":
+		// Cycle the support stage filter: all → active → resolved →
+		// closed → all. Selection follows the same ticket when it
+		// survives the narrowing.
+		if m.mode == modeList && m.focus == paneSupport {
+			anchor := m.selectedID()
+			switch m.stateFilter {
+			case "":
+				m.stateFilter = "active"
+			case "active":
+				m.stateFilter = "resolved"
+			case "resolved":
+				m.stateFilter = "closed"
+			default:
+				m.stateFilter = ""
+			}
+			m.anchorCursor(anchor)
+		}
 	case "j", "down":
 		if m.mode == modeList {
 			switch m.focus {
 			case paneSupport:
-				if m.cursor < len(m.tickets)-1 {
+				if m.cursor < len(m.visibleTickets())-1 {
 					m.cursor++
 				}
 			case paneEvents:
@@ -809,6 +912,35 @@ func (m model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case modeCellDetail:
 			m.mode = modeList
 			m.detailCell = nil
+		case modeTicketDetail:
+			m.mode = m.ticketInfoReturn
+			m.detailTicket = nil
+		}
+	case "i":
+		// Inspect the ticket RECORD (timestamps, category, SLA fields,
+		// correlation, metadata) — the thread view shows the
+		// conversation; this shows the object.
+		switch {
+		case m.mode == modeList && m.focus == paneSupport:
+			if t := m.selected(); t != nil {
+				cp := *t
+				m.detailTicket = &cp
+				m.ticketInfoReturn = modeList
+				m.mode = modeTicketDetail
+			}
+		case m.mode == modeDetail && m.thread != nil:
+			cp := client.AdminTicket{SupportTicket: m.thread.Ticket}
+			// Cell isn't on the thread payload — recover it from the
+			// list row when present.
+			for _, lt := range m.tickets {
+				if lt.ID == cp.ID {
+					cp.Cell = lt.Cell
+					break
+				}
+			}
+			m.detailTicket = &cp
+			m.ticketInfoReturn = modeDetail
+			m.mode = modeTicketDetail
 		}
 	case "r":
 		if m.mode == modeDetail {
@@ -885,7 +1017,7 @@ func (m model) View() string {
 		b.WriteString(m.viewList())
 	case modeDetail:
 		b.WriteString(m.viewDetail())
-		b.WriteString("\n" + styDim.Render("r reply · R resolve · C close · O reopen · esc back · q quit"))
+		b.WriteString("\n" + styDim.Render("r reply · i inspect · R resolve · C close · O reopen · esc back · q quit"))
 	case modeCompose:
 		b.WriteString(m.viewDetail())
 		b.WriteString("\n" + styTitle.Render("Reply as fleet admin") + "\n")
@@ -896,6 +1028,9 @@ func (m model) View() string {
 		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	case modeCellDetail:
 		b.WriteString(m.viewCellDetail())
+		b.WriteString("\n" + styDim.Render("esc back · q quit"))
+	case modeTicketDetail:
+		b.WriteString(m.viewTicketDetail())
 		b.WriteString("\n" + styDim.Render("esc back · q quit"))
 	}
 	if badge := m.upgradeBadge(); badge != "" {
@@ -999,11 +1134,19 @@ func (m model) viewList() string {
 	}
 
 	// ── support window ────────────────────────────────────
+	// Stage-grouped (needs-us first, closed last), stage filter
+	// applied, selection rendered PLAIN under reverse-video —
+	// embedded color resets would otherwise cancel the highlight
+	// mid-line and make the selection invisible.
+	vis := m.visibleTickets()
 	var supLines []string
-	if len(m.tickets) == 0 {
-		if m.loading {
+	if len(vis) == 0 {
+		switch {
+		case m.loading:
 			supLines = append(supLines, styDim.Render("loading…"))
-		} else {
+		case m.stateFilter != "":
+			supLines = append(supLines, styDim.Render("no "+m.stateFilter+" tickets — f cycles the filter"))
+		default:
 			supLines = append(supLines, styDim.Render("no open tickets across the fleet 🎉"))
 		}
 	} else {
@@ -1011,8 +1154,28 @@ func (m model) viewList() string {
 		if m.cursor >= topRows {
 			start = m.cursor - topRows + 1
 		}
-		for i := start; i < len(m.tickets) && i < start+topRows; i++ {
-			t := m.tickets[i]
+		prevRank := -1
+		if start > 0 {
+			prevRank = stateRank(vis[start-1].State)
+		}
+		for i := start; i < len(vis) && i < start+topRows; i++ {
+			t := vis[i]
+			// Stage boundary marker when a new group begins (skipped
+			// under a single-stage filter — it would be noise).
+			if r := stateRank(t.State); r != prevRank && m.stateFilter == "" && prevRank != -1 {
+				supLines = append(supLines, styDim.Render(fitLine("· · ·", supportW)))
+			}
+			prevRank = stateRank(t.State)
+			if i == m.cursor {
+				plain := fmt.Sprintf("%s %-6s %-18s %s %s",
+					plainStateBadge(t.State), t.Priority,
+					truncate(t.ID, 18),
+					truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
+					humanAge(m.now().Sub(t.LastActivityAt)),
+				)
+				supLines = append(supLines, stySelected.Render(fitLine(plain, supportW)))
+				continue
+			}
 			line := fmt.Sprintf("%s %-6s %-18s %s %s",
 				stateBadge(t.State),
 				t.Priority,
@@ -1020,9 +1183,6 @@ func (m model) viewList() string {
 				truncate(oneLine(t.Subject), maxInt(supportW-42, 10)),
 				styDim.Render(humanAge(m.now().Sub(t.LastActivityAt))),
 			)
-			if i == m.cursor {
-				line = stySelected.Render(fitLine(line, supportW))
-			}
 			supLines = append(supLines, fitLine(line, supportW))
 		}
 	}
@@ -1058,12 +1218,16 @@ func (m model) viewList() string {
 		// Fan-out health from the last ticket refresh, when we have it.
 		cellsTitle = "cells · " + cellSummary(m.cells)
 	}
+	supportTitle := fmt.Sprintf("support · %d tickets", len(m.tickets))
+	if m.stateFilter != "" {
+		supportTitle = fmt.Sprintf("support · %d/%d · filter: %s", len(vis), len(m.tickets), m.stateFilter)
+	}
 	cellsBox := paneBox(cellsTitle, cellLines, cellsW, topRows, m.focus == paneCells)
-	supportBox := paneBox(fmt.Sprintf("support · %d tickets", len(m.tickets)), supLines, supportW, topRows, m.focus == paneSupport)
+	supportBox := paneBox(supportTitle, supLines, supportW, topRows, m.focus == paneSupport)
 	eventsBox := paneBox(eventsTitle, evLines, eventsW, eventRows, m.focus == paneEvents)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsBox, supportBox)
-	footer := styDim.Render("tab focus · j/k move · enter open · R resolve · C close · g refresh · q quit")
+	footer := styDim.Render("tab focus · j/k move · enter open · i inspect · f filter · R resolve · C close · g refresh · q quit")
 	return lipgloss.JoinVertical(lipgloss.Left, top, eventsBox, footer)
 }
 
@@ -1179,6 +1343,65 @@ func (m model) viewEventDetail() string {
 	}
 	title := "event · " + oneLine(e.Verb)
 	return paneBox(title, lines, contentW, maxInt(len(lines), 8), true)
+}
+
+// viewTicketDetail is the drill-down on one ticket's RECORD — every
+// field including the SLA timestamps and correlation, complementing
+// the thread view (which shows the conversation).
+func (m model) viewTicketDetail() string {
+	t := m.detailTicket
+	if t == nil {
+		return styDim.Render("no ticket selected")
+	}
+	w := m.width
+	if w < 60 {
+		w = 100
+	}
+	contentW := w - 4
+	ts := func(p *time.Time) string {
+		if p == nil {
+			return styDim.Render("—")
+		}
+		return p.UTC().Format(time.RFC3339)
+	}
+	lines := []string{
+		fitLine(styDim.Render("subject         ")+oneLine(t.Subject), contentW),
+		fitLine(styDim.Render("account         ")+oneLine(t.AccountID), contentW),
+		fitLine(styDim.Render("cell            ")+oneLine(t.Cell), contentW),
+		fitLine(styDim.Render("state           ")+stateBadge(t.State)+" "+t.State, contentW),
+		fitLine(styDim.Render("category        ")+t.Category, contentW),
+		fitLine(styDim.Render("priority        ")+t.Priority, contentW),
+		fitLine(styDim.Render("opened          ")+t.OpenedAt.UTC().Format(time.RFC3339)+" by "+t.OpenedByKind+":"+oneLine(t.OpenedByID), contentW),
+		fitLine(styDim.Render("first response  ")+ts(t.FirstResponseAt), contentW),
+		fitLine(styDim.Render("resolved        ")+ts(t.ResolvedAt), contentW),
+		fitLine(styDim.Render("closed          ")+ts(t.ClosedAt), contentW),
+		fitLine(styDim.Render("last activity   ")+t.LastActivityAt.UTC().Format(time.RFC3339), contentW),
+		fitLine(styDim.Render("last message    ")+oneLine(t.LastMessageID), contentW),
+	}
+	if len(t.Correlation) > 0 && string(t.Correlation) != "[]" {
+		lines = append(lines, "", styDim.Render("correlation"))
+		lines = append(lines, prettyJSONLines(t.Correlation, contentW)...)
+	}
+	if len(t.Metadata) > 0 && string(t.Metadata) != "{}" {
+		lines = append(lines, "", styDim.Render("metadata"))
+		lines = append(lines, prettyJSONLines(t.Metadata, contentW)...)
+	}
+	return paneBox("ticket · "+oneLine(t.ID), lines, contentW, maxInt(len(lines), 8), true)
+}
+
+// prettyJSONLines indents raw JSON for a detail panel, sanitized and
+// width-fitted; falls back to the raw string when it isn't valid JSON.
+func prettyJSONLines(raw []byte, width int) []string {
+	pretty := &bytes.Buffer{}
+	if err := json.Indent(pretty, raw, "", "  "); err != nil {
+		pretty.Reset()
+		pretty.Write(raw)
+	}
+	var out []string
+	for _, ln := range strings.Split(sanitizeText(pretty.String()), "\n") {
+		out = append(out, fitLine("  "+ln, width))
+	}
+	return out
 }
 
 // viewCellDetail is the drill-down on one fleet cell.

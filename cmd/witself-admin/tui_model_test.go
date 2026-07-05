@@ -25,27 +25,85 @@ func mkTicket(id, state string, activity time.Time) client.AdminTicket {
 	}
 }
 
-// TestUpsertTicketOrdering pins the live-update merge: replaced in
-// place by id, inserted when new, and always re-sorted newest-activity
-// first — the order the list view promises.
+// TestUpsertTicketOrdering pins the live-update merge under the
+// stage-grouped order: replaced in place by id, inserted when new,
+// re-sorted so needs-attention stages float and finished work sinks —
+// even when the finished ticket has the freshest activity.
 func TestUpsertTicketOrdering(t *testing.T) {
 	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	tickets := []client.AdminTicket{
 		mkTicket("tkt_b", "awaiting_admin", t0.Add(-1*time.Hour)),
 		mkTicket("tkt_a", "awaiting_admin", t0.Add(-2*time.Hour)),
 	}
-	// New ticket with the freshest activity lands on top.
+	// New same-stage ticket with the freshest activity lands on top.
 	tickets = upsertTicket(tickets, mkTicket("tkt_c", "awaiting_admin", t0))
 	if tickets[0].ID != "tkt_c" || len(tickets) != 3 {
 		t.Fatalf("insert: order = %v", ids(tickets))
 	}
-	// Updating an existing ticket re-sorts rather than duplicating.
+	// A ticket updated to resolved SINKS below the active group, even
+	// though its activity is the newest — stage outranks recency.
 	tickets = upsertTicket(tickets, mkTicket("tkt_a", "resolved", t0.Add(time.Minute)))
 	if len(tickets) != 3 {
 		t.Fatalf("update duplicated: %v", ids(tickets))
 	}
-	if tickets[0].ID != "tkt_a" || tickets[0].State != "resolved" {
-		t.Fatalf("update not applied/re-sorted: %v state=%s", ids(tickets), tickets[0].State)
+	last := tickets[len(tickets)-1]
+	if last.ID != "tkt_a" || last.State != "resolved" {
+		t.Fatalf("resolved ticket must sink to the bottom: %v (last=%s/%s)", ids(tickets), last.ID, last.State)
+	}
+	if tickets[0].ID != "tkt_c" {
+		t.Fatalf("active group must stay on top: %v", ids(tickets))
+	}
+}
+
+// TestStateFilterCycle pins the f-key filter: all → active → resolved
+// → closed → all, with the cursor following the selected ticket when
+// it survives the narrowing and all actions operating on the filtered
+// view.
+func TestStateFilterCycle(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.tickets = []client.AdminTicket{
+		mkTicket("tkt_active", "awaiting_admin", t0),
+		mkTicket("tkt_done", "resolved", t0.Add(-time.Hour)),
+	}
+	sortTickets(m.tickets)
+
+	// Unfiltered: both visible, active first.
+	if got := m.visibleTickets(); len(got) != 2 || got[0].ID != "tkt_active" {
+		t.Fatalf("unfiltered order: %v", ids(got))
+	}
+	// f → active: only the active ticket remains, selectable.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m2 := next.(model)
+	if m2.stateFilter != "active" || len(m2.visibleTickets()) != 1 {
+		t.Fatalf("active filter: %q %v", m2.stateFilter, ids(m2.visibleTickets()))
+	}
+	if m2.selected().ID != "tkt_active" {
+		t.Fatalf("selection after filter: %v", m2.selected().ID)
+	}
+	// f → resolved.
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m3 := next.(model)
+	if m3.stateFilter != "resolved" || m3.selected() == nil || m3.selected().ID != "tkt_done" {
+		t.Fatalf("resolved filter: %q sel=%v", m3.stateFilter, m3.selected())
+	}
+	// Title reflects the narrowing.
+	if !strings.Contains(m3.viewList(), "filter: resolved") {
+		t.Fatal("filter must show in the pane title")
+	}
+	// f → closed (none) → selection nil.
+	next, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m4 := next.(model)
+	if m4.selected() != nil {
+		t.Fatal("empty filter must yield no selection")
+	}
+	// f → back to all.
+	next, _ = m4.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m5 := next.(model)
+	if m5.stateFilter != "" || len(m5.visibleTickets()) != 2 {
+		t.Fatalf("cycle back to all: %q", m5.stateFilter)
 	}
 }
 
@@ -739,5 +797,48 @@ func TestCellsPaneShowsArchived(t *testing.T) {
 	m.mode = modeCellDetail
 	if !strings.Contains(m.View(), "archived") {
 		t.Fatal("cell detail must always show the archived row")
+	}
+}
+
+// TestTicketRecordInspector pins the 'i' drill-down: full ticket
+// record (SLA timestamps included) from the list or from the thread,
+// with esc returning to wherever it was opened from.
+func TestTicketRecordInspector(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil)
+	m.loading = false
+	m.width, m.height = 100, 30
+	tk := mkTicket("tkt_1", "resolved", t0)
+	tk.FirstResponseAt = &t0
+	m.tickets = []client.AdminTicket{tk}
+
+	// From the list: i opens the record, esc returns to the list.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m2 := next.(model)
+	if m2.mode != modeTicketDetail || m2.detailTicket == nil {
+		t.Fatalf("i from list: mode=%v", m2.mode)
+	}
+	view := m2.View()
+	for _, want := range []string{"tkt_1", "first response", "aws-sandbox-usw2-dev", "subject tkt_1"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("record view missing %q", want)
+		}
+	}
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m3 := next.(model); m3.mode != modeList {
+		t.Fatalf("esc from list-opened inspector: mode=%v", m3.mode)
+	}
+
+	// From the thread: i opens, esc returns to the THREAD.
+	m.mode = modeDetail
+	m.thread = &client.GetSupportTicketResult{Ticket: tk.SupportTicket}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m4 := next.(model)
+	if m4.mode != modeTicketDetail {
+		t.Fatalf("i from thread: mode=%v", m4.mode)
+	}
+	next, _ = m4.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m5 := next.(model); m5.mode != modeDetail {
+		t.Fatalf("esc must return to the thread: mode=%v", m5.mode)
 	}
 }
