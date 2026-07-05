@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -366,7 +367,7 @@ func TestPastDueTracking(t *testing.T) {
 		t.Fatal("redelivered failure moved PastDueSince")
 	}
 
-	rec := []billing.Event{{Type: billing.EventPaymentRecovered, CustomerID: r.CustomerID, At: h.ck.t}}
+	rec := []billing.Event{{Type: billing.EventPaymentRecovered, CustomerID: r.CustomerID, At: h.ck.t.Add(2 * time.Hour)}}
 	if err := h.m.OnEvents(ctx, "fake", rec); err != nil {
 		t.Fatalf("OnEvents: %v", err)
 	}
@@ -473,9 +474,11 @@ func TestCancelRacingActivation(t *testing.T) {
 	}
 	r := h.record(t, "acct_1")
 
-	// Arm the interleave: inside CancelPending's write window, the checkout
-	// completes and its activation webhook is fully processed.
-	h.hooked.beforePut = func(Record) {
+	// The race window under disarm-first ordering: the payer completes
+	// checkout in the instant between CancelPending's read and its provider
+	// disarm. Simulated with a provider hook (the store hook can no longer
+	// reach this window — that is the point of the reordering).
+	hooked := &hookProvider{Provider: h.fake, beforeCancel: func() {
 		h.ck.t = h.ck.t.Add(time.Minute)
 		events, err := h.fake.Complete(r.CustomerID)
 		if err != nil {
@@ -484,8 +487,15 @@ func TestCancelRacingActivation(t *testing.T) {
 		if err := h.m.OnEvents(ctx, "fake", events); err != nil {
 			t.Errorf("OnEvents: %v", err)
 		}
+	}}
+	m2, err := NewManager(Config{
+		Catalog: mustCatalog(t), Providers: map[string]billing.Provider{"fake": hooked}, Default: "fake",
+		Store: h.store, Applier: h.applier, Now: h.ck.now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
 	}
-	err := h.m.CancelPending(ctx, "acct_1")
+	err = m2.CancelPending(ctx, "acct_1")
 	if err == nil || !strings.Contains(err.Error(), "nothing is pending") {
 		t.Fatalf("CancelPending racing activation = %v; want 'nothing is pending'", err)
 	}
@@ -493,6 +503,21 @@ func TestCancelRacingActivation(t *testing.T) {
 	if final.Entitled != "standard" || final.Applied != "standard" {
 		t.Fatalf("record = %+v; the paid entitlement must survive the racing cancel", final)
 	}
+}
+
+// hookProvider interposes on CancelPending to interleave work into the
+// disarm window.
+type hookProvider struct {
+	billing.Provider
+	beforeCancel func()
+}
+
+func (h *hookProvider) CancelPending(ctx context.Context, customerID string) error {
+	if f := h.beforeCancel; f != nil {
+		h.beforeCancel = nil
+		f()
+	}
+	return h.Provider.CancelPending(ctx, customerID)
 }
 
 // TestStaleCancelDropped reproduces the review's redelivery finding: a
@@ -608,9 +633,10 @@ func TestReplacingPendingCancelsProviderSide(t *testing.T) {
 	}
 }
 
-// TestUnknownPlanEventSkipped: an activation for a plan the catalog does not
-// know must not corrupt entitlement.
-func TestUnknownPlanEventSkipped(t *testing.T) {
+// TestUnknownPlanEventErrors: an activation for a plan the catalog does not
+// know is deploy skew — it must fail the batch (provider redelivers until the
+// catalog catches up) and must not corrupt entitlement meanwhile.
+func TestUnknownPlanEventErrors(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
@@ -619,11 +645,11 @@ func TestUnknownPlanEventSkipped(t *testing.T) {
 	r := h.record(t, "acct_1")
 
 	bogus := []billing.Event{{Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID, Plan: "mystery", At: h.ck.t.Add(time.Hour)}}
-	if err := h.m.OnEvents(ctx, "fake", bogus); err != nil {
-		t.Fatalf("OnEvents: %v", err)
+	if err := h.m.OnEvents(ctx, "fake", bogus); err == nil {
+		t.Fatal("unknown-plan activation must fail the batch for redelivery")
 	}
 	if r = h.record(t, "acct_1"); r.Entitled != "standard" {
-		t.Fatalf("entitled = %q; an unknown-plan activation must be skipped", r.Entitled)
+		t.Fatalf("entitled = %q; the unroutable event must not corrupt state", r.Entitled)
 	}
 }
 
@@ -647,5 +673,114 @@ func TestCancelClearsPastDue(t *testing.T) {
 	r = h.record(t, "acct_1")
 	if r.Entitled != plans.Free || r.PastDueSince != nil {
 		t.Fatalf("record = %+v; want free with PastDueSince cleared", r)
+	}
+}
+
+// TestDunningFence reproduces the review's redelivered-dunning finding: a
+// payment_failed folded AFTER its recovery (partial-batch redelivery) must
+// not re-mark a paid-up account past due.
+func TestDunningFence(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+
+	t1, t2 := h.ck.t.Add(time.Hour), h.ck.t.Add(2*time.Hour)
+	failed := []billing.Event{{Type: billing.EventPaymentFailed, CustomerID: r.CustomerID, At: t1}}
+	recovered := []billing.Event{{Type: billing.EventPaymentRecovered, CustomerID: r.CustomerID, At: t2}}
+	if err := h.m.OnEvents(ctx, "fake", failed); err != nil {
+		t.Fatalf("OnEvents failed: %v", err)
+	}
+	if err := h.m.OnEvents(ctx, "fake", recovered); err != nil {
+		t.Fatalf("OnEvents recovered: %v", err)
+	}
+	// The stale T1 failure redelivers (lost ACK / partial batch): fenced out.
+	if err := h.m.OnEvents(ctx, "fake", failed); err != nil {
+		t.Fatalf("OnEvents redelivered: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.PastDueSince != nil {
+		t.Fatalf("redelivered stale payment_failed re-marked a recovered account: %+v", r)
+	}
+}
+
+// TestUnroutableEventsFailTheBatch: unknown customers and unknown plans must
+// error (so webhooks 500 and the provider redelivers) — a silent ACK would
+// drop a possibly-paid event forever.
+func TestUnroutableEventsFailTheBatch(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if err := h.m.OnEvents(ctx, "fake", []billing.Event{
+		{Type: billing.EventSubscriptionActivated, CustomerID: "fake_cus_9999", Plan: "standard", At: h.ck.t},
+	}); err == nil {
+		t.Fatal("unknown-customer event must fail the batch, not be ACKed away")
+	}
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+	if err := h.m.OnEvents(ctx, "fake", []billing.Event{
+		{Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID, Plan: "mystery", At: h.ck.t.Add(time.Hour)},
+	}); err == nil {
+		t.Fatal("unknown-plan activation must fail the batch (deploy skew), not vanish")
+	}
+}
+
+// TestCancelDisarmsProviderFirst reproduces the review's stuck-state finding:
+// if the provider's cancel fails, the record must still show the pending
+// change (truthful + retryable) — not "nothing pending" with a schedule
+// silently armed at the partner.
+func TestCancelDisarmsProviderFirst(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "standard"); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	if _, err := h.m.RequestDowngrade(ctx, "acct_1", "s@example.com", "free"); err != nil {
+		t.Fatalf("RequestDowngrade: %v", err)
+	}
+	// Simulate the partner API failing the disarm: the fake errors on an
+	// unknown customer, so point the record's customer at a vanished id by
+	// building a manager whose provider has no such customer.
+	other := fake.New(fake.Config{Prices: map[string]int64{"standard": 3000}})
+	m2, err := NewManager(Config{
+		Catalog: mustCatalog(t), Providers: map[string]billing.Provider{"fake": other}, Default: "fake",
+		Store: h.store, Applier: h.applier, Now: h.ck.now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m2.CancelPending(ctx, "acct_1"); err == nil {
+		t.Fatal("provider disarm failure must surface as an error")
+	}
+	if r := h.record(t, "acct_1"); r.Pending == nil {
+		t.Fatal("provider disarm failed but the local pending was cleared — the stuck state the review found")
+	}
+	// The original manager (working provider) retries successfully.
+	if err := h.m.CancelPending(ctx, "acct_1"); err != nil {
+		t.Fatalf("retry after provider recovery: %v", err)
+	}
+}
+
+func mustCatalog(t *testing.T) *plans.Catalog {
+	t.Helper()
+	c, err := plans.Load()
+	if err != nil {
+		t.Fatalf("plans.Load: %v", err)
+	}
+	return c
+}
+
+// TestRefusalSentinel: user refusals carry ErrRefusal; infra errors don't.
+func TestRefusalSentinel(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	_, err := h.m.RequestUpgrade(ctx, "acct_1", "s@example.com", "nope")
+	if !errors.Is(err, ErrRefusal) {
+		t.Fatalf("unknown plan = %v; want ErrRefusal", err)
+	}
+	if err := h.m.CancelPending(ctx, "acct_1"); !errors.Is(err, ErrRefusal) {
+		t.Fatalf("nothing-pending = %v; want ErrRefusal", err)
 	}
 }

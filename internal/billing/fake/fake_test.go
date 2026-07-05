@@ -237,3 +237,22 @@ func TestErrors(t *testing.T) {
 		t.Fatal("downgrade to a pricier plan should error")
 	}
 }
+
+// TestWebhookSecret: with a secret configured, unsigned webhook deliveries
+// are rejected — the fake's stand-in for real signature verification, so a
+// publicly mounted route cannot accept forged entitlement events.
+func TestWebhookSecret(t *testing.T) {
+	f := New(Config{Prices: prices, WebhookSecret: "s3cret"})
+	id, _ := f.EnsureCustomer(context.Background(), "acct_1", "s@example.com")
+
+	body := `{"customer_id":"` + id + `","type":"payment_failed"}`
+	r := httptest.NewRequest("POST", "/v1/billing/webhook", strings.NewReader(body))
+	if _, err := f.HandleWebhook(r); err == nil {
+		t.Fatal("unsigned webhook must be rejected when a secret is set")
+	}
+	r = httptest.NewRequest("POST", "/v1/billing/webhook", strings.NewReader(body))
+	r.Header.Set("X-Witself-Fake-Signature", "s3cret")
+	if _, err := f.HandleWebhook(r); err != nil {
+		t.Fatalf("signed webhook rejected: %v", err)
+	}
+}

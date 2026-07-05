@@ -98,6 +98,11 @@ type Record struct {
 	// PastDueSince is set while the provider reports failed renewals. Grace
 	// policy (when to suspend) is a control-plane decision layered on top.
 	PastDueSince *time.Time
+	// DunningAt is the staleness fence for dunning events, the analogue of
+	// EntitledAt: a payment_failed/recovered whose partner timestamp predates
+	// it is a redelivered stale event and is dropped — so a redelivered
+	// "failed" can never re-mark an account that has since recovered.
+	DunningAt time.Time
 	// ApplyBlocked carries the violation report when the authoritative
 	// apply-time fit check refused to push a downgraded snapshot to the cell.
 	// The cell keeps enforcing the old plan (the gap stays visible as
@@ -114,6 +119,20 @@ type Record struct {
 // read. The Manager re-reads and re-decides; Store implementations return it
 // verbatim.
 var ErrStale = errors.New("lifecycle: stale record version")
+
+// ErrRefusal is the sentinel every user-addressed refusal wraps: "already on
+// standard", "not an upgrade from ...", the fit-check violations report,
+// "nothing is pending". Everything NOT wrapped in it is infrastructure or
+// provider failure (Store I/O, provider API errors, CAS exhaustion) — the
+// HTTP layer maps refusals to 409 with the message verbatim and everything
+// else to a generic 500, so an R2 outage never reads as a policy conflict
+// and backend detail never reaches the CLI.
+var ErrRefusal = errors.New("plan change refused")
+
+// refuse builds a user-addressed refusal.
+func refuse(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrRefusal}, args...)...)
+}
 
 // Store persists Records with optimistic concurrency. Implementations must be
 // safe for concurrent use, and Put MUST be compare-and-swap on Record.Version:
@@ -307,7 +326,7 @@ func (m *Manager) cancelReplacedPending(ctx context.Context, r Record) error {
 func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
 	target, ok := m.cfg.Catalog.Get(planID)
 	if !ok {
-		return Outcome{}, fmt.Errorf("unknown plan %q", planID)
+		return Outcome{}, refuse("unknown plan %q", planID)
 	}
 	now := m.cfg.Now()
 
@@ -319,10 +338,10 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
-			return fmt.Errorf("already on the %s plan", target.ID)
+			return refuse("already on the %s plan", target.ID)
 		}
 		if target.PriceCents() <= current.PriceCents() {
-			return fmt.Errorf("%s is not an upgrade from %s — use downgrade", target.ID, current.ID)
+			return refuse("%s is not an upgrade from %s — use downgrade", target.ID, current.ID)
 		}
 		if !target.Available {
 			// Not self-serve yet: the stored desire IS the sales lead; the
@@ -332,7 +351,7 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 			return nil
 		}
 		if !target.Purchasable() {
-			return fmt.Errorf("plan %q is not purchasable", target.ID)
+			return refuse("plan %q is not purchasable", target.ID)
 		}
 		replaced = *r
 		r.Pending = &Pending{
@@ -375,7 +394,7 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 	folded, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		p := r.Pending
 		if p == nil || p.Kind != PendingUpgrade || p.Plan != target.ID || !p.Requested.Equal(now) {
-			return fmt.Errorf("upgrade to %s was superseded by another request", target.ID)
+			return refuse("upgrade to %s was superseded by another request", target.ID)
 		}
 		if r.CustomerID == "" {
 			// First billing objects: pin the provider for the life of the
@@ -422,7 +441,7 @@ func (m *Manager) releaseClaim(ctx context.Context, accountID string, claim Reco
 func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
 	target, ok := m.cfg.Catalog.Get(planID)
 	if !ok {
-		return Outcome{}, fmt.Errorf("unknown plan %q", planID)
+		return Outcome{}, refuse("unknown plan %q", planID)
 	}
 	now := m.cfg.Now()
 
@@ -430,17 +449,17 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
-			return fmt.Errorf("already on the %s plan", target.ID)
+			return refuse("already on the %s plan", target.ID)
 		}
 		if target.PriceCents() >= current.PriceCents() {
-			return fmt.Errorf("%s is not a downgrade from %s — use upgrade", target.ID, current.ID)
+			return refuse("%s is not a downgrade from %s — use upgrade", target.ID, current.ID)
 		}
 		violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
 		if err != nil {
 			return err
 		}
 		if len(violations) > 0 {
-			return fmt.Errorf("blocked — the account does not fit the %s plan:\n  %s",
+			return refuse("blocked — the account does not fit the %s plan:\n  %s",
 				target.ID, strings.Join(violations, "\n  "))
 		}
 		replaced = *r
@@ -466,7 +485,7 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 	if _, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		p := r.Pending
 		if p == nil || p.Kind != PendingDowngrade || p.Plan != target.ID || !p.Requested.Equal(now) {
-			return fmt.Errorf("downgrade to %s was superseded by another request", target.ID)
+			return refuse("downgrade to %s was superseded by another request", target.ID)
 		}
 		r.Pending.Effective = effective
 		return nil
@@ -482,18 +501,31 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 // sees it and this returns "nothing is pending" instead of clobbering the new
 // entitlement.
 func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
-	var toCancel Record
-	if _, err := m.mutate(ctx, accountID, "", func(r *Record) error {
-		if r.Pending == nil {
-			return fmt.Errorf("nothing is pending")
-		}
-		toCancel = *r
-		r.Pending = nil
-		return nil
-	}); err != nil {
+	// Disarm the provider FIRST: if its cancel fails, the record still shows
+	// the pending change (truthful, retryable). The old order cleared local
+	// state first, so a provider blip left a schedule armed at the partner
+	// with nothing visible locally — a downgrade would fire "spontaneously"
+	// at period end with no API path left to disarm it.
+	r, err := m.load(ctx, accountID, "")
+	if err != nil {
 		return err
 	}
-	return m.cancelReplacedPending(ctx, toCancel)
+	if r.Pending == nil {
+		return refuse("nothing is pending")
+	}
+	if err := m.cancelReplacedPending(ctx, r); err != nil {
+		return err
+	}
+	_, err = m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.Pending == nil {
+			// The change resolved while we were disarming (e.g. the payer
+			// completed checkout): nothing to clear, entitlement stands.
+			return refuse("nothing is pending")
+		}
+		r.Pending = nil
+		return nil
+	})
+	return err
 }
 
 // OnEvents folds normalized provider events into records. provider names the
@@ -503,8 +535,12 @@ func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
 //
 // Redelivery and ordering: entitlement events (activated/canceled) do not
 // commute with intervening changes, so any such event whose partner timestamp
-// predates the record's EntitledAt is stale and dropped. Within that fence,
-// folding the same event twice converges on the same state.
+// predates the record's EntitledAt is stale and dropped; dunning events fence
+// on DunningAt the same way. Within those fences, folding the same event
+// twice converges on the same state. Events that cannot be routed (unknown
+// customer, unknown plan) FAIL the batch — a 2xx would ACK a possibly-paid
+// event forever; redelivery lets the claim/fold race and catalog deploys
+// resolve.
 func (m *Manager) OnEvents(ctx context.Context, provider string, events []billing.Event) error {
 	for _, e := range events {
 		seed, ok, err := m.cfg.Store.ByCustomer(ctx, provider, e.CustomerID)
@@ -512,15 +548,21 @@ func (m *Manager) OnEvents(ctx context.Context, provider string, events []billin
 			return err
 		}
 		if !ok {
-			// Unknown customer: not ours (or not yet registered). Skip rather
-			// than fail the whole batch — providers redeliver on error.
-			continue
+			// Unknown customer: either NOT YET ours (the claim/fold window —
+			// the index lands moments later) or genuinely foreign. We cannot
+			// tell the difference, and a silent ACK on the former loses a
+			// paid event forever. Fail the batch so the provider redelivers;
+			// convergence resolves the race, and truly-foreign deliveries age
+			// out at the provider's retry horizon.
+			return fmt.Errorf("event %s for unknown %s customer — will resolve on redelivery", e.Type, provider)
 		}
-		// An activation for a plan the catalog does not know cannot be
-		// entitled or applied; skip loudly-in-state rather than corrupt it.
+		// An activation for a plan this catalog does not know is deploy skew
+		// (the partner sells something this binary has not heard of). ACKing
+		// would lose a PAID event forever; fail the batch so the provider
+		// redelivers until the catalog catches up.
 		if e.Type == billing.EventSubscriptionActivated {
 			if _, ok := m.cfg.Catalog.Get(e.Plan); !ok {
-				continue
+				return fmt.Errorf("activation for plan %q not in this catalog — will resolve on redelivery after deploy", e.Plan)
 			}
 		}
 		r, err := m.mutate(ctx, seed.AccountID, "", func(r *Record) error {
@@ -548,12 +590,20 @@ func (m *Manager) OnEvents(ctx context.Context, provider string, events []billin
 					r.Pending = nil
 				}
 			case billing.EventPaymentFailed:
+				if !e.At.IsZero() && e.At.Before(r.DunningAt) {
+					return errSkipWrite // stale: predates newer dunning state
+				}
 				if r.PastDueSince == nil {
 					t := e.At
 					r.PastDueSince = &t
 				}
+				r.DunningAt = e.At
 			case billing.EventPaymentRecovered:
+				if !e.At.IsZero() && e.At.Before(r.DunningAt) {
+					return errSkipWrite
+				}
 				r.PastDueSince = nil
+				r.DunningAt = e.At
 			default:
 				return errSkipWrite
 			}

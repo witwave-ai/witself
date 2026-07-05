@@ -134,9 +134,10 @@ func TestManagerOnR2Store(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 
-	// The reviewer's race, replayed on R2: checkout completes inside
-	// CancelPending's write window. The stale write must lose to a 412.
-	hooked.beforePut = func(Record) {
+	// The reviewer's race, replayed on R2: checkout completes inside the
+	// disarm window. The re-read (backed by R2's conditional writes) must see
+	// the activation and refuse instead of clobbering.
+	hookedP := &hookProvider{Provider: f, beforeCancel: func() {
 		ck.t = ck.t.Add(time.Minute)
 		events, err := f.Complete(r.CustomerID)
 		if err != nil {
@@ -145,8 +146,15 @@ func TestManagerOnR2Store(t *testing.T) {
 		if err := m.OnEvents(ctx, "fake", events); err != nil {
 			t.Errorf("OnEvents: %v", err)
 		}
+	}}
+	m2, err := NewManager(Config{
+		Catalog: catalog, Providers: map[string]billing.Provider{"fake": hookedP}, Default: "fake",
+		Store: hooked, Applier: ap, Now: ck.now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager m2: %v", err)
 	}
-	err = m.CancelPending(ctx, "acct_1")
+	err = m2.CancelPending(ctx, "acct_1")
 	if err == nil || !strings.Contains(err.Error(), "nothing is pending") {
 		t.Fatalf("CancelPending racing activation = %v; want 'nothing is pending'", err)
 	}

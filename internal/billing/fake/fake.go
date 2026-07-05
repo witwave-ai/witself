@@ -14,6 +14,7 @@ package fake
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +41,12 @@ type Config struct {
 	Now func() time.Time
 	// PeriodDays is the billing period length. Defaults to 30.
 	PeriodDays int
+	// WebhookSecret, when set, makes HandleWebhook require the
+	// X-Witself-Fake-Signature header to equal it — the fake's stand-in for
+	// a real partner's signature verification. Without it, a PUBLICLY
+	// mounted fake webhook route would accept forged entitlement events
+	// from anonymous callers (customer ids are guessably sequential).
+	WebhookSecret string
 }
 
 type pendingKind string
@@ -221,6 +228,12 @@ func (f *Fake) CancelPending(_ context.Context, customerID string) error {
 // {"customer_id": "...", "type": "...", "plan": "..."} — so the control
 // plane's webhook route can be exercised end-to-end without a real provider.
 func (f *Fake) HandleWebhook(r *http.Request) ([]billing.Event, error) {
+	if f.cfg.WebhookSecret != "" {
+		sig := r.Header.Get("X-Witself-Fake-Signature")
+		if subtle.ConstantTimeCompare([]byte(sig), []byte(f.cfg.WebhookSecret)) != 1 {
+			return nil, fmt.Errorf("fake webhook: bad signature")
+		}
+	}
 	var body struct {
 		CustomerID string `json:"customer_id"`
 		Type       string `json:"type"`
