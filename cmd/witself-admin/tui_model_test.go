@@ -507,14 +507,39 @@ func TestEventsSeedReversal(t *testing.T) {
 }
 
 // TestRenderEventLineSanitizes pins injection defense on the event
-// tail — actor ids and metadata are server-side strings.
+// tail — actor ids are server-side strings.
 func TestRenderEventLineSanitizes(t *testing.T) {
 	e := mkEvent("evt_1", "recovery.requested", time.Now())
 	e.ActorID = "mal\x1b[2Jlory"
 	e.Metadata = []byte("{\"x\":\"\x07bell\"}")
-	out := renderEventLine(e, 120)
+	out := renderEventLine(e)
 	if strings.Contains(out, "\x1b[2J") || strings.Contains(out, "\x07") {
 		t.Fatalf("escape survived event line: %q", out)
+	}
+}
+
+// TestEventLineColumnsAlign pins the fixed-width table layout of the
+// events tail: columns line up across rows regardless of verb length,
+// the cell column is present, and raw metadata JSON never reaches the
+// pane (it lives in the enter drill-down).
+func TestEventLineColumnsAlign(t *testing.T) {
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	short := plainEventLine(mkEvent("evt_1", "account.created", t0))
+	long := plainEventLine(mkEvent("evt_2", "account.support_policy_changed", t0))
+	if strings.Index(short, "acc_1") != strings.Index(long, "acc_1") {
+		t.Fatalf("account column drifts:\n%q\n%q", short, long)
+	}
+	if strings.Index(short, "aws-sandbox") != strings.Index(long, "aws-sandbox") {
+		t.Fatalf("cell column drifts:\n%q\n%q", short, long)
+	}
+	if !strings.Contains(short, "aws-sandbox-usw2-dev") {
+		t.Fatalf("cell column missing: %q", short)
+	}
+	if !strings.Contains(short, "control_plane") {
+		t.Fatalf("actor column missing: %q", short)
+	}
+	if strings.Contains(short, "{") || strings.Contains(short, `"k"`) {
+		t.Fatalf("metadata JSON leaked into the tail row: %q", short)
 	}
 }
 

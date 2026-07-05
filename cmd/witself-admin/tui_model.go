@@ -1321,7 +1321,7 @@ func (m model) viewList() string {
 		}
 		start := maxInt(end-eventRows, 0)
 		for i := start; i < end; i++ {
-			line := fitLine(renderEventLine(m.events[i], eventsW), eventsW)
+			line := fitLine(renderEventLine(m.events[i]), eventsW)
 			if m.focus == paneEvents && i == selIdx {
 				line = selectedLine(plainEventLine(m.events[i]), eventsW)
 			}
@@ -1421,48 +1421,64 @@ func selectedLine(plain string, width int) string {
 	return stySelected.Render(line)
 }
 
-// renderEventLine renders one audit event for the tail pane. Verb is
-// the loud part; security-relevant verbs get the error color so a
-// recovery attempt or suspension jumps out of the stream.
-func renderEventLine(e client.AdminEvent, width int) string {
-	verb := e.Verb
-	styled := styInfo.Render(verb)
-	if strings.HasPrefix(verb, "recovery.") ||
+// Event-tail column widths — fixed, so the pane reads as a table
+// instead of a ragged stream. Verb is sized to the longest verb we
+// emit ("account.support_policy_changed", 30). Metadata is NOT a
+// column: the raw JSON swallowed the useful fields; enter drills into
+// the full record when the payload matters.
+const (
+	evVerbW = 30
+	evAcctW = 20
+	evCellW = 20
+)
+
+// securityVerb picks which verbs get the loud color in the tail — a
+// recovery attempt, suspension, or revocation must jump out of the
+// stream.
+func securityVerb(verb string) bool {
+	return strings.HasPrefix(verb, "recovery.") ||
 		strings.HasPrefix(verb, "account.suspended") ||
 		verb == "token.revoked" ||
 		verb == "account.email.changed" ||
-		verb == "account.support_policy_changed" {
-		styled = styErr.Render(verb)
-	}
-	actor := e.ActorKind
+		verb == "account.support_policy_changed"
+}
+
+// eventCols builds the fixed-width column values one tail row shows:
+// time, verb, account, cell, actor. Shared by the styled and plain
+// renders so the selection row can never drift out of alignment with
+// its neighbors.
+func eventCols(e client.AdminEvent) (ts, verb, acct, cell, actor string) {
+	actor = e.ActorKind
 	if e.ActorID != "" {
 		actor += ":" + oneLine(e.ActorID)
 	}
-	meta := truncate(oneLine(string(e.Metadata)), maxInt(width-70, 10))
-	return fmt.Sprintf(" %s %s %-14s %s %s",
-		styDim.Render(e.OccurredAt.UTC().Format("15:04:05")),
-		styled,
-		truncate(oneLine(e.AccountID), 14),
-		styDim.Render(actor),
-		styDim.Render(meta),
-	)
+	return e.OccurredAt.UTC().Format("15:04:05"),
+		fmt.Sprintf("%-*s", evVerbW, truncate(oneLine(e.Verb), evVerbW)),
+		fmt.Sprintf("%-*s", evAcctW, truncate(oneLine(e.AccountID), evAcctW)),
+		fmt.Sprintf("%-*s", evCellW, truncate(oneLine(e.Cell), evCellW)),
+		actor
+}
+
+// renderEventLine renders one audit event for the tail pane. Fields
+// are padded BEFORE styling — ANSI bytes inside a %-*s would break the
+// column grid.
+func renderEventLine(e client.AdminEvent) string {
+	ts, verb, acct, cell, actor := eventCols(e)
+	styledVerb := styInfo.Render(verb)
+	if securityVerb(e.Verb) {
+		styledVerb = styErr.Render(verb)
+	}
+	return fmt.Sprintf(" %s  %s  %s  %s  %s",
+		styDim.Render(ts), styledVerb, acct,
+		styDim.Render(cell), styDim.Render(actor))
 }
 
 // plainEventLine is renderEventLine without per-field styling, for the
 // reverse-video selection row (reverse over embedded color codes
 // renders inconsistently across terminals).
 func plainEventLine(e client.AdminEvent) string {
-	actor := e.ActorKind
-	if e.ActorID != "" {
-		actor += ":" + oneLine(e.ActorID)
-	}
-	return fmt.Sprintf(" %s %s %-14s %s %s",
-		e.OccurredAt.UTC().Format("15:04:05"),
-		e.Verb,
-		truncate(oneLine(e.AccountID), 14),
-		actor,
-		oneLine(string(e.Metadata)),
-	)
+	ts, verb, acct, cell, actor := eventCols(e)
+	return fmt.Sprintf(" %s  %s  %s  %s  %s", ts, verb, acct, cell, actor)
 }
 
 // viewEventDetail is the drill-down on one audit event: every field
