@@ -10,8 +10,8 @@
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 25, "realms": 1 },
-      "features": ["agent-memory-limited"],
-      "summary": "Limited and capped. Agent memory for up to 25 agents in one realm."
+      "features": ["memory", "facts"],
+      "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm."
     },
     {
       "id": "standard",
@@ -20,8 +20,8 @@
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 250, "realms": 10 },
-      "features": ["agent-memory", "support"],
-      "summary": "Capped. 250 agents across 10 realms, support included."
+      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "summary": "Capped. Memory, facts, secrets, and collaboration for 250 agents across 10 realms, support included."
     },
     {
       "id": "team",
@@ -30,8 +30,8 @@
       "available": false,
       "usage_billed": true,
       "limits": null,
-      "features": [],
-      "summary": "Coming soon. Base price plus usage; details to follow."
+      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "summary": "Coming soon. Everything in Standard with higher limits, plus usage-based billing."
     },
     {
       "id": "enterprise",
