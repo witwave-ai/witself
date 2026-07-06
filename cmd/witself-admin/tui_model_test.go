@@ -710,6 +710,55 @@ func TestAutoRefresh(t *testing.T) {
 	}
 }
 
+// TestCellTopologyChangeReseedsEvents pins the decommission refresh bug: the
+// live events subprocess can stay open while the fleet drops a cell, leaving
+// the append-only event tail full of rows from a cell that is no longer in the
+// current fan-out. A cells refresh that changes the fleet topology must trigger
+// an events reseed even though the watch channel is still alive.
+func TestCellTopologyChangeReseedsEvents(t *testing.T) {
+	ch := make(chan client.AdminEvent)
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil).withEventWatch(ch)
+	m.loading = false
+	m.fleetCells = []client.AdminCell{{Name: "aws-sandbox-usw2-dev", Endpoint: "https://api.example"}}
+	m.events = []client.AdminEvent{mkEvent("evt_stale", "account.suspended", t0)}
+
+	next, cmd := m.Update(cellsLoadedMsg{cells: nil})
+	m2 := next.(model)
+	if cmd == nil {
+		t.Fatal("cell topology change must trigger an events reseed")
+	}
+	if len(m2.fleetCells) != 0 {
+		t.Fatalf("fleet cells = %v; want empty after decommission refresh", m2.fleetCells)
+	}
+	if m2.loading {
+		t.Fatal("topology refresh must not set loading")
+	}
+}
+
+func TestCellTopologyChanged(t *testing.T) {
+	oldCells := []client.AdminCell{
+		{Name: "cell-b", Endpoint: "https://b"},
+		{Name: "cell-a", Endpoint: "https://a"},
+	}
+	same := []client.AdminCell{
+		{Name: "cell-a", Endpoint: "https://a", AccountCount: 99},
+		{Name: "cell-b", Endpoint: "https://b"},
+	}
+	if cellTopologyChanged(oldCells, same) {
+		t.Fatal("same cells in different order, with count changes, should not be topology change")
+	}
+	if !cellTopologyChanged(oldCells, []client.AdminCell{{Name: "cell-a", Endpoint: "https://a"}}) {
+		t.Fatal("removed cell should be topology change")
+	}
+	if !cellTopologyChanged(oldCells, []client.AdminCell{
+		{Name: "cell-a", Endpoint: "https://a"},
+		{Name: "cell-b", Endpoint: "https://b2"},
+	}) {
+		t.Fatal("endpoint change should be topology change")
+	}
+}
+
 // TestCellsPaneShowsVersion pins the running-software column: reported
 // versions render (sanitized), unreachable cells say so loudly.
 func TestCellsPaneShowsVersion(t *testing.T) {

@@ -748,6 +748,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "cells load failed: " + msg.err.Error()
 			return m, nil
 		}
+		topologyChanged := cellTopologyChanged(m.fleetCells, msg.cells)
 		m.fleetCells = msg.cells
 		// One health sample per refresh cycle. Cells and tickets load
 		// in the same batch, so the ticket counts here are at worst one
@@ -762,6 +763,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				open:     open,
 				events:   m.eventsSeen,
 			})
+		}
+		if topologyChanged {
+			// The events watch process polls the current fleet, but the
+			// in-memory tail is only append-only. When a cell is drained
+			// or removed, the stream can stay alive while its previous
+			// rows are no longer part of the current fan-out. Reseed on
+			// topology changes so the events pane converges with cells
+			// and support without requiring a full dashboard restart.
+			return m, m.seedEvents()
 		}
 		return m, nil
 
@@ -1115,6 +1125,28 @@ func (m model) actionTarget() (accountID, ticketID string) {
 		}
 	}
 	return "", ""
+}
+
+func cellTopologyChanged(oldCells, newCells []client.AdminCell) bool {
+	if len(oldCells) != len(newCells) {
+		return true
+	}
+	old := make([]string, len(oldCells))
+	for i, c := range oldCells {
+		old[i] = c.Name + "\x00" + c.Endpoint
+	}
+	newNames := make([]string, len(newCells))
+	for i, c := range newCells {
+		newNames[i] = c.Name + "\x00" + c.Endpoint
+	}
+	sort.Strings(old)
+	sort.Strings(newNames)
+	for i := range old {
+		if old[i] != newNames[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func (m model) View() string {
