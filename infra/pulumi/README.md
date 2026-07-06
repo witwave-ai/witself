@@ -89,9 +89,10 @@ missing; pass `-bootstrap` to create it on first use.
 GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not the
 cell boundary: one project can host multiple cell stacks. The current GCP cell
 program provisions the first substrate slice only: a dedicated custom VPC,
-regional subnet, future GKE secondary IP ranges, and an internal firewall rule.
-It intentionally does **not** create Cloud NAT yet, so the networking slice stays
-low-cost until private workloads need outbound egress.
+regional subnet, future GKE secondary IP ranges, an internal firewall rule, and
+private services access for future private-IP Cloud SQL. It intentionally does
+**not** create Cloud NAT or Cloud SQL yet, so the networking slice stays low-cost
+until private workloads/database capacity are added.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -211,7 +212,8 @@ control plane forgets them.
    purge); fleet token from `~/.witself/tokens/fleet.token`.
 8. **[done]** GCP GCS + Cloud KMS state backend and empty stack lifecycle.
 9. **[done]** GCP network substrate: custom VPC, regional subnet, secondary
-   ranges for future GKE pods/services, and internal firewall.
+   ranges for future GKE pods/services, internal firewall, and private services
+   access for future Cloud SQL.
 10. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
    then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
    GKE/Cloud SQL/DNS.

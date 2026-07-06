@@ -345,7 +345,7 @@ func run(args []string) error {
 	if *cloud == "gcp" && cmd != "outputs" {
 		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
-		}, "compute.googleapis.com"); err != nil {
+		}, "cloudresourcemanager.googleapis.com", "compute.googleapis.com", "servicenetworking.googleapis.com"); err != nil {
 			return err
 		}
 	}

@@ -2,10 +2,12 @@ package cell
 
 import (
 	"fmt"
+	"net/netip"
 
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp"
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/compute"
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/projects"
+	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/servicenetworking"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -19,6 +21,9 @@ type gcpNetwork struct {
 	podsRangeCIDR     string
 	servicesRangeName string
 	servicesRangeCIDR string
+	privateRangeName  pulumi.StringOutput
+	privateRangeCIDR  string
+	privatePeering    pulumi.StringOutput
 }
 
 func gcpDefaultLabels(c gcpCell) pulumi.StringMap {
@@ -58,12 +63,21 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
-	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI)
+	serviceNetworkingAPI, err := projects.NewService(ctx, "gcp-service-networking-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("servicenetworking.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
 	if err != nil {
 		return err
 	}
 
-	ctx.Export("status", pulumi.String("gcp: vpc network substrate provisioned"))
+	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI, serviceNetworkingAPI)
+	if err != nil {
+		return err
+	}
+
+	ctx.Export("status", pulumi.String("gcp: vpc network + private services access provisioned"))
 	ctx.Export("gcpProject", pulumi.String(c.project))
 	ctx.Export("gcpRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
@@ -77,16 +91,20 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	ctx.Export("podsRangeCIDR", pulumi.String(net.podsRangeCIDR))
 	ctx.Export("servicesRangeName", pulumi.String(net.servicesRangeName))
 	ctx.Export("servicesRangeCIDR", pulumi.String(net.servicesRangeCIDR))
+	ctx.Export("privateServiceRangeName", net.privateRangeName)
+	ctx.Export("privateServiceRangeCIDR", pulumi.String(net.privateRangeCIDR))
+	ctx.Export("privateServicePeering", net.privatePeering)
 	return nil
 }
 
-func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, computeAPI pulumi.Resource) (*gcpNetwork, error) {
+func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, computeAPI, serviceNetworkingAPI pulumi.Resource) (*gcpNetwork, error) {
 	prefix := cidrPrefix(c.cidr)
 	subnetCIDR := fmt.Sprintf("%s.0.0/20", prefix)
 	podsRangeName := "pods"
 	podsRangeCIDR := fmt.Sprintf("%s.16.0/20", prefix)
 	servicesRangeName := "services"
 	servicesRangeCIDR := fmt.Sprintf("%s.32.0/22", prefix)
+	privateRangeAddress, privateRangeCIDR := privateServicesRange(c.cidr)
 
 	network, err := compute.NewNetwork(ctx, "cell", &compute.NetworkArgs{
 		Name:                        pulumi.String(rname(c.name, "vpc")),
@@ -139,6 +157,30 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		return nil, err
 	}
 
+	privateRange, err := compute.NewGlobalAddress(ctx, "cell-private-services", &compute.GlobalAddressArgs{
+		Name:         pulumi.String(rname(c.name, "private-services")),
+		Description:  pulumi.String("Private services access range for " + c.name),
+		Purpose:      pulumi.String("VPC_PEERING"),
+		AddressType:  pulumi.String("INTERNAL"),
+		Address:      pulumi.String(privateRangeAddress),
+		PrefixLength: pulumi.Int(20),
+		Network:      network.ID(),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{network, serviceNetworkingAPI}))
+	if err != nil {
+		return nil, err
+	}
+
+	privateConnection, err := servicenetworking.NewConnection(ctx, "cell-private-services", &servicenetworking.ConnectionArgs{
+		Network: pulumi.Sprintf("projects/%s/global/networks/%s", c.project, network.Name),
+		Service: pulumi.String("servicenetworking.googleapis.com"),
+		ReservedPeeringRanges: pulumi.StringArray{
+			privateRange.Name,
+		},
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{privateRange, serviceNetworkingAPI}))
+	if err != nil {
+		return nil, err
+	}
+
 	return &gcpNetwork{
 		networkName:       network.Name,
 		networkSelfLink:   network.SelfLink,
@@ -149,5 +191,29 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		podsRangeCIDR:     podsRangeCIDR,
 		servicesRangeName: servicesRangeName,
 		servicesRangeCIDR: servicesRangeCIDR,
+		privateRangeName:  privateRange.Name,
+		privateRangeCIDR:  privateRangeCIDR,
+		privatePeering:    privateConnection.Peering,
 	}, nil
+}
+
+func privateServicesRange(cidr string) (address string, block string) {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return "10.21.0.0", "10.21.0.0/20"
+	}
+	p = p.Masked()
+	a := p.Addr()
+	if !a.Is4() || p.Bits() >= 32 {
+		return "10.21.0.0", "10.21.0.0/20"
+	}
+	ip := a.As4()
+	base := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+	next := base + (uint32(1) << uint(32-p.Bits()))
+	nextIP := netip.AddrFrom4([4]byte{byte(next >> 24), byte(next >> 16), byte(next >> 8), byte(next)})
+	if !nextIP.IsPrivate() {
+		return "10.21.0.0", "10.21.0.0/20"
+	}
+	address = nextIP.String()
+	return address, address + "/20"
 }
