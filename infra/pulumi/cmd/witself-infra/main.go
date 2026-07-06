@@ -116,7 +116,7 @@ flags:
   -profile        resource sizing (functional): minimal|prod  (default "minimal")
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -k8s-version    EKS Kubernetes version                       (default "1.36")
-  -db-version     RDS PostgreSQL major version                 (default "18")
+  -db-version     PostgreSQL major version                     (default "18")
   -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -argocd         install Argo CD (GitOps control plane)        (default false)
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
@@ -179,7 +179,7 @@ func run(args []string) error {
 	profile := fs.String("profile", "minimal", "resource sizing (functional): minimal|prod")
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	k8sVersion := fs.String("k8s-version", "1.36", "EKS Kubernetes version")
-	dbVersion := fs.String("db-version", "18", "RDS PostgreSQL major version")
+	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
 	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
 	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
@@ -345,7 +345,7 @@ func run(args []string) error {
 	if *cloud == "gcp" && cmd != "outputs" {
 		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
-		}, "cloudresourcemanager.googleapis.com", "compute.googleapis.com", "servicenetworking.googleapis.com", "container.googleapis.com"); err != nil {
+		}, "cloudresourcemanager.googleapis.com", "compute.googleapis.com", "servicenetworking.googleapis.com", "container.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com"); err != nil {
 			return err
 		}
 	}

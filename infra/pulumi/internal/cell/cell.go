@@ -57,6 +57,7 @@ type gcpCell struct {
 	region       string // real region, e.g. us-west2
 	profile      string // minimal | prod
 	cidr         string // cell VPC CIDR (/16)
+	dbVersion    string // Cloud SQL PostgreSQL major version
 	accountAlias string // free-text account label
 	role         string // dev | prod | canary | ordinal
 }
@@ -140,6 +141,7 @@ func Program(ctx *pulumi.Context) error {
 			region:       g.Get("region"),
 			profile:      profile,
 			cidr:         cidr,
+			dbVersion:    dbVersion,
 			accountAlias: w.Get("accountAlias"),
 			role:         w.Get("role"),
 		})

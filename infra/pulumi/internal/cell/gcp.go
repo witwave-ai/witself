@@ -25,6 +25,7 @@ type gcpNetwork struct {
 	privateRangeName  pulumi.StringOutput
 	privateRangeCIDR  string
 	privatePeering    pulumi.StringOutput
+	privateConnection pulumi.Resource
 }
 
 type gcpKubernetes struct {
@@ -34,6 +35,19 @@ type gcpKubernetes struct {
 	certificateAuthority pulumi.StringOutput
 	workloadPool         string
 	releaseChannel       string
+}
+
+type gcpDatabase struct {
+	instanceName   pulumi.StringOutput
+	connectionName pulumi.StringOutput
+	privateIP      pulumi.StringOutput
+	databaseName   pulumi.StringOutput
+	username       pulumi.StringOutput
+	password       pulumi.StringOutput
+	dsn            pulumi.StringOutput
+	secretName     pulumi.StringOutput
+	secretID       pulumi.IDOutput
+	version        string
 }
 
 func gcpDefaultLabels(c gcpCell) pulumi.StringMap {
@@ -49,9 +63,8 @@ func gcpDefaultLabels(c gcpCell) pulumi.StringMap {
 	}
 }
 
-// provisionGCP is the first GCP slice: a real Pulumi stack with no workload
-// substrate. The state backend and secrets provider are prepared outside the
-// resource graph by internal/backend/gcp.go.
+// provisionGCP provisions the current GCP cell substrate. The state backend and
+// secrets provider are prepared outside the resource graph by internal/backend/gcp.go.
 func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	prov, err := gcp.NewProvider(ctx, "gcp", &gcp.ProviderArgs{
 		Project:             pulumi.String(c.project),
@@ -91,6 +104,24 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	sqlAPI, err := projects.NewService(ctx, "gcp-sql-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("sqladmin.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
+	secretManagerAPI, err := projects.NewService(ctx, "gcp-secret-manager-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("secretmanager.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
 	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI, serviceNetworkingAPI)
 	if err != nil {
 		return err
@@ -101,7 +132,12 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
-	ctx.Export("status", pulumi.String("gcp: vpc network + private services access + gke autopilot provisioned"))
+	db, err := provisionGCPCloudSQL(ctx, c, net, prov, sqlAPI, secretManagerAPI)
+	if err != nil {
+		return err
+	}
+
+	ctx.Export("status", pulumi.String("gcp: vpc network + private services access + gke autopilot + cloud sql postgres provisioned"))
 	ctx.Export("gcpProject", pulumi.String(c.project))
 	ctx.Export("gcpRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
@@ -125,6 +161,16 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	ctx.Export("gkeWorkloadPool", pulumi.String(gke.workloadPool))
 	ctx.Export("gkeReleaseChannel", pulumi.String(gke.releaseChannel))
 	ctx.Export("gkeAutopilot", pulumi.Bool(true))
+	ctx.Export("dbInstance", db.instanceName)
+	ctx.Export("dbConnectionName", db.connectionName)
+	ctx.Export("dbEndpoint", db.privateIP)
+	ctx.Export("dbName", db.databaseName)
+	ctx.Export("dbUsername", db.username)
+	ctx.Export("dbPassword", db.password)
+	ctx.Export("dbDSN", db.dsn)
+	ctx.Export("dbVersion", pulumi.String(db.version))
+	ctx.Export("dbSecretName", db.secretName)
+	ctx.Export("dbSecretID", db.secretID)
 	return nil
 }
 
@@ -225,6 +271,7 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		privateRangeName:  privateRange.Name,
 		privateRangeCIDR:  privateRangeCIDR,
 		privatePeering:    privateConnection.Peering,
+		privateConnection: privateConnection,
 	}, nil
 }
 

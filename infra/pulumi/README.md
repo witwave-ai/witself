@@ -90,9 +90,10 @@ GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not th
 cell boundary: one project can host multiple cell stacks. The current GCP cell
 program provisions a dedicated custom VPC, regional subnet, GKE pod/service
 secondary ranges, an internal firewall rule, private services access for future
-private-IP Cloud SQL, and a regional GKE Autopilot cluster. It intentionally
-does **not** create Cloud NAT, Cloud SQL, Argo CD, or application workloads yet,
-so database and app capacity are still deferred.
+private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
+Cloud SQL Postgres instance, and a Secret Manager DB connection secret. It
+intentionally does **not** create Cloud NAT, Argo CD, or application workloads
+yet, so app capacity is still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -216,6 +217,8 @@ control plane forgets them.
    access for future Cloud SQL.
 10. **[done]** GCP GKE Autopilot substrate with VPC-native pod/service ranges
     and Workload Identity.
-11. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
+11. **[done]** GCP Cloud SQL Postgres over private services access plus Secret
+    Manager DB connection JSON.
+12. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
     then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
-    Cloud SQL/DNS/GitOps.
+    DNS/GitOps.
