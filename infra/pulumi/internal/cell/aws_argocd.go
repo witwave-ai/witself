@@ -134,8 +134,9 @@ cell:
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
 		Kind:       pulumi.String("Application"),
 		Metadata: &metav1.ObjectMetaArgs{
-			Name:      pulumi.String("bootstrap"),
-			Namespace: pulumi.String(argocdNamespace),
+			Name:       pulumi.String("bootstrap"),
+			Namespace:  pulumi.String(argocdNamespace),
+			Finalizers: pulumi.StringArray{pulumi.String("resources-finalizer.argocd.argoproj.io")},
 		},
 		OtherFields: kubernetes.UntypedArgs{
 			"spec": map[string]interface{}{

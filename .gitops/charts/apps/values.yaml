@@ -29,6 +29,12 @@ apps:
       enabled: false
       managedCertificateName: witself-api
       backendConfigName: witself-server
+      frontendConfig:
+        enabled: false
+        name: witself-api
+        redirectToHttps:
+          enabled: true
+          responseCodeName: PERMANENT_REDIRECT
       staticIPName: ""
       annotations: {}
       hosts:

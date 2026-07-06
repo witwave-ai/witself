@@ -12,7 +12,7 @@ import (
 // AWS, but authenticates to GKE with an exec kubeconfig backed by gcloud. GKE
 // accepts the Google OAuth access token for the operator account that runs
 // witself-infra; that account must have the usual GKE cluster-admin permissions.
-func provisionGCPArgoCD(ctx *pulumi.Context, c gcpCell, gke *gcpKubernetes, dns *gcpDNS, externalDNSServiceAccountEmail pulumi.StringOutput) error {
+func provisionGCPArgoCD(ctx *pulumi.Context, c gcpCell, gke *gcpKubernetes, dns *gcpDNS, externalDNSServiceAccountEmail pulumi.StringOutput, rootDependencies ...pulumi.Resource) error {
 	tokenExec := `token="$(gcloud auth print-access-token)"
 printf '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential","status":{"token":"%s"}}\n' "$token"
 `
@@ -94,12 +94,15 @@ platform:
       iam.gke.io/gcp-service-account: %q
 `, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, cellDomain, apiHost, ingressStaticIPName, externalDNSServiceAccountEmail)
 
+	rootDependsOn := append([]pulumi.Resource{release}, rootDependencies...)
+
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
 		Kind:       pulumi.String("Application"),
 		Metadata: &metav1.ObjectMetaArgs{
-			Name:      pulumi.String("bootstrap"),
-			Namespace: pulumi.String(argocdNamespace),
+			Name:       pulumi.String("bootstrap"),
+			Namespace:  pulumi.String(argocdNamespace),
+			Finalizers: pulumi.StringArray{pulumi.String("resources-finalizer.argocd.argoproj.io")},
 		},
 		OtherFields: kubernetes.UntypedArgs{
 			"spec": map[string]interface{}{
@@ -129,7 +132,7 @@ platform:
 				},
 			},
 		},
-	}, pulumi.Provider(k8s), pulumi.DependsOn([]pulumi.Resource{release}))
+	}, pulumi.Provider(k8s), pulumi.DependsOn(rootDependsOn))
 	if err != nil {
 		return err
 	}

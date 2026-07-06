@@ -1,0 +1,19 @@
+{{- $ingress := .Values.apps.witselfServer.gcpIngress -}}
+{{- $frontendConfig := default dict $ingress.frontendConfig -}}
+{{- if and .Values.apps.witselfServer.enabled $ingress.enabled $frontendConfig.enabled (eq .Values.cell.cloud "gcp") }}
+{{- $redirect := default dict $frontendConfig.redirectToHttps -}}
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: {{ default "witself-api" $frontendConfig.name | quote }}
+  namespace: {{ .Values.apps.witselfServer.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  redirectToHttps:
+    enabled: {{ default true $redirect.enabled }}
+    {{- if $redirect.responseCodeName }}
+    responseCodeName: {{ $redirect.responseCodeName | quote }}
+    {{- end }}
+{{- end }}

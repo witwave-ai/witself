@@ -111,23 +111,23 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		return nil, err
 	}
 
-	database, err := sql.NewDatabase(ctx, "witself", &sql.DatabaseArgs{
-		Name:      pulumi.String(dbName),
-		Instance:  instance.Name,
-		Project:   pulumi.String(c.project),
-		Charset:   pulumi.String("UTF8"),
-		Collation: pulumi.String("en_US.UTF8"),
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{instance}))
-	if err != nil {
-		return nil, err
-	}
-
 	user, err := sql.NewUser(ctx, "witself", &sql.UserArgs{
 		Name:     pulumi.String(dbUser),
 		Instance: instance.Name,
 		Project:  pulumi.String(c.project),
 		Password: pw.Result,
 	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{instance}))
+	if err != nil {
+		return nil, err
+	}
+
+	database, err := sql.NewDatabase(ctx, "witself", &sql.DatabaseArgs{
+		Name:      pulumi.String(dbName),
+		Instance:  instance.Name,
+		Project:   pulumi.String(c.project),
+		Charset:   pulumi.String("UTF8"),
+		Collation: pulumi.String("en_US.UTF8"),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{instance, user}))
 	if err != nil {
 		return nil, err
 	}
@@ -181,5 +181,6 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		secretName:     pulumi.String(gcpDBSecretName(c)).ToStringOutput(),
 		secretID:       secret.ID(),
 		version:        version,
+		database:       database,
 	}, nil
 }

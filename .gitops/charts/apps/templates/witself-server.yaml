@@ -10,9 +10,13 @@
 {{- end -}}
 {{- if and .Values.apps.witselfServer.gcpIngress.enabled (eq .Values.cell.cloud "gcp") -}}
 {{- $gcpIngress := .Values.apps.witselfServer.gcpIngress -}}
+{{- $frontendConfig := default dict $gcpIngress.frontendConfig -}}
 {{- $ingressAnnotations := deepCopy $gcpIngress.annotations -}}
 {{- $_ := set $ingressAnnotations "kubernetes.io/ingress.class" "gce" -}}
 {{- $_ := set $ingressAnnotations "networking.gke.io/managed-certificates" (default "witself-api" $gcpIngress.managedCertificateName) -}}
+{{- if $frontendConfig.enabled -}}
+{{- $_ := set $ingressAnnotations "networking.gke.io/v1beta1.FrontendConfig" (default "witself-api" $frontendConfig.name) -}}
+{{- end -}}
 {{- if $gcpIngress.staticIPName -}}
 {{- $_ := set $ingressAnnotations "kubernetes.io/ingress.global-static-ip-name" $gcpIngress.staticIPName -}}
 {{- end -}}

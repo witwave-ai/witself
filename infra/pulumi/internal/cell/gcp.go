@@ -48,6 +48,7 @@ type gcpDatabase struct {
 	secretName     pulumi.StringOutput
 	secretID       pulumi.IDOutput
 	version        string
+	database       pulumi.Resource
 }
 
 type gcpSecretAccess struct {
@@ -191,7 +192,7 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		if err != nil {
 			return err
 		}
-		if err := provisionGCPArgoCD(ctx, c, gke, dns, externalDNSServiceAccountEmail); err != nil {
+		if err := provisionGCPArgoCD(ctx, c, gke, dns, externalDNSServiceAccountEmail, db.database); err != nil {
 			return err
 		}
 	}
@@ -307,8 +308,9 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 	}
 
 	privateConnection, err := servicenetworking.NewConnection(ctx, "cell-private-services", &servicenetworking.ConnectionArgs{
-		Network: pulumi.Sprintf("projects/%s/global/networks/%s", c.project, network.Name),
-		Service: pulumi.String("servicenetworking.googleapis.com"),
+		Network:        pulumi.Sprintf("projects/%s/global/networks/%s", c.project, network.Name),
+		Service:        pulumi.String("servicenetworking.googleapis.com"),
+		DeletionPolicy: pulumi.String("ABANDON"),
 		ReservedPeeringRanges: pulumi.StringArray{
 			privateRange.Name,
 		},

@@ -22,6 +22,12 @@ apps:
       enabled: true
       managedCertificateName: witself-api
       backendConfigName: witself-server
+      frontendConfig:
+        enabled: true
+        name: witself-api
+        redirectToHttps:
+          enabled: true
+          responseCodeName: PERMANENT_REDIRECT
       staticIPName: witself-gcp-sandbox-use1-dev-api
       annotations:
         external-dns.alpha.kubernetes.io/hostname: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
