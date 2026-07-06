@@ -749,6 +749,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		topologyChanged := cellTopologyChanged(m.fleetCells, msg.cells)
+		eventBackfillChanged := cellEventBackfillChanged(m.fleetCells, msg.cells)
 		m.fleetCells = msg.cells
 		// One health sample per refresh cycle. Cells and tickets load
 		// in the same batch, so the ticket counts here are at worst one
@@ -764,13 +765,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				events:   m.eventsSeen,
 			})
 		}
-		if topologyChanged {
+		if topologyChanged || eventBackfillChanged {
 			// The events watch process polls the current fleet, but the
-			// in-memory tail is only append-only. When a cell is drained
-			// or removed, the stream can stay alive while its previous
-			// rows are no longer part of the current fan-out. Reseed on
-			// topology changes so the events pane converges with cells
-			// and support without requiring a full dashboard restart.
+			// in-memory tail is only append-only. Topology changes can
+			// leave old rows from a removed cell, while restore/import can
+			// backfill account_events with original timestamps older than
+			// the watch stream's high-water mark. Reseed when either shape
+			// changes so the events pane converges with cells and support
+			// without requiring a full dashboard restart.
 			return m, m.seedEvents()
 		}
 		return m, nil
@@ -1143,6 +1145,26 @@ func cellTopologyChanged(oldCells, newCells []client.AdminCell) bool {
 	sort.Strings(newNames)
 	for i := range old {
 		if old[i] != newNames[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func cellEventBackfillChanged(oldCells, newCells []client.AdminCell) bool {
+	if len(oldCells) == 0 && len(newCells) == 0 {
+		return false
+	}
+	old := make(map[string]client.AdminCell, len(oldCells))
+	for _, c := range oldCells {
+		old[c.Name] = c
+	}
+	for _, c := range newCells {
+		prev, ok := old[c.Name]
+		if !ok {
+			continue
+		}
+		if prev.AccountCount != c.AccountCount || prev.ArchivedCount != c.ArchivedCount {
 			return true
 		}
 	}

@@ -736,6 +736,41 @@ func TestCellTopologyChangeReseedsEvents(t *testing.T) {
 	}
 }
 
+// TestCellAccountCountChangeReseedsEvents pins the restore refresh bug:
+// imported account_events keep their original occurred_at timestamps, so the
+// live event watch high-water mark will not append them. The cells pane sees
+// account/archive counts move after restore, and that must trigger a reseed
+// even when the event watch process is still running.
+func TestCellAccountCountChangeReseedsEvents(t *testing.T) {
+	ch := make(chan client.AdminEvent)
+	t0 := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), &adminCLI{bin: "/nonexistent"}, nil).withEventWatch(ch)
+	m.loading = false
+	m.fleetCells = []client.AdminCell{{
+		Name:          "gcp-sandbox-use1-dev",
+		Endpoint:      "https://api.example",
+		AccountCount:  0,
+		ArchivedCount: 3,
+	}}
+	m.events = []client.AdminEvent{mkEvent("evt_newer_hwm", "account.restored", t0.Add(time.Hour))}
+
+	next, cmd := m.Update(cellsLoadedMsg{cells: []client.AdminCell{{
+		Name:         "gcp-sandbox-use1-dev",
+		Endpoint:     "https://api.example",
+		AccountCount: 3,
+	}}})
+	m2 := next.(model)
+	if cmd == nil {
+		t.Fatal("account/archive count change must trigger an events reseed")
+	}
+	if cellTopologyChanged(m.fleetCells, m2.fleetCells) {
+		t.Fatal("restore count movement must not be treated as topology change")
+	}
+	if m2.loading {
+		t.Fatal("count refresh must not set loading")
+	}
+}
+
 func TestCellTopologyChanged(t *testing.T) {
 	oldCells := []client.AdminCell{
 		{Name: "cell-b", Endpoint: "https://b"},
@@ -756,6 +791,32 @@ func TestCellTopologyChanged(t *testing.T) {
 		{Name: "cell-b", Endpoint: "https://b2"},
 	}) {
 		t.Fatal("endpoint change should be topology change")
+	}
+}
+
+func TestCellEventBackfillChanged(t *testing.T) {
+	oldCells := []client.AdminCell{
+		{Name: "cell-a", Endpoint: "https://a", AccountCount: 1, ArchivedCount: 0},
+		{Name: "cell-b", Endpoint: "https://b", AccountCount: 2, ArchivedCount: 1},
+	}
+	same := []client.AdminCell{
+		{Name: "cell-b", Endpoint: "https://b2", AccountCount: 2, ArchivedCount: 1},
+		{Name: "cell-a", Endpoint: "https://a", AccountCount: 1, ArchivedCount: 0},
+	}
+	if cellEventBackfillChanged(oldCells, same) {
+		t.Fatal("same counts in different order should not be an event-backfill change")
+	}
+	if !cellEventBackfillChanged(oldCells, []client.AdminCell{
+		{Name: "cell-a", Endpoint: "https://a", AccountCount: 3, ArchivedCount: 0},
+		{Name: "cell-b", Endpoint: "https://b", AccountCount: 2, ArchivedCount: 1},
+	}) {
+		t.Fatal("account count change should be an event-backfill change")
+	}
+	if !cellEventBackfillChanged(oldCells, []client.AdminCell{
+		{Name: "cell-a", Endpoint: "https://a", AccountCount: 1, ArchivedCount: 0},
+		{Name: "cell-b", Endpoint: "https://b", AccountCount: 2, ArchivedCount: 0},
+	}) {
+		t.Fatal("archived count change should be an event-backfill change")
 	}
 }
 
