@@ -56,6 +56,7 @@ type gcpCell struct {
 	project      string // existing GCP project that can host multiple cell stacks
 	region       string // real region, e.g. us-west2
 	profile      string // minimal | prod
+	cidr         string // cell VPC CIDR (/16)
 	accountAlias string // free-text account label
 	role         string // dev | prod | canary | ordinal
 }
@@ -138,6 +139,7 @@ func Program(ctx *pulumi.Context) error {
 			project:      g.Get("project"),
 			region:       g.Get("region"),
 			profile:      profile,
+			cidr:         cidr,
 			accountAlias: w.Get("accountAlias"),
 			role:         w.Get("role"),
 		})

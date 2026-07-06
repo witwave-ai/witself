@@ -88,8 +88,10 @@ missing; pass `-bootstrap` to create it on first use.
 
 GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not the
 cell boundary: one project can host multiple cell stacks. The current GCP cell
-program is intentionally empty, so this validates state and stack lifecycle
-before adding GKE/Cloud SQL/DNS.
+program provisions the first substrate slice only: a dedicated custom VPC,
+regional subnet, future GKE secondary IP ranges, and an internal firewall rule.
+It intentionally does **not** create Cloud NAT yet, so the networking slice stays
+low-cost until private workloads need outbound egress.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -103,15 +105,16 @@ witself-infra bootstrap \
   -gcp-project witself-sandbox \
   -region us-west2
 
-# or one-shot: prepare state if missing, then create/update the empty stack
+# or one-shot: prepare state if missing, then create/update the cell network
 witself-infra up \
   -account-alias sandbox \
   -backend gcs \
   -bootstrap \
   -cloud gcp \
+  -cidr 10.20.0.0/16 \
   -gcp-project witself-sandbox \
   -profile minimal \
-  -region us-west2 \
+  -region us-east1 \
   -role dev
 ```
 
@@ -206,5 +209,9 @@ control plane forgets them.
 7. **[done]** Fleet registration: `-control-plane` on `up`/`destroy` registers /
    drains+removes the cell against the control plane (`-destroy-accounts` to
    purge); fleet token from `~/.witself/tokens/fleet.token`.
-8. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds); then
-   SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP provider.
+8. **[done]** GCP GCS + Cloud KMS state backend and empty stack lifecycle.
+9. **[done]** GCP network substrate: custom VPC, regional subnet, secondary
+   ranges for future GKE pods/services, and internal firewall.
+10. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
+   then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
+   GKE/Cloud SQL/DNS.

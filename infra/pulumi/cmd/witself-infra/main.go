@@ -222,6 +222,9 @@ func run(args []string) error {
 	if *gcpProject != "" && !gcpProjectID.MatchString(*gcpProject) {
 		return fmt.Errorf("-gcp-project %q must be a Google Cloud project ID", *gcpProject)
 	}
+	if *cloud == "gcp" && *gcpProject == "" {
+		return fmt.Errorf("-gcp-project is required with -cloud gcp")
+	}
 	// Cross-flag rejects come BEFORE any cloud work — an operator who typed
 	// the wrong combination should learn it in milliseconds, not after
 	// 20 minutes of EKS provisioning.
@@ -338,6 +341,13 @@ func run(args []string) error {
 		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
 	default:
 		return fmt.Errorf("unknown -backend %q (want local|s3|gcs)", *backendFlag)
+	}
+	if *cloud == "gcp" && cmd != "outputs" {
+		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
+			fmt.Fprintln(os.Stderr, "  "+m)
+		}, "compute.googleapis.com"); err != nil {
+			return err
+		}
 	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))

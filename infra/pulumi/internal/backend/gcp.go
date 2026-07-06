@@ -85,7 +85,7 @@ func BootstrapGCP(ctx context.Context, project, region, regionCode string, log f
 		return nil, err
 	}
 	info := gcpNames(project, region, regionCode)
-	if err := ensureGCPServices(ctx, project, log, "storage.googleapis.com", "cloudkms.googleapis.com"); err != nil {
+	if err := EnsureGCPServices(ctx, project, log, "storage.googleapis.com", "cloudkms.googleapis.com"); err != nil {
 		return nil, err
 	}
 	if err := ensureGCPKMSKey(ctx, project, region, regionCode, log); err != nil {
@@ -97,7 +97,7 @@ func BootstrapGCP(ctx context.Context, project, region, regionCode string, log f
 	return info, nil
 }
 
-func ensureGCPServices(ctx context.Context, project string, log func(string), services ...string) error {
+func EnsureGCPServices(ctx context.Context, project string, log func(string), services ...string) error {
 	svc, err := serviceusage.NewService(ctx, option.WithScopes(gcpCloudPlatformScope))
 	if err != nil {
 		return fmt.Errorf("create serviceusage client: %w", err)
