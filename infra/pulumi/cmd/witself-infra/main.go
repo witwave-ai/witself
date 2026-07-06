@@ -146,6 +146,9 @@ flags:
                   archived account whose region matches this cell's region
                   from Cloudflare R2. Loops until none remain. Requires
                   -control-plane.
+  -restore-any-region  with -restore-archives: intentionally restore all
+                  archived accounts, ignoring their stored region. Use for
+                  explicit cross-cloud/cross-region evacuation tests only.
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -197,6 +200,7 @@ func run(args []string) error {
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
 	restoreArchives := fs.Bool("restore-archives", false, "with up: pull every archived account in this cell's region from R2 after registration")
+	restoreAnyRegion := fs.Bool("restore-any-region", false, "with -restore-archives: pull every archived account from R2, ignoring stored region")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -233,6 +237,9 @@ func run(args []string) error {
 	}
 	if *restoreArchives && cmd != "up" {
 		return fmt.Errorf("-restore-archives is only valid with `up`")
+	}
+	if *restoreAnyRegion && !*restoreArchives {
+		return fmt.Errorf("-restore-any-region requires -restore-archives")
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
@@ -454,7 +461,7 @@ func run(args []string) error {
 				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
 				if err == nil {
 					if err = waitForCellHealthy(ctx, cl, cellName, 20*time.Minute, 20*time.Second); err == nil {
-						err = restoreCell(ctx, cl, cellName)
+						err = restoreCell(ctx, cl, cellName, *restoreAnyRegion)
 					}
 				}
 			}
@@ -708,16 +715,16 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 	}
 }
 
-// restoreCell loops the control-plane's :restore batches until every
-// region-matched archived account has landed on the cell (remaining=0). The
+// restoreCell loops the control-plane's :restore batches until every archived
+// account in the requested scope has landed on the cell (remaining=0). The
 // mirror of evacuateCell — same batch size, same stall guards. Fails fast on
 // per-account failure so a partial restore never proceeds silently.
-func restoreCell(ctx context.Context, cl *fleet.Client, cellName string) error {
+func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegions bool) error {
 	const batch = 4
 	total := 0
 	prevRemaining := -1
 	for iter := 0; ; iter++ {
-		res, err := cl.Restore(ctx, cellName, batch)
+		res, err := cl.Restore(ctx, cellName, batch, allRegions)
 		if err != nil {
 			if errors.Is(err, fleet.ErrCellDrained) {
 				// The cell was just registered accepting=true, so this

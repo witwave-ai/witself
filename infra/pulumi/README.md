@@ -209,6 +209,8 @@ control plane forgets them.
 | `-control-plane URL` | `destroy` | drain, evacuate every account to R2, then remove the cell from the fleet before teardown |
 | `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: SKIP evacuation and force-purge accounts — sandbox/dev override, the data dies with the cell |
+| `-restore-archives` | `up` | after registration, restore archived accounts whose stored region matches this cell's region |
+| `-restore-any-region` | `up` | with `-restore-archives`: explicit operator override that restores every archived account, ignoring stored region |
 
 ## Roadmap (one slice at a time)
 

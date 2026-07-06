@@ -99,7 +99,7 @@ func TestRestoreCellLoop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = restoreCell(context.Background(), cl, "cell-a")
+			err = restoreCell(context.Background(), cl, "cell-a", false)
 			if calls != tc.wantCalls {
 				t.Errorf("calls = %d, want %d", calls, tc.wantCalls)
 			}
@@ -113,6 +113,49 @@ func TestRestoreCellLoop(t *testing.T) {
 				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestRestoreCellAllRegionsSendsOverride(t *testing.T) {
+	var got struct {
+		Batch      int  `json:"batch"`
+		AllRegions bool `json:"all_regions"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, ":restore") {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode restore request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(restoreResponse{
+			Restored:  []ra{},
+			Remaining: 0,
+			Region:    "all",
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	tf := filepath.Join(dir, "fleet.token")
+	if err := os.WriteFile(tf, []byte("witself_flt_TEST"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := fleet.NewClient(srv.URL, tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreCell(context.Background(), cl, "cell-a", true); err != nil {
+		t.Fatalf("restoreCell: %v", err)
+	}
+	if got.Batch != 4 {
+		t.Fatalf("batch = %d, want 4", got.Batch)
+	}
+	if !got.AllRegions {
+		t.Fatal("all_regions override was not sent")
 	}
 }
 

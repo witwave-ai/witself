@@ -2903,8 +2903,9 @@ async function evacuateAccount(env, cellName, cell, accountId) {
 }
 
 // handleRestore is POST /v1/cells/{name}:restore — the mirror of :evacuate.
-// Iterates archived: pointers whose region matches the target cell's, and
-// for a bounded batch streams the R2 object into the cell's :import, calls
+// Iterates archived: pointers whose region matches the target cell's (or every
+// archived pointer when the fleet operator explicitly requests all_regions),
+// and for a bounded batch streams the R2 object into the cell's :import, calls
 // :resume, writes the new acct: pointer, then deletes both the archived:
 // KV entry and the R2 object. Each of the four steps is individually
 // re-safe (ready-check-then-act, deterministic keys), so a partial restore
@@ -2943,18 +2944,21 @@ async function handleRestore(request, env, cellName) {
     batch = 4;
   }
   batch = Math.min(Math.floor(batch), 10);
+  const allRegions = body.all_regions === true;
+  const restoreScope = allRegions ? "all" : cell.region;
 
-  // Iterate archived: pointers, region-matching the target cell. Region is
-  // the user-facing placement axis: an archived account waits in R2 until a
-  // cell in its region can host it, so a us-west-2 archive never silently
-  // lands in eu-central-1.
+  // Iterate archived: pointers, region-matching the target cell by default.
+  // Region is the user-facing placement axis: an archived account waits in R2
+  // until a cell in its region can host it, so a us-west-2 archive never
+  // silently lands in eu-central-1. all_regions is an explicit operator escape
+  // hatch for cross-cloud/cross-region evacuation tests.
   const targets = [];
   let cursor;
   do {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
     for (const k of page.keys) {
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry?.region === cell.region) {
+      if (allRegions || entry?.region === cell.region) {
         targets.push({ accountId: k.name.slice("archived:".length), archived: entry });
         if (targets.length >= batch) {
           break;
@@ -2967,7 +2971,7 @@ async function handleRestore(request, env, cellName) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
 
-  const progressKey = `restore:${cellName}`;
+  const progressKey = allRegions ? `restore:${cellName}:all-regions` : `restore:${cellName}`;
   const progress = (await env.DIRECTORY.get(progressKey, { type: "json" })) ?? {
     started_at: new Date().toISOString(),
     done: 0,
@@ -2991,7 +2995,7 @@ async function handleRestore(request, env, cellName) {
     }
   }
 
-  // Count region-matched archived: pointers still awaiting placement.
+  // Count archived: pointers still awaiting placement in this restore scope.
   // witself-infra loops until this reaches zero.
   let remaining = 0;
   let cursor2;
@@ -2999,7 +3003,7 @@ async function handleRestore(request, env, cellName) {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor: cursor2 });
     for (const k of page.keys) {
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry?.region === cell.region) {
+      if (allRegions || entry?.region === cell.region) {
         remaining += 1;
       }
     }
@@ -3009,13 +3013,15 @@ async function handleRestore(request, env, cellName) {
   progress.remaining = remaining;
   if (remaining === 0) {
     progress.finished_at = new Date().toISOString();
+  } else {
+    delete progress.finished_at;
   }
   await env.DIRECTORY.put(progressKey, JSON.stringify(progress));
 
   return json({
     schema_version: "witself.v0",
     cell: cellName,
-    region: cell.region,
+    region: restoreScope,
     restored: results,
     remaining,
     progress,

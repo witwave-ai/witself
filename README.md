@@ -150,6 +150,12 @@ looping until none remain). A fresh us-west-2 cell will inherit every
 us-west-2 account currently awaiting placement; nothing lands in a
 different region than the archived account was exported from.
 
+For an explicit evacuation test where provider region names do not line up
+(for example, restoring AWS `us-west-2` archives onto a temporary GCP
+`us-east1` cell), add `-restore-any-region` with `-restore-archives`. That is
+an operator override: it intentionally restores every archived account,
+ignoring the archive's stored region.
+
 See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
 [.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps
 tree after `-argocd` is enabled.

@@ -325,7 +325,7 @@ func (c *Client) Probe(ctx context.Context, name string) (ProbeResult, error) {
 
 // RestoreResult reports one :restore call's outcome. Restored is the
 // per-account report for THIS batch; Remaining is the number of archived:
-// pointers matching this cell's region still awaiting placement. The caller
+// pointers still awaiting placement in the requested restore scope. The caller
 // loops until Remaining is zero.
 type RestoreResult struct {
 	Restored  []RestoredAccount `json:"restored"`
@@ -341,13 +341,21 @@ type RestoredAccount struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// Restore asks the control plane to pull a batch of archived accounts (whose
-// region matches the target cell's) from R2 and land them on the named cell.
+// Restore asks the control plane to pull a batch of archived accounts from R2
+// and land them on the named cell. By default the Worker only selects archives
+// whose stored region matches the target cell; allRegions is an operator
+// override for intentionally landing every archived account on one cell.
 // The call is bounded in wall-clock by batch size; the caller loops until
 // Remaining is zero. Same longer HTTP timeout as Evacuate — each archive
 // streams from R2 through the Worker into the cell's :import.
-func (c *Client) Restore(ctx context.Context, name string, batch int) (RestoreResult, error) {
-	body := map[string]int{"batch": batch}
+func (c *Client) Restore(ctx context.Context, name string, batch int, allRegions bool) (RestoreResult, error) {
+	body := struct {
+		Batch      int  `json:"batch"`
+		AllRegions bool `json:"all_regions,omitempty"`
+	}{
+		Batch:      batch,
+		AllRegions: allRegions,
+	}
 	rdr, err := marshalBody(body)
 	if err != nil {
 		return RestoreResult{}, err
