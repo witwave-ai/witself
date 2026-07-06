@@ -137,6 +137,12 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	if c.argocd {
+		if err := provisionGCPArgoCD(ctx, c, gke); err != nil {
+			return err
+		}
+	}
+
 	ctx.Export("status", pulumi.String("gcp: vpc network + private services access + gke autopilot + cloud sql postgres provisioned"))
 	ctx.Export("gcpProject", pulumi.String(c.project))
 	ctx.Export("gcpRegion", pulumi.String(c.region))

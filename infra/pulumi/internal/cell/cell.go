@@ -52,14 +52,19 @@ type awsCell struct {
 }
 
 type gcpCell struct {
-	name         string // composed cell name (= ctx.Stack())
-	project      string // existing GCP project that can host multiple cell stacks
-	region       string // real region, e.g. us-west2
-	profile      string // minimal | prod
-	cidr         string // cell VPC CIDR (/16)
-	dbVersion    string // Cloud SQL PostgreSQL major version
-	accountAlias string // free-text account label
-	role         string // dev | prod | canary | ordinal
+	name             string // composed cell name (= ctx.Stack())
+	project          string // existing GCP project that can host multiple cell stacks
+	region           string // real region, e.g. us-west2
+	profile          string // minimal | prod
+	cidr             string // cell VPC CIDR (/16)
+	dbVersion        string // Cloud SQL PostgreSQL major version
+	accountAlias     string // free-text account label
+	role             string // dev | prod | canary | ordinal
+	argocd           bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo       string // GitOps repo URL Argo's root app reconciles
+	gitopsPath       string // path in the repo for the root bootstrap chart
+	gitopsValuesPath string // path in the repo for this cell's bootstrap values
+	gitopsRevision   string // repo revision (branch/tag)
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -136,14 +141,19 @@ func Program(ctx *pulumi.Context) error {
 		})
 	case "gcp":
 		return provisionGCP(ctx, gcpCell{
-			name:         cellName,
-			project:      g.Get("project"),
-			region:       g.Get("region"),
-			profile:      profile,
-			cidr:         cidr,
-			dbVersion:    dbVersion,
-			accountAlias: w.Get("accountAlias"),
-			role:         w.Get("role"),
+			name:             cellName,
+			project:          g.Get("project"),
+			region:           g.Get("region"),
+			profile:          profile,
+			cidr:             cidr,
+			dbVersion:        dbVersion,
+			accountAlias:     w.Get("accountAlias"),
+			role:             w.Get("role"),
+			argocd:           argocd,
+			gitopsRepo:       gitopsRepo,
+			gitopsPath:       gitopsPath,
+			gitopsValuesPath: gitopsValuesPath,
+			gitopsRevision:   gitopsRevision,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

@@ -91,9 +91,10 @@ cell boundary: one project can host multiple cell stacks. The current GCP cell
 program provisions a dedicated custom VPC, regional subnet, GKE pod/service
 secondary ranges, an internal firewall rule, private services access for future
 private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
-Cloud SQL Postgres instance, and a Secret Manager DB connection secret. It
-intentionally does **not** create Cloud NAT, Argo CD, or application workloads
-yet, so app capacity is still deferred.
+Cloud SQL Postgres instance, and a Secret Manager DB connection secret. With
+`-argocd`, it also installs Argo CD and bootstraps the GCP cell values file. It
+intentionally does **not** create Cloud NAT, GCP ingress/DNS, ESO-to-Secret
+Manager wiring, or application workloads yet, so app capacity is still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -136,8 +137,8 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 ```
 
 The Kubernetes provider authenticates with an exec kubeconfig (`aws eks
-get-token`, auto-refreshing — Auto Mode provisions nodes on demand, so the first
-install can outlast a static token while Argo's pods wait for compute).
+get-token` on AWS, `gcloud auth print-access-token` on GCP), so the first
+install can outlast a static token while managed Kubernetes provisions capacity.
 
 `-argocd` also creates a root Argo `Application` (`bootstrap`) that renders the
 shared `.gitops/charts/bootstrap` chart with this cell's
@@ -219,6 +220,7 @@ control plane forgets them.
     and Workload Identity.
 11. **[done]** GCP Cloud SQL Postgres over private services access plus Secret
     Manager DB connection JSON.
-12. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
+12. **[done]** GCP Argo CD control plane and GCP cell GitOps values scaffold.
+13. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
     then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
-    DNS/GitOps.
+    Secret Manager ESO/DNS/ingress.

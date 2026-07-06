@@ -1,0 +1,71 @@
+cell:
+  name: gcp-sandbox-use1-dev
+  cloud: gcp
+  accountAlias: sandbox
+  region: us-east1
+  role: dev
+  domain: gcp-sandbox-use1-dev.cells.witself.witwave.ai
+  apiHost: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+apps:
+  witselfServer:
+    enabled: false
+    namespace: witself
+    chartVersion: 0.0.98
+    imageTag: 0.0.98
+    backendKind: managed
+    awsAlbIngress:
+      enabled: false
+    secrets:
+      bootstrap:
+        enabled: false
+        remoteKeySuffix: bootstrap/operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
+        storeName: gcp
+      database:
+        remoteKey: witself-gcp-sandbox-use1-dev-db
+        targetName: witself-db
+        urlKey: dsn
+        refreshInterval: 1h
+        storeName: gcp
+      provision:
+        enabled: false
+        remoteKeySuffix: provision/token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+        storeName: gcp
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: v1.20.3
+    namespace: cert-manager
+  externalDNS:
+    enabled: false
+    chartVersion: 1.21.1
+    namespace: external-dns
+    serviceAccountName: external-dns
+    domainFilters:
+      - gcp-sandbox-use1-dev.cells.witself.witwave.ai
+    txtOwnerId: gcp-sandbox-use1-dev
+  externalSecrets:
+    enabled: false
+    chartVersion: 2.7.0
+    namespace: external-secrets
+    storeName: gcp
+  keda:
+    enabled: true
+    chartVersion: 2.20.1
+    namespace: keda
+  metricsServer:
+    enabled: false
+    chartVersion: 3.13.1
+    namespace: kube-system
+    replicas: 1
