@@ -26,6 +26,11 @@ type gcpNetwork struct {
 	privateRangeCIDR  string
 	privatePeering    pulumi.StringOutput
 	privateConnection pulumi.Resource
+	natAddressName    pulumi.StringOutput
+	natAddress        pulumi.StringOutput
+	natRouterName     pulumi.StringOutput
+	natName           pulumi.StringOutput
+	nat               pulumi.Resource
 }
 
 type gcpKubernetes struct {
@@ -197,7 +202,7 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		}
 	}
 
-	ctx.Export("status", pulumi.String("gcp: vpc network + private services access + gke autopilot + cloud sql postgres provisioned"))
+	ctx.Export("status", pulumi.String("gcp: vpc network + cloud nat + private services access + gke autopilot + cloud sql postgres provisioned"))
 	ctx.Export("gcpProject", pulumi.String(c.project))
 	ctx.Export("gcpRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
@@ -214,6 +219,10 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	ctx.Export("privateServiceRangeName", net.privateRangeName)
 	ctx.Export("privateServiceRangeCIDR", pulumi.String(net.privateRangeCIDR))
 	ctx.Export("privateServicePeering", net.privatePeering)
+	ctx.Export("natAddressName", net.natAddressName)
+	ctx.Export("natAddress", net.natAddress)
+	ctx.Export("natRouterName", net.natRouterName)
+	ctx.Export("natName", net.natName)
 	ctx.Export("gkeCluster", gke.name)
 	ctx.Export("gkeLocation", gke.location)
 	ctx.Export("gkeEndpoint", gke.endpoint)
@@ -319,6 +328,40 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		return nil, err
 	}
 
+	natAddress, err := compute.NewAddress(ctx, "cell-nat", &compute.AddressArgs{
+		Name:        pulumi.String(rname(c.name, "nat")),
+		Description: pulumi.String("Static outbound NAT IP for " + c.name),
+		AddressType: pulumi.String("EXTERNAL"),
+		NetworkTier: pulumi.String("PREMIUM"),
+		Region:      pulumi.String(c.region),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{computeAPI}))
+	if err != nil {
+		return nil, err
+	}
+
+	natRouter, err := compute.NewRouter(ctx, "cell-nat", &compute.RouterArgs{
+		Name:        pulumi.String(rname(c.name, "nat")),
+		Description: pulumi.String("Cloud Router for " + c.name + " outbound NAT"),
+		Network:     network.SelfLink,
+		Region:      pulumi.String(c.region),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{network}))
+	if err != nil {
+		return nil, err
+	}
+
+	nat, err := compute.NewRouterNat(ctx, "cell", &compute.RouterNatArgs{
+		Name:                          pulumi.String(rname(c.name, "nat")),
+		Region:                        pulumi.String(c.region),
+		Router:                        natRouter.Name,
+		NatIpAllocateOption:           pulumi.String("MANUAL_ONLY"),
+		NatIps:                        pulumi.StringArray{natAddress.SelfLink},
+		SourceSubnetworkIpRangesToNat: pulumi.String("ALL_SUBNETWORKS_ALL_IP_RANGES"),
+		Type:                          pulumi.String("PUBLIC"),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{subnet, natAddress, natRouter}))
+	if err != nil {
+		return nil, err
+	}
+
 	return &gcpNetwork{
 		networkName:       network.Name,
 		networkSelfLink:   network.SelfLink,
@@ -333,6 +376,11 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		privateRangeCIDR:  privateRangeCIDR,
 		privatePeering:    privateConnection.Peering,
 		privateConnection: privateConnection,
+		natAddressName:    natAddress.Name,
+		natAddress:        natAddress.Address,
+		natRouterName:     natRouter.Name,
+		natName:           nat.Name,
+		nat:               nat,
 	}, nil
 }
 
@@ -360,7 +408,7 @@ func provisionGCPGKE(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov *gcp.
 			WorkloadPool: pulumi.String(workloadPool),
 		},
 		ResourceLabels: gcpDefaultLabels(c),
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{containerAPI}))
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{containerAPI, net.nat}))
 	if err != nil {
 		return nil, err
 	}

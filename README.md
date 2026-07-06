@@ -98,6 +98,10 @@ When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
 per-cell DNS zone from the Cloudflare zone for the configured domain. Keep
 that token available during teardown so the delegated DNS records can be removed.
 
+The GCP substrate includes a regional Cloud Router and Public Cloud NAT with a
+reserved outbound IP, so sandbox and production cells get predictable controlled
+egress in the same one-shot `up` path.
+
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the
 fleet token. `-fleet-token-file` points at the token file; when omitted the
@@ -117,8 +121,8 @@ and larger disk headroom; use it for persistent cells, not save-money teardown
 tests.
 
 The teardown command keeps only the stack identity, backend, configured domain,
-and credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
-backend remains for the next run.
+and credentials. It destroys the cell resources; the shared Pulumi state backend
+remains for the next run.
 
 ```sh
 witself-infra destroy \

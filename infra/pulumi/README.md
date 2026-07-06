@@ -92,13 +92,14 @@ program provisions a dedicated custom VPC, regional subnet, GKE pod/service
 secondary ranges, an internal firewall rule, private services access for
 private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
 Cloud SQL Postgres instance, Secret Manager JSON secrets for DB/bootstrap/
-provision material, a public Cloud DNS zone, and a reserved global IPv4 address
-for the GKE Ingress. With `-argocd`, it also installs Argo CD and bootstraps the
-GCP cell values file. It grants Workload Identity paths for External Secrets
-Operator to read the cell secrets and for ExternalDNS to manage only the cell
-Cloud DNS zone. The GCP cell values enable `witself-server`, ExternalDNS, GKE
-Ingress, BackendConfig health checks, FrontendConfig HTTP-to-HTTPS redirects,
-and a Google-managed certificate. Cloud NAT is still deferred.
+provision material, a regional Cloud Router + Public Cloud NAT with a reserved
+outbound IPv4 address, a public Cloud DNS zone, and a reserved global IPv4
+address for the GKE Ingress. With `-argocd`, it also installs Argo CD and
+bootstraps the GCP cell values file. It grants Workload Identity paths for
+External Secrets Operator to read the cell secrets and for ExternalDNS to manage
+only the cell Cloud DNS zone. The GCP cell values enable `witself-server`,
+ExternalDNS, GKE Ingress, BackendConfig health checks, FrontendConfig
+HTTP-to-HTTPS redirects, and a Google-managed certificate.
 
 GCP profile sizing follows the same operator intent as AWS. `-profile minimal`
 is the low-cost, one-shot test profile: zonal Cloud SQL, small disk, and no
@@ -258,5 +259,7 @@ control plane forgets them.
 15. **[done]** GCP Cloud DNS + Cloudflare delegation + ExternalDNS Workload
     Identity + GKE Ingress/BackendConfig/FrontendConfig + Google-managed
     certificate + HTTP-to-HTTPS redirect.
-16. SSO; sealed-plane KMS (prod); Cloud NAT/egress posture, deletion-protection
-    break-glass flow, and remaining production hardening.
+16. **[done]** GCP controlled egress with regional Cloud Router, reserved
+    outbound IPv4 address, and Public Cloud NAT over the cell subnet ranges.
+17. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+    remaining production hardening.
