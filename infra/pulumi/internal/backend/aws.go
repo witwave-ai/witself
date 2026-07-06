@@ -23,12 +23,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-// Info describes the state backend for one account + region.
+// Info describes the state backend for one cloud account/project + region.
 type Info struct {
 	Bucket          string // s3://… holds every cell's state for this account+region
 	BackendURL      string // PULUMI_BACKEND_URL, e.g. s3://witself-state-<account>-<region-code>
-	KeyAlias        string // alias/witself-state-<region-code>
-	SecretsProvider string // Pulumi secrets provider, e.g. awskms://alias/witself-state-usw2?region=us-west-2
+	KeyAlias        string // cloud KMS key name/alias used by the secrets provider
+	SecretsProvider string // Pulumi secrets provider, e.g. awskms://… or gcpkms://…
 }
 
 func names(account, region, regionCode string) *Info {

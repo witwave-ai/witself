@@ -51,6 +51,15 @@ type awsCell struct {
 	bootstrapTokenSet bool
 }
 
+type gcpCell struct {
+	name         string // composed cell name (= ctx.Stack())
+	project      string // existing GCP project that can host multiple cell stacks
+	region       string // real region, e.g. us-west2
+	profile      string // minimal | prod
+	accountAlias string // free-text account label
+	role         string // dev | prod | canary | ordinal
+}
+
 // Program is the inline Pulumi program — the embedded Automation API engine runs
 // this closure, so the cell definition is compiled into the witself-infra binary.
 func Program(ctx *pulumi.Context) error {
@@ -58,6 +67,7 @@ func Program(ctx *pulumi.Context) error {
 
 	w := config.New(ctx, "witself")
 	a := config.New(ctx, "aws")
+	g := config.New(ctx, "gcp")
 
 	cloud := w.Get("cloud")     // aws | gcp | azure
 	profile := w.Get("profile") // minimal | prod
@@ -121,6 +131,15 @@ func Program(ctx *pulumi.Context) error {
 			cloudflareDNS:     cloudflareDNS,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
+		})
+	case "gcp":
+		return provisionGCP(ctx, gcpCell{
+			name:         cellName,
+			project:      g.Get("project"),
+			region:       g.Get("region"),
+			profile:      profile,
+			accountAlias: w.Get("accountAlias"),
+			role:         w.Get("role"),
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

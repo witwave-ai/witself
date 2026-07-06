@@ -24,6 +24,7 @@ build from the repo-root module.
 ```text
 infra/pulumi/
   cmd/witself-infra/    # the CLI: up | preview | destroy | refresh | outputs
+  internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS)
   internal/cell/        # the inline Pulumi program — the cell definition
 ```
 
@@ -65,9 +66,11 @@ the backend is missing. Pass `-backend local` for a zero-setup local file backen
 
 ## State backend
 
-State is stored in **S3 by default** — shared, durable, KMS-encrypted (no
-passphrase), **one bucket + one KMS key per account + region**. (`-backend local`
-is the dev opt-out.)
+State is stored in a cloud object-storage backend for real cells — shared,
+durable, KMS-encrypted secrets (no passphrase), **one bucket + one KMS key per
+account/project + region**. (`-backend local` is the dev opt-out.)
+
+AWS uses S3 + AWS KMS and remains the default backend:
 
 ```sh
 # once per account+region: create the bucket + KMS key (idempotent — reuses if present)
@@ -82,6 +85,35 @@ SSE-KMS, public-access-blocked, TLS-only) and `alias/witself-state-<region-code>
 and prints the `s3://…` backend + `awskms://…` secrets provider. `up --backend s3`
 **uses** that backend (KMS-encrypted secrets, no passphrase) and errors if it is
 missing; pass `-bootstrap` to create it on first use.
+
+GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not the
+cell boundary: one project can host multiple cell stacks. The current GCP cell
+program is intentionally empty, so this validates state and stack lifecycle
+before adding GKE/Cloud SQL/DNS.
+
+```sh
+# Pulumi's GCS backend and gcpkms secrets provider use Application Default
+# Credentials, not only `gcloud auth login`.
+gcloud auth application-default login --project witself-sandbox
+
+# prepare state only
+witself-infra bootstrap \
+  -backend gcs \
+  -cloud gcp \
+  -gcp-project witself-sandbox \
+  -region us-west2
+
+# or one-shot: prepare state if missing, then create/update the empty stack
+witself-infra up \
+  -account-alias sandbox \
+  -backend gcs \
+  -bootstrap \
+  -cloud gcp \
+  -gcp-project witself-sandbox \
+  -profile minimal \
+  -region us-west2 \
+  -role dev
+```
 
 ## GitOps (Argo CD)
 

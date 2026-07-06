@@ -61,12 +61,37 @@ var regionCodes = map[string]string{
 	"sa-east-1":  "sae1",
 	"af-south-1": "afs1",
 	"me-south-1": "mes1", "me-central-1": "mec1",
+
+	// Google Cloud regions. These intentionally share the same short token as
+	// the equivalent AWS geography where one exists; the cloud token in the cell
+	// name keeps gcp-sandbox-usw2-dev distinct from aws-sandbox-usw2-dev.
+	"us-central1": "usc1",
+	"us-east1":    "use1", "us-east4": "use4", "us-east5": "use5",
+	"us-west1": "usw1", "us-west2": "usw2", "us-west3": "usw3", "us-west4": "usw4",
+	"northamerica-northeast1": "nane1", "northamerica-northeast2": "nane2",
+	"southamerica-east1": "same1", "southamerica-west1": "samw1",
+	"europe-central2":   "euc2",
+	"europe-north1":     "eun1",
+	"europe-southwest1": "eusw1",
+	"europe-west1":      "euw1", "europe-west2": "euw2", "europe-west3": "euw3", "europe-west4": "euw4",
+	"europe-west8": "euw8", "europe-west9": "euw9", "europe-west10": "euw10", "europe-west12": "euw12",
+	"asia-east1":      "ase1",
+	"asia-east2":      "ase2",
+	"asia-northeast1": "asne1", "asia-northeast2": "asne2", "asia-northeast3": "asne3",
+	"asia-south1": "ass1", "asia-south2": "ass2",
+	"asia-southeast1": "asse1", "asia-southeast2": "asse2",
+	"australia-southeast1": "ause1", "australia-southeast2": "ause2",
+	"me-west1":      "mew1",
+	"me-central1":   "mec1",
+	"me-central2":   "mec2",
+	"africa-south1": "afs1",
 }
 
 // label is the safe form for the free-text account-alias and role tokens: they
 // land in DNS-style resource names, so lowercase alphanumeric with internal hyphens.
 var label = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 var domainName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+var gcpProjectID = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
 
 const usage = `witself-infra — provision and manage Witself cells
 
@@ -74,7 +99,7 @@ usage:
   witself-infra <command> [flags]
 
 commands:
-  bootstrap initialize the state backend (S3 bucket + KMS key) for the account
+  bootstrap initialize the state backend (S3/GCS bucket + KMS key) for the account/project
   up        create or update the cell
   preview   show what up would change
   destroy   tear the cell down
@@ -103,8 +128,9 @@ flags:
                   (default: ~/.witself/tokens/<cell>/bootstrap.token when
                   present, else the shared ~/.witself/tokens/bootstrap.token)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
-  -backend        state backend: s3|local                      (default "s3")
-  -bootstrap      with -backend s3, create the backend if missing
+  -gcp-project    GCP project ID for GCP cells/state backend
+  -backend        state backend: s3|gcs|local                  (default "s3")
+  -bootstrap      with -backend s3/gcs, create the backend if missing
   -state-dir      local Pulumi state backend dir (backend=local)
   -control-plane  fleet control plane URL, e.g. https://self.witwave.ai
                   up: registers the cell after provisioning
@@ -163,8 +189,9 @@ func run(args []string) error {
 	domain := fs.String("domain", cell.DefaultDomain, "parent domain for cell hostnames, e.g. cells.witself.witwave.ai")
 	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: per-cell ~/.witself/tokens/<cell>/bootstrap.token, else shared ~/.witself/tokens/bootstrap.token)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
-	backendFlag := fs.String("backend", "s3", "state backend: s3|local (local is a dev opt-out)")
-	bootstrap := fs.Bool("bootstrap", false, "with -backend s3: create the backend if it is missing")
+	gcpProject := fs.String("gcp-project", "", "GCP project ID for GCP cells/state backend")
+	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|local (local is a dev opt-out)")
+	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
@@ -192,6 +219,9 @@ func run(args []string) error {
 	if *domain != "" && !domainName.MatchString(*domain) {
 		return fmt.Errorf("-domain %q must be a DNS domain name like cells.example.com", *domain)
 	}
+	if *gcpProject != "" && !gcpProjectID.MatchString(*gcpProject) {
+		return fmt.Errorf("-gcp-project %q must be a Google Cloud project ID", *gcpProject)
+	}
 	// Cross-flag rejects come BEFORE any cloud work — an operator who typed
 	// the wrong combination should learn it in milliseconds, not after
 	// 20 minutes of EKS provisioning.
@@ -211,7 +241,7 @@ func run(args []string) error {
 	// bootstrap initializes the state backend (S3 + KMS) and returns; it is not a
 	// cell op, so it skips the stack/passphrase machinery below.
 	if cmd == "bootstrap" {
-		return runBootstrap(*cloud, *region, regionCode, *awsProfile)
+		return runBootstrap(*cloud, *region, regionCode, *awsProfile, *gcpProject)
 	}
 
 	// Compose the cell name: it is the Pulumi stack name and the resource prefix.
@@ -276,8 +306,38 @@ func run(args []string) error {
 		env["PULUMI_BACKEND_URL"] = info.BackendURL
 		secretsProvider = info.SecretsProvider
 		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
+	case "gcs":
+		// Shared GCS backend + Cloud KMS secrets provider (no passphrase). The
+		// bucket is project+region scoped, so one GCP project can hold many cell
+		// stacks without making project == cell.
+		if *cloud != "gcp" {
+			return fmt.Errorf("-backend gcs is only implemented for -cloud gcp")
+		}
+		if *gcpProject == "" {
+			return fmt.Errorf("-gcp-project is required with -cloud gcp -backend gcs")
+		}
+		if err := backend.EnsureGCPADC(ctx, *gcpProject); err != nil {
+			return err
+		}
+		info, exists, err := backend.ResolveGCP(ctx, *gcpProject, *region, regionCode)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if !*bootstrap {
+				return fmt.Errorf("state backend %s does not exist — run `witself-infra bootstrap -cloud gcp -backend gcs -gcp-project %s -region %s` first (or pass -bootstrap)", info.Bucket, *gcpProject, *region)
+			}
+			if _, err := backend.BootstrapGCP(ctx, *gcpProject, *region, regionCode, func(m string) {
+				fmt.Fprintln(os.Stderr, "  "+m)
+			}); err != nil {
+				return err
+			}
+		}
+		env["PULUMI_BACKEND_URL"] = info.BackendURL
+		secretsProvider = info.SecretsProvider
+		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
 	default:
-		return fmt.Errorf("unknown -backend %q (want local|s3)", *backendFlag)
+		return fmt.Errorf("unknown -backend %q (want local|s3|gcs)", *backendFlag)
 	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))
@@ -317,10 +377,25 @@ func run(args []string) error {
 		"witself:gitopsRevision":   *gitopsRevision,
 		"witself:domain":           *domain,
 		"witself:cloudflareDNS":    fmt.Sprintf("%t", cloudflareDelegation),
-		"aws:region":               *region,
 	} {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
 			return fmt.Errorf("set config %s: %w", k, err)
+		}
+	}
+	switch *cloud {
+	case "aws":
+		if err := stack.SetConfig(ctx, "aws:region", auto.ConfigValue{Value: *region}); err != nil {
+			return fmt.Errorf("set config aws:region: %w", err)
+		}
+	case "gcp":
+		for k, v := range map[string]string{
+			"witself:gcpProject": *gcpProject,
+			"gcp:project":        *gcpProject,
+			"gcp:region":         *region,
+		} {
+			if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
+				return fmt.Errorf("set config %s: %w", k, err)
+			}
 		}
 	}
 	if cmd == "up" || cmd == "preview" {
@@ -693,20 +768,35 @@ func printOutputs(ctx context.Context, stack auto.Stack) error {
 	return nil
 }
 
-// runBootstrap initializes the state backend for the account+region (idempotent).
-func runBootstrap(cloud, region, regionCode, profile string) error {
-	if cloud != "aws" {
-		return fmt.Errorf("bootstrap is only implemented for -cloud aws")
+// runBootstrap initializes the state backend for the account/project+region
+// (idempotent).
+func runBootstrap(cloud, region, regionCode, awsProfile, gcpProject string) error {
+	ctx := context.Background()
+	var (
+		info *backend.Info
+		err  error
+	)
+	switch cloud {
+	case "aws":
+		info, err = backend.BootstrapAWS(ctx, region, regionCode, awsProfile, func(m string) {
+			fmt.Fprintln(os.Stderr, "  "+m)
+		})
+	case "gcp":
+		if gcpProject == "" {
+			return fmt.Errorf("-gcp-project is required with -cloud gcp bootstrap")
+		}
+		info, err = backend.BootstrapGCP(ctx, gcpProject, region, regionCode, func(m string) {
+			fmt.Fprintln(os.Stderr, "  "+m)
+		})
+	default:
+		return fmt.Errorf("bootstrap is not implemented for -cloud %s", cloud)
 	}
-	info, err := backend.BootstrapAWS(context.Background(), region, regionCode, profile, func(m string) {
-		fmt.Fprintln(os.Stderr, "  "+m)
-	})
 	if err != nil {
 		return err
 	}
 	fmt.Println("state backend ready:")
 	fmt.Println("  bucket:           " + info.Bucket)
-	fmt.Println("  backend (s3):     " + info.BackendURL)
+	fmt.Println("  backend:          " + info.BackendURL)
 	fmt.Println("  secrets provider: " + info.SecretsProvider)
 	return nil
 }
