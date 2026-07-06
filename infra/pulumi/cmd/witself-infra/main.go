@@ -466,6 +466,9 @@ func run(args []string) error {
 				}
 			}
 		}
+		if err == nil {
+			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 15*time.Minute, 20*time.Second)
+		}
 	case "preview":
 		_, err = stack.Preview(ctx, optpreview.ProgressStreams(os.Stdout))
 	case "destroy":
