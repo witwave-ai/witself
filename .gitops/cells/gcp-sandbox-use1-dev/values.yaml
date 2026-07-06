@@ -11,7 +11,7 @@ gitops:
   targetRevision: main
 apps:
   witselfServer:
-    enabled: false
+    enabled: true
     namespace: witself
     chartVersion: 0.0.98
     imageTag: 0.0.98
