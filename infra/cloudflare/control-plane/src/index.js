@@ -2958,7 +2958,7 @@ async function handleRestore(request, env, cellName) {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
     for (const k of page.keys) {
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (allRegions || entry?.region === cell.region) {
+      if (entry && (allRegions || entry.region === cell.region)) {
         targets.push({ accountId: k.name.slice("archived:".length), archived: entry });
         if (targets.length >= batch) {
           break;
@@ -2996,14 +2996,24 @@ async function handleRestore(request, env, cellName) {
   }
 
   // Count archived: pointers still awaiting placement in this restore scope.
-  // witself-infra loops until this reaches zero.
+  // witself-infra loops until this reaches zero. KV list/get can briefly lag
+  // deletes, so do not count accounts this very call restored successfully.
+  // Those accounts are already routed to the target cell; treating stale
+  // archived: keys as remaining makes the CLI report a false stalled restore.
+  const restoredOK = new Set(
+    results.filter((r) => r.ok).map((r) => r.account_id),
+  );
   let remaining = 0;
   let cursor2;
   do {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor: cursor2 });
     for (const k of page.keys) {
+      const accountId = k.name.slice("archived:".length);
+      if (restoredOK.has(accountId)) {
+        continue;
+      }
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (allRegions || entry?.region === cell.region) {
+      if (entry && (allRegions || entry.region === cell.region)) {
         remaining += 1;
       }
     }
