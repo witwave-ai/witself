@@ -104,6 +104,7 @@ and a Google-managed certificate. Cloud NAT is still deferred.
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
 # Credentials, not only `gcloud auth login`.
 gcloud auth application-default login --project witself-sandbox
+gcloud config set container/use_application_default_credentials true
 
 # prepare state only
 witself-infra bootstrap \
@@ -128,8 +129,17 @@ witself-infra up \
   -gitops-values-path .gitops/cells/gcp-sandbox-use1-dev/values.yaml \
   -profile minimal \
   -region us-east1 \
+  -restore-archives \
+  -restore-any-region \
   -role dev
 ```
+
+For GCP cells with `-argocd`, `up` does not stop at Pulumi success. After the
+cell is registered and reachable through the control-plane probe, and after any
+archive restore completes, the CLI reads the GKE API directly with ADC and waits
+for every Argo CD Application to report `Synced/Healthy`. That makes Google
+ManagedCertificate status lag visible as a normal waiter instead of a surprise
+operator caveat after the command exits.
 
 ## GitOps (Argo CD)
 
@@ -147,8 +157,9 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 ```
 
 The Kubernetes provider authenticates with an exec kubeconfig (`aws eks
-get-token` on AWS, `gcloud auth print-access-token` on GCP), so the first
-install can outlast a static token while managed Kubernetes provisions capacity.
+get-token` on AWS, `gcloud auth application-default print-access-token` on GCP),
+so the first install can outlast a static token while managed Kubernetes
+provisions capacity.
 
 `-argocd` also creates a root Argo `Application` (`bootstrap`) that renders the
 shared `.gitops/charts/bootstrap` chart with this cell's

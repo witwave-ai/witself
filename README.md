@@ -60,6 +60,9 @@ witself-infra up \
 For the current GCP sandbox cell in `us-east1`:
 
 ```sh
+# Pulumi GCS/GCP KMS and GKE verification use Application Default Credentials.
+gcloud auth application-default login --project witself-sandbox
+
 witself-infra up \
   -account-alias sandbox \
   -argocd \
@@ -79,6 +82,8 @@ witself-infra up \
   -gitops-values-path .gitops/cells/gcp-sandbox-use1-dev/values.yaml \
   -profile minimal \
   -region us-east1 \
+  -restore-archives \
+  -restore-any-region \
   -role dev
 ```
 
@@ -90,7 +95,7 @@ claim). If `-bootstrap-token-file` is omitted, the CLI prefers a per-cell
 `~/.witself/tokens/bootstrap.token`.
 
 When `CLOUDFLARE_API_TOKEN` is present, `witself-infra` also delegates the
-per-cell Route 53 zone from the Cloudflare zone for the configured domain. Keep
+per-cell DNS zone from the Cloudflare zone for the configured domain. Keep
 that token available during teardown so the delegated DNS records can be removed.
 
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
@@ -99,6 +104,11 @@ fleet token. `-fleet-token-file` points at the token file; when omitted the
 token is read from `WITSELF_FLEET_TOKEN`, then `~/.witself/tokens/fleet.token`.
 Omit `-control-plane` entirely and no registration happens — the self-hosted
 path is the same command without the flag.
+
+With `-argocd` on GCP, `up` also waits for the Argo CD Applications to report
+`Synced/Healthy` through the GKE API after the public endpoint is reachable and
+archives have been restored. This catches late DNS/TLS/ManagedCertificate health
+convergence before the command exits.
 
 The teardown command keeps only the stack identity, backend, configured domain,
 and credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
