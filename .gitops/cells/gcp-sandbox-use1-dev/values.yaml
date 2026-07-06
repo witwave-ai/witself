@@ -64,6 +64,7 @@ platform:
     enabled: true
     chartVersion: 2.20.1
     namespace: keda
+    ignoreDeploymentResourceDifferences: true
   metricsServer:
     enabled: false
     chartVersion: 3.13.1
