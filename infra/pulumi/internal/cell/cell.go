@@ -65,6 +65,10 @@ type gcpCell struct {
 	gitopsPath       string // path in the repo for the root bootstrap chart
 	gitopsValuesPath string // path in the repo for this cell's bootstrap values
 	gitopsRevision   string // repo revision (branch/tag)
+	domain           string // optional parent domain for cell hostnames
+	cloudflareDNS    bool   // delegate the cell zone from Cloudflare when credentials are available
+	cellDomain       string // cloud-managed DNS zone for this cell
+	apiHost          string // API hostname inside the cell domain
 }
 
 // Program is the inline Pulumi program — the embedded Automation API engine runs
@@ -154,6 +158,8 @@ func Program(ctx *pulumi.Context) error {
 			gitopsPath:       gitopsPath,
 			gitopsValuesPath: gitopsValuesPath,
 			gitopsRevision:   gitopsRevision,
+			domain:           domain,
+			cloudflareDNS:    cloudflareDNS,
 		})
 	default:
 		ctx.Export("status", pulumi.String("cloud "+cloud+" not implemented yet — no resources"))

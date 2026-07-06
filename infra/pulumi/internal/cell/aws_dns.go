@@ -69,7 +69,11 @@ func provisionAWSDNS(ctx *pulumi.Context, c awsCell, prov *aws.Provider) (*awsDN
 		return nil, err
 	}
 
-	delegationRecords, err := provisionCloudflareDNSDelegation(ctx, c, zoneName, zone.NameServers)
+	delegationRecords, err := provisionCloudflareDNSDelegation(ctx, cloudflareDelegation{
+		enabled:      c.cloudflareDNS,
+		cellName:     c.name,
+		parentDomain: c.domain,
+	}, zoneName, zone.NameServers)
 	if err != nil {
 		return nil, err
 	}

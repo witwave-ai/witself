@@ -1,4 +1,4 @@
-{{- if and .Values.platform.externalDNS.enabled (eq .Values.cell.cloud "aws") }}
+{{- if and .Values.platform.externalDNS.enabled (or (eq .Values.cell.cloud "aws") (eq .Values.cell.cloud "gcp")) }}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -32,6 +32,10 @@ spec:
         serviceAccount:
           create: true
           name: {{ .Values.platform.externalDNS.serviceAccountName | quote }}
+          {{- with .Values.platform.externalDNS.serviceAccountAnnotations }}
+          annotations:
+{{ toYaml . | nindent 12 }}
+          {{- end }}
         extraArgs:
 {{ toYaml .Values.platform.externalDNS.extraArgs | nindent 10 }}
   destination:

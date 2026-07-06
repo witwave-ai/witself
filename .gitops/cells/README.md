@@ -20,15 +20,15 @@ For DNS, keep the stable names here:
 - `cell.domain` is the cell's public DNS zone, usually
   `<cell>.cells.witself.witwave.ai`.
 - `cell.apiHost` is the Witself API hostname under that zone.
-- `platform.externalDNS` enables the ExternalDNS chart for AWS cells and limits
-  it to the cell zone with `domainFilters` and `txtOwnerId`. Keep it disabled on
-  GCP until the GCP DNS/ingress slice lands.
-- GCP cells run `witself-server` as an internal ClusterIP workload before the
-  public ingress slice lands. ESO syncs the DB secret from Google Secret Manager
-  first; keep GCP ExternalDNS and ingress-specific values disabled until the GCP
-  DNS/ingress path exists.
+- `platform.externalDNS` enables the ExternalDNS chart and limits it to the cell
+  zone with `domainFilters` and `txtOwnerId`. AWS uses Route 53; GCP uses Cloud
+  DNS with a Workload Identity-bound Google service account.
+- `apps.witselfServer.awsAlbIngress` is the AWS ALB path. `gcpIngress` is the
+  GKE-native path: GKE Ingress, BackendConfig health checks, a reserved global
+  static IP, and a Google-managed certificate.
 
-`witself-infra` still owns the durable cloud side: Route 53 zone creation,
-Cloudflare parent-zone delegation, ACM certificate validation, and the AWS Pod
-Identity role ExternalDNS uses. Pulumi injects generated cloud outputs, such as
-the ACM certificate ARN, into the root app at deploy time.
+`witself-infra` still owns the durable cloud side: Route 53 or Cloud DNS zone
+creation, Cloudflare parent-zone delegation, certificate/static-IP cloud
+resources, and the cloud IAM role/service account ExternalDNS uses. Pulumi
+injects generated cloud outputs, such as the ACM certificate ARN, GCP static IP
+name, and GCP service account annotation, into the root app at deploy time.

@@ -18,6 +18,18 @@ apps:
     backendKind: managed
     awsAlbIngress:
       enabled: false
+    gcpIngress:
+      enabled: true
+      managedCertificateName: witself-api
+      backendConfigName: witself-server
+      staticIPName: witself-gcp-sandbox-use1-dev-api
+      annotations:
+        external-dns.alpha.kubernetes.io/hostname: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+      hosts:
+        - host: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+          paths:
+            - path: /*
+              pathType: ImplementationSpecific
     secrets:
       bootstrap:
         enabled: false
@@ -49,13 +61,20 @@ platform:
     chartVersion: v1.20.3
     namespace: cert-manager
   externalDNS:
-    enabled: false
+    enabled: true
     chartVersion: 1.21.1
     namespace: external-dns
     serviceAccountName: external-dns
+    serviceAccountAnnotations:
+      iam.gke.io/gcp-service-account: ws-dns-gcp-sandbox-use1-dev@witself-sandbox.iam.gserviceaccount.com
     domainFilters:
       - gcp-sandbox-use1-dev.cells.witself.witwave.ai
     txtOwnerId: gcp-sandbox-use1-dev
+    provider:
+      name: google
+    extraArgs:
+      google-project: witself-sandbox
+      google-zone-visibility: public
   externalSecrets:
     enabled: true
     chartVersion: 2.7.0

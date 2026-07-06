@@ -37,8 +37,14 @@ func newCloudflareDNSRecord(ctx *pulumi.Context, name string, args pulumi.Map, o
 	return &record, nil
 }
 
-func provisionCloudflareDNSDelegation(ctx *pulumi.Context, c awsCell, zoneName string, nameServers pulumi.StringArrayOutput) ([]pulumi.Resource, error) {
-	if !c.cloudflareDNS || zoneName == "" {
+type cloudflareDelegation struct {
+	enabled      bool
+	cellName     string
+	parentDomain string
+}
+
+func provisionCloudflareDNSDelegation(ctx *pulumi.Context, d cloudflareDelegation, zoneName string, nameServers pulumi.StringArrayOutput) ([]pulumi.Resource, error) {
+	if !d.enabled || zoneName == "" {
 		ctx.Export("cloudflareDNSDelegation", pulumi.String("disabled"))
 		return nil, nil
 	}
@@ -48,7 +54,7 @@ func provisionCloudflareDNSDelegation(ctx *pulumi.Context, c awsCell, zoneName s
 		return nil, err
 	}
 
-	parentZone, err := lookupCloudflareZone(ctx, c.domain, prov)
+	parentZone, err := lookupCloudflareZone(ctx, d.parentDomain, prov)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +68,7 @@ func provisionCloudflareDNSDelegation(ctx *pulumi.Context, c awsCell, zoneName s
 			"type":    pulumi.String("NS"),
 			"content": nameServers.Index(pulumi.Int(i)),
 			"ttl":     pulumi.Float64(cloudflareDelegationTTL),
-			"comment": pulumi.String("Witself cell DNS delegation for " + c.name),
+			"comment": pulumi.String("Witself cell DNS delegation for " + d.cellName),
 		}, pulumi.Provider(prov))
 		if err != nil {
 			return nil, err

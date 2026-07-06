@@ -25,6 +25,25 @@ apps:
             - path: /
               pathType: Prefix
       tls: []
+    gcpIngress:
+      enabled: false
+      managedCertificateName: witself-api
+      backendConfigName: witself-server
+      staticIPName: ""
+      annotations: {}
+      hosts:
+        - paths:
+            - path: /*
+              pathType: ImplementationSpecific
+      backendConfig:
+        healthCheck:
+          checkIntervalSec: 10
+          timeoutSec: 5
+          healthyThreshold: 1
+          unhealthyThreshold: 3
+          type: HTTP
+          requestPath: /readyz
+          port: 8081
     secrets:
       bootstrap:
         enabled: true

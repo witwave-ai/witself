@@ -1,0 +1,14 @@
+{{- $ingress := .Values.apps.witselfServer.gcpIngress -}}
+{{- if and .Values.apps.witselfServer.enabled $ingress.enabled (eq .Values.cell.cloud "gcp") }}
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ default "witself-server" $ingress.backendConfigName | quote }}
+  namespace: {{ .Values.apps.witselfServer.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  healthCheck:
+{{ toYaml $ingress.backendConfig.healthCheck | nindent 4 }}
+{{- end }}

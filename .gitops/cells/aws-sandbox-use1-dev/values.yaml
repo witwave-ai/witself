@@ -73,6 +73,8 @@ platform:
     domainFilters:
       - aws-sandbox-use1-dev.cells.witself.witwave.ai
     txtOwnerId: aws-sandbox-use1-dev
+    extraArgs:
+      aws-zone-type: public
   externalSecrets:
     enabled: true
     chartVersion: 2.7.0

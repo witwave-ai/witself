@@ -1,9 +1,13 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
 {{- $certARN := default "" .Values.cell.tlsCertificateARN -}}
+{{- $externalDNSAnnotations := default dict .Values.platform.externalDNS.serviceAccountAnnotations -}}
 {{- $platformRuntimeValues := dict -}}
 {{- $platformRuntime := dict -}}
 {{- if $certARN -}}
 {{- $_ := set $platformRuntime "awsAlbIngress" (dict "certificateARNs" (list $certARN) "listeners" (list (dict "protocol" "HTTP" "port" 80) (dict "protocol" "HTTPS" "port" 443))) -}}
+{{- end -}}
+{{- if $externalDNSAnnotations -}}
+{{- $_ := set $platformRuntime "externalDNS" (dict "serviceAccountAnnotations" $externalDNSAnnotations) -}}
 {{- end -}}
 {{- if $platformRuntime -}}
 {{- $_ := set $platformRuntimeValues "cell" (dict "tlsCertificateARN" $certARN) -}}

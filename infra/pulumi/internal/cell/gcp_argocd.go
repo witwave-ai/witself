@@ -12,7 +12,7 @@ import (
 // AWS, but authenticates to GKE with an exec kubeconfig backed by gcloud. GKE
 // accepts the Google OAuth access token for the operator account that runs
 // witself-infra; that account must have the usual GKE cluster-admin permissions.
-func provisionGCPArgoCD(ctx *pulumi.Context, c gcpCell, gke *gcpKubernetes) error {
+func provisionGCPArgoCD(ctx *pulumi.Context, c gcpCell, gke *gcpKubernetes, dns *gcpDNS, externalDNSServiceAccountEmail pulumi.StringOutput) error {
 	tokenExec := `token="$(gcloud auth print-access-token)"
 printf '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential","status":{"token":"%s"}}\n' "$token"
 `
@@ -68,11 +68,31 @@ users:
 		return err
 	}
 
+	cellDomain := pulumi.String("").ToStringOutput()
+	apiHost := pulumi.String("").ToStringOutput()
+	ingressStaticIPName := pulumi.String("").ToStringOutput()
+	if dns != nil {
+		cellDomain = pulumi.String(dns.zoneName).ToStringOutput()
+		apiHost = pulumi.String(dns.apiHost).ToStringOutput()
+		ingressStaticIPName = dns.apiAddressName
+	}
+
 	runtimeValues := pulumi.Sprintf(`gitops:
   repoURL: %q
   targetRevision: %q
   valuesPath: %q
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath)
+cell:
+  domain: %q
+  apiHost: %q
+apps:
+  witselfServer:
+    gcpIngress:
+      staticIPName: %q
+platform:
+  externalDNS:
+    serviceAccountAnnotations:
+      iam.gke.io/gcp-service-account: %q
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, cellDomain, apiHost, ingressStaticIPName, externalDNSServiceAccountEmail)
 
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),

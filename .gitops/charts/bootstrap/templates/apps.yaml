@@ -1,9 +1,25 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
 {{- $apiHost := default "" .Values.cell.apiHost -}}
+{{- $gcpIngressValues := default dict .Values.apps.witselfServer.gcpIngress -}}
+{{- $gcpStaticIPName := default "" $gcpIngressValues.staticIPName -}}
 {{- $appsRuntime := dict -}}
+{{- $witselfServerRuntime := dict -}}
 {{- if $apiHost -}}
 {{- $_ := set $appsRuntime "cell" (dict "apiHost" $apiHost "domain" (default "" .Values.cell.domain) "tlsCertificateARN" (default "" .Values.cell.tlsCertificateARN)) -}}
-{{- $_ := set $appsRuntime "apps" (dict "witselfServer" (dict "awsAlbIngress" (dict "annotations" (dict "external-dns.alpha.kubernetes.io/hostname" $apiHost) "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/" "pathType" "Prefix"))))))) -}}
+{{- if eq .Values.cell.cloud "aws" -}}
+{{- $_ := set $witselfServerRuntime "awsAlbIngress" (dict "annotations" (dict "external-dns.alpha.kubernetes.io/hostname" $apiHost) "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/" "pathType" "Prefix"))))) -}}
+{{- end -}}
+{{- if eq .Values.cell.cloud "gcp" -}}
+{{- $_ := set $witselfServerRuntime "gcpIngress" (dict "annotations" (dict "external-dns.alpha.kubernetes.io/hostname" $apiHost) "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/*" "pathType" "ImplementationSpecific"))))) -}}
+{{- end -}}
+{{- end -}}
+{{- if $gcpStaticIPName -}}
+{{- $existingGCPIngress := default dict (get $witselfServerRuntime "gcpIngress") -}}
+{{- $_ := set $existingGCPIngress "staticIPName" $gcpStaticIPName -}}
+{{- $_ := set $witselfServerRuntime "gcpIngress" $existingGCPIngress -}}
+{{- end -}}
+{{- if $witselfServerRuntime -}}
+{{- $_ := set $appsRuntime "apps" (dict "witselfServer" $witselfServerRuntime) -}}
 {{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application

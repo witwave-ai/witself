@@ -91,13 +91,13 @@ cell boundary: one project can host multiple cell stacks. The current GCP cell
 program provisions a dedicated custom VPC, regional subnet, GKE pod/service
 secondary ranges, an internal firewall rule, private services access for future
 private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
-Cloud SQL Postgres instance, and a Secret Manager DB connection secret. With
+Cloud SQL Postgres instance, a Secret Manager DB connection secret, a public
+Cloud DNS zone, and a reserved global IPv4 address for the GKE Ingress. With
 `-argocd`, it also installs Argo CD and bootstraps the GCP cell values file. It
-also grants the External Secrets Operator a GKE Workload Identity path to the
-cell DB secret. The GCP cell values currently enable `witself-server` as an
-internal ClusterIP workload only, using the ESO-synced DB secret. It
-intentionally does **not** create Cloud NAT or GCP ingress/DNS yet, so public
-edge capacity is still deferred.
+also grants Workload Identity paths for External Secrets Operator to read the
+cell DB secret and for ExternalDNS to manage only the cell Cloud DNS zone. The
+GCP cell values enable `witself-server`, ExternalDNS, GKE Ingress, BackendConfig
+health checks, and a Google-managed certificate. Cloud NAT is still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -134,7 +134,7 @@ or a self-hosted cluster. It is **opt-in** and off by default.
 ```sh
 witself-infra up -argocd $F
 
-# reach the UI (ClusterIP — no public LB yet):
+# reach the UI (ClusterIP):
 kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, user: admin
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
@@ -158,7 +158,7 @@ witself-infra up -argocd \
   -gitops-revision main $F
 ```
 
-Wiring ESO to AWS Secrets Manager, SSO, and ingress are later slices.
+SSO, ingress polish, and production hardening are later slices.
 
 ## Fleet (control plane)
 
@@ -228,4 +228,6 @@ control plane forgets them.
     secret.
 14. **[done]** GCP `witself-server` GitOps app as an internal ClusterIP
     workload, backed by the ESO-synced Cloud SQL DSN.
-15. GCP DNS/ingress; then SSO + ingress polish; sealed-plane KMS (prod).
+15. **[done]** GCP Cloud DNS + Cloudflare delegation + ExternalDNS Workload
+    Identity + GKE Ingress/BackendConfig + Google-managed certificate.
+16. SSO + ingress polish; sealed-plane KMS (prod).

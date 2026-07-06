@@ -86,6 +86,15 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	dnsAPI, err := projects.NewService(ctx, "gcp-dns-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("dns.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
 	serviceNetworkingAPI, err := projects.NewService(ctx, "gcp-service-networking-api", &projects.ServiceArgs{
 		Project:          pulumi.String(c.project),
 		Service:          pulumi.String("servicenetworking.googleapis.com"),
@@ -131,6 +140,15 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	dns, err := provisionGCPDNS(ctx, c, prov, dnsAPI, computeAPI)
+	if err != nil {
+		return err
+	}
+	if dns != nil {
+		c.cellDomain = dns.zoneName
+		c.apiHost = dns.apiHost
+	}
+
 	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI, serviceNetworkingAPI)
 	if err != nil {
 		return err
@@ -150,7 +168,11 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		if err := provisionGCPESOWorkloadIdentity(ctx, c, db, prov, iamCredentialsAPI); err != nil {
 			return err
 		}
-		if err := provisionGCPArgoCD(ctx, c, gke); err != nil {
+		externalDNSServiceAccountEmail, err := provisionGCPExternalDNSWorkloadIdentity(ctx, c, dns, prov, iamCredentialsAPI)
+		if err != nil {
+			return err
+		}
+		if err := provisionGCPArgoCD(ctx, c, gke, dns, externalDNSServiceAccountEmail); err != nil {
 			return err
 		}
 	}

@@ -8,6 +8,24 @@
 {{- if and .Values.apps.witselfServer.awsAlbIngress.enabled (eq .Values.cell.cloud "aws") -}}
 {{- $_ := set $serverValues "ingress" .Values.apps.witselfServer.awsAlbIngress -}}
 {{- end -}}
+{{- if and .Values.apps.witselfServer.gcpIngress.enabled (eq .Values.cell.cloud "gcp") -}}
+{{- $gcpIngress := .Values.apps.witselfServer.gcpIngress -}}
+{{- $ingressAnnotations := deepCopy $gcpIngress.annotations -}}
+{{- $_ := set $ingressAnnotations "kubernetes.io/ingress.class" "gce" -}}
+{{- $_ := set $ingressAnnotations "networking.gke.io/managed-certificates" (default "witself-api" $gcpIngress.managedCertificateName) -}}
+{{- if $gcpIngress.staticIPName -}}
+{{- $_ := set $ingressAnnotations "kubernetes.io/ingress.global-static-ip-name" $gcpIngress.staticIPName -}}
+{{- end -}}
+{{- if .Values.cell.apiHost -}}
+{{- $_ := set $ingressAnnotations "external-dns.alpha.kubernetes.io/hostname" .Values.cell.apiHost -}}
+{{- end -}}
+{{- $ingressHosts := $gcpIngress.hosts -}}
+{{- if .Values.cell.apiHost -}}
+{{- $ingressHosts = list (dict "host" .Values.cell.apiHost "paths" (list (dict "path" "/*" "pathType" "ImplementationSpecific"))) -}}
+{{- end -}}
+{{- $_ := set $serverValues "ingress" (dict "enabled" true "annotations" $ingressAnnotations "hosts" $ingressHosts "tls" (list)) -}}
+{{- $_ := set $serverValues "service" (dict "annotations" (dict "cloud.google.com/backend-config" (printf "{\"ports\":{\"80\":\"%s\"}}" (default "witself-server" $gcpIngress.backendConfigName)) "cloud.google.com/neg" "{\"ingress\": true}")) -}}
+{{- end -}}
 {{- if $bootstrap.enabled -}}
 {{- $_ := set $serverValues "bootstrap" (dict "tokenFile" $bootstrapMountPath "existingSecret" (dict "name" $bootstrapTargetName "tokenKey" $bootstrap.tokenKey "ttlKey" $bootstrap.ttlKey)) -}}
 {{- end -}}

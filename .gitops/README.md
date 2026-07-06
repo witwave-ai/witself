@@ -44,8 +44,9 @@ cell. For the current sandbox cell, that file is
 
 Stable DNS intent lives in that values file too: `cell.domain`, `cell.apiHost`,
 and `platform.externalDNS` describe what ExternalDNS should manage. Pulumi keeps
-ownership of the cloud resources behind that intent, including Route 53,
-Cloudflare delegation, ACM validation, and the ExternalDNS Pod Identity role.
+ownership of the cloud resources behind that intent, including Route 53 or Cloud
+DNS, Cloudflare delegation, ACM or Google-managed TLS, static ingress IPs where
+the cloud needs them, and the cloud IAM identity ExternalDNS uses.
 
 The Application manifests here reference this public repo by URL; a self-hosted
 fork (`-gitops-repo`) would adjust the root source, and the per-cell values file

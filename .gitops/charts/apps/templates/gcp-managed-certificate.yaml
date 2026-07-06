@@ -1,0 +1,14 @@
+{{- $ingress := .Values.apps.witselfServer.gcpIngress -}}
+{{- if and .Values.apps.witselfServer.enabled $ingress.enabled (eq .Values.cell.cloud "gcp") }}
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: {{ default "witself-api" $ingress.managedCertificateName | quote }}
+  namespace: {{ .Values.apps.witselfServer.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  domains:
+    - {{ required "cell.apiHost is required for GCP ingress" .Values.cell.apiHost | quote }}
+{{- end }}

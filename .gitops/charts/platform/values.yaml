@@ -39,6 +39,7 @@ platform:
     chartVersion: 1.21.1
     namespace: external-dns
     serviceAccountName: external-dns
+    serviceAccountAnnotations: {}
     sources:
       - ingress
     policy: sync
@@ -48,8 +49,7 @@ platform:
     interval: 1m
     provider:
       name: aws
-    extraArgs:
-      aws-zone-type: public
+    extraArgs: {}
   externalSecrets:
     enabled: true
     chartRepoURL: https://charts.external-secrets.io
