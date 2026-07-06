@@ -481,6 +481,9 @@ func run(args []string) error {
 			}
 		}
 		_, err = stack.Destroy(ctx, optdestroy.ProgressStreams(os.Stdout))
+		if err == nil {
+			err = verifyPulumiDestroyEmpty(ctx, stack)
+		}
 	case "refresh":
 		_, err = stack.Refresh(ctx)
 	case "outputs":
