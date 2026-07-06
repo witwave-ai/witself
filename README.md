@@ -110,6 +110,12 @@ With `-argocd` on GCP, `up` also waits for the Argo CD Applications to report
 archives have been restored. This catches late DNS/TLS/ManagedCertificate health
 convergence before the command exits.
 
+The example uses `-profile minimal`: a cheap, disposable sandbox shape with a
+zonal Cloud SQL instance and no retained database backups. The GCP `prod`
+profile uses a regional Cloud SQL instance, PITR backups, retained/final backups,
+and larger disk headroom; use it for persistent cells, not save-money teardown
+tests.
+
 The teardown command keeps only the stack identity, backend, configured domain,
 and credentials. It destroys the cell resources; the shared S3/KMS Pulumi state
 backend remains for the next run.

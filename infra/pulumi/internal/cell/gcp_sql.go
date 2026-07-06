@@ -23,26 +23,41 @@ func gcpPostgresVersion(version string) string {
 	return "POSTGRES_" + v
 }
 
-func gcpDBTier(profile string) string {
-	if profile == "prod" {
-		return "db-custom-2-8192"
-	}
-	return "db-f1-micro"
-}
-
 func gcpDBSecretName(c gcpCell) string {
 	return rname(c.name, "db")
 }
 
-func gcpDBAvailabilityType(minimal bool) string {
-	if minimal {
-		return "ZONAL"
-	}
-	return "REGIONAL"
+type gcpDBProfile struct {
+	tier                     string
+	availabilityType         string
+	diskSizeGB               int
+	diskAutoresizeLimitGB    int
+	retainBackupsOnDelete    bool
+	finalBackupRetentionDays int
 }
 
-func gcpDBBackupConfiguration(minimal bool) *sql.DatabaseInstanceSettingsBackupConfigurationArgs {
-	if minimal {
+func gcpDBProfileFor(profile string) gcpDBProfile {
+	if profile == "prod" {
+		return gcpDBProfile{
+			tier:                     "db-custom-2-8192",
+			availabilityType:         "REGIONAL",
+			diskSizeGB:               100,
+			diskAutoresizeLimitGB:    500,
+			retainBackupsOnDelete:    true,
+			finalBackupRetentionDays: 30,
+		}
+	}
+
+	return gcpDBProfile{
+		tier:                  "db-f1-micro",
+		availabilityType:      "ZONAL",
+		diskSizeGB:            10,
+		diskAutoresizeLimitGB: 20,
+	}
+}
+
+func gcpDBBackupConfiguration(p gcpDBProfile) *sql.DatabaseInstanceSettingsBackupConfigurationArgs {
+	if p.availabilityType == "ZONAL" {
 		return &sql.DatabaseInstanceSettingsBackupConfigurationArgs{
 			Enabled: pulumi.Bool(false),
 		}
@@ -59,8 +74,18 @@ func gcpDBBackupConfiguration(minimal bool) *sql.DatabaseInstanceSettingsBackupC
 	}
 }
 
+func gcpDBFinalBackupConfiguration(p gcpDBProfile) sql.DatabaseInstanceSettingsFinalBackupConfigPtrInput {
+	if p.finalBackupRetentionDays == 0 {
+		return nil
+	}
+	return &sql.DatabaseInstanceSettingsFinalBackupConfigArgs{
+		Enabled:       pulumi.Bool(true),
+		RetentionDays: pulumi.Int(p.finalBackupRetentionDays),
+	}
+}
+
 func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov *gcp.Provider, sqlAPI, secretManagerAPI pulumi.Resource) (*gcpDatabase, error) {
-	minimal := c.profile != "prod"
+	dbProfile := gcpDBProfileFor(c.profile)
 	version := gcpPostgresVersion(c.dbVersion)
 	dbName := "witself"
 	dbUser := "witself"
@@ -87,17 +112,18 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		DeletionPolicy:     pulumi.String("DELETE"),
 		DeletionProtection: pulumi.Bool(false),
 		Settings: &sql.DatabaseInstanceSettingsArgs{
-			Tier:                      pulumi.String(gcpDBTier(c.profile)),
+			Tier:                      pulumi.String(dbProfile.tier),
 			Edition:                   pulumi.String("ENTERPRISE"),
-			AvailabilityType:          pulumi.String(gcpDBAvailabilityType(minimal)),
+			AvailabilityType:          pulumi.String(dbProfile.availabilityType),
 			DiskType:                  pulumi.String("PD_SSD"),
-			DiskSize:                  pulumi.Int(10),
+			DiskSize:                  pulumi.Int(dbProfile.diskSizeGB),
 			DiskAutoresize:            pulumi.Bool(true),
-			DiskAutoresizeLimit:       pulumi.Int(20),
+			DiskAutoresizeLimit:       pulumi.Int(dbProfile.diskAutoresizeLimitGB),
 			DeletionProtectionEnabled: pulumi.Bool(false),
-			RetainBackupsOnDelete:     pulumi.Bool(false),
+			RetainBackupsOnDelete:     pulumi.Bool(dbProfile.retainBackupsOnDelete),
 			UserLabels:                gcpDefaultLabels(c),
-			BackupConfiguration:       gcpDBBackupConfiguration(minimal),
+			BackupConfiguration:       gcpDBBackupConfiguration(dbProfile),
+			FinalBackupConfig:         gcpDBFinalBackupConfiguration(dbProfile),
 			IpConfiguration: &sql.DatabaseInstanceSettingsIpConfigurationArgs{
 				Ipv4Enabled:                             pulumi.Bool(false),
 				PrivateNetwork:                          net.networkSelfLink,

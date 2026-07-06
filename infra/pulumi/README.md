@@ -100,6 +100,13 @@ Cloud DNS zone. The GCP cell values enable `witself-server`, ExternalDNS, GKE
 Ingress, BackendConfig health checks, FrontendConfig HTTP-to-HTTPS redirects,
 and a Google-managed certificate. Cloud NAT is still deferred.
 
+GCP profile sizing follows the same operator intent as AWS. `-profile minimal`
+is the low-cost, one-shot test profile: zonal Cloud SQL, small disk, and no
+retained database backups. `-profile prod` raises Cloud SQL to regional
+availability, enables PITR plus retained/final backups, and increases disk
+headroom; it is meant for persistent cells rather than nightly save-money
+teardown loops.
+
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
 # Credentials, not only `gcloud auth login`.
@@ -251,5 +258,5 @@ control plane forgets them.
 15. **[done]** GCP Cloud DNS + Cloudflare delegation + ExternalDNS Workload
     Identity + GKE Ingress/BackendConfig/FrontendConfig + Google-managed
     certificate + HTTP-to-HTTPS redirect.
-16. SSO; sealed-plane KMS (prod); Cloud NAT/egress posture and production
-    hardening.
+16. SSO; sealed-plane KMS (prod); Cloud NAT/egress posture, deletion-protection
+    break-glass flow, and remaining production hardening.
