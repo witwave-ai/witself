@@ -25,7 +25,7 @@ func gcpESOAccountID(c gcpCell) string {
 	return "ws-eso-" + hex.EncodeToString(sum[:])[:12]
 }
 
-func provisionGCPESOWorkloadIdentity(ctx *pulumi.Context, c gcpCell, db *gcpDatabase, prov *gcp.Provider, iamCredentialsAPI pulumi.Resource) error {
+func provisionGCPESOWorkloadIdentity(ctx *pulumi.Context, c gcpCell, secrets []gcpSecretAccess, prov *gcp.Provider, iamCredentialsAPI pulumi.Resource) error {
 	gsa, err := serviceaccount.NewAccount(ctx, "cell-eso", &serviceaccount.AccountArgs{
 		AccountId:   pulumi.String(gcpESOAccountID(c)),
 		DisplayName: pulumi.String("Witself ESO for " + c.name),
@@ -44,13 +44,15 @@ func provisionGCPESOWorkloadIdentity(ctx *pulumi.Context, c gcpCell, db *gcpData
 		return err
 	}
 
-	if _, err := secretmanager.NewSecretIamMember(ctx, "cell-eso-db-secret", &secretmanager.SecretIamMemberArgs{
-		SecretId: db.secretID,
-		Project:  pulumi.String(c.project),
-		Role:     pulumi.String("roles/secretmanager.secretAccessor"),
-		Member:   pulumi.Sprintf("serviceAccount:%s", gsa.Email),
-	}, pulumi.Provider(prov)); err != nil {
-		return err
+	for _, secret := range secrets {
+		if _, err := secretmanager.NewSecretIamMember(ctx, "cell-eso-"+secret.resourceName+"-secret", &secretmanager.SecretIamMemberArgs{
+			SecretId: secret.secretID,
+			Project:  pulumi.String(c.project),
+			Role:     pulumi.String("roles/secretmanager.secretAccessor"),
+			Member:   pulumi.Sprintf("serviceAccount:%s", gsa.Email),
+		}, pulumi.Provider(prov)); err != nil {
+			return err
+		}
 	}
 
 	ctx.Export("esoServiceAccountEmail", gsa.Email)

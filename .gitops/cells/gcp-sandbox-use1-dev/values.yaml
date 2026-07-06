@@ -32,8 +32,8 @@ apps:
               pathType: ImplementationSpecific
     secrets:
       bootstrap:
-        enabled: false
-        remoteKeySuffix: bootstrap/operator-token
+        enabled: true
+        remoteKey: witself-gcp-sandbox-use1-dev-bootstrap-operator-token
         targetName: witself-bootstrap
         tokenKey: token
         ttlKey: ttl
@@ -47,8 +47,8 @@ apps:
         refreshInterval: 1h
         storeName: gcp
       provision:
-        enabled: false
-        remoteKeySuffix: provision/token
+        enabled: true
+        remoteKey: witself-gcp-sandbox-use1-dev-provision-token
         targetName: witself-provision
         tokenKey: token
         refreshInterval: 1h

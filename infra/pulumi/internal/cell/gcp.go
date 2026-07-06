@@ -50,6 +50,11 @@ type gcpDatabase struct {
 	version        string
 }
 
+type gcpSecretAccess struct {
+	resourceName string
+	secretID     pulumi.IDOutput
+}
+
 func gcpDefaultLabels(c gcpCell) pulumi.StringMap {
 	return pulumi.StringMap{
 		"app":                   pulumi.String("witself"),
@@ -164,8 +169,22 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	bootstrapSecret, err := provisionGCPBootstrapSecret(ctx, c, prov, secretManagerAPI)
+	if err != nil {
+		return err
+	}
+
+	provisionSecret, err := provisionGCPProvisionSecret(ctx, c, prov, secretManagerAPI)
+	if err != nil {
+		return err
+	}
+
 	if c.argocd {
-		if err := provisionGCPESOWorkloadIdentity(ctx, c, db, prov, iamCredentialsAPI); err != nil {
+		if err := provisionGCPESOWorkloadIdentity(ctx, c, []gcpSecretAccess{
+			{resourceName: "db", secretID: db.secretID},
+			{resourceName: "bootstrap", secretID: bootstrapSecret.id},
+			{resourceName: "provision", secretID: provisionSecret.id},
+		}, prov, iamCredentialsAPI); err != nil {
 			return err
 		}
 		externalDNSServiceAccountEmail, err := provisionGCPExternalDNSWorkloadIdentity(ctx, c, dns, prov, iamCredentialsAPI)
