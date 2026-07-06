@@ -36,6 +36,7 @@ apps:
         refreshInterval: 1h
         storeName: aws
       database:
+        enabled: true
         remoteKeySuffix: db
         targetName: witself-db
         urlKey: dsn

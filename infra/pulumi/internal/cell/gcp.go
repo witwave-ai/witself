@@ -122,6 +122,15 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	iamCredentialsAPI, err := projects.NewService(ctx, "gcp-iam-credentials-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("iamcredentials.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
 	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI, serviceNetworkingAPI)
 	if err != nil {
 		return err
@@ -138,6 +147,9 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	}
 
 	if c.argocd {
+		if err := provisionGCPESOWorkloadIdentity(ctx, c, db, prov, iamCredentialsAPI); err != nil {
+			return err
+		}
 		if err := provisionGCPArgoCD(ctx, c, gke); err != nil {
 			return err
 		}

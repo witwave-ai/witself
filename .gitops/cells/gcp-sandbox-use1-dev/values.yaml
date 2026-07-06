@@ -28,6 +28,7 @@ apps:
         refreshInterval: 1h
         storeName: gcp
       database:
+        enabled: true
         remoteKey: witself-gcp-sandbox-use1-dev-db
         targetName: witself-db
         urlKey: dsn
@@ -56,10 +57,14 @@ platform:
       - gcp-sandbox-use1-dev.cells.witself.witwave.ai
     txtOwnerId: gcp-sandbox-use1-dev
   externalSecrets:
-    enabled: false
+    enabled: true
     chartVersion: 2.7.0
     namespace: external-secrets
     storeName: gcp
+    serviceAccountName: external-secrets
+    serviceAccountAnnotations:
+      iam.gke.io/gcp-service-account: ws-eso-gcp-sandbox-use1-dev@witself-sandbox.iam.gserviceaccount.com
+    gcpProjectID: witself-sandbox
   keda:
     enabled: true
     chartVersion: 2.20.1

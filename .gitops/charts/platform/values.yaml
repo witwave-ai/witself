@@ -57,8 +57,11 @@ platform:
     chartVersion: 2.7.0
     namespace: external-secrets
     installCRDs: true
+    serviceAccountName: external-secrets
+    serviceAccountAnnotations: {}
     storeName: aws
     secretsManagerRegion: ""
+    gcpProjectID: ""
   keda:
     enabled: true
     chartRepoURL: https://kedacore.github.io/charts

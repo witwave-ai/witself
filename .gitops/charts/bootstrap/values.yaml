@@ -57,6 +57,7 @@ apps:
     backendKind: managed
     secrets:
       database:
+        enabled: true
         remoteKeySuffix: db
         targetName: witself-db
         urlKey: dsn

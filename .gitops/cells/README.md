@@ -24,8 +24,8 @@ For DNS, keep the stable names here:
   it to the cell zone with `domainFilters` and `txtOwnerId`. Keep it disabled on
   GCP until the GCP DNS/ingress slice lands.
 - GCP cells can run the GitOps control plane before app workloads are enabled.
-  Keep `apps.witselfServer.enabled` false until ESO can sync from Google Secret
-  Manager and a GCP ingress path exists.
+  ESO syncs the DB secret from Google Secret Manager first; keep
+  `apps.witselfServer.enabled` false until a GCP ingress path exists.
 
 `witself-infra` still owns the durable cloud side: Route 53 zone creation,
 Cloudflare parent-zone delegation, ACM certificate validation, and the AWS Pod

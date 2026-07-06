@@ -1,4 +1,6 @@
-{{- if .Values.apps.witselfServer.enabled }}
+{{- $secrets := .Values.apps.witselfServer.secrets -}}
+{{- $dbEnabled := default true $secrets.database.enabled -}}
+{{- if or .Values.apps.witselfServer.enabled $secrets.bootstrap.enabled $dbEnabled $secrets.provision.enabled }}
 apiVersion: v1
 kind: Namespace
 metadata:
