@@ -1,0 +1,15 @@
+.git
+.github
+
+# Local build outputs and dependency caches are not needed by the container
+# builds. Keeping them out of the Wrangler context makes control-plane deploys
+# much less likely to fail while streaming the build context to Docker.
+bin
+dist
+coverage
+*.cover
+*.test
+
+node_modules
+infra/cloudflare/control-plane/node_modules
+infra/pulumi/bin
