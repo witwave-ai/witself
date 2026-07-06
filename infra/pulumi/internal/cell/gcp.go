@@ -6,6 +6,7 @@ import (
 
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp"
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/compute"
+	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/container"
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/projects"
 	"github.com/pulumi/pulumi-gcp/sdk/v9/go/gcp/servicenetworking"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -24,6 +25,15 @@ type gcpNetwork struct {
 	privateRangeName  pulumi.StringOutput
 	privateRangeCIDR  string
 	privatePeering    pulumi.StringOutput
+}
+
+type gcpKubernetes struct {
+	name                 pulumi.StringOutput
+	location             pulumi.StringOutput
+	endpoint             pulumi.StringOutput
+	certificateAuthority pulumi.StringOutput
+	workloadPool         string
+	releaseChannel       string
 }
 
 func gcpDefaultLabels(c gcpCell) pulumi.StringMap {
@@ -72,12 +82,26 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 		return err
 	}
 
+	containerAPI, err := projects.NewService(ctx, "gcp-container-api", &projects.ServiceArgs{
+		Project:          pulumi.String(c.project),
+		Service:          pulumi.String("container.googleapis.com"),
+		DisableOnDestroy: pulumi.Bool(false),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return err
+	}
+
 	net, err := provisionGCPNetwork(ctx, c, prov, computeAPI, serviceNetworkingAPI)
 	if err != nil {
 		return err
 	}
 
-	ctx.Export("status", pulumi.String("gcp: vpc network + private services access provisioned"))
+	gke, err := provisionGCPGKE(ctx, c, net, prov, containerAPI)
+	if err != nil {
+		return err
+	}
+
+	ctx.Export("status", pulumi.String("gcp: vpc network + private services access + gke autopilot provisioned"))
 	ctx.Export("gcpProject", pulumi.String(c.project))
 	ctx.Export("gcpRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
@@ -94,6 +118,13 @@ func provisionGCP(ctx *pulumi.Context, c gcpCell) error {
 	ctx.Export("privateServiceRangeName", net.privateRangeName)
 	ctx.Export("privateServiceRangeCIDR", pulumi.String(net.privateRangeCIDR))
 	ctx.Export("privateServicePeering", net.privatePeering)
+	ctx.Export("gkeCluster", gke.name)
+	ctx.Export("gkeLocation", gke.location)
+	ctx.Export("gkeEndpoint", gke.endpoint)
+	ctx.Export("gkeCertificateAuthority", gke.certificateAuthority)
+	ctx.Export("gkeWorkloadPool", pulumi.String(gke.workloadPool))
+	ctx.Export("gkeReleaseChannel", pulumi.String(gke.releaseChannel))
+	ctx.Export("gkeAutopilot", pulumi.Bool(true))
 	return nil
 }
 
@@ -194,6 +225,45 @@ func provisionGCPNetwork(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, com
 		privateRangeName:  privateRange.Name,
 		privateRangeCIDR:  privateRangeCIDR,
 		privatePeering:    privateConnection.Peering,
+	}, nil
+}
+
+func provisionGCPGKE(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov *gcp.Provider, containerAPI pulumi.Resource) (*gcpKubernetes, error) {
+	releaseChannel := "REGULAR"
+	workloadPool := c.project + ".svc.id.goog"
+
+	cluster, err := container.NewCluster(ctx, "cell", &container.ClusterArgs{
+		Name:               pulumi.String(rname(c.name, "")),
+		Description:        pulumi.String("Witself cell GKE Autopilot cluster for " + c.name),
+		Location:           pulumi.String(c.region),
+		EnableAutopilot:    pulumi.Bool(true),
+		DeletionProtection: pulumi.Bool(false),
+		Network:            net.networkSelfLink,
+		Subnetwork:         net.subnetSelfLink,
+		NetworkingMode:     pulumi.String("VPC_NATIVE"),
+		IpAllocationPolicy: &container.ClusterIpAllocationPolicyArgs{
+			ClusterSecondaryRangeName:  pulumi.String(net.podsRangeName),
+			ServicesSecondaryRangeName: pulumi.String(net.servicesRangeName),
+		},
+		ReleaseChannel: &container.ClusterReleaseChannelArgs{
+			Channel: pulumi.String(releaseChannel),
+		},
+		WorkloadIdentityConfig: &container.ClusterWorkloadIdentityConfigArgs{
+			WorkloadPool: pulumi.String(workloadPool),
+		},
+		ResourceLabels: gcpDefaultLabels(c),
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{containerAPI}))
+	if err != nil {
+		return nil, err
+	}
+
+	return &gcpKubernetes{
+		name:                 cluster.Name,
+		location:             cluster.Location,
+		endpoint:             cluster.Endpoint,
+		certificateAuthority: cluster.MasterAuth.ClusterCaCertificate().Elem(),
+		workloadPool:         workloadPool,
+		releaseChannel:       releaseChannel,
 	}, nil
 }
 

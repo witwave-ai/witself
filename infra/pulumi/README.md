@@ -88,11 +88,11 @@ missing; pass `-bootstrap` to create it on first use.
 
 GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not the
 cell boundary: one project can host multiple cell stacks. The current GCP cell
-program provisions the first substrate slice only: a dedicated custom VPC,
-regional subnet, future GKE secondary IP ranges, an internal firewall rule, and
-private services access for future private-IP Cloud SQL. It intentionally does
-**not** create Cloud NAT or Cloud SQL yet, so the networking slice stays low-cost
-until private workloads/database capacity are added.
+program provisions a dedicated custom VPC, regional subnet, GKE pod/service
+secondary ranges, an internal firewall rule, private services access for future
+private-IP Cloud SQL, and a regional GKE Autopilot cluster. It intentionally
+does **not** create Cloud NAT, Cloud SQL, Argo CD, or application workloads yet,
+so database and app capacity are still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -106,7 +106,7 @@ witself-infra bootstrap \
   -gcp-project witself-sandbox \
   -region us-west2
 
-# or one-shot: prepare state if missing, then create/update the cell network
+# or one-shot: prepare state if missing, then create/update the GCP substrate
 witself-infra up \
   -account-alias sandbox \
   -backend gcs \
@@ -214,6 +214,8 @@ control plane forgets them.
 9. **[done]** GCP network substrate: custom VPC, regional subnet, secondary
    ranges for future GKE pods/services, internal firewall, and private services
    access for future Cloud SQL.
-10. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
-   then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
-   GKE/Cloud SQL/DNS.
+10. **[done]** GCP GKE Autopilot substrate with VPC-native pod/service ranges
+    and Workload Identity.
+11. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
+    then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
+    Cloud SQL/DNS/GitOps.
