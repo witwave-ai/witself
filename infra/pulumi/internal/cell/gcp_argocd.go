@@ -9,11 +9,12 @@ import (
 )
 
 // provisionGCPArgoCD installs the same portable Argo CD chart/root app used on
-// AWS, but authenticates to GKE with an exec kubeconfig backed by gcloud. GKE
-// accepts the Google OAuth access token for the operator account that runs
-// witself-infra; that account must have the usual GKE cluster-admin permissions.
+// AWS, but authenticates to GKE with an exec kubeconfig backed by Application
+// Default Credentials. The GCS backend and gcpkms secrets provider already
+// require ADC, so using the same credential path avoids depending on stale
+// interactive gcloud login state during Argo/Helm operations.
 func provisionGCPArgoCD(ctx *pulumi.Context, c gcpCell, gke *gcpKubernetes, dns *gcpDNS, externalDNSServiceAccountEmail pulumi.StringOutput, rootDependencies ...pulumi.Resource) error {
-	tokenExec := `token="$(gcloud auth print-access-token)"
+	tokenExec := `token="$(gcloud auth application-default print-access-token)"
 printf '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential","status":{"token":"%s"}}\n' "$token"
 `
 	kubeconfig := pulumi.Sprintf(`apiVersion: v1
