@@ -89,15 +89,16 @@ missing; pass `-bootstrap` to create it on first use.
 GCP uses GCS + Cloud KMS. The GCP project is a shared substrate boundary, not the
 cell boundary: one project can host multiple cell stacks. The current GCP cell
 program provisions a dedicated custom VPC, regional subnet, GKE pod/service
-secondary ranges, an internal firewall rule, private services access for future
+secondary ranges, an internal firewall rule, private services access for
 private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
-Cloud SQL Postgres instance, a Secret Manager DB connection secret, a public
-Cloud DNS zone, and a reserved global IPv4 address for the GKE Ingress. With
-`-argocd`, it also installs Argo CD and bootstraps the GCP cell values file. It
-also grants Workload Identity paths for External Secrets Operator to read the
-cell DB secret and for ExternalDNS to manage only the cell Cloud DNS zone. The
-GCP cell values enable `witself-server`, ExternalDNS, GKE Ingress, BackendConfig
-health checks, and a Google-managed certificate. Cloud NAT is still deferred.
+Cloud SQL Postgres instance, Secret Manager JSON secrets for DB/bootstrap/
+provision material, a public Cloud DNS zone, and a reserved global IPv4 address
+for the GKE Ingress. With `-argocd`, it also installs Argo CD and bootstraps the
+GCP cell values file. It grants Workload Identity paths for External Secrets
+Operator to read the cell secrets and for ExternalDNS to manage only the cell
+Cloud DNS zone. The GCP cell values enable `witself-server`, ExternalDNS, GKE
+Ingress, BackendConfig health checks, FrontendConfig HTTP-to-HTTPS redirects,
+and a Google-managed certificate. Cloud NAT is still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -114,11 +115,17 @@ witself-infra bootstrap \
 # or one-shot: prepare state if missing, then create/update the GCP substrate
 witself-infra up \
   -account-alias sandbox \
+  -argocd \
   -backend gcs \
   -bootstrap \
   -cloud gcp \
   -cidr 10.20.0.0/16 \
+  -control-plane https://self.witwave.ai \
   -gcp-project witself-sandbox \
+  -gitops-path .gitops/charts/bootstrap \
+  -gitops-repo https://github.com/witwave-ai/witself \
+  -gitops-revision main \
+  -gitops-values-path .gitops/cells/gcp-sandbox-use1-dev/values.yaml \
   -profile minimal \
   -region us-east1 \
   -role dev
@@ -224,10 +231,12 @@ control plane forgets them.
 11. **[done]** GCP Cloud SQL Postgres over private services access plus Secret
     Manager DB connection JSON.
 12. **[done]** GCP Argo CD control plane and GCP cell GitOps values scaffold.
-13. **[done]** GCP ESO → Secret Manager via GKE Workload Identity for the DB
-    secret.
+13. **[done]** GCP ESO → Secret Manager via GKE Workload Identity for DB,
+    bootstrap, and provision secrets.
 14. **[done]** GCP `witself-server` GitOps app as an internal ClusterIP
     workload, backed by the ESO-synced Cloud SQL DSN.
 15. **[done]** GCP Cloud DNS + Cloudflare delegation + ExternalDNS Workload
-    Identity + GKE Ingress/BackendConfig + Google-managed certificate.
-16. SSO + ingress polish; sealed-plane KMS (prod).
+    Identity + GKE Ingress/BackendConfig/FrontendConfig + Google-managed
+    certificate + HTTP-to-HTTPS redirect.
+16. SSO; sealed-plane KMS (prod); Cloud NAT/egress posture and production
+    hardening.

@@ -57,6 +57,31 @@ witself-infra up \
   -role dev
 ```
 
+For the current GCP sandbox cell in `us-east1`:
+
+```sh
+witself-infra up \
+  -account-alias sandbox \
+  -argocd \
+  -backend gcs \
+  -bootstrap \
+  -bootstrap-token-file ~/.witself/tokens/bootstrap.token \
+  -cidr 10.20.0.0/16 \
+  -cloud gcp \
+  -control-plane https://self.witwave.ai \
+  -db-version 18 \
+  -domain cells.witself.witwave.ai \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
+  -gcp-project witself-sandbox \
+  -gitops-path .gitops/charts/bootstrap \
+  -gitops-repo https://github.com/witwave-ai/witself \
+  -gitops-revision main \
+  -gitops-values-path .gitops/cells/gcp-sandbox-use1-dev/values.yaml \
+  -profile minimal \
+  -region us-east1 \
+  -role dev
+```
+
 The bootstrap token file contains the first operator token that `witself-infra`
 publishes to the cell's cloud secret store. One shared token can bootstrap every
 cell (it is single-use *per cell* — each cell consumes its own copy on first
@@ -89,6 +114,23 @@ witself-infra destroy \
   -domain cells.witself.witwave.ai \
   -fleet-token-file ~/.witself/tokens/fleet.token \
   -region us-west-2 \
+  -role dev
+```
+
+For the GCP sandbox, use the same teardown shape with the GCS backend and GCP
+project:
+
+```sh
+witself-infra destroy \
+  -account-alias sandbox \
+  -argocd \
+  -backend gcs \
+  -cloud gcp \
+  -control-plane https://self.witwave.ai \
+  -domain cells.witself.witwave.ai \
+  -fleet-token-file ~/.witself/tokens/fleet.token \
+  -gcp-project witself-sandbox \
+  -region us-east1 \
   -role dev
 ```
 

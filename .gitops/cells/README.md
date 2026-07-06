@@ -25,7 +25,8 @@ For DNS, keep the stable names here:
   DNS with a Workload Identity-bound Google service account.
 - `apps.witselfServer.awsAlbIngress` is the AWS ALB path. `gcpIngress` is the
   GKE-native path: GKE Ingress, BackendConfig health checks, a reserved global
-  static IP, and a Google-managed certificate.
+  static IP, FrontendConfig HTTP-to-HTTPS redirects, and a Google-managed
+  certificate.
 
 `witself-infra` still owns the durable cloud side: Route 53 or Cloud DNS zone
 creation, Cloudflare parent-zone delegation, certificate/static-IP cloud
