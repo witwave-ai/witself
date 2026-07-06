@@ -94,8 +94,10 @@ private-IP Cloud SQL, a regional GKE Autopilot cluster, a minimal private-IP
 Cloud SQL Postgres instance, and a Secret Manager DB connection secret. With
 `-argocd`, it also installs Argo CD and bootstraps the GCP cell values file. It
 also grants the External Secrets Operator a GKE Workload Identity path to the
-cell DB secret. It intentionally does **not** create Cloud NAT, GCP ingress/DNS,
-or application workloads yet, so app capacity is still deferred.
+cell DB secret. The GCP cell values currently enable `witself-server` as an
+internal ClusterIP workload only, using the ESO-synced DB secret. It
+intentionally does **not** create Cloud NAT or GCP ingress/DNS yet, so public
+edge capacity is still deferred.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
@@ -224,6 +226,6 @@ control plane forgets them.
 12. **[done]** GCP Argo CD control plane and GCP cell GitOps values scaffold.
 13. **[done]** GCP ESO → Secret Manager via GKE Workload Identity for the DB
     secret.
-14. ESO → AWS Secrets Manager (Pod Identity/IRSA + `SecretStore` + DB creds);
-    then SSO + ingress; the witself-server chart; sealed-plane KMS (prod), GCP
-    DNS/ingress.
+14. **[done]** GCP `witself-server` GitOps app as an internal ClusterIP
+    workload, backed by the ESO-synced Cloud SQL DSN.
+15. GCP DNS/ingress; then SSO + ingress polish; sealed-plane KMS (prod).

@@ -23,9 +23,10 @@ For DNS, keep the stable names here:
 - `platform.externalDNS` enables the ExternalDNS chart for AWS cells and limits
   it to the cell zone with `domainFilters` and `txtOwnerId`. Keep it disabled on
   GCP until the GCP DNS/ingress slice lands.
-- GCP cells can run the GitOps control plane before app workloads are enabled.
-  ESO syncs the DB secret from Google Secret Manager first; keep
-  `apps.witselfServer.enabled` false until a GCP ingress path exists.
+- GCP cells run `witself-server` as an internal ClusterIP workload before the
+  public ingress slice lands. ESO syncs the DB secret from Google Secret Manager
+  first; keep GCP ExternalDNS and ingress-specific values disabled until the GCP
+  DNS/ingress path exists.
 
 `witself-infra` still owns the durable cloud side: Route 53 zone creation,
 Cloudflare parent-zone delegation, ACM certificate validation, and the AWS Pod
