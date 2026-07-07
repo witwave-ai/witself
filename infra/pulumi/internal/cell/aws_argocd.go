@@ -26,6 +26,33 @@ const (
 	DefaultGitopsRevision = "main"
 )
 
+const argocdApplicationHealthLua = `hs = {}
+hs.status = "Progressing"
+hs.message = ""
+if obj.status ~= nil then
+  if obj.status.health ~= nil then
+    hs.status = obj.status.health.status
+    if obj.status.health.message ~= nil then
+      hs.message = obj.status.health.message
+    end
+  end
+end
+return hs
+`
+
+func argocdReleaseValues() pulumi.Map {
+	return pulumi.Map{
+		"configs": pulumi.Map{
+			"cm": pulumi.Map{
+				"resource.customizations.health.argoproj.io_Application": pulumi.String(argocdApplicationHealthLua),
+			},
+		},
+		"server": pulumi.Map{
+			"service": pulumi.Map{"type": pulumi.String("ClusterIP")},
+		},
+	}
+}
+
 func DefaultGitopsValuesPath(cellName string) string {
 	return ".gitops/cells/" + cellName + "/values.yaml"
 }
@@ -102,11 +129,7 @@ users:
 		CreateNamespace: pulumi.Bool(true),
 		// Generous: Auto Mode may provision a node before Argo's pods go Ready.
 		Timeout: pulumi.Int(900),
-		Values: pulumi.Map{
-			"server": pulumi.Map{
-				"service": pulumi.Map{"type": pulumi.String("ClusterIP")},
-			},
-		},
+		Values:  argocdReleaseValues(),
 		// Delete-before-replace: the argo-cd chart has fixed-name resources
 		// (argocd-cm, argocd-rbac-cm, argocd-secret, the CRDs) that are NOT
 		// release-prefixed, so a create-before-delete replacement would collide

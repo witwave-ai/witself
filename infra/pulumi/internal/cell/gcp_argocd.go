@@ -59,11 +59,7 @@ users:
 		Namespace:       pulumi.String(argocdNamespace),
 		CreateNamespace: pulumi.Bool(true),
 		Timeout:         pulumi.Int(900),
-		Values: pulumi.Map{
-			"server": pulumi.Map{
-				"service": pulumi.Map{"type": pulumi.String("ClusterIP")},
-			},
-		},
+		Values:          argocdReleaseValues(),
 	}, pulumi.Provider(k8s), pulumi.DeleteBeforeReplace(true))
 	if err != nil {
 		return err
