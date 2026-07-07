@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optrefresh"
 )
 
 type deploymentResource struct {
@@ -16,9 +17,10 @@ type deploymentResource struct {
 }
 
 type deploymentOperation struct {
-	Type     string             `json:"type"`
-	URN      string             `json:"urn"`
-	Resource deploymentResource `json:"resource"`
+	Type      string             `json:"type"`
+	Operation string             `json:"operation"`
+	URN       string             `json:"urn"`
+	Resource  deploymentResource `json:"resource"`
 }
 
 type deploymentSnapshot struct {
@@ -34,6 +36,20 @@ func verifyPulumiDestroyEmpty(ctx context.Context, stack auto.Stack) error {
 	resources, pending, err := remainingPulumiResources(dep.Deployment)
 	if err != nil {
 		return fmt.Errorf("verify Pulumi destroy state: %w", err)
+	}
+	if shouldClearPendingCreates(resources, pending) {
+		fmt.Fprintf(os.Stderr, "Pulumi destroy left %d stale pending create operation(s); clearing them with refresh\n", len(pending))
+		if _, err := stack.Refresh(ctx, optrefresh.ClearPendingCreates(), optrefresh.ProgressStreams(os.Stdout)); err != nil {
+			return fmt.Errorf("clear Pulumi pending creates after destroy: %w", err)
+		}
+		dep, err = stack.Export(ctx)
+		if err != nil {
+			return fmt.Errorf("verify Pulumi destroy state after pending-create cleanup: %w", err)
+		}
+		resources, pending, err = remainingPulumiResources(dep.Deployment)
+		if err != nil {
+			return fmt.Errorf("verify Pulumi destroy state after pending-create cleanup: %w", err)
+		}
 	}
 	if len(pending) > 0 {
 		return fmt.Errorf("Pulumi destroy left %d pending operation(s): %s", len(pending), summarizePendingOperations(pending, 5))
@@ -54,6 +70,25 @@ func remainingPulumiResources(raw json.RawMessage) ([]deploymentResource, []depl
 		return nil, nil, fmt.Errorf("decode exported deployment: %w", err)
 	}
 	return snap.Resources, snap.PendingOperations, nil
+}
+
+func shouldClearPendingCreates(resources []deploymentResource, pending []deploymentOperation) bool {
+	if len(resources) > 0 || len(pending) == 0 {
+		return false
+	}
+	for _, op := range pending {
+		if !strings.Contains(strings.ToLower(op.kind()), "creat") {
+			return false
+		}
+	}
+	return true
+}
+
+func (op deploymentOperation) kind() string {
+	if op.Operation != "" {
+		return op.Operation
+	}
+	return op.Type
 }
 
 func summarizeDeploymentResources(resources []deploymentResource, limit int) string {

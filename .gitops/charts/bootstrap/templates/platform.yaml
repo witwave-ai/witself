@@ -1,6 +1,8 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
 {{- $certARN := default "" .Values.cell.tlsCertificateARN -}}
 {{- $externalDNSAnnotations := default dict .Values.platform.externalDNS.serviceAccountAnnotations -}}
+{{- $externalSecretsAnnotations := default dict .Values.platform.externalSecrets.serviceAccountAnnotations -}}
+{{- $azureVaultURL := default "" .Values.platform.externalSecrets.azureVaultURL -}}
 {{- $platformRuntimeValues := dict -}}
 {{- $platformRuntime := dict -}}
 {{- if $certARN -}}
@@ -8,6 +10,16 @@
 {{- end -}}
 {{- if $externalDNSAnnotations -}}
 {{- $_ := set $platformRuntime "externalDNS" (dict "serviceAccountAnnotations" $externalDNSAnnotations) -}}
+{{- end -}}
+{{- if or $azureVaultURL $externalSecretsAnnotations -}}
+{{- $externalSecretsRuntime := dict -}}
+{{- if $azureVaultURL -}}
+{{- $_ := set $externalSecretsRuntime "azureVaultURL" $azureVaultURL -}}
+{{- end -}}
+{{- if $externalSecretsAnnotations -}}
+{{- $_ := set $externalSecretsRuntime "serviceAccountAnnotations" $externalSecretsAnnotations -}}
+{{- end -}}
+{{- $_ := set $platformRuntime "externalSecrets" $externalSecretsRuntime -}}
 {{- end -}}
 {{- if $platformRuntime -}}
 {{- $_ := set $platformRuntimeValues "cell" (dict "tlsCertificateARN" $certARN) -}}
