@@ -49,7 +49,8 @@
 //                           "finished_at"}
 //                           cross-batch progress for a cell-wide evacuation.
 //   cell:<name>          -> {"endpoint","cloud","region","region_code",
-//                             "owner","weight","accepting","registered_at"}
+//                             "channel","owner","weight","accepting",
+//                             "registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
 //                             "uses","note","created_at","cell","region"}
 //   config:placement     -> {"strategy":"weighted"|"pinned","pinned_cell"}
@@ -102,6 +103,7 @@ const INVITE_PATH = /^\/v1\/invites\/([a-z0-9][a-z0-9-]{2,63})$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const REGION_NAME = /^[a-z0-9-]{2,32}$/;
 const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
+const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
 
 // Admin identity: the audit trail only ever records a first-name handle
 // (author_id on support_ticket_messages when author_kind='fleet_admin',
@@ -1296,6 +1298,9 @@ async function handleCells(request, env, url) {
     if (body.region_code != null && !REGION_NAME.test(body.region_code)) {
       return err("region_code must be a canonical region code like usw2", 400);
     }
+    if (body.channel != null && !PLACEMENT_CHANNELS.has(body.channel)) {
+      return err("channel must be stable, edge, or experimental", 400);
+    }
     const key = `cell:${body.name}`;
     const existing = await env.DIRECTORY.get(key, { type: "json" });
     const entry = {
@@ -1303,6 +1308,7 @@ async function handleCells(request, env, url) {
       cloud: body.cloud || "",
       region: body.region || "",
       region_code: body.region_code ?? existing?.region_code ?? "",
+      channel: body.channel ?? existing?.channel ?? "experimental",
       // v0: one fleet token, one owner. With per-party credentials the owner
       // comes from the credential, never the payload.
       owner: "witwave",

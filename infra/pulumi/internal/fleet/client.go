@@ -37,6 +37,7 @@ type Cell struct {
 	Cloud      string  `json:"cloud,omitempty"`
 	Region     string  `json:"region,omitempty"`
 	RegionCode string  `json:"region_code,omitempty"`
+	Channel    string  `json:"channel,omitempty"`
 	Weight     float64 `json:"weight,omitempty"`
 	Accepting  *bool   `json:"accepting,omitempty"`
 	// ProvisionToken is the cell's account-provisioning credential, sent once at

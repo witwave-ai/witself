@@ -45,6 +45,7 @@ const projectName = "witself-infra"
 
 // clouds are the functional provider selectors (also the name token).
 var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true}
+var placementChannels = map[string]bool{"stable": true, "edge": true, "experimental": true}
 
 // legacyRegionCodes maps real cloud regions outside the three-cloud placement
 // catalog to the short token used in existing cell names and state backends.
@@ -121,6 +122,7 @@ flags:
   -account-alias  free-text account label for the name        (default "sandbox")
   -region         real cloud region (functional)              (default "us-west-2")
   -role           role/ordinal label: dev, dev2, prod, ...    (default "1")
+  -channel        placement channel: stable|edge|experimental (default "experimental")
   -profile        resource sizing (functional): minimal|prod  (default "minimal")
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -k8s-version    EKS Kubernetes version                       (default "1.36")
@@ -188,6 +190,7 @@ func run(args []string) error {
 	accountAlias := fs.String("account-alias", "sandbox", "free-text account label for the cell name")
 	region := fs.String("region", "us-west-2", "real cloud region (functional)")
 	role := fs.String("role", "1", "role/ordinal label for the cell name: dev, dev2, prod")
+	channel := fs.String("channel", "experimental", "placement channel: stable|edge|experimental")
 	profile := fs.String("profile", "minimal", "resource sizing (functional): minimal|prod")
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	k8sVersion := fs.String("k8s-version", "1.36", "EKS Kubernetes version")
@@ -228,6 +231,10 @@ func run(args []string) error {
 	}
 	if !label.MatchString(*role) {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", *role)
+	}
+	*channel = strings.ToLower(strings.TrimSpace(*channel))
+	if !placementChannels[*channel] {
+		return fmt.Errorf("unknown -channel %q (want stable|edge|experimental)", *channel)
 	}
 	*domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*domain)), ".")
 	if *domain != "" && !domainName.MatchString(*domain) {
@@ -452,6 +459,7 @@ func run(args []string) error {
 		"witself:cidr":             *cidr,
 		"witself:accountAlias":     *accountAlias,
 		"witself:role":             *role,
+		"witself:channel":          *channel,
 		"witself:k8sVersion":       *k8sVersion,
 		"witself:dbVersion":        *dbVersion,
 		"witself:argocd":           fmt.Sprintf("%t", *argocd),
@@ -524,7 +532,7 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode)
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
@@ -574,7 +582,7 @@ func run(args []string) error {
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
 // hostname is returned so callers can chain a readiness poll before the
 // next post-provision step (restore-archives).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode string) (string, error) {
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return "", err
@@ -596,6 +604,7 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 		Cloud:          cloud,
 		Region:         region,
 		RegionCode:     regionCode,
+		Channel:        channel,
 		ProvisionToken: provisionToken,
 	}); err != nil {
 		return "", err

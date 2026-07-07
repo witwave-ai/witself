@@ -194,6 +194,7 @@ type AdminCell struct {
 	Cloud             string `json:"cloud,omitempty"`
 	Region            string `json:"region,omitempty"`
 	RegionCode        string `json:"region_code,omitempty"`
+	Channel           string `json:"channel,omitempty"`
 	Endpoint          string `json:"endpoint,omitempty"`
 	Accepting         bool   `json:"accepting"`
 	HasProvisionToken bool   `json:"has_provision_token"`

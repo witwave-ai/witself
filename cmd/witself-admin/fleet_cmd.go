@@ -57,14 +57,14 @@ func cellsList(args []string) int {
 		fmt.Fprintln(os.Stderr, "no cells registered")
 		return 0
 	}
-	w, flush := tableWriter("cell\tcloud\tregion\taccepting\taccounts\tarchived\tversion")
+	w, flush := tableWriter("cell\tcloud\tregion\tchannel\taccepting\taccounts\tarchived\tversion")
 	for _, c := range cells {
 		ver := c.Version
 		if ver == "" {
 			ver = "unreachable"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%d\t%d\t%s\n",
-			tabSafe(safeText(c.Name)), c.Cloud, c.Region, c.Accepting,
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\n",
+			tabSafe(safeText(c.Name)), c.Cloud, c.Region, c.Channel, c.Accepting,
 			c.AccountCount, c.ArchivedCount,
 			tabSafe(safeText(ver)))
 	}
