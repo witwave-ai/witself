@@ -54,6 +54,9 @@
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
 //                             "uses","note","created_at","cell","region"}
 //   config:placement     -> {"strategy":"weighted"|"pinned","pinned_cell"}
+//   config:placement_runner -> {"enabled":bool,"restore_archives":bool,
+//                               "restore_batch":N,"restore_any_region":bool,
+//                               "rebalance":bool,"rebalance_batch":N}
 //   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:
@@ -3583,6 +3586,154 @@ async function handlePlacementRebalance(request, env) {
   });
 }
 
+function clampInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.floor(n), min), max);
+}
+
+function normalizePlacementRunnerConfig(raw = {}) {
+  return {
+    enabled: raw.enabled === true,
+    restore_archives: raw.restore_archives !== false,
+    restore_batch: clampInt(raw.restore_batch, 4, 1, 10),
+    restore_any_region: raw.restore_any_region === true,
+    rebalance: raw.rebalance !== false,
+    rebalance_batch: clampInt(raw.rebalance_batch, 1, 1, 5),
+  };
+}
+
+async function placementRunnerConfig(env) {
+  const cfg = (await env.DIRECTORY.get("config:placement_runner", { type: "json" })) ?? {};
+  return normalizePlacementRunnerConfig(cfg);
+}
+
+async function handlePlacementRunner(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (request.method === "GET") {
+    return json({
+      schema_version: "witself.v0",
+      placement_runner: await placementRunnerConfig(env),
+    });
+  }
+  if (request.method !== "POST") {
+    return err("method not allowed", 405);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return err("invalid JSON body", 400);
+  }
+  const current = await placementRunnerConfig(env);
+  const next = normalizePlacementRunnerConfig({ ...current, ...body });
+  await env.DIRECTORY.put("config:placement_runner", JSON.stringify(next));
+  return json({ schema_version: "witself.v0", placement_runner: next });
+}
+
+async function callInternalFleetHandler(env, path, body, handler) {
+  if (!env.FLEET_TOKEN) {
+    return { ok: false, status: 501, body: { error: "FLEET_TOKEN is not configured" } };
+  }
+  const req = new Request(`https://internal${path}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.FLEET_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  const resp = await handler(req, env);
+  const text = await resp.text();
+  let parsed = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = { body: text };
+  }
+  return { ok: resp.ok, status: resp.status, body: parsed };
+}
+
+async function runPlacementRunner(env, cfg) {
+  const config = normalizePlacementRunnerConfig(cfg);
+  const out = {
+    schema_version: "witself.v0",
+    placement_runner: config,
+  };
+  if (config.restore_archives) {
+    const restore = await callInternalFleetHandler(
+      env,
+      "/v1/placement:restore",
+      {
+        batch: config.restore_batch,
+        all_regions: config.restore_any_region,
+      },
+      handlePlacementRestore,
+    );
+    out.restore = restore.body;
+    if (!restore.ok) {
+      out.restore_error = { status: restore.status, body: restore.body };
+      return out;
+    }
+  }
+  if (config.rebalance) {
+    const rebalance = await callInternalFleetHandler(
+      env,
+      "/v1/placement:rebalance",
+      { batch: config.rebalance_batch },
+      handlePlacementRebalance,
+    );
+    out.rebalance = rebalance.body;
+    if (!rebalance.ok) {
+      out.rebalance_error = { status: rebalance.status, body: rebalance.body };
+    }
+  }
+  return out;
+}
+
+async function handlePlacementRun(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // defaults are fine for manual runs
+  }
+  const stored = await placementRunnerConfig(env);
+  const cfg = normalizePlacementRunnerConfig({
+    ...stored,
+    ...body,
+    enabled: true,
+  });
+  const result = await runPlacementRunner(env, cfg);
+  return json(result);
+}
+
+async function runScheduledPlacementRunner(env) {
+  try {
+    const cfg = await placementRunnerConfig(env);
+    if (!cfg.enabled) {
+      return;
+    }
+    const res = await runPlacementRunner(env, cfg);
+    const restored = res.restore?.restored?.filter((r) => r.ok).length ?? 0;
+    const rebalanced = res.rebalance?.rebalanced?.filter((r) => r.ok).length ?? 0;
+    const restoreRemaining = res.restore?.remaining ?? 0;
+    const rebalanceRemaining = res.rebalance?.remaining ?? 0;
+    console.log(
+      `placement-runner: restored=${restored} rebalanced=${rebalanced} restore_remaining=${restoreRemaining} rebalance_remaining=${rebalanceRemaining}`,
+    );
+  } catch (e) {
+    console.log(`placement-runner failed: ${String(e?.message ?? e)}`);
+  }
+}
+
 // restoreAccount runs the four-step restore for a single account. Each step
 // is idempotent under retry, and the ordering — import THEN resume THEN
 // route THEN clean — guarantees the account is never simultaneously
@@ -4058,6 +4209,15 @@ export default {
     if (url.pathname === "/v1/placement") {
       return handlePlacement(request, env);
     }
+    if (url.pathname === "/v1/placement-runner") {
+      return handlePlacementRunner(request, env);
+    }
+    if (url.pathname === "/v1/placement:run") {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handlePlacementRun(request, env);
+    }
     if (url.pathname === "/v1/placement:restore") {
       if (request.method !== "POST") {
         return err("method not allowed", 405);
@@ -4142,8 +4302,9 @@ export default {
     return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
   },
 
-  // Cron: the pending-account expiry sweep (see reapExpiredPendings).
+  // Cron: pending-account expiry plus opt-in placement restore/rebalance.
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(reapExpiredPendings(env));
+    ctx.waitUntil(runScheduledPlacementRunner(env));
   },
 };

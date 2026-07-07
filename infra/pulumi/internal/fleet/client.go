@@ -374,6 +374,28 @@ type SkippedAccount struct {
 	Reason    string `json:"reason"`
 }
 
+type PlacementRunnerConfig struct {
+	Enabled          bool `json:"enabled"`
+	RestoreArchives  bool `json:"restore_archives"`
+	RestoreBatch     int  `json:"restore_batch"`
+	RestoreAnyRegion bool `json:"restore_any_region"`
+	Rebalance        bool `json:"rebalance"`
+	RebalanceBatch   int  `json:"rebalance_batch"`
+}
+
+type PlacementRunnerResult struct {
+	PlacementRunner PlacementRunnerConfig     `json:"placement_runner"`
+	Restore         *RestoreResult            `json:"restore,omitempty"`
+	Rebalance       *RebalanceResult          `json:"rebalance,omitempty"`
+	RestoreError    *PlacementRunnerStepError `json:"restore_error,omitempty"`
+	RebalanceError  *PlacementRunnerStepError `json:"rebalance_error,omitempty"`
+}
+
+type PlacementRunnerStepError struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
 // Restore asks the control plane to pull a batch of archived accounts from R2
 // and land them on the named cell. By default the Worker only selects archives
 // whose stored region matches the target cell; allRegions is an operator
@@ -492,6 +514,62 @@ func (c *Client) Rebalance(ctx context.Context, batch int, dryRun bool) (Rebalan
 	var out RebalanceResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return RebalanceResult{}, fmt.Errorf("decode rebalance response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) GetPlacementRunner(ctx context.Context) (PlacementRunnerConfig, error) {
+	var out struct {
+		PlacementRunner PlacementRunnerConfig `json:"placement_runner"`
+	}
+	code, body, err := c.do(ctx, http.MethodGet, "/v1/placement-runner", nil, &out)
+	if err != nil {
+		return PlacementRunnerConfig{}, err
+	}
+	if code != http.StatusOK {
+		return PlacementRunnerConfig{}, fmt.Errorf("placement runner: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.PlacementRunner, nil
+}
+
+func (c *Client) SetPlacementRunner(ctx context.Context, cfg PlacementRunnerConfig) (PlacementRunnerConfig, error) {
+	var out struct {
+		PlacementRunner PlacementRunnerConfig `json:"placement_runner"`
+	}
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/placement-runner", cfg, &out)
+	if err != nil {
+		return PlacementRunnerConfig{}, err
+	}
+	if code != http.StatusOK {
+		return PlacementRunnerConfig{}, fmt.Errorf("set placement runner: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.PlacementRunner, nil
+}
+
+func (c *Client) RunPlacementRunner(ctx context.Context, cfg PlacementRunnerConfig) (PlacementRunnerResult, error) {
+	rdr, err := marshalBody(cfg)
+	if err != nil {
+		return PlacementRunnerResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/placement:run", rdr)
+	if err != nil {
+		return PlacementRunnerResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	hc := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return PlacementRunnerResult{}, fmt.Errorf("control plane %s: %w", c.base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return PlacementRunnerResult{}, fmt.Errorf("placement runner: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out PlacementRunnerResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return PlacementRunnerResult{}, fmt.Errorf("decode placement runner response: %w", err)
 	}
 	return out, nil
 }

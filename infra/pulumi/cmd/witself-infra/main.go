@@ -115,6 +115,7 @@ commands:
   refresh   reconcile state with the real cloud
   outputs   print the cell's stack outputs
   rebalance move live accounts to better eligible cells by placement policy
+  placement-runner show, enable, disable, or trigger scheduled placement work
 
 The cell name is composed: <cloud>-<account-alias>-<region-code>-<role>
 
@@ -163,6 +164,9 @@ flags:
                   explicit cross-cloud/cross-region evacuation tests only.
   -batch          with rebalance: accounts to move per control-plane call (default 1)
   -dry-run        with rebalance: print selected moves without changing accounts
+  -enable         with placement-runner: enable scheduled restore/rebalance
+  -disable        with placement-runner: disable scheduled restore/rebalance
+  -run            with placement-runner: trigger one manual restore/rebalance pass
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -219,6 +223,9 @@ func run(args []string) error {
 	restoreAnyRegion := fs.Bool("restore-any-region", false, "with -restore-archives: pull every archived account from R2, ignoring stored region")
 	rebalanceBatch := fs.Int("batch", 1, "with rebalance: accounts to move per control-plane call")
 	rebalanceDryRun := fs.Bool("dry-run", false, "with rebalance: print selected moves without changing accounts")
+	placementRunnerEnable := fs.Bool("enable", false, "with placement-runner: enable scheduled restore/rebalance")
+	placementRunnerDisable := fs.Bool("disable", false, "with placement-runner: disable scheduled restore/rebalance")
+	placementRunnerRun := fs.Bool("run", false, "with placement-runner: trigger one manual restore/rebalance pass")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -228,6 +235,12 @@ func run(args []string) error {
 			return fmt.Errorf("rebalance requires -control-plane")
 		}
 		return rebalanceFleet(context.Background(), *controlPlane, *fleetTokenFile, *rebalanceBatch, *rebalanceDryRun)
+	}
+	if cmd == "placement-runner" {
+		if *controlPlane == "" {
+			return fmt.Errorf("placement-runner requires -control-plane")
+		}
+		return placementRunnerFleet(context.Background(), *controlPlane, *fleetTokenFile, *placementRunnerEnable, *placementRunnerDisable, *placementRunnerRun)
 	}
 
 	// Validate functional + label inputs before composing the name.
@@ -945,6 +958,73 @@ func rebalanceFleet(ctx context.Context, controlPlane, fleetTokenFile string, ba
 			return fmt.Errorf("rebalance is not making progress (%d eligible account(s) remaining after a successful batch)", res.Remaining)
 		}
 		prevRemaining = res.Remaining
+	}
+}
+
+func placementRunnerFleet(ctx context.Context, controlPlane, fleetTokenFile string, enable, disable, runOnce bool) error {
+	if enable && disable {
+		return fmt.Errorf("choose only one of -enable or -disable")
+	}
+	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
+	if err != nil {
+		return err
+	}
+	cfg, err := cl.GetPlacementRunner(ctx)
+	if err != nil {
+		return err
+	}
+	if enable || disable {
+		cfg.Enabled = enable
+		cfg, err = cl.SetPlacementRunner(ctx, cfg)
+		if err != nil {
+			return err
+		}
+	}
+	printPlacementRunnerConfig(cfg)
+	if !runOnce {
+		return nil
+	}
+	res, err := cl.RunPlacementRunner(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	printPlacementRunnerResult(res)
+	if res.RestoreError != nil {
+		return fmt.Errorf("placement runner restore failed: HTTP %d: %s", res.RestoreError.Status, string(res.RestoreError.Body))
+	}
+	if res.RebalanceError != nil {
+		return fmt.Errorf("placement runner rebalance failed: HTTP %d: %s", res.RebalanceError.Status, string(res.RebalanceError.Body))
+	}
+	return nil
+}
+
+func printPlacementRunnerConfig(cfg fleet.PlacementRunnerConfig) {
+	fmt.Printf("enabled\t%v\n", cfg.Enabled)
+	fmt.Printf("restore archives\t%v\n", cfg.RestoreArchives)
+	fmt.Printf("restore batch\t%d\n", cfg.RestoreBatch)
+	fmt.Printf("restore any region\t%v\n", cfg.RestoreAnyRegion)
+	fmt.Printf("rebalance\t%v\n", cfg.Rebalance)
+	fmt.Printf("rebalance batch\t%d\n", cfg.RebalanceBatch)
+}
+
+func printPlacementRunnerResult(res fleet.PlacementRunnerResult) {
+	if res.Restore != nil {
+		ok := 0
+		for _, a := range res.Restore.Restored {
+			if a.OK {
+				ok++
+			}
+		}
+		fmt.Printf("restore\t%d restored, %d remaining, %d unplaced\n", ok, res.Restore.Remaining, res.Restore.Unplaced)
+	}
+	if res.Rebalance != nil {
+		ok := 0
+		for _, a := range res.Rebalance.Rebalanced {
+			if a.OK {
+				ok++
+			}
+		}
+		fmt.Printf("rebalance\t%d moved, %d remaining\n", ok, res.Rebalance.Remaining)
 	}
 }
 
