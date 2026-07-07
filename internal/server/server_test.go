@@ -182,6 +182,44 @@ func TestPlacementPolicyEndpoints(t *testing.T) {
 	}
 }
 
+func TestPlacementPolicySystemEndpoint(t *testing.T) {
+	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:   "witself_prv_test",
+		ProvisionAccount: provision,
+		GetPlacementPolicySystem: func(_ context.Context, accountID string) (placement.Policy, error) {
+			if accountID != "acc_1" {
+				t.Fatalf("accountID = %q, want acc_1", accountID)
+			}
+			return placement.Policy{PreferredClouds: []string{"gcp"}}, nil
+		},
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/accounts/acc_1/placement-policy", nil)
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		AccountID       string           `json:"account_id"`
+		PlacementPolicy placement.Policy `json:"placement_policy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET system placement policy = %d, want 200", resp.StatusCode)
+	}
+	if out.AccountID != "acc_1" || len(out.PlacementPolicy.PreferredClouds) != 1 || out.PlacementPolicy.PreferredClouds[0] != "gcp" {
+		t.Fatalf("response = %#v", out)
+	}
+}
+
 func TestRealmsCreateAndList(t *testing.T) {
 	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {

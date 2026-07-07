@@ -120,6 +120,11 @@ type Config struct {
 	// Read-only, machine-authorized.
 	AccountContact func(ctx context.Context, accountID string) (AccountRecord, error)
 
+	// GetPlacementPolicySystem, when set (with the provisioning pair), enables
+	// GET /v1/accounts/{id}/placement-policy — the control plane reading the
+	// account-owned placement policy during evacuation, without an owner token.
+	GetPlacementPolicySystem func(ctx context.Context, accountID string) (placement.Policy, error)
+
 	// RecoverAccount, when set (with the provisioning pair), enables POST
 	// /v1/accounts/{id}:recover — after the control plane verifies inbox
 	// control, the cell rotates the root operator's credentials: all live
@@ -642,6 +647,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
+		if cfg.GetPlacementPolicySystem != nil {
+			mux.HandleFunc("GET /v1/accounts/", accountPlacementPolicySystemHandler(cfg.ProvisionToken, cfg.GetPlacementPolicySystem))
+		}
 	}
 	if cfg.Authenticate != nil {
 		whoami := whoamiHandler(cfg.Authenticate)
@@ -973,6 +981,36 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"account":        acct,
+		})
+	}
+}
+
+func accountPlacementPolicySystemHandler(provisionToken string, get func(ctx context.Context, accountID string) (placement.Policy, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "placement-policy")
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		policy, err := get(r.Context(), accountID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read placement policy")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"account_id":       accountID,
+			"placement_policy": policy,
 		})
 	}
 }

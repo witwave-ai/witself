@@ -38,7 +38,8 @@
 //   undoemail:<account_id> -> {"code_hash","old_email","new_email","expires_at"}
 //                           (KV TTL 48h) — undo window shipped in the notice
 //   archived:<account_id> -> {"cell","region","region_code","object",
-//                           "exported_at","size","format_version"}
+//                           "exported_at","size","format_version",
+//                           "placement_policy"}
 //                           post-evacuation state; the directory answers
 //                           "archived — awaiting placement" for these. Only
 //                           {cell,region,region_code,exported_at} are returned
@@ -2781,6 +2782,27 @@ async function cellForAccount(env, accountId) {
   return cell ?? null;
 }
 
+async function fetchPlacementPolicySnapshot(cell, accountId) {
+  try {
+    const resp = await fetch(
+      `${cell.endpoint}/v1/accounts/${accountId}/placement-policy`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${cell.provision_token}` },
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    if (!resp.ok) {
+      await resp.text().catch(() => "");
+      return null;
+    }
+    const body = await resp.json();
+    return body?.placement_policy ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
 // metadata. Mirrors the cell-side MaskEmail exactly (internal/store/
 // events.go) so the same shape lands on both sides of the trust link.
@@ -2848,6 +2870,8 @@ async function evacuateAccount(env, cellName, cell, accountId) {
   }
   await suspendResp.text().catch(() => "");
 
+  const placementPolicy = await fetchPlacementPolicySnapshot(cell, accountId);
+
   // (2) Stream the archive from the cell into R2 as a MULTIPART upload:
   // - Streaming exports have no Content-Length; single-shot put() rejects.
   // - Multipart finalizes atomically only on complete() — a truncated
@@ -2892,6 +2916,7 @@ async function evacuateAccount(env, cellName, cell, accountId) {
       exported_at: nowISO,
       size,
       format_version: 1,
+      placement_policy: placementPolicy,
     }),
   );
 
