@@ -2809,28 +2809,52 @@ async function fetchPlacementPolicySnapshot(cell, accountId) {
   }
 }
 
+async function fetchAccountContact(cell, accountId) {
+  try {
+    const resp = await fetch(
+      `${cell.endpoint}/v1/accounts/${accountId}:contact`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cell.provision_token}` },
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return { error: `contact ${resp.status}: ${text.slice(0, 200)}` };
+    }
+    return await resp.json();
+  } catch (e) {
+    return { error: String(e?.message ?? e) };
+  }
+}
+
 function policyList(policy, field) {
   const values = policy?.[field];
   return Array.isArray(values) ? values.filter((v) => typeof v === "string") : [];
 }
 
+function cellMatchesPolicy(cell, policy) {
+  const allowedClouds = policyList(policy, "allowed_clouds");
+  if (allowedClouds.length > 0 && !allowedClouds.includes(cell.cloud || "")) {
+    return false;
+  }
+  const allowedRegions = policyList(policy, "allowed_regions");
+  if (allowedRegions.length > 0 && !allowedRegions.includes(cell.region_code || "")) {
+    return false;
+  }
+  const allowedChannels = policyList(policy, "allowed_channels");
+  const channel = cell.channel || "experimental";
+  if (allowedChannels.length > 0 && !allowedChannels.includes(channel)) {
+    return false;
+  }
+  return true;
+}
+
 function cellMatchesArchivedPlacement(cell, archived, allRegions) {
   const policy = archived?.placement_policy;
   if (policy) {
-    const allowedClouds = policyList(policy, "allowed_clouds");
-    if (allowedClouds.length > 0 && !allowedClouds.includes(cell.cloud || "")) {
-      return false;
-    }
-    const allowedRegions = policyList(policy, "allowed_regions");
-    if (allowedRegions.length > 0 && !allowedRegions.includes(cell.region_code || "")) {
-      return false;
-    }
-    const allowedChannels = policyList(policy, "allowed_channels");
-    const channel = cell.channel || "experimental";
-    if (allowedChannels.length > 0 && !allowedChannels.includes(channel)) {
-      return false;
-    }
-    return true;
+    return cellMatchesPolicy(cell, policy);
   }
   if (allRegions) {
     return true;
@@ -2839,6 +2863,20 @@ function cellMatchesArchivedPlacement(cell, archived, allRegions) {
     return archived.region_code === cell.region_code;
   }
   return archived?.region === cell.region;
+}
+
+function axisValue(cell, axis) {
+  if (axis === "cloud") return cell.cloud || "";
+  if (axis === "region") return cell.region_code || "";
+  if (axis === "channel") return cell.channel || "experimental";
+  return "";
+}
+
+function axisPreferenceField(axis) {
+  if (axis === "cloud") return "preferred_clouds";
+  if (axis === "region") return "preferred_regions";
+  if (axis === "channel") return "preferred_channels";
+  return "";
 }
 
 async function accountCountsByCell(env) {
@@ -2882,6 +2920,20 @@ function comparePlacementCells(a, b, archived, counts) {
   return a.name.localeCompare(b.name);
 }
 
+function bestPolicyCell(cells, policy, counts) {
+  const eligible = cells.filter((cell) => cellMatchesPolicy(cell, policy));
+  if (eligible.length === 0) {
+    return null;
+  }
+  eligible.sort((a, b) => comparePlacementCells(
+    a,
+    b,
+    { placement_policy: policy },
+    counts,
+  ));
+  return eligible[0];
+}
+
 function bestPlacementCell(cells, archived, counts, allRegions) {
   const eligible = cells.filter((cell) => cellMatchesArchivedPlacement(cell, archived, allRegions));
   if (eligible.length === 0) {
@@ -2889,6 +2941,50 @@ function bestPlacementCell(cells, archived, counts, allRegions) {
   }
   eligible.sort((a, b) => comparePlacementCells(a, b, archived, counts));
   return eligible[0];
+}
+
+function rebalanceRank(policy, axis, cell) {
+  const field = axisPreferenceField(axis);
+  if (!field) {
+    return 0;
+  }
+  return preferenceRank(policy, field, axisValue(cell, axis));
+}
+
+function rebalanceImproves(policy, current, target) {
+  for (const axis of policyList(policy, "rebalance_on")) {
+    if (rebalanceRank(policy, axis, target) < rebalanceRank(policy, axis, current)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function bestRebalanceCell(cells, current, policy, counts) {
+  if (!policy) {
+    return null;
+  }
+  if (!cellMatchesPolicy(current, policy)) {
+    const hardPinned = bestPolicyCell(cells, policy, counts);
+    return hardPinned ? { cell: hardPinned, reason: "hard pin" } : null;
+  }
+  if (policyList(policy, "rebalance_on").length === 0) {
+    return null;
+  }
+  const candidates = cells.filter((cell) =>
+    cell.name !== current.name &&
+    cellMatchesPolicy(cell, policy) &&
+    rebalanceImproves(policy, current, cell));
+  if (candidates.length === 0) {
+    return null;
+  }
+  candidates.sort((a, b) => comparePlacementCells(
+    a,
+    b,
+    { placement_policy: policy },
+    counts,
+  ));
+  return { cell: candidates[0], reason: "preferred placement" };
 }
 
 // maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
@@ -2913,7 +3009,7 @@ function maskEmail(addr) {
 // after any failure just overwrites, so no orphaned objects can accrete.
 // Multipart upload atomically finalizes the object only on complete(), so a
 // truncated stream aborts the upload and nothing is committed at the key.
-async function evacuateAccount(env, cellName, cell, accountId) {
+async function evacuateAccount(env, cellName, cell, accountId, opts = {}) {
   // Idempotency short-circuit: if an archived: pointer already exists we
   // just need to ensure acct: is retired (a failure between steps 3 and 4
   // on a prior call is what leaves that gap). No R2 work — the archive is
@@ -2944,13 +3040,16 @@ async function evacuateAccount(env, cellName, cell, accountId) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${cell.provision_token}`,
       },
-      body: JSON.stringify({ for: "evacuation", reason: "cell decommission" }),
+      body: JSON.stringify({ for: "evacuation", reason: opts.reason ?? "cell decommission" }),
       signal: AbortSignal.timeout(15000),
     },
   );
   if (!suspendResp.ok) {
     const suspendBody = await suspendResp.text().catch(() => "");
     if (suspendResp.status === 409 && suspendBody.includes("pending")) {
+      if (opts.allowPendingReap === false) {
+        throw new Error("account is pending — not eligible for rebalance");
+      }
       await reapPendingDuringEvacuation(env, cell, accountId);
       return { reaped: true };
     }
@@ -3264,6 +3363,223 @@ async function handlePlacementRestore(request, env) {
     blocked: blockedAfter.length > 0 ? blockedAfter : blocked,
     remaining,
     unplaced,
+  });
+}
+
+async function rebalanceTargetForAccount(env, cellsByName, destinationCells, counts, accountId, route) {
+  const current = cellsByName.get(route?.cell || "");
+  if (!current) {
+    return { skip: { account_id: accountId, reason: `current cell ${route?.cell || ""} is not registered` } };
+  }
+  if (!current.endpoint || !current.provision_token) {
+    return { skip: { account_id: accountId, cell: current.name, reason: "current cell has no provision endpoint" } };
+  }
+  const contact = await fetchAccountContact(current, accountId);
+  if (contact.error) {
+    return { skip: { account_id: accountId, cell: current.name, reason: contact.error } };
+  }
+  if (contact.status !== "active" && contact.status !== "suspended") {
+    return { skip: { account_id: accountId, cell: current.name, reason: `status ${contact.status || "unknown"} is not eligible` } };
+  }
+  const policy = await fetchPlacementPolicySnapshot(current, accountId);
+  if (!policy) {
+    return { skip: { account_id: accountId, cell: current.name, reason: "could not read placement policy" } };
+  }
+  if (!cellMatchesPolicy(current, policy) && !bestPolicyCell(destinationCells, policy, counts)) {
+    return { skip: { account_id: accountId, cell: current.name, reason: "no eligible accepting cell for hard pin" } };
+  }
+  const target = bestRebalanceCell(destinationCells, current, policy, counts);
+  if (!target || target.cell.name === current.name) {
+    return {};
+  }
+  return {
+    accountId,
+    current,
+    target: target.cell,
+    reason: target.reason,
+  };
+}
+
+async function handlePlacementRebalance(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (!env.ARCHIVES) {
+    return err("R2 bucket not bound — witwave-archives is not configured", 501);
+  }
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // defaults are fine
+  }
+  let batch = Number(body.batch);
+  if (!Number.isFinite(batch) || batch < 1) {
+    batch = 1;
+  }
+  batch = Math.min(Math.floor(batch), 5);
+  const dryRun = body.dry_run === true;
+
+  const cells = await listCells(env);
+  const cellsByName = new Map(cells.map((cell) => [cell.name, cell]));
+  const destinationCells = cells.filter(
+    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+  );
+  const counts = await accountCountsByCell(env);
+  const selectionCounts = new Map(counts);
+  const targets = [];
+  const skipped = [];
+
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("acct:".length);
+      const route = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!route) {
+        continue;
+      }
+      const candidate = await rebalanceTargetForAccount(
+        env,
+        cellsByName,
+        destinationCells,
+        selectionCounts,
+        accountId,
+        route,
+      );
+      if (candidate.skip) {
+        skipped.push(candidate.skip);
+        continue;
+      }
+      if (!candidate.target) {
+        continue;
+      }
+      selectionCounts.set(
+        candidate.current.name,
+        Math.max(0, (selectionCounts.get(candidate.current.name) ?? 0) - 1),
+      );
+      selectionCounts.set(
+        candidate.target.name,
+        (selectionCounts.get(candidate.target.name) ?? 0) + 1,
+      );
+      targets.push(candidate);
+      if (targets.length >= batch) {
+        break;
+      }
+    }
+    if (targets.length >= batch) {
+      break;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  const results = [];
+  for (const target of targets) {
+    const accountId = target.accountId;
+    if (dryRun) {
+      results.push({
+        account_id: accountId,
+        ok: true,
+        from_cell: target.current.name,
+        to_cell: target.target.name,
+        reason: target.reason,
+        dry_run: true,
+      });
+      continue;
+    }
+
+    const claimKey = `rebalancing:${accountId}`;
+    const existingClaim = await env.DIRECTORY.get(claimKey, { type: "json" });
+    if (existingClaim) {
+      results.push({
+        account_id: accountId,
+        ok: false,
+        from_cell: target.current.name,
+        to_cell: target.target.name,
+        error: `already rebalancing since ${existingClaim.started_at}`,
+      });
+      continue;
+    }
+    await env.DIRECTORY.put(
+      claimKey,
+      JSON.stringify({
+        from_cell: target.current.name,
+        to_cell: target.target.name,
+        started_at: new Date().toISOString(),
+      }),
+      { expirationTtl: 900 },
+    );
+    try {
+      await evacuateAccount(
+        env,
+        target.current.name,
+        target.current,
+        accountId,
+        {
+          allowPendingReap: false,
+          reason: "placement rebalance",
+        },
+      );
+      const archived = await env.DIRECTORY.get(`archived:${accountId}`, { type: "json" });
+      if (!archived) {
+        throw new Error("account did not land in archive after evacuation");
+      }
+      await restoreAccount(env, target.target.name, target.target, accountId, archived);
+      counts.set(target.current.name, Math.max(0, (counts.get(target.current.name) ?? 0) - 1));
+      counts.set(target.target.name, (counts.get(target.target.name) ?? 0) + 1);
+      results.push({
+        account_id: accountId,
+        ok: true,
+        from_cell: target.current.name,
+        to_cell: target.target.name,
+        reason: target.reason,
+      });
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      results.push({
+        account_id: accountId,
+        ok: false,
+        from_cell: target.current.name,
+        to_cell: target.target.name,
+        error: msg,
+      });
+      console.log(`rebalance ${target.current.name}->${target.target.name}/${accountId} failed: ${msg}`);
+    } finally {
+      await env.DIRECTORY.delete(claimKey);
+    }
+  }
+
+  let remaining = 0;
+  let cursor2;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor: cursor2 });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("acct:".length);
+      const route = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!route) {
+        continue;
+      }
+      const candidate = await rebalanceTargetForAccount(
+        env,
+        cellsByName,
+        destinationCells,
+        counts,
+        accountId,
+        route,
+      );
+      if (candidate.target) {
+        remaining += 1;
+      }
+    }
+    cursor2 = page.list_complete ? undefined : page.cursor;
+  } while (cursor2);
+
+  return json({
+    schema_version: "witself.v0",
+    dry_run: dryRun,
+    rebalanced: results,
+    skipped: skipped.slice(0, 20),
+    remaining,
   });
 }
 
@@ -3747,6 +4063,12 @@ export default {
         return err("method not allowed", 405);
       }
       return handlePlacementRestore(request, env);
+    }
+    if (url.pathname === "/v1/placement:rebalance") {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handlePlacementRebalance(request, env);
     }
 
     // Fleet-wide pending-account expiry policy (fleet-token authorized).

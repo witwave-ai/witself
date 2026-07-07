@@ -351,6 +351,29 @@ type BlockedAccount struct {
 	Reason    string `json:"reason"`
 }
 
+type RebalanceResult struct {
+	Rebalanced []RebalancedAccount `json:"rebalanced"`
+	Skipped    []SkippedAccount    `json:"skipped,omitempty"`
+	Remaining  int                 `json:"remaining"`
+	DryRun     bool                `json:"dry_run,omitempty"`
+}
+
+type RebalancedAccount struct {
+	AccountID string `json:"account_id"`
+	OK        bool   `json:"ok"`
+	FromCell  string `json:"from_cell"`
+	ToCell    string `json:"to_cell"`
+	Reason    string `json:"reason,omitempty"`
+	DryRun    bool   `json:"dry_run,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type SkippedAccount struct {
+	AccountID string `json:"account_id"`
+	Cell      string `json:"cell,omitempty"`
+	Reason    string `json:"reason"`
+}
+
 // Restore asks the control plane to pull a batch of archived accounts from R2
 // and land them on the named cell. By default the Worker only selects archives
 // whose stored region matches the target cell; allRegions is an operator
@@ -434,6 +457,41 @@ func (c *Client) RestorePlacement(ctx context.Context, batch int, allRegions boo
 	var out RestoreResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return RestoreResult{}, fmt.Errorf("decode placement restore response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) Rebalance(ctx context.Context, batch int, dryRun bool) (RebalanceResult, error) {
+	body := struct {
+		Batch  int  `json:"batch"`
+		DryRun bool `json:"dry_run,omitempty"`
+	}{
+		Batch:  batch,
+		DryRun: dryRun,
+	}
+	rdr, err := marshalBody(body)
+	if err != nil {
+		return RebalanceResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/placement:rebalance", rdr)
+	if err != nil {
+		return RebalanceResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	hc := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return RebalanceResult{}, fmt.Errorf("control plane %s: %w", c.base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return RebalanceResult{}, fmt.Errorf("rebalance: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out RebalanceResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return RebalanceResult{}, fmt.Errorf("decode rebalance response: %w", err)
 	}
 	return out, nil
 }

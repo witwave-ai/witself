@@ -114,6 +114,7 @@ commands:
   destroy   tear the cell down
   refresh   reconcile state with the real cloud
   outputs   print the cell's stack outputs
+  rebalance move live accounts to better eligible cells by placement policy
 
 The cell name is composed: <cloud>-<account-alias>-<region-code>-<role>
 
@@ -160,6 +161,8 @@ flags:
   -restore-any-region  with -restore-archives: intentionally restore all
                   archived accounts, ignoring their stored region. Use for
                   explicit cross-cloud/cross-region evacuation tests only.
+  -batch          with rebalance: accounts to move per control-plane call (default 1)
+  -dry-run        with rebalance: print selected moves without changing accounts
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -214,8 +217,17 @@ func run(args []string) error {
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
 	restoreArchives := fs.Bool("restore-archives", false, "with up: pull every archived account in this cell's region from R2 after registration")
 	restoreAnyRegion := fs.Bool("restore-any-region", false, "with -restore-archives: pull every archived account from R2, ignoring stored region")
+	rebalanceBatch := fs.Int("batch", 1, "with rebalance: accounts to move per control-plane call")
+	rebalanceDryRun := fs.Bool("dry-run", false, "with rebalance: print selected moves without changing accounts")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+
+	if cmd == "rebalance" {
+		if *controlPlane == "" {
+			return fmt.Errorf("rebalance requires -control-plane")
+		}
+		return rebalanceFleet(context.Background(), *controlPlane, *fleetTokenFile, *rebalanceBatch, *rebalanceDryRun)
 	}
 
 	// Validate functional + label inputs before composing the name.
@@ -873,6 +885,64 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 			// The acct: pointer never landed, or the archived: entry
 			// wasn't retired — either way, spinning is the wrong answer.
 			return fmt.Errorf("placement restore is not making progress (%d eligible account(s) remaining after batch reported success)", res.Remaining)
+		}
+		prevRemaining = res.Remaining
+	}
+}
+
+func rebalanceFleet(ctx context.Context, controlPlane, fleetTokenFile string, batch int, dryRun bool) error {
+	if batch < 1 {
+		return fmt.Errorf("-batch must be at least 1")
+	}
+	if batch > 5 {
+		batch = 5
+	}
+	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
+	if err != nil {
+		return err
+	}
+	total := 0
+	prevRemaining := -1
+	for iter := 0; ; iter++ {
+		res, err := cl.Rebalance(ctx, batch, dryRun)
+		if err != nil {
+			return err
+		}
+		for _, a := range res.Rebalanced {
+			if !a.OK {
+				return fmt.Errorf("rebalance failed for %s from %s to %s: %s", a.AccountID, a.FromCell, a.ToCell, a.Error)
+			}
+			total++
+			if dryRun || a.DryRun {
+				fmt.Fprintf(os.Stderr, "would move %s from %s to %s", a.AccountID, a.FromCell, a.ToCell)
+			} else {
+				fmt.Fprintf(os.Stderr, "moved %s from %s to %s", a.AccountID, a.FromCell, a.ToCell)
+			}
+			if a.Reason != "" {
+				fmt.Fprintf(os.Stderr, " (%s)", a.Reason)
+			}
+			fmt.Fprintln(os.Stderr)
+		}
+		if len(res.Skipped) > 0 && iter == 0 {
+			fmt.Fprintf(os.Stderr, "%d account(s) skipped by the control plane\n", len(res.Skipped))
+		}
+		if dryRun {
+			fmt.Fprintf(os.Stderr, "%d account(s) would be moved in this batch; %d move candidate(s) currently visible\n", total, res.Remaining)
+			return nil
+		}
+		if res.Remaining == 0 {
+			if total == 0 && iter == 0 {
+				fmt.Fprintln(os.Stderr, "no live accounts currently need rebalancing")
+			} else {
+				fmt.Fprintf(os.Stderr, "%d account(s) rebalanced\n", total)
+			}
+			return nil
+		}
+		if len(res.Rebalanced) == 0 {
+			return fmt.Errorf("rebalance stalled with %d account(s) still eligible to move", res.Remaining)
+		}
+		if prevRemaining != -1 && res.Remaining >= prevRemaining {
+			return fmt.Errorf("rebalance is not making progress (%d eligible account(s) remaining after a successful batch)", res.Remaining)
 		}
 		prevRemaining = res.Remaining
 	}
