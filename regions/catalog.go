@@ -12,17 +12,20 @@ import (
 //go:embed catalog.json
 var catalogFS embed.FS
 
+// Catalog is the canonical placement-region mapping for all supported clouds.
 type Catalog struct {
 	SchemaVersion string            `json:"schema_version"`
 	Regions       map[string]Region `json:"regions"`
 }
 
+// Region describes one canonical Witself region and its provider mappings.
 type Region struct {
 	Name      string              `json:"name"`
 	Geography string              `json:"geography"`
 	Providers map[string]Provider `json:"providers"`
 }
 
+// Provider maps one canonical region to a cloud provider's native region.
 type Provider struct {
 	Region string `json:"region"`
 	Name   string `json:"name"`
@@ -35,6 +38,7 @@ var (
 	loadErr  error
 )
 
+// Load returns the embedded canonical region catalog.
 func Load() (Catalog, error) {
 	loadOnce.Do(func() {
 		raw, err := catalogFS.ReadFile("catalog.json")
@@ -53,6 +57,7 @@ func Load() (Catalog, error) {
 	return loaded, loadErr
 }
 
+// Codes returns every canonical region code in sorted order.
 func Codes() ([]string, error) {
 	catalog, err := Load()
 	if err != nil {
@@ -66,6 +71,7 @@ func Codes() ([]string, error) {
 	return codes, nil
 }
 
+// ValidCode reports whether code exists in the canonical region catalog.
 func ValidCode(code string) bool {
 	catalog, err := Load()
 	if err != nil {

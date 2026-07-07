@@ -12,6 +12,7 @@ import (
 	"github.com/witwave-ai/witself/internal/placement"
 )
 
+// GetPlacementPolicy reads an account placement policy for an owning operator.
 func (s *Store) GetPlacementPolicy(ctx context.Context, accountID, operatorID string) (placement.Policy, error) {
 	var raw []byte
 	var isOwner bool
@@ -33,6 +34,7 @@ func (s *Store) GetPlacementPolicy(ctx context.Context, accountID, operatorID st
 	return placement.FromJSON(raw)
 }
 
+// SetPlacementPolicy replaces an active account placement policy for an owner.
 func (s *Store) SetPlacementPolicy(ctx context.Context, accountID, operatorID string, next placement.Policy) (placement.Policy, error) {
 	next, err := placement.Normalize(next)
 	if err != nil {

@@ -1,3 +1,4 @@
+// Package placement defines account-owned cell placement preferences and pins.
 package placement
 
 import (
@@ -10,6 +11,7 @@ import (
 	"github.com/witwave-ai/witself/regions"
 )
 
+// Policy describes where an account prefers or requires its cell placement.
 type Policy struct {
 	PreferredClouds   []string `json:"preferred_clouds"`
 	PreferredRegions  []string `json:"preferred_regions"`
@@ -20,6 +22,7 @@ type Policy struct {
 	RebalanceOn       []string `json:"rebalance_on"`
 }
 
+// ErrInvalidPolicy marks malformed or unsupported placement-policy input.
 var ErrInvalidPolicy = errors.New("invalid placement policy")
 
 var (
@@ -28,6 +31,7 @@ var (
 	legalRebalanceAxes = []string{"cloud", "region", "channel"}
 )
 
+// DefaultPolicy returns the fleet-wide default account placement preference.
 func DefaultPolicy() Policy {
 	return Policy{
 		PreferredClouds:   []string{},
@@ -40,6 +44,7 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// Normalize canonicalizes and validates a placement policy.
 func Normalize(p Policy) (Policy, error) {
 	var err error
 	if p.PreferredClouds, err = normalizeList("preferred_clouds", p.PreferredClouds, validCloud); err != nil {
@@ -66,6 +71,7 @@ func Normalize(p Policy) (Policy, error) {
 	return p, nil
 }
 
+// FromJSON decodes a placement policy, returning the default for empty input.
 func FromJSON(raw []byte) (Policy, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return DefaultPolicy(), nil
@@ -77,6 +83,7 @@ func FromJSON(raw []byte) (Policy, error) {
 	return Normalize(p)
 }
 
+// FromAny decodes a placement policy from a generic JSON-like object.
 func FromAny(v any) (Policy, error) {
 	if _, ok := v.(map[string]any); !ok {
 		return Policy{}, fmt.Errorf("%w: placement_policy must be an object", ErrInvalidPolicy)
@@ -88,6 +95,7 @@ func FromAny(v any) (Policy, error) {
 	return FromJSON(raw)
 }
 
+// MustJSON returns the normalized JSON form of p or panics if p is invalid.
 func MustJSON(p Policy) []byte {
 	normalized, err := Normalize(p)
 	if err != nil {

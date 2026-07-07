@@ -101,6 +101,7 @@ func GetAccount(ctx context.Context, endpoint, token string) (*AccountRecord, er
 	return &out.Account, nil
 }
 
+// GetPlacementPolicy reads the authenticated account owner's placement policy.
 func GetPlacementPolicy(ctx context.Context, endpoint, token string) (placement.Policy, error) {
 	var out struct {
 		PlacementPolicy placement.Policy `json:"placement_policy"`
@@ -112,6 +113,7 @@ func GetPlacementPolicy(ctx context.Context, endpoint, token string) (placement.
 	return placement.Normalize(out.PlacementPolicy)
 }
 
+// SetPlacementPolicy updates the authenticated account owner's placement policy.
 func SetPlacementPolicy(ctx context.Context, endpoint, token string, policy placement.Policy) (placement.Policy, error) {
 	policy, err := placement.Normalize(policy)
 	if err != nil {
