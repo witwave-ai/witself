@@ -32,12 +32,13 @@ var (
 
 // Cell is a fleet registry entry as sent/received over the API.
 type Cell struct {
-	Name      string  `json:"name"`
-	Endpoint  string  `json:"endpoint"`
-	Cloud     string  `json:"cloud,omitempty"`
-	Region    string  `json:"region,omitempty"`
-	Weight    float64 `json:"weight,omitempty"`
-	Accepting *bool   `json:"accepting,omitempty"`
+	Name       string  `json:"name"`
+	Endpoint   string  `json:"endpoint"`
+	Cloud      string  `json:"cloud,omitempty"`
+	Region     string  `json:"region,omitempty"`
+	RegionCode string  `json:"region_code,omitempty"`
+	Weight     float64 `json:"weight,omitempty"`
+	Accepting  *bool   `json:"accepting,omitempty"`
 	// ProvisionToken is the cell's account-provisioning credential, sent once at
 	// registration; the control plane stores it and never returns it on reads.
 	ProvisionToken string `json:"provision_token,omitempty"`

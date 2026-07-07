@@ -23,7 +23,8 @@
 // counting arrives with the Durable Object authority.
 //
 // KV schema (v0, one namespace):
-//   acct:<account_id>    -> {"cell":"<name>","endpoint":"https://..."}
+//   acct:<account_id>    -> {"cell":"<name>","endpoint":"https://...",
+//                            "region","region_code"}
 //   pending:<account_id> -> {"cell":"<name>","created_at":"<iso>"}
 //                           reap candidate; dropped on activation/close/reap
 //   verify:<sha256(token)> -> {"account_id","cell","created_at"}
@@ -36,17 +37,18 @@
 //                           pending email change + rate-limit state
 //   undoemail:<account_id> -> {"code_hash","old_email","new_email","expires_at"}
 //                           (KV TTL 48h) — undo window shipped in the notice
-//   archived:<account_id> -> {"cell","region","object","exported_at","size",
-//                           "format_version"}
+//   archived:<account_id> -> {"cell","region","region_code","object",
+//                           "exported_at","size","format_version"}
 //                           post-evacuation state; the directory answers
 //                           "archived — awaiting placement" for these. Only
-//                           {cell,region,exported_at} are returned to the
-//                           public directory route; the rest are fleet-only.
+//                           {cell,region,region_code,exported_at} are returned
+//                           to the public directory route; the rest are
+//                           fleet-only.
 //   evac:<cell>          -> {"started_at","done","failed"[],"remaining",
 //                           "finished_at"}
 //                           cross-batch progress for a cell-wide evacuation.
-//   cell:<name>          -> {"endpoint","cloud","region","owner","weight",
-//                             "accepting","registered_at"}
+//   cell:<name>          -> {"endpoint","cloud","region","region_code",
+//                             "owner","weight","accepting","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
 //                             "uses","note","created_at","cell","region"}
 //   config:placement     -> {"strategy":"weighted"|"pinned","pinned_cell"}
@@ -1290,12 +1292,16 @@ async function handleCells(request, env, url) {
     if (body.provision_token != null && typeof body.provision_token !== "string") {
       return err("provision_token must be a string", 400);
     }
+    if (body.region_code != null && !REGION_NAME.test(body.region_code)) {
+      return err("region_code must be a canonical region code like usw2", 400);
+    }
     const key = `cell:${body.name}`;
     const existing = await env.DIRECTORY.get(key, { type: "json" });
     const entry = {
       endpoint: body.endpoint,
       cloud: body.cloud || "",
       region: body.region || "",
+      region_code: body.region_code ?? existing?.region_code ?? "",
       // v0: one fleet token, one owner. With per-party credentials the owner
       // comes from the credential, never the payload.
       owner: "witwave",
@@ -1465,7 +1471,12 @@ async function handleSignup(request, env) {
   // with the DO authority).
   await env.DIRECTORY.put(
     `acct:${provisioned.account_id}`,
-    JSON.stringify({ cell: cell.name, endpoint: cell.endpoint }),
+    JSON.stringify({
+      cell: cell.name,
+      endpoint: cell.endpoint,
+      region: cell.region ?? null,
+      region_code: cell.region_code ?? null,
+    }),
   );
   const fresh = (await env.DIRECTORY.get(inviteKey, { type: "json" })) ?? invite;
   fresh.uses = (fresh.uses ?? 0) + 1;
@@ -2876,6 +2887,7 @@ async function evacuateAccount(env, cellName, cell, accountId) {
     JSON.stringify({
       cell: cellName,
       region: cell.region ?? null,
+      region_code: cell.region_code ?? null,
       object: objectKey,
       exported_at: nowISO,
       size,
@@ -3189,6 +3201,7 @@ async function restoreAccount(env, cellName, cell, accountId, archived) {
       cell: cellName,
       endpoint: cell.endpoint,
       region: cell.region,
+      region_code: cell.region_code ?? null,
     }),
   );
 
@@ -3422,6 +3435,7 @@ export default {
             archived: {
               cell: archived.cell,
               region: archived.region ?? null,
+              region_code: archived.region_code ?? null,
               exported_at: archived.exported_at,
             },
           },

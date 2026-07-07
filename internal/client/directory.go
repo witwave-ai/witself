@@ -16,6 +16,7 @@ import (
 type ErrAccountArchived struct {
 	Cell       string
 	Region     string
+	RegionCode string
 	Object     string
 	ExportedAt time.Time
 }
@@ -38,6 +39,7 @@ func LookupAccount(ctx context.Context, controlPlane, accountID string) (cellNam
 		Archived *struct {
 			Cell       string    `json:"cell"`
 			Region     string    `json:"region"`
+			RegionCode string    `json:"region_code"`
 			Object     string    `json:"object"`
 			ExportedAt time.Time `json:"exported_at"`
 		} `json:"archived,omitempty"`
@@ -50,6 +52,7 @@ func LookupAccount(ctx context.Context, controlPlane, accountID string) (cellNam
 		return "", "", &ErrAccountArchived{
 			Cell:       out.Archived.Cell,
 			Region:     out.Archived.Region,
+			RegionCode: out.Archived.RegionCode,
 			Object:     out.Archived.Object,
 			ExportedAt: out.Archived.ExportedAt,
 		}

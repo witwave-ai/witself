@@ -38,6 +38,7 @@ import (
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/cell"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
+	"github.com/witwave-ai/witself/infra/pulumi/internal/regions"
 )
 
 const projectName = "witself-infra"
@@ -45,10 +46,12 @@ const projectName = "witself-infra"
 // clouds are the functional provider selectors (also the name token).
 var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true}
 
-// regionCodes maps a real cloud region to the short token used in the cell name.
-// This is a lookup table, not an algorithm: naive abbreviation collides (e.g.
-// ap-south-1 vs ap-southeast-1). Unknown regions are a hard error, not a guess.
-var regionCodes = map[string]string{
+// legacyRegionCodes maps real cloud regions outside the three-cloud placement
+// catalog to the short token used in existing cell names and state backends.
+// The placement catalog is authoritative for region_code registration; this
+// fallback keeps older/single-provider regions from breaking while the catalog
+// is deliberately limited to high-fidelity AWS/GCP/Azure mappings.
+var legacyRegionCodes = map[string]string{
 	"us-east-1": "use1", "us-east-2": "use2",
 	"us-west-1": "usw1", "us-west-2": "usw2",
 	"ca-central-1": "cac1",
@@ -216,9 +219,9 @@ func run(args []string) error {
 	if !clouds[*cloud] {
 		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure)", *cloud)
 	}
-	regionCode, ok := regionCodes[*region]
+	regionCode, placementRegionCode, ok := resolveRegionCode(*cloud, *region)
 	if !ok {
-		return fmt.Errorf("unknown -region %q; add it to the region-code table", *region)
+		return fmt.Errorf("unknown -region %q for -cloud %s; add it to regions/catalog.json or the legacy region table", *region, *cloud)
 	}
 	if !label.MatchString(*accountAlias) {
 		return fmt.Errorf("-account-alias %q must be lowercase alphanumeric/hyphen", *accountAlias)
@@ -521,7 +524,7 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region)
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
@@ -571,7 +574,7 @@ func run(args []string) error {
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
 // hostname is returned so callers can chain a readiness poll before the
 // next post-provision step (restore-archives).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region string) (string, error) {
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode string) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return "", err
@@ -592,12 +595,24 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 		Endpoint:       "https://" + host,
 		Cloud:          cloud,
 		Region:         region,
+		RegionCode:     regionCode,
 		ProvisionToken: provisionToken,
 	}); err != nil {
 		return "", err
 	}
 	fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
 	return host, nil
+}
+
+func resolveRegionCode(cloud, providerRegion string) (nameRegionCode, placementRegionCode string, ok bool) {
+	if code, _, _, found := regions.LookupProviderRegion(cloud, providerRegion); found {
+		return code, code, true
+	}
+	code, found := legacyRegionCodes[providerRegion]
+	if !found {
+		return "", "", false
+	}
+	return code, "", true
 }
 
 // waitForCellHealthy polls the cell's public API endpoint until GET

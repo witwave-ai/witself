@@ -1,0 +1,144 @@
+{
+  "schema_version": "witself.regions.v1",
+  "description": "Canonical Witself placement regions and provider-native mappings. Canonical region codes are the account-placement vocabulary; provider mappings are the deployment vocabulary.",
+  "regions": {
+    "use1": {
+      "name": "US East 1",
+      "geography": "United States",
+      "providers": {
+        "aws": {
+          "region": "us-east-1",
+          "name": "US East (N. Virginia)",
+          "match": "native",
+          "az_count": 6,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "us-east1",
+          "name": "South Carolina",
+          "match": "native"
+        },
+        "azure": {
+          "region": "eastus",
+          "name": "East US",
+          "match": "native"
+        }
+      }
+    },
+    "usw1": {
+      "name": "US West 1",
+      "geography": "United States",
+      "providers": {
+        "aws": {
+          "region": "us-west-1",
+          "name": "US West (N. California)",
+          "match": "native",
+          "az_count": 3,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "us-west1",
+          "name": "Oregon",
+          "match": "native"
+        },
+        "azure": {
+          "region": "westus",
+          "name": "West US",
+          "match": "native"
+        }
+      }
+    },
+    "usw2": {
+      "name": "US West 2",
+      "geography": "United States",
+      "providers": {
+        "aws": {
+          "region": "us-west-2",
+          "name": "US West (Oregon)",
+          "match": "native",
+          "az_count": 4,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "us-west2",
+          "name": "Los Angeles",
+          "match": "native"
+        },
+        "azure": {
+          "region": "westus2",
+          "name": "West US 2",
+          "match": "native"
+        }
+      }
+    },
+    "euc1": {
+      "name": "Europe Central 1",
+      "geography": "Germany",
+      "providers": {
+        "aws": {
+          "region": "eu-central-1",
+          "name": "Europe (Frankfurt)",
+          "match": "native",
+          "az_count": 3,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "europe-west3",
+          "name": "Frankfurt",
+          "match": "native"
+        },
+        "azure": {
+          "region": "germanywestcentral",
+          "name": "Germany West Central",
+          "match": "native"
+        }
+      }
+    },
+    "euw1": {
+      "name": "Europe West 1",
+      "geography": "Ireland",
+      "providers": {
+        "aws": {
+          "region": "eu-west-1",
+          "name": "Europe (Ireland)",
+          "match": "native",
+          "az_count": 3,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "europe-west1",
+          "name": "Belgium",
+          "match": "nearest"
+        },
+        "azure": {
+          "region": "northeurope",
+          "name": "North Europe",
+          "match": "native"
+        }
+      }
+    },
+    "euw2": {
+      "name": "Europe West 2",
+      "geography": "United Kingdom",
+      "providers": {
+        "aws": {
+          "region": "eu-west-2",
+          "name": "Europe (London)",
+          "match": "native",
+          "az_count": 3,
+          "opt_in": "not_required"
+        },
+        "gcp": {
+          "region": "europe-west2",
+          "name": "London",
+          "match": "native"
+        },
+        "azure": {
+          "region": "uksouth",
+          "name": "UK South",
+          "match": "nearest"
+        }
+      }
+    }
+  }
+}
