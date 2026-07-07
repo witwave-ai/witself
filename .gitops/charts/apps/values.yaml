@@ -70,6 +70,11 @@ apps:
           issuerRef:
             kind: ClusterIssuer
             name: letsencrypt-prod
+          acme:
+            enabled: false
+            email: ""
+            server: https://acme-v02.api.letsencrypt.org/directory
+            privateKeySecretName: letsencrypt-prod-private-key
     secrets:
       bootstrap:
         enabled: true

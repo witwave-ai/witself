@@ -23,21 +23,13 @@ platform:
       - protocol: HTTP
         port: 80
     certificateARNs: []
-  azureAlbController:
-    enabled: false
-    chartRepoURL: mcr.microsoft.com/application-lb/charts
-    chartName: alb-controller
-    chartVersion: 1.11.1
-    namespace: azure-alb-system
-    controllerNamespace: azure-alb-system
-    podIdentity:
-      clientID: ""
   certManager:
     enabled: true
     chartRepoURL: https://charts.jetstack.io
     chartName: cert-manager
     chartVersion: v1.20.3
     namespace: cert-manager
+    enableGatewayAPI: false
     ignoreWebhookConfigurationDifferences: false
     crds:
       enabled: true

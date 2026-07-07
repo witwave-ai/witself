@@ -92,11 +92,13 @@ the shared Pulumi state backend plus the first workload substrate slices:
 resource group, VNet, workload subnet, PostgreSQL-delegated DB subnet,
 controlled outbound egress through Azure NAT Gateway, private Azure Database
 for PostgreSQL Flexible Server, per-cell Azure Key Vault app secrets, AKS with
-OIDC/workload identity enabled, Azure DNS delegation, and GitOps identities for
-platform add-ons such as External Secrets Operator, ExternalDNS, and the Azure
-ALB Controller for Application Gateway for Containers. The GitOps app tier can
-then render the Azure Gateway API path for the Witself API. Automated Azure TLS
-issuance/redirect policy is the remaining Azure ingress parity slice.
+OIDC/workload identity enabled, native AKS cluster autoscaler on the system
+node pool, Azure DNS delegation, and GitOps identities for platform add-ons such
+as External Secrets Operator and ExternalDNS. Pulumi also enables the
+AKS-managed Application Gateway for Containers ALB Controller add-on so the
+GitOps app tier can render the Azure Gateway API path for the Witself API,
+including cert-manager-managed Let's Encrypt TLS for HTTPS. HTTP-to-HTTPS
+redirect policy remains a follow-up ingress polish slice.
 
 ```sh
 az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
@@ -145,8 +147,10 @@ egress in the same one-shot `up` path.
 The Azure substrate includes a NAT Gateway and static public IP on the workload
 subnet, with default outbound access disabled, so AKS workloads have a
 predictable controlled egress path. AKS uses Azure CNI overlay, a one-node
-minimal system pool, and OIDC/workload identity so GitOps platform components
-can read cloud secrets without long-lived credentials. Its
+minimal system pool that can autoscale to 20 nodes (`prod` starts at two nodes
+and also caps at 20), and OIDC/workload identity so GitOps platform components
+can read cloud secrets without long-lived
+credentials. Its
 PostgreSQL Flexible Server is private only, uses the delegated DB subnet, and
 resolves through the cell's private DNS zone link. Azure stores the cell DB JSON,
 first-operator bootstrap token, and account-provision token as JSON secrets in
@@ -156,9 +160,11 @@ it read access to the cell Key Vault. Pulumi creates the Azure DNS zone,
 delegates it from Cloudflare when `CLOUDFLARE_API_TOKEN` is present, and creates
 the ExternalDNS managed identity plus federated credential for the
 `external-dns/external-dns` service account. Pulumi also reserves a delegated
-subnet for Azure Application Gateway for Containers, creates the ALB Controller
-managed identity/role assignments/federation, and passes those outputs into
-GitOps so Argo installs the controller and renders the Gateway API manifests.
+subnet for Azure Application Gateway for Containers, enables the AKS-managed ALB
+Controller add-on, grants that add-on identity permission to join the delegated
+subnet, and passes the subnet ID into GitOps so Argo renders the Gateway API
+manifests plus cert-manager's Gateway HTTP-01 issuer/certificate resources for
+HTTPS.
 Add `-argocd` to the Azure `up` command to install the same Argo CD app-of-apps
 layer used by AWS and GCP.
 
@@ -169,10 +175,10 @@ token is read from `WITSELF_FLEET_TOKEN`, then `~/.witself/tokens/fleet.token`.
 Omit `-control-plane` entirely and no registration happens — the self-hosted
 path is the same command without the flag.
 
-With `-argocd` on GCP, `up` also waits for the Argo CD Applications to report
-`Synced/Healthy` through the GKE API after the public endpoint is reachable and
-archives have been restored. This catches late DNS/TLS/ManagedCertificate health
-convergence before the command exits.
+With `-argocd` on GCP and Azure, `up` also waits for the Argo CD Applications to
+report `Synced/Healthy` through the cluster API after Pulumi finishes. This
+catches late DNS, ingress, certificate, and app-of-apps convergence before the
+command exits.
 
 The examples use `-profile minimal`: cheap, disposable sandbox shapes with small
 managed Postgres instances and clean teardown behavior. GCP `prod` raises Cloud

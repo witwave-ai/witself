@@ -81,12 +81,6 @@ apps:
       enabled: true
       albSubnetID: %q
 platform:
-  azureAlbController:
-    enabled: true
-    namespace: %q
-    controllerNamespace: %q
-    podIdentity:
-      clientID: %q
   externalDNS:
     enabled: true
     serviceAccountAnnotations:
@@ -116,7 +110,7 @@ platform:
     serviceAccountAnnotations:
       azure.workload.identity/client-id: %q
       azure.workload.identity/tenant-id: %q
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, azDNS.zoneName, azDNS.apiHost, net.albSubnetID.ToStringOutput(), azureALBControllerNamespace, azureALBControllerNamespace, albController.clientID, azDNS.clientID, azureExternalDNSConfigSecret, azDNS.tenantID, azDNS.subscriptionID, azDNS.resourceGroupName, azureExternalDNSConfigSecret, secrets.vaultURL, eso.clientID, eso.tenantID)
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, azDNS.zoneName, azDNS.apiHost, net.albSubnetID.ToStringOutput(), azDNS.clientID, azureExternalDNSConfigSecret, azDNS.tenantID, azDNS.subscriptionID, azDNS.resourceGroupName, azureExternalDNSConfigSecret, secrets.vaultURL, eso.clientID, eso.tenantID)
 	}
 
 	rootDependsOn := append([]pulumi.Resource{release}, eso.dependencies...)

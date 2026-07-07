@@ -404,6 +404,21 @@ func run(args []string) error {
 		}, "Microsoft.Network", "Microsoft.NetworkFunction", "Microsoft.ServiceNetworking", "Microsoft.DBforPostgreSQL", "Microsoft.KeyVault", "Microsoft.ManagedIdentity", "Microsoft.Compute", "Microsoft.ContainerService"); err != nil {
 			return err
 		}
+		if cmd == "up" && *argocd {
+			if err := backend.EnsureAzureFeatures(ctx, func(m string) {
+				fmt.Fprintln(os.Stderr, "  "+m)
+			},
+				backend.AzureFeature{Namespace: "Microsoft.ContainerService", Name: "ManagedGatewayAPIPreview"},
+				backend.AzureFeature{Namespace: "Microsoft.ContainerService", Name: "ApplicationLoadBalancerPreview"},
+			); err != nil {
+				return err
+			}
+			if err := backend.EnsureAzureProviders(ctx, func(m string) {
+				fmt.Fprintln(os.Stderr, "  "+m)
+			}, "Microsoft.ContainerService"); err != nil {
+				return err
+			}
+		}
 	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))

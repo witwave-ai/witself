@@ -109,6 +109,12 @@ availability, enables PITR plus retained/final backups, and increases disk
 headroom; it is meant for persistent cells rather than nightly save-money
 teardown loops.
 
+The intended Kubernetes node envelope is `1..20` for `minimal` and `2..20` for
+`prod` across clouds. AKS exposes that envelope directly on the system node pool.
+AWS EKS Auto Mode and GKE Autopilot are currently left in their managed scaling
+modes; literal node-count min/max controls will require custom EKS Auto Mode
+NodePools and/or a future GKE Standard node-pool path.
+
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
 # Credentials, not only `gcloud auth login`.
@@ -151,20 +157,21 @@ Gateway, static public IPv4 address, private DNS zone/link, private Azure
 Database for PostgreSQL Flexible Server, the logical `witself` database, and a
 per-cell Key Vault containing DB/bootstrap/provision JSON secrets. It also
 creates an AKS cluster in the workload subnet with Azure CNI overlay, controlled
-egress through the cell NAT Gateway, and OIDC/workload identity enabled. It also
-creates an ESO managed identity, federates it to the
+egress through the cell NAT Gateway, native cluster autoscaler enabled on the
+system node pool, and OIDC/workload identity enabled. It also creates an ESO
+managed identity, federates it to the
 `external-secrets/external-secrets` Kubernetes service account, grants that
 identity read access to the cell Key Vault, and can install Argo CD when
 `-argocd` is set. It creates an Azure DNS zone for the cell, delegates that zone
 from Cloudflare when `CLOUDFLARE_API_TOKEN` is available, and creates an
 ExternalDNS managed identity plus federated credential. It also creates a
 dedicated subnet delegated to `Microsoft.ServiceNetworking/trafficControllers`
-for Azure Application Gateway for Containers, creates the ALB Controller managed
-identity, role assignments, and federated credential, then passes those outputs
-into GitOps. The GitOps platform layer installs Microsoft's ALB Controller Helm
-chart, and the app layer renders the Gateway API manifests for the Witself API.
-Automated certificate issuance and HTTPS redirect policy are the remaining Azure
-public ingress/TLS slice.
+for Azure Application Gateway for Containers, enables the AKS-managed ALB
+Controller add-on, grants the add-on identity permission to join that subnet,
+then passes the subnet ID into GitOps. The app layer renders the Gateway API
+manifests for the Witself API plus cert-manager's Gateway HTTP-01
+issuer/certificate resources for Let's Encrypt HTTPS. HTTP-to-HTTPS redirect
+policy remains a follow-up Azure ingress polish slice.
 
 ```sh
 # Pulumi's azblob backend and azurekeyvault secrets provider can use Azure CLI
@@ -203,9 +210,12 @@ state vault so Pulumi can create and use the state encryption key.
 
 `up` registers the required workload resource providers if needed before running
 Pulumi, so a fresh subscription can create the VNet, NAT resources, database,
-Key Vault, and AKS cluster in the same command. The workload subnet has default
-outbound access disabled and egresses through the NAT Gateway; the DB subnet has
-default outbound access disabled and is delegated to
+Key Vault, and AKS cluster in the same command. With `-argocd`, it waits for the
+Argo CD app-of-apps tree to report `Synced/Healthy` after Pulumi finishes. The
+AKS system node pool uses the native cluster autoscaler (`1..20` nodes for
+`minimal`, `2..20` for `prod`). The workload subnet has default outbound access
+disabled and egresses through the NAT Gateway; the DB subnet has default
+outbound access disabled and is delegated to
 `Microsoft.DBforPostgreSQL/flexibleServers`; the ALB subnet has default outbound
 access disabled and is delegated to
 `Microsoft.ServiceNetworking/trafficControllers`. The PostgreSQL server uses
@@ -347,15 +357,17 @@ control plane forgets them.
     database on the delegated DB subnet.
 20. **[done]** Azure Key Vault app secrets for DB, bootstrap, and provision
     material.
-21. **[done]** Azure AKS with Azure CNI overlay, controlled egress through the
-    cell NAT Gateway, and OIDC/workload identity enabled.
+21. **[done]** Azure AKS with Azure CNI overlay, native cluster autoscaler,
+    controlled egress through the cell NAT Gateway, and OIDC/workload identity
+    enabled.
 22. **[done]** Azure ESO Workload Identity and Key Vault read access.
 23. **[done]** Azure GitOps/Argo CD installation parity.
 24. **[done]** Azure DNS delegation and ExternalDNS Workload Identity parity.
-25. **[done]** Azure Application Gateway for Containers subnet, ALB Controller
-    Workload Identity/RBAC, GitOps controller install, and Gateway API HTTP
+25. **[done]** Azure Application Gateway for Containers subnet, AKS-managed ALB
+    Controller add-on, delegated subnet permission, and Gateway API HTTP
     manifest path.
-26. Azure HTTPS parity: cert-manager issuer/certificate automation and HTTP to
-    HTTPS redirect policy for the Azure Gateway path.
-27. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+26. **[done]** Azure HTTPS parity with cert-manager Gateway HTTP-01
+    issuer/certificate automation for the Azure Gateway path.
+27. Azure HTTP-to-HTTPS redirect policy.
+28. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
     remaining production hardening.

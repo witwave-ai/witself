@@ -30,9 +30,10 @@ For DNS, keep the stable names here:
   GKE-native path: GKE Ingress, BackendConfig health checks, a reserved global
   static IP, FrontendConfig HTTP-to-HTTPS redirects, and a Google-managed
   certificate. `azureGateway` is the Azure Application Gateway for Containers
-  path. It renders Gateway API companion manifests when enabled; Pulumi turns it
-  on at runtime after creating the ALB Controller identity and delegated
-  association subnet.
+  path. It renders Gateway API companion manifests plus cert-manager Gateway
+  HTTP-01 issuer/certificate resources for HTTPS when enabled; Pulumi turns it
+  on at runtime after enabling the AKS-managed ALB Controller add-on and
+  injecting the delegated association subnet.
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.
@@ -42,4 +43,4 @@ DNS zone creation, Cloudflare parent-zone delegation, certificate/static-IP or
 gateway-association cloud resources, and the cloud IAM role/service account
 ExternalDNS uses. Pulumi injects generated cloud outputs, such as the ACM
 certificate ARN, GCP static IP name, Azure ALB subnet ID, and cloud identity
-annotations, into the root app at deploy time.
+annotations for GitOps-managed add-ons, into the root app at deploy time.

@@ -18,12 +18,6 @@ platform:
     enabled: false
     certificateARNs: []
     listeners: []
-  azureAlbController:
-    enabled: false
-    namespace: azure-alb-system
-    controllerNamespace: azure-alb-system
-    podIdentity:
-      clientID: ""
   externalDNS:
     enabled: false
     chartRepoURL: https://kubernetes-sigs.github.io/external-dns/

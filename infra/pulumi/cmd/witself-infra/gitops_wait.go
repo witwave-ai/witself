@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"gopkg.in/yaml.v3"
 )
 
 type argoApplication struct {
@@ -45,10 +46,17 @@ type argoApplicationLister interface {
 }
 
 func waitForPostUpConvergence(ctx context.Context, stack auto.Stack, cloud string, argocd bool, maxWait, pollEvery time.Duration) error {
-	if !argocd || cloud != "gcp" {
+	if !argocd {
 		return nil
 	}
-	return waitForGCPArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+	switch cloud {
+	case "gcp":
+		return waitForGCPArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+	case "azure":
+		return waitForAzureArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+	default:
+		return nil
+	}
 }
 
 func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
@@ -57,6 +65,18 @@ func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, ma
 		return fmt.Errorf("read outputs for GitOps verification: %w", err)
 	}
 	lister, namespace, err := newGCPArgoListerFromOutputs(outs)
+	if err != nil {
+		return err
+	}
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, maxWait, pollEvery)
+}
+
+func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+	outs, err := stack.Outputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read outputs for GitOps verification: %w", err)
+	}
+	lister, namespace, err := newAzureArgoListerFromOutputs(ctx, outs)
 	if err != nil {
 		return err
 	}
@@ -203,6 +223,142 @@ func (l *gcpArgoLister) ListArgoApplications(ctx context.Context, namespace stri
 		return nil, fmt.Errorf("decode Argo CD applications: %w", err)
 	}
 	return out.Items, nil
+}
+
+type tokenArgoLister struct {
+	baseURL string
+	client  *http.Client
+	token   string
+}
+
+func newAzureArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap) (*tokenArgoLister, string, error) {
+	resourceGroup := outputString(outs, "resourceGroup")
+	if resourceGroup == "" {
+		return nil, "", fmt.Errorf("stack exports no resourceGroup; cannot verify Argo CD health")
+	}
+	clusterName := outputString(outs, "aksCluster")
+	if clusterName == "" {
+		return nil, "", fmt.Errorf("stack exports no aksCluster; cannot verify Argo CD health")
+	}
+	namespace := outputString(outs, "argocdNamespace")
+	if namespace == "" {
+		namespace = "argocd"
+	}
+	raw, err := azureAKSKubeconfig(ctx, resourceGroup, clusterName)
+	if err != nil {
+		return nil, "", err
+	}
+	lister, err := newAzureArgoListerFromKubeconfig(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	return lister, namespace, nil
+}
+
+func newAzureArgoListerFromKubeconfig(raw []byte) (*tokenArgoLister, error) {
+	var cfg kubeconfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("decode AKS kubeconfig: %w", err)
+	}
+	if len(cfg.Clusters) == 0 {
+		return nil, fmt.Errorf("AKS kubeconfig contained no clusters")
+	}
+	server := strings.TrimSpace(cfg.Clusters[0].Cluster.Server)
+	if server == "" {
+		return nil, fmt.Errorf("AKS kubeconfig cluster contained no server")
+	}
+	caData := strings.TrimSpace(cfg.Clusters[0].Cluster.CertificateAuthorityData)
+	if caData == "" {
+		return nil, fmt.Errorf("AKS kubeconfig cluster contained no certificate-authority-data")
+	}
+	ca, err := base64.StdEncoding.DecodeString(caData)
+	if err != nil {
+		return nil, fmt.Errorf("decode AKS certificate authority: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		return nil, fmt.Errorf("AKS certificate authority output did not contain PEM data")
+	}
+	token := ""
+	for _, user := range cfg.Users {
+		token = strings.TrimSpace(user.User.Token)
+		if token != "" {
+			break
+		}
+	}
+	if token == "" {
+		return nil, fmt.Errorf("AKS kubeconfig contained no bearer token")
+	}
+	return &tokenArgoLister{
+		baseURL: strings.TrimRight(server, "/"),
+		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		}},
+		token: token,
+	}, nil
+}
+
+func azureAKSKubeconfig(ctx context.Context, resourceGroup, clusterName string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "az", "aks", "get-credentials",
+		"--resource-group", resourceGroup,
+		"--name", clusterName,
+		"--format", "exec",
+		"--file", "-",
+		"--overwrite-existing",
+		"--only-show-errors",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		detail := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			detail = strings.TrimSpace(string(ee.Stderr))
+		}
+		if detail != "" {
+			return nil, fmt.Errorf("get AKS credentials: %w: %s", err, detail)
+		}
+		return nil, fmt.Errorf("get AKS credentials: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("get AKS credentials: command returned empty kubeconfig")
+	}
+	return out, nil
+}
+
+func (l *tokenArgoLister) ListArgoApplications(ctx context.Context, namespace string) ([]argoApplication, error) {
+	url := fmt.Sprintf("%s/apis/argoproj.io/v1alpha1/namespaces/%s/applications", l.baseURL, namespace)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+l.token)
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query Argo CD applications: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("query Argo CD applications: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out argoApplicationList
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode Argo CD applications: %w", err)
+	}
+	return out.Items, nil
+}
+
+type kubeconfig struct {
+	Clusters []struct {
+		Cluster struct {
+			Server                   string `yaml:"server"`
+			CertificateAuthorityData string `yaml:"certificate-authority-data"`
+		} `yaml:"cluster"`
+	} `yaml:"clusters"`
+	Users []struct {
+		User struct {
+			Token string `yaml:"token"`
+		} `yaml:"user"`
+	} `yaml:"users"`
 }
 
 func gcpADCAccessToken(ctx context.Context, project string) (string, error) {

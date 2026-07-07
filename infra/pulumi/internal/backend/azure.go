@@ -23,6 +23,11 @@ type azureAccount struct {
 	TenantID string `json:"tenantId"`
 }
 
+type AzureFeature struct {
+	Namespace string
+	Name      string
+}
+
 func azureNames(subscriptionID, regionCode string) *Info {
 	shortID := strings.ToLower(strings.ReplaceAll(subscriptionID, "-", ""))
 	if len(shortID) > 8 {
@@ -111,6 +116,20 @@ func EnsureAzureProviders(ctx context.Context, log func(string), namespaces ...s
 	return nil
 }
 
+// EnsureAzureFeatures idempotently registers preview/flighted Azure features
+// required by workload resources before the Pulumi graph starts.
+func EnsureAzureFeatures(ctx context.Context, log func(string), features ...AzureFeature) error {
+	if err := EnsureAzureCLI(ctx, ""); err != nil {
+		return err
+	}
+	for _, feature := range features {
+		if err := ensureAzureFeature(ctx, feature.Namespace, feature.Name, log); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BootstrapAzure idempotently ensures the Azure state backend exists: a
 // versioned private Blob container plus a Key Vault key for Pulumi's
 // azurekeyvault secrets provider. Safe to re-run.
@@ -178,10 +197,45 @@ func ensureAzureProvider(ctx context.Context, namespace string, log func(string)
 	return nil
 }
 
+func ensureAzureFeature(ctx context.Context, namespace, name string, log func(string)) error {
+	state, err := azureFeatureState(ctx, namespace, name)
+	if err != nil || state == "" {
+		state = "NotRegistered"
+	}
+	if state != "Registered" && state != "Registering" {
+		if _, err := runAzure(ctx, nil, "feature", "register", "--namespace", namespace, "--name", name, "-o", "none"); err != nil {
+			return fmt.Errorf("register Azure feature %s/%s: %w", namespace, name, err)
+		}
+	}
+	deadline := time.Now().Add(30 * time.Minute)
+	for {
+		state, err = azureFeatureState(ctx, namespace, name)
+		if err == nil && state == "Registered" {
+			log("azure: ensured feature " + namespace + "/" + name)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("wait for Azure feature %s/%s: %w", namespace, name, err)
+			}
+			return fmt.Errorf("Azure feature %s/%s is %q after waiting 30m", namespace, name, state)
+		}
+		time.Sleep(15 * time.Second)
+	}
+}
+
 func azureProviderState(ctx context.Context, namespace string) (string, error) {
 	out, err := runAzure(ctx, nil, "provider", "show", "--namespace", namespace, "--query", "registrationState", "-o", "tsv")
 	if err != nil {
 		return "", fmt.Errorf("read Azure provider %s: %w", namespace, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func azureFeatureState(ctx context.Context, namespace, name string) (string, error) {
+	out, err := runAzure(ctx, nil, "feature", "show", "--namespace", namespace, "--name", name, "--query", "properties.state", "-o", "tsv")
+	if err != nil {
+		return "", fmt.Errorf("read Azure feature %s/%s: %w", namespace, name, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

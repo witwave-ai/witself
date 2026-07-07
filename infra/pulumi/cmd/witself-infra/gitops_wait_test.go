@@ -2,6 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,6 +103,54 @@ func TestWaitForArgoApplicationsHealthy(t *testing.T) {
 	})
 }
 
+func TestNewAzureArgoListerFromKubeconfig(t *testing.T) {
+	caData := testCertificateAuthorityData(t)
+	raw := []byte(fmt.Sprintf(`apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: %s
+    server: https://aks.example.test:443
+  name: cell
+users:
+- name: operator
+  user:
+    token: test-token
+`, caData))
+
+	lister, err := newAzureArgoListerFromKubeconfig(raw)
+	if err != nil {
+		t.Fatalf("newAzureArgoListerFromKubeconfig: %v", err)
+	}
+	if lister.baseURL != "https://aks.example.test:443" {
+		t.Fatalf("baseURL = %q, want AKS server URL", lister.baseURL)
+	}
+	if lister.token != "test-token" {
+		t.Fatalf("token = %q, want test-token", lister.token)
+	}
+}
+
+func TestNewAzureArgoListerFromKubeconfigRequiresToken(t *testing.T) {
+	caData := testCertificateAuthorityData(t)
+	raw := []byte(fmt.Sprintf(`apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: %s
+    server: https://aks.example.test:443
+  name: cell
+users:
+- name: operator
+  user: {}
+`, caData))
+
+	_, err := newAzureArgoListerFromKubeconfig(raw)
+	if err == nil {
+		t.Fatal("expected missing token error")
+	}
+	if !strings.Contains(err.Error(), "no bearer token") {
+		t.Fatalf("error = %v, want missing bearer token", err)
+	}
+}
+
 func mkArgoApp(name, syncStatus, healthStatus, healthMessage string) argoApplication {
 	var app argoApplication
 	app.Metadata.Name = name
@@ -124,4 +177,18 @@ func (f *fakeArgoLister) ListArgoApplications(context.Context, string) ([]argoAp
 	}
 	r := f.responses[idx]
 	return r.apps, r.err
+}
+
+func testCertificateAuthorityData(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cert := srv.Certificate()
+	if cert == nil {
+		t.Fatal("test TLS server did not expose a certificate")
+	}
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	return base64.StdEncoding.EncodeToString(pemData)
 }

@@ -1,7 +1,5 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
 {{- $certARN := default "" .Values.cell.tlsCertificateARN -}}
-{{- $azureAlbController := default dict .Values.platform.azureAlbController -}}
-{{- $azureAlbPodIdentity := default dict $azureAlbController.podIdentity -}}
 {{- $externalDNSAnnotations := default dict .Values.platform.externalDNS.serviceAccountAnnotations -}}
 {{- $externalDNSLabels := default dict .Values.platform.externalDNS.serviceAccountLabels -}}
 {{- $externalDNSPodLabels := default dict .Values.platform.externalDNS.podLabels -}}
@@ -15,9 +13,6 @@
 {{- $platformRuntime := dict -}}
 {{- if $certARN -}}
 {{- $_ := set $platformRuntime "awsAlbIngress" (dict "certificateARNs" (list $certARN) "listeners" (list (dict "protocol" "HTTP" "port" 80) (dict "protocol" "HTTPS" "port" 443))) -}}
-{{- end -}}
-{{- if or $azureAlbController.enabled $azureAlbPodIdentity.clientID -}}
-{{- $_ := set $platformRuntime "azureAlbController" $azureAlbController -}}
 {{- end -}}
 {{- $externalDNSRuntime := dict -}}
 {{- if .Values.platform.externalDNS.enabled -}}

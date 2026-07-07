@@ -1,0 +1,30 @@
+{{- $app := .Values.apps.witselfServer -}}
+{{- $gateway := default dict $app.azureGateway -}}
+{{- $https := default dict $gateway.https -}}
+{{- $certificate := default dict $https.certificate -}}
+{{- $acme := default dict $certificate.acme -}}
+{{- if and $app.enabled $gateway.enabled (eq .Values.cell.cloud "azure") $https.enabled $certificate.enabled $acme.enabled }}
+{{- $issuerRef := default dict $certificate.issuerRef -}}
+{{- $gatewayName := default "witself-api" $gateway.gatewayName -}}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ required "apps.witselfServer.azureGateway.https.certificate.issuerRef.name is required when Azure ACME is enabled" $issuerRef.name | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  acme:
+    email: {{ required "apps.witselfServer.azureGateway.https.certificate.acme.email is required when Azure ACME is enabled" $acme.email | quote }}
+    server: {{ default "https://acme-v02.api.letsencrypt.org/directory" $acme.server | quote }}
+    privateKeySecretRef:
+      name: {{ default (printf "%s-private-key" $issuerRef.name) $acme.privateKeySecretName | quote }}
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: {{ $gatewayName | quote }}
+                namespace: {{ $app.namespace | quote }}
+                kind: Gateway
+{{- end }}

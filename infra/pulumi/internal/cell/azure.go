@@ -53,6 +53,9 @@ type azureKubernetes struct {
 	networkPlugin           pulumi.StringPtrOutput
 	networkPluginMode       pulumi.StringPtrOutput
 	outboundType            pulumi.StringPtrOutput
+	nodePoolAutoScaling     bool
+	nodePoolMinCount        int
+	nodePoolMaxCount        int
 	cluster                 pulumi.Resource
 }
 
@@ -69,11 +72,10 @@ type azureESO struct {
 
 type azureALBController struct {
 	identityName             pulumi.StringOutput
-	identityID               pulumi.IDOutput
+	identityID               pulumi.StringOutput
 	clientID                 pulumi.StringOutput
 	principalID              pulumi.StringOutput
 	tenantID                 pulumi.StringOutput
-	federatedCredentialName  pulumi.StringOutput
 	kubernetesServiceAccount string
 	dependencies             []pulumi.Resource
 }
@@ -131,7 +133,7 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 
 	var albController *azureALBController
 	if c.argocd && dns != nil {
-		albController, err = provisionAzureALBControllerIdentity(ctx, c, net, aks)
+		albController, err = provisionAzureALBAddon(ctx, c, net, aks)
 		if err != nil {
 			return err
 		}
@@ -194,6 +196,9 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("aksNetworkPlugin", aks.networkPlugin)
 	ctx.Export("aksNetworkPluginMode", aks.networkPluginMode)
 	ctx.Export("aksOutboundType", aks.outboundType)
+	ctx.Export("aksNodePoolAutoScaling", pulumi.Bool(aks.nodePoolAutoScaling))
+	ctx.Export("aksNodePoolMinCount", pulumi.Int(aks.nodePoolMinCount))
+	ctx.Export("aksNodePoolMaxCount", pulumi.Int(aks.nodePoolMaxCount))
 	ctx.Export("esoIdentityName", eso.identityName)
 	ctx.Export("esoIdentityID", eso.identityID)
 	ctx.Export("esoClientID", eso.clientID)

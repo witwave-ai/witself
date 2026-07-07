@@ -143,14 +143,14 @@ func provisionAzureDNS(ctx *pulumi.Context, c azureCell, net *azureNetwork, aks 
 	}, nil
 }
 
-func azureRoleAssignment(ctx *pulumi.Context, name string, principalID pulumi.StringOutput, scope pulumi.StringOutput, subscriptionID, roleID string) (*authorization.RoleAssignment, error) {
+func azureRoleAssignment(ctx *pulumi.Context, name string, principalID pulumi.StringOutput, scope pulumi.StringOutput, subscriptionID, roleID string, opts ...pulumi.ResourceOption) (*authorization.RoleAssignment, error) {
 	roleAssignmentName, err := random.NewRandomUuid(ctx, name, &random.RandomUuidArgs{
 		Keepers: pulumi.StringMap{
 			"principal": principalID,
 			"scope":     scope,
 			"role":      pulumi.String(roleID),
 		},
-	})
+	}, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,5 +161,5 @@ func azureRoleAssignment(ctx *pulumi.Context, name string, principalID pulumi.St
 		PrincipalType:      authorization.PrincipalTypeServicePrincipal,
 		RoleDefinitionId:   pulumi.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/%s", subscriptionID, roleID),
 		Scope:              scope,
-	})
+	}, opts...)
 }

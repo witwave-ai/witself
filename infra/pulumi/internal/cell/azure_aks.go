@@ -16,6 +16,7 @@ func provisionAzureAKS(ctx *pulumi.Context, c azureCell, net *azureNetwork) (*az
 		return nil, err
 	}
 
+	nodeProfile := azureAKSNodeProfileFor(c.profile)
 	clusterName := rname(c.name, "")
 	identityName := rname(c.name, "aks")
 	nodeResourceGroup := rname(c.name, "aks-nodes-rg")
@@ -77,15 +78,17 @@ func provisionAzureAKS(ctx *pulumi.Context, c azureCell, net *azureNetwork) (*az
 		AgentPoolProfiles: containerservice.ManagedClusterAgentPoolProfileArray{
 			containerservice.ManagedClusterAgentPoolProfileArgs{
 				Name:                pulumi.String("system"),
-				Count:               pulumi.Int(1),
+				Count:               pulumi.Int(nodeProfile.minCount),
 				Mode:                containerservice.AgentPoolModeSystem,
 				Type:                containerservice.AgentPoolTypeVirtualMachineScaleSets,
 				OsType:              pulumi.String("Linux"),
 				OsDiskSizeGB:        pulumi.Int(64),
-				VmSize:              pulumi.String(azureAKSNodeSize(c.profile)),
+				VmSize:              pulumi.String(nodeProfile.vmSize),
 				OrchestratorVersion: pulumi.String(c.k8sVersion),
 				VnetSubnetID:        net.workloadSubnetID.ToStringOutput(),
-				EnableAutoScaling:   pulumi.Bool(false),
+				EnableAutoScaling:   pulumi.Bool(true),
+				MinCount:            pulumi.Int(nodeProfile.minCount),
+				MaxCount:            pulumi.Int(nodeProfile.maxCount),
 				MaxPods:             pulumi.Int(110),
 				NodeLabels: pulumi.StringMap{
 					"witself.io/cell": pulumi.String(c.name),
@@ -126,13 +129,30 @@ func provisionAzureAKS(ctx *pulumi.Context, c azureCell, net *azureNetwork) (*az
 		networkPlugin:           network.NetworkPlugin(),
 		networkPluginMode:       network.NetworkPluginMode(),
 		outboundType:            network.OutboundType(),
+		nodePoolAutoScaling:     true,
+		nodePoolMinCount:        nodeProfile.minCount,
+		nodePoolMaxCount:        nodeProfile.maxCount,
 		cluster:                 cluster,
 	}, nil
 }
 
-func azureAKSNodeSize(profile string) string {
+type azureAKSNodeProfile struct {
+	vmSize   string
+	minCount int
+	maxCount int
+}
+
+func azureAKSNodeProfileFor(profile string) azureAKSNodeProfile {
 	if profile == "prod" {
-		return "Standard_D2s_v4"
+		return azureAKSNodeProfile{
+			vmSize:   "Standard_D2s_v4",
+			minCount: 2,
+			maxCount: 20,
+		}
 	}
-	return "Standard_D2s_v4"
+	return azureAKSNodeProfile{
+		vmSize:   "Standard_D2s_v4",
+		minCount: 1,
+		maxCount: 20,
+	}
 }
