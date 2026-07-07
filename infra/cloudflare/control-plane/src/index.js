@@ -2841,6 +2841,56 @@ function cellMatchesArchivedPlacement(cell, archived, allRegions) {
   return archived?.region === cell.region;
 }
 
+async function accountCountsByCell(env) {
+  const counts = new Map();
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.cell) {
+        counts.set(entry.cell, (counts.get(entry.cell) ?? 0) + 1);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return counts;
+}
+
+function preferenceRank(policy, field, value) {
+  const preferred = policyList(policy, field);
+  if (preferred.length === 0) {
+    return 0;
+  }
+  const idx = preferred.indexOf(value || "");
+  return idx >= 0 ? idx : preferred.length;
+}
+
+function comparePlacementCells(a, b, archived, counts) {
+  const policy = archived?.placement_policy;
+  const cloudRank = preferenceRank(policy, "preferred_clouds", a.cloud) -
+    preferenceRank(policy, "preferred_clouds", b.cloud);
+  if (cloudRank !== 0) return cloudRank;
+  const regionRank = preferenceRank(policy, "preferred_regions", a.region_code) -
+    preferenceRank(policy, "preferred_regions", b.region_code);
+  if (regionRank !== 0) return regionRank;
+  const channelRank = preferenceRank(policy, "preferred_channels", a.channel || "experimental") -
+    preferenceRank(policy, "preferred_channels", b.channel || "experimental");
+  if (channelRank !== 0) return channelRank;
+  const countRank = (counts.get(a.name) ?? 0) - (counts.get(b.name) ?? 0);
+  if (countRank !== 0) return countRank;
+  return a.name.localeCompare(b.name);
+}
+
+function bestPlacementCell(cells, archived, counts, allRegions) {
+  const eligible = cells.filter((cell) => cellMatchesArchivedPlacement(cell, archived, allRegions));
+  if (eligible.length === 0) {
+    return null;
+  }
+  eligible.sort((a, b) => comparePlacementCells(a, b, archived, counts));
+  return eligible[0];
+}
+
 // maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
 // metadata. Mirrors the cell-side MaskEmail exactly (internal/store/
 // events.go) so the same shape lands on both sides of the trust link.
@@ -3109,6 +3159,111 @@ async function handleRestore(request, env, cellName) {
     restored: results,
     remaining,
     progress,
+  });
+}
+
+async function handlePlacementRestore(request, env) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (!env.ARCHIVES) {
+    return err("R2 bucket not bound — witwave-archives is not configured", 501);
+  }
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // defaults are fine
+  }
+  let batch = Number(body.batch);
+  if (!Number.isFinite(batch) || batch < 1) {
+    batch = 4;
+  }
+  batch = Math.min(Math.floor(batch), 10);
+  const allRegions = body.all_regions === true;
+
+  const cells = (await listCells(env)).filter(
+    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+  );
+  const counts = await accountCountsByCell(env);
+  const selectionCounts = new Map(counts);
+
+  const targets = [];
+  const blocked = [];
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("archived:".length);
+      const archived = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!archived) {
+        continue;
+      }
+      const cell = bestPlacementCell(cells, archived, selectionCounts, allRegions);
+      if (!cell) {
+        blocked.push({ account_id: accountId, reason: "no eligible accepting cell" });
+        continue;
+      }
+      selectionCounts.set(cell.name, (selectionCounts.get(cell.name) ?? 0) + 1);
+      targets.push({ accountId, archived, cell });
+      if (targets.length >= batch) {
+        break;
+      }
+    }
+    if (targets.length >= batch) {
+      break;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  const results = [];
+  for (const { accountId, archived, cell } of targets) {
+    try {
+      await restoreAccount(env, cell.name, cell, accountId, archived);
+      counts.set(cell.name, (counts.get(cell.name) ?? 0) + 1);
+      results.push({ account_id: accountId, ok: true, cell: cell.name });
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      results.push({ account_id: accountId, ok: false, cell: cell.name, error: msg });
+      console.log(`placement restore ${cell.name}/${accountId} failed: ${msg}`);
+    }
+  }
+
+  const restoredOK = new Set(
+    results.filter((r) => r.ok).map((r) => r.account_id),
+  );
+  const blockedAfter = [];
+  let remaining = 0;
+  let unplaced = 0;
+  let cursor2;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor: cursor2 });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("archived:".length);
+      if (restoredOK.has(accountId)) {
+        continue;
+      }
+      const archived = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!archived) {
+        continue;
+      }
+      const cell = bestPlacementCell(cells, archived, counts, allRegions);
+      if (cell) {
+        remaining += 1;
+      } else {
+        unplaced += 1;
+        blockedAfter.push({ account_id: accountId, reason: "no eligible accepting cell" });
+      }
+    }
+    cursor2 = page.list_complete ? undefined : page.cursor;
+  } while (cursor2);
+
+  return json({
+    schema_version: "witself.v0",
+    restored: results,
+    blocked: blockedAfter.length > 0 ? blockedAfter : blocked,
+    remaining,
+    unplaced,
   });
 }
 
@@ -3586,6 +3741,12 @@ export default {
     // Fleet-wide placement strategy (fleet-token authorized).
     if (url.pathname === "/v1/placement") {
       return handlePlacement(request, env);
+    }
+    if (url.pathname === "/v1/placement:restore") {
+      if (request.method !== "POST") {
+        return err("method not allowed", 405);
+      }
+      return handlePlacementRestore(request, env);
     }
 
     // Fleet-wide pending-account expiry policy (fleet-token authorized).

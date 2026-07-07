@@ -331,8 +331,10 @@ func (c *Client) Probe(ctx context.Context, name string) (ProbeResult, error) {
 // loops until Remaining is zero.
 type RestoreResult struct {
 	Restored  []RestoredAccount `json:"restored"`
+	Blocked   []BlockedAccount  `json:"blocked,omitempty"`
 	Remaining int               `json:"remaining"`
-	Region    string            `json:"region"`
+	Unplaced  int               `json:"unplaced,omitempty"`
+	Region    string            `json:"region,omitempty"`
 }
 
 // RestoredAccount is one line in a restore batch's report. Same shape as
@@ -340,7 +342,13 @@ type RestoreResult struct {
 type RestoredAccount struct {
 	AccountID string `json:"account_id"`
 	OK        bool   `json:"ok"`
+	Cell      string `json:"cell,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+type BlockedAccount struct {
+	AccountID string `json:"account_id"`
+	Reason    string `json:"reason"`
 }
 
 // Restore asks the control plane to pull a batch of archived accounts from R2
@@ -393,6 +401,41 @@ func (c *Client) Restore(ctx context.Context, name string, batch int, allRegions
 	default:
 		return RestoreResult{}, fmt.Errorf("restore cell: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
+}
+
+func (c *Client) RestorePlacement(ctx context.Context, batch int, allRegions bool) (RestoreResult, error) {
+	body := struct {
+		Batch      int  `json:"batch"`
+		AllRegions bool `json:"all_regions,omitempty"`
+	}{
+		Batch:      batch,
+		AllRegions: allRegions,
+	}
+	rdr, err := marshalBody(body)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/placement:restore", rdr)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	hc := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("control plane %s: %w", c.base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return RestoreResult{}, fmt.Errorf("placement restore: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out RestoreResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return RestoreResult{}, fmt.Errorf("decode placement restore response: %w", err)
+	}
+	return out, nil
 }
 
 // marshalBody encodes body as JSON if non-nil.

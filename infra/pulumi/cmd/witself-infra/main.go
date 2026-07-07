@@ -818,37 +818,47 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 	}
 }
 
-// restoreCell loops the control-plane's :restore batches until every archived
-// account in the requested scope has landed on the cell (remaining=0). The
-// mirror of evacuateCell — same batch size, same stall guards. Fails fast on
-// per-account failure so a partial restore never proceeds silently.
+// restoreCell loops the control-plane placement runner until every currently
+// placeable archived account has landed on its best eligible cell
+// (remaining=0). The cellName argument is the just-registered cell that
+// triggered the run and is used for compatibility fallback and status text.
 func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegions bool) error {
 	const batch = 4
 	total := 0
 	prevRemaining := -1
 	for iter := 0; ; iter++ {
-		res, err := cl.Restore(ctx, cellName, batch, allRegions)
+		res, err := cl.RestorePlacement(ctx, batch, allRegions)
 		if err != nil {
-			if errors.Is(err, fleet.ErrCellDrained) {
-				// The cell was just registered accepting=true, so this
-				// should never happen — but if the operator concurrently
-				// drained the cell, restore has no target.
-				return fmt.Errorf("cell %s is drained — cannot restore into it", cellName)
+			// Older control planes only know the per-cell restore endpoint.
+			if strings.Contains(err.Error(), "HTTP 404") {
+				res, err = cl.Restore(ctx, cellName, batch, allRegions)
 			}
-			return fmt.Errorf("restore cell: %w", err)
+			if err != nil {
+				if errors.Is(err, fleet.ErrCellDrained) {
+					return fmt.Errorf("cell %s is drained — cannot restore into it", cellName)
+				}
+				return fmt.Errorf("restore archives: %w", err)
+			}
 		}
 		for _, a := range res.Restored {
+			dest := a.Cell
+			if dest == "" {
+				dest = cellName
+			}
 			if !a.OK {
-				return fmt.Errorf("restore failed for %s onto %s: %s", a.AccountID, cellName, a.Error)
+				return fmt.Errorf("restore failed for %s onto %s: %s", a.AccountID, dest, a.Error)
 			}
 			total++
-			fmt.Fprintf(os.Stderr, "restored %s onto %s\n", a.AccountID, cellName)
+			fmt.Fprintf(os.Stderr, "restored %s onto %s\n", a.AccountID, dest)
 		}
 		if res.Remaining == 0 {
+			if res.Unplaced > 0 {
+				fmt.Fprintf(os.Stderr, "%d archived account(s) remain unplaced (no eligible accepting cell)\n", res.Unplaced)
+			}
 			if total == 0 && iter == 0 {
-				fmt.Fprintf(os.Stderr, "cell %s: no archived accounts awaiting placement in region %s\n", cellName, res.Region)
+				fmt.Fprintln(os.Stderr, "no archived accounts currently eligible for placement")
 			} else {
-				fmt.Fprintf(os.Stderr, "cell %s: %d accounts restored from Cloudflare R2\n", cellName, total)
+				fmt.Fprintf(os.Stderr, "%d accounts restored from Cloudflare R2\n", total)
 			}
 			return nil
 		}
@@ -856,13 +866,13 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 			// Remaining > 0 but the batch reported nothing — the control
 			// plane sees archived accounts it will not hand us. Silent loop
 			// would be wrong.
-			return fmt.Errorf("restore stalled on cell %s with %d account(s) still awaiting placement in region %s", cellName, res.Remaining, res.Region)
+			return fmt.Errorf("placement restore stalled with %d eligible archived account(s) still awaiting placement", res.Remaining)
 		}
 		if prevRemaining != -1 && res.Remaining >= prevRemaining {
 			// A batch fired (per-account "ok") but the count didn't drop.
 			// The acct: pointer never landed, or the archived: entry
 			// wasn't retired — either way, spinning is the wrong answer.
-			return fmt.Errorf("restore on cell %s is not making progress in region %s (%d accounts remaining after batch reported success)", cellName, res.Region, res.Remaining)
+			return fmt.Errorf("placement restore is not making progress (%d eligible account(s) remaining after batch reported success)", res.Remaining)
 		}
 		prevRemaining = res.Remaining
 	}
