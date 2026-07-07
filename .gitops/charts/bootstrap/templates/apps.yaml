@@ -5,6 +5,7 @@
 {{- $azureGatewayValues := default dict .Values.apps.witselfServer.azureGateway -}}
 {{- $azureGatewaySubnetID := default "" $azureGatewayValues.albSubnetID -}}
 {{- $azureGatewayEnabled := default false $azureGatewayValues.enabled -}}
+{{- $azureGatewayHTTPS := default dict $azureGatewayValues.https -}}
 {{- $appsRuntime := dict -}}
 {{- $witselfServerRuntime := dict -}}
 {{- if $apiHost -}}
@@ -32,6 +33,11 @@
 {{- if $azureGatewaySubnetID -}}
 {{- $existingAzureGateway := default dict (get $witselfServerRuntime "azureGateway") -}}
 {{- $_ := set $existingAzureGateway "albSubnetID" $azureGatewaySubnetID -}}
+{{- $_ := set $witselfServerRuntime "azureGateway" $existingAzureGateway -}}
+{{- end -}}
+{{- if $azureGatewayHTTPS -}}
+{{- $existingAzureGateway := default dict (get $witselfServerRuntime "azureGateway") -}}
+{{- $_ := set $existingAzureGateway "https" $azureGatewayHTTPS -}}
 {{- $_ := set $witselfServerRuntime "azureGateway" $existingAzureGateway -}}
 {{- end -}}
 {{- if $witselfServerRuntime -}}
