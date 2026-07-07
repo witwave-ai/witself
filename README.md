@@ -91,9 +91,12 @@ For the Azure sandbox subscription in `eastus2`, Azure support currently covers
 the shared Pulumi state backend plus the first workload substrate slices:
 resource group, VNet, workload subnet, PostgreSQL-delegated DB subnet,
 controlled outbound egress through Azure NAT Gateway, private Azure Database
-for PostgreSQL Flexible Server, per-cell Azure Key Vault app secrets, and AKS
-with OIDC/workload identity enabled for platform add-ons such as External
-Secrets Operator.
+for PostgreSQL Flexible Server, per-cell Azure Key Vault app secrets, AKS with
+OIDC/workload identity enabled, Azure DNS delegation, and GitOps identities for
+platform add-ons such as External Secrets Operator, ExternalDNS, and the Azure
+ALB Controller for Application Gateway for Containers. The GitOps app tier can
+then render the Azure Gateway API path for the Witself API. Automated Azure TLS
+issuance/redirect policy is the remaining Azure ingress parity slice.
 
 ```sh
 az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
@@ -107,10 +110,16 @@ witself-infra bootstrap \
 
 witself-infra up \
   -account-alias sandbox \
+  -argocd \
   -azure-subscription witwave-sandbox \
   -backend azblob \
   -cloud azure \
   -db-version 18 \
+  -domain cells.witself.witwave.ai \
+  -gitops-path .gitops/charts/bootstrap \
+  -gitops-repo https://github.com/witwave-ai/witself \
+  -gitops-revision main \
+  -gitops-values-path .gitops/cells/azure-sandbox-use2-dev/values.yaml \
   -ingress none \
   -k8s-version 1.36 \
   -profile minimal \
@@ -143,8 +152,15 @@ resolves through the cell's private DNS zone link. Azure stores the cell DB JSON
 first-operator bootstrap token, and account-provision token as JSON secrets in
 the cell Key Vault. Pulumi also creates the ESO managed identity, federates it
 to the `external-secrets/external-secrets` Kubernetes service account, and grants
-it read access to the cell Key Vault. Add `-argocd` to the Azure `up` command to
-install the same Argo CD app-of-apps layer used by AWS and GCP.
+it read access to the cell Key Vault. Pulumi creates the Azure DNS zone,
+delegates it from Cloudflare when `CLOUDFLARE_API_TOKEN` is present, and creates
+the ExternalDNS managed identity plus federated credential for the
+`external-dns/external-dns` service account. Pulumi also reserves a delegated
+subnet for Azure Application Gateway for Containers, creates the ALB Controller
+managed identity/role assignments/federation, and passes those outputs into
+GitOps so Argo installs the controller and renders the Gateway API manifests.
+Add `-argocd` to the Azure `up` command to install the same Argo CD app-of-apps
+layer used by AWS and GCP.
 
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the

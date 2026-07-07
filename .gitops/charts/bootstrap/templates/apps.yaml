@@ -2,6 +2,9 @@
 {{- $apiHost := default "" .Values.cell.apiHost -}}
 {{- $gcpIngressValues := default dict .Values.apps.witselfServer.gcpIngress -}}
 {{- $gcpStaticIPName := default "" $gcpIngressValues.staticIPName -}}
+{{- $azureGatewayValues := default dict .Values.apps.witselfServer.azureGateway -}}
+{{- $azureGatewaySubnetID := default "" $azureGatewayValues.albSubnetID -}}
+{{- $azureGatewayEnabled := default false $azureGatewayValues.enabled -}}
 {{- $appsRuntime := dict -}}
 {{- $witselfServerRuntime := dict -}}
 {{- if $apiHost -}}
@@ -12,11 +15,24 @@
 {{- if eq .Values.cell.cloud "gcp" -}}
 {{- $_ := set $witselfServerRuntime "gcpIngress" (dict "annotations" (dict "external-dns.alpha.kubernetes.io/hostname" $apiHost) "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/*" "pathType" "ImplementationSpecific"))))) -}}
 {{- end -}}
+{{- if eq .Values.cell.cloud "azure" -}}
+{{- $_ := set $witselfServerRuntime "azureGateway" (dict "hostname" $apiHost) -}}
+{{- end -}}
 {{- end -}}
 {{- if $gcpStaticIPName -}}
 {{- $existingGCPIngress := default dict (get $witselfServerRuntime "gcpIngress") -}}
 {{- $_ := set $existingGCPIngress "staticIPName" $gcpStaticIPName -}}
 {{- $_ := set $witselfServerRuntime "gcpIngress" $existingGCPIngress -}}
+{{- end -}}
+{{- if $azureGatewayEnabled -}}
+{{- $existingAzureGateway := default dict (get $witselfServerRuntime "azureGateway") -}}
+{{- $_ := set $existingAzureGateway "enabled" true -}}
+{{- $_ := set $witselfServerRuntime "azureGateway" $existingAzureGateway -}}
+{{- end -}}
+{{- if $azureGatewaySubnetID -}}
+{{- $existingAzureGateway := default dict (get $witselfServerRuntime "azureGateway") -}}
+{{- $_ := set $existingAzureGateway "albSubnetID" $azureGatewaySubnetID -}}
+{{- $_ := set $witselfServerRuntime "azureGateway" $existingAzureGateway -}}
 {{- end -}}
 {{- if $witselfServerRuntime -}}
 {{- $_ := set $appsRuntime "apps" (dict "witselfServer" $witselfServerRuntime) -}}

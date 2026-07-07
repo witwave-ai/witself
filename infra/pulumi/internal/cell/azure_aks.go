@@ -16,7 +16,7 @@ func provisionAzureAKS(ctx *pulumi.Context, c azureCell, net *azureNetwork) (*az
 		return nil, err
 	}
 
-	clusterName := rname(c.name, "aks")
+	clusterName := rname(c.name, "")
 	identityName := rname(c.name, "aks")
 	nodeResourceGroup := rname(c.name, "aks-nodes-rg")
 

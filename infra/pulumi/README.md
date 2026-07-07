@@ -155,7 +155,16 @@ egress through the cell NAT Gateway, and OIDC/workload identity enabled. It also
 creates an ESO managed identity, federates it to the
 `external-secrets/external-secrets` Kubernetes service account, grants that
 identity read access to the cell Key Vault, and can install Argo CD when
-`-argocd` is set. Azure DNS/ingress is a later slice.
+`-argocd` is set. It creates an Azure DNS zone for the cell, delegates that zone
+from Cloudflare when `CLOUDFLARE_API_TOKEN` is available, and creates an
+ExternalDNS managed identity plus federated credential. It also creates a
+dedicated subnet delegated to `Microsoft.ServiceNetworking/trafficControllers`
+for Azure Application Gateway for Containers, creates the ALB Controller managed
+identity, role assignments, and federated credential, then passes those outputs
+into GitOps. The GitOps platform layer installs Microsoft's ALB Controller Helm
+chart, and the app layer renders the Gateway API manifests for the Witself API.
+Automated certificate issuance and HTTPS redirect policy are the remaining Azure
+public ingress/TLS slice.
 
 ```sh
 # Pulumi's azblob backend and azurekeyvault secrets provider can use Azure CLI
@@ -197,9 +206,11 @@ Pulumi, so a fresh subscription can create the VNet, NAT resources, database,
 Key Vault, and AKS cluster in the same command. The workload subnet has default
 outbound access disabled and egresses through the NAT Gateway; the DB subnet has
 default outbound access disabled and is delegated to
-`Microsoft.DBforPostgreSQL/flexibleServers`. The PostgreSQL server uses password
-auth, public network access disabled, the delegated DB subnet, and a private DNS
-zone named `privatelink.postgres.database.azure.com`.
+`Microsoft.DBforPostgreSQL/flexibleServers`; the ALB subnet has default outbound
+access disabled and is delegated to
+`Microsoft.ServiceNetworking/trafficControllers`. The PostgreSQL server uses
+password auth, public network access disabled, the delegated DB subnet, and a
+private DNS zone named `privatelink.postgres.database.azure.com`.
 
 The cell Key Vault is separate from the state-backend Key Vault. It stores the
 same app material as AWS Secrets Manager and GCP Secret Manager: `db`,
@@ -330,7 +341,8 @@ control plane forgets them.
 17. **[done]** Azure Blob Storage + Key Vault state backend and empty stack
     lifecycle in `eastus2`.
 18. **[done]** Azure network substrate: resource group, VNet, workload subnet,
-    PostgreSQL-delegated DB subnet, NAT Gateway, and static outbound IP.
+    PostgreSQL-delegated DB subnet, Application Gateway for Containers subnet,
+    NAT Gateway, and static outbound IP.
 19. **[done]** Azure private PostgreSQL Flexible Server plus logical `witself`
     database on the delegated DB subnet.
 20. **[done]** Azure Key Vault app secrets for DB, bootstrap, and provision
@@ -338,7 +350,12 @@ control plane forgets them.
 21. **[done]** Azure AKS with Azure CNI overlay, controlled egress through the
     cell NAT Gateway, and OIDC/workload identity enabled.
 22. **[done]** Azure ESO Workload Identity and Key Vault read access.
-23. Azure GitOps/Argo CD installation parity.
-24. Azure DNS/ingress parity.
-25. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+23. **[done]** Azure GitOps/Argo CD installation parity.
+24. **[done]** Azure DNS delegation and ExternalDNS Workload Identity parity.
+25. **[done]** Azure Application Gateway for Containers subnet, ALB Controller
+    Workload Identity/RBAC, GitOps controller install, and Gateway API HTTP
+    manifest path.
+26. Azure HTTPS parity: cert-manager issuer/certificate automation and HTTP to
+    HTTPS redirect policy for the Azure Gateway path.
+27. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
     remaining production hardening.

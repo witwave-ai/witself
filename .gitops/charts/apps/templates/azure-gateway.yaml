@@ -1,0 +1,133 @@
+{{- $app := .Values.apps.witselfServer -}}
+{{- $gateway := default dict $app.azureGateway -}}
+{{- if and $app.enabled $gateway.enabled (eq .Values.cell.cloud "azure") }}
+{{- $hostname := required "cell.apiHost or apps.witselfServer.azureGateway.hostname is required for Azure gateway" (default .Values.cell.apiHost $gateway.hostname) -}}
+{{- $albNamespace := default "azure-alb-system" $gateway.albNamespace -}}
+{{- $albName := default "witself-api" $gateway.albName -}}
+{{- $albSubnetID := required "apps.witselfServer.azureGateway.albSubnetID is required when Azure gateway is enabled" $gateway.albSubnetID -}}
+{{- $gatewayName := default "witself-api" $gateway.gatewayName -}}
+{{- $gatewayClassName := default "azure-alb-external" $gateway.gatewayClassName -}}
+{{- $serviceName := default "witself-server" $gateway.serviceName -}}
+{{- $servicePort := default 80 $gateway.servicePort -}}
+{{- $http := default dict $gateway.http -}}
+{{- $httpEnabled := true -}}
+{{- if hasKey $http "enabled" -}}
+{{- $httpEnabled = $http.enabled -}}
+{{- end -}}
+{{- $https := default dict $gateway.https -}}
+{{- $httpsEnabled := false -}}
+{{- if hasKey $https "enabled" -}}
+{{- $httpsEnabled = $https.enabled -}}
+{{- end -}}
+{{- $certificate := default dict $https.certificate -}}
+{{- $certificateEnabled := false -}}
+{{- if hasKey $certificate "enabled" -}}
+{{- $certificateEnabled = $certificate.enabled -}}
+{{- end -}}
+{{- $certificateSecretName := default "witself-api-tls" $certificate.secretName -}}
+{{- $issuerRef := default dict $certificate.issuerRef -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $albNamespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: alb.networking.azure.io/v1
+kind: ApplicationLoadBalancer
+metadata:
+  name: {{ $albName | quote }}
+  namespace: {{ $albNamespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  associations:
+    - {{ $albSubnetID | quote }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gatewayName | quote }}
+  namespace: {{ $app.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    alb.networking.azure.io/alb-namespace: {{ $albNamespace | quote }}
+    alb.networking.azure.io/alb-name: {{ $albName | quote }}
+    external-dns.alpha.kubernetes.io/hostname: {{ $hostname | quote }}
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  gatewayClassName: {{ $gatewayClassName | quote }}
+  listeners:
+    {{- if $httpEnabled }}
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: {{ $hostname | quote }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+    {{- if $httpsEnabled }}
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ $hostname | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ $certificateSecretName | quote }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $gatewayName | quote }}
+  namespace: {{ $app.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  parentRefs:
+    - name: {{ $gatewayName | quote }}
+  hostnames:
+    - {{ $hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $serviceName | quote }}
+          port: {{ $servicePort }}
+{{- if $certificateEnabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certificateSecretName | quote }}
+  namespace: {{ $app.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  secretName: {{ $certificateSecretName | quote }}
+  dnsNames:
+    - {{ $hostname | quote }}
+  issuerRef:
+    kind: {{ default "ClusterIssuer" $issuerRef.kind | quote }}
+    name: {{ required "apps.witselfServer.azureGateway.https.certificate.issuerRef.name is required when the Azure certificate is enabled" $issuerRef.name | quote }}
+{{- end }}
+{{- end }}

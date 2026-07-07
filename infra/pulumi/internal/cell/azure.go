@@ -10,14 +10,18 @@ import (
 
 type azureNetwork struct {
 	resourceGroupName pulumi.StringOutput
+	resourceGroupID   pulumi.IDOutput
 	vnetName          pulumi.StringOutput
 	vnetID            pulumi.IDOutput
 	workloadSubnetID  pulumi.IDOutput
 	dbSubnetID        pulumi.IDOutput
+	albSubnetID       pulumi.IDOutput
 	workloadSubnet    string
 	workloadCIDR      string
 	dbSubnet          string
 	dbCIDR            string
+	albSubnet         string
+	albCIDR           string
 	natGatewayName    pulumi.StringOutput
 	natGatewayID      pulumi.IDOutput
 	natPublicIPName   pulumi.StringOutput
@@ -53,6 +57,17 @@ type azureKubernetes struct {
 }
 
 type azureESO struct {
+	identityName             pulumi.StringOutput
+	identityID               pulumi.IDOutput
+	clientID                 pulumi.StringOutput
+	principalID              pulumi.StringOutput
+	tenantID                 pulumi.StringOutput
+	federatedCredentialName  pulumi.StringOutput
+	kubernetesServiceAccount string
+	dependencies             []pulumi.Resource
+}
+
+type azureALBController struct {
 	identityName             pulumi.StringOutput
 	identityID               pulumi.IDOutput
 	clientID                 pulumi.StringOutput
@@ -109,13 +124,26 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 		return err
 	}
 
-	if c.argocd {
-		if err := provisionAzureArgoCD(ctx, c, net, aks, secrets, eso); err != nil {
+	dns, err := provisionAzureDNS(ctx, c, net, aks)
+	if err != nil {
+		return err
+	}
+
+	var albController *azureALBController
+	if c.argocd && dns != nil {
+		albController, err = provisionAzureALBControllerIdentity(ctx, c, net, aks)
+		if err != nil {
 			return err
 		}
 	}
 
-	ctx.Export("status", pulumi.String("azure: resource group + vnet + controlled egress + postgres flexible server + key vault secrets + aks + eso workload identity provisioned"))
+	if c.argocd {
+		if err := provisionAzureArgoCD(ctx, c, net, aks, secrets, eso, dns, albController); err != nil {
+			return err
+		}
+	}
+
+	ctx.Export("status", pulumi.String("azure: resource group + vnet + controlled egress + postgres flexible server + key vault secrets + aks + eso workload identity + dns provisioned"))
 	ctx.Export("azureRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
 	ctx.Export("role", pulumi.String(c.role))
@@ -128,6 +156,9 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("dbSubnetName", pulumi.String(net.dbSubnet))
 	ctx.Export("dbSubnetID", net.dbSubnetID)
 	ctx.Export("dbSubnetCIDR", pulumi.String(net.dbCIDR))
+	ctx.Export("albSubnetName", pulumi.String(net.albSubnet))
+	ctx.Export("albSubnetID", net.albSubnetID)
+	ctx.Export("albSubnetCIDR", pulumi.String(net.albCIDR))
 	ctx.Export("natGatewayName", net.natGatewayName)
 	ctx.Export("natGatewayID", net.natGatewayID)
 	ctx.Export("natPublicIPName", net.natPublicIPName)
@@ -177,11 +208,13 @@ func provisionAzureNetwork(ctx *pulumi.Context, c azureCell) (*azureNetwork, err
 	prefix := cidrPrefix(c.cidr)
 	workloadCIDR := fmt.Sprintf("%s.0.0/20", prefix)
 	dbCIDR := fmt.Sprintf("%s.32.0/24", prefix)
+	albCIDR := fmt.Sprintf("%s.48.0/24", prefix)
 
 	resourceGroupName := rname(c.name, "rg")
 	vnetName := rname(c.name, "vnet")
 	workloadSubnetName := rname(c.name, "workload")
 	dbSubnetName := rname(c.name, "db")
+	albSubnetName := rname(c.name, "alb")
 	natName := rname(c.name, "nat")
 
 	rg, err := resources.NewResourceGroup(ctx, "cell", &resources.ResourceGroupArgs{
@@ -268,16 +301,40 @@ func provisionAzureNetwork(ctx *pulumi.Context, c azureCell) (*azureNetwork, err
 		return nil, err
 	}
 
+	albSubnet, err := network.NewSubnet(ctx, "cell-alb", &network.SubnetArgs{
+		ResourceGroupName:     rg.Name,
+		VirtualNetworkName:    vnet.Name,
+		SubnetName:            pulumi.String(albSubnetName),
+		AddressPrefix:         pulumi.String(albCIDR),
+		DefaultOutboundAccess: pulumi.Bool(false),
+		Delegations: network.DelegationArray{
+			network.DelegationArgs{
+				Name:        pulumi.String("application-gateway-for-containers"),
+				ServiceName: pulumi.String("Microsoft.ServiceNetworking/trafficControllers"),
+				Actions: pulumi.StringArray{
+					pulumi.String("Microsoft.Network/virtualNetworks/subnets/join/action"),
+				},
+			},
+		},
+	}, pulumi.DependsOn([]pulumi.Resource{vnet}))
+	if err != nil {
+		return nil, err
+	}
+
 	return &azureNetwork{
 		resourceGroupName: rg.Name,
+		resourceGroupID:   rg.ID(),
 		vnetName:          vnet.Name,
 		vnetID:            vnet.ID(),
 		workloadSubnetID:  workloadSubnet.ID(),
 		dbSubnetID:        dbSubnet.ID(),
+		albSubnetID:       albSubnet.ID(),
 		workloadSubnet:    workloadSubnetName,
 		workloadCIDR:      workloadCIDR,
 		dbSubnet:          dbSubnetName,
 		dbCIDR:            dbCIDR,
+		albSubnet:         albSubnetName,
+		albCIDR:           albCIDR,
 		natGatewayName:    nat.Name,
 		natGatewayID:      nat.ID(),
 		natPublicIPName:   publicIP.Name,

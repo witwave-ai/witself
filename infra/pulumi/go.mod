@@ -14,6 +14,7 @@ require (
 	github.com/pulumi/pulumi-azure-native-sdk/authorization/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/containerservice/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v3 v3.19.0
+	github.com/pulumi/pulumi-azure-native-sdk/dns/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/keyvault/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/managedidentity/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/network/v3 v3.19.0

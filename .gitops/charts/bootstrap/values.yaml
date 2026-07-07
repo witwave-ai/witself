@@ -18,6 +18,12 @@ platform:
     enabled: false
     certificateARNs: []
     listeners: []
+  azureAlbController:
+    enabled: false
+    namespace: azure-alb-system
+    controllerNamespace: azure-alb-system
+    podIdentity:
+      clientID: ""
   externalDNS:
     enabled: false
     chartRepoURL: https://kubernetes-sigs.github.io/external-dns/
@@ -25,6 +31,9 @@ platform:
     chartVersion: 1.21.1
     namespace: external-dns
     serviceAccountName: external-dns
+    serviceAccountLabels: {}
+    serviceAccountAnnotations: {}
+    podLabels: {}
     sources:
       - ingress
     policy: sync
@@ -34,8 +43,15 @@ platform:
     interval: 1m
     provider:
       name: aws
-    extraArgs:
-      aws-zone-type: public
+    extraArgs: {}
+    extraVolumes: []
+    extraVolumeMounts: []
+    azureConfig:
+      enabled: false
+      secretName: external-dns-azure
+      tenantId: ""
+      subscriptionId: ""
+      resourceGroup: ""
   externalSecrets:
     enabled: true
     chartRepoURL: https://charts.external-secrets.io

@@ -292,6 +292,8 @@ github.com/pulumi/pulumi-azure-native-sdk/containerservice/v3 v3.19.0 h1:99HKM5t
 github.com/pulumi/pulumi-azure-native-sdk/containerservice/v3 v3.19.0/go.mod h1:6h/wsAp5M/qQJc5OfR1wbFkkuBnXchLBWKnTR11F2wQ=
 github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v3 v3.19.0 h1:3lbp+n/GeNsdB0qj6SRxvlRD+4uMfPgxvpRDhZGMcFw=
 github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v3 v3.19.0/go.mod h1:ySDRZewWB1giBxQBRm0QQPc1CRxqRHdSzYj9Wl1gNZs=
+github.com/pulumi/pulumi-azure-native-sdk/dns/v3 v3.19.0 h1:ZNoes53Z5h1kUUOgUIXv4yNrsgB+QxkCY3ya64imtQU=
+github.com/pulumi/pulumi-azure-native-sdk/dns/v3 v3.19.0/go.mod h1:c/8uFd3RA9YzQaSZ1aRFViqEvH1I7L087/n3cuUcgjs=
 github.com/pulumi/pulumi-azure-native-sdk/keyvault/v3 v3.19.0 h1:k8XsZDf9wwAmhM6tMZFw2guGLchv4LdP53WevT9a694=
 github.com/pulumi/pulumi-azure-native-sdk/keyvault/v3 v3.19.0/go.mod h1:262XdT88xBOVzv94qSfkjX5w9cQjlaPQ6TobNUDUNRE=
 github.com/pulumi/pulumi-azure-native-sdk/managedidentity/v3 v3.19.0 h1:5W39yiR35qRnVSr5EpHXz6UGJWAUj4ujbb3T6DPG9Y4=

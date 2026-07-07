@@ -1,6 +1,14 @@
 {{- $valuesPath := default (printf ".gitops/cells/%s/values.yaml" (required "cell.name is required" .Values.cell.name)) .Values.gitops.valuesPath -}}
 {{- $certARN := default "" .Values.cell.tlsCertificateARN -}}
+{{- $azureAlbController := default dict .Values.platform.azureAlbController -}}
+{{- $azureAlbPodIdentity := default dict $azureAlbController.podIdentity -}}
 {{- $externalDNSAnnotations := default dict .Values.platform.externalDNS.serviceAccountAnnotations -}}
+{{- $externalDNSLabels := default dict .Values.platform.externalDNS.serviceAccountLabels -}}
+{{- $externalDNSPodLabels := default dict .Values.platform.externalDNS.podLabels -}}
+{{- $externalDNSAzureConfig := default dict .Values.platform.externalDNS.azureConfig -}}
+{{- $externalDNSExtraArgs := default dict .Values.platform.externalDNS.extraArgs -}}
+{{- $externalDNSExtraVolumes := default (list) .Values.platform.externalDNS.extraVolumes -}}
+{{- $externalDNSExtraVolumeMounts := default (list) .Values.platform.externalDNS.extraVolumeMounts -}}
 {{- $externalSecretsAnnotations := default dict .Values.platform.externalSecrets.serviceAccountAnnotations -}}
 {{- $azureVaultURL := default "" .Values.platform.externalSecrets.azureVaultURL -}}
 {{- $platformRuntimeValues := dict -}}
@@ -8,8 +16,36 @@
 {{- if $certARN -}}
 {{- $_ := set $platformRuntime "awsAlbIngress" (dict "certificateARNs" (list $certARN) "listeners" (list (dict "protocol" "HTTP" "port" 80) (dict "protocol" "HTTPS" "port" 443))) -}}
 {{- end -}}
+{{- if or $azureAlbController.enabled $azureAlbPodIdentity.clientID -}}
+{{- $_ := set $platformRuntime "azureAlbController" $azureAlbController -}}
+{{- end -}}
+{{- $externalDNSRuntime := dict -}}
+{{- if .Values.platform.externalDNS.enabled -}}
+{{- $_ := set $externalDNSRuntime "enabled" true -}}
+{{- end -}}
 {{- if $externalDNSAnnotations -}}
-{{- $_ := set $platformRuntime "externalDNS" (dict "serviceAccountAnnotations" $externalDNSAnnotations) -}}
+{{- $_ := set $externalDNSRuntime "serviceAccountAnnotations" $externalDNSAnnotations -}}
+{{- end -}}
+{{- if $externalDNSLabels -}}
+{{- $_ := set $externalDNSRuntime "serviceAccountLabels" $externalDNSLabels -}}
+{{- end -}}
+{{- if $externalDNSPodLabels -}}
+{{- $_ := set $externalDNSRuntime "podLabels" $externalDNSPodLabels -}}
+{{- end -}}
+{{- if $externalDNSAzureConfig -}}
+{{- $_ := set $externalDNSRuntime "azureConfig" $externalDNSAzureConfig -}}
+{{- end -}}
+{{- if $externalDNSExtraArgs -}}
+{{- $_ := set $externalDNSRuntime "extraArgs" $externalDNSExtraArgs -}}
+{{- end -}}
+{{- if $externalDNSExtraVolumes -}}
+{{- $_ := set $externalDNSRuntime "extraVolumes" $externalDNSExtraVolumes -}}
+{{- end -}}
+{{- if $externalDNSExtraVolumeMounts -}}
+{{- $_ := set $externalDNSRuntime "extraVolumeMounts" $externalDNSExtraVolumeMounts -}}
+{{- end -}}
+{{- if $externalDNSRuntime -}}
+{{- $_ := set $platformRuntime "externalDNS" $externalDNSRuntime -}}
 {{- end -}}
 {{- if or $azureVaultURL $externalSecretsAnnotations -}}
 {{- $externalSecretsRuntime := dict -}}

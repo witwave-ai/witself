@@ -87,6 +87,8 @@ type azureCell struct {
 	gitopsPath        string // path in the repo for the root bootstrap chart
 	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
 	gitopsRevision    string // repo revision (branch/tag)
+	domain            string // parent domain for cloud-managed DNS delegation
+	cloudflareDNS     bool   // create NS delegation in Cloudflare when credentials are present
 	bootstrapToken    pulumi.StringOutput
 	bootstrapTokenSet bool
 }
@@ -199,6 +201,8 @@ func Program(ctx *pulumi.Context) error {
 			gitopsPath:        gitopsPath,
 			gitopsValuesPath:  gitopsValuesPath,
 			gitopsRevision:    gitopsRevision,
+			domain:            domain,
+			cloudflareDNS:     cloudflareDNS,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

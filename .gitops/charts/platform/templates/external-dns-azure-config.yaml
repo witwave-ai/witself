@@ -1,0 +1,30 @@
+{{- $cfg := .Values.platform.externalDNS.azureConfig -}}
+{{- if and .Values.platform.externalDNS.enabled (eq .Values.cell.cloud "azure") $cfg.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.platform.externalDNS.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ required "platform.externalDNS.azureConfig.secretName is required for Azure cells" $cfg.secretName | quote }}
+  namespace: {{ .Values.platform.externalDNS.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+type: Opaque
+stringData:
+  azure.json: |
+    {
+      "tenantId": {{ required "platform.externalDNS.azureConfig.tenantId is required for Azure cells" $cfg.tenantId | quote }},
+      "subscriptionId": {{ required "platform.externalDNS.azureConfig.subscriptionId is required for Azure cells" $cfg.subscriptionId | quote }},
+      "resourceGroup": {{ required "platform.externalDNS.azureConfig.resourceGroup is required for Azure cells" $cfg.resourceGroup | quote }},
+      "useWorkloadIdentityExtension": true
+    }
+{{- end }}

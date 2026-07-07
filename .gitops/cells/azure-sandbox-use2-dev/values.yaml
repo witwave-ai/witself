@@ -20,6 +20,13 @@ apps:
       enabled: false
     gcpIngress:
       enabled: false
+    azureGateway:
+      # Pulumi enables this at runtime after wiring the Azure ALB Controller
+      # identity and injecting the delegated association subnet ID.
+      enabled: false
+      albNamespace: azure-alb-system
+      albName: witself-api
+      gatewayName: witself-api
     secrets:
       bootstrap:
         enabled: true
@@ -46,16 +53,28 @@ apps:
 platform:
   awsAlbIngress:
     enabled: false
+  azureAlbController:
+    # Pulumi enables this at runtime after creating the controller managed
+    # identity, role assignments, and federated credential.
+    enabled: false
+    chartVersion: 1.11.1
+    namespace: azure-alb-system
+    controllerNamespace: azure-alb-system
   certManager:
     enabled: true
     chartVersion: v1.20.3
     namespace: cert-manager
     ignoreWebhookConfigurationDifferences: true
   externalDNS:
+    # Pulumi enables this at runtime after creating Azure DNS, the managed
+    # identity, and the azure.json config Secret values for the live cell.
     enabled: false
     chartVersion: 1.21.1
     namespace: external-dns
     serviceAccountName: external-dns
+    sources:
+      - ingress
+      - gateway-httproute
     domainFilters:
       - azure-sandbox-use2-dev.cells.witself.witwave.ai
     txtOwnerId: azure-sandbox-use2-dev

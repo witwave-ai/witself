@@ -1,4 +1,4 @@
-{{- if and .Values.platform.externalDNS.enabled (or (eq .Values.cell.cloud "aws") (eq .Values.cell.cloud "gcp")) }}
+{{- if and .Values.platform.externalDNS.enabled (or (eq .Values.cell.cloud "aws") (eq .Values.cell.cloud "gcp") (eq .Values.cell.cloud "azure")) }}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -29,15 +29,31 @@ spec:
         domainFilters:
 {{ toYaml .Values.platform.externalDNS.domainFilters | nindent 10 }}
         interval: {{ .Values.platform.externalDNS.interval | quote }}
+        {{- with .Values.platform.externalDNS.podLabels }}
+        podLabels:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
         serviceAccount:
           create: true
           name: {{ .Values.platform.externalDNS.serviceAccountName | quote }}
+          {{- with .Values.platform.externalDNS.serviceAccountLabels }}
+          labels:
+{{ toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.platform.externalDNS.serviceAccountAnnotations }}
           annotations:
 {{ toYaml . | nindent 12 }}
           {{- end }}
         extraArgs:
 {{ toYaml .Values.platform.externalDNS.extraArgs | nindent 10 }}
+        {{- with .Values.platform.externalDNS.extraVolumes }}
+        extraVolumes:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.platform.externalDNS.extraVolumeMounts }}
+        extraVolumeMounts:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}
     namespace: {{ .Values.platform.externalDNS.namespace | quote }}

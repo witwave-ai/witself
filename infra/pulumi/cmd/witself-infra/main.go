@@ -401,7 +401,7 @@ func run(args []string) error {
 	if *cloud == "azure" && cmd != "outputs" {
 		if err := backend.EnsureAzureProviders(ctx, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
-		}, "Microsoft.Network", "Microsoft.DBforPostgreSQL", "Microsoft.KeyVault", "Microsoft.ManagedIdentity", "Microsoft.Compute", "Microsoft.ContainerService"); err != nil {
+		}, "Microsoft.Network", "Microsoft.NetworkFunction", "Microsoft.ServiceNetworking", "Microsoft.DBforPostgreSQL", "Microsoft.KeyVault", "Microsoft.ManagedIdentity", "Microsoft.Compute", "Microsoft.ContainerService"); err != nil {
 			return err
 		}
 	}

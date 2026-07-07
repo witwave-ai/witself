@@ -22,18 +22,24 @@ For DNS, keep the stable names here:
 - `cell.apiHost` is the Witself API hostname under that zone.
 - `platform.externalDNS` enables the ExternalDNS chart and limits it to the cell
   zone with `domainFilters` and `txtOwnerId`. AWS uses Route 53; GCP uses Cloud
-  DNS with a Workload Identity-bound Google service account. Azure DNS is still
-  a later slice, so the Azure sandbox keeps ExternalDNS disabled for now.
+  DNS with a Workload Identity-bound Google service account. Azure uses Azure
+  DNS with an AKS Workload Identity-bound managed identity; Pulumi enables the
+  live Azure ExternalDNS values at runtime after it creates the zone, identity,
+  and federated credential.
 - `apps.witselfServer.awsAlbIngress` is the AWS ALB path. `gcpIngress` is the
   GKE-native path: GKE Ingress, BackendConfig health checks, a reserved global
   static IP, FrontendConfig HTTP-to-HTTPS redirects, and a Google-managed
-  certificate. Azure ingress is still a later slice.
+  certificate. `azureGateway` is the Azure Application Gateway for Containers
+  path. It renders Gateway API companion manifests when enabled; Pulumi turns it
+  on at runtime after creating the ALB Controller identity and delegated
+  association subnet.
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.
 
-`witself-infra` still owns the durable cloud side: Route 53 or Cloud DNS zone
-creation, Cloudflare parent-zone delegation, certificate/static-IP cloud
-resources, and the cloud IAM role/service account ExternalDNS uses. Pulumi
-injects generated cloud outputs, such as the ACM certificate ARN, GCP static IP
-name, and GCP service account annotation, into the root app at deploy time.
+`witself-infra` still owns the durable cloud side: Route 53, Cloud DNS, or Azure
+DNS zone creation, Cloudflare parent-zone delegation, certificate/static-IP or
+gateway-association cloud resources, and the cloud IAM role/service account
+ExternalDNS uses. Pulumi injects generated cloud outputs, such as the ACM
+certificate ARN, GCP static IP name, Azure ALB subnet ID, and cloud identity
+annotations, into the root app at deploy time.

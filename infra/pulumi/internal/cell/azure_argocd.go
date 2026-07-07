@@ -16,7 +16,7 @@ import (
 // AWS and GCP, but obtains the AKS kubeconfig from Azure Resource Manager. AKS
 // returns a credential-bearing kubeconfig for this cluster shape, so the
 // provider input is marked secret before Pulumi stores it in state.
-func provisionAzureArgoCD(ctx *pulumi.Context, c azureCell, net *azureNetwork, aks *azureKubernetes, secrets *azureSecrets, eso *azureESO) error {
+func provisionAzureArgoCD(ctx *pulumi.Context, c azureCell, net *azureNetwork, aks *azureKubernetes, secrets *azureSecrets, eso *azureESO, azDNS *azureDNS, albController *azureALBController) error {
 	credentials := containerservice.ListManagedClusterUserCredentialsOutput(ctx, containerservice.ListManagedClusterUserCredentialsOutputArgs{
 		ResourceGroupName: net.resourceGroupName,
 		ResourceName:      aks.name,
@@ -67,8 +67,65 @@ platform:
       azure.workload.identity/client-id: %q
       azure.workload.identity/tenant-id: %q
 `, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, secrets.vaultURL, eso.clientID, eso.tenantID)
+	if azDNS != nil {
+		runtimeValues = pulumi.Sprintf(`gitops:
+  repoURL: %q
+  targetRevision: %q
+  valuesPath: %q
+cell:
+  domain: %q
+  apiHost: %q
+apps:
+  witselfServer:
+    azureGateway:
+      enabled: true
+      albSubnetID: %q
+platform:
+  azureAlbController:
+    enabled: true
+    namespace: %q
+    controllerNamespace: %q
+    podIdentity:
+      clientID: %q
+  externalDNS:
+    enabled: true
+    serviceAccountAnnotations:
+      azure.workload.identity/client-id: %q
+    serviceAccountLabels:
+      azure.workload.identity/use: "true"
+    podLabels:
+      azure.workload.identity/use: "true"
+    azureConfig:
+      enabled: true
+      secretName: %q
+      tenantId: %q
+      subscriptionId: %q
+      resourceGroup: %q
+    extraVolumes:
+      - name: azure-config-file
+        secret:
+          secretName: %q
+    extraVolumeMounts:
+      - name: azure-config-file
+        mountPath: /etc/kubernetes
+        readOnly: true
+    extraArgs:
+      azure-config-file: /etc/kubernetes/azure.json
+  externalSecrets:
+    azureVaultURL: %q
+    serviceAccountAnnotations:
+      azure.workload.identity/client-id: %q
+      azure.workload.identity/tenant-id: %q
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, azDNS.zoneName, azDNS.apiHost, net.albSubnetID.ToStringOutput(), azureALBControllerNamespace, azureALBControllerNamespace, albController.clientID, azDNS.clientID, azureExternalDNSConfigSecret, azDNS.tenantID, azDNS.subscriptionID, azDNS.resourceGroupName, azureExternalDNSConfigSecret, secrets.vaultURL, eso.clientID, eso.tenantID)
+	}
 
 	rootDependsOn := append([]pulumi.Resource{release}, eso.dependencies...)
+	if azDNS != nil {
+		rootDependsOn = append(rootDependsOn, azDNS.dependencies...)
+	}
+	if albController != nil {
+		rootDependsOn = append(rootDependsOn, albController.dependencies...)
+	}
 
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),

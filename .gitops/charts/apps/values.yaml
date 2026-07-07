@@ -50,6 +50,26 @@ apps:
           type: HTTP
           requestPath: /readyz
           port: 8081
+    azureGateway:
+      enabled: false
+      albNamespace: azure-alb-system
+      albName: witself-api
+      albSubnetID: ""
+      gatewayName: witself-api
+      gatewayClassName: azure-alb-external
+      hostname: ""
+      serviceName: witself-server
+      servicePort: 80
+      http:
+        enabled: true
+      https:
+        enabled: false
+        certificate:
+          enabled: false
+          secretName: witself-api-tls
+          issuerRef:
+            kind: ClusterIssuer
+            name: letsencrypt-prod
     secrets:
       bootstrap:
         enabled: true
