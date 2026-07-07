@@ -1,0 +1,83 @@
+cell:
+  name: azure-sandbox-use2-dev
+  cloud: azure
+  accountAlias: sandbox
+  region: eastus2
+  role: dev
+  domain: azure-sandbox-use2-dev.cells.witself.witwave.ai
+  apiHost: api.azure-sandbox-use2-dev.cells.witself.witwave.ai
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+apps:
+  witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: 0.0.98
+    imageTag: 0.0.98
+    backendKind: managed
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    secrets:
+      bootstrap:
+        enabled: true
+        remoteKey: bootstrap-operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
+        storeName: azure
+      database:
+        enabled: true
+        remoteKey: db
+        targetName: witself-db
+        urlKey: dsn
+        refreshInterval: 1h
+        storeName: azure
+      provision:
+        enabled: true
+        remoteKey: provision-token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+        storeName: azure
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: v1.20.3
+    namespace: cert-manager
+  externalDNS:
+    enabled: false
+    chartVersion: 1.21.1
+    namespace: external-dns
+    serviceAccountName: external-dns
+    domainFilters:
+      - azure-sandbox-use2-dev.cells.witself.witwave.ai
+    txtOwnerId: azure-sandbox-use2-dev
+    provider:
+      name: azure
+  externalSecrets:
+    enabled: true
+    chartVersion: 2.7.0
+    namespace: external-secrets
+    storeName: azure
+    serviceAccountName: external-secrets
+    serviceAccountAnnotations:
+      azure.workload.identity/client-id: 25c58557-8c10-445b-bf77-e219040941fb
+      azure.workload.identity/tenant-id: a18639f4-1eb4-4810-ab3b-5717aa935e27
+    podLabels:
+      azure.workload.identity/use: "true"
+    azureVaultURL: https://witself-f002d6-kv.vault.azure.net/
+  keda:
+    enabled: true
+    chartVersion: 2.20.1
+    namespace: keda
+  metricsServer:
+    enabled: false
+    chartVersion: 3.13.1
+    namespace: kube-system
+    replicas: 1

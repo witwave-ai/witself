@@ -151,8 +151,11 @@ Gateway, static public IPv4 address, private DNS zone/link, private Azure
 Database for PostgreSQL Flexible Server, the logical `witself` database, and a
 per-cell Key Vault containing DB/bootstrap/provision JSON secrets. It also
 creates an AKS cluster in the workload subnet with Azure CNI overlay, controlled
-egress through the cell NAT Gateway, and OIDC/workload identity enabled. ESO,
-DNS/ingress, and GitOps parity are later slices.
+egress through the cell NAT Gateway, and OIDC/workload identity enabled. It also
+creates an ESO managed identity, federates it to the
+`external-secrets/external-secrets` Kubernetes service account, and grants that
+identity read access to the cell Key Vault. Azure DNS/ingress and Argo CD
+installation are later slices.
 
 ```sh
 # Pulumi's azblob backend and azurekeyvault secrets provider can use Azure CLI
@@ -201,8 +204,9 @@ zone named `privatelink.postgres.database.azure.com`.
 The cell Key Vault is separate from the state-backend Key Vault. It stores the
 same app material as AWS Secrets Manager and GCP Secret Manager: `db`,
 `bootstrap-operator-token`, and `provision-token`. The current operator gets an
-access policy so Pulumi can write the secrets during `up`; Azure Workload
-Identity read access is added with the ESO slice.
+access policy so Pulumi can write the secrets during `up`; the ESO managed
+identity gets a separate `get/list` access-policy resource for External
+Secrets.
 
 For GCP cells with `-argocd`, `up` does not stop at Pulumi success. After the
 cell is registered and reachable through the control-plane probe, and after any
@@ -333,6 +337,7 @@ control plane forgets them.
     material.
 21. **[done]** Azure AKS with Azure CNI overlay, controlled egress through the
     cell NAT Gateway, and OIDC/workload identity enabled.
-22. Azure ESO Workload Identity, DNS/ingress, and GitOps parity.
-23. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+22. **[done]** Azure ESO Workload Identity and Key Vault read access.
+23. Azure DNS/ingress and GitOps/Argo CD installation parity.
+24. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
     remaining production hardening.

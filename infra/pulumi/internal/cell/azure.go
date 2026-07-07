@@ -52,6 +52,15 @@ type azureKubernetes struct {
 	cluster                 pulumi.Resource
 }
 
+type azureESO struct {
+	identityName             pulumi.StringOutput
+	identityID               pulumi.IDOutput
+	clientID                 pulumi.StringOutput
+	principalID              pulumi.StringOutput
+	federatedCredentialName  pulumi.StringOutput
+	kubernetesServiceAccount string
+}
+
 func azureDefaultTags(c azureCell) pulumi.StringMap {
 	return pulumi.StringMap{
 		"app":                   pulumi.String("witself"),
@@ -93,7 +102,12 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 		return err
 	}
 
-	ctx.Export("status", pulumi.String("azure: resource group + vnet + controlled egress + postgres flexible server + key vault secrets + aks provisioned"))
+	eso, err := provisionAzureESOWorkloadIdentity(ctx, c, net, aks, secrets)
+	if err != nil {
+		return err
+	}
+
+	ctx.Export("status", pulumi.String("azure: resource group + vnet + controlled egress + postgres flexible server + key vault secrets + aks + eso workload identity provisioned"))
 	ctx.Export("azureRegion", pulumi.String(c.region))
 	ctx.Export("accountAlias", pulumi.String(c.accountAlias))
 	ctx.Export("role", pulumi.String(c.role))
@@ -121,6 +135,7 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("dbPrivateDNSLink", db.privateDNSLink)
 	ctx.Export("secretVaultName", secrets.vaultName)
 	ctx.Export("secretVaultID", secrets.vaultID)
+	ctx.Export("secretVaultURL", secrets.vaultURL)
 	ctx.Export("dbSecretName", pulumi.String(secrets.dbSecretName))
 	ctx.Export("dbSecretID", secrets.dbSecretID)
 	ctx.Export("bootstrapSecretName", pulumi.String(secrets.bootstrapSecretName))
@@ -140,6 +155,12 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("aksNetworkPlugin", aks.networkPlugin)
 	ctx.Export("aksNetworkPluginMode", aks.networkPluginMode)
 	ctx.Export("aksOutboundType", aks.outboundType)
+	ctx.Export("esoIdentityName", eso.identityName)
+	ctx.Export("esoIdentityID", eso.identityID)
+	ctx.Export("esoClientID", eso.clientID)
+	ctx.Export("esoPrincipalID", eso.principalID)
+	ctx.Export("esoFederatedCredential", eso.federatedCredentialName)
+	ctx.Export("esoKubernetesServiceAccount", pulumi.String(eso.kubernetesServiceAccount))
 	return nil
 }
 

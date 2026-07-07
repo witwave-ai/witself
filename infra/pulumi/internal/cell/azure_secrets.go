@@ -18,6 +18,8 @@ const (
 type azureSecrets struct {
 	vaultName           pulumi.StringOutput
 	vaultID             pulumi.IDOutput
+	vaultURL            pulumi.StringOutput
+	vault               pulumi.Resource
 	dbSecretID          pulumi.IDOutput
 	bootstrapSecretID   pulumi.IDOutput
 	provisionSecretID   pulumi.IDOutput
@@ -73,7 +75,10 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 			},
 		},
 		Tags: azureResourceTags(c, rname(c.name, "secrets"), "secrets"),
-	}, pulumi.DependsOn([]pulumi.Resource{db.database}))
+	},
+		pulumi.DependsOn([]pulumi.Resource{db.database}),
+		pulumi.IgnoreChanges([]string{"properties.accessPolicies"}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +109,8 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 	return &azureSecrets{
 		vaultName:           vault.Name,
 		vaultID:             vault.ID(),
+		vaultURL:            vault.Properties.VaultUri(),
+		vault:               vault,
 		dbSecretID:          dbSecret.ID(),
 		bootstrapSecretID:   bootstrapSecret.ID(),
 		provisionSecretID:   provisionSecret.ID(),

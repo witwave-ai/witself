@@ -1,0 +1,19 @@
+{{- if and .Values.platform.externalSecrets.enabled (eq .Values.cell.cloud "azure") }}
+{{- $serviceAccountRefName := default .Values.platform.externalSecrets.serviceAccountName .Values.platform.externalSecrets.azureServiceAccountRefName -}}
+{{- $serviceAccountRefNamespace := default .Values.platform.externalSecrets.namespace .Values.platform.externalSecrets.azureServiceAccountRefNamespace -}}
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: {{ .Values.platform.externalSecrets.storeName | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: {{ required "platform.externalSecrets.azureVaultURL is required for Azure cells" .Values.platform.externalSecrets.azureVaultURL | quote }}
+      serviceAccountRef:
+        name: {{ required "platform.externalSecrets.serviceAccountName or azureServiceAccountRefName is required for Azure cells" $serviceAccountRefName | quote }}
+        namespace: {{ required "platform.externalSecrets.namespace or azureServiceAccountRefNamespace is required for Azure cells" $serviceAccountRefNamespace | quote }}
+{{- end }}

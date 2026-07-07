@@ -22,11 +22,15 @@ For DNS, keep the stable names here:
 - `cell.apiHost` is the Witself API hostname under that zone.
 - `platform.externalDNS` enables the ExternalDNS chart and limits it to the cell
   zone with `domainFilters` and `txtOwnerId`. AWS uses Route 53; GCP uses Cloud
-  DNS with a Workload Identity-bound Google service account.
+  DNS with a Workload Identity-bound Google service account. Azure DNS is still
+  a later slice, so the Azure sandbox keeps ExternalDNS disabled for now.
 - `apps.witselfServer.awsAlbIngress` is the AWS ALB path. `gcpIngress` is the
   GKE-native path: GKE Ingress, BackendConfig health checks, a reserved global
   static IP, FrontendConfig HTTP-to-HTTPS redirects, and a Google-managed
-  certificate.
+  certificate. Azure ingress is still a later slice.
+- `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
+  Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
+  Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.
 
 `witself-infra` still owns the durable cloud side: Route 53 or Cloud DNS zone
 creation, Cloudflare parent-zone delegation, certificate/static-IP cloud

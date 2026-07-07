@@ -22,6 +22,8 @@ loads one cell-specific [`cells/<cell>/values.yaml`](cells) file.
       values.yaml
     aws-sandbox-use1-dev/
       values.yaml
+    azure-sandbox-use2-dev/
+      values.yaml
 ```
 
 ## How app-of-apps works here
@@ -59,5 +61,6 @@ the simpler control plane.
 - This repo is **public**, and the root app points at the `main` branch, so Argo
   needs **no credentials** to read `.gitops/`.
 - **No secrets live here.** Application secrets (DB credentials, …) are delivered
-  into the cluster by the External Secrets Operator from AWS Secrets Manager;
-  `.gitops/` only references them by name.
+  into the cluster by the External Secrets Operator from the cell's cloud secret
+  store: AWS Secrets Manager, GCP Secret Manager, or Azure Key Vault. `.gitops/`
+  only references them by name.

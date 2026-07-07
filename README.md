@@ -92,7 +92,8 @@ the shared Pulumi state backend plus the first workload substrate slices:
 resource group, VNet, workload subnet, PostgreSQL-delegated DB subnet,
 controlled outbound egress through Azure NAT Gateway, private Azure Database
 for PostgreSQL Flexible Server, per-cell Azure Key Vault app secrets, and AKS
-with OIDC/workload identity enabled.
+with OIDC/workload identity enabled for platform add-ons such as External
+Secrets Operator.
 
 ```sh
 az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
@@ -135,12 +136,14 @@ egress in the same one-shot `up` path.
 The Azure substrate includes a NAT Gateway and static public IP on the workload
 subnet, with default outbound access disabled, so AKS workloads have a
 predictable controlled egress path. AKS uses Azure CNI overlay, a one-node
-minimal system pool, and OIDC/workload identity so later GitOps platform
-components can read cloud secrets without long-lived credentials. Its
+minimal system pool, and OIDC/workload identity so GitOps platform components
+can read cloud secrets without long-lived credentials. Its
 PostgreSQL Flexible Server is private only, uses the delegated DB subnet, and
 resolves through the cell's private DNS zone link. Azure stores the cell DB JSON,
 first-operator bootstrap token, and account-provision token as JSON secrets in
-the cell Key Vault.
+the cell Key Vault. Pulumi also creates the ESO managed identity, federates it
+to the `external-secrets/external-secrets` Kubernetes service account, and grants
+it read access to the cell Key Vault.
 
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the

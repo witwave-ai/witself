@@ -59,9 +59,14 @@ platform:
     installCRDs: true
     serviceAccountName: external-secrets
     serviceAccountAnnotations: {}
+    serviceAccountLabels: {}
+    podLabels: {}
     storeName: aws
     secretsManagerRegion: ""
     gcpProjectID: ""
+    azureVaultURL: ""
+    azureServiceAccountRefName: ""
+    azureServiceAccountRefNamespace: ""
   keda:
     enabled: true
     chartRepoURL: https://kedacore.github.io/charts
