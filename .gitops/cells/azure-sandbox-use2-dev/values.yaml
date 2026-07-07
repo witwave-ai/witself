@@ -94,12 +94,10 @@ platform:
     namespace: external-secrets
     storeName: azure
     serviceAccountName: external-secrets
-    serviceAccountAnnotations:
-      azure.workload.identity/client-id: 25c58557-8c10-445b-bf77-e219040941fb
-      azure.workload.identity/tenant-id: a18639f4-1eb4-4810-ab3b-5717aa935e27
     podLabels:
       azure.workload.identity/use: "true"
-    azureVaultURL: https://witself-f002d6-kv.vault.azure.net/
+    # Pulumi injects the live Azure Key Vault URL and workload identity
+    # annotations into the bootstrap Application for each provisioned cell.
   keda:
     enabled: true
     chartVersion: 2.20.1
