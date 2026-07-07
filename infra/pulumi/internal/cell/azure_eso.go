@@ -34,7 +34,7 @@ func provisionAzureESOWorkloadIdentity(ctx *pulumi.Context, c azureCell, net *az
 		return nil, err
 	}
 
-	if _, err := keyvault.NewAccessPolicy(ctx, "cell-eso-secrets", &keyvault.AccessPolicyArgs{
+	policy, err := keyvault.NewAccessPolicy(ctx, "cell-eso-secrets", &keyvault.AccessPolicyArgs{
 		ResourceGroupName: net.resourceGroupName,
 		VaultName:         secrets.vaultName,
 		Policy: keyvault.AccessPolicyEntryArgs{
@@ -47,7 +47,8 @@ func provisionAzureESOWorkloadIdentity(ctx *pulumi.Context, c azureCell, net *az
 				},
 			},
 		},
-	}, pulumi.DependsOn([]pulumi.Resource{secrets.vault, identity})); err != nil {
+	}, pulumi.DependsOn([]pulumi.Resource{secrets.vault, identity}))
+	if err != nil {
 		return nil, err
 	}
 
@@ -75,7 +76,9 @@ func provisionAzureESOWorkloadIdentity(ctx *pulumi.Context, c azureCell, net *az
 		identityID:               identity.ID(),
 		clientID:                 identity.ClientId,
 		principalID:              identity.PrincipalId,
+		tenantID:                 pulumi.String(client.TenantId).ToStringOutput(),
 		federatedCredentialName:  credential.Name,
 		kubernetesServiceAccount: azureESOKubernetesServiceAccount,
+		dependencies:             []pulumi.Resource{policy, credential},
 	}, nil
 }

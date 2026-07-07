@@ -29,6 +29,7 @@ platform:
     chartName: cert-manager
     chartVersion: v1.20.3
     namespace: cert-manager
+    ignoreWebhookConfigurationDifferences: false
     crds:
       enabled: true
       keep: true
@@ -75,6 +76,7 @@ platform:
     namespace: keda
     installCRDs: true
     ignoreDeploymentResourceDifferences: false
+    ignoreWebhookConfigurationDifferences: false
   metricsServer:
     enabled: true
     chartRepoURL: https://kubernetes-sigs.github.io/metrics-server/

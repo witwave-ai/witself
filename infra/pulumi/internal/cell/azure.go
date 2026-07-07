@@ -57,8 +57,10 @@ type azureESO struct {
 	identityID               pulumi.IDOutput
 	clientID                 pulumi.StringOutput
 	principalID              pulumi.StringOutput
+	tenantID                 pulumi.StringOutput
 	federatedCredentialName  pulumi.StringOutput
 	kubernetesServiceAccount string
+	dependencies             []pulumi.Resource
 }
 
 func azureDefaultTags(c azureCell) pulumi.StringMap {
@@ -105,6 +107,12 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	eso, err := provisionAzureESOWorkloadIdentity(ctx, c, net, aks, secrets)
 	if err != nil {
 		return err
+	}
+
+	if c.argocd {
+		if err := provisionAzureArgoCD(ctx, c, net, aks, secrets, eso); err != nil {
+			return err
+		}
 	}
 
 	ctx.Export("status", pulumi.String("azure: resource group + vnet + controlled egress + postgres flexible server + key vault secrets + aks + eso workload identity provisioned"))
@@ -159,6 +167,7 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("esoIdentityID", eso.identityID)
 	ctx.Export("esoClientID", eso.clientID)
 	ctx.Export("esoPrincipalID", eso.principalID)
+	ctx.Export("esoTenantID", eso.tenantID)
 	ctx.Export("esoFederatedCredential", eso.federatedCredentialName)
 	ctx.Export("esoKubernetesServiceAccount", pulumi.String(eso.kubernetesServiceAccount))
 	return nil

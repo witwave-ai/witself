@@ -153,9 +153,9 @@ per-cell Key Vault containing DB/bootstrap/provision JSON secrets. It also
 creates an AKS cluster in the workload subnet with Azure CNI overlay, controlled
 egress through the cell NAT Gateway, and OIDC/workload identity enabled. It also
 creates an ESO managed identity, federates it to the
-`external-secrets/external-secrets` Kubernetes service account, and grants that
-identity read access to the cell Key Vault. Azure DNS/ingress and Argo CD
-installation are later slices.
+`external-secrets/external-secrets` Kubernetes service account, grants that
+identity read access to the cell Key Vault, and can install Argo CD when
+`-argocd` is set. Azure DNS/ingress is a later slice.
 
 ```sh
 # Pulumi's azblob backend and azurekeyvault secrets provider can use Azure CLI
@@ -338,6 +338,7 @@ control plane forgets them.
 21. **[done]** Azure AKS with Azure CNI overlay, controlled egress through the
     cell NAT Gateway, and OIDC/workload identity enabled.
 22. **[done]** Azure ESO Workload Identity and Key Vault read access.
-23. Azure DNS/ingress and GitOps/Argo CD installation parity.
-24. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+23. Azure GitOps/Argo CD installation parity.
+24. Azure DNS/ingress parity.
+25. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
     remaining production hardening.

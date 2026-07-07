@@ -24,12 +24,22 @@ spec:
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}
     namespace: {{ .Values.platform.keda.namespace | quote }}
-  {{- if .Values.platform.keda.ignoreDeploymentResourceDifferences }}
+  {{- if or .Values.platform.keda.ignoreDeploymentResourceDifferences .Values.platform.keda.ignoreWebhookConfigurationDifferences }}
   ignoreDifferences:
+  {{- if .Values.platform.keda.ignoreDeploymentResourceDifferences }}
     - group: apps
       kind: Deployment
       jqPathExpressions:
         - .spec.template.spec.containers[].resources
+  {{- end }}
+  {{- if .Values.platform.keda.ignoreWebhookConfigurationDifferences }}
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: keda-admission
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+        - .webhooks[]?.namespaceSelector
+  {{- end }}
   {{- end }}
   syncPolicy:
     automated:

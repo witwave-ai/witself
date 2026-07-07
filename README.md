@@ -143,7 +143,8 @@ resolves through the cell's private DNS zone link. Azure stores the cell DB JSON
 first-operator bootstrap token, and account-provision token as JSON secrets in
 the cell Key Vault. Pulumi also creates the ESO managed identity, federates it
 to the `external-secrets/external-secrets` Kubernetes service account, and grants
-it read access to the cell Key Vault.
+it read access to the cell Key Vault. Add `-argocd` to the Azure `up` command to
+install the same Argo CD app-of-apps layer used by AWS and GCP.
 
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the

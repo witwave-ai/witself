@@ -50,6 +50,7 @@ platform:
     enabled: true
     chartVersion: v1.20.3
     namespace: cert-manager
+    ignoreWebhookConfigurationDifferences: true
   externalDNS:
     enabled: false
     chartVersion: 1.21.1
@@ -76,6 +77,7 @@ platform:
     enabled: true
     chartVersion: 2.20.1
     namespace: keda
+    ignoreWebhookConfigurationDifferences: true
   metricsServer:
     enabled: false
     chartVersion: 3.13.1

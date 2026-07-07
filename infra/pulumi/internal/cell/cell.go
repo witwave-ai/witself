@@ -82,6 +82,11 @@ type azureCell struct {
 	dbVersion         string // Azure Database for PostgreSQL major version
 	accountAlias      string // free-text account label
 	role              string // dev | prod | canary | ordinal
+	argocd            bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo        string // GitOps repo URL Argo's root app reconciles
+	gitopsPath        string // path in the repo for the root bootstrap chart
+	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
+	gitopsRevision    string // repo revision (branch/tag)
 	bootstrapToken    pulumi.StringOutput
 	bootstrapTokenSet bool
 }
@@ -189,6 +194,11 @@ func Program(ctx *pulumi.Context) error {
 			dbVersion:         dbVersion,
 			accountAlias:      w.Get("accountAlias"),
 			role:              w.Get("role"),
+			argocd:            argocd,
+			gitopsRepo:        gitopsRepo,
+			gitopsPath:        gitopsPath,
+			gitopsValuesPath:  gitopsValuesPath,
+			gitopsRevision:    gitopsRevision,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

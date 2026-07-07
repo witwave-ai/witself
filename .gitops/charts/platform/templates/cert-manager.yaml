@@ -25,6 +25,14 @@ spec:
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}
     namespace: {{ .Values.platform.certManager.namespace | quote }}
+  {{- if .Values.platform.certManager.ignoreWebhookConfigurationDifferences }}
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: cert-manager-webhook
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+  {{- end }}
   syncPolicy:
     automated:
       prune: true
