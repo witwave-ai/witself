@@ -3734,6 +3734,140 @@ async function runScheduledPlacementRunner(env) {
   }
 }
 
+async function archivedCountsByCell(env) {
+  const counts = new Map();
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
+    for (const k of page.keys) {
+      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (entry?.cell) {
+        counts.set(entry.cell, (counts.get(entry.cell) ?? 0) + 1);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return counts;
+}
+
+async function handlePlacementStatus(request, env, url) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (request.method !== "GET") {
+    return err("method not allowed", 405);
+  }
+  const sampleLimit = clampInt(url.searchParams.get("limit"), 25, 1, 200);
+  const cells = await listCells(env);
+  const cellsByName = new Map(cells.map((cell) => [cell.name, cell]));
+  const destinationCells = cells.filter(
+    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+  );
+  const liveCounts = await accountCountsByCell(env);
+  const archivedCounts = await archivedCountsByCell(env);
+
+  let archivedTotal = 0;
+  let archivedPlaceable = 0;
+  let archivedUnplaced = 0;
+  const archivedBlocked = [];
+  let cursor;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("archived:".length);
+      const archived = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!archived) {
+        continue;
+      }
+      archivedTotal += 1;
+      const target = bestPlacementCell(destinationCells, archived, liveCounts, false);
+      if (target) {
+        archivedPlaceable += 1;
+        continue;
+      }
+      archivedUnplaced += 1;
+      if (archivedBlocked.length < sampleLimit) {
+        archivedBlocked.push({
+          account_id: accountId,
+          from_cell: archived.cell ?? null,
+          region: archived.region ?? null,
+          region_code: archived.region_code ?? null,
+          reason: "no eligible accepting cell",
+        });
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  let liveTotal = 0;
+  let movable = 0;
+  let skipped = 0;
+  const movableAccounts = [];
+  const skippedAccounts = [];
+  let cursor2;
+  do {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor: cursor2 });
+    for (const k of page.keys) {
+      const accountId = k.name.slice("acct:".length);
+      const route = await env.DIRECTORY.get(k.name, { type: "json" });
+      if (!route) {
+        continue;
+      }
+      liveTotal += 1;
+      const candidate = await rebalanceTargetForAccount(
+        env,
+        cellsByName,
+        destinationCells,
+        liveCounts,
+        accountId,
+        route,
+      );
+      if (candidate.skip) {
+        skipped += 1;
+        if (skippedAccounts.length < sampleLimit) {
+          skippedAccounts.push(candidate.skip);
+        }
+        continue;
+      }
+      if (candidate.target) {
+        movable += 1;
+        if (movableAccounts.length < sampleLimit) {
+          movableAccounts.push({
+            account_id: accountId,
+            from_cell: candidate.current.name,
+            to_cell: candidate.target.name,
+            reason: candidate.reason,
+          });
+        }
+      }
+    }
+    cursor2 = page.list_complete ? undefined : page.cursor;
+  } while (cursor2);
+
+  return json({
+    schema_version: "witself.v0",
+    placement_runner: await placementRunnerConfig(env),
+    cells: cells.map((cell) => ({
+      ...publicCell(cell),
+      account_count: liveCounts.get(cell.name) ?? 0,
+      archived_count: archivedCounts.get(cell.name) ?? 0,
+    })),
+    archived: {
+      total: archivedTotal,
+      placeable: archivedPlaceable,
+      unplaced: archivedUnplaced,
+      blocked: archivedBlocked,
+    },
+    live: {
+      total: liveTotal,
+      movable,
+      skipped,
+      movable_accounts: movableAccounts,
+      skipped_accounts: skippedAccounts,
+    },
+  });
+}
+
 // restoreAccount runs the four-step restore for a single account. Each step
 // is idempotent under retry, and the ordering — import THEN resume THEN
 // route THEN clean — guarantees the account is never simultaneously
@@ -4211,6 +4345,9 @@ export default {
     }
     if (url.pathname === "/v1/placement-runner") {
       return handlePlacementRunner(request, env);
+    }
+    if (url.pathname === "/v1/placement-status") {
+      return handlePlacementStatus(request, env, url);
     }
     if (url.pathname === "/v1/placement:run") {
       if (request.method !== "POST") {

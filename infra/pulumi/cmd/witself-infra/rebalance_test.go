@@ -192,6 +192,49 @@ func TestPlacementRunnerFleetEnableAndRun(t *testing.T) {
 	}
 }
 
+func TestPlacementStatusFleetSendsLimit(t *testing.T) {
+	var gotLimit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/placement-status" {
+			http.NotFound(w, r)
+			return
+		}
+		gotLimit = r.URL.Query().Get("limit")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"placement_runner": map[string]any{
+				"enabled":            true,
+				"restore_archives":   true,
+				"restore_batch":      4,
+				"restore_any_region": false,
+				"rebalance":          true,
+				"rebalance_batch":    1,
+			},
+			"cells": []any{
+				map[string]any{
+					"name":                "aws-sandbox-use1-dev",
+					"cloud":               "aws",
+					"region_code":         "use1",
+					"channel":             "experimental",
+					"accepting":           true,
+					"has_provision_token": true,
+					"account_count":       1,
+					"archived_count":      0,
+				},
+			},
+			"archived": map[string]any{"total": 0, "placeable": 0, "unplaced": 0},
+			"live":     map[string]any{"total": 1, "movable": 0, "skipped": 0},
+		})
+	}))
+	defer srv.Close()
+
+	if err := placementStatusFleet(context.Background(), srv.URL, writeFleetToken(t), 7); err != nil {
+		t.Fatalf("placementStatusFleet: %v", err)
+	}
+	if gotLimit != "7" {
+		t.Fatalf("limit = %q, want 7", gotLimit)
+	}
+}
+
 func writeFleetToken(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

@@ -347,8 +347,11 @@ type RestoredAccount struct {
 }
 
 type BlockedAccount struct {
-	AccountID string `json:"account_id"`
-	Reason    string `json:"reason"`
+	AccountID  string `json:"account_id"`
+	FromCell   string `json:"from_cell,omitempty"`
+	Region     string `json:"region,omitempty"`
+	RegionCode string `json:"region_code,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 type RebalanceResult struct {
@@ -394,6 +397,42 @@ type PlacementRunnerResult struct {
 type PlacementRunnerStepError struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
+}
+
+type PlacementStatus struct {
+	PlacementRunner PlacementRunnerConfig  `json:"placement_runner"`
+	Cells           []PlacementStatusCell  `json:"cells"`
+	Archived        PlacementArchiveStatus `json:"archived"`
+	Live            PlacementLiveStatus    `json:"live"`
+}
+
+type PlacementStatusCell struct {
+	Name              string  `json:"name"`
+	Endpoint          string  `json:"endpoint"`
+	Cloud             string  `json:"cloud,omitempty"`
+	Region            string  `json:"region,omitempty"`
+	RegionCode        string  `json:"region_code,omitempty"`
+	Channel           string  `json:"channel,omitempty"`
+	Weight            float64 `json:"weight,omitempty"`
+	Accepting         bool    `json:"accepting"`
+	HasProvisionToken bool    `json:"has_provision_token"`
+	AccountCount      int     `json:"account_count"`
+	ArchivedCount     int     `json:"archived_count"`
+}
+
+type PlacementArchiveStatus struct {
+	Total     int              `json:"total"`
+	Placeable int              `json:"placeable"`
+	Unplaced  int              `json:"unplaced"`
+	Blocked   []BlockedAccount `json:"blocked,omitempty"`
+}
+
+type PlacementLiveStatus struct {
+	Total           int                 `json:"total"`
+	Movable         int                 `json:"movable"`
+	Skipped         int                 `json:"skipped"`
+	MovableAccounts []RebalancedAccount `json:"movable_accounts,omitempty"`
+	SkippedAccounts []SkippedAccount    `json:"skipped_accounts,omitempty"`
 }
 
 // Restore asks the control plane to pull a batch of archived accounts from R2
@@ -570,6 +609,22 @@ func (c *Client) RunPlacementRunner(ctx context.Context, cfg PlacementRunnerConf
 	var out PlacementRunnerResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return PlacementRunnerResult{}, fmt.Errorf("decode placement runner response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) GetPlacementStatus(ctx context.Context, limit int) (PlacementStatus, error) {
+	path := "/v1/placement-status"
+	if limit > 0 {
+		path = fmt.Sprintf("%s?limit=%d", path, limit)
+	}
+	var out PlacementStatus
+	code, body, err := c.do(ctx, http.MethodGet, path, nil, &out)
+	if err != nil {
+		return PlacementStatus{}, err
+	}
+	if code != http.StatusOK {
+		return PlacementStatus{}, fmt.Errorf("placement status: HTTP %d: %s", code, strings.TrimSpace(body))
 	}
 	return out, nil
 }

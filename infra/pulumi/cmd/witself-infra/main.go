@@ -116,6 +116,7 @@ commands:
   outputs   print the cell's stack outputs
   rebalance move live accounts to better eligible cells by placement policy
   placement-runner show, enable, disable, or trigger scheduled placement work
+  placement-status show fleet placement, archive, and rebalance status
 
 The cell name is composed: <cloud>-<account-alias>-<region-code>-<role>
 
@@ -167,6 +168,7 @@ flags:
   -enable         with placement-runner: enable scheduled restore/rebalance
   -disable        with placement-runner: disable scheduled restore/rebalance
   -run            with placement-runner: trigger one manual restore/rebalance pass
+  -limit          with placement-status: max sample rows per category (default 25)
 
 example:
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
@@ -226,6 +228,7 @@ func run(args []string) error {
 	placementRunnerEnable := fs.Bool("enable", false, "with placement-runner: enable scheduled restore/rebalance")
 	placementRunnerDisable := fs.Bool("disable", false, "with placement-runner: disable scheduled restore/rebalance")
 	placementRunnerRun := fs.Bool("run", false, "with placement-runner: trigger one manual restore/rebalance pass")
+	placementStatusLimit := fs.Int("limit", 25, "with placement-status: max sample rows per category")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -241,6 +244,12 @@ func run(args []string) error {
 			return fmt.Errorf("placement-runner requires -control-plane")
 		}
 		return placementRunnerFleet(context.Background(), *controlPlane, *fleetTokenFile, *placementRunnerEnable, *placementRunnerDisable, *placementRunnerRun)
+	}
+	if cmd == "placement-status" {
+		if *controlPlane == "" {
+			return fmt.Errorf("placement-status requires -control-plane")
+		}
+		return placementStatusFleet(context.Background(), *controlPlane, *fleetTokenFile, *placementStatusLimit)
 	}
 
 	// Validate functional + label inputs before composing the name.
@@ -1025,6 +1034,70 @@ func printPlacementRunnerResult(res fleet.PlacementRunnerResult) {
 			}
 		}
 		fmt.Printf("rebalance\t%d moved, %d remaining\n", ok, res.Rebalance.Remaining)
+	}
+}
+
+func placementStatusFleet(ctx context.Context, controlPlane, fleetTokenFile string, limit int) error {
+	if limit < 1 {
+		return fmt.Errorf("-limit must be at least 1")
+	}
+	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
+	if err != nil {
+		return err
+	}
+	status, err := cl.GetPlacementStatus(ctx, limit)
+	if err != nil {
+		return err
+	}
+	printPlacementStatus(status)
+	return nil
+}
+
+func printPlacementStatus(status fleet.PlacementStatus) {
+	fmt.Printf("runner\tenabled=%v restore=%v rebalance=%v\n",
+		status.PlacementRunner.Enabled,
+		status.PlacementRunner.RestoreArchives,
+		status.PlacementRunner.Rebalance)
+	fmt.Printf("archived\ttotal=%d placeable=%d unplaced=%d\n",
+		status.Archived.Total,
+		status.Archived.Placeable,
+		status.Archived.Unplaced)
+	fmt.Printf("live\ttotal=%d movable=%d skipped=%d\n",
+		status.Live.Total,
+		status.Live.Movable,
+		status.Live.Skipped)
+
+	cells := append([]fleet.PlacementStatusCell(nil), status.Cells...)
+	sort.Slice(cells, func(i, j int) bool { return cells[i].Name < cells[j].Name })
+	for _, c := range cells {
+		fmt.Printf("cell\t%s\tcloud=%s region_code=%s channel=%s accepting=%v live=%d archived=%d\n",
+			c.Name,
+			c.Cloud,
+			c.RegionCode,
+			c.Channel,
+			c.Accepting,
+			c.AccountCount,
+			c.ArchivedCount)
+	}
+	for _, a := range status.Archived.Blocked {
+		fmt.Printf("blocked\t%s\tfrom=%s region_code=%s reason=%s\n",
+			a.AccountID,
+			a.FromCell,
+			a.RegionCode,
+			a.Reason)
+	}
+	for _, a := range status.Live.MovableAccounts {
+		fmt.Printf("movable\t%s\tfrom=%s to=%s reason=%s\n",
+			a.AccountID,
+			a.FromCell,
+			a.ToCell,
+			a.Reason)
+	}
+	for _, a := range status.Live.SkippedAccounts {
+		fmt.Printf("skipped\t%s\tcell=%s reason=%s\n",
+			a.AccountID,
+			a.Cell,
+			a.Reason)
 	}
 }
 
