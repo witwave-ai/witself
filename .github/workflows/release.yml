@@ -127,13 +127,13 @@ jobs:
 
       - name: Run GoReleaser
         env:
-          # --parallelism 2: witself-infra (pulumi-aws + pulumi-kubernetes) is a
-          # memory-heavy compile; building all targets at once (default = nproc)
-          # OOM-killed the runner on v0.0.35. Cap concurrent builds so at most two
-          # heavy targets compile simultaneously.
+          # --parallelism 1: witself-infra now includes the AWS, GCP, Azure,
+          # and Kubernetes provider graph. Running two infra builds together
+          # exhausted the GitHub runner during v0.0.116, so serialize builds and
+          # lean on the Go cache for speed.
           RELEASE_ARGS: >-
-            ${{ github.event_name == 'push' && 'release --clean --parallelism 2'
-                || 'release --snapshot --clean --skip=sign --parallelism 2' }}
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 1'
+                || 'release --snapshot --clean --skip=sign --parallelism 1' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Required for the cross-repo Homebrew formula push (org secret).
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -176,8 +176,8 @@ jobs:
         if: always()
         env:
           RELEASE_ARGS: >-
-            ${{ github.event_name == 'push' && 'release --clean --parallelism 2'
-                || 'release --snapshot --clean --skip=sign --parallelism 2' }}
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 1'
+                || 'release --snapshot --clean --skip=sign --parallelism 1' }}
           RELEASE_CACHE_HIT: ${{ steps.release-go-cache.outputs.cache-hit }}
           RELEASE_CACHE_KEY: release-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'infra/pulumi/go.sum') }}
         run: |
