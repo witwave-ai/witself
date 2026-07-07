@@ -32,6 +32,10 @@ spec:
       name: cert-manager-webhook
       jqPathExpressions:
         - .webhooks[]?.clientConfig.caBundle
+        - .webhooks[]?.clientConfig.service.port
+        - .webhooks[]?.namespaceSelector
+        - .webhooks[]?.objectSelector
+        - .webhooks[]?.rules[]?.scope
   {{- end }}
   syncPolicy:
     automated:
