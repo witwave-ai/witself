@@ -30,6 +30,8 @@ platform:
     chartVersion: v1.20.3
     namespace: cert-manager
     enableGatewayAPI: false
+    serviceAccountAnnotations: {}
+    podLabels: {}
     ignoreWebhookConfigurationDifferences: false
     crds:
       enabled: true

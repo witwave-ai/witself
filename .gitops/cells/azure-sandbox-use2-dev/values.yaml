@@ -40,6 +40,7 @@ apps:
             email: scott@witwave.ai
             server: https://acme-v02.api.letsencrypt.org/directory
             privateKeySecretName: letsencrypt-prod-private-key
+            solver: dns01
     secrets:
       bootstrap:
         enabled: true

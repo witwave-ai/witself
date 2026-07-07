@@ -17,6 +17,9 @@ const (
 	azureExternalDNSServiceAccount      = "external-dns"
 	azureExternalDNSFederatedCredential = "external-dns"
 	azureExternalDNSConfigSecret        = "external-dns-azure"
+	azureCertManagerNamespace           = "cert-manager"
+	azureCertManagerServiceAccount      = "cert-manager"
+	azureCertManagerFederatedCredential = "cert-manager"
 )
 
 type azureDNS struct {
@@ -108,7 +111,19 @@ func provisionAzureDNS(ctx *pulumi.Context, c azureCell, net *azureNetwork, aks 
 		return nil, err
 	}
 
-	deps := []pulumi.Resource{identity, readerRole, zoneContributorRole, credential}
+	certManagerCredential, err := managedidentity.NewFederatedIdentityCredential(ctx, "cell-cert-manager-dns-federated", &managedidentity.FederatedIdentityCredentialArgs{
+		ResourceGroupName:                       net.resourceGroupName,
+		ResourceName:                            identity.Name,
+		FederatedIdentityCredentialResourceName: pulumi.String(azureCertManagerFederatedCredential),
+		Issuer:                                  issuer,
+		Subject:                                 pulumi.String("system:serviceaccount:" + azureCertManagerNamespace + ":" + azureCertManagerServiceAccount),
+		Audiences:                               pulumi.StringArray{pulumi.String(azureWorkloadIdentityAudience)},
+	}, pulumi.DependsOn([]pulumi.Resource{aks.cluster, identity}))
+	if err != nil {
+		return nil, err
+	}
+
+	deps := []pulumi.Resource{identity, readerRole, zoneContributorRole, credential, certManagerCredential}
 	deps = append(deps, delegationRecords...)
 
 	ctx.Export("cellDomain", pulumi.String(zoneName))
@@ -125,6 +140,8 @@ func provisionAzureDNS(ctx *pulumi.Context, c azureCell, net *azureNetwork, aks 
 	ctx.Export("externalDNSPrincipalID", identity.PrincipalId)
 	ctx.Export("externalDNSKubernetesServiceAccount", pulumi.String(azureExternalDNSNamespace+"/"+azureExternalDNSServiceAccount))
 	ctx.Export("externalDNSZone", pulumi.String(zoneName))
+	ctx.Export("certManagerDNSClientID", identity.ClientId)
+	ctx.Export("certManagerDNSKubernetesServiceAccount", pulumi.String(azureCertManagerNamespace+"/"+azureCertManagerServiceAccount))
 
 	return &azureDNS{
 		zoneName:          zoneName,

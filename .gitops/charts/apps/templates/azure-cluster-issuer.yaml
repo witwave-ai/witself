@@ -6,6 +6,7 @@
 {{- if and $app.enabled $gateway.enabled (eq .Values.cell.cloud "azure") $https.enabled $certificate.enabled $acme.enabled }}
 {{- $issuerRef := default dict $certificate.issuerRef -}}
 {{- $gatewayName := default "witself-api" $gateway.gatewayName -}}
+{{- $solver := default "http01" $acme.solver -}}
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -21,10 +22,27 @@ spec:
     privateKeySecretRef:
       name: {{ default (printf "%s-private-key" $issuerRef.name) $acme.privateKeySecretName | quote }}
     solvers:
+      {{ if eq $solver "dns01" -}}
+      {{- $dns01 := default dict $acme.dns01 -}}
+      {{- $azureDNS := default dict $dns01.azureDNS -}}
+      {{- $managedIdentity := default dict $azureDNS.managedIdentity -}}
+      - dns01:
+          azureDNS:
+            hostedZoneName: {{ required "apps.witselfServer.azureGateway.https.certificate.acme.dns01.azureDNS.hostedZoneName is required when Azure DNS-01 is enabled" $azureDNS.hostedZoneName | quote }}
+            resourceGroupName: {{ required "apps.witselfServer.azureGateway.https.certificate.acme.dns01.azureDNS.resourceGroupName is required when Azure DNS-01 is enabled" $azureDNS.resourceGroupName | quote }}
+            subscriptionID: {{ required "apps.witselfServer.azureGateway.https.certificate.acme.dns01.azureDNS.subscriptionID is required when Azure DNS-01 is enabled" $azureDNS.subscriptionID | quote }}
+            environment: {{ default "AzurePublicCloud" $azureDNS.environment | quote }}
+            managedIdentity:
+              clientID: {{ required "apps.witselfServer.azureGateway.https.certificate.acme.dns01.azureDNS.managedIdentity.clientID is required when Azure DNS-01 is enabled" $managedIdentity.clientID | quote }}
+              {{- if $managedIdentity.tenantID }}
+              tenantID: {{ $managedIdentity.tenantID | quote }}
+              {{- end }}
+      {{ else -}}
       - http01:
           gatewayHTTPRoute:
             parentRefs:
               - name: {{ $gatewayName | quote }}
                 namespace: {{ $app.namespace | quote }}
                 kind: Gateway
+      {{- end }}
 {{- end }}

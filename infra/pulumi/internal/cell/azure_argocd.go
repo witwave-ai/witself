@@ -80,7 +80,24 @@ apps:
     azureGateway:
       enabled: true
       albSubnetID: %q
+      https:
+        certificate:
+          acme:
+            dns01:
+              azureDNS:
+                hostedZoneName: %q
+                resourceGroupName: %q
+                subscriptionID: %q
+                managedIdentity:
+                  clientID: %q
+                  tenantID: %q
 platform:
+  certManager:
+    serviceAccountAnnotations:
+      azure.workload.identity/client-id: %q
+      azure.workload.identity/tenant-id: %q
+    podLabels:
+      azure.workload.identity/use: "true"
   externalDNS:
     enabled: true
     serviceAccountAnnotations:
@@ -110,7 +127,7 @@ platform:
     serviceAccountAnnotations:
       azure.workload.identity/client-id: %q
       azure.workload.identity/tenant-id: %q
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, azDNS.zoneName, azDNS.apiHost, net.albSubnetID.ToStringOutput(), azDNS.clientID, azureExternalDNSConfigSecret, azDNS.tenantID, azDNS.subscriptionID, azDNS.resourceGroupName, azureExternalDNSConfigSecret, secrets.vaultURL, eso.clientID, eso.tenantID)
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, azDNS.zoneName, azDNS.apiHost, net.albSubnetID.ToStringOutput(), azDNS.zoneName, azDNS.resourceGroupName, azDNS.subscriptionID, azDNS.clientID, azDNS.tenantID, azDNS.clientID, azDNS.tenantID, azDNS.clientID, azureExternalDNSConfigSecret, azDNS.tenantID, azDNS.subscriptionID, azDNS.resourceGroupName, azureExternalDNSConfigSecret, secrets.vaultURL, eso.clientID, eso.tenantID)
 	}
 
 	rootDependsOn := append([]pulumi.Resource{release}, eso.dependencies...)

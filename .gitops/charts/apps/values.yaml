@@ -75,6 +75,16 @@ apps:
             email: ""
             server: https://acme-v02.api.letsencrypt.org/directory
             privateKeySecretName: letsencrypt-prod-private-key
+            solver: http01
+            dns01:
+              azureDNS:
+                hostedZoneName: ""
+                resourceGroupName: ""
+                subscriptionID: ""
+                environment: AzurePublicCloud
+                managedIdentity:
+                  clientID: ""
+                  tenantID: ""
     secrets:
       bootstrap:
         enabled: true

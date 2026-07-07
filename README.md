@@ -97,8 +97,9 @@ node pool, Azure DNS delegation, and GitOps identities for platform add-ons such
 as External Secrets Operator and ExternalDNS. Pulumi also enables the
 AKS-managed Application Gateway for Containers ALB Controller add-on so the
 GitOps app tier can render the Azure Gateway API path for the Witself API,
-including cert-manager-managed Let's Encrypt TLS for HTTPS. HTTP-to-HTTPS
-redirect policy remains a follow-up ingress polish slice.
+including cert-manager-managed Let's Encrypt TLS with Azure DNS-01 validation
+for HTTPS. HTTP-to-HTTPS redirect policy remains a follow-up ingress polish
+slice.
 
 ```sh
 az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
@@ -163,7 +164,7 @@ the ExternalDNS managed identity plus federated credential for the
 subnet for Azure Application Gateway for Containers, enables the AKS-managed ALB
 Controller add-on, grants that add-on identity permission to join the delegated
 subnet, and passes the subnet ID into GitOps so Argo renders the Gateway API
-manifests plus cert-manager's Gateway HTTP-01 issuer/certificate resources for
+manifests plus cert-manager's Azure DNS-01 issuer/certificate resources for
 HTTPS.
 Add `-argocd` to the Azure `up` command to install the same Argo CD app-of-apps
 layer used by AWS and GCP.

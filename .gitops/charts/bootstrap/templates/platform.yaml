@@ -7,6 +7,8 @@
 {{- $externalDNSExtraArgs := default dict .Values.platform.externalDNS.extraArgs -}}
 {{- $externalDNSExtraVolumes := default (list) .Values.platform.externalDNS.extraVolumes -}}
 {{- $externalDNSExtraVolumeMounts := default (list) .Values.platform.externalDNS.extraVolumeMounts -}}
+{{- $certManagerAnnotations := default dict .Values.platform.certManager.serviceAccountAnnotations -}}
+{{- $certManagerPodLabels := default dict .Values.platform.certManager.podLabels -}}
 {{- $externalSecretsAnnotations := default dict .Values.platform.externalSecrets.serviceAccountAnnotations -}}
 {{- $azureVaultURL := default "" .Values.platform.externalSecrets.azureVaultURL -}}
 {{- $platformRuntimeValues := dict -}}
@@ -41,6 +43,16 @@
 {{- end -}}
 {{- if $externalDNSRuntime -}}
 {{- $_ := set $platformRuntime "externalDNS" $externalDNSRuntime -}}
+{{- end -}}
+{{- if or $certManagerAnnotations $certManagerPodLabels -}}
+{{- $certManagerRuntime := dict -}}
+{{- if $certManagerAnnotations -}}
+{{- $_ := set $certManagerRuntime "serviceAccountAnnotations" $certManagerAnnotations -}}
+{{- end -}}
+{{- if $certManagerPodLabels -}}
+{{- $_ := set $certManagerRuntime "podLabels" $certManagerPodLabels -}}
+{{- end -}}
+{{- $_ := set $platformRuntime "certManager" $certManagerRuntime -}}
 {{- end -}}
 {{- if or $azureVaultURL $externalSecretsAnnotations -}}
 {{- $externalSecretsRuntime := dict -}}

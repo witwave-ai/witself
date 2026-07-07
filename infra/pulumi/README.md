@@ -169,7 +169,7 @@ dedicated subnet delegated to `Microsoft.ServiceNetworking/trafficControllers`
 for Azure Application Gateway for Containers, enables the AKS-managed ALB
 Controller add-on, grants the add-on identity permission to join that subnet,
 then passes the subnet ID into GitOps. The app layer renders the Gateway API
-manifests for the Witself API plus cert-manager's Gateway HTTP-01
+manifests for the Witself API plus cert-manager's Azure DNS-01
 issuer/certificate resources for Let's Encrypt HTTPS. HTTP-to-HTTPS redirect
 policy remains a follow-up Azure ingress polish slice.
 
@@ -366,7 +366,7 @@ control plane forgets them.
 25. **[done]** Azure Application Gateway for Containers subnet, AKS-managed ALB
     Controller add-on, delegated subnet permission, and Gateway API HTTP
     manifest path.
-26. **[done]** Azure HTTPS parity with cert-manager Gateway HTTP-01
+26. **[done]** Azure HTTPS parity with cert-manager Azure DNS-01
     issuer/certificate automation for the Azure Gateway path.
 27. Azure HTTP-to-HTTPS redirect policy.
 28. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
