@@ -73,6 +73,19 @@ type gcpCell struct {
 	bootstrapTokenSet bool
 }
 
+type azureCell struct {
+	name              string // composed cell name (= ctx.Stack())
+	region            string // real Azure region, e.g. eastus2
+	profile           string // minimal | prod
+	cidr              string // cell VNet CIDR (/16)
+	k8sVersion        string // AKS Kubernetes version
+	dbVersion         string // Azure Database for PostgreSQL major version
+	accountAlias      string // free-text account label
+	role              string // dev | prod | canary | ordinal
+	bootstrapToken    pulumi.StringOutput
+	bootstrapTokenSet bool
+}
+
 // Program is the inline Pulumi program — the embedded Automation API engine runs
 // this closure, so the cell definition is compiled into the witself-infra binary.
 func Program(ctx *pulumi.Context) error {
@@ -81,6 +94,7 @@ func Program(ctx *pulumi.Context) error {
 	w := config.New(ctx, "witself")
 	a := config.New(ctx, "aws")
 	g := config.New(ctx, "gcp")
+	az := config.New(ctx, "azure-native")
 
 	cloud := w.Get("cloud")     // aws | gcp | azure
 	profile := w.Get("profile") // minimal | prod
@@ -162,6 +176,19 @@ func Program(ctx *pulumi.Context) error {
 			gitopsRevision:    gitopsRevision,
 			domain:            domain,
 			cloudflareDNS:     cloudflareDNS,
+			bootstrapToken:    w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet: bootstrapTokenSet,
+		})
+	case "azure":
+		return provisionAzure(ctx, azureCell{
+			name:              cellName,
+			region:            az.Get("location"),
+			profile:           profile,
+			cidr:              cidr,
+			k8sVersion:        k8sVersion,
+			dbVersion:         dbVersion,
+			accountAlias:      w.Get("accountAlias"),
+			role:              w.Get("role"),
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

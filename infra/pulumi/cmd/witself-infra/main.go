@@ -85,6 +85,11 @@ var regionCodes = map[string]string{
 	"me-central1":   "mec1",
 	"me-central2":   "mec2",
 	"africa-south1": "afs1",
+
+	// Azure regions. These also share geography tokens with AWS/GCP where
+	// possible; the cloud token keeps azure-sandbox-use2-dev distinct.
+	"eastus":  "use1",
+	"eastus2": "use2",
 }
 
 // label is the safe form for the free-text account-alias and role tokens: they
@@ -99,7 +104,7 @@ usage:
   witself-infra <command> [flags]
 
 commands:
-  bootstrap initialize the state backend (S3/GCS bucket + KMS key) for the account/project
+  bootstrap initialize the state backend for the account/project/subscription
   up        create or update the cell
   preview   show what up would change
   destroy   tear the cell down
@@ -129,8 +134,9 @@ flags:
                   present, else the shared ~/.witself/tokens/bootstrap.token)
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -gcp-project    GCP project ID for GCP cells/state backend
-  -backend        state backend: s3|gcs|local                  (default "s3")
-  -bootstrap      with -backend s3/gcs, create the backend if missing
+  -azure-subscription Azure subscription name or ID for Azure cells/state backend
+  -backend        state backend: s3|gcs|azblob|local           (default "s3")
+  -bootstrap      with -backend s3/gcs/azblob, create backend if missing
   -state-dir      local Pulumi state backend dir (backend=local)
   -control-plane  fleet control plane URL, e.g. https://self.witwave.ai
                   up: registers the cell after provisioning
@@ -193,8 +199,9 @@ func run(args []string) error {
 	bootstrapTokenFile := fs.String("bootstrap-token-file", "", "first-operator bootstrap token file (default: per-cell ~/.witself/tokens/<cell>/bootstrap.token, else shared ~/.witself/tokens/bootstrap.token)")
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	gcpProject := fs.String("gcp-project", "", "GCP project ID for GCP cells/state backend")
-	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|local (local is a dev opt-out)")
-	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs: create the backend if it is missing")
+	azureSubscription := fs.String("azure-subscription", "", "Azure subscription name or ID for Azure cells/state backend (default: az CLI current subscription)")
+	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|local (local is a dev opt-out)")
+	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs/azblob: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
@@ -251,7 +258,7 @@ func run(args []string) error {
 	// bootstrap initializes the state backend (S3 + KMS) and returns; it is not a
 	// cell op, so it skips the stack/passphrase machinery below.
 	if cmd == "bootstrap" {
-		return runBootstrap(*cloud, *region, regionCode, *awsProfile, *gcpProject)
+		return runBootstrap(*cloud, *region, regionCode, *awsProfile, *gcpProject, *azureSubscription)
 	}
 
 	// Compose the cell name: it is the Pulumi stack name and the resource prefix.
@@ -280,6 +287,7 @@ func run(args []string) error {
 
 	var wsOpts []auto.LocalWorkspaceOption
 	var secretsProvider string
+	var azureSubscriptionID string
 	switch *backendFlag {
 	case "local":
 		// Local file backend with a tool-managed passphrase (dev default).
@@ -346,13 +354,54 @@ func run(args []string) error {
 		env["PULUMI_BACKEND_URL"] = info.BackendURL
 		secretsProvider = info.SecretsProvider
 		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
+	case "azblob":
+		// Shared Azure Blob backend + Key Vault secrets provider (no passphrase).
+		// The storage account is subscription+region scoped and can hold many
+		// cell stacks; cell identity stays in the stack name.
+		if *cloud != "azure" {
+			return fmt.Errorf("-backend azblob is only implemented for -cloud azure")
+		}
+		info, exists, err := backend.ResolveAzure(ctx, *azureSubscription, *region, regionCode)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if !*bootstrap {
+				return fmt.Errorf("state backend %s does not exist — run `witself-infra bootstrap -cloud azure -backend azblob -region %s` first (or pass -bootstrap)", info.Bucket, *region)
+			}
+			if _, err := backend.BootstrapAzure(ctx, *azureSubscription, *region, regionCode, func(m string) {
+				fmt.Fprintln(os.Stderr, "  "+m)
+			}); err != nil {
+				return err
+			}
+			info, exists, err = backend.ResolveAzure(ctx, *azureSubscription, *region, regionCode)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("state backend %s was not visible after bootstrap", info.Bucket)
+			}
+		}
+		env["PULUMI_BACKEND_URL"] = info.BackendURL
+		env["AZURE_STORAGE_ACCOUNT"] = info.Bucket
+		env["AZURE_STORAGE_KEY"] = info.StorageKey
+		azureSubscriptionID = info.SubscriptionID
+		secretsProvider = info.SecretsProvider
+		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
 	default:
-		return fmt.Errorf("unknown -backend %q (want local|s3|gcs)", *backendFlag)
+		return fmt.Errorf("unknown -backend %q (want local|s3|gcs|azblob)", *backendFlag)
 	}
 	if *cloud == "gcp" && cmd != "outputs" {
 		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
 		}, "cloudresourcemanager.googleapis.com", "compute.googleapis.com", "dns.googleapis.com", "servicenetworking.googleapis.com", "container.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "iamcredentials.googleapis.com"); err != nil {
+			return err
+		}
+	}
+	if *cloud == "azure" && cmd != "outputs" {
+		if err := backend.EnsureAzureProviders(ctx, func(m string) {
+			fmt.Fprintln(os.Stderr, "  "+m)
+		}, "Microsoft.Network", "Microsoft.DBforPostgreSQL", "Microsoft.KeyVault", "Microsoft.ManagedIdentity", "Microsoft.Compute", "Microsoft.ContainerService"); err != nil {
 			return err
 		}
 	}
@@ -412,6 +461,15 @@ func run(args []string) error {
 		} {
 			if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
 				return fmt.Errorf("set config %s: %w", k, err)
+			}
+		}
+	case "azure":
+		if err := stack.SetConfig(ctx, "azure-native:location", auto.ConfigValue{Value: *region}); err != nil {
+			return fmt.Errorf("set config azure-native:location: %w", err)
+		}
+		if azureSubscriptionID != "" {
+			if err := stack.SetConfig(ctx, "azure-native:subscriptionId", auto.ConfigValue{Value: azureSubscriptionID}); err != nil {
+				return fmt.Errorf("set config azure-native:subscriptionId: %w", err)
 			}
 		}
 	}
@@ -793,7 +851,7 @@ func printOutputs(ctx context.Context, stack auto.Stack) error {
 
 // runBootstrap initializes the state backend for the account/project+region
 // (idempotent).
-func runBootstrap(cloud, region, regionCode, awsProfile, gcpProject string) error {
+func runBootstrap(cloud, region, regionCode, awsProfile, gcpProject, azureSubscription string) error {
 	ctx := context.Background()
 	var (
 		info *backend.Info
@@ -809,6 +867,10 @@ func runBootstrap(cloud, region, regionCode, awsProfile, gcpProject string) erro
 			return fmt.Errorf("-gcp-project is required with -cloud gcp bootstrap")
 		}
 		info, err = backend.BootstrapGCP(ctx, gcpProject, region, regionCode, func(m string) {
+			fmt.Fprintln(os.Stderr, "  "+m)
+		})
+	case "azure":
+		info, err = backend.BootstrapAzure(ctx, azureSubscription, region, regionCode, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
 		})
 	default:

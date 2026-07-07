@@ -24,7 +24,7 @@ build from the repo-root module.
 ```text
 infra/pulumi/
   cmd/witself-infra/    # the CLI: up | preview | destroy | refresh | outputs
-  internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS)
+  internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS, Azure Blob)
   internal/cell/        # the inline Pulumi program — the cell definition
 ```
 
@@ -67,8 +67,9 @@ the backend is missing. Pass `-backend local` for a zero-setup local file backen
 ## State backend
 
 State is stored in a cloud object-storage backend for real cells — shared,
-durable, KMS-encrypted secrets (no passphrase), **one bucket + one KMS key per
-account/project + region**. (`-backend local` is the dev opt-out.)
+durable, cloud-KMS-encrypted secrets (no passphrase), **one object-store backend
+and one cloud key per account/project/subscription + region**. (`-backend local`
+is the dev opt-out.)
 
 AWS uses S3 + AWS KMS and remains the default backend:
 
@@ -141,6 +142,67 @@ witself-infra up \
   -restore-any-region \
   -role dev
 ```
+
+Azure uses Blob Storage + Key Vault. The Azure subscription is a shared
+substrate boundary, not the cell boundary: one subscription+region backend can
+hold many cell stacks. The current Azure cell program provisions a dedicated
+resource group, VNet, workload subnet, PostgreSQL-delegated DB subnet, NAT
+Gateway, static public IPv4 address, private DNS zone/link, private Azure
+Database for PostgreSQL Flexible Server, the logical `witself` database, and a
+per-cell Key Vault containing DB/bootstrap/provision JSON secrets. It also
+creates an AKS cluster in the workload subnet with Azure CNI overlay, controlled
+egress through the cell NAT Gateway, and OIDC/workload identity enabled. ESO,
+DNS/ingress, and GitOps parity are later slices.
+
+```sh
+# Pulumi's azblob backend and azurekeyvault secrets provider can use Azure CLI
+# auth. The backend bootstrap stores a storage account key in the local process
+# environment for Pulumi, but it never prints that key.
+az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
+az account set --subscription witwave-sandbox
+
+# prepare state only
+witself-infra bootstrap \
+  -azure-subscription witwave-sandbox \
+  -backend azblob \
+  -cloud azure \
+  -region eastus2
+
+# create/update the Azure network and controlled-egress substrate
+witself-infra up \
+  -account-alias sandbox \
+  -azure-subscription witwave-sandbox \
+  -backend azblob \
+  -cloud azure \
+  -db-version 18 \
+  -ingress none \
+  -k8s-version 1.36 \
+  -profile minimal \
+  -region eastus2 \
+  -role dev
+```
+
+`bootstrap` registers the required Azure resource providers if needed, creates
+`witself-state-<region-code>`, a private versioned Blob container named
+`pulumi-state`, and a Key Vault key named `pulumi-secrets`. It prints the
+`azblob://...` backend and `azurekeyvault://...` secrets provider. In RBAC-mode
+vaults, bootstrap grants the signed-in user `Key Vault Crypto Officer` on the
+state vault so Pulumi can create and use the state encryption key.
+
+`up` registers the required workload resource providers if needed before running
+Pulumi, so a fresh subscription can create the VNet, NAT resources, database,
+Key Vault, and AKS cluster in the same command. The workload subnet has default
+outbound access disabled and egresses through the NAT Gateway; the DB subnet has
+default outbound access disabled and is delegated to
+`Microsoft.DBforPostgreSQL/flexibleServers`. The PostgreSQL server uses password
+auth, public network access disabled, the delegated DB subnet, and a private DNS
+zone named `privatelink.postgres.database.azure.com`.
+
+The cell Key Vault is separate from the state-backend Key Vault. It stores the
+same app material as AWS Secrets Manager and GCP Secret Manager: `db`,
+`bootstrap-operator-token`, and `provision-token`. The current operator gets an
+access policy so Pulumi can write the secrets during `up`; Azure Workload
+Identity read access is added with the ESO slice.
 
 For GCP cells with `-argocd`, `up` does not stop at Pulumi success. After the
 cell is registered and reachable through the control-plane probe, and after any
@@ -261,5 +323,16 @@ control plane forgets them.
     certificate + HTTP-to-HTTPS redirect.
 16. **[done]** GCP controlled egress with regional Cloud Router, reserved
     outbound IPv4 address, and Public Cloud NAT over the cell subnet ranges.
-17. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
+17. **[done]** Azure Blob Storage + Key Vault state backend and empty stack
+    lifecycle in `eastus2`.
+18. **[done]** Azure network substrate: resource group, VNet, workload subnet,
+    PostgreSQL-delegated DB subnet, NAT Gateway, and static outbound IP.
+19. **[done]** Azure private PostgreSQL Flexible Server plus logical `witself`
+    database on the delegated DB subnet.
+20. **[done]** Azure Key Vault app secrets for DB, bootstrap, and provision
+    material.
+21. **[done]** Azure AKS with Azure CNI overlay, controlled egress through the
+    cell NAT Gateway, and OIDC/workload identity enabled.
+22. Azure ESO Workload Identity, DNS/ingress, and GitOps parity.
+23. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
     remaining production hardening.

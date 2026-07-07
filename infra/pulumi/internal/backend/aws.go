@@ -25,10 +25,12 @@ import (
 
 // Info describes the state backend for one cloud account/project + region.
 type Info struct {
-	Bucket          string // s3://… holds every cell's state for this account+region
+	Bucket          string // object-store backend root: S3 bucket, GCS bucket, or Azure storage account
 	BackendURL      string // PULUMI_BACKEND_URL, e.g. s3://witself-state-<account>-<region-code>
 	KeyAlias        string // cloud KMS key name/alias used by the secrets provider
 	SecretsProvider string // Pulumi secrets provider, e.g. awskms://… or gcpkms://…
+	StorageKey      string // Azure storage account key for azblob backends; secret, never print
+	SubscriptionID  string // Azure subscription ID selected by the CLI/backend resolver
 }
 
 func names(account, region, regionCode string) *Info {

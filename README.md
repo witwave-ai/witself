@@ -87,6 +87,36 @@ witself-infra up \
   -role dev
 ```
 
+For the Azure sandbox subscription in `eastus2`, Azure support currently covers
+the shared Pulumi state backend plus the first workload substrate slices:
+resource group, VNet, workload subnet, PostgreSQL-delegated DB subnet,
+controlled outbound egress through Azure NAT Gateway, private Azure Database
+for PostgreSQL Flexible Server, per-cell Azure Key Vault app secrets, and AKS
+with OIDC/workload identity enabled.
+
+```sh
+az login --tenant a18639f4-1eb4-4810-ab3b-5717aa935e27
+az account set --subscription witwave-sandbox
+
+witself-infra bootstrap \
+  -azure-subscription witwave-sandbox \
+  -backend azblob \
+  -cloud azure \
+  -region eastus2
+
+witself-infra up \
+  -account-alias sandbox \
+  -azure-subscription witwave-sandbox \
+  -backend azblob \
+  -cloud azure \
+  -db-version 18 \
+  -ingress none \
+  -k8s-version 1.36 \
+  -profile minimal \
+  -region eastus2 \
+  -role dev
+```
+
 The bootstrap token file contains the first operator token that `witself-infra`
 publishes to the cell's cloud secret store. One shared token can bootstrap every
 cell (it is single-use *per cell* — each cell consumes its own copy on first
@@ -102,6 +132,16 @@ The GCP substrate includes a regional Cloud Router and Public Cloud NAT with a
 reserved outbound IP, so sandbox and production cells get predictable controlled
 egress in the same one-shot `up` path.
 
+The Azure substrate includes a NAT Gateway and static public IP on the workload
+subnet, with default outbound access disabled, so AKS workloads have a
+predictable controlled egress path. AKS uses Azure CNI overlay, a one-node
+minimal system pool, and OIDC/workload identity so later GitOps platform
+components can read cloud secrets without long-lived credentials. Its
+PostgreSQL Flexible Server is private only, uses the delegated DB subnet, and
+resolves through the cell's private DNS zone link. Azure stores the cell DB JSON,
+first-operator bootstrap token, and account-provision token as JSON secrets in
+the cell Key Vault.
+
 With `-control-plane`, `up` registers the cell with the Witself Cloud fleet
 after provisioning (endpoint = the cell's `apiHost` output), authorized by the
 fleet token. `-fleet-token-file` points at the token file; when omitted the
@@ -114,11 +154,11 @@ With `-argocd` on GCP, `up` also waits for the Argo CD Applications to report
 archives have been restored. This catches late DNS/TLS/ManagedCertificate health
 convergence before the command exits.
 
-The example uses `-profile minimal`: a cheap, disposable sandbox shape with a
-zonal Cloud SQL instance and no retained database backups. The GCP `prod`
-profile uses a regional Cloud SQL instance, PITR backups, retained/final backups,
-and larger disk headroom; use it for persistent cells, not save-money teardown
-tests.
+The examples use `-profile minimal`: cheap, disposable sandbox shapes with small
+managed Postgres instances and clean teardown behavior. GCP `prod` raises Cloud
+SQL to regional availability, PITR backups, retained/final backups, and larger
+disk headroom; similar Azure prod hardening is a later slice. Use prod for
+persistent cells, not save-money teardown tests.
 
 The teardown command keeps only the stack identity, backend, configured domain,
 and credentials. It destroys the cell resources; the shared Pulumi state backend
@@ -151,6 +191,20 @@ witself-infra destroy \
   -fleet-token-file ~/.witself/tokens/fleet.token \
   -gcp-project witself-sandbox \
   -region us-east1 \
+  -role dev
+```
+
+For the Azure sandbox, use the Azure Blob backend and subscription selector:
+
+```sh
+witself-infra destroy \
+  -account-alias sandbox \
+  -azure-subscription witwave-sandbox \
+  -backend azblob \
+  -cloud azure \
+  -ingress none \
+  -profile minimal \
+  -region eastus2 \
   -role dev
 ```
 
