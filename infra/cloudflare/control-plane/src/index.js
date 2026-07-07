@@ -2809,6 +2809,38 @@ async function fetchPlacementPolicySnapshot(cell, accountId) {
   }
 }
 
+function policyList(policy, field) {
+  const values = policy?.[field];
+  return Array.isArray(values) ? values.filter((v) => typeof v === "string") : [];
+}
+
+function cellMatchesArchivedPlacement(cell, archived, allRegions) {
+  const policy = archived?.placement_policy;
+  if (policy) {
+    const allowedClouds = policyList(policy, "allowed_clouds");
+    if (allowedClouds.length > 0 && !allowedClouds.includes(cell.cloud || "")) {
+      return false;
+    }
+    const allowedRegions = policyList(policy, "allowed_regions");
+    if (allowedRegions.length > 0 && !allowedRegions.includes(cell.region_code || "")) {
+      return false;
+    }
+    const allowedChannels = policyList(policy, "allowed_channels");
+    const channel = cell.channel || "experimental";
+    if (allowedChannels.length > 0 && !allowedChannels.includes(channel)) {
+      return false;
+    }
+    return true;
+  }
+  if (allRegions) {
+    return true;
+  }
+  if (archived?.region_code && cell.region_code) {
+    return archived.region_code === cell.region_code;
+  }
+  return archived?.region === cell.region;
+}
+
 // maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
 // metadata. Mirrors the cell-side MaskEmail exactly (internal/store/
 // events.go) so the same shape lands on both sides of the trust link.
@@ -2946,11 +2978,12 @@ async function evacuateAccount(env, cellName, cell, accountId) {
 }
 
 // handleRestore is POST /v1/cells/{name}:restore — the mirror of :evacuate.
-// Iterates archived: pointers whose region matches the target cell's (or every
-// archived pointer when the fleet operator explicitly requests all_regions),
-// and for a bounded batch streams the R2 object into the cell's :import, calls
-// :resume, writes the new acct: pointer, then deletes both the archived:
-// KV entry and the R2 object. Each of the four steps is individually
+// Iterates archived: pointers eligible for the target cell. Policy-aware
+// archives must satisfy hard allowed_* pins; older archives fall back to
+// region_code/region matching unless all_regions explicitly bypasses that
+// legacy guard. For a bounded batch, streams the R2 object into the cell's
+// :import, calls :resume, writes the new acct: pointer, then deletes both the
+// archived: KV entry and the R2 object. Each of the four steps is individually
 // re-safe (ready-check-then-act, deterministic keys), so a partial restore
 // resumes cleanly on the next call. Refuses to restore into a drained cell
 // (accepting=false): dumping accounts onto a cell that will not accept them
@@ -2988,20 +3021,18 @@ async function handleRestore(request, env, cellName) {
   }
   batch = Math.min(Math.floor(batch), 10);
   const allRegions = body.all_regions === true;
-  const restoreScope = allRegions ? "all" : cell.region;
+  const restoreScope = allRegions ? "all" : (cell.region_code || cell.region);
 
-  // Iterate archived: pointers, region-matching the target cell by default.
-  // Region is the user-facing placement axis: an archived account waits in R2
-  // until a cell in its region can host it, so a us-west-2 archive never
-  // silently lands in eu-central-1. all_regions is an explicit operator escape
-  // hatch for cross-cloud/cross-region evacuation tests.
+  // Iterate archived: pointers. Policy-aware archives use hard allowed_* pins;
+  // pre-policy archives keep the old region guard. all_regions remains the
+  // explicit operator escape hatch for legacy cross-region tests.
   const targets = [];
   let cursor;
   do {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
     for (const k of page.keys) {
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry && (allRegions || entry.region === cell.region)) {
+      if (entry && cellMatchesArchivedPlacement(cell, entry, allRegions)) {
         targets.push({ accountId: k.name.slice("archived:".length), archived: entry });
         if (targets.length >= batch) {
           break;
@@ -3056,7 +3087,7 @@ async function handleRestore(request, env, cellName) {
         continue;
       }
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry && (allRegions || entry.region === cell.region)) {
+      if (entry && cellMatchesArchivedPlacement(cell, entry, allRegions)) {
         remaining += 1;
       }
     }
