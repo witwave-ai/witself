@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
@@ -307,7 +308,32 @@ func serve() int {
 				Plan:            a.Plan,
 				PlanLimits:      a.PlanLimits,
 				PlanFeatures:    a.PlanFeatures,
+				PlacementPolicy: a.PlacementPolicy,
 			}, nil
+		}
+		cfg.GetPlacementPolicy = func(ctx context.Context, accountID, operatorID string) (placement.Policy, error) {
+			policy, err := st.GetPlacementPolicy(ctx, accountID, operatorID)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return placement.Policy{}, server.ErrNotFound
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return placement.Policy{}, server.ErrNotAccountOwner
+			default:
+				return policy, err
+			}
+		}
+		cfg.SetPlacementPolicy = func(ctx context.Context, accountID, operatorID string, policy placement.Policy) (placement.Policy, error) {
+			policy, err := st.SetPlacementPolicy(ctx, accountID, operatorID, policy)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return placement.Policy{}, server.ErrNotFound
+			case errors.Is(err, store.ErrNotAccountOwner):
+				return placement.Policy{}, server.ErrNotAccountOwner
+			case errors.Is(err, store.ErrAccountNotActive):
+				return placement.Policy{}, server.ErrAccountNotActive
+			default:
+				return policy, err
+			}
 		}
 		cfg.SuspendAccountOwner = func(ctx context.Context, accountID, operatorID, reason string) error {
 			err := st.SuspendAccountOwner(ctx, accountID, operatorID, reason)

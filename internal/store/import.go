@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 // ErrAccountExists is returned when an import targets an account id already
@@ -45,6 +46,7 @@ var importColumns = map[string]map[string]bool{
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
 		"support_policy": true,
 		"plan":           true, "plan_limits": true, "plan_features": true,
+		"placement_policy": true,
 	},
 	"operators": {
 		"id": true, "account_id": true, "role": true, "is_root": true,
@@ -174,6 +176,11 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				if _, ok := raw.(string); !ok {
 					return badf("accounts row plan_features entries must be strings")
 				}
+			}
+		}
+		if v, present := obj["placement_policy"]; present {
+			if _, err := placement.FromAny(v); err != nil {
+				return badf("accounts row %v", err)
 			}
 		}
 		ic.accounts++

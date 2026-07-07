@@ -50,16 +50,17 @@ const (
 // metadata shapes don't slip in silently.
 const (
 	// Owner-initiated on the cell.
-	VerbOperatorCreated      = "operator.created"
-	VerbOperatorDeleted      = "operator.deleted"
-	VerbOperatorTokenMinted  = "operator.token.minted"
-	VerbAgentTokenMinted     = "agent.token.minted"
-	VerbTokenRevoked         = "token.revoked"
-	VerbAccountRenamed       = "account.renamed"
-	VerbAccountEmailChanged  = "account.email.changed"
-	VerbAccountEmailUndone   = "account.email.undone"
-	VerbAccountSuspendedByMe = "account.suspended.owner"
-	VerbAccountResumedByMe   = "account.resumed.owner"
+	VerbOperatorCreated               = "operator.created"
+	VerbOperatorDeleted               = "operator.deleted"
+	VerbOperatorTokenMinted           = "operator.token.minted"
+	VerbAgentTokenMinted              = "agent.token.minted"
+	VerbTokenRevoked                  = "token.revoked"
+	VerbAccountRenamed                = "account.renamed"
+	VerbAccountEmailChanged           = "account.email.changed"
+	VerbAccountEmailUndone            = "account.email.undone"
+	VerbAccountSuspendedByMe          = "account.suspended.owner"
+	VerbAccountResumedByMe            = "account.resumed.owner"
+	VerbAccountPlacementPolicyChanged = "account.placement_policy.changed"
 
 	// Control-plane forwarded (Worker calls the cell's :events endpoint
 	// with these).
@@ -180,6 +181,14 @@ var verbMetadataSchema = map[string]verbSpec{
 	},
 	VerbAccountResumedByMe: {
 		allowedKeys:   []string{},
+		allowedActors: []string{ActorOwner},
+	},
+	VerbAccountPlacementPolicyChanged: {
+		allowedKeys: []string{
+			"preferred_clouds", "preferred_regions", "preferred_channels",
+			"allowed_clouds", "allowed_regions", "allowed_channels",
+			"rebalance_on",
+		},
 		allowedActors: []string{ActorOwner},
 	},
 

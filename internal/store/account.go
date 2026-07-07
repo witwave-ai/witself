@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 // ErrAccountNotFound is returned when an account id does not exist.
@@ -83,6 +85,8 @@ type Account struct {
 	Plan         string
 	PlanLimits   map[string]int64
 	PlanFeatures []string
+
+	PlacementPolicy placement.Policy
 }
 
 // GetAccount reads one account's lifecycle record. Closed accounts are
@@ -90,15 +94,15 @@ type Account struct {
 func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, error) {
 	var a Account
 	var email, closedReason, suspendedFor, suspendedReason *string
-	var planLimits, planFeatures []byte
+	var planLimits, planFeatures, placementPolicy []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, email, display_name, status, created_at,
 		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason,
-		        support_policy, plan, plan_limits, plan_features
+		        support_policy, plan, plan_limits, plan_features, placement_policy
 		 FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
 			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason,
-			&a.SupportPolicy, &a.Plan, &planLimits, &planFeatures)
+			&a.SupportPolicy, &a.Plan, &planLimits, &planFeatures, &placementPolicy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}
@@ -110,6 +114,10 @@ func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, erro
 	}
 	if err := json.Unmarshal(planFeatures, &a.PlanFeatures); err != nil {
 		return Account{}, fmt.Errorf("decode plan features: %w", err)
+	}
+	a.PlacementPolicy, err = placement.FromJSON(placementPolicy)
+	if err != nil {
+		return Account{}, fmt.Errorf("decode placement policy: %w", err)
 	}
 	if email != nil {
 		a.Email = *email

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 func TestHealthProbes(t *testing.T) {
@@ -118,6 +120,65 @@ func TestAuthWhoamiAlias(t *testing.T) {
 	closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/v1/auth/whoami = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestPlacementPolicyEndpoints(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		if tok == "good" {
+			return "opr_owner", "acc_owner", "active", true, nil
+		}
+		return "", "", "", false, nil
+	}
+	policy := placement.DefaultPolicy()
+	var saved placement.Policy
+	srv := httptest.NewServer(apiMux(Config{
+		Authenticate: auth,
+		GetPlacementPolicy: func(_ context.Context, accountID, operatorID string) (placement.Policy, error) {
+			if accountID != "acc_owner" || operatorID != "opr_owner" {
+				t.Fatalf("get principal = %s/%s", accountID, operatorID)
+			}
+			return policy, nil
+		},
+		SetPlacementPolicy: func(_ context.Context, accountID, operatorID string, next placement.Policy) (placement.Policy, error) {
+			if accountID != "acc_owner" || operatorID != "opr_owner" {
+				t.Fatalf("set principal = %s/%s", accountID, operatorID)
+			}
+			saved = next
+			return next, nil
+		},
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/account/placement-policy", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		PlacementPolicy placement.Policy `json:"placement_policy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK || got.PlacementPolicy.PreferredRegions[0] != "usw2" {
+		t.Fatalf("GET placement = %d %#v", resp.StatusCode, got.PlacementPolicy)
+	}
+
+	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/account/placement-policy", strings.NewReader(`{"preferred_clouds":["gcp"],"preferred_regions":["use1"],"preferred_channels":["stable"],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":["cloud"]}`))
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH placement = %d, want 200", resp.StatusCode)
+	}
+	if len(saved.PreferredClouds) != 1 || saved.PreferredClouds[0] != "gcp" {
+		t.Fatalf("saved policy = %#v", saved)
 	}
 }
 

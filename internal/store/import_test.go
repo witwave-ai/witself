@@ -438,3 +438,59 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateAndRecordPlacementPolicyShape(t *testing.T) {
+	const acc = "acc_target"
+	tests := []struct {
+		name   string
+		row    map[string]any
+		wantOK bool
+		want   string
+	}{
+		{
+			name: "well-formed placement policy is accepted",
+			row: map[string]any{"id": acc, "placement_policy": map[string]any{
+				"preferred_regions":  []any{"usw2", "use1"},
+				"preferred_channels": []any{"stable", "edge", "experimental"},
+				"rebalance_on":       []any{"cloud", "channel"},
+			}},
+			wantOK: true,
+		},
+		{
+			name:   "absent placement_policy is accepted (pre-0018 archives)",
+			row:    map[string]any{"id": acc, "status": "suspended"},
+			wantOK: true,
+		},
+		{
+			name:   "placement_policy must be an object",
+			row:    map[string]any{"id": acc, "placement_policy": []any{"nope"}},
+			wantOK: false, want: "placement_policy must be an object",
+		},
+		{
+			name:   "placement_policy rejects unknown regions",
+			row:    map[string]any{"id": acc, "placement_policy": map[string]any{"preferred_regions": []any{"use9"}}},
+			wantOK: false, want: "unknown value",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := newImportCtx(acc)
+			err := ic.validateAndRecord("accounts", tc.row)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("wantOK, got err = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("wanted error containing %q, got nil", tc.want)
+			}
+			if !errors.Is(err, ErrArchiveContent) {
+				t.Errorf("error not wrapped in ErrArchiveContent: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}

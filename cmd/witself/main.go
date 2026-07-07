@@ -19,6 +19,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/token"
 	"github.com/witwave-ai/witself/internal/version"
 )
@@ -233,6 +234,57 @@ func tableWriter(header string) (w io.Writer, flush func()) {
 	}
 	fmt.Fprintln(os.Stderr, header)
 	return os.Stdout, func() {}
+}
+
+func flagWasPassed(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func parseCSVList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{}
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+func printPlacementPolicy(policy placement.Policy) {
+	w, flush := tableWriter("field\tvalues")
+	_, _ = fmt.Fprintf(w, "preferred clouds\t%s\n", joinPolicyList(policy.PreferredClouds))
+	_, _ = fmt.Fprintf(w, "preferred regions\t%s\n", joinPolicyList(policy.PreferredRegions))
+	_, _ = fmt.Fprintf(w, "preferred channels\t%s\n", joinPolicyList(policy.PreferredChannels))
+	_, _ = fmt.Fprintf(w, "only clouds\t%s\n", joinPolicyList(policy.AllowedClouds))
+	_, _ = fmt.Fprintf(w, "only regions\t%s\n", joinPolicyList(policy.AllowedRegions))
+	_, _ = fmt.Fprintf(w, "only channels\t%s\n", joinPolicyList(policy.AllowedChannels))
+	_, _ = fmt.Fprintf(w, "rebalance on\t%s\n", joinPolicyListOr(policy.RebalanceOn, "(none)"))
+	flush()
+}
+
+func joinPolicyList(values []string) string {
+	return joinPolicyListOr(values, "(any)")
+}
+
+func joinPolicyListOr(values []string, empty string) string {
+	if len(values) == 0 {
+		return empty
+	}
+	return strings.Join(values, ",")
 }
 
 func realmCmd(args []string) int {
@@ -921,7 +973,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `witself account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself account create|adopt|list|status|resend-verification|change-email|change-display-name|recover|close|events|support|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: witself account create|adopt|list|status|placement|resend-verification|change-email|change-display-name|recover|close|events|support|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -933,6 +985,8 @@ func accountCmd(args []string) int {
 		return accountList(args[1:])
 	case "status":
 		return accountStatus(args[1:])
+	case "placement":
+		return accountPlacementCmd(args[1:])
 	case "resend-verification":
 		return accountResendVerification(args[1:])
 	case "change-email":
@@ -957,6 +1011,168 @@ func accountCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself account: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+func accountPlacementCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself account placement show|set|reset [--account NAME]")
+		return 2
+	}
+	switch args[0] {
+	case "show":
+		return accountPlacementShow(args[1:])
+	case "set":
+		return accountPlacementSet(args[1:])
+	case "reset":
+		return accountPlacementReset(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself account placement: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func accountPlacementShow(args []string) int {
+	fs := flag.NewFlagSet("account placement show", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	policy, err := client.GetPlacementPolicy(ctx, ep, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"placement_policy": policy})
+	}
+	printPlacementPolicy(policy)
+	return 0
+}
+
+func accountPlacementSet(args []string) int {
+	fs := flag.NewFlagSet("account placement set", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	preferClouds := fs.String("prefer-clouds", "", "ranked cloud preference list (aws,gcp,azure); empty clears it")
+	preferRegions := fs.String("prefer-regions", "", "ranked canonical region list (for example usw2,use1); empty clears it")
+	preferChannels := fs.String("prefer-channels", "", "ranked channel list (stable,edge,experimental); empty clears it")
+	onlyClouds := fs.String("only-clouds", "", "hard cloud pin list; empty allows every cloud")
+	onlyRegions := fs.String("only-regions", "", "hard canonical region pin list; empty allows every region")
+	onlyChannels := fs.String("only-channels", "", "hard channel pin list; empty allows every channel")
+	rebalanceOn := fs.String("rebalance-on", "", "movement triggers (cloud,region,channel); empty disables live rebalance")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself account placement set [--account NAME] [--prefer-clouds CSV] [--prefer-regions CSV] [--prefer-channels CSV] [--only-clouds CSV] [--only-regions CSV] [--only-channels CSV] [--rebalance-on CSV]")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	policy, err := client.GetPlacementPolicy(ctx, ep, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	changed := false
+	if flagWasPassed(fs, "prefer-clouds") {
+		policy.PreferredClouds = parseCSVList(*preferClouds)
+		changed = true
+	}
+	if flagWasPassed(fs, "prefer-regions") {
+		policy.PreferredRegions = parseCSVList(*preferRegions)
+		changed = true
+	}
+	if flagWasPassed(fs, "prefer-channels") {
+		policy.PreferredChannels = parseCSVList(*preferChannels)
+		changed = true
+	}
+	if flagWasPassed(fs, "only-clouds") {
+		policy.AllowedClouds = parseCSVList(*onlyClouds)
+		changed = true
+	}
+	if flagWasPassed(fs, "only-regions") {
+		policy.AllowedRegions = parseCSVList(*onlyRegions)
+		changed = true
+	}
+	if flagWasPassed(fs, "only-channels") {
+		policy.AllowedChannels = parseCSVList(*onlyChannels)
+		changed = true
+	}
+	if flagWasPassed(fs, "rebalance-on") {
+		policy.RebalanceOn = parseCSVList(*rebalanceOn)
+		changed = true
+	}
+	if !changed {
+		fmt.Fprintln(os.Stderr, "usage: witself account placement set needs at least one policy flag")
+		return 2
+	}
+	policy, err = placement.Normalize(policy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	policy, err = client.SetPlacementPolicy(ctx, ep, tok, policy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"placement_policy": policy})
+	}
+	fmt.Fprintln(os.Stderr, "placement policy updated")
+	printPlacementPolicy(policy)
+	return 0
+}
+
+func accountPlacementReset(args []string) int {
+	fs := flag.NewFlagSet("account placement reset", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	jsonOut := jsonFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself account placement reset [--account NAME]")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	policy, err := client.SetPlacementPolicy(ctx, ep, tok, placement.DefaultPolicy())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"placement_policy": policy})
+	}
+	fmt.Fprintln(os.Stderr, "placement policy reset")
+	printPlacementPolicy(policy)
+	return 0
 }
 
 // accountSupportCmd is the ws-side support-ticket entry point. Slice 1a
@@ -2062,6 +2278,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself account adopt        Bind an existing account (id + token) to a local name")
 	usageLine(w, "  witself account list         List this machine's local account names")
 	usageLine(w, "  witself account status       Show an account's lifecycle status")
+	usageLine(w, "  witself account placement    Show or change account cell-placement policy")
 	usageLine(w, "  witself account recover      Email a recovery code, redeem it for a fresh owner token")
 	usageLine(w, "  witself account change-email Move the account to a new address (code-confirmed)")
 	usageLine(w, "  witself account change-display-name  Rename the account (owner only)")

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 // CreatedAccount is the control plane's signup result: the new account, the
@@ -68,17 +70,18 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 
 // AccountRecord is an account's lifecycle record as served by its cell.
 type AccountRecord struct {
-	ID              string     `json:"id"`
-	Email           string     `json:"email,omitempty"`
-	DisplayName     string     `json:"display_name,omitempty"`
-	Status          string     `json:"status"`
-	CreatedAt       time.Time  `json:"created_at"`
-	ClosedAt        *time.Time `json:"closed_at,omitempty"`
-	ClosedReason    string     `json:"closed_reason,omitempty"`
-	SuspendedAt     *time.Time `json:"suspended_at,omitempty"`
-	SuspendedFor    string     `json:"suspended_for,omitempty"`
-	SuspendedReason string     `json:"suspended_reason,omitempty"`
-	SupportPolicy   string     `json:"support_policy,omitempty"`
+	ID              string           `json:"id"`
+	Email           string           `json:"email,omitempty"`
+	DisplayName     string           `json:"display_name,omitempty"`
+	Status          string           `json:"status"`
+	CreatedAt       time.Time        `json:"created_at"`
+	ClosedAt        *time.Time       `json:"closed_at,omitempty"`
+	ClosedReason    string           `json:"closed_reason,omitempty"`
+	SuspendedAt     *time.Time       `json:"suspended_at,omitempty"`
+	SuspendedFor    string           `json:"suspended_for,omitempty"`
+	SuspendedReason string           `json:"suspended_reason,omitempty"`
+	SupportPolicy   string           `json:"support_policy,omitempty"`
+	PlacementPolicy placement.Policy `json:"placement_policy,omitempty"`
 }
 
 // GetAccount reads the authenticated operator's account record from its cell
@@ -96,6 +99,36 @@ func GetAccount(ctx context.Context, endpoint, token string) (*AccountRecord, er
 		return nil, fmt.Errorf("server returned no account")
 	}
 	return &out.Account, nil
+}
+
+func GetPlacementPolicy(ctx context.Context, endpoint, token string) (placement.Policy, error) {
+	var out struct {
+		PlacementPolicy placement.Policy `json:"placement_policy"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/account/placement-policy"
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return placement.Policy{}, err
+	}
+	return placement.Normalize(out.PlacementPolicy)
+}
+
+func SetPlacementPolicy(ctx context.Context, endpoint, token string, policy placement.Policy) (placement.Policy, error) {
+	policy, err := placement.Normalize(policy)
+	if err != nil {
+		return placement.Policy{}, err
+	}
+	body, err := json.Marshal(policy)
+	if err != nil {
+		return placement.Policy{}, err
+	}
+	var out struct {
+		PlacementPolicy placement.Policy `json:"placement_policy"`
+	}
+	url := strings.TrimRight(endpoint, "/") + "/v1/account/placement-policy"
+	if err := doJSON(ctx, http.MethodPatch, url, token, body, &out); err != nil {
+		return placement.Policy{}, err
+	}
+	return placement.Normalize(out.PlacementPolicy)
 }
 
 // ResendVerification asks the control plane to email a fresh verification

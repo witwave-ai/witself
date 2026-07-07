@@ -12,6 +12,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 func TestDefaultBootstrapTokenPath(t *testing.T) {
@@ -179,6 +180,65 @@ func TestOperatorLifecycleCommands(t *testing.T) {
 	}
 	if revokedToken != "tok_2" {
 		t.Fatalf("revokedToken = %q, want tok_2", revokedToken)
+	}
+}
+
+func TestAccountPlacementSetMergesCurrentPolicy(t *testing.T) {
+	policy := placement.DefaultPolicy()
+	var patched placement.Policy
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/account/placement-policy":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version":   "witself.v0",
+				"placement_policy": policy,
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/account/placement-policy":
+			if err := json.NewDecoder(r.Body).Decode(&patched); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version":   "witself.v0",
+				"placement_policy": patched,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "parent.token")
+	if err := os.WriteFile(parent, []byte("witself_opr_parent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := run([]string{
+		"account", "placement", "set",
+		"--endpoint", srv.URL,
+		"--token-file", parent,
+		"--prefer-clouds", "gcp,aws",
+		"--prefer-regions", "use1",
+		"--only-channels", "stable,edge",
+		"--rebalance-on", "cloud,channel",
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+	if got := patched.PreferredClouds; len(got) != 2 || got[0] != "gcp" || got[1] != "aws" {
+		t.Fatalf("preferred_clouds = %#v", got)
+	}
+	if got := patched.PreferredRegions; len(got) != 1 || got[0] != "use1" {
+		t.Fatalf("preferred_regions = %#v", got)
+	}
+	if got := patched.PreferredChannels; len(got) != 3 || got[0] != "stable" || got[2] != "experimental" {
+		t.Fatalf("preferred_channels was not preserved: %#v", got)
+	}
+	if got := patched.AllowedChannels; len(got) != 2 || got[0] != "stable" || got[1] != "edge" {
+		t.Fatalf("allowed_channels = %#v", got)
 	}
 }
 

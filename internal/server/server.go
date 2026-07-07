@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
@@ -84,6 +85,12 @@ type Config struct {
 	// RenameAccount, when set, enables POST /v1/account:rename — the
 	// owner-only change of the account's server-side display name.
 	RenameAccount func(ctx context.Context, accountID, operatorID, displayName string) error
+
+	// Placement policy is the account owner's preference/pinning source of
+	// truth for future cell placement. This only stores policy; movement is
+	// still driven by the control plane.
+	GetPlacementPolicy func(ctx context.Context, accountID, operatorID string) (placement.Policy, error)
+	SetPlacementPolicy func(ctx context.Context, accountID, operatorID string, policy placement.Policy) (placement.Policy, error)
 
 	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
 	// the control-plane -> cell trust link that creates a new (non-default)
@@ -405,6 +412,8 @@ type AccountRecord struct {
 	Plan         string           `json:"plan,omitempty"`
 	PlanLimits   map[string]int64 `json:"plan_limits,omitempty"`
 	PlanFeatures []string         `json:"plan_features,omitempty"`
+
+	PlacementPolicy placement.Policy `json:"placement_policy,omitempty"`
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -685,6 +694,12 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.RenameAccount != nil {
 			mux.HandleFunc("POST /v1/account:rename", renameAccountHandler(cfg.Authenticate, cfg.RenameAccount))
+		}
+		if cfg.GetPlacementPolicy != nil {
+			mux.HandleFunc("GET /v1/account/placement-policy", getPlacementPolicyHandler(cfg.Authenticate, cfg.GetPlacementPolicy))
+		}
+		if cfg.SetPlacementPolicy != nil {
+			mux.HandleFunc("PATCH /v1/account/placement-policy", setPlacementPolicyHandler(cfg.Authenticate, cfg.SetPlacementPolicy))
 		}
 		if cfg.SuspendAccountOwner != nil {
 			mux.HandleFunc("POST /v1/account:suspend", suspendAccountHandler(cfg.Authenticate, cfg.SuspendAccountOwner))
@@ -1844,6 +1859,61 @@ func renameAccountHandler(auth AuthFunc, rename func(ctx context.Context, accoun
 			"schema_version": "witself.v0",
 			"account_id":     p.accountID,
 			"display_name":   req.DisplayName,
+		})
+	})
+}
+
+func getPlacementPolicyHandler(auth AuthFunc, get func(ctx context.Context, accountID, operatorID string) (placement.Policy, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		policy, err := get(r.Context(), p.accountID, p.operatorID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner may view placement policy")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read placement policy")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"placement_policy": policy,
+		})
+	})
+}
+
+func setPlacementPolicyHandler(auth AuthFunc, set func(ctx context.Context, accountID, operatorID string, policy placement.Policy) (placement.Policy, error)) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req placement.Policy
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		policy, err := set(r.Context(), p.accountID, p.operatorID, req)
+		switch {
+		case errors.Is(err, placement.ErrInvalidPolicy):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrNotAccountOwner):
+			writeJSONError(w, http.StatusForbidden, "only the account owner may change placement policy")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not change placement policy")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"placement_policy": policy,
 		})
 	})
 }
