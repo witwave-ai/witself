@@ -22,6 +22,37 @@ func provisionAzureALBAddon(ctx *pulumi.Context, c azureCell, net *azureNetwork,
 		return nil, err
 	}
 
+	gatewayAPI, err := resources.NewDeployment(ctx, "cell-gateway-api", &resources.DeploymentArgs{
+		DeploymentName:    pulumi.StringPtr(rname(c.name, "gateway-api")),
+		ResourceGroupName: net.resourceGroupName,
+		Properties: resources.DeploymentPropertiesArgs{
+			Mode: resources.DeploymentModeIncremental,
+			Template: pulumi.Map{
+				"$schema":        pulumi.String("https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#"),
+				"contentVersion": pulumi.String("1.0.0.0"),
+				"resources": pulumi.Array{
+					pulumi.Map{
+						"type":       pulumi.String("Microsoft.ContainerService/managedClusters"),
+						"apiVersion": pulumi.String(azureALBAddonAPIVersion),
+						"name":       aks.name,
+						"location":   pulumi.String(c.region),
+						"properties": pulumi.Map{
+							"ingressProfile": pulumi.Map{
+								"gatewayAPI": pulumi.Map{
+									"installation": pulumi.String("Standard"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Tags: azureResourceTags(c, rname(c.name, "gateway-api"), "ingress"),
+	}, pulumi.DependsOn([]pulumi.Resource{aks.cluster}))
+	if err != nil {
+		return nil, err
+	}
+
 	addon, err := resources.NewDeployment(ctx, "cell-alb-addon", &resources.DeploymentArgs{
 		DeploymentName:    pulumi.StringPtr(rname(c.name, "alb-addon")),
 		ResourceGroupName: net.resourceGroupName,
@@ -41,9 +72,6 @@ func provisionAzureALBAddon(ctx *pulumi.Context, c azureCell, net *azureNetwork,
 								"applicationLoadBalancer": pulumi.Map{
 									"enabled": pulumi.Bool(true),
 								},
-								"gatewayAPI": pulumi.Map{
-									"installation": pulumi.String("Standard"),
-								},
 							},
 						},
 					},
@@ -51,7 +79,7 @@ func provisionAzureALBAddon(ctx *pulumi.Context, c azureCell, net *azureNetwork,
 			},
 		},
 		Tags: azureResourceTags(c, rname(c.name, "alb-addon"), "ingress"),
-	}, pulumi.DependsOn([]pulumi.Resource{aks.cluster}))
+	}, pulumi.DependsOn([]pulumi.Resource{gatewayAPI}))
 	if err != nil {
 		return nil, err
 	}
