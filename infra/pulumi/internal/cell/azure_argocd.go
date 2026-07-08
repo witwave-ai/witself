@@ -174,7 +174,9 @@ platform:
 				},
 			},
 		},
-	}, pulumi.Provider(k8s), pulumi.DependsOn(rootDependsOn))
+	}, pulumi.Provider(k8s), pulumi.DependsOn(rootDependsOn), pulumi.Timeouts(&pulumi.CustomTimeouts{
+		Delete: "30m",
+	}))
 	if err != nil {
 		return err
 	}

@@ -189,7 +189,9 @@ cell:
 				},
 			},
 		},
-	}, pulumi.Provider(k8s), pulumi.DependsOn([]pulumi.Resource{release}))
+	}, pulumi.Provider(k8s), pulumi.DependsOn([]pulumi.Resource{release}), pulumi.Timeouts(&pulumi.CustomTimeouts{
+		Delete: "30m",
+	}))
 	if err != nil {
 		return err
 	}
