@@ -1,0 +1,110 @@
+cell:
+  name: azure-sandbox-usw2-dev
+  cloud: azure
+  accountAlias: sandbox
+  region: westus2
+  role: dev
+  domain: azure-sandbox-usw2-dev.cells.witself.witwave.ai
+  apiHost: api.azure-sandbox-usw2-dev.cells.witself.witwave.ai
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+apps:
+  witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: 0.0.98
+    imageTag: 0.0.98
+    backendKind: managed
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    azureGateway:
+      # Pulumi enables this at runtime after enabling the AKS-managed ALB
+      # Controller add-on and injecting the delegated association subnet ID.
+      enabled: false
+      albNamespace: azure-alb-system
+      albName: witself-api
+      gatewayName: witself-api
+      https:
+        enabled: true
+        certificate:
+          enabled: true
+          secretName: witself-api-tls
+          issuerRef:
+            kind: ClusterIssuer
+            name: letsencrypt-prod
+          acme:
+            enabled: true
+            email: scott@witwave.ai
+            server: https://acme-v02.api.letsencrypt.org/directory
+            privateKeySecretName: letsencrypt-prod-private-key
+            solver: dns01
+    secrets:
+      bootstrap:
+        enabled: true
+        remoteKey: bootstrap-operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
+        storeName: azure
+      database:
+        enabled: true
+        remoteKey: db
+        targetName: witself-db
+        urlKey: dsn
+        refreshInterval: 1h
+        storeName: azure
+      provision:
+        enabled: true
+        remoteKey: provision-token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+        storeName: azure
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: v1.20.3
+    namespace: cert-manager
+    enableGatewayAPI: true
+    ignoreWebhookConfigurationDifferences: true
+  externalDNS:
+    # Pulumi enables this at runtime after creating Azure DNS, the managed
+    # identity, and the azure.json config Secret values for the live cell.
+    enabled: false
+    chartVersion: 1.21.1
+    namespace: external-dns
+    serviceAccountName: external-dns
+    sources:
+      - ingress
+      - gateway-httproute
+    domainFilters:
+      - azure-sandbox-usw2-dev.cells.witself.witwave.ai
+    txtOwnerId: azure-sandbox-usw2-dev
+    provider:
+      name: azure
+  externalSecrets:
+    enabled: true
+    chartVersion: 2.7.0
+    namespace: external-secrets
+    storeName: azure
+    serviceAccountName: external-secrets
+    podLabels:
+      azure.workload.identity/use: "true"
+    # Pulumi injects the live Azure Key Vault URL and workload identity
+    # annotations into the bootstrap Application for each provisioned cell.
+  keda:
+    enabled: true
+    chartVersion: 2.20.1
+    namespace: keda
+    ignoreWebhookConfigurationDifferences: true
+  metricsServer:
+    enabled: false
+    chartVersion: 3.13.1
+    namespace: kube-system
+    replicas: 1
