@@ -258,6 +258,7 @@ type dashboardModel struct {
 	previewSeen    map[string]bool // cells with a successful preview
 	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
 	spinnerFrame   int             // advances every spinnerInterval while m.op != nil
+	opGen          int             // increments on each launchOp; ticks tag their generation
 }
 
 // controlPlaneInfo carries per-CP metadata for the header context
@@ -407,7 +408,13 @@ type loadedMsg struct {
 	err           error
 }
 type refreshTickMsg struct{}
-type spinnerTickMsg struct{}
+
+// spinnerTickMsg carries the op generation that scheduled it. On
+// wake, the handler drops any tick whose gen doesn't match the current
+// op's — this closes the "ticker adopts the next op" race where a
+// stale tick from a just-finished op could fire against a freshly
+// launched op inside the 100ms tail window and fork a second loop.
+type spinnerTickMsg struct{ gen int }
 
 const autoRefreshInterval = 60 * time.Second
 
@@ -420,32 +427,42 @@ const spinnerInterval = 100 * time.Millisecond
 // is one cell wide, so swapping mid-column doesn't shift the layout.
 var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
 
-func spinnerCmd() tea.Cmd {
-	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+func spinnerCmdGen(gen int) tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerTickMsg{gen: gen} })
+}
+
+// opKindStyle picks the accent used for both the cell-row spinner and
+// the ops-pane title spinner — green for preview (read-only), yellow
+// for up (mutating), red for destroy (irreversible). Kept as a single
+// helper so the two surfaces can't drift out of sync.
+func opKindStyle(kind opKind) lipgloss.Style {
+	switch kind {
+	case opPreview:
+		return styOK
+	case opUp:
+		return styWarn
+	case opDestroy:
+		return styErr
+	}
+	return styTitle
 }
 
 // opSpinnerLabel returns the fixed-width spinner cell for the running
-// op — statusCellW cells wide so cell names still line up. Colored by
-// kind: preview (green, read-only), up (yellow, mutating), destroy
-// (red, irreversible) — same accents the ops pane already uses.
+// op — statusCellW cells wide so cell names still line up.
 func opSpinnerLabel(kind opKind, frame int) string {
 	ch := spinnerFrames[frame%len(spinnerFrames)]
 	label := ch + " " + kind.verb()
 	if pad := statusCellW - lipgloss.Width(label); pad > 0 {
 		label += strings.Repeat(" ", pad)
 	}
-	var style lipgloss.Style
-	switch kind {
-	case opPreview:
-		style = styOK
-	case opUp:
-		style = styWarn
-	case opDestroy:
-		style = styErr
-	default:
-		style = styTitle
-	}
-	return style.Render(label)
+	return opKindStyle(kind).Render(label)
+}
+
+// opSpinnerRune returns just the current braille frame, colored by
+// kind — for the ops-pane title, where we don't want the verb (it's
+// already right after) but still want the same accent as the cell row.
+func opSpinnerRune(kind opKind, frame int) string {
+	return opKindStyle(kind).Render(spinnerFrames[frame%len(spinnerFrames)])
 }
 
 func (m dashboardModel) Init() tea.Cmd {
@@ -499,14 +516,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshTickMsg:
 		return m, tea.Batch(m.loadCmd(), tickCmd())
 	case spinnerTickMsg:
-		// Advance the throb frame; keep ticking only while an op is
-		// running. Once m.op clears (opDoneMsg), the loop stops on its
-		// own without any explicit stop signal.
-		if m.op == nil {
+		// Advance the throb frame; keep ticking only while THIS op's
+		// generation is still current. Guards against a stale tick from
+		// a just-finished op adopting a freshly launched one during the
+		// 100ms tail window and forking a duplicate loop.
+		if m.op == nil || msg.gen != m.opGen {
 			return m, nil
 		}
 		m.spinnerFrame++
-		return m, spinnerCmd()
+		return m, spinnerCmdGen(m.opGen)
 	case opLineMsg:
 		return m, nil // re-render tick; the ring buffer already holds the line
 	case opDoneMsg:
@@ -516,9 +534,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.previewSeen = map[string]bool{}
 				}
 				m.previewSeen[msg.cell] = true
-				m.status = "preview complete on " + msg.cell + " — press u to apply"
+				m.status = "✓ preview complete on " + msg.cell + " — press u to apply"
 			} else if msg.err != nil {
-				m.status = m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLine(msg.err.Error())
+				m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLine(msg.err.Error())
 				// Failed preview must NOT arm up; a failed up leaves a
 				// partial diff so the last previewed plan is stale too.
 				delete(m.previewSeen, msg.cell)
@@ -528,10 +546,20 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// a manual `aws sso login` in another window and a
 				// blind guess about what went wrong.
 				if looksLikeAuthFailure(m.op.snapshot(20)) {
-					m.status = m.op.kind.verb() + " on " + msg.cell + " failed on auth — press `a` to log in and try again"
+					m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " failed on auth — press `a` to log in and try again"
 				}
 			} else {
-				m.status = m.op.kind.verb() + " on " + msg.cell + " succeeded"
+				// Explicit outcome per verb so the operator sees the
+				// state change in words as well as in the marker refresh
+				// (loadCmd fires below and swaps ◌ absent → ● live).
+				switch m.op.kind {
+				case opUp:
+					m.status = "✓ up complete on " + msg.cell + " — cell is now live"
+				case opDestroy:
+					m.status = "✓ destroy complete on " + msg.cell + " — cell decommissioned"
+				default:
+					m.status = "✓ " + m.op.kind.verb() + " complete on " + msg.cell
+				}
 				// ANY successful mutation invalidates the previewed
 				// plan: an up applied it, a destroy removed everything.
 				// A subsequent up must start from a fresh preview.
@@ -549,10 +577,10 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadCmd()
 	case authCompletedMsg:
 		if msg.err != nil {
-			m.status = msg.desc + " failed: " + oneLine(msg.err.Error())
+			m.status = "✗ " + msg.desc + " failed: " + oneLine(msg.err.Error())
 			return m, nil
 		}
-		m.status = msg.desc + " ✓ — refreshing"
+		m.status = "✓ " + msg.desc + " — refreshing"
 		return m, m.loadCmd()
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -769,7 +797,17 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 
 func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
-	if s == "esc" {
+	// esc / ctrl+c always dismiss. For non-destroy confirms, `q`
+	// dismisses too — the review found operators habitually pressed q
+	// to quit the dialog and got silently swallowed. Destroy is the
+	// exception: `q` is a legitimate typed character in the cell-name
+	// match (e.g. "azure-sandbox-…"), so only esc/ctrl+c abort there.
+	if s == "esc" || s == "ctrl+c" {
+		m.pending = nil
+		m.status = "confirmation dismissed"
+		return m, nil
+	}
+	if s == "q" && m.pending.kind != opDestroy {
 		m.pending = nil
 		m.status = "confirmation dismissed"
 		return m, nil
@@ -810,14 +848,15 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 	m.lastOp = nil
 	m.opsScroll = 0
 	m.spinnerFrame = 0
+	m.opGen++ // fence any stale spinnerTickMsg from a prior op
 	if op.logPath != "" {
 		m.status = kind.verb() + " running on " + cell + " · logs " + op.logPath
 	} else {
 		m.status = kind.verb() + " running on " + cell
 	}
-	// Kick off the throb loop. spinnerTickMsg self-terminates when
-	// m.op clears on opDoneMsg.
-	return m, spinnerCmd()
+	// Kick off the throb loop tagged with this op's generation. Ticks
+	// from previous ops are no-ops (their gen won't match m.opGen).
+	return m, spinnerCmdGen(m.opGen)
 }
 
 // looksLikeAuthFailure scans an op's log tail for phrases the three
@@ -1162,9 +1201,10 @@ func (m dashboardModel) View() string {
 		if active.isDone() {
 			state += " (done)"
 		} else {
-			// Same throb frame as the cell row — reads as one indicator
-			// on two surfaces, not two flickers out of sync.
-			state = spinnerFrames[m.spinnerFrame%len(spinnerFrames)] + " " + state
+			// Same frame AND color as the cell row — reads as one
+			// indicator on two surfaces, not two flickers with mismatched
+			// accents.
+			state = opSpinnerRune(active.kind, m.spinnerFrame) + " " + state
 		}
 		title = fmt.Sprintf("operations · %s %s", state, active.cell)
 		if m.opsScroll > 0 {
@@ -1188,9 +1228,20 @@ func (m dashboardModel) View() string {
 	} else {
 		footer = fitLine(hints, max(w-lipgloss.Width(ver)-1, 10)) + " " + ver
 	}
+	// Status line style is dispatched by prefix so the OP-completion
+	// signal actually pops instead of blending into every other dim
+	// message. "✓ " → green (success), "✗ " → red (failure), else the
+	// default dim informational tone.
 	status := ""
 	if m.status != "" {
-		status = "\n" + styDim.Render(" "+m.status)
+		switch {
+		case strings.HasPrefix(m.status, "✓ "):
+			status = "\n" + styOK.Render(" "+m.status)
+		case strings.HasPrefix(m.status, "✗ "):
+			status = "\n" + styErr.Render(" "+m.status)
+		default:
+			status = "\n" + styDim.Render(" "+m.status)
+		}
 	}
 	rendered := top + opsPane + "\n" + styDim.Render(footer) + status
 

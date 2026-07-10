@@ -701,6 +701,82 @@ func TestCellRowThrobsWhileOpRuns(t *testing.T) {
 	}
 }
 
+// TestSpinnerColorMatchesAcrossSurfaces pins that the cell-row
+// spinner and the ops-pane title spinner share the SAME accent
+// (green/yellow/red), not just the same frame. The review found the
+// title spinner was uncolored while the cell row was color-coded —
+// visually broke the "one indicator, two surfaces" promise.
+func TestSpinnerColorMatchesAcrossSurfaces(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	acc := true
+	for _, kind := range []opKind{opPreview, opUp, opDestroy} {
+		t.Run(kind.verb(), func(t *testing.T) {
+			states := []cellState{{
+				name:  "aws-sandbox-usw2-dev",
+				fleet: &fleet.Cell{Name: "aws-sandbox-usw2-dev", Accepting: &acc},
+			}}
+			m := seedModel(states, 120, 30)
+			m.op = &opRun{kind: kind, cell: "aws-sandbox-usw2-dev"}
+			m.spinnerFrame = 2
+
+			// Both surfaces must render with the same SGR foreground
+			// code. Cell row wraps the whole label (rune + verb) in one
+			// style.Render call, ops title wraps just the rune — but the
+			// leading SGR code is the same in both places, so the code
+			// itself must appear at least twice in the frame.
+			style := opKindStyle(kind)
+			marker := "MARK"
+			sgrOpen := strings.Split(style.Render(marker), marker)[0]
+			if sgrOpen == "" {
+				t.Fatalf("expected style.Render to emit an SGR open sequence for %s", kind.verb())
+			}
+			v := m.View()
+			hits := strings.Count(v, sgrOpen)
+			if hits < 2 {
+				t.Fatalf("expected the %s color SGR %q to appear at least twice (cell row + ops title), got %d occurrences", kind.verb(), sgrOpen, hits)
+			}
+			// And the exact same braille frame must appear in the frame
+			// stripped of ANSI — so the two surfaces share both frame AND
+			// color, not just color.
+			if strings.Count(v, spinnerFrames[2]) < 2 {
+				t.Fatalf("expected braille frame %q to appear at least twice (cell row + ops title), got %d occurrences", spinnerFrames[2], strings.Count(v, spinnerFrames[2]))
+			}
+		})
+	}
+}
+
+// TestSpinnerTickFencedByOpGen pins the ticker-leak fix: a stale
+// spinnerTickMsg from a previous op (different opGen) must be
+// discarded so it can't fork a duplicate loop on a newly launched op.
+func TestSpinnerTickFencedByOpGen(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
+	m.opGen = 5
+
+	// Stale tick from opGen=4 (a previous op that already finished).
+	next, cmd := m.Update(spinnerTickMsg{gen: 4})
+	m2 := next.(dashboardModel)
+	if m2.spinnerFrame != 0 {
+		t.Fatalf("stale tick must NOT advance frame: got %d, want 0", m2.spinnerFrame)
+	}
+	if cmd != nil {
+		t.Fatal("stale tick must NOT reschedule — else the leaked loop keeps ticking against the new op")
+	}
+	// Current tick fires and advances normally.
+	next, cmd = m.Update(spinnerTickMsg{gen: 5})
+	m3 := next.(dashboardModel)
+	if m3.spinnerFrame != 1 {
+		t.Fatalf("current tick must advance frame: got %d, want 1", m3.spinnerFrame)
+	}
+	if cmd == nil {
+		t.Fatal("current tick must reschedule the next tick")
+	}
+}
+
 // TestSpinnerAdvancesEveryTick pins the frame-advance/self-terminate
 // loop: spinnerTickMsg while op is running advances the frame and
 // returns another spinnerCmd; after op ends the tick becomes a no-op.
@@ -766,5 +842,127 @@ func TestSpinnerLabelWidth(t *testing.T) {
 				t.Fatalf("%s frame %d: width %d, want %d", kind.verb(), frame, got, statusCellW)
 			}
 		}
+	}
+}
+
+// TestOpDoneStatusIsExplicitlyStyled pins the completion signal:
+// success gets a ✓ prefix (rendered green), failure gets ✗ (red).
+// A plain informational status stays dim. This is what the user sees
+// when an op finishes — the marker refresh is subtle, the status line
+// carries the "done" signal in words.
+func TestOpDoneStatusIsExplicitlyStyled(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	cases := []struct {
+		name    string
+		kind    opKind
+		err     error
+		wantSub string // must appear in m.status
+	}{
+		{"up success", opUp, nil, "✓ up complete"},
+		{"up failure", opUp, errFake("boom"), "✗ up on"},
+		{"destroy success", opDestroy, nil, "✓ destroy complete"},
+		{"destroy failure", opDestroy, errFake("stuck"), "✗ destroy on"},
+		{"preview success", opPreview, nil, "✓ preview complete"},
+		{"preview failure", opPreview, errFake("provider"), "✗ preview on"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+			m := seedModel(states, 120, 30)
+			m.op = &opRun{kind: tc.kind, cell: "aws-sandbox-usw2-dev"}
+			next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: tc.err})
+			m2 := next.(dashboardModel)
+			if !strings.Contains(m2.status, tc.wantSub) {
+				t.Fatalf("status %q missing substring %q", m2.status, tc.wantSub)
+			}
+			// The render must color the status line — green for ✓, red
+			// for ✗. Both apply an SGR foreground code, so a dim-only
+			// render (which is the default) would NOT include one.
+			v := m2.View()
+			if strings.HasPrefix(strings.TrimSpace(m2.status), "✓") && !strings.Contains(v, "\x1b[32m") && !strings.Contains(v, "\x1b[92m") {
+				t.Fatalf("success status must render with a green SGR code, got: %q", v)
+			}
+			if strings.HasPrefix(strings.TrimSpace(m2.status), "✗") && !strings.Contains(v, "\x1b[31m") && !strings.Contains(v, "\x1b[91m") {
+				t.Fatalf("failure status must render with a red SGR code, got: %q", v)
+			}
+		})
+	}
+}
+
+// TestOpDoneTriggersRefresh pins that a completed op schedules a
+// loadCmd — this is what changes the cell's marker from ◌ absent to
+// ● live within seconds of a successful up (or vice versa for
+// destroy), instead of waiting for the 60s refresh tick.
+func TestOpDoneTriggersRefresh(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opUp, cell: "aws-sandbox-usw2-dev"}
+	_, cmd := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
+	if cmd == nil {
+		t.Fatal("opDone must schedule an immediate reload — else the marker stays stale until next 60s tick")
+	}
+}
+
+// TestDestroyDialogHeightStableAcrossErr pins the anti-jitter fix:
+// toggling the "does not match" error line must NOT change the total
+// line count, or overlayCenter re-centers and the whole dialog jumps
+// vertically as the operator types. Reserving the err slot keeps the
+// dialog height constant.
+func TestDestroyDialogHeightStableAcrossErr(t *testing.T) {
+	c := &confirmDialog{kind: opDestroy, cell: "aws-sandbox-usw2-dev"}
+	noErr := strings.Count(c.render(), "\n")
+	c.err = "does not match — press esc to start over"
+	withErr := strings.Count(c.render(), "\n")
+	if noErr != withErr {
+		t.Fatalf("dialog height jitters: %d newlines without err, %d with — overlayCenter will re-center and the dialog will visibly jump", noErr, withErr)
+	}
+}
+
+// TestConfirmKeysDismissOnQAndCtrlC pins the input-trap fix: pressing
+// q or ctrl+c during an up-confirmation dismisses the dialog instead
+// of being silently swallowed. Destroy is the exception — q is a
+// valid typed character there — but ctrl+c still aborts.
+func TestConfirmKeysDismissOnQAndCtrlC(t *testing.T) {
+	cases := []struct {
+		name   string
+		kind   opKind
+		key    string
+		wantIn bool // must dismiss (m.pending becomes nil)
+	}{
+		{"up: q dismisses", opUp, "q", true},
+		{"up: ctrl+c dismisses", opUp, "ctrl+c", true},
+		{"up: esc dismisses", opUp, "esc", true},
+		{"destroy: ctrl+c dismisses", opDestroy, "ctrl+c", true},
+		{"destroy: esc dismisses", opDestroy, "esc", true},
+		{"destroy: q is a valid char, NOT a dismiss", opDestroy, "q", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+			m := seedModel(states, 120, 30)
+			m.pending = &confirmDialog{kind: tc.kind, cell: "aws-sandbox-usw2-dev", previewSeen: true}
+			// tea.KeyMsg.String() special-cases ctrl+c and esc; use the
+			// canned constructions for those, KeyRunes for regular chars.
+			var keyMsg tea.KeyMsg
+			switch tc.key {
+			case "ctrl+c":
+				keyMsg = tea.KeyMsg{Type: tea.KeyCtrlC}
+			case "esc":
+				keyMsg = tea.KeyMsg{Type: tea.KeyEsc}
+			default:
+				keyMsg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)}
+			}
+			next, _ := m.handleConfirmKey(keyMsg)
+			m2 := next.(dashboardModel)
+			if tc.wantIn && m2.pending != nil {
+				t.Fatalf("%s: expected dismiss, but m.pending still set", tc.name)
+			}
+			if !tc.wantIn && m2.pending == nil {
+				t.Fatalf("%s: expected NO dismiss, but m.pending cleared", tc.name)
+			}
+		})
 	}
 }

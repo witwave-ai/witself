@@ -412,8 +412,14 @@ func (c *confirmDialog) render() string {
 		b.WriteString("destroy will DRAIN the cell, EVACUATE every account to R2, then DELETE the fleet entry and tear down every cloud resource.\n\n")
 		b.WriteString("type the cell name exactly to confirm:\n")
 		b.WriteString("  " + c.typed + "▏\n")
+		// Always reserve the err slot so toggling it on/off doesn't
+		// change the dialog height — otherwise overlayCenter recenters
+		// and the whole dialog visibly jumps by one row.
+		b.WriteString("\n")
 		if c.err != "" {
-			b.WriteString("\n" + c.err + "\n")
+			b.WriteString(c.err + "\n")
+		} else {
+			b.WriteString("\n")
 		}
 	}
 	return b.String()
