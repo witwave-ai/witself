@@ -7,9 +7,10 @@ package main
 // (when the config pins expected_account_id or tenant) refuses to
 // return success unless the runtime identity matches.
 //
-// The provisioning verbs (up / preview / destroy / refresh) run the
-// same check before touching any cloud state, so an operator can
-// never sink 20 minutes of EKS creation into the wrong account.
+// The provisioning verbs (up / preview / destroy / refresh /
+// bootstrap) run the same check before touching any cloud state, so
+// an operator can never sink 20 minutes of EKS creation into the
+// wrong account.
 
 import (
 	"context"
@@ -204,8 +205,10 @@ func runWhoami(fs *flag.FlagSet) error {
 	if cellName == "" {
 		return fmt.Errorf("whoami requires -cell")
 	}
-	// Apply the config so a whoami on a not-otherwise-configured
-	// terminal still finds the profile/subscription/project.
+	// whoamiCell reloads the config itself; this pass exists for its
+	// VALIDATION side effects — unknown-cell listing, identity-flag
+	// conflicts, and the key↔composition check — so whoami reports
+	// config problems the same way the provisioning verbs would.
 	if err := applyCellConfig(fs, cellName, configPath); err != nil {
 		return err
 	}
@@ -250,9 +253,6 @@ func requireIdentityMatch(ctx context.Context, cellName, configPath string) erro
 	}
 	return nil
 }
-
-// Suppress unused-warning: runWhoami references the OS import chain.
-var _ = os.Environ
 
 func strDeref(p *string) string {
 	if p == nil {

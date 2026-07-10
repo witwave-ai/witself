@@ -120,9 +120,11 @@ commands:
   whoami    resolve a cell's security context, call the cloud identity
               API, and refuse if it doesn't match the expected_account_id
               / tenant pin (also runs as a pre-flight before up/preview/
-              destroy/refresh when a cell is resolved from the config)
-  dashboard  fullscreen infra dashboard: inventory + fleet + per-cell
-              identity, tab focus, drill-down (read-only for now)
+              destroy/refresh/bootstrap when -cell resolves the config)
+  dashboard  fullscreen infra dashboard (alias: tui): inventory + fleet
+              + per-cell identity, plus p/preview, u/up, D/destroy with
+              typed-name and preview-first confirmation gates
+  version   print version information
   config    manage the local cell inventory (~/.witself/infra.yaml):
               config init                 write a skeleton file
               config add-cell [flags]     record a cell from the usual flags
@@ -140,6 +142,8 @@ flags:
                   from the config entry (identity flags then conflict)
   -config         config file path (default: $WITSELF_HOME/infra.yaml,
                   else ~/.witself/infra.yaml)
+  -progress-json  with up/preview/destroy: emit NDJSON phase events on
+                  stderr ({"ts","phase","state","cell","note"} lines)
   -cloud          provider (functional): aws|gcp|azure        (default "aws")
   -account-alias  free-text account label for the name        (default "sandbox")
   -region         real cloud region (functional)              (default "us-west-2")
@@ -190,11 +194,35 @@ flags:
   -limit          with placement-status: max sample rows per category (default 25)
 
 example:
+  witself-infra config add-cell -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
+  witself-infra up -cell aws-sandbox-usw2-dev
+  # or the equivalent all-flags invocation (no config file needed):
   witself-infra up -cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile witwave-sandbox
   # cell aws-sandbox-usw2-dev -> resources witself-aws-sandbox-usw2-dev-*
   # creds come from -aws-profile (or the ambient AWS_PROFILE/OIDC). The local-state
   # passphrase is managed for you — no PULUMI_CONFIG_PASSPHRASE needed.
 `
+
+// Injected by goreleaser ldflags; source builds report "dev". Closes
+// the deployment-consistency gap where witself-infra was the only
+// family binary with no version surface.
+var (
+	buildVersion = "dev"
+	buildCommit  = ""
+	buildDate    = ""
+)
+
+func versionLine() string {
+	out := "witself-infra " + buildVersion
+	if buildCommit != "" {
+		out += " (commit " + buildCommit
+		if buildDate != "" {
+			out += ", built " + buildDate
+		}
+		out += ")"
+	}
+	return out
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -204,6 +232,10 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
+		fmt.Println(versionLine())
+		return nil
+	}
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		fmt.Print(usage)
 		if len(args) == 0 {

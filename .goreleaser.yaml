@@ -73,8 +73,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    # The nested module can't import the root module's internal/version,
+    # so the stamp lands on main-package vars instead.
     ldflags:
-      - -s -w
+      - -s -w -X main.buildVersion={{.Version}} -X main.buildCommit={{.ShortCommit}} -X main.buildDate={{.CommitDate}}
 
 archives:
   - id: witself

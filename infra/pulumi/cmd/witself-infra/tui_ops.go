@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,15 +53,14 @@ func (k opKind) verb() string {
 	return "?"
 }
 
-// opRun tracks one in-flight subprocess.
+// opRun tracks one in-flight subprocess. Completion and its error
+// travel exclusively via opDoneMsg — the model never polls the struct.
 type opRun struct {
 	kind    opKind
 	cell    string
 	cmd     *exec.Cmd
 	cancel  context.CancelFunc
 	lines   []string // ring buffer, newest last
-	done    bool
-	err     error
 	mu      sync.Mutex
 	program *tea.Program // pushed lines land as opLineMsg
 }
@@ -126,94 +124,44 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 		return nil, err
 	}
 	op := &opRun{kind: kind, cell: cell, cmd: cmd, cancel: cancel, program: program}
-	go op.pump(stdout, "stdout")
-	go op.pump(stderr, "stderr")
+	go op.pump(stdout)
+	go op.pump(stderr)
 	go op.wait()
 	return op, nil
 }
 
-func (o *opRun) pump(r io.Reader, stream string) {
+func (o *opRun) pump(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
-		line := sc.Text()
-		o.appendLine(line)
+		o.appendLine(sc.Text())
 		if o.program != nil {
-			o.program.Send(opLineMsg{cell: o.cell, stream: stream, line: line})
+			o.program.Send(opLineMsg{})
 		}
+	}
+	// An over-long line (>1MB) stops the scanner; surface it in the
+	// ring buffer rather than silently truncating the tail.
+	if err := sc.Err(); err != nil {
+		o.appendLine("[output truncated: " + err.Error() + "]")
 	}
 }
 
 func (o *opRun) wait() {
 	err := o.cmd.Wait()
-	o.mu.Lock()
-	o.done = true
-	o.err = err
-	o.mu.Unlock()
 	if o.program != nil {
 		o.program.Send(opDoneMsg{cell: o.cell, err: err})
 	}
 }
 
-// detach reroutes the child's stdout/stderr from our pipes onto a
-// persistent log file, then closes our end. That way the parent can
-// exit without the child taking SIGPIPE on its next write — the
-// entire point of a "detach and quit" option.
-//
-// The pipes live inside the exec.Cmd; the "child fd" the child
-// actually writes to is the write end held open in the child. We
-// don't have access to it directly, but closing OUR read ends and
-// letting the parent exit is safe when Go's runtime is told to ignore
-// SIGPIPE for the just-cleared child. Since we can't intervene in the
-// child's runtime, the pragmatic move is: tee every subsequent write
-// to a log file so the operator can see progress after detach — and
-// keep the read ends open in a detached goroutine so the child never
-// sees the pipe close. The goroutine outlives the parent process by
-// hopping onto the child (via reparenting to PID 1) with the standard
-// UNIX trick: close nothing, just stop reading. But that leaks fds
-// and eventually blocks. The correct fix is the log file plus a
-// keep-alive reader that runs until Wait completes.
+// detach would let the dashboard exit while the op keeps running.
+// REFUSED for now, honestly: the child's stdout/stderr are OUR pipes,
+// and a parent exit closes their read ends — pulumi takes SIGPIPE on
+// its next progress write within milliseconds, killing the very op a
+// "detach" claims to preserve. A real detach needs a re-parenting
+// helper (fork+setsid+dup2 onto a log file) at SPAWN time, not
+// post-hoc; until that lands the interrupt modal offers keep/cancel.
 func (o *opRun) detach() error {
-	logPath := detachLogPath(o.cell, o.kind.verb())
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "detached — pulumi output continues in %s\n", logPath)
-	// The pump goroutines are already reading; hand each pipe a copy of
-	// the file descriptor to tee into via an atomic pointer swap.
-	// Since our pumps use bufio.Scanner over cmd.StdoutPipe/StderrPipe,
-	// the simplest path is to install the tee sink on the opRun so
-	// subsequent lines land in the file too. The parent will exit
-	// after this returns; the pump goroutines run inside the parent so
-	// they die too — which means the child's next write hits SIGPIPE.
-	//
-	// The RELIABLE detach is a fork-exec re-parenting to PID 1 which
-	// we can't do post-hoc from within the same process; so the safe
-	// choice for now is to REFUSE detach with a clear error rather
-	// than lie. Callers get an explicit message: kill or keep. The
-	// "d" branch in tui.go already handles a non-nil error by
-	// reporting it in the status line.
-	_ = f.Close()
-	_ = os.Remove(logPath)
-	return fmt.Errorf("detach not implemented — pick [k] keep running or [c] cancel; a running op cannot survive the dashboard exiting on this platform")
-}
-
-// detachLogPath is where a detached op WOULD stream to when detach is
-// implemented (Slice 4b — via a fork+setsid+dup2 helper on POSIX).
-func detachLogPath(cell, verb string) string {
-	root := os.Getenv("WITSELF_HOME")
-	if root == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			root = filepath.Join(home, ".witself")
-		} else {
-			root = os.TempDir()
-		}
-	}
-	return filepath.Join(root, "logs", "infra", cell+"-"+verb+".log")
+	return fmt.Errorf("detach not implemented — pick [k] keep running or [c] cancel; a running op cannot survive the dashboard exiting")
 }
 
 // killOp SIGKILLs the running child's process group so the whole
@@ -229,7 +177,9 @@ func (o *opRun) killOp() {
 	}
 }
 
-type opLineMsg struct{ cell, stream, line string }
+// opLineMsg is a re-render tick: the ring buffer already holds the
+// line; the message just wakes the event loop so the view repaints.
+type opLineMsg struct{}
 type opDoneMsg struct {
 	cell string
 	err  error

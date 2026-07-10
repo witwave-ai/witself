@@ -50,6 +50,15 @@ func defaultConfigPath() (string, error) {
 	return filepath.Join(root, "infra.yaml"), nil
 }
 
+// resolveConfigPath applies the -config default: explicit path wins,
+// else $WITSELF_HOME/infra.yaml.
+func resolveConfigPath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	return defaultConfigPath()
+}
+
 // gitopsEntry mirrors the -gitops-* flags.
 type gitopsEntry struct {
 	Repo       *string `yaml:"repo,omitempty"`
@@ -62,7 +71,7 @@ type gitopsEntry struct {
 // as. ExpectedAccountID is the safety net: whoami compares STS's
 // caller identity against this pin so a wrong profile can't quietly
 // bootstrap a fresh state backend in the wrong account (bucket names
-// embed the account ID — bakend/aws.go:36-48).
+// embed the account ID — internal/backend/aws.go).
 type awsContext struct {
 	Profile           *string `yaml:"profile,omitempty"`
 	ExpectedAccountID *string `yaml:"expected_account_id,omitempty"`
@@ -196,12 +205,9 @@ var secretShapes = regexp.MustCompile(
 // errors (a typo like k8s_verion must not silently fall back to a
 // default), and secret-shaped values are rejected with a line number.
 func loadInfraConfig(path string) (*infraConfig, string, error) {
-	if path == "" {
-		var err error
-		path, err = defaultConfigPath()
-		if err != nil {
-			return nil, "", err
-		}
+	path, err := resolveConfigPath(path)
+	if err != nil {
+		return nil, "", err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -280,7 +286,7 @@ func applyCellConfig(fs *flag.FlagSet, cellName, configPath string) error {
 	maps.Copy(merged, cfg.Defaults.flagValues())
 	maps.Copy(merged, entry.flagValues())
 	for _, name := range identityFlags {
-		if _, ok := merged[strings.ReplaceAll(name, "_", "-")]; !ok {
+		if _, ok := merged[name]; !ok {
 			return fmt.Errorf("cell %q in %s is missing %s — identity must be complete", cellName, path, name)
 		}
 	}

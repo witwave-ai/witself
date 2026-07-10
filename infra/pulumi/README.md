@@ -23,9 +23,11 @@ build from the repo-root module.
 
 ```text
 infra/pulumi/
-  cmd/witself-infra/    # the CLI: up | preview | destroy | refresh | outputs
+  cmd/witself-infra/    # the CLI: up | preview | destroy | refresh | outputs |
+                        #   config | whoami | dashboard | version | fleet verbs
   internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS, Azure Blob)
   internal/cell/        # the inline Pulumi program — the cell definition
+  internal/fleet/       # control-plane fleet-registry client
 ```
 
 ## Prerequisites
@@ -34,6 +36,58 @@ The Automation API drives the `pulumi` engine binary, so it must be on `PATH`
 (`brew install pulumi`). A planned follow-up has `witself-infra` install and pin
 its own engine on first run (via `auto.NewPulumiCommand`), so the end user
 installs only `witself-infra` — the engine is fetched like a provider plugin.
+
+## The cell inventory (`~/.witself/infra.yaml`)
+
+Cells can live in a local config file instead of being retyped as
+flags. Record a cell once with the flags you already know, then every
+verb takes `-cell`:
+
+```sh
+witself-infra config init
+witself-infra config add-cell -cloud aws -account-alias sandbox \
+  -region us-west-2 -role dev -aws-profile witwave-sandbox -argocd
+witself-infra up -cell aws-sandbox-usw2-dev
+witself-infra config show -cell aws-sandbox-usw2-dev   # effective merged config
+```
+
+Precedence: explicit flag > cell entry > `defaults:` block > built-in.
+The file holds references only — profile names, subscription/project
+IDs, token file *paths*. Both the load and write paths reject anything
+shaped like a credential.
+
+Each cell can pin a **security context** — the identity its operations
+must run as:
+
+```yaml
+security_context:
+  aws:
+    profile: witwave-sandbox
+    expected_account_id: "537139788978"   # STS-verified before any op
+  # azure: {subscription: ..., tenant: ...}
+  # gcp:   {project: ..., credentials_file: ...}
+```
+
+`witself-infra whoami -cell X` resolves the context, calls the cloud
+identity API, and refuses on a mismatch. The same check runs
+automatically before `up`/`preview`/`destroy`/`refresh`/`bootstrap`
+whenever `-cell` is used — a wrong profile fails in milliseconds, not
+after twenty minutes of EKS provisioning.
+
+## The dashboard
+
+`witself-infra dashboard` is a fullscreen TUI: the cell inventory
+merged with the fleet registry on the left (live / draining / absent /
+orphan), the selected cell's identity on the right, and a running
+operation's output below. `p` previews, `u` applies (only after a
+successful preview on that cell), `D` destroys (type the cell name
+verbatim to confirm). Ctrl+c under a running op offers keep/cancel —
+never a silent kill. Operations run as subprocesses of the same
+binary, so the dashboard drives exactly what scripts drive.
+
+`-progress-json` on `up`/`preview`/`destroy` additionally emits NDJSON
+phase events on stderr (`{"ts","phase","state","cell","note"}`) for
+machine consumers.
 
 ## Run it
 

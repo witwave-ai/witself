@@ -1,12 +1,13 @@
 package main
 
-// Slice 5: structured NDJSON progress. `-progress json` on up/preview/
-// destroy emits one JSON object per line to stderr for every phase
-// transition (backend, pulumi, register, health-wait, argo-wait,
-// evacuate, restore) alongside the existing plain-text Pulumi output
-// on stdout. The dashboard consumes these to render phase-level
-// checklists instead of scrolling raw text; scripts get an
-// unambiguous machine-parseable timeline.
+// Structured NDJSON progress. `-progress-json` on up/preview/destroy
+// emits one JSON object per line to stderr for phase transitions —
+// currently pulumi.up, pulumi.preview, pulumi.destroy, and
+// fleet.remove (the destroy pre-step) — alongside the existing
+// plain-text Pulumi output on stdout. Finer phases (register,
+// health-wait, argo-wait, restore) and a dashboard phase-checklist
+// consumer are future additions; nothing parses these lines in-tree
+// yet beyond the contract test.
 //
 // The line contract is stable: {"ts":"<RFC3339Nano>","phase":"<name>",
 // "state":"<start|end|error>","cell":"<name>","note":"<free-text>"}.
@@ -21,13 +22,13 @@ import (
 	"time"
 )
 
-// progressSink writes NDJSON events. Nil when -progress json isn't set.
+// progressSink writes NDJSON events. Nil when -progress-json isn't set.
 type progressSink struct {
 	w  io.Writer
 	mu sync.Mutex
 }
 
-// newProgressSink returns a sink if the flag was set, else nil.
+// newProgressSink returns a sink when -progress-json was set, else nil.
 func newProgressSink(enabled bool) *progressSink {
 	if !enabled {
 		return nil

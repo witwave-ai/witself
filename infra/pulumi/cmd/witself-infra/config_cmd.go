@@ -56,13 +56,9 @@ func runConfigCmd(sub string, fs *flag.FlagSet, configPath string) error {
 }
 
 func configInit(configPath string) error {
-	path := configPath
-	if path == "" {
-		var err error
-		path, err = defaultConfigPath()
-		if err != nil {
-			return err
-		}
+	path, err := resolveConfigPath(configPath)
+	if err != nil {
+		return err
 	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists — not overwriting", path)
@@ -169,13 +165,9 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		entry.SecurityContext = sc
 	}
 
-	path := configPath
-	if path == "" {
-		var err error
-		path, err = defaultConfigPath()
-		if err != nil {
-			return err
-		}
+	path, err := resolveConfigPath(configPath)
+	if err != nil {
+		return err
 	}
 	cfg := &infraConfig{Version: 1, Cells: map[string]cellEntry{}}
 	existed := false

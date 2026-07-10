@@ -1,15 +1,15 @@
 package main
 
-// `witself-infra dashboard` — the read-only infra dashboard (Slice 3
-// of the arc). Reads the cell inventory from infra.yaml and the
-// fleet registry from the control plane, and shows a two-pane view:
-// cells list on the left, the selected cell's identity + context on
-// the right. No mutations here — provisioning verbs (slice 4) hang
-// off this same view later.
+// `witself-infra dashboard` — the infra operator dashboard. Reads the
+// cell inventory from infra.yaml and the fleet registry from the
+// control plane; shows cells on the left, the selected cell's
+// identity + context on the right, and a running operation's output
+// below. p/u/D run preview/up/destroy as subprocesses (tui_ops.go)
+// behind the confirmation rules documented there.
 //
 // The visual language matches witself-admin's dashboard on purpose:
-// paneBox with a thick focused border, tab-cycled focus, one-line
-// footer with hints on the left and the version tag on the right.
+// thick-bordered panes with bold titles, one-line footer with hints
+// on the left and the version tag on the right.
 
 import (
 	"context"
@@ -200,14 +200,14 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.states = msg.states
 		if m.cursor >= len(m.states) {
-			m.cursor = maxInt(len(m.states)-1, 0)
+			m.cursor = max(len(m.states)-1, 0)
 		}
 		m.status = fmt.Sprintf("%d cells · %s", len(m.states), m.now().UTC().Format("15:04:05"))
 		return m, nil
 	case refreshTickMsg:
 		return m, tea.Batch(m.loadCmd(), tickCmd())
 	case opLineMsg:
-		return m, nil // ring buffer already updated; re-render happens on every message
+		return m, nil // re-render tick; the ring buffer already holds the line
 	case opDoneMsg:
 		if m.op != nil {
 			if msg.err == nil && m.op.kind == opPreview {
@@ -217,7 +217,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewSeen[msg.cell] = true
 				m.status = "preview complete on " + msg.cell + " — press u to apply"
 			} else if msg.err != nil {
-				m.status = m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLineInfra(msg.err.Error())
+				m.status = m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLine(msg.err.Error())
 				// Failed preview must NOT arm up; a failed up leaves a
 				// partial diff so the last previewed plan is stale too.
 				delete(m.previewSeen, msg.cell)
@@ -292,7 +292,7 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "q":
 		if m.op != nil {
-			m.status = "an op is running — ctrl+c for keep/cancel/detach"
+			m.status = "an op is running — ctrl+c for keep/cancel"
 			return m, nil
 		}
 		return m, tea.Quit
@@ -397,8 +397,8 @@ func (m dashboardModel) View() string {
 		h = 30
 	}
 	footerH := 1
-	contentH := maxInt(h-footerH-3, 6) // -3 = pane border + title
-	cellsW := minInt(maxInt(w/2, 30), 60)
+	contentH := max(h-footerH-3, 6) // -3 = pane border + title
+	cellsW := min(max(w/2, 30), 60)
 	contextW := w - cellsW - 2 // account for JoinHorizontal spacing
 
 	// Cells pane
@@ -413,12 +413,12 @@ func (m dashboardModel) View() string {
 		} else {
 			row = "  " + row
 		}
-		lines = append(lines, fitLineInfra(row, cellsW-2))
+		lines = append(lines, fitLine(row, cellsW-2))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
 	}
-	cellsPane := paneBoxInfra("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsW-2, contentH, true)
+	cellsPane := paneBox("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsW-2, contentH, true)
 
 	// Context pane
 	var ctxLines []string
@@ -450,15 +450,9 @@ func (m dashboardModel) View() string {
 		ctxLines = append(ctxLines, "")
 		ctxLines = append(ctxLines, styTitle.Render("  identity"))
 		if st.err != nil {
-			ctxLines = append(ctxLines, styErr.Render("  "+oneLineInfra(st.err.Error())))
+			ctxLines = append(ctxLines, styErr.Render("  "+oneLine(st.err.Error())))
 		} else if st.identity.Cloud != "" {
 			id := st.identity
-			put = func(k, v string) {
-				if v == "" {
-					return
-				}
-				ctxLines = append(ctxLines, styDim.Render(fmt.Sprintf("  %-14s ", k))+v)
-			}
 			put("profile", id.Profile)
 			put("account", id.Account)
 			put("tenant", id.Tenant)
@@ -469,13 +463,13 @@ func (m dashboardModel) View() string {
 			}
 			ctxLines = append(ctxLines, "  "+ok)
 			for _, n := range id.Notes {
-				ctxLines = append(ctxLines, styWarn.Render("  · "+oneLineInfra(n)))
+				ctxLines = append(ctxLines, styWarn.Render("  · "+oneLine(n)))
 			}
 		}
 	} else {
 		ctxLines = append(ctxLines, styDim.Render("select a cell to see its identity"))
 	}
-	contextPane := paneBoxInfra("context", ctxLines, contextW-2, contentH, false)
+	contextPane := paneBox("context", ctxLines, contextW-2, contentH, false)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 
@@ -487,14 +481,14 @@ func (m dashboardModel) View() string {
 		if m.op != nil {
 			logLines = m.op.snapshot(12)
 			for i := range logLines {
-				logLines[i] = fitLineInfra(logLines[i], w-4)
+				logLines[i] = fitLine(logLines[i], w-4)
 			}
 		}
 		title := "operations"
 		if m.op != nil {
 			title = fmt.Sprintf("operations · %s %s", m.op.kind.verb(), m.op.cell)
 		}
-		opsPane = "\n" + paneBoxInfra(title, logLines, w-4, 12, m.op != nil)
+		opsPane = "\n" + paneBox(title, logLines, w-4, 12, m.op != nil)
 	}
 
 	// Footer: hints left, version tag right.
@@ -517,7 +511,7 @@ func (m dashboardModel) View() string {
 	// (not centered-splice like witself-admin) — this binary's dialogs
 	// are safety-critical, not decorative.
 	if m.pending != nil {
-		return rendered + "\n" + dialogBoxInfra(m.pending.render())
+		return rendered + "\n" + dialogBox(m.pending.render())
 	}
 	if m.interruptModal && m.op != nil {
 		// The "detach and quit" option promises what we can't reliably
@@ -527,12 +521,12 @@ func (m dashboardModel) View() string {
 		body := fmt.Sprintf(
 			"An operation is running: %s %s\n\n[k] keep it running (default)\n[c] cancel it (SIGKILL to the process group)\n\ndetaching a running op is not yet supported — see WITSELF_HOME/logs/infra after the op completes.\n",
 			m.op.kind.verb(), m.op.cell)
-		return rendered + "\n" + dialogBoxInfra(body)
+		return rendered + "\n" + dialogBox(body)
 	}
 	return rendered
 }
 
-func dialogBoxInfra(body string) string {
+func dialogBox(body string) string {
 	st := lipgloss.NewStyle().
 		Border(lipgloss.ThickBorder()).
 		BorderForeground(lipgloss.Color("3")).
@@ -540,16 +534,16 @@ func dialogBoxInfra(body string) string {
 	return st.Render(body)
 }
 
-// paneBoxInfra frames one pane with a thick border and bold title —
+// paneBox frames one pane with a thick border and bold title —
 // same idiom as the witself-admin dashboard.
-func paneBoxInfra(title string, lines []string, contentW, contentH int, focused bool) string {
+func paneBox(title string, lines []string, contentW, contentH int, focused bool) string {
 	if len(lines) > contentH {
 		lines = lines[:contentH]
 	}
 	for len(lines) < contentH {
 		lines = append(lines, "")
 	}
-	body := styTitle.Render(fitLineInfra(title, contentW)) + "\n" + strings.Join(lines, "\n")
+	body := styTitle.Render(fitLine(title, contentW)) + "\n" + strings.Join(lines, "\n")
 	st := lipgloss.NewStyle().
 		Border(lipgloss.ThickBorder()).
 		Padding(0, 1).
@@ -560,7 +554,7 @@ func paneBoxInfra(title string, lines []string, contentW, contentH int, focused 
 	return st.Render(body)
 }
 
-func fitLineInfra(s string, width int) string {
+func fitLine(s string, width int) string {
 	if width <= 1 {
 		return ""
 	}
@@ -576,22 +570,9 @@ func fitLineInfra(s string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-func oneLineInfra(s string) string {
+func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.ReplaceAll(s, "\t", " ")
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // runDashboard is the `dashboard` subcommand.
@@ -623,7 +604,4 @@ func runDashboard(fs *flag.FlagSet) error {
 // Only one dashboard runs at a time.
 var teaProgram *tea.Program
 
-// versionString is a shim: witself-infra doesn't inject its version
-// via ldflags today (an open item), so the footer shows "dev" until
-// that lands. Kept as a function so the fix is one edit.
-func versionString() string { return "dev" }
+func versionString() string { return buildVersion }

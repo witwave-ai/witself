@@ -207,7 +207,7 @@ func TestQuitBlockedWhileOpRuns(t *testing.T) {
 	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m3 := next.(dashboardModel)
 	if !m3.interruptModal {
-		t.Fatal("ctrl+c under an op must open the keep/cancel/detach modal")
+		t.Fatal("ctrl+c under an op must open the keep/cancel modal")
 	}
 	// 'd' is intentionally unsupported until a real re-parenting helper
 	// lands — the modal message says so, and the key returns an error
