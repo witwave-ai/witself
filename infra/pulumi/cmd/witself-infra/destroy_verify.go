@@ -52,10 +52,10 @@ func verifyPulumiDestroyEmpty(ctx context.Context, stack auto.Stack) error {
 		}
 	}
 	if len(pending) > 0 {
-		return fmt.Errorf("Pulumi destroy left %d pending operation(s): %s", len(pending), summarizePendingOperations(pending, 5))
+		return fmt.Errorf("pulumi destroy left %d pending operation(s): %s", len(pending), summarizePendingOperations(pending, 5))
 	}
 	if len(resources) > 0 {
-		return fmt.Errorf("Pulumi destroy left %d resource(s) in state: %s", len(resources), summarizeDeploymentResources(resources, 5))
+		return fmt.Errorf("pulumi destroy left %d resource(s) in state: %s", len(resources), summarizeDeploymentResources(resources, 5))
 	}
 	fmt.Fprintln(os.Stderr, "Pulumi state verified empty after destroy")
 	return nil

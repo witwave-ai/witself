@@ -104,14 +104,14 @@ func BootstrapAWS(ctx context.Context, region, regionCode, profile string, log f
 }
 
 func ensureKMSKey(ctx context.Context, kc *kms.Client, alias string, log func(string)) (string, error) {
-	if out, err := kc.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(alias)}); err == nil {
+	out, err := kc.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(alias)})
+	if err == nil {
 		log("kms: reusing " + alias)
 		return aws.ToString(out.KeyMetadata.Arn), nil
-	} else {
-		var nf *kmstypes.NotFoundException
-		if !errors.As(err, &nf) {
-			return "", fmt.Errorf("describe kms key: %w", err)
-		}
+	}
+	var nf *kmstypes.NotFoundException
+	if !errors.As(err, &nf) {
+		return "", fmt.Errorf("describe kms key: %w", err)
 	}
 
 	created, err := kc.CreateKey(ctx, &kms.CreateKeyInput{

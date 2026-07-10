@@ -93,18 +93,18 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 		apps, err := lister.ListArgoApplications(ctx, namespace)
 		var reason string
 		if err == nil {
-			if ready, why := argoApplicationsReady(apps); ready {
+			ready, why := argoApplicationsReady(apps)
+			if ready {
 				fmt.Fprintf(os.Stderr, "Argo CD applications Synced/Healthy (took %s)\n", time.Since(started).Round(time.Second))
 				return nil
-			} else {
-				reason = why
 			}
+			reason = why
 		} else {
 			reason = err.Error()
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("Argo CD applications in %s did not become Synced/Healthy within %s (last: %s)", namespace, maxWait, reason)
+			return fmt.Errorf("argo CD applications in %s did not become Synced/Healthy within %s (last: %s)", namespace, maxWait, reason)
 		}
 
 		fmt.Fprintf(os.Stderr, "  Argo CD: %s (%s elapsed)\n", truncate(reason, 160), time.Since(started).Round(time.Second))

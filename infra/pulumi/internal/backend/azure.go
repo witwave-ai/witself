@@ -23,6 +23,8 @@ type azureAccount struct {
 	TenantID string `json:"tenantId"`
 }
 
+// AzureFeature names a subscription-level preview feature that must be
+// registered before AKS can use it.
 type AzureFeature struct {
 	Namespace string
 	Name      string
@@ -50,7 +52,7 @@ func azureNames(subscriptionID, regionCode string) *Info {
 // bootstrap uses az directly so there is one operator login path.
 func EnsureAzureCLI(ctx context.Context, subscription string) error {
 	if _, err := exec.LookPath("az"); err != nil {
-		return fmt.Errorf("Azure CLI is required for Azure backends: %w\nrun: brew install azure-cli && az login --tenant <tenant-id>", err)
+		return fmt.Errorf("azure CLI is required for Azure backends: %w\nrun: brew install azure-cli && az login --tenant <tenant-id>", err)
 	}
 	if subscription != "" {
 		if _, err := runAzure(ctx, nil, "account", "set", "--subscription", subscription); err != nil {
@@ -73,7 +75,7 @@ func currentAzureAccount(ctx context.Context) (*azureAccount, error) {
 		return nil, fmt.Errorf("parse Azure account: %w", err)
 	}
 	if acct.ID == "" {
-		return nil, errors.New("Azure CLI is not logged into a subscription; run `az login` and select the Witwave subscription")
+		return nil, errors.New("azure CLI is not logged into a subscription; run `az login` and select the Witwave subscription")
 	}
 	return &acct, nil
 }
@@ -81,7 +83,9 @@ func currentAzureAccount(ctx context.Context) (*azureAccount, error) {
 // ResolveAzure computes the Azure Blob/Key Vault backend names and reports
 // whether the storage account already exists. One subscription+region backend
 // can hold many cell stacks; the stack name remains the cell boundary.
-func ResolveAzure(ctx context.Context, subscription, region, regionCode string) (*Info, bool, error) {
+// The middle parameter (region) is unused — names key off regionCode —
+// but kept for signature symmetry with ResolveAWS/ResolveGCP.
+func ResolveAzure(ctx context.Context, subscription string, _ string, regionCode string) (*Info, bool, error) {
 	if err := EnsureAzureCLI(ctx, subscription); err != nil {
 		return nil, false, err
 	}
@@ -218,7 +222,7 @@ func ensureAzureFeature(ctx context.Context, namespace, name string, log func(st
 			if err != nil {
 				return fmt.Errorf("wait for Azure feature %s/%s: %w", namespace, name, err)
 			}
-			return fmt.Errorf("Azure feature %s/%s is %q after waiting 30m", namespace, name, state)
+			return fmt.Errorf("azure feature %s/%s is %q after waiting 30m", namespace, name, state)
 		}
 		time.Sleep(15 * time.Second)
 	}
@@ -297,7 +301,7 @@ func azureStorageKey(ctx context.Context, subscriptionID, resourceGroup, account
 	}
 	key := strings.TrimSpace(string(out))
 	if key == "" {
-		return "", errors.New("Azure storage account key was empty")
+		return "", errors.New("azure storage account key was empty")
 	}
 	return key, nil
 }
@@ -390,7 +394,7 @@ func azureKeyVaultID(ctx context.Context, subscriptionID, vaultName string) (str
 	}
 	id := strings.TrimSpace(string(out))
 	if id == "" {
-		return "", errors.New("Azure Key Vault ID was empty")
+		return "", errors.New("azure Key Vault ID was empty")
 	}
 	return id, nil
 }
@@ -445,7 +449,7 @@ func ensureAzureKeyVaultKey(ctx context.Context, vaultName, keyName string, log 
 			"-o", "none"); err == nil {
 			log("keyvault: created key " + keyName)
 			return nil
-		} else {
+		} else { //nolint:revive // err is scoped to the if — restructuring would widen it
 			lastErr = err
 		}
 	}
@@ -459,7 +463,7 @@ func azureSignedInObjectID(ctx context.Context) (string, error) {
 	}
 	id := strings.TrimSpace(string(out))
 	if id == "" {
-		return "", errors.New("Azure signed-in user object ID was empty")
+		return "", errors.New("azure signed-in user object ID was empty")
 	}
 	return id, nil
 }

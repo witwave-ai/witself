@@ -24,6 +24,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
+// DefaultDomain is the parent domain cell hostnames hang off.
 const DefaultDomain = "cells.witself.witwave.ai"
 
 // awsCell carries the cell's identity + placement into the AWS provisioning code,

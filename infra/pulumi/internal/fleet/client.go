@@ -346,6 +346,8 @@ type RestoredAccount struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// BlockedAccount is an archived account the restore pass could not
+// place, with the placement axes that blocked it.
 type BlockedAccount struct {
 	AccountID  string `json:"account_id"`
 	FromCell   string `json:"from_cell,omitempty"`
@@ -354,6 +356,8 @@ type BlockedAccount struct {
 	Reason     string `json:"reason"`
 }
 
+// RebalanceResult reports one rebalance pass: which accounts moved
+// (or would move, dry-run) and which were skipped.
 type RebalanceResult struct {
 	Rebalanced []RebalancedAccount `json:"rebalanced"`
 	Skipped    []SkippedAccount    `json:"skipped,omitempty"`
@@ -361,6 +365,7 @@ type RebalanceResult struct {
 	DryRun     bool                `json:"dry_run,omitempty"`
 }
 
+// RebalancedAccount is one account movement in a rebalance pass.
 type RebalancedAccount struct {
 	AccountID string `json:"account_id"`
 	OK        bool   `json:"ok"`
@@ -371,12 +376,16 @@ type RebalancedAccount struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// SkippedAccount is an account a rebalance pass considered and left
+// in place, with the reason.
 type SkippedAccount struct {
 	AccountID string `json:"account_id"`
 	Cell      string `json:"cell,omitempty"`
 	Reason    string `json:"reason"`
 }
 
+// PlacementRunnerConfig is the scheduled placement runner's state:
+// whether the cron-driven restore/rebalance passes are enabled.
 type PlacementRunnerConfig struct {
 	Enabled          bool `json:"enabled"`
 	RestoreArchives  bool `json:"restore_archives"`
@@ -386,6 +395,7 @@ type PlacementRunnerConfig struct {
 	RebalanceBatch   int  `json:"rebalance_batch"`
 }
 
+// PlacementRunnerResult reports one runner pass across both steps.
 type PlacementRunnerResult struct {
 	PlacementRunner PlacementRunnerConfig     `json:"placement_runner"`
 	Restore         *RestoreResult            `json:"restore,omitempty"`
@@ -394,11 +404,15 @@ type PlacementRunnerResult struct {
 	RebalanceError  *PlacementRunnerStepError `json:"rebalance_error,omitempty"`
 }
 
+// PlacementRunnerStepError is a per-step failure inside a runner pass
+// — the other step may still have succeeded.
 type PlacementRunnerStepError struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
 }
 
+// PlacementStatus is the fleet-wide placement picture: live accounts
+// per cell, archived accounts awaiting placement, and blocked ones.
 type PlacementStatus struct {
 	PlacementRunner PlacementRunnerConfig  `json:"placement_runner"`
 	Cells           []PlacementStatusCell  `json:"cells"`
@@ -406,6 +420,7 @@ type PlacementStatus struct {
 	Live            PlacementLiveStatus    `json:"live"`
 }
 
+// PlacementStatusCell is one cell's slice of the placement picture.
 type PlacementStatusCell struct {
 	Name              string  `json:"name"`
 	Endpoint          string  `json:"endpoint"`
@@ -420,6 +435,8 @@ type PlacementStatusCell struct {
 	ArchivedCount     int     `json:"archived_count"`
 }
 
+// PlacementArchiveStatus summarizes the R2 archive: how many accounts
+// wait for placement and a sample of the oldest.
 type PlacementArchiveStatus struct {
 	Total     int              `json:"total"`
 	Placeable int              `json:"placeable"`
@@ -427,6 +444,7 @@ type PlacementArchiveStatus struct {
 	Blocked   []BlockedAccount `json:"blocked,omitempty"`
 }
 
+// PlacementLiveStatus summarizes live accounts across the fleet.
 type PlacementLiveStatus struct {
 	Total           int                 `json:"total"`
 	Movable         int                 `json:"movable"`
@@ -487,6 +505,8 @@ func (c *Client) Restore(ctx context.Context, name string, batch int, allRegions
 	}
 }
 
+// RestorePlacement asks the control plane to place archived accounts
+// onto eligible cells, batch at a time (POST /v1/placement:restore).
 func (c *Client) RestorePlacement(ctx context.Context, batch int, allRegions bool) (RestoreResult, error) {
 	body := struct {
 		Batch      int  `json:"batch"`
@@ -522,6 +542,8 @@ func (c *Client) RestorePlacement(ctx context.Context, batch int, allRegions boo
 	return out, nil
 }
 
+// Rebalance asks the control plane to move live accounts to better
+// eligible cells by placement policy (POST /v1/placement:rebalance).
 func (c *Client) Rebalance(ctx context.Context, batch int, dryRun bool) (RebalanceResult, error) {
 	body := struct {
 		Batch  int  `json:"batch"`
@@ -557,6 +579,7 @@ func (c *Client) Rebalance(ctx context.Context, batch int, dryRun bool) (Rebalan
 	return out, nil
 }
 
+// GetPlacementRunner reads the scheduled runner's configuration.
 func (c *Client) GetPlacementRunner(ctx context.Context) (PlacementRunnerConfig, error) {
 	var out struct {
 		PlacementRunner PlacementRunnerConfig `json:"placement_runner"`
@@ -571,6 +594,7 @@ func (c *Client) GetPlacementRunner(ctx context.Context) (PlacementRunnerConfig,
 	return out.PlacementRunner, nil
 }
 
+// SetPlacementRunner enables or disables the scheduled runner.
 func (c *Client) SetPlacementRunner(ctx context.Context, cfg PlacementRunnerConfig) (PlacementRunnerConfig, error) {
 	var out struct {
 		PlacementRunner PlacementRunnerConfig `json:"placement_runner"`
@@ -585,6 +609,7 @@ func (c *Client) SetPlacementRunner(ctx context.Context, cfg PlacementRunnerConf
 	return out.PlacementRunner, nil
 }
 
+// RunPlacementRunner triggers one manual restore/rebalance pass.
 func (c *Client) RunPlacementRunner(ctx context.Context, cfg PlacementRunnerConfig) (PlacementRunnerResult, error) {
 	rdr, err := marshalBody(cfg)
 	if err != nil {
@@ -613,6 +638,8 @@ func (c *Client) RunPlacementRunner(ctx context.Context, cfg PlacementRunnerConf
 	return out, nil
 }
 
+// GetPlacementStatus fetches the fleet placement picture, sampling at
+// most limit rows per category.
 func (c *Client) GetPlacementStatus(ctx context.Context, limit int) (PlacementStatus, error) {
 	path := "/v1/placement-status"
 	if limit > 0 {

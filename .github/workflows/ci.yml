@@ -21,7 +21,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true # root module cache; infra/pulumi is released separately
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            infra/pulumi/go.sum
 
       - name: gofmt
         run: |
@@ -42,6 +45,16 @@ jobs:
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          golangci-lint run ./...
+
+      # infra/pulumi is a NESTED module: ./... from the repo root never
+      # descends into it, so without this step its tests run nowhere.
+      - name: infra module gates
+        run: |
+          cd infra/pulumi
+          go vet ./...
+          go build ./...
+          go test ./...
           golangci-lint run ./...
 
       - name: govulncheck

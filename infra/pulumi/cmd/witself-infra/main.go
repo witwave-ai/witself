@@ -117,10 +117,23 @@ commands:
   rebalance move live accounts to better eligible cells by placement policy
   placement-runner show, enable, disable, or trigger scheduled placement work
   placement-status show fleet placement, archive, and rebalance status
+  config    manage the local cell inventory (~/.witself/infra.yaml):
+              config init                 write a skeleton file
+              config add-cell [flags]     record a cell from the usual flags
+              config show [-cell NAME]    list cells, or print one cell's
+                                          effective merged configuration
 
 The cell name is composed: <cloud>-<account-alias>-<region-code>-<role>
 
+Cells can live in the config file instead of flags:
+  witself-infra up -cell aws-sandbox-usw2-dev
+Precedence: explicit flag > cell entry > defaults block > built-in.
+
 flags:
+  -cell           cell name from infra.yaml — fills every unset flag
+                  from the config entry (identity flags then conflict)
+  -config         config file path (default: $WITSELF_HOME/infra.yaml,
+                  else ~/.witself/infra.yaml)
   -cloud          provider (functional): aws|gcp|azure        (default "aws")
   -account-alias  free-text account label for the name        (default "sandbox")
   -region         real cloud region (functional)              (default "us-west-2")
@@ -194,6 +207,18 @@ func run(args []string) error {
 	}
 	cmd := args[0]
 
+	// `config <sub>` carries its subcommand between the command and the
+	// flags — split it out before the shared parse.
+	fsArgs := args[1:]
+	configSub := ""
+	if cmd == "config" {
+		if len(args) < 2 {
+			return fmt.Errorf("config needs a subcommand: init|add-cell|show")
+		}
+		configSub = args[1]
+		fsArgs = args[2:]
+	}
+
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	cloud := fs.String("cloud", "aws", "provider (functional): aws|gcp|azure")
 	accountAlias := fs.String("account-alias", "sandbox", "free-text account label for the cell name")
@@ -229,8 +254,28 @@ func run(args []string) error {
 	placementRunnerDisable := fs.Bool("disable", false, "with placement-runner: disable scheduled restore/rebalance")
 	placementRunnerRun := fs.Bool("run", false, "with placement-runner: trigger one manual restore/rebalance pass")
 	placementStatusLimit := fs.Int("limit", 25, "with placement-status: max sample rows per category")
-	if err := fs.Parse(args[1:]); err != nil {
+	cellSelector := fs.String("cell", "", "cell name from infra.yaml — fills every unset flag from the config entry")
+	configPath := fs.String("config", "", "config file path (default: $WITSELF_HOME/infra.yaml, else ~/.witself/infra.yaml)")
+	if err := fs.Parse(fsArgs); err != nil {
 		return err
+	}
+
+	if cmd == "config" {
+		return runConfigCmd(configSub, fs, *configPath)
+	}
+	// -cell presets flags from the config file BEFORE any validation or
+	// cloud work; an explicit flag still wins over the file. Fleet-wide
+	// commands reject it: `rebalance -cell X` READS as "rebalance this
+	// cell" but the operation moves live accounts across the whole
+	// fleet — a scoping illusion this tool must not offer.
+	if *cellSelector != "" {
+		switch cmd {
+		case "rebalance", "placement-runner", "placement-status":
+			return fmt.Errorf("%s is fleet-wide — -cell does not scope it; pass -control-plane and -fleet-token-file directly", cmd)
+		}
+		if err := applyCellConfig(fs, *cellSelector, *configPath); err != nil {
+			return err
+		}
 	}
 
 	if cmd == "rebalance" {

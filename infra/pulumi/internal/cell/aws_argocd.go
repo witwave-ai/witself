@@ -53,6 +53,8 @@ func argocdReleaseValues() pulumi.Map {
 	}
 }
 
+// DefaultGitopsValuesPath is where a cell's bootstrap values live in
+// the GitOps repo when no explicit path is given.
 func DefaultGitopsValuesPath(cellName string) string {
 	return ".gitops/cells/" + cellName + "/values.yaml"
 }

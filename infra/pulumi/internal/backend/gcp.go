@@ -65,7 +65,7 @@ func ResolveGCP(ctx context.Context, project, region, regionCode string) (*Info,
 	if err != nil {
 		return nil, false, fmt.Errorf("create storage client: %w", err)
 	}
-	defer sc.Close()
+	defer func() { _ = sc.Close() }()
 
 	_, err = sc.Bucket(info.Bucket).Attrs(ctx)
 	if err == nil {
@@ -97,6 +97,8 @@ func BootstrapGCP(ctx context.Context, project, region, regionCode string, log f
 	return info, nil
 }
 
+// EnsureGCPServices enables the required GCP service APIs on the
+// project, idempotently, before any resources are created.
 func EnsureGCPServices(ctx context.Context, project string, log func(string), services ...string) error {
 	svc, err := serviceusage.NewService(ctx, option.WithScopes(gcpCloudPlatformScope))
 	if err != nil {
@@ -145,7 +147,7 @@ func ensureGCPKMSKey(ctx context.Context, project, region, regionCode string, lo
 	if err != nil {
 		return fmt.Errorf("create kms client: %w", err)
 	}
-	defer kc.Close()
+	defer func() { _ = kc.Close() }()
 
 	parent := fmt.Sprintf("projects/%s/locations/%s", project, region)
 	keyRingID := "witself-state-" + regionCode
@@ -201,7 +203,7 @@ func ensureGCSStateBucket(ctx context.Context, project, region, bucket string, l
 	if err != nil {
 		return fmt.Errorf("create storage client: %w", err)
 	}
-	defer sc.Close()
+	defer func() { _ = sc.Close() }()
 
 	bh := sc.Bucket(bucket)
 	attrs := &storage.BucketAttrs{
