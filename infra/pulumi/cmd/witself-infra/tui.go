@@ -259,10 +259,11 @@ type dashboardModel struct {
 	lastOp         *opRun // the most recently completed op; kept so its tail is still scrollable
 	opsScroll      int    // rows scrolled back from the live tail; 0 = follow
 	pending        *confirmDialog
-	previewSeen    map[string]bool // cells with a successful preview
-	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
-	spinnerFrame   int             // advances every spinnerInterval while m.op != nil
-	opGen          int             // increments on each launchOp; ticks tag their generation
+	previewSeen    map[string]time.Time // cell → when its last preview passed; armed while younger than previewTTL
+	planPath       string               // persisted plan state; "" disables persistence (tests)
+	interruptModal bool                 // ctrl+c while op running: keep/cancel/detach
+	spinnerFrame   int                  // advances every spinnerInterval while m.op != nil
+	opGen          int                  // increments on each launchOp; ticks tag their generation
 }
 
 // controlPlaneInfo carries per-CP metadata for the header context
@@ -535,9 +536,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.op != nil {
 			if msg.err == nil && m.op.kind == opPreview {
 				if m.previewSeen == nil {
-					m.previewSeen = map[string]bool{}
+					m.previewSeen = map[string]time.Time{}
 				}
-				m.previewSeen[msg.cell] = true
+				m.previewSeen[msg.cell] = m.now()
 				m.status = "✓ preview complete on " + msg.cell + " — press u to apply"
 			} else if msg.err != nil {
 				m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLine(msg.err.Error())
@@ -577,6 +578,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// was open — the modal's copy of m.op is stale, and every
 			// modal-key branch (k/c/d) would otherwise nil-panic.
 			m.interruptModal = false
+			// Every branch above may have mutated the plan map (armed,
+			// invalidated, consumed) — persist so a restart remembers.
+			savePlanState(m.planPath, m.previewSeen, m.now())
 		}
 		return m, m.loadCmd()
 	case authCompletedMsg:
@@ -788,14 +792,18 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 	// succeeded — matches the dimmed hint in the footer and makes the
 	// "why nothing happened" message explicit rather than hiding the
 	// answer inside a dialog the operator would have to open first.
-	if kind == opUp && !m.previewSeen[cell] {
-		m.status = "run `p` (preview) first — up won't fire until you've seen the diff for " + cell
+	if kind == opUp && !m.planArmed(cell) {
+		if _, had := m.previewSeen[cell]; had {
+			m.status = "the preview for " + cell + " has expired (older than " + previewTTL.String() + ") — run `p` again"
+		} else {
+			m.status = "run `p` (preview) first — up won't fire until you've seen the diff for " + cell
+		}
 		return m, nil
 	}
 	if kind == opPreview {
 		return m.launchOp(kind, cell)
 	}
-	m.pending = startConfirm(kind, cell, m.previewSeen[cell])
+	m.pending = startConfirm(kind, cell, m.planArmed(cell))
 	return m, nil
 }
 
@@ -921,7 +929,7 @@ func (m dashboardModel) footerHints() string {
 	// harmless, and credentials can go stale between refreshes (ADC's
 	// reauth window) without the dashboard having noticed yet.
 	authRelevant := idle && haveCell
-	previewOK := haveCell && m.previewSeen[stp.name]
+	previewOK := haveCell && m.planArmed(stp.name)
 	// Ops scroll is available whenever there's something in the ops
 	// pane — during a running op or after one completed. The `end`
 	// hint is redundant when already at tail (opsScroll == 0), but
@@ -1038,9 +1046,12 @@ func (m dashboardModel) renderContext(ctxContentW int) []string {
 		put("control plane", groupLabel(st.controlPlane))
 		put("status", st.status())
 		// Plan state: spells out what the ◆ in the cells pane means, and
-		// what to press next either way.
-		if m.previewSeen[st.name] {
-			put("plan", styPlan.Render("◆ previewed — press u to apply"))
+		// what to press next either way. Age shown so the operator can
+		// judge how stale the diff they approved is getting.
+		if age, ok := m.planAge(st.name); ok && m.planArmed(st.name) {
+			put("plan", styPlan.Render(fmt.Sprintf("◆ previewed %s ago — press u to apply", age.Round(time.Minute))))
+		} else if ok {
+			put("plan", styDim.Render("preview expired — press p again"))
 		} else {
 			put("plan", styDim.Render("none — press p to preview"))
 		}
@@ -1180,7 +1191,7 @@ func (m dashboardModel) View() string {
 			// this cell, blank otherwise. Two cells wide on every row so
 			// names stay aligned whether or not the mark is present.
 			plan := "  "
-			if m.previewSeen[st.name] {
+			if m.planArmed(st.name) {
 				plan = styPlan.Render("◆") + " "
 			}
 			text := fmt.Sprintf("%s %s%s", marker, plan, st.name)
@@ -1364,13 +1375,16 @@ func oneLine(s string) string {
 // runDashboard is the `dashboard` subcommand.
 func runDashboard(fs *flag.FlagSet) error {
 	configPath := fs.Lookup("config").Value.String()
+	planPath := planStatePath()
 	m := dashboardModel{
-		ctx:        context.Background(),
-		cli:        liveDataSource{},
-		configPath: configPath,
-		now:        time.Now,
-		loading:    true,
-		status:     "loading inventory…",
+		ctx:         context.Background(),
+		cli:         liveDataSource{},
+		configPath:  configPath,
+		now:         time.Now,
+		loading:     true,
+		status:      "loading inventory…",
+		planPath:    planPath,
+		previewSeen: loadPlanState(planPath, time.Now()),
 	}
 	// Ops subprocesses push lines via program.Send. Because bubbletea
 	// takes the model by VALUE, the model can't hold a live pointer to

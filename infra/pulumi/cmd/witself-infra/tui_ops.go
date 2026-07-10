@@ -263,15 +263,7 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 // PATH (open failed: …)" status is still possible; the file handle is
 // nil on failure and appendLine short-circuits its tee.
 func openOpLog(cell, verb string) (string, *os.File) {
-	root := os.Getenv("WITSELF_HOME")
-	if root == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			root = filepath.Join(home, ".witself")
-		} else {
-			root = os.TempDir()
-		}
-	}
-	dir := filepath.Join(root, "logs", "infra")
+	dir := filepath.Join(witselfHomeDir(), "logs", "infra")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return filepath.Join(dir, cell+"-"+verb+".log"), nil
 	}
