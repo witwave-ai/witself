@@ -212,6 +212,18 @@ func newGCPArgoListerFromOutputs(outs auto.OutputMap) (*gcpArgoLister, string, e
 	}, namespace, nil
 }
 
+// clusterReadyz probes the kube-apiserver's /readyz through the same
+// authenticated client. A 200 "ok" is ready; a non-200 (500 lists the
+// failing checks) is degraded; a transport error is "" reason, which
+// the caller treats as unreachable.
+func (l *gcpArgoLister) clusterReadyz(ctx context.Context) (bool, string) {
+	token, err := l.tokenCmd(ctx, l.project)
+	if err != nil {
+		return false, ""
+	}
+	return clusterReadyzGet(ctx, l.client, l.baseURL, token)
+}
+
 func (l *gcpArgoLister) ListArgoApplications(ctx context.Context, namespace string) ([]argoApplication, error) {
 	token, err := l.tokenCmd(ctx, l.project)
 	if err != nil {
@@ -336,6 +348,45 @@ func azureAKSKubeconfig(ctx context.Context, resourceGroup, clusterName string) 
 		return nil, fmt.Errorf("get AKS credentials: command returned empty kubeconfig")
 	}
 	return out, nil
+}
+
+func (l *tokenArgoLister) clusterReadyz(ctx context.Context) (bool, string) {
+	return clusterReadyzGet(ctx, l.client, l.baseURL, l.token)
+}
+
+// clusterReadyzGet performs the authenticated GET on /readyz shared by
+// both listers. Ready is a 200 whose body is "ok"; a non-200 returns
+// the body (kube-apiserver's 500 enumerates the failing checks); a
+// transport error returns ("", false) so the caller can distinguish
+// "unreachable" from "reachable but not ready".
+func clusterReadyzGet(ctx context.Context, client *http.Client, baseURL, token string) (bool, string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/readyz?verbose", nil)
+	if err != nil {
+		return false, ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusOK {
+		return true, ""
+	}
+	body := strings.TrimSpace(string(raw))
+	// The verbose body lists per-check lines; surface just the failing
+	// ones so the Health line stays short.
+	var failed []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "[-]") {
+			failed = append(failed, strings.TrimPrefix(line, "[-]"))
+		}
+	}
+	if len(failed) > 0 {
+		return false, "failing checks: " + strings.Join(failed, ", ")
+	}
+	return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
 }
 
 func (l *tokenArgoLister) ListArgoApplications(ctx context.Context, namespace string) ([]argoApplication, error) {

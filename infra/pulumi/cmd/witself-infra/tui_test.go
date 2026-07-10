@@ -27,6 +27,8 @@ type fakeSource struct {
 	err           error
 	reach         reachResult
 	reachErr      error
+	health        cellHealthReport
+	healthErr     error
 }
 
 func (f fakeSource) load(_ context.Context, _ string) (loadResult, error) {
@@ -35,6 +37,10 @@ func (f fakeSource) load(_ context.Context, _ string) (loadResult, error) {
 
 func (f fakeSource) probe(_ context.Context, _, _ string) (reachResult, error) {
 	return f.reach, f.reachErr
+}
+
+func (f fakeSource) probeHealth(_ context.Context, _, _ string) (cellHealthReport, error) {
+	return f.health, f.healthErr
 }
 
 // seedModel builds a dashboardModel and runs one loadedMsg through
@@ -193,8 +199,8 @@ func TestHealthTabFreeLines(t *testing.T) {
 			t.Errorf("Health tab missing line %q", want)
 		}
 	}
-	if !strings.Contains(v, "not yet probed") {
-		t.Error("unprobed lines must show a placeholder")
+	if !strings.Contains(v, "not probed yet") {
+		t.Error("unprobed subsystem lines must show a placeholder")
 	}
 
 	// A cell with an auth error paints its credential line red/bad.
@@ -267,6 +273,60 @@ func TestReachProbeFiresAndRenders(t *testing.T) {
 	}
 	if !strings.Contains(v, "witself-server 0.0.86") {
 		t.Errorf("reachable line must show the version the Worker saw: %s", v)
+	}
+}
+
+// TestHealthReportProbeAndRender pins the subsystem lines: landing on
+// the Health tab kicks the cell-health subprocess, and the returned
+// report drives the Kubernetes/Database/Workloads lines.
+func TestHealthReportProbeAndRender(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	states := mkTabStates()
+	report := cellHealthReport{
+		Kubernetes: subsystemHealth{healthGood, "apiserver ready"},
+		Database:   subsystemHealth{healthUnknown, "status probe not yet wired"},
+		Argo:       subsystemHealth{healthDegraded, "witself-server OutOfSync/Progressing"},
+	}
+	m := dashboardModel{
+		ctx:    context.Background(),
+		cli:    fakeSource{states: states, reach: reachResult{ok: true}, health: report},
+		width:  120,
+		height: 30,
+		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: states})
+	m = next.(dashboardModel)
+
+	// Focus context, walk to Health — the transition must batch a
+	// health-report probe (plus the reachability probe).
+	mm := tea.Model(m)
+	mm, _ = mm.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyTab})
+	var cmd tea.Cmd
+	for i := 0; i < 3; i++ {
+		mm, cmd = mm.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	fm := mm.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("landing on Health must kick probes")
+	}
+	if !fm.health["aws-sandbox-usw2-dev"].inflight {
+		t.Fatal("the cell-health report must be marked in-flight")
+	}
+
+	// Deliver the report; the three subsystem lines must reflect it.
+	done, _ := fm.Update(healthResultMsg{cell: "aws-sandbox-usw2-dev", report: report})
+	v := done.(dashboardModel).View()
+	if !strings.Contains(v, "apiserver ready") {
+		t.Error("Kubernetes line must show the report detail")
+	}
+	if !strings.Contains(v, "OutOfSync/Progressing") {
+		t.Error("Workloads line must show the Argo detail")
+	}
+	if !strings.Contains(v, "status probe not yet wired") {
+		t.Error("Database line must show its placeholder detail from the report")
 	}
 }
 

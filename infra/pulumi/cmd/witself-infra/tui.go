@@ -13,9 +13,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -317,6 +319,19 @@ type dashboardModel struct {
 	// for the Health tab. Probes fire only while that tab is showing a
 	// cell — no background cost when you're not looking.
 	reach map[string]cellReach
+	// health caches the last cell-health subprocess report per cell
+	// (Kubernetes / Database / Argo). Heavier than reach, so it runs on
+	// a longer cadence (healthReportTTL).
+	health map[string]cellHealthState
+}
+
+// cellHealthState is one cell's cached subsystem-health report plus the
+// in-flight flag for its subprocess probe.
+type cellHealthState struct {
+	probed   time.Time
+	inflight bool
+	report   cellHealthReport
+	err      error
 }
 
 // cellReach is one cell's cached reachability state: the last probe's
@@ -332,6 +347,11 @@ type cellReach struct {
 // re-entry or cursor move re-probes. Short — this is a live health
 // view — but long enough to avoid re-probing on every keystroke.
 const reachTTL = 15 * time.Second
+
+// healthReportTTL is the cadence for the heavier cell-health
+// subprocess. Longer than reachTTL because each run selects a Pulumi
+// stack and reaches the cluster — not something to repeat on a hover.
+const healthReportTTL = 45 * time.Second
 
 // paneFocus names which pane the arrow keys currently drive. Cells is
 // the default — j/k always move the cell cursor regardless — but tab
@@ -413,6 +433,11 @@ type reachResult struct {
 type cellDataSource interface {
 	load(ctx context.Context, configPath string) (loadResult, error)
 	probe(ctx context.Context, configPath, cell string) (reachResult, error)
+	// probeHealth runs the cell-health subprocess and returns its
+	// per-subsystem report (Kubernetes / Database / Argo). Heavier than
+	// probe — it selects the Pulumi stack and reaches the cluster — so
+	// the model runs it on a longer cadence.
+	probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error)
 }
 
 // liveDataSource reads infra.yaml, then the control plane, then runs
@@ -561,6 +586,34 @@ func (liveDataSource) probe(ctx context.Context, configPath, cell string) (reach
 	return reachResult{ok: pr.OK, reason: pr.Reason, version: pr.CellVersion, status: pr.CellStatus}, nil
 }
 
+// probeHealth shells out to `witself-infra cell-health -cell X` and
+// decodes its JSON report. The subprocess owns the heavy Pulumi
+// stack-select + cluster reach; the dashboard just orchestrates it.
+// A non-zero exit with un-parseable stdout surfaces as an error the
+// Health lines render as "probe failed".
+func (liveDataSource) probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error) {
+	cmd, err := spawnCommand(ctx, []string{"cell-health", "-cell", cell, "-config", configPath})
+	if err != nil {
+		return cellHealthReport{}, err
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		detail := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			detail = strings.TrimSpace(string(ee.Stderr))
+		}
+		if detail != "" {
+			return cellHealthReport{}, fmt.Errorf("%v: %s", err, oneLine(detail))
+		}
+		return cellHealthReport{}, err
+	}
+	var rep cellHealthReport
+	if err := json.Unmarshal(out, &rep); err != nil {
+		return cellHealthReport{}, fmt.Errorf("decode cell-health report: %w", err)
+	}
+	return rep, nil
+}
+
 type loadedMsg struct {
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
@@ -573,6 +626,13 @@ type probeResultMsg struct {
 	cell string
 	res  reachResult
 	err  error
+}
+
+// healthResultMsg carries one async cell-health subprocess report back.
+type healthResultMsg struct {
+	cell   string
+	report cellHealthReport
+	err    error
 }
 type refreshTickMsg struct{}
 
@@ -656,11 +716,20 @@ func (m dashboardModel) probeCmd(cell string) tea.Cmd {
 	}
 }
 
-// maybeHealthProbe kicks a reachability probe for the selected cell
-// when the Health tab is showing it and the cached result is missing
-// or stale — and nothing is already in flight for that cell. Called
-// after any key that could change the tab or the selected cell, so the
-// probe is on-demand: no background cost when the Health tab isn't up.
+func (m dashboardModel) healthCmd(cell string) tea.Cmd {
+	ctx, cli, path := m.ctx, m.cli, m.configPath
+	return func() tea.Msg {
+		rep, err := cli.probeHealth(ctx, path, cell)
+		return healthResultMsg{cell: cell, report: rep, err: err}
+	}
+}
+
+// maybeHealthProbe kicks the probes the Health tab needs for the
+// selected cell — the cheap reachability probe (reachTTL) and the
+// heavier subsystem report (healthReportTTL) — each only when its
+// cached result is missing or stale and nothing is already in flight.
+// Called after any key that could change the tab or the selected cell,
+// so probing is on-demand: no background cost when Health isn't up.
 func (m dashboardModel) maybeHealthProbe() (dashboardModel, tea.Cmd) {
 	if m.activeTab != tabHealth {
 		return m, nil
@@ -669,16 +738,27 @@ func (m dashboardModel) maybeHealthProbe() (dashboardModel, tea.Cmd) {
 	if stp == nil {
 		return m, nil
 	}
-	r := m.reach[stp.name]
-	if r.inflight || (!r.probed.IsZero() && m.now().Sub(r.probed) < reachTTL) {
+	var cmds []tea.Cmd
+	if r := m.reach[stp.name]; !r.inflight && (r.probed.IsZero() || m.now().Sub(r.probed) >= reachTTL) {
+		if m.reach == nil {
+			m.reach = map[string]cellReach{}
+		}
+		r.inflight = true
+		m.reach[stp.name] = r
+		cmds = append(cmds, m.probeCmd(stp.name))
+	}
+	if h := m.health[stp.name]; !h.inflight && (h.probed.IsZero() || m.now().Sub(h.probed) >= healthReportTTL) {
+		if m.health == nil {
+			m.health = map[string]cellHealthState{}
+		}
+		h.inflight = true
+		m.health[stp.name] = h
+		cmds = append(cmds, m.healthCmd(stp.name))
+	}
+	if len(cmds) == 0 {
 		return m, nil
 	}
-	if m.reach == nil {
-		m.reach = map[string]cellReach{}
-	}
-	r.inflight = true
-	m.reach[stp.name] = r
-	return m, m.probeCmd(stp.name)
+	return m, tea.Batch(cmds...)
 }
 
 func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -735,6 +815,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reach = map[string]cellReach{}
 		}
 		m.reach[msg.cell] = cellReach{probed: m.now(), res: msg.res, err: msg.err}
+		return m, nil
+	case healthResultMsg:
+		if m.health == nil {
+			m.health = map[string]cellHealthState{}
+		}
+		m.health[msg.cell] = cellHealthState{probed: m.now(), report: msg.report, err: msg.err}
 		return m, nil
 	case opLineMsg:
 		return m, nil // re-render tick; the ring buffer already holds the line
@@ -1393,13 +1479,34 @@ func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
 	credLvl, credMsg := cellCredentialHealth(st)
 	fleetLvl, fleetMsg := cellFleetHealth(st)
 	reachLvl, reachMsg := m.cellReachHealth(st)
+	k8sLvl, k8sMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Kubernetes })
+	dbLvl, dbMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Database })
+	argoLvl, argoMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Argo })
 	return []string{
 		line("Cloud credentials", credLvl, credMsg),
 		line("Fleet registration", fleetLvl, fleetMsg),
 		line("Cell reachability", reachLvl, reachMsg),
-		line("Kubernetes", healthUnknown, "— not yet probed"),
-		line("Database", healthUnknown, "— not yet probed"),
-		line("Workloads · Argo CD", healthUnknown, "— not yet probed"),
+		line("Kubernetes", k8sLvl, k8sMsg),
+		line("Database", dbLvl, dbMsg),
+		line("Workloads · Argo CD", argoLvl, argoMsg),
+	}
+}
+
+// cellSubsystem reads one subsystem line from the cached cell-health
+// report: unknown/"checking…" before or during a probe, red if the
+// subprocess itself failed, else the report's own level and detail.
+func (m dashboardModel) cellSubsystem(st cellState, pick func(cellHealthReport) subsystemHealth) (healthLevel, string) {
+	h := m.health[st.name]
+	switch {
+	case h.inflight:
+		return healthUnknown, "checking…"
+	case h.probed.IsZero():
+		return healthUnknown, "— not probed yet"
+	case h.err != nil:
+		return healthBad, "✗ probe failed: " + oneLine(h.err.Error())
+	default:
+		s := pick(h.report)
+		return s.Level, s.Detail
 	}
 }
 

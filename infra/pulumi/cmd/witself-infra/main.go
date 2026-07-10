@@ -409,8 +409,10 @@ func run(args []string) error {
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
-	// operation doesn't fail on credentials mid-flight.
-	if *cloud == "aws" {
+	// operation doesn't fail on credentials mid-flight. Read-only verbs
+	// (outputs, cell-health) skip it — a background health probe must
+	// never pop an interactive login.
+	if *cloud == "aws" && cmd != "outputs" && cmd != "cell-health" {
 		backend.EnsureAWSSession(context.Background(), *awsProfile)
 	}
 
@@ -550,14 +552,14 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown -backend %q (want local|s3|gcs|azblob)", *backendFlag)
 	}
-	if *cloud == "gcp" && cmd != "outputs" {
+	if *cloud == "gcp" && cmd != "outputs" && cmd != "cell-health" {
 		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
 		}, "cloudresourcemanager.googleapis.com", "compute.googleapis.com", "dns.googleapis.com", "servicenetworking.googleapis.com", "container.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "iamcredentials.googleapis.com"); err != nil {
 			return err
 		}
 	}
-	if *cloud == "azure" && cmd != "outputs" {
+	if *cloud == "azure" && cmd != "outputs" && cmd != "cell-health" {
 		if err := backend.EnsureAzureProviders(ctx, func(m string) {
 			fmt.Fprintln(os.Stderr, "  "+m)
 		}, "Microsoft.Network", "Microsoft.NetworkFunction", "Microsoft.ServiceNetworking", "Microsoft.DBforPostgreSQL", "Microsoft.KeyVault", "Microsoft.ManagedIdentity", "Microsoft.Compute", "Microsoft.ContainerService"); err != nil {
@@ -743,6 +745,8 @@ func run(args []string) error {
 		_, err = stack.Refresh(ctx)
 	case "outputs":
 		return printOutputs(ctx, stack)
+	case "cell-health":
+		return printCellHealth(ctx, stack, *cloud, *argocd)
 	default:
 		return fmt.Errorf("unknown command %q (see: witself-infra help)", cmd)
 	}
