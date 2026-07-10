@@ -1,11 +1,11 @@
 cell:
-  name: gcp-sandbox-use1-dev
+  name: gcp-sandbox-usw2-dev
   cloud: gcp
   accountAlias: sandbox
-  region: us-east1
+  region: us-west2
   role: dev
-  domain: gcp-sandbox-use1-dev.cells.witself.witwave.ai
-  apiHost: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+  domain: gcp-sandbox-usw2-dev.cells.witself.witwave.ai
+  apiHost: api.gcp-sandbox-usw2-dev.cells.witself.witwave.ai
 gitops:
   repoURL: https://github.com/witwave-ai/witself
   targetRevision: main
@@ -28,18 +28,18 @@ apps:
         redirectToHttps:
           enabled: true
           responseCodeName: PERMANENT_REDIRECT
-      staticIPName: witself-gcp-sandbox-use1-dev-api
+      staticIPName: witself-gcp-sandbox-usw2-dev-api
       annotations:
-        external-dns.alpha.kubernetes.io/hostname: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+        external-dns.alpha.kubernetes.io/hostname: api.gcp-sandbox-usw2-dev.cells.witself.witwave.ai
       hosts:
-        - host: api.gcp-sandbox-use1-dev.cells.witself.witwave.ai
+        - host: api.gcp-sandbox-usw2-dev.cells.witself.witwave.ai
           paths:
             - path: /*
               pathType: ImplementationSpecific
     secrets:
       bootstrap:
         enabled: true
-        remoteKey: witself-gcp-sandbox-use1-dev-bootstrap-operator-token
+        remoteKey: witself-gcp-sandbox-usw2-dev-bootstrap-operator-token
         targetName: witself-bootstrap
         tokenKey: token
         ttlKey: ttl
@@ -47,14 +47,14 @@ apps:
         storeName: gcp
       database:
         enabled: true
-        remoteKey: witself-gcp-sandbox-use1-dev-db
+        remoteKey: witself-gcp-sandbox-usw2-dev-db
         targetName: witself-db
         urlKey: dsn
         refreshInterval: 1h
         storeName: gcp
       provision:
         enabled: true
-        remoteKey: witself-gcp-sandbox-use1-dev-provision-token
+        remoteKey: witself-gcp-sandbox-usw2-dev-provision-token
         targetName: witself-provision
         tokenKey: token
         refreshInterval: 1h
@@ -72,10 +72,10 @@ platform:
     namespace: external-dns
     serviceAccountName: external-dns
     serviceAccountAnnotations:
-      iam.gke.io/gcp-service-account: ws-dns-gcp-sandbox-use1-dev@witself-sandbox.iam.gserviceaccount.com
+      iam.gke.io/gcp-service-account: ws-dns-gcp-sandbox-usw2-dev@witself-sandbox.iam.gserviceaccount.com
     domainFilters:
-      - gcp-sandbox-use1-dev.cells.witself.witwave.ai
-    txtOwnerId: gcp-sandbox-use1-dev
+      - gcp-sandbox-usw2-dev.cells.witself.witwave.ai
+    txtOwnerId: gcp-sandbox-usw2-dev
     provider:
       name: google
     extraArgs:
@@ -88,7 +88,7 @@ platform:
     storeName: gcp
     serviceAccountName: external-secrets
     serviceAccountAnnotations:
-      iam.gke.io/gcp-service-account: ws-eso-gcp-sandbox-use1-dev@witself-sandbox.iam.gserviceaccount.com
+      iam.gke.io/gcp-service-account: ws-eso-gcp-sandbox-usw2-dev@witself-sandbox.iam.gserviceaccount.com
     gcpProjectID: witself-sandbox
   keda:
     enabled: true

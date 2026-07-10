@@ -244,18 +244,45 @@ restored onto another cell. Add `-destroy-accounts` to skip preservation and
 purge the directory entries instead: the sandbox/dev override, an explicit
 acknowledgment that the accounts die with the cell.
 
-Pass `-restore-archives` to `up` to close the loop: after the new cell
-registers with the control plane, it pulls every archived account in the
-same region from R2 back onto the cell (import → resume → route → cleanup,
-looping until none remain). A fresh us-west-2 cell will inherit every
-us-west-2 account currently awaiting placement; nothing lands in a
-different region than the archived account was exported from.
+Pass `-restore-archives` to `up` to close the loop. After the new cell
+registers, the fleet placement runner assigns each archived account to its
+best eligible accepting cell (import → resume → route → cleanup). Ranked
+cloud, canonical-region, and release-channel preferences decide first; hard
+`only-*` pins filter eligibility; current account count and then cell name
+break ties.
 
 For an explicit evacuation test where provider region names do not line up
 (for example, restoring AWS `us-west-2` archives onto a temporary GCP
-`us-east1` cell), add `-restore-any-region` with `-restore-archives`. That is
-an operator override: it intentionally restores every archived account,
-ignoring the archive's stored region.
+`us-east1` cell), add `-restore-any-region` with `-restore-archives`. That
+operator override bypasses the provider-region guard on legacy archives.
+Policy-aware archives still honor their explicit hard pins.
+
+Account owners manage the policy stored with their account:
+
+```sh
+witself account placement show
+witself account placement set \
+  --prefer-clouds gcp,aws,azure \
+  --prefer-regions usw2,use1 \
+  --prefer-channels stable,edge,experimental \
+  --rebalance-on cloud,channel
+```
+
+Fleet operators can inspect placement, preview or perform live movement, and
+enable the five-minute scheduled restore/rebalance pass:
+
+```sh
+witself-infra placement-status -control-plane https://self.witwave.ai
+witself-infra rebalance -control-plane https://self.witwave.ai -dry-run
+witself-infra placement-runner -control-plane https://self.witwave.ai -enable -run
+```
+
+If an archived account has impossible hard pins, an operator can clear only
+the blocked axes while preserving its ranked preferences:
+
+```sh
+witself-admin placement rescue --account-id acc_... --axes region,channel
+```
 
 See [infra/pulumi/README.md](infra/pulumi/README.md) for the CLI internals and
 [.gitops/README.md](.gitops/README.md) for how Argo CD reconciles the GitOps

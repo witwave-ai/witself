@@ -316,7 +316,28 @@ control plane forgets them.
 | `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: SKIP evacuation and force-purge accounts — sandbox/dev override, the data dies with the cell |
 | `-restore-archives` | `up` | after registration, restore archived accounts whose stored region matches this cell's region |
-| `-restore-any-region` | `up` | with `-restore-archives`: explicit operator override that restores every archived account, ignoring stored region |
+| `-restore-any-region` | `up` | with `-restore-archives`: bypass the provider-region guard for legacy archives; policy-aware hard pins remain authoritative |
+
+Placement-aware fleet operations use the same fleet token:
+
+```sh
+# Fleet health: cells, archived accounts blocked by pins, and live move candidates.
+witself-infra placement-status -control-plane https://self.witwave.ai
+
+# Preview once, then run bounded live moves until no better eligible target remains.
+witself-infra rebalance -control-plane https://self.witwave.ai -dry-run
+witself-infra rebalance -control-plane https://self.witwave.ai -batch 1
+
+# The Worker cron ticks every five minutes but remains a no-op until enabled.
+witself-infra placement-runner -control-plane https://self.witwave.ai -enable -run
+
+# Emergency escape hatch for an archived account with impossible hard pins.
+witself-admin placement rescue --account-id acc_... --axes cloud,region,channel
+```
+
+The rescue operation only clears the selected `allowed_*` hard-pin lists. It
+preserves ranked preferences and does not restore or move the account itself;
+the next manual or scheduled placement pass does that.
 
 ## Roadmap (one slice at a time)
 

@@ -72,6 +72,14 @@
 // KV stays the read projection. The O(accounts) scan in DELETE moves to DO
 // counters at the same time.
 import { Container, getContainer } from "@cloudflare/containers";
+import {
+  bestPlacementCell,
+  bestPolicyCell,
+  bestRebalanceCell,
+  cellMatchesArchivedPlacement,
+  cellMatchesPolicy,
+  rescuePlacementPolicy,
+} from "./placement.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -107,6 +115,8 @@ const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const REGION_NAME = /^[a-z0-9-]{2,32}$/;
 const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
+const PLACEMENT_RESCUE_PATH = /^\/v1\/placement\/archives\/([A-Za-z0-9_-]{1,128}):rescue$/;
+const PLACEMENT_RESCUE_AXES = new Set(["cloud", "region", "channel"]);
 
 // Admin identity: the audit trail only ever records a first-name handle
 // (author_id on support_ticket_messages when author_kind='fleet_admin',
@@ -2812,7 +2822,7 @@ async function fetchPlacementPolicySnapshot(cell, accountId) {
   }
 }
 
-async function fetchAccountContact(cell, accountId) {
+async function fetchPlacementAccountContact(cell, accountId) {
   try {
     const resp = await fetch(
       `${cell.endpoint}/v1/accounts/${accountId}:contact`,
@@ -2832,56 +2842,6 @@ async function fetchAccountContact(cell, accountId) {
   }
 }
 
-function policyList(policy, field) {
-  const values = policy?.[field];
-  return Array.isArray(values) ? values.filter((v) => typeof v === "string") : [];
-}
-
-function cellMatchesPolicy(cell, policy) {
-  const allowedClouds = policyList(policy, "allowed_clouds");
-  if (allowedClouds.length > 0 && !allowedClouds.includes(cell.cloud || "")) {
-    return false;
-  }
-  const allowedRegions = policyList(policy, "allowed_regions");
-  if (allowedRegions.length > 0 && !allowedRegions.includes(cell.region_code || "")) {
-    return false;
-  }
-  const allowedChannels = policyList(policy, "allowed_channels");
-  const channel = cell.channel || "experimental";
-  if (allowedChannels.length > 0 && !allowedChannels.includes(channel)) {
-    return false;
-  }
-  return true;
-}
-
-function cellMatchesArchivedPlacement(cell, archived, allRegions) {
-  const policy = archived?.placement_policy;
-  if (policy) {
-    return cellMatchesPolicy(cell, policy);
-  }
-  if (allRegions) {
-    return true;
-  }
-  if (archived?.region_code && cell.region_code) {
-    return archived.region_code === cell.region_code;
-  }
-  return archived?.region === cell.region;
-}
-
-function axisValue(cell, axis) {
-  if (axis === "cloud") return cell.cloud || "";
-  if (axis === "region") return cell.region_code || "";
-  if (axis === "channel") return cell.channel || "experimental";
-  return "";
-}
-
-function axisPreferenceField(axis) {
-  if (axis === "cloud") return "preferred_clouds";
-  if (axis === "region") return "preferred_regions";
-  if (axis === "channel") return "preferred_channels";
-  return "";
-}
-
 async function accountCountsByCell(env) {
   const counts = new Map();
   let cursor;
@@ -2896,98 +2856,6 @@ async function accountCountsByCell(env) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return counts;
-}
-
-function preferenceRank(policy, field, value) {
-  const preferred = policyList(policy, field);
-  if (preferred.length === 0) {
-    return 0;
-  }
-  const idx = preferred.indexOf(value || "");
-  return idx >= 0 ? idx : preferred.length;
-}
-
-function comparePlacementCells(a, b, archived, counts) {
-  const policy = archived?.placement_policy;
-  const cloudRank = preferenceRank(policy, "preferred_clouds", a.cloud) -
-    preferenceRank(policy, "preferred_clouds", b.cloud);
-  if (cloudRank !== 0) return cloudRank;
-  const regionRank = preferenceRank(policy, "preferred_regions", a.region_code) -
-    preferenceRank(policy, "preferred_regions", b.region_code);
-  if (regionRank !== 0) return regionRank;
-  const channelRank = preferenceRank(policy, "preferred_channels", a.channel || "experimental") -
-    preferenceRank(policy, "preferred_channels", b.channel || "experimental");
-  if (channelRank !== 0) return channelRank;
-  const countRank = (counts.get(a.name) ?? 0) - (counts.get(b.name) ?? 0);
-  if (countRank !== 0) return countRank;
-  return a.name.localeCompare(b.name);
-}
-
-function bestPolicyCell(cells, policy, counts) {
-  const eligible = cells.filter((cell) => cellMatchesPolicy(cell, policy));
-  if (eligible.length === 0) {
-    return null;
-  }
-  eligible.sort((a, b) => comparePlacementCells(
-    a,
-    b,
-    { placement_policy: policy },
-    counts,
-  ));
-  return eligible[0];
-}
-
-function bestPlacementCell(cells, archived, counts, allRegions) {
-  const eligible = cells.filter((cell) => cellMatchesArchivedPlacement(cell, archived, allRegions));
-  if (eligible.length === 0) {
-    return null;
-  }
-  eligible.sort((a, b) => comparePlacementCells(a, b, archived, counts));
-  return eligible[0];
-}
-
-function rebalanceRank(policy, axis, cell) {
-  const field = axisPreferenceField(axis);
-  if (!field) {
-    return 0;
-  }
-  return preferenceRank(policy, field, axisValue(cell, axis));
-}
-
-function rebalanceImproves(policy, current, target) {
-  for (const axis of policyList(policy, "rebalance_on")) {
-    if (rebalanceRank(policy, axis, target) < rebalanceRank(policy, axis, current)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function bestRebalanceCell(cells, current, policy, counts) {
-  if (!policy) {
-    return null;
-  }
-  if (!cellMatchesPolicy(current, policy)) {
-    const hardPinned = bestPolicyCell(cells, policy, counts);
-    return hardPinned ? { cell: hardPinned, reason: "hard pin" } : null;
-  }
-  if (policyList(policy, "rebalance_on").length === 0) {
-    return null;
-  }
-  const candidates = cells.filter((cell) =>
-    cell.name !== current.name &&
-    cellMatchesPolicy(cell, policy) &&
-    rebalanceImproves(policy, current, cell));
-  if (candidates.length === 0) {
-    return null;
-  }
-  candidates.sort((a, b) => comparePlacementCells(
-    a,
-    b,
-    { placement_policy: policy },
-    counts,
-  ));
-  return { cell: candidates[0], reason: "preferred placement" };
 }
 
 // maskEmail turns "scott@witwave.ai" into "s***@w***.ai" for audit
@@ -3377,7 +3245,7 @@ async function rebalanceTargetForAccount(env, cellsByName, destinationCells, cou
   if (!current.endpoint || !current.provision_token) {
     return { skip: { account_id: accountId, cell: current.name, reason: "current cell has no provision endpoint" } };
   }
-  const contact = await fetchAccountContact(current, accountId);
+  const contact = await fetchPlacementAccountContact(current, accountId);
   if (contact.error) {
     return { skip: { account_id: accountId, cell: current.name, reason: contact.error } };
   }
@@ -3868,6 +3736,50 @@ async function handlePlacementStatus(request, env, url) {
   });
 }
 
+async function handlePlacementRescue(request, env, accountId) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  if (request.method !== "POST") {
+    return err("method not allowed", 405);
+  }
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // Clearing every hard pin is the safe operator-rescue default.
+  }
+  const axes = body.axes == null ? ["cloud", "region", "channel"] : body.axes;
+  if (!Array.isArray(axes) || axes.length === 0 ||
+      axes.some((axis) => typeof axis !== "string" || !PLACEMENT_RESCUE_AXES.has(axis))) {
+    return err("axes must be a non-empty subset of cloud, region, channel", 400);
+  }
+  const uniqueAxes = [...new Set(axes)];
+  const key = `archived:${accountId}`;
+  const archived = await env.DIRECTORY.get(key, { type: "json" });
+  if (!archived) {
+    return err("archived account not found", 404);
+  }
+  const nextPolicy = rescuePlacementPolicy(archived.placement_policy, uniqueAxes);
+  const changed = !archived.placement_policy ||
+    JSON.stringify(nextPolicy) !== JSON.stringify(archived.placement_policy);
+  if (changed) {
+    archived.placement_policy = nextPolicy;
+    archived.placement_rescue = {
+      at: new Date().toISOString(),
+      cleared_axes: uniqueAxes,
+    };
+    await env.DIRECTORY.put(key, JSON.stringify(archived));
+  }
+  return json({
+    schema_version: "witself.v0",
+    account_id: accountId,
+    changed,
+    cleared_axes: uniqueAxes,
+    placement_policy: nextPolicy,
+  });
+}
+
 // restoreAccount runs the four-step restore for a single account. Each step
 // is idempotent under retry, and the ordering — import THEN resume THEN
 // route THEN clean — guarantees the account is never simultaneously
@@ -4348,6 +4260,10 @@ export default {
     }
     if (url.pathname === "/v1/placement-status") {
       return handlePlacementStatus(request, env, url);
+    }
+    const placementRescue = url.pathname.match(PLACEMENT_RESCUE_PATH);
+    if (placementRescue) {
+      return handlePlacementRescue(request, env, placementRescue[1]);
     }
     if (url.pathname === "/v1/placement:run") {
       if (request.method !== "POST") {

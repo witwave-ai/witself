@@ -67,6 +67,8 @@ func run(args []string) int {
 		return cellsCmd(args[1:])
 	case "events":
 		return eventsCmd(args[1:])
+	case "placement":
+		return placementCmd(args[1:])
 	case "dashboard", "tui":
 		return dashboardCmd(args[1:])
 	default:
@@ -88,6 +90,8 @@ func usage(w io.Writer) {
 	usageLine(w, "                                (support-policy)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
+	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
+	usageLine(w, "                                (rescue)")
 	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")
 	usageLine(w, "                                events; self-upgrades and resumes its view)")
 	usageLine(w, "  witself-admin version       Print version information")

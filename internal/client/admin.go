@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 // Admin is the public shape of a fleet-admin credential (as returned
@@ -305,6 +307,32 @@ func SetAdminSupportPolicy(ctx context.Context, cpEndpoint, adminToken, accountI
 		strings.TrimRight(cpEndpoint, "/"), accountID)
 	var out SupportPolicyChange
 	if err := doJSON(ctx, http.MethodPatch, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ArchivedPlacementRescue reports an operator override applied to one
+// archived account that could not satisfy its hard placement pins.
+type ArchivedPlacementRescue struct {
+	AccountID       string           `json:"account_id"`
+	Changed         bool             `json:"changed"`
+	ClearedAxes     []string         `json:"cleared_axes"`
+	PlacementPolicy placement.Policy `json:"placement_policy"`
+}
+
+// RescueArchivedPlacement clears selected hard-pin axes on an archived
+// account. It requires the fleet token because an archived account has no
+// running cell against which to authenticate its owner token.
+func RescueArchivedPlacement(ctx context.Context, cpEndpoint, fleetToken, accountID string, axes []string) (*ArchivedPlacementRescue, error) {
+	body, err := json.Marshal(map[string]any{"axes": axes})
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/v1/placement/archives/%s:rescue",
+		strings.TrimRight(cpEndpoint, "/"), accountID)
+	var out ArchivedPlacementRescue
+	if err := doJSON(ctx, http.MethodPost, url, fleetToken, body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

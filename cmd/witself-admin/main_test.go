@@ -184,6 +184,13 @@ func TestJSONEnvelopes(t *testing.T) {
 			}),
 			wantKeys: []string{"support_policy_change"},
 		},
+		{
+			name: "placement rescue",
+			value: placementRescueJSONMap(&client.ArchivedPlacementRescue{
+				AccountID: "acc_1", Changed: true, ClearedAxes: []string{"region"},
+			}),
+			wantKeys: []string{"placement_rescue"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
