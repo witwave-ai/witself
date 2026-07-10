@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -122,6 +123,28 @@ func whoamiAWSCore(ctx context.Context, entry cellEntry, bgSSO bool) (identity, 
 	return id, nil
 }
 
+// gcpADCProbe verifies Application Default Credentials can actually
+// mint a token. Overridable in tests. The token itself is discarded
+// unread (Stdout → io.Discard) — only the exit status and stderr
+// matter, and stderr never contains the credential.
+var gcpADCProbe = func(ctx context.Context, credsFile string) error {
+	cmd := exec.CommandContext(ctx, "gcloud", "auth", "application-default", "print-access-token")
+	if credsFile != "" {
+		cmd.Env = append(os.Environ(), "GOOGLE_APPLICATION_CREDENTIALS="+credsFile)
+	}
+	var stderr strings.Builder
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("%s", detail)
+	}
+	return nil
+}
+
 func whoamiGCP(ctx context.Context, entry cellEntry) (identity, error) {
 	project := ""
 	credsFile := ""
@@ -147,6 +170,15 @@ func whoamiGCP(ctx context.Context, entry cellEntry) (identity, error) {
 		return identity{}, fmt.Errorf("gcloud auth list: %w — run `gcloud auth application-default login --project %s`", err, project)
 	}
 	actor := strings.TrimSpace(string(out))
+	// ADC is a SEPARATE credential from `gcloud auth login`, with its
+	// own reauth window — and it's the one Pulumi's GCP provider and
+	// the Argo CD health probe actually authenticate with. Without
+	// this probe, `gcloud auth list` alone passes while ADC is
+	// expired, the cell stays green, and the failure surfaces 15
+	// minutes into the next up's convergence wait instead of here.
+	if adcErr := gcpADCProbe(ctx, credsFile); adcErr != nil {
+		return identity{}, fmt.Errorf("GCP ADC expired or missing: %s — run `gcloud auth application-default login` (dashboard: press `a`)", oneLine(adcErr.Error()))
+	}
 	id := identity{Cloud: "gcp", Profile: project, Account: project, Actor: actor, OK: true}
 	if actor == "" {
 		id.OK = false

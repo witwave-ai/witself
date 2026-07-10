@@ -486,6 +486,10 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 		{"reauthentication is needed. Please run: `gcloud auth login`"},
 		{"AuthenticationFailed: The access token is invalid"},
 		{"Unable to locate credentials. You can configure credentials by running..."},
+		// The exact truncated line the ops pane showed during the ADC
+		// expiry incident — dotted CLI path, remedy text cut off.
+		{"  Argo CD: mint GCP ADC access token: exit status 1: ERROR: (gcloud.auth.application-default.print-access-token) There was a problem refre… (9m14s elapsed)"},
+		{"ERROR: (gcloud.auth.application-default.print-access-token) There was a problem refreshing your current auth tokens: Reauthentication failed."},
 	} {
 		if !looksLikeAuthFailure(tail) {
 			t.Errorf("auth pattern missed: %v", tail)

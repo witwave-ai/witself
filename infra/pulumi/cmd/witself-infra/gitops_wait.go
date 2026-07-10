@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,13 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"gopkg.in/yaml.v3"
 )
+
+// errLocalAuth marks a failure to mint LOCAL cloud credentials
+// (expired gcloud ADC, a dead `az` session). Unlike a cluster that's
+// still converging, polling cannot heal this — the fix is a human
+// running a login flow — so the convergence wait aborts immediately
+// instead of retrying the same doomed call until maxWait.
+var errLocalAuth = errors.New("local cloud credentials unavailable")
 
 type argoApplication struct {
 	Metadata struct {
@@ -91,6 +99,12 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 
 	for {
 		apps, err := lister.ListArgoApplications(ctx, namespace)
+		// A local-credential failure can't heal by polling — every retry
+		// runs the same login-required CLI on the same machine. Abort
+		// with the remedy up front instead of burning maxWait on it.
+		if err != nil && errors.Is(err, errLocalAuth) {
+			return fmt.Errorf("argo CD verification aborted after %s: %w — run the login flow (dashboard: press `a`) and re-run the op", time.Since(started).Round(time.Second), err)
+		}
 		var reason string
 		if err == nil {
 			ready, why := argoApplicationsReady(apps)
@@ -314,9 +328,9 @@ func azureAKSKubeconfig(ctx context.Context, resourceGroup, clusterName string) 
 			detail = strings.TrimSpace(string(ee.Stderr))
 		}
 		if detail != "" {
-			return nil, fmt.Errorf("get AKS credentials: %w: %s", err, detail)
+			return nil, fmt.Errorf("%w: get AKS credentials: %v: %s", errLocalAuth, err, detail)
 		}
-		return nil, fmt.Errorf("get AKS credentials: %w", err)
+		return nil, fmt.Errorf("%w: get AKS credentials: %v", errLocalAuth, err)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("get AKS credentials: command returned empty kubeconfig")
@@ -368,11 +382,11 @@ func gcpADCAccessToken(ctx context.Context, project string) (string, error) {
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("mint GCP ADC access token: %w: %s", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%w: mint GCP ADC access token: %v: %s", errLocalAuth, err, strings.TrimSpace(string(out)))
 	}
 	token := strings.TrimSpace(string(out))
 	if token == "" {
-		return "", fmt.Errorf("mint GCP ADC access token: command returned an empty token")
+		return "", fmt.Errorf("%w: mint GCP ADC access token: command returned an empty token", errLocalAuth)
 	}
 	return token, nil
 }

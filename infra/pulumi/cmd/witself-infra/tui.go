@@ -876,8 +876,11 @@ func looksLikeAuthFailure(tail []string) bool {
 		"unable to locate credentials",
 		"expiredtoken",
 		"reauthentication is needed",
+		"reauthentication failed",
 		"gcloud auth", // covers `gcloud auth login`, `application-default login`
 		"application default credentials",
+		"application-default", // gcloud's dotted CLI path in error banners
+		"gcp adc",             // our own whoami/gitops-wait wording
 		"authenticationfailed",
 		"az login",
 	}

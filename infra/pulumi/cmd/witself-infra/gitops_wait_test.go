@@ -101,6 +101,48 @@ func TestWaitForArgoApplicationsHealthy(t *testing.T) {
 			t.Fatalf("error = %v, want last diagnostic", err)
 		}
 	})
+
+	// Pins the fail-fast fix: an expired-ADC (or any errLocalAuth)
+	// failure must abort on the FIRST poll instead of retrying the
+	// same doomed local CLI call until maxWait — the observed failure
+	// burned 15 minutes of "mint GCP ADC access token" spam before
+	// reporting what one poll already knew.
+	t.Run("local auth failure aborts immediately", func(t *testing.T) {
+		lister := &fakeArgoLister{responses: []argoListResponse{
+			{err: fmt.Errorf("%w: mint GCP ADC access token: exit status 1: Reauthentication failed", errLocalAuth)},
+		}}
+		started := time.Now()
+		err := waitForArgoApplicationsHealthy(context.Background(), lister, "argocd", time.Hour, time.Hour)
+		if err == nil {
+			t.Fatal("expected immediate abort")
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("abort took %s — it retried instead of failing fast", elapsed)
+		}
+		if got := lister.calls.Load(); got != 1 {
+			t.Fatalf("calls = %d, want exactly 1 (no retries on local auth failure)", got)
+		}
+		if !strings.Contains(err.Error(), "press `a`") {
+			t.Fatalf("error must carry the remedy, got: %v", err)
+		}
+	})
+
+	// A REMOTE error (cluster still coming up, API flap) must still
+	// retry — only local-credential failures short-circuit.
+	t.Run("remote errors still retry", func(t *testing.T) {
+		lister := &fakeArgoLister{responses: []argoListResponse{
+			{err: fmt.Errorf("query Argo CD applications: HTTP 503: upstream connect error")},
+			{apps: []argoApplication{
+				mkArgoApp("apps", "Synced", "Healthy", ""),
+			}},
+		}}
+		if err := waitForArgoApplicationsHealthy(context.Background(), lister, "argocd", time.Second, 5*time.Millisecond); err != nil {
+			t.Fatalf("remote flap should heal by retrying: %v", err)
+		}
+		if got := lister.calls.Load(); got != 2 {
+			t.Fatalf("calls = %d, want 2", got)
+		}
+	})
 }
 
 func TestNewAzureArgoListerFromKubeconfig(t *testing.T) {
