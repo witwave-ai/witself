@@ -809,22 +809,19 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 
 func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
-	// esc / ctrl+c always dismiss. For non-destroy confirms, `q`
-	// dismisses too — the review found operators habitually pressed q
-	// to quit the dialog and got silently swallowed. Destroy is the
-	// exception: `q` is a legitimate typed character in the cell-name
-	// match (e.g. "azure-sandbox-…"), so only esc/ctrl+c abort there.
-	if s == "esc" || s == "ctrl+c" {
+	// esc / ctrl+c / q always dismiss — operators habitually press q
+	// to quit a dialog, and none of them collide with the destroy
+	// confirmation word ("yes" has no q).
+	if s == "esc" || s == "ctrl+c" || s == "q" {
 		m.pending = nil
 		m.status = "confirmation dismissed"
 		return m, nil
 	}
-	if s == "q" && m.pending.kind != opDestroy {
-		m.pending = nil
-		m.status = "confirmation dismissed"
-		return m, nil
-	}
-	if s == "y" && m.pending.canConfirm() {
+	// Fire: `y` clears the up-confirm; destroy needs the typed word
+	// plus enter (the extra beat is deliberate for the irreversible
+	// verb). A bare first `y` on destroy falls through to the typing
+	// branch below — canConfirm is false until the word is complete.
+	if (s == "y" || s == "enter") && m.pending.canConfirm() {
 		kind, cell := m.pending.kind, m.pending.cell
 		m.pending = nil
 		return m.launchOp(kind, cell)
@@ -838,10 +835,10 @@ func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case len(s) == 1: // single printable char
 			m.pending.typed += s
 		}
-		if m.pending.typed == m.pending.cell {
+		if len(m.pending.typed) > 0 && !strings.HasPrefix(destroyConfirmWord, m.pending.typed) {
+			m.pending.err = "type `" + destroyConfirmWord + "` to confirm — esc to cancel"
+		} else {
 			m.pending.err = ""
-		} else if len(m.pending.typed) > 0 && !strings.HasPrefix(m.pending.cell, m.pending.typed) {
-			m.pending.err = "does not match — press esc to start over"
 		}
 	}
 	return m, nil

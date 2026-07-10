@@ -182,21 +182,79 @@ func TestUpRequiresPreview(t *testing.T) {
 	}
 }
 
-// TestDestroyRequiresTypedCellName pins the destroy safety rule: the
+// TestDestroyRequiresTypedYes pins the destroy safety rule: the
 // dialog only becomes confirmable once the operator has typed the
-// full cell name, no shortcuts.
-func TestDestroyRequiresTypedCellName(t *testing.T) {
+// confirmation word in full — no single-key shortcut for the
+// irreversible verb.
+func TestDestroyRequiresTypedYes(t *testing.T) {
 	c := startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
 	if c.canConfirm() {
 		t.Fatal("destroy must not be confirmable with an empty typed field")
 	}
-	c.typed = "aws-sandbox"
+	c.typed = "ye"
 	if c.canConfirm() {
-		t.Fatal("destroy must not be confirmable on a prefix match")
+		t.Fatal("destroy must not be confirmable on a partial word")
 	}
-	c.typed = "aws-sandbox-usw2-dev"
+	c.typed = destroyConfirmWord
 	if !c.canConfirm() {
-		t.Fatal("destroy must be confirmable once the name matches exactly")
+		t.Fatal("destroy must be confirmable once the word is complete")
+	}
+	// The cell name is NOT the confirmation word anymore.
+	c.typed = "aws-sandbox-usw2-dev"
+	if c.canConfirm() {
+		t.Fatal("typing the cell name must not confirm — the word is `yes`")
+	}
+}
+
+// TestDestroyTypedFlowThroughKeys pins the key-by-key path: y → ye →
+// yes arms the dialog without firing (enter fires), a wrong char sets
+// the inline error, and backspace recovers.
+func TestDestroyTypedFlowThroughKeys(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws")}}}
+	m := seedModel(states, 120, 30)
+	m.pending = startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
+
+	type step struct {
+		key     string
+		typed   string
+		hasErr  bool
+		canFire bool
+	}
+	press := func(key string) {
+		var msg tea.KeyMsg
+		if key == "backspace" {
+			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+		} else {
+			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+		}
+		next, _ := m.handleConfirmKey(msg)
+		m = next.(dashboardModel)
+	}
+	for _, st := range []step{
+		{key: "y", typed: "y", hasErr: false, canFire: false},
+		{key: "e", typed: "ye", hasErr: false, canFire: false},
+		{key: "x", typed: "yex", hasErr: true, canFire: false},
+		{key: "backspace", typed: "ye", hasErr: false, canFire: false},
+		{key: "s", typed: "yes", hasErr: false, canFire: true},
+	} {
+		press(st.key)
+		if m.pending == nil {
+			t.Fatalf("after %q: dialog must stay open until enter", st.key)
+		}
+		if m.pending.typed != st.typed {
+			t.Fatalf("after %q: typed = %q, want %q", st.key, m.pending.typed, st.typed)
+		}
+		if (m.pending.err != "") != st.hasErr {
+			t.Fatalf("after %q: err = %q, wanted hasErr=%t", st.key, m.pending.err, st.hasErr)
+		}
+		if m.pending.canConfirm() != st.canFire {
+			t.Fatalf("after %q: canConfirm = %t, want %t", st.key, m.pending.canConfirm(), st.canFire)
+		}
+	}
+	// q now dismisses destroy too — it's no longer a typing character.
+	press("q")
+	if m.pending != nil {
+		t.Fatal("q must dismiss the destroy dialog")
 	}
 }
 
@@ -1051,9 +1109,9 @@ func TestDestroyDialogHeightStableAcrossErr(t *testing.T) {
 }
 
 // TestConfirmKeysDismissOnQAndCtrlC pins the input-trap fix: pressing
-// q or ctrl+c during an up-confirmation dismisses the dialog instead
-// of being silently swallowed. Destroy is the exception — q is a
-// valid typed character there — but ctrl+c still aborts.
+// q, esc, or ctrl+c during ANY confirmation dismisses the dialog
+// instead of being silently swallowed. Since the destroy confirmation
+// word became `yes`, q is no longer a typing character anywhere.
 func TestConfirmKeysDismissOnQAndCtrlC(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1066,7 +1124,7 @@ func TestConfirmKeysDismissOnQAndCtrlC(t *testing.T) {
 		{"up: esc dismisses", opUp, "esc", true},
 		{"destroy: ctrl+c dismisses", opDestroy, "ctrl+c", true},
 		{"destroy: esc dismisses", opDestroy, "esc", true},
-		{"destroy: q is a valid char, NOT a dismiss", opDestroy, "q", false},
+		{"destroy: q dismisses", opDestroy, "q", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

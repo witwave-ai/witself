@@ -356,13 +356,18 @@ type opDoneMsg struct {
 	err  error
 }
 
+// destroyConfirmWord is what the operator types (plus enter) to fire
+// a destroy. The dialog title already names the target cell; the
+// typed word guards against reflex keypresses, not wrong-cell aim.
+const destroyConfirmWord = "yes"
+
 // confirmDialog names what the operator is being asked to confirm.
 type confirmDialog struct {
 	kind        opKind
 	cell        string
 	previewSeen bool   // for up: a successful preview must precede
-	typed       string // for destroy: the operator must type the cell name
-	err         string // shown on partial typed match
+	typed       string // for destroy: the operator must type destroyConfirmWord
+	err         string // shown on a typed mismatch
 }
 
 // startConfirm decides what confirmation an op needs.
@@ -378,13 +383,14 @@ func startConfirm(kind opKind, cell string, previewSeen bool) *confirmDialog {
 	return nil
 }
 
-// canConfirm reports whether the confirm state permits the y-key to fire.
+// canConfirm reports whether the confirm state permits the fire keys
+// (y / enter) to launch the op.
 func (c *confirmDialog) canConfirm() bool {
 	switch c.kind {
 	case opUp:
 		return c.previewSeen
 	case opDestroy:
-		return c.typed == c.cell
+		return c.typed == destroyConfirmWord
 	}
 	return true
 }
@@ -402,7 +408,7 @@ func (c *confirmDialog) render() string {
 		}
 	case opDestroy:
 		b.WriteString("destroy will DRAIN the cell, EVACUATE every account to R2, then DELETE the fleet entry and tear down every cloud resource.\n\n")
-		b.WriteString("type the cell name exactly to confirm:\n")
+		b.WriteString("type `" + destroyConfirmWord + "` then enter to confirm:\n")
 		b.WriteString("  " + c.typed + "▏\n")
 		// Always reserve the err slot so toggling it on/off doesn't
 		// change the dialog height — otherwise overlayCenter recenters
