@@ -2,7 +2,7 @@ module github.com/witwave-ai/witself
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0

@@ -38,8 +38,8 @@ requirements before code exists.
 
 ## Go Baseline
 
-Witself should use the latest stable Go release. As of June 26, 2026, the
-current stable Go release is `go1.26.4`.
+Witself should use the latest stable Go release. As of July 10, 2026, the
+current stable Go release is `go1.26.5`.
 
 Initial module settings when code starts:
 
@@ -48,7 +48,7 @@ module github.com/witwave-ai/witself
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.5
 ```
 
 Refresh this baseline before first implementation and before each release. If a
@@ -73,7 +73,7 @@ The initial module bootstrap, once the first Go package exists, should look like
 ```sh
 go mod init github.com/witwave-ai/witself
 go mod edit -go=1.26
-go mod edit -toolchain=go1.26.4
+go mod edit -toolchain=go1.26.5
 go mod tidy
 ```
 

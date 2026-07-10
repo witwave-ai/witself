@@ -51,7 +51,7 @@ The initial scaffold should create:
 ## Module And Binaries
 
 - Single Go module `github.com/witwave-ai/witself`, `go 1.26`, toolchain
-  `go1.26.4`, refreshed before the first implementation pass.
+  `go1.26.5`, refreshed before the first implementation pass.
 - `cmd/witself` builds the `witself` CLI and `witself mcp serve`. There is no
   `server` subcommand on the main CLI.
 - `cmd/witself-server` builds the separate backend API binary, including its
