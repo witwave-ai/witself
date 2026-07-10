@@ -81,6 +81,13 @@ type dashboardModel struct {
 	loading    bool
 	status     string
 	now        func() time.Time
+
+	// Slice 4 ops state.
+	program        *tea.Program
+	op             *opRun
+	pending        *confirmDialog
+	previewSeen    map[string]bool // cells with a successful preview
+	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
 }
 
 // cellDataSource is what the model needs from the outside world — a
@@ -193,24 +200,162 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTickMsg:
 		return m, tea.Batch(m.loadCmd(), tickCmd())
+	case opLineMsg:
+		return m, nil // ring buffer already updated; re-render happens on every message
+	case opDoneMsg:
+		if m.op != nil {
+			if msg.err == nil && m.op.kind == opPreview {
+				if m.previewSeen == nil {
+					m.previewSeen = map[string]bool{}
+				}
+				m.previewSeen[msg.cell] = true
+				m.status = "preview complete on " + msg.cell + " — press u to apply"
+			} else if msg.err != nil {
+				m.status = m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLineInfra(msg.err.Error())
+			} else {
+				m.status = m.op.kind.verb() + " on " + msg.cell + " succeeded"
+				if m.op.kind == opUp {
+					delete(m.previewSeen, msg.cell)
+				}
+			}
+			m.op = nil
+		}
+		return m, m.loadCmd()
 	case tea.KeyMsg:
+		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+C safety modal — never quits under a running op.
+	if m.interruptModal {
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "k":
+			m.interruptModal = false
+			m.status = "keeping " + m.op.kind.verb() + " running"
+			return m, nil
+		case "c":
+			m.interruptModal = false
+			if m.op != nil {
+				m.op.killOp()
+				m.status = "sent SIGKILL to " + m.op.kind.verb() + " on " + m.op.cell
+			}
+			return m, nil
+		case "d":
+			// Detach: leave the child running, just quit the dashboard.
 			return m, tea.Quit
-		case "j", "down":
-			if m.cursor < len(m.states)-1 {
-				m.cursor++
+		}
+		return m, nil
+	}
+
+	// Confirmation dialog captures keys.
+	if m.pending != nil {
+		return m.handleConfirmKey(msg)
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		if m.op != nil {
+			m.interruptModal = true
+			return m, nil
+		}
+		return m, tea.Quit
+	case "q":
+		if m.op != nil {
+			m.status = "an op is running — ctrl+c for keep/cancel/detach"
+			return m, nil
+		}
+		return m, tea.Quit
+	case "j", "down":
+		if m.cursor < len(m.states)-1 {
+			m.cursor++
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "g":
+		m.loading = true
+		m.status = "refreshing…"
+		return m, m.loadCmd()
+	case "p", "u", "D":
+		return m.startOpKey(msg.String())
+	}
+	return m, nil
+}
+
+func (m dashboardModel) selectedCell() string {
+	if m.cursor >= 0 && m.cursor < len(m.states) {
+		return m.states[m.cursor].name
+	}
+	return ""
+}
+
+func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
+	cell := m.selectedCell()
+	if cell == "" {
+		m.status = "no cell selected"
+		return m, nil
+	}
+	if m.op != nil {
+		m.status = "another op is running — wait or ctrl+c to cancel"
+		return m, nil
+	}
+	var kind opKind
+	switch key {
+	case "p":
+		kind = opPreview
+	case "u":
+		kind = opUp
+	case "D":
+		kind = opDestroy
+	}
+	if kind == opPreview {
+		return m.launchOp(kind, cell)
+	}
+	m.pending = startConfirm(kind, cell, m.previewSeen[cell])
+	return m, nil
+}
+
+func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	if s == "esc" {
+		m.pending = nil
+		m.status = "confirmation dismissed"
+		return m, nil
+	}
+	if s == "y" && m.pending.canConfirm() {
+		kind, cell := m.pending.kind, m.pending.cell
+		m.pending = nil
+		return m.launchOp(kind, cell)
+	}
+	if m.pending.kind == opDestroy {
+		switch {
+		case s == "backspace":
+			if n := len(m.pending.typed); n > 0 {
+				m.pending.typed = m.pending.typed[:n-1]
 			}
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "g":
-			m.loading = true
-			m.status = "refreshing…"
-			return m, m.loadCmd()
+		case len(s) == 1: // single printable char
+			m.pending.typed += s
+		}
+		if m.pending.typed == m.pending.cell {
+			m.pending.err = ""
+		} else if len(m.pending.typed) > 0 && !strings.HasPrefix(m.pending.cell, m.pending.typed) {
+			m.pending.err = "does not match — press esc to start over"
 		}
 	}
+	return m, nil
+}
+
+func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) {
+	op, err := startOp(teaProgram, kind, cell, m.configPath)
+	if err != nil {
+		m.status = "launch failed: " + err.Error()
+		return m, nil
+	}
+	m.op = op
+	m.status = kind.verb() + " running on " + cell
 	return m, nil
 }
 
@@ -305,8 +450,26 @@ func (m dashboardModel) View() string {
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 
+	// Ops log pane below — takes half the remaining height when an op
+	// has been run this session, otherwise a compact hint bar.
+	var opsPane string
+	if m.op != nil || (m.states != nil) {
+		var logLines []string
+		if m.op != nil {
+			logLines = m.op.snapshot(12)
+			for i := range logLines {
+				logLines[i] = fitLineInfra(logLines[i], w-4)
+			}
+		}
+		title := "operations"
+		if m.op != nil {
+			title = fmt.Sprintf("operations · %s %s", m.op.kind.verb(), m.op.cell)
+		}
+		opsPane = "\n" + paneBoxInfra(title, logLines, w-4, 12, m.op != nil)
+	}
+
 	// Footer: hints left, version tag right.
-	hints := " j/k select · g refresh · q quit "
+	hints := " j/k select · p preview · u up · D destroy · g refresh · q quit "
 	ver := " witself-infra v" + versionString() + " "
 	pad := w - lipgloss.Width(hints) - lipgloss.Width(ver)
 	var footer string
@@ -319,7 +482,29 @@ func (m dashboardModel) View() string {
 	if m.status != "" {
 		status = "\n" + styDim.Render(" "+m.status)
 	}
-	return top + "\n" + styDim.Render(footer) + status
+	rendered := top + opsPane + "\n" + styDim.Render(footer) + status
+
+	// Overlay a dialog when we have one to show. Simple stacked layout
+	// (not centered-splice like witself-admin) — this binary's dialogs
+	// are safety-critical, not decorative.
+	if m.pending != nil {
+		return rendered + "\n" + dialogBoxInfra(m.pending.render())
+	}
+	if m.interruptModal && m.op != nil {
+		body := fmt.Sprintf(
+			"An operation is running: %s %s\n\n[k] keep it running (default)\n[c] cancel it (SIGKILL to the process group)\n[d] detach and quit — child keeps running\n",
+			m.op.kind.verb(), m.op.cell)
+		return rendered + "\n" + dialogBoxInfra(body)
+	}
+	return rendered
+}
+
+func dialogBoxInfra(body string) string {
+	st := lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(lipgloss.Color("3")).
+		Padding(0, 2)
+	return st.Render(body)
 }
 
 // paneBoxInfra frames one pane with a thick border and bold title —
@@ -387,9 +572,23 @@ func runDashboard(fs *flag.FlagSet) error {
 		loading:    true,
 		status:     "loading inventory…",
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	// Ops subprocesses push lines via program.Send. Because bubbletea
+	// takes the model by VALUE, the model can't hold a live pointer to
+	// its own program without a two-step init: build the program with a
+	// nil-program model, then update the program's stored model right
+	// after via Send. That's fragile — instead, hold the program in a
+	// package-level pointer set here so opRun goroutines can reach it.
+	m.program = nil
+	prog := tea.NewProgram(m, tea.WithAltScreen())
+	teaProgram = prog
+	_, err := prog.Run()
 	return err
 }
+
+// teaProgram is the running dashboard's tea.Program handle, set for
+// the duration of a Run so opRun goroutines can push messages back.
+// Only one dashboard runs at a time.
+var teaProgram *tea.Program
 
 // versionString is a shim: witself-infra doesn't inject its version
 // via ldflags today (an open item), so the footer shows "dev" until

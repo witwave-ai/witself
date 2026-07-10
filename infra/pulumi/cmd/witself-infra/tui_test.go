@@ -139,3 +139,98 @@ func TestDashboardLoadErrorReported(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// TestUpRequiresPreview pins Slice 4's central safety rule: `u` opens
+// a confirm dialog that REFUSES to fire until a `p` (preview) on the
+// same cell has succeeded — no keystroke should launch an up without
+// an operator having seen the diff.
+func TestUpRequiresPreview(t *testing.T) {
+	// preview on aws-sandbox-usw2-dev has never succeeded.
+	c := startConfirm(opUp, "aws-sandbox-usw2-dev", false)
+	if c == nil {
+		t.Fatal("up must produce a confirm dialog")
+	}
+	if c.canConfirm() {
+		t.Fatal("up must NOT be confirmable without a successful preview")
+	}
+	// After a preview, y is allowed.
+	c2 := startConfirm(opUp, "aws-sandbox-usw2-dev", true)
+	if !c2.canConfirm() {
+		t.Fatal("up with a passed preview must be confirmable")
+	}
+}
+
+// TestDestroyRequiresTypedCellName pins the destroy safety rule: the
+// dialog only becomes confirmable once the operator has typed the
+// full cell name, no shortcuts.
+func TestDestroyRequiresTypedCellName(t *testing.T) {
+	c := startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
+	if c.canConfirm() {
+		t.Fatal("destroy must not be confirmable with an empty typed field")
+	}
+	c.typed = "aws-sandbox"
+	if c.canConfirm() {
+		t.Fatal("destroy must not be confirmable on a prefix match")
+	}
+	c.typed = "aws-sandbox-usw2-dev"
+	if !c.canConfirm() {
+		t.Fatal("destroy must be confirmable once the name matches exactly")
+	}
+}
+
+// TestPreviewNeedsNoConfirm pins the read-only rule.
+func TestPreviewNeedsNoConfirm(t *testing.T) {
+	if c := startConfirm(opPreview, "any-cell", false); c != nil {
+		t.Fatal("preview is read-only — no confirmation dialog")
+	}
+}
+
+// TestQuitBlockedWhileOpRuns pins the ctrl+c safety modal: `q` refuses
+// to quit under an in-flight op, and ctrl+c opens the modal.
+func TestQuitBlockedWhileOpRuns(t *testing.T) {
+	m := dashboardModel{
+		width: 120, height: 24, ctx: context.Background(),
+		cli:    fakeSource{},
+		now:    func() time.Time { return time.Time{} },
+		states: []cellState{{name: "x"}},
+		op:     &opRun{kind: opUp, cell: "x"}, // pretend an up is running
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m2 := next.(dashboardModel)
+	if cmd != nil {
+		t.Fatal("q under a running op must not quit")
+	}
+	if !strings.Contains(m2.status, "op is running") {
+		t.Fatalf("expected op-running warning, got %q", m2.status)
+	}
+	// ctrl+c opens the interrupt modal.
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m3 := next.(dashboardModel)
+	if !m3.interruptModal {
+		t.Fatal("ctrl+c under an op must open the keep/cancel/detach modal")
+	}
+	// 'd' detaches — quits without killing the child.
+	_, cmd = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if cmd == nil {
+		t.Fatal("d must return tea.Quit")
+	}
+}
+
+// TestPreviewSuccessArmsUp pins the state transition: opDone for a
+// successful preview marks the cell as preview-passed so `u` can then
+// clear the confirm.
+func TestPreviewSuccessArmsUp(t *testing.T) {
+	m := dashboardModel{
+		ctx: context.Background(), cli: fakeSource{},
+		now: func() time.Time { return time.Time{} },
+		op:  &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"},
+	}
+	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
+	m2 := next.(dashboardModel)
+	if !m2.previewSeen["aws-sandbox-usw2-dev"] {
+		t.Fatal("successful preview must arm the cell for up")
+	}
+	if m2.op != nil {
+		t.Fatal("op must clear when done")
+	}
+}
