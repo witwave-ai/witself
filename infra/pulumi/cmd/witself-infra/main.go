@@ -123,7 +123,8 @@ commands:
               destroy/refresh/bootstrap when -cell resolves the config)
   dashboard  fullscreen infra dashboard (alias: tui): inventory + fleet
               + per-cell identity, plus p/preview, u/up, D/destroy with
-              typed-name and preview-first confirmation gates
+              typed-name and preview-first confirmation gates, and
+              a/auth (interactive login for a cell in an auth-error state)
   version   print version information
   config    manage the local cell inventory (~/.witself/infra.yaml):
               config init                 write a skeleton file

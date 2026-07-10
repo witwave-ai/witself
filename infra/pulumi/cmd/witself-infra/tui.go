@@ -57,18 +57,29 @@ func (c cellState) status() string {
 	}
 }
 
+// statusCellW is the fixed display width of the status column in the
+// cells pane. Sized to the widest label ("draining") + the dot + a
+// trailing gap so cell names always start at the same column.
+const statusCellW = 12
+
 func (c cellState) statusStyled() string {
+	label, style := "● live", styOK
 	switch c.status() {
-	case "live":
-		return styOK.Render("● live")
 	case "draining":
-		return styWarn.Render("◐ draining")
+		label, style = "◐ draining", styWarn
 	case "absent":
-		return styDim.Render("◌ absent")
+		label, style = "◌ absent", styDim
 	case "error":
-		return styErr.Render("● error")
+		label, style = "● error", styErr
 	}
-	return c.status()
+	// Pad the PLAIN label first, then style. Padding the styled output
+	// would fold the trailing spaces into the SGR run and, more
+	// importantly, complicate width math when styles differ between
+	// terminals — cheaper and more predictable to pad in plain space.
+	if pad := statusCellW - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
+	return style.Render(label)
 }
 
 type dashboardModel struct {
@@ -238,6 +249,13 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.interruptModal = false
 		}
 		return m, m.loadCmd()
+	case authCompletedMsg:
+		if msg.err != nil {
+			m.status = msg.desc + " failed: " + oneLine(msg.err.Error())
+			return m, nil
+		}
+		m.status = msg.desc + " ✓ — refreshing"
+		return m, m.loadCmd()
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -311,6 +329,9 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadCmd()
 	case "p", "u", "D":
 		return m.startOpKey(msg.String())
+	case "a":
+		next, cmd := m.startAuth()
+		return next, cmd
 	}
 	return m, nil
 }
@@ -437,7 +458,9 @@ func (m dashboardModel) View() string {
 		lines = append(lines, styDim.Render("loading inventory…"))
 	}
 	for i, st := range m.states {
-		row := fmt.Sprintf("%s  %s", st.statusStyled(), st.name)
+		// One space between the fixed-width status column and the cell
+		// name — statusStyled() already carries its own trailing gap.
+		row := fmt.Sprintf("%s %s", st.statusStyled(), st.name)
 		if i == m.cursor {
 			row = "▸ " + row
 		} else {
@@ -522,7 +545,7 @@ func (m dashboardModel) View() string {
 	// version wins over hints (hints are re-learnable; "am I current?"
 	// is the question the stamp exists to answer). Same rule the
 	// witself-admin dashboard uses.
-	hints := " j/k select · p preview · u up · D destroy · g refresh · q quit "
+	hints := " j/k select · a auth · p preview · u up · D destroy · g refresh · q quit "
 	ver := " witself-infra v" + versionString() + " "
 	pad := w - lipgloss.Width(hints) - lipgloss.Width(ver)
 	var footer string
