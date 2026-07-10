@@ -45,6 +45,10 @@ func argocdReleaseValues() pulumi.Map {
 		"configs": pulumi.Map{
 			"cm": pulumi.Map{
 				"resource.customizations.health.argoproj.io_Application": pulumi.String(argocdApplicationHealthLua),
+				// App-of-apps health depends on child Application status updates. The
+				// chart's global /status ignore can leave those updates stale in the
+				// parent cache, so use Argo's supported switch to keep them observable.
+				"resource.ignoreResourceUpdatesEnabled": pulumi.String("false"),
 			},
 		},
 		"server": pulumi.Map{
