@@ -121,6 +121,8 @@ commands:
               API, and refuse if it doesn't match the expected_account_id
               / tenant pin (also runs as a pre-flight before up/preview/
               destroy/refresh when a cell is resolved from the config)
+  dashboard  fullscreen infra dashboard: inventory + fleet + per-cell
+              identity, tab focus, drill-down (read-only for now)
   config    manage the local cell inventory (~/.witself/infra.yaml):
               config init                 write a skeleton file
               config add-cell [flags]     record a cell from the usual flags
@@ -284,6 +286,9 @@ func run(args []string) error {
 
 	if cmd == "whoami" {
 		return runWhoami(fs)
+	}
+	if cmd == "dashboard" || cmd == "tui" {
+		return runDashboard(fs)
 	}
 	// Identity pre-flight: any command that will TOUCH cloud state
 	// runs whoami first when the cell has expected_account_id / tenant

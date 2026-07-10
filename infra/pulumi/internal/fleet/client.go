@@ -151,8 +151,10 @@ func (c *Client) Register(ctx context.Context, cell Cell) error {
 	return nil
 }
 
-// lookup fetches the cell's current registry entry.
-func (c *Client) lookup(ctx context.Context, name string) (*Cell, error) {
+// ListCells returns every cell registered with the control plane —
+// the read the dashboard uses to show configured-and-registered vs
+// configured-only (absent) vs registered-only (orphan) cells.
+func (c *Client) ListCells(ctx context.Context) ([]Cell, error) {
 	var out struct {
 		Cells []Cell `json:"cells"`
 	}
@@ -163,9 +165,18 @@ func (c *Client) lookup(ctx context.Context, name string) (*Cell, error) {
 	if code != http.StatusOK {
 		return nil, fmt.Errorf("list cells: HTTP %d: %s", code, strings.TrimSpace(body))
 	}
-	for i := range out.Cells {
-		if out.Cells[i].Name == name {
-			return &out.Cells[i], nil
+	return out.Cells, nil
+}
+
+// lookup fetches the cell's current registry entry.
+func (c *Client) lookup(ctx context.Context, name string) (*Cell, error) {
+	cells, err := c.ListCells(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range cells {
+		if cells[i].Name == name {
+			return &cells[i], nil
 		}
 	}
 	return nil, ErrNotRegistered
