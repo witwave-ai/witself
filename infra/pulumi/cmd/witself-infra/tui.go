@@ -15,6 +15,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -37,11 +38,49 @@ var (
 // cellState is the merged view of one cell across the config file and
 // the fleet registry.
 type cellState struct {
-	name     string
-	entry    cellEntry
-	fleet    *fleet.Cell // nil = not registered
-	identity identity
-	err      error // whoami / fleet error, if any
+	name         string
+	entry        cellEntry
+	fleet        *fleet.Cell // nil = not registered
+	identity     identity
+	err          error  // whoami / fleet error, if any
+	controlPlane string // effective control plane URL ("" = self-hosted)
+}
+
+// selfHosted is the group label for cells with no control_plane in
+// their effective config (a plain single-machine deploy — no fleet
+// registry, no witself-admin visibility). Matches the "self-host vs
+// Witself Cloud" split from the project direction.
+const selfHosted = "self-hosted"
+
+// groupLabel is the human-readable name for a control-plane URL, or
+// "self-hosted" for the empty string. self.witwave.ai gets its
+// friendly product name; anything else shows its hostname.
+func groupLabel(controlPlane string) string {
+	if controlPlane == "" {
+		return selfHosted
+	}
+	host := controlPlane
+	if u, err := url.Parse(controlPlane); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	if host == "self.witwave.ai" {
+		return "witself cloud"
+	}
+	return host
+}
+
+// groupRank orders groups: default CP first (0), self-hosted last
+// (large), other CPs in between (1). Ties resolve alphabetically at
+// the call site.
+func groupRank(cp, defaultCP string) int {
+	switch {
+	case cp == defaultCP && defaultCP != "":
+		return 0
+	case cp == "":
+		return 2
+	default:
+		return 1
+	}
 }
 
 func (c cellState) status() string {
@@ -141,14 +180,15 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 		byName[registered[i].Name] = &registered[i]
 	}
 
-	names := make([]string, 0, len(cfg.Cells))
-	for n := range cfg.Cells {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	states := make([]cellState, 0, len(names))
-	for _, n := range names {
-		st := cellState{name: n, entry: cfg.Cells[n], fleet: byName[n]}
+	// Effective per-cell control plane = entry override, else defaults.
+	defaultCP := controlPlane
+	states := make([]cellState, 0, len(cfg.Cells))
+	for n, entry := range cfg.Cells {
+		cp := defaultCP
+		if entry.ControlPlane != nil {
+			cp = *entry.ControlPlane
+		}
+		st := cellState{name: n, entry: entry, fleet: byName[n], controlPlane: cp}
 		// Silent path: the dashboard iterates every cell every 60s and
 		// on every g/opDone; the interactive `aws sso login` fallback
 		// would paint the browser banner over the altscreen and
@@ -164,14 +204,26 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 		delete(byName, n)
 		states = append(states, st)
 	}
+	// Sort by group so cells with the same control plane are
+	// contiguous. Group order: the default control plane first
+	// (the one an operator sees in defaults:), other CPs alpha,
+	// self-hosted last. Within a group, cells sort by name.
+	sort.SliceStable(states, func(i, j int) bool {
+		gi, gj := states[i].controlPlane, states[j].controlPlane
+		if gi != gj {
+			return groupRank(gi, defaultCP) < groupRank(gj, defaultCP)
+		}
+		return states[i].name < states[j].name
+	})
 	// Any remaining registered names are orphans — registered with the
-	// control plane but not in the local inventory.
+	// control plane but not in the local inventory. Their group is
+	// the CP they registered with, so they land next to their peers.
 	for _, o := range registered {
 		if _, still := byName[o.Name]; !still {
 			continue
 		}
 		f := o
-		states = append(states, cellState{name: o.Name, fleet: &f})
+		states = append(states, cellState{name: o.Name, fleet: &f, controlPlane: defaultCP})
 	}
 	return states, nil
 }
@@ -457,14 +509,34 @@ func (m dashboardModel) View() string {
 	if m.loading && len(m.states) == 0 {
 		lines = append(lines, styDim.Render("loading inventory…"))
 	}
+	// Tree layout: group cells by control_plane. m.states is already
+	// sorted so members of a group are contiguous — walk and emit a
+	// header whenever the group changes. Group headers are NOT
+	// selectable (cursor indexes m.states, which has cells only), so
+	// j/k moves through cells and skips headers naturally.
+	prevGroup := "\x00" // sentinel that no real group can equal
 	for i, st := range m.states {
-		// One space between the fixed-width status column and the cell
-		// name — statusStyled() already carries its own trailing gap.
+		if st.controlPlane != prevGroup {
+			if i > 0 {
+				lines = append(lines, "")
+			}
+			n := 0
+			for j := i; j < len(m.states) && m.states[j].controlPlane == st.controlPlane; j++ {
+				n++
+			}
+			header := groupLabel(st.controlPlane)
+			if st.controlPlane != "" {
+				header = header + " · " + shortHost(st.controlPlane)
+			}
+			header = fmt.Sprintf("%s  %d cell%s", header, n, plural(n))
+			lines = append(lines, styTitle.Render(fitLine(header, cellsContentW)))
+			prevGroup = st.controlPlane
+		}
 		row := fmt.Sprintf("%s %s", st.statusStyled(), st.name)
 		if i == m.cursor {
-			row = "▸ " + row
+			row = "  ▸ " + row
 		} else {
-			row = "  " + row
+			row = "    " + row
 		}
 		lines = append(lines, fitLine(row, cellsContentW))
 	}
@@ -492,6 +564,7 @@ func (m dashboardModel) View() string {
 		if e.Region != nil {
 			put("region", *e.Region)
 		}
+		put("control plane", groupLabel(st.controlPlane))
 		put("status", st.status())
 		if st.fleet != nil {
 			if st.fleet.Endpoint != "" {
@@ -585,6 +658,23 @@ func dialogBox(body string) string {
 		BorderForeground(lipgloss.Color("3")).
 		Padding(0, 2)
 	return st.Render(body)
+}
+
+// shortHost returns just the hostname of a URL for the group header —
+// enough to disambiguate two control planes without eating pane width
+// with the full https://... prefix.
+func shortHost(controlPlane string) string {
+	if u, err := url.Parse(controlPlane); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return controlPlane
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // paneBox frames one pane with a thick border and bold title —
