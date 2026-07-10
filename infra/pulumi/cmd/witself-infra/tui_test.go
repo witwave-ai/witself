@@ -455,7 +455,7 @@ func TestDestroyInvalidatesPreview(t *testing.T) {
 	m := dashboardModel{
 		ctx: context.Background(), cli: fakeSource{},
 		now:         func() time.Time { return time.Time{} },
-		previewSeen: map[string]time.Time{"aws-sandbox-usw2-dev": {}},
+		previewSeen: map[string]planEntry{"aws-sandbox-usw2-dev": {}},
 		op:          &opRun{kind: opDestroy, cell: "aws-sandbox-usw2-dev"},
 	}
 	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
@@ -471,7 +471,7 @@ func TestFailedPreviewDoesNotArmUp(t *testing.T) {
 	m := dashboardModel{
 		ctx: context.Background(), cli: fakeSource{},
 		now:         func() time.Time { return time.Time{} },
-		previewSeen: map[string]time.Time{"aws-sandbox-usw2-dev": {}},
+		previewSeen: map[string]planEntry{"aws-sandbox-usw2-dev": {}},
 		op:          &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"},
 	}
 	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: errFake("provider blew up")})
@@ -650,7 +650,7 @@ func TestFooterHintsDimUnavailable(t *testing.T) {
 		t.Errorf("auth hint should be enabled on any selected cell while idle: %q", hints)
 	}
 	// After a successful preview, up flips to available.
-	m.previewSeen = map[string]time.Time{"aws-sandbox-usw2-dev": m.now()}
+	m.previewSeen = map[string]planEntry{"aws-sandbox-usw2-dev": {At: m.now()}}
 	if strings.Contains(m.footerHints(), styDim.Render("u up")) {
 		t.Errorf("up hint should be enabled after preview: %q", m.footerHints())
 	}
@@ -676,7 +676,7 @@ func TestPreviewedCellShowsPlanMark(t *testing.T) {
 		{name: "gcp-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-west2")}},
 	}
 	m := seedModel(states, 120, 30)
-	m.previewSeen = map[string]time.Time{"aws-sandbox-usw2-dev": m.now()}
+	m.previewSeen = map[string]planEntry{"aws-sandbox-usw2-dev": {At: m.now()}}
 
 	v := m.View()
 	// Prefix match — the cells pane may ellipsize long names; the mark
@@ -722,7 +722,7 @@ func TestPreviewedCellShowsPlanMark(t *testing.T) {
 func TestPlanMarkClearsWhenInvalidated(t *testing.T) {
 	states := []cellState{{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws")}}}
 	m := seedModel(states, 120, 30)
-	m.previewSeen = map[string]time.Time{"aws-sandbox-usw2-dev": m.now()}
+	m.previewSeen = map[string]planEntry{"aws-sandbox-usw2-dev": {At: m.now()}}
 	m.op = &opRun{kind: opUp, cell: "aws-sandbox-usw2-dev"}
 	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
 	m2 := next.(dashboardModel)
@@ -889,7 +889,7 @@ func TestPendingDialogOverlaysDoesNotOverflow(t *testing.T) {
 		identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
 	}}
 	m := seedModel(states, 120, 30)
-	m.previewSeen = map[string]time.Time{"aws-sandbox-usw2-dev": m.now()}
+	m.previewSeen = map[string]planEntry{"aws-sandbox-usw2-dev": {At: m.now()}}
 	m.pending = startConfirm(opUp, "aws-sandbox-usw2-dev", true)
 
 	v := m.View()

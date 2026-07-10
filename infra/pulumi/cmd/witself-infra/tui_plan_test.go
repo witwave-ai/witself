@@ -15,17 +15,20 @@ var planT0 = time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 // returns — a dashboard restart keeps armed plans armed.
 func TestPlanStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "infra-previews.json")
-	plans := map[string]time.Time{
-		"aws-sandbox-usw2-dev": planT0.Add(-10 * time.Minute),
-		"gcp-sandbox-use1-dev": planT0.Add(-2 * time.Minute),
+	plans := map[string]planEntry{
+		"aws-sandbox-usw2-dev": {At: planT0.Add(-10 * time.Minute), ConfigFinger: "abc123"},
+		"gcp-sandbox-use1-dev": {At: planT0.Add(-2 * time.Minute), ConfigFinger: "def456"},
 	}
 	savePlanState(path, plans, planT0)
 	got := loadPlanState(path, planT0)
 	if len(got) != 2 {
 		t.Fatalf("round trip lost entries: %v", got)
 	}
-	if !got["aws-sandbox-usw2-dev"].Equal(plans["aws-sandbox-usw2-dev"]) {
+	if !got["aws-sandbox-usw2-dev"].At.Equal(plans["aws-sandbox-usw2-dev"].At) {
 		t.Fatalf("timestamp changed in round trip: %v", got["aws-sandbox-usw2-dev"])
+	}
+	if got["aws-sandbox-usw2-dev"].ConfigFinger != "abc123" {
+		t.Fatalf("config fingerprint lost in round trip: %q", got["aws-sandbox-usw2-dev"].ConfigFinger)
 	}
 }
 
@@ -34,9 +37,9 @@ func TestPlanStateRoundTrip(t *testing.T) {
 // the dashboard comes back up.
 func TestPlanStateExpiryOnLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "infra-previews.json")
-	savePlanState(path, map[string]time.Time{
-		"fresh-cell": planT0.Add(-previewTTL + time.Minute),
-		"stale-cell": planT0.Add(-previewTTL - time.Minute),
+	savePlanState(path, map[string]planEntry{
+		"fresh-cell": {At: planT0.Add(-previewTTL + time.Minute)},
+		"stale-cell": {At: planT0.Add(-previewTTL - time.Minute)},
 	}, planT0.Add(-previewTTL+time.Minute)) // save while both are young enough to persist
 	got := loadPlanState(path, planT0)
 	if _, ok := got["fresh-cell"]; !ok {
@@ -70,7 +73,7 @@ func TestPlanStateTolerant(t *testing.T) {
 func TestPlanArmedTTL(t *testing.T) {
 	m := dashboardModel{
 		now:         func() time.Time { return planT0 },
-		previewSeen: map[string]time.Time{"cell-young": planT0.Add(-59 * time.Minute), "cell-old": planT0.Add(-61 * time.Minute)},
+		previewSeen: map[string]planEntry{"cell-young": {At: planT0.Add(-59 * time.Minute)}, "cell-old": {At: planT0.Add(-61 * time.Minute)}},
 	}
 	if !m.planArmed("cell-young") {
 		t.Fatal("59-minute-old preview must still arm u")
@@ -80,6 +83,29 @@ func TestPlanArmedTTL(t *testing.T) {
 	}
 	if m.planArmed("cell-never") {
 		t.Fatal("never-previewed cell must not be armed")
+	}
+}
+
+// TestPlanArmedConfigBinding pins the safety fix: a plan armed against
+// one config fingerprint must NOT arm u once the loaded config's
+// fingerprint differs (a different -config, or a mid-session edit).
+func TestPlanArmedConfigBinding(t *testing.T) {
+	m := dashboardModel{
+		now:          func() time.Time { return planT0 },
+		configFinger: "config-A",
+		previewSeen:  map[string]planEntry{"cell": {At: planT0.Add(-time.Minute), ConfigFinger: "config-A"}},
+	}
+	if !m.planArmed("cell") {
+		t.Fatal("plan previewed against the current config must be armed")
+	}
+	// The config changes underneath (edit or different -config).
+	m.configFinger = "config-B"
+	if m.planArmed("cell") {
+		t.Fatal("plan must NOT arm once the config fingerprint differs — this is the wrong-target guard")
+	}
+	// Age is still reported so the UI can say "config changed" vs "expired".
+	if age, ok := m.planAge("cell"); !ok || age >= previewTTL {
+		t.Fatalf("planAge must still report a fresh age for a config-mismatched plan: %v ok=%v", age, ok)
 	}
 }
 
@@ -117,7 +143,7 @@ func TestOpDonePersistsPlanState(t *testing.T) {
 func TestExpiredPlanMessaging(t *testing.T) {
 	states := []cellState{{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws")}}}
 	m := seedModel(states, 120, 30)
-	m.previewSeen = map[string]time.Time{"aws-sandbox-usw2-dev": m.now().Add(-previewTTL - time.Minute)}
+	m.previewSeen = map[string]planEntry{"aws-sandbox-usw2-dev": {At: m.now().Add(-previewTTL - time.Minute)}}
 
 	next, _ := m.startOpKey("u")
 	m2 := next.(dashboardModel)

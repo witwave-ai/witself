@@ -300,8 +300,9 @@ type dashboardModel struct {
 	lastOp         *opRun // the most recently completed op; kept so its tail is still scrollable
 	opsScroll      int    // rows scrolled back from the live tail; 0 = follow
 	pending        *confirmDialog
-	previewSeen    map[string]time.Time // cell → when its last preview passed; armed while younger than previewTTL
+	previewSeen    map[string]planEntry // cell → its last passed preview (time + config fingerprint)
 	planPath       string               // persisted plan state; "" disables persistence (tests)
+	configFinger   string               // fingerprint of the loaded config; binds armed plans to it
 	interruptModal bool                 // ctrl+c while op running: keep/cancel/detach
 	spinnerFrame   int                  // advances every spinnerInterval while m.op != nil
 	opGen          int                  // increments on each launchOp; ticks tag their generation
@@ -367,10 +368,13 @@ type controlPlaneInfo struct {
 }
 
 // loadResult carries everything one refresh brings back: the merged
-// cell states AND per-CP metadata for header rows.
+// cell states, per-CP metadata for header rows, and a fingerprint of
+// the config file that produced it (so a persisted preview can be
+// bound to the exact config it was run against).
 type loadResult struct {
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
+	configFinger  string
 }
 
 // cellDataSource is what the model needs from the outside world — a
@@ -485,12 +489,13 @@ func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, 
 		info.configured++
 		cps[st.controlPlane] = info
 	}
-	return loadResult{states: states, controlPlanes: cps}, nil
+	return loadResult{states: states, controlPlanes: cps, configFinger: configFileFingerprint(configPath)}, nil
 }
 
 type loadedMsg struct {
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
+	configFinger  string
 	err           error
 }
 type refreshTickMsg struct{}
@@ -563,7 +568,7 @@ func (m dashboardModel) loadCmd() tea.Cmd {
 	ctx, cli, path := m.ctx, m.cli, m.configPath
 	return func() tea.Msg {
 		res, err := cli.load(ctx, path)
-		return loadedMsg{states: res.states, controlPlanes: res.controlPlanes, err: err}
+		return loadedMsg{states: res.states, controlPlanes: res.controlPlanes, configFinger: res.configFinger, err: err}
 	}
 }
 
@@ -580,6 +585,11 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		firstLoad := len(m.states) == 0
 		m.states = msg.states
 		m.controlPlanes = msg.controlPlanes
+		// Rebind plan state to the freshly-read config: if the file
+		// changed since a preview armed a cell, its fingerprint no longer
+		// matches and planArmed drops it — so an edit that could retarget
+		// a cell forces a re-preview.
+		m.configFinger = msg.configFinger
 		// Cursor indexes rows() (headers + cells). On the FIRST load,
 		// jump past the initial header so the operator can immediately
 		// act on a cell; on subsequent loads preserve position for a
@@ -617,9 +627,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.op != nil {
 			if msg.err == nil && m.op.kind == opPreview {
 				if m.previewSeen == nil {
-					m.previewSeen = map[string]time.Time{}
+					m.previewSeen = map[string]planEntry{}
 				}
-				m.previewSeen[msg.cell] = m.now()
+				// Stamp the plan with the config fingerprint it was run
+				// against — planArmed refuses to fire `u` if the config
+				// later changes or a different -config is loaded.
+				m.previewSeen[msg.cell] = planEntry{At: m.now(), ConfigFinger: m.configFinger}
 				m.status = "✓ preview complete on " + msg.cell + " — press u to apply"
 			} else if msg.err != nil {
 				m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLine(msg.err.Error())
@@ -896,7 +909,10 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 	// "why nothing happened" message explicit rather than hiding the
 	// answer inside a dialog the operator would have to open first.
 	if kind == opUp && !m.planArmed(cell) {
-		if _, had := m.previewSeen[cell]; had {
+		if age, had := m.planAge(cell); had && age < previewTTL {
+			// Within the TTL but not armed → the config fingerprint moved.
+			m.status = "the config for " + cell + " changed since its preview — run `p` again"
+		} else if had {
 			m.status = "the preview for " + cell + " has expired (older than " + previewTTL.String() + ") — run `p` again"
 		} else {
 			m.status = "run `p` (preview) first — up won't fire until you've seen the diff for " + cell
@@ -1196,11 +1212,18 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 	lines = ctxPut(lines, w, "status", st.status())
 	// Plan state: what the ◆ in the cells pane means and what to press
 	// next either way. Age shown so the operator can judge how stale the
-	// approved diff is getting.
-	if age, ok := m.planAge(st.name); ok && m.planArmed(st.name) {
+	// approved diff is getting. A plan can fail to arm two ways — the
+	// TTL lapsed, or the config changed under it — and the message says
+	// which so "press p again" doesn't feel arbitrary.
+	if m.planArmed(st.name) {
+		age, _ := m.planAge(st.name)
 		lines = ctxPut(lines, w, "plan", styPlan.Render(fmt.Sprintf("◆ previewed %s ago — press u to apply", age.Round(time.Minute))))
-	} else if ok {
-		lines = ctxPut(lines, w, "plan", styDim.Render("preview expired — press p again"))
+	} else if age, ok := m.planAge(st.name); ok {
+		if age < previewTTL {
+			lines = ctxPut(lines, w, "plan", styDim.Render("config changed since preview — press p again"))
+		} else {
+			lines = ctxPut(lines, w, "plan", styDim.Render("preview expired — press p again"))
+		}
 	} else {
 		lines = ctxPut(lines, w, "plan", styDim.Render("none — press p to preview"))
 	}
@@ -1592,6 +1615,9 @@ func runDashboard(fs *flag.FlagSet) error {
 		status:      "loading inventory…",
 		planPath:    planPath,
 		previewSeen: loadPlanState(planPath, time.Now()),
+		// Seed the fingerprint eagerly so persisted plans validate on the
+		// very first render, before the async load's loadedMsg arrives.
+		configFinger: configFileFingerprint(configPath),
 	}
 	// Ops subprocesses push lines via program.Send. Because bubbletea
 	// takes the model by VALUE, the model can't hold a live pointer to
