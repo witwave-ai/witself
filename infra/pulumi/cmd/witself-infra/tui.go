@@ -267,6 +267,13 @@ type controlPlaneInfo struct {
 	err        error  // nil when reachable, else the ListCells failure
 	registered int    // cells the CP knows about
 	configured int    // cells in the local infra.yaml belonging to this CP
+	// Account counts across every cell this CP manages. Fetched via
+	// GetPlacementStatus; hasAccounts is false when we couldn't reach
+	// the endpoint (renders as "—" rather than a misleading 0).
+	hasAccounts bool
+	liveAccts   int // live accounts across all cells
+	archived    int // accounts sitting in R2 awaiting placement
+	blocked     int // archived accounts no eligible cell can accept
 }
 
 // loadResult carries everything one refresh brings back: the merged
@@ -314,6 +321,16 @@ func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, 
 				info.registered = len(cells)
 			} else {
 				info.err = ferr
+			}
+			// Placement status: live/archived/blocked account counts
+			// across the CP. limit=1 keeps the sample lists tiny —
+			// we only want the totals for the header context view.
+			// Non-fatal on error; the header just shows "—".
+			if ps, perr := fc.GetPlacementStatus(ctx, 1); perr == nil {
+				info.hasAccounts = true
+				info.liveAccts = ps.Live.Total
+				info.archived = ps.Archived.Total
+				info.blocked = len(ps.Archived.Blocked)
 			}
 		} else {
 			info.err = ferr
@@ -729,6 +746,26 @@ func (m dashboardModel) renderContext(ctxContentW int) []string {
 			orphans := info.registered - info.configured
 			if orphans > 0 {
 				put("orphans", fmt.Sprintf("%d (registered but not in local infra.yaml)", orphans))
+			}
+		}
+		// Accounts across all cells this CP manages: live customers
+		// running today, plus anything sitting in the R2 archive
+		// awaiting placement. Blocked accounts are the ones no
+		// eligible cell can currently accept — worth calling out in
+		// red because they need operator attention.
+		if r.cp != "" {
+			ctxLines = append(ctxLines, "")
+			ctxLines = append(ctxLines, styTitle.Render("  accounts"))
+			if !info.hasAccounts {
+				put("status", styDim.Render("(placement status unavailable)"))
+			} else {
+				put("live", fmt.Sprintf("%d", info.liveAccts))
+				put("archived", fmt.Sprintf("%d awaiting placement", info.archived))
+				if info.blocked > 0 {
+					label := styDim.Render(fmt.Sprintf("  %-14s ", "blocked"))
+					val := styErr.Render(fmt.Sprintf("%d no eligible cell", info.blocked))
+					ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
+				}
 			}
 		}
 		return ctxLines
