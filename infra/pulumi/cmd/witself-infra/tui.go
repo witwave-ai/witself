@@ -37,6 +37,15 @@ var (
 
 // cellState is the merged view of one cell across the config file and
 // the fleet registry.
+// settingRow is one row in the context pane's settings block: the
+// effective value a provisioning verb would apply, and whether it
+// came straight from a built-in default (rendered dim) or was set
+// explicitly in the config (rendered normal).
+type settingRow struct {
+	key, value string
+	fromEntry  bool // true = came from cell entry or defaults block
+}
+
 type cellState struct {
 	name         string
 	entry        cellEntry
@@ -44,6 +53,7 @@ type cellState struct {
 	identity     identity
 	err          error  // whoami / fleet error, if any
 	controlPlane string // effective control plane URL ("" = self-hosted)
+	settings     []settingRow
 }
 
 // selfHosted is the group label for cells with no control_plane in
@@ -121,6 +131,93 @@ func (c cellState) statusStyled() string {
 	return style.Render(label)
 }
 
+// effectiveSettings resolves each per-cell provisioning flag through
+// the same precedence run() uses: cell entry > defaults > built-in.
+// Provenance is recorded so the context pane can dim rows that came
+// from a built-in default (nothing set in the config), which lets an
+// operator scan for what was deliberately configured.
+func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
+	var out []settingRow
+	str := func(key, builtin string, cell *string, getDef func(*cellEntry) *string) {
+		if cell != nil {
+			out = append(out, settingRow{key: key, value: *cell, fromEntry: true})
+			return
+		}
+		if d != nil {
+			if v := getDef(d); v != nil {
+				out = append(out, settingRow{key: key, value: *v, fromEntry: true})
+				return
+			}
+		}
+		if builtin != "" {
+			out = append(out, settingRow{key: key, value: builtin, fromEntry: false})
+		}
+	}
+	boolean := func(key string, builtin bool, cell *bool, getDef func(*cellEntry) *bool) bool {
+		if cell != nil {
+			out = append(out, settingRow{key: key, value: boolLabel(*cell), fromEntry: true})
+			return *cell
+		}
+		if d != nil {
+			if v := getDef(d); v != nil {
+				out = append(out, settingRow{key: key, value: boolLabel(*v), fromEntry: true})
+				return *v
+			}
+		}
+		out = append(out, settingRow{key: key, value: boolLabel(builtin), fromEntry: false})
+		return builtin
+	}
+	// Order: infra shape first (what an operator checks before `up`),
+	// then plumbing (channel, backend, domain). GitOps rows only when
+	// argocd is on — off means they wouldn't apply.
+	str("sizing", "minimal", e.Profile, func(x *cellEntry) *string { return x.Profile })
+	str("k8s version", "1.36", e.K8sVersion, func(x *cellEntry) *string { return x.K8sVersion })
+	str("db version", "18", e.DBVersion, func(x *cellEntry) *string { return x.DBVersion })
+	str("cidr", "10.20.0.0/16", e.CIDR, func(x *cellEntry) *string { return x.CIDR })
+	str("ingress", "cloudflare-tunnel", e.Ingress, func(x *cellEntry) *string { return x.Ingress })
+	argocdOn := boolean("argocd", false, e.ArgoCD, func(x *cellEntry) *bool { return x.ArgoCD })
+	if argocdOn {
+		str("gitops repo", "https://github.com/witwave-ai/witself",
+			gitField(e.Gitops, gitRepo), func(x *cellEntry) *string { return gitField(x.Gitops, gitRepo) })
+		str("gitops rev", "main",
+			gitField(e.Gitops, gitRev), func(x *cellEntry) *string { return gitField(x.Gitops, gitRev) })
+	}
+	str("channel", "experimental", e.Channel, func(x *cellEntry) *string { return x.Channel })
+	str("backend", "s3", e.Backend, func(x *cellEntry) *string { return x.Backend })
+	str("domain", "cells.witself.witwave.ai", e.Domain, func(x *cellEntry) *string { return x.Domain })
+	return out
+}
+
+func boolLabel(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// gitField selects one nested gitopsEntry field, or nil when the
+// block itself is unset. Kept small — only two of the four sub-fields
+// (repo, revision) surface in the context pane today.
+type gitFieldKey int
+
+const (
+	gitRepo gitFieldKey = iota
+	gitRev
+)
+
+func gitField(g *gitopsEntry, f gitFieldKey) *string {
+	if g == nil {
+		return nil
+	}
+	switch f {
+	case gitRepo:
+		return g.Repo
+	case gitRev:
+		return g.Revision
+	}
+	return nil
+}
+
 type dashboardModel struct {
 	ctx        context.Context
 	cli        cellDataSource
@@ -189,6 +286,7 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 			cp = *entry.ControlPlane
 		}
 		st := cellState{name: n, entry: entry, fleet: byName[n], controlPlane: cp}
+		st.settings = effectiveSettings(entry, cfg.Defaults)
 		// Silent path: the dashboard iterates every cell every 60s and
 		// on every g/opDone; the interactive `aws sso login` fallback
 		// would paint the browser banner over the altscreen and
@@ -572,6 +670,22 @@ func (m dashboardModel) View() string {
 			}
 			if st.fleet.Channel != "" {
 				put("channel", st.fleet.Channel)
+			}
+		}
+		// Settings — what a provisioning verb would use. Values from
+		// the entry or defaults block render normal; values falling
+		// back to a built-in render dim so an operator can scan for
+		// what was deliberately configured before pressing `p`/`u`.
+		if len(st.settings) > 0 {
+			ctxLines = append(ctxLines, "")
+			ctxLines = append(ctxLines, styTitle.Render("  settings"))
+			for _, row := range st.settings {
+				val := row.value
+				if !row.fromEntry {
+					val = styDim.Render(val)
+				}
+				label := styDim.Render(fmt.Sprintf("  %-14s ", row.key))
+				ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
 			}
 		}
 		ctxLines = append(ctxLines, "")
