@@ -1192,10 +1192,13 @@ func (m dashboardModel) View() string {
 				plan = styPlan.Render("◆") + " "
 			}
 			text := fmt.Sprintf("%s %s%s", marker, plan, st.name)
+			// Cells share the headers' two-column cursor gutter — the
+			// bold header text and per-group counts carry the hierarchy,
+			// so a deeper indent bought nothing but truncated names.
 			if selected {
-				text = "  ▸ " + text
+				text = "▸ " + text
 			} else {
-				text = "    " + text
+				text = "  " + text
 			}
 			lines = append(lines, fitLine(text, cellsContentW))
 		}
