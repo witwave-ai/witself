@@ -262,6 +262,7 @@ func run(args []string) error {
 	placementStatusLimit := fs.Int("limit", 25, "with placement-status: max sample rows per category")
 	cellSelector := fs.String("cell", "", "cell name from infra.yaml — fills every unset flag from the config entry")
 	configPath := fs.String("config", "", "config file path (default: $WITSELF_HOME/infra.yaml, else ~/.witself/infra.yaml)")
+	progressJSON := fs.Bool("progress-json", false, "emit NDJSON phase events on stderr alongside the plain-text output (dashboard-friendly)")
 	if err := fs.Parse(fsArgs); err != nil {
 		return err
 	}
@@ -641,9 +642,16 @@ func run(args []string) error {
 		}
 	}
 
+	sink := newProgressSink(*progressJSON)
 	switch cmd {
 	case "up":
+		sink.start(cellName, "pulumi.up", "")
 		_, err = stack.Up(ctx, optup.ProgressStreams(os.Stdout))
+		if err != nil {
+			sink.errPhase(cellName, "pulumi.up", err)
+		} else {
+			sink.end(cellName, "pulumi.up", "")
+		}
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
@@ -669,17 +677,32 @@ func run(args []string) error {
 			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 15*time.Minute, 20*time.Second)
 		}
 	case "preview":
+		sink.start(cellName, "pulumi.preview", "")
 		_, err = stack.Preview(ctx, optpreview.ProgressStreams(os.Stdout))
+		if err != nil {
+			sink.errPhase(cellName, "pulumi.preview", err)
+		} else {
+			sink.end(cellName, "pulumi.preview", "")
+		}
 	case "destroy":
 		if *controlPlane != "" {
+			sink.start(cellName, "fleet.remove", "")
 			// Fleet removal is a pre-step: drain first (placement stops), then
 			// remove — refusing while accounts live on the cell unless the
 			// operator explicitly acknowledges their destruction.
 			if err := removeCell(ctx, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts); err != nil {
+				sink.errPhase(cellName, "fleet.remove", err)
 				return err
 			}
+			sink.end(cellName, "fleet.remove", "")
 		}
+		sink.start(cellName, "pulumi.destroy", "")
 		_, err = stack.Destroy(ctx, optdestroy.ProgressStreams(os.Stdout))
+		if err != nil {
+			sink.errPhase(cellName, "pulumi.destroy", err)
+		} else {
+			sink.end(cellName, "pulumi.destroy", "")
+		}
 		if err == nil {
 			err = verifyPulumiDestroyEmpty(ctx, stack)
 		}
