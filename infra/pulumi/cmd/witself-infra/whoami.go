@@ -41,6 +41,17 @@ type identity struct {
 // cloud identity API. It returns the runtime identity and any
 // mismatch against expected_account_id / tenant pins.
 func whoamiCell(ctx context.Context, cellName, configPath string) (identity, error) {
+	return whoamiCellCore(ctx, cellName, configPath, true)
+}
+
+// whoamiCellSilent skips the interactive SSO refresh — the dashboard's
+// hot loop uses this so 60s auto-refresh doesn't spawn browser logins
+// on top of the altscreen.
+func whoamiCellSilent(ctx context.Context, cellName, configPath string) (identity, error) {
+	return whoamiCellCore(ctx, cellName, configPath, false)
+}
+
+func whoamiCellCore(ctx context.Context, cellName, configPath string, bgSSO bool) (identity, error) {
 	cfg, _, err := loadInfraConfig(configPath)
 	if err != nil {
 		return identity{}, err
@@ -55,7 +66,7 @@ func whoamiCell(ctx context.Context, cellName, configPath string) (identity, err
 	}
 	switch cloud {
 	case "aws":
-		return whoamiAWS(ctx, entry)
+		return whoamiAWSCore(ctx, entry, bgSSO)
 	case "gcp":
 		return whoamiGCP(ctx, entry)
 	case "azure":
@@ -71,11 +82,19 @@ func awsProfileFor(entry cellEntry) string {
 	return ""
 }
 
-func whoamiAWS(ctx context.Context, entry cellEntry) (identity, error) {
+// whoamiAWSCore resolves the runtime AWS identity and compares
+// against the expected_account_id pin. bgSSO reports whether to
+// refresh a stale SSO session — the DASHBOARD path passes false
+// because it loops over every cell every 60s and firing `aws sso
+// login` inside a bubbletea altscreen would paint the browser's
+// launch banner over the TUI and contend for stdin. The command-line
+// whoami and the provisioning pre-flights pass true (interactive
+// one-shot).
+func whoamiAWSCore(ctx context.Context, entry cellEntry, bgSSO bool) (identity, error) {
 	profile := awsProfileFor(entry)
-	// Refresh a stale SSO session before the STS call so whoami never
-	// fails on expired creds when a browser login would fix it.
-	backend.EnsureAWSSession(ctx, profile)
+	if bgSSO {
+		backend.EnsureAWSSession(ctx, profile)
+	}
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
@@ -113,17 +132,18 @@ func whoamiGCP(ctx context.Context, entry cellEntry) (identity, error) {
 			credsFile = *sc.GCP.CredentialsFile
 		}
 	}
-	// A configured credentials_file is respected via the standard ADC
-	// env var — the same delivery pulumi/gcloud honor implicitly.
+	// Query gcloud with GOOGLE_APPLICATION_CREDENTIALS set for JUST
+	// this call — never os.Setenv, which would leak across cells in
+	// the dashboard's load loop and into every subprocess spawned by
+	// startOp (they inherit the parent's env). Same footgun class the
+	// slice explicitly closed for `az account set`.
+	cmd := exec.CommandContext(ctx, "gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
 	if credsFile != "" {
-		_ = os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+		cmd.Env = append(os.Environ(), "GOOGLE_APPLICATION_CREDENTIALS="+credsFile)
 	}
-	// gcloud is the source of truth for "who is my ADC?" — a Go
-	// google.DefaultTokenSource call would tell us we have a token
-	// but not name the account. Shell out.
-	out, err := exec.CommandContext(ctx, "gcloud", "config", "list", "account", "--format=value(core.account)").Output()
+	out, err := cmd.Output()
 	if err != nil {
-		return identity{}, fmt.Errorf("gcloud config list account: %w — run `gcloud auth application-default login --project %s`", err, project)
+		return identity{}, fmt.Errorf("gcloud auth list: %w — run `gcloud auth application-default login --project %s`", err, project)
 	}
 	actor := strings.TrimSpace(string(out))
 	id := identity{Cloud: "gcp", Profile: project, Account: project, Actor: actor, OK: true}
@@ -230,6 +250,9 @@ func requireIdentityMatch(ctx context.Context, cellName, configPath string) erro
 	}
 	return nil
 }
+
+// Suppress unused-warning: runWhoami references the OS import chain.
+var _ = os.Environ
 
 func strDeref(p *string) string {
 	if p == nil {

@@ -209,10 +209,16 @@ func TestQuitBlockedWhileOpRuns(t *testing.T) {
 	if !m3.interruptModal {
 		t.Fatal("ctrl+c under an op must open the keep/cancel/detach modal")
 	}
-	// 'd' detaches — quits without killing the child.
-	_, cmd = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
-	if cmd == nil {
-		t.Fatal("d must return tea.Quit")
+	// 'd' is intentionally unsupported until a real re-parenting helper
+	// lands — the modal message says so, and the key returns an error
+	// in the status rather than quitting (would SIGPIPE the child).
+	m4next, cmd := m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m4 := m4next.(dashboardModel)
+	if cmd != nil {
+		t.Fatal("d must not quit — detach would SIGPIPE the child")
+	}
+	if !strings.Contains(m4.status, "detach not implemented") {
+		t.Fatalf("d must explain detach isn't supported, got %q", m4.status)
 	}
 }
 
@@ -232,5 +238,81 @@ func TestPreviewSuccessArmsUp(t *testing.T) {
 	}
 	if m2.op != nil {
 		t.Fatal("op must clear when done")
+	}
+}
+
+// TestDestroyInvalidatesPreview pins the fix for the review's most
+// serious finding: after a successful destroy, previewSeen[cell]
+// must be cleared. Otherwise `u` immediately after `D` renders "preview
+// passed" and applies a recreate-from-scratch plan the operator never
+// saw.
+func TestDestroyInvalidatesPreview(t *testing.T) {
+	m := dashboardModel{
+		ctx: context.Background(), cli: fakeSource{},
+		now:         func() time.Time { return time.Time{} },
+		previewSeen: map[string]bool{"aws-sandbox-usw2-dev": true},
+		op:          &opRun{kind: opDestroy, cell: "aws-sandbox-usw2-dev"},
+	}
+	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
+	m2 := next.(dashboardModel)
+	if m2.previewSeen["aws-sandbox-usw2-dev"] {
+		t.Fatal("successful destroy must invalidate previewSeen — else the next u applies a stale plan")
+	}
+}
+
+// TestFailedPreviewDoesNotArmUp pins the fix: a preview that ERRORED
+// must not leave previewSeen true, so up still refuses.
+func TestFailedPreviewDoesNotArmUp(t *testing.T) {
+	m := dashboardModel{
+		ctx: context.Background(), cli: fakeSource{},
+		now:         func() time.Time { return time.Time{} },
+		previewSeen: map[string]bool{"aws-sandbox-usw2-dev": true},
+		op:          &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"},
+	}
+	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: errFake("provider blew up")})
+	m2 := next.(dashboardModel)
+	if m2.previewSeen["aws-sandbox-usw2-dev"] {
+		t.Fatal("failed preview must not arm up")
+	}
+}
+
+// TestInterruptModalClearedOnOpDone pins the nil-panic fix: opDone
+// while the ctrl+c modal is open must clear both m.op AND the modal.
+// Without this, pressing k after the race raised a nil-pointer panic.
+func TestInterruptModalClearedOnOpDone(t *testing.T) {
+	m := dashboardModel{
+		ctx: context.Background(), cli: fakeSource{},
+		now:            func() time.Time { return time.Time{} },
+		op:             &opRun{kind: opUp, cell: "x"},
+		interruptModal: true,
+	}
+	next, _ := m.Update(opDoneMsg{cell: "x", err: nil})
+	m2 := next.(dashboardModel)
+	if m2.interruptModal {
+		t.Fatal("opDone must clear the interrupt modal — else k nil-panics")
+	}
+	// Even without the clear, k must not panic now.
+	m3 := dashboardModel{ctx: context.Background(), cli: fakeSource{},
+		now:            func() time.Time { return time.Time{} },
+		interruptModal: true, op: nil, // simulate stale modal
+	}
+	// This would have panicked pre-fix.
+	next, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if next.(dashboardModel).interruptModal {
+		t.Fatal("k must close a stale modal")
+	}
+}
+
+// TestDetachRefusesRatherThanLie pins the honest-detach fix: rather
+// than PROMISE the child keeps running and SIGPIPE it milliseconds
+// later, detach returns an error the UI reports.
+func TestDetachRefusesRatherThanLie(t *testing.T) {
+	op := &opRun{kind: opUp, cell: "x", cmd: nil}
+	err := op.detach()
+	if err == nil {
+		t.Fatal("detach must return an error until reliable re-parenting is implemented — the modal must not promise 'child keeps running' when it doesn't")
+	}
+	if !strings.Contains(err.Error(), "detach not implemented") {
+		t.Fatalf("detach error must explain the situation: %v", err)
 	}
 }

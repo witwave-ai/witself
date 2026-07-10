@@ -137,7 +137,13 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 	states := make([]cellState, 0, len(names))
 	for _, n := range names {
 		st := cellState{name: n, entry: cfg.Cells[n], fleet: byName[n]}
-		id, err := whoamiCell(ctx, n, configPath)
+		// Silent path: the dashboard iterates every cell every 60s and
+		// on every g/opDone; the interactive `aws sso login` fallback
+		// would paint the browser banner over the altscreen and
+		// contend for stdin. Operators run `witself-infra whoami` (or
+		// hit up/preview/destroy — those still refresh) to fix stale
+		// SSO.
+		id, err := whoamiCellSilent(ctx, n, configPath)
 		if err != nil {
 			st.err = err
 		} else {
@@ -212,13 +218,23 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "preview complete on " + msg.cell + " — press u to apply"
 			} else if msg.err != nil {
 				m.status = m.op.kind.verb() + " on " + msg.cell + " FAILED: " + oneLineInfra(msg.err.Error())
+				// Failed preview must NOT arm up; a failed up leaves a
+				// partial diff so the last previewed plan is stale too.
+				delete(m.previewSeen, msg.cell)
 			} else {
 				m.status = m.op.kind.verb() + " on " + msg.cell + " succeeded"
-				if m.op.kind == opUp {
+				// ANY successful mutation invalidates the previewed
+				// plan: an up applied it, a destroy removed everything.
+				// A subsequent up must start from a fresh preview.
+				if m.op.kind == opUp || m.op.kind == opDestroy {
 					delete(m.previewSeen, msg.cell)
 				}
 			}
 			m.op = nil
+			// Clear the interrupt modal if the op finished while it
+			// was open — the modal's copy of m.op is stale, and every
+			// modal-key branch (k/c/d) would otherwise nil-panic.
+			m.interruptModal = false
 		}
 		return m, m.loadCmd()
 	case tea.KeyMsg:
@@ -233,7 +249,11 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "k":
 			m.interruptModal = false
-			m.status = "keeping " + m.op.kind.verb() + " running"
+			if m.op != nil {
+				m.status = "keeping " + m.op.kind.verb() + " running"
+			} else {
+				m.status = "op already finished — no action needed"
+			}
 			return m, nil
 		case "c":
 			m.interruptModal = false
@@ -243,7 +263,16 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "d":
-			// Detach: leave the child running, just quit the dashboard.
+			// Detach is intentionally unsupported until a proper re-
+			// parenting helper lands — see the modal text and
+			// opRun.detach for the honest reason.
+			if m.op != nil {
+				if err := m.op.detach(); err != nil {
+					m.interruptModal = false
+					m.status = err.Error()
+					return m, nil
+				}
+			}
 			return m, tea.Quit
 		}
 		return m, nil
@@ -491,8 +520,12 @@ func (m dashboardModel) View() string {
 		return rendered + "\n" + dialogBoxInfra(m.pending.render())
 	}
 	if m.interruptModal && m.op != nil {
+		// The "detach and quit" option promises what we can't reliably
+		// deliver on POSIX without a re-parenting helper (SIGPIPE kills
+		// the child seconds after the parent exits). Offer keep/cancel
+		// only until Slice 4b implements a real detach.
 		body := fmt.Sprintf(
-			"An operation is running: %s %s\n\n[k] keep it running (default)\n[c] cancel it (SIGKILL to the process group)\n[d] detach and quit — child keeps running\n",
+			"An operation is running: %s %s\n\n[k] keep it running (default)\n[c] cancel it (SIGKILL to the process group)\n\ndetaching a running op is not yet supported — see WITSELF_HOME/logs/infra after the op completes.\n",
 			m.op.kind.verb(), m.op.cell)
 		return rendered + "\n" + dialogBoxInfra(body)
 	}

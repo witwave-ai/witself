@@ -278,9 +278,17 @@ func run(args []string) error {
 		switch cmd {
 		case "rebalance", "placement-runner", "placement-status":
 			return fmt.Errorf("%s is fleet-wide — -cell does not scope it; pass -control-plane and -fleet-token-file directly", cmd)
-		}
-		if err := applyCellConfig(fs, *cellSelector, *configPath); err != nil {
-			return err
+		case "whoami":
+			// whoami owns its own applyCellConfig call; running it here
+			// too would set flags via fs.Set that flag.Visit then sees
+			// as "explicit" on the second call, tripping the identity
+			// conflict guard and breaking `whoami -cell X` end to end.
+		case "dashboard", "tui":
+			// The dashboard resolves every cell's config internally.
+		default:
+			if err := applyCellConfig(fs, *cellSelector, *configPath); err != nil {
+				return err
+			}
 		}
 	}
 
