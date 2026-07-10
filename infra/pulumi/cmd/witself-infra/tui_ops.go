@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -119,6 +120,9 @@ type opRun struct {
 	lines   []string // ring buffer, newest last
 	mu      sync.Mutex
 	program *tea.Program // pushed lines land as opLineMsg
+	logPath string       // absolute path of the persistent log file
+	logFile *os.File     // open handle for tee'ing every line as it arrives
+	done    bool         // set by wait() once cmd.Wait returns
 }
 
 const opLineCap = 2000
@@ -130,6 +134,50 @@ func (o *opRun) appendLine(line string) {
 	if len(o.lines) > opLineCap {
 		o.lines = o.lines[len(o.lines)-opLineCap:]
 	}
+	// Persist unconditionally — the ring buffer trims, the file grows.
+	// A file write error just drops the tee (best-effort); the ring
+	// buffer alone still keeps the dashboard alive.
+	if o.logFile != nil {
+		_, _ = o.logFile.WriteString(line + "\n")
+	}
+}
+
+// tailFrom returns lines starting `offset` back from the newest line,
+// clipped to at most `n` rows. offset=0 is the live tail; offset>0 is
+// scroll-back. The returned slice is a copy — writers keep mutating
+// the ring buffer.
+func (o *opRun) tailFrom(offset, n int) []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	total := len(o.lines)
+	if total == 0 || n <= 0 {
+		return nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	end := total - offset
+	if end <= 0 {
+		return nil
+	}
+	start := end - n
+	if start < 0 {
+		start = 0
+	}
+	out := make([]string, end-start)
+	copy(out, o.lines[start:end])
+	return out
+}
+
+// maxScroll reports the largest offset that would still show at least
+// one line — useful for PgUp bounding without racing appendLine.
+func (o *opRun) maxScroll(view int) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.lines) <= view {
+		return 0
+	}
+	return len(o.lines) - view
 }
 
 // snapshot copies the tail for the view — never share the underlying
@@ -197,12 +245,53 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 		cancel()
 		return nil, err
 	}
-	op := &opRun{kind: kind, cell: cell, cmd: cmd, cancel: cancel, program: program}
+	// Persistent log: one file per (cell, verb, start time) at
+	// $WITSELF_HOME/logs/infra/. Best-effort: if the file can't open
+	// (perms, disk full), the dashboard still works from the ring
+	// buffer alone — we don't fail the op over a logging failure.
+	logPath, logFile := openOpLog(cell, kind.verb())
+	op := &opRun{kind: kind, cell: cell, cmd: cmd, cancel: cancel, program: program,
+		logPath: logPath, logFile: logFile}
 	go op.pump(stdout)
 	go op.pump(stderr)
 	go op.wait()
 	return op, nil
 }
+
+// openOpLog creates the log file for one op run. Returns the resolved
+// path even when the file couldn't be opened, so a helpful "logs at
+// PATH (open failed: …)" status is still possible; the file handle is
+// nil on failure and appendLine short-circuits its tee.
+func openOpLog(cell, verb string) (string, *os.File) {
+	root := os.Getenv("WITSELF_HOME")
+	if root == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			root = filepath.Join(home, ".witself")
+		} else {
+			root = os.TempDir()
+		}
+	}
+	dir := filepath.Join(root, "logs", "infra")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return filepath.Join(dir, cell+"-"+verb+".log"), nil
+	}
+	// Timestamp keeps concurrent-op logs from collision (multiple
+	// preview attempts on the same cell within a session are common).
+	ts := timeNowFn().UTC().Format("20060102T150405Z")
+	name := cell + "-" + verb + "-" + ts + ".log"
+	path := filepath.Join(dir, name)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return path, nil
+	}
+	// A little header so hand-reading is easy.
+	_, _ = fmt.Fprintf(f, "# witself-infra %s %s\n# started %s\n", verb, cell, ts)
+	return path, f
+}
+
+// timeNowFn is a var so tests can pin it; production points at
+// time.Now.
+var timeNowFn = time.Now
 
 func (o *opRun) pump(r io.Reader) {
 	sc := bufio.NewScanner(r)
@@ -222,9 +311,25 @@ func (o *opRun) pump(r io.Reader) {
 
 func (o *opRun) wait() {
 	err := o.cmd.Wait()
+	o.mu.Lock()
+	o.done = true
+	if o.logFile != nil {
+		_, _ = fmt.Fprintf(o.logFile, "# finished (err=%v)\n", err)
+		_ = o.logFile.Close()
+		o.logFile = nil
+	}
+	o.mu.Unlock()
 	if o.program != nil {
 		o.program.Send(opDoneMsg{cell: o.cell, err: err})
 	}
+}
+
+// isDone reports whether the child has exited. Racy-free — done is
+// under the same mutex the appendLine + log-close paths use.
+func (o *opRun) isDone() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.done
 }
 
 // detach would let the dashboard exit while the op keeps running.

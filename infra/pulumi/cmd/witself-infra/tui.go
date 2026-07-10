@@ -252,6 +252,8 @@ type dashboardModel struct {
 	// Slice 4 ops state.
 	program        *tea.Program
 	op             *opRun
+	lastOp         *opRun // the most recently completed op; kept so its tail is still scrollable
+	opsScroll      int    // rows scrolled back from the live tail; 0 = follow
 	pending        *confirmDialog
 	previewSeen    map[string]bool // cells with a successful preview
 	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
@@ -489,6 +491,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					delete(m.previewSeen, msg.cell)
 				}
 			}
+			m.lastOp = m.op
 			m.op = nil
 			// Clear the interrupt modal if the op finished while it
 			// was open — the modal's copy of m.op is stale, and every
@@ -579,8 +582,57 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		next, cmd := m.startAuth()
 		return next, cmd
+	case "pgup":
+		return m.scrollOps(+1), nil
+	case "pgdown":
+		return m.scrollOps(-1), nil
+	case "home":
+		// End of history — oldest lines. Rare want for a live log,
+		// but symmetric with End (below) and cheap.
+		if op := m.opsSource(); op != nil {
+			m.opsScroll = op.maxScroll(m.opsViewH())
+		}
+	case "end":
+		m.opsScroll = 0
 	}
 	return m, nil
+}
+
+// opsSource picks which op the pane is looking at: the running one if
+// there is one, else the last completed one. Same rule as the render.
+func (m dashboardModel) opsSource() *opRun {
+	if m.op != nil {
+		return m.op
+	}
+	return m.lastOp
+}
+
+// opsViewH returns the ops pane's content height (rows). Matches the
+// adaptive rule the View uses so scroll math and paint math agree.
+func (m dashboardModel) opsViewH() int {
+	if m.op != nil {
+		return 8
+	}
+	return 4
+}
+
+// scrollOps steps the ops-pane view by `pages` view-heights (positive
+// = further into history, negative = back toward tail). Clamped so we
+// never scroll past the oldest kept line or below the live tail.
+func (m dashboardModel) scrollOps(pages int) dashboardModel {
+	op := m.opsSource()
+	if op == nil {
+		return m
+	}
+	view := m.opsViewH()
+	m.opsScroll += pages * view
+	if m.opsScroll < 0 {
+		m.opsScroll = 0
+	}
+	if maxOff := op.maxScroll(view); m.opsScroll > maxOff {
+		m.opsScroll = maxOff
+	}
+	return m
 }
 
 // rows builds the flat selectable list: one header per control-plane
@@ -703,8 +755,17 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 		m.status = "launch failed: " + err.Error()
 		return m, nil
 	}
+	// New op: reset scroll to the live tail and drop the previous
+	// completed op's tail — the operator's asking to watch this run,
+	// not the last one.
 	m.op = op
-	m.status = kind.verb() + " running on " + cell
+	m.lastOp = nil
+	m.opsScroll = 0
+	if op.logPath != "" {
+		m.status = kind.verb() + " running on " + cell + " · logs " + op.logPath
+	} else {
+		m.status = kind.verb() + " running on " + cell
+	}
 	return m, nil
 }
 
@@ -761,6 +822,11 @@ func (m dashboardModel) footerHints() string {
 	idle := m.op == nil
 	authRelevant := idle && haveCell && stp.err != nil
 	previewOK := haveCell && m.previewSeen[stp.name]
+	// Ops scroll is available whenever there's something in the ops
+	// pane — during a running op or after one completed. The `end`
+	// hint is redundant when already at tail (opsScroll == 0), but
+	// harmless — hint density matters less than discoverability here.
+	scrollable := m.opsSource() != nil
 	parts := []part{
 		{"j/k", "select", true},
 		{"a", "auth", authRelevant},
@@ -768,6 +834,7 @@ func (m dashboardModel) footerHints() string {
 		{"u", "up", idle && haveCell && previewOK},
 		{"D", "destroy", idle && haveCell},
 		{"g", "refresh", idle},
+		{"PgUp/Dn", "log", scrollable},
 		{"q", "quit", true},
 	}
 	segs := make([]string, 0, len(parts))
@@ -1015,17 +1082,30 @@ func (m dashboardModel) View() string {
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 
-	// Ops log pane below the two top panes. Always rendered (stable
-	// layout beats a pane that pops in and out); title carries the
-	// running op's cell when one is live.
+	// Ops log pane below the two top panes. Renders the live op if
+	// there is one, else the last completed op's tail so its output
+	// stays scrollable until you launch something else. Scroll offset
+	// travels back through the ring buffer; new lines land at the
+	// bottom without yanking the view when scrolled up.
 	var logLines []string
 	title := "operations"
-	if m.op != nil {
-		logLines = m.op.snapshot(opsH)
+	active := m.op
+	if active == nil {
+		active = m.lastOp
+	}
+	if active != nil {
+		logLines = active.tailFrom(m.opsScroll, opsH)
 		for i := range logLines {
 			logLines[i] = fitLine(logLines[i], opsContentW)
 		}
-		title = fmt.Sprintf("operations · %s %s", m.op.kind.verb(), m.op.cell)
+		state := active.kind.verb()
+		if active.isDone() {
+			state += " (done)"
+		}
+		title = fmt.Sprintf("operations · %s %s", state, active.cell)
+		if m.opsScroll > 0 {
+			title += fmt.Sprintf(" · scrolled %d lines (End to follow)", m.opsScroll)
+		}
 	}
 	opsPane := "\n" + paneBox(title, logLines, opsContentW, opsH, m.op != nil)
 
