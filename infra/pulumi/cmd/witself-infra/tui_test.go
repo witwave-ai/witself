@@ -25,10 +25,16 @@ type fakeSource struct {
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
 	err           error
+	reach         reachResult
+	reachErr      error
 }
 
 func (f fakeSource) load(_ context.Context, _ string) (loadResult, error) {
 	return loadResult{states: f.states, controlPlanes: f.controlPlanes}, f.err
+}
+
+func (f fakeSource) probe(_ context.Context, _, _ string) (reachResult, error) {
+	return f.reach, f.reachErr
 }
 
 // seedModel builds a dashboardModel and runs one loadedMsg through
@@ -206,6 +212,92 @@ func TestHealthTabFreeLines(t *testing.T) {
 	}
 	if lvl, _ := cellFleetHealth(cellState{}); lvl != healthWarn {
 		t.Fatalf("no fleet record must be healthWarn, got %d", lvl)
+	}
+}
+
+// TestReachProbeFiresAndRenders pins the async reachability line: a key
+// that lands on the Health tab kicks a probe, the returned result is
+// cached, and the line renders green with the version the Worker saw.
+func TestReachProbeFiresAndRenders(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	states := mkTabStates()
+	m := dashboardModel{
+		ctx:    context.Background(),
+		cli:    fakeSource{states: states, reach: reachResult{ok: true, version: "0.0.86"}},
+		width:  120,
+		height: 30,
+		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: states})
+	m = next.(dashboardModel)
+
+	// Focus the context pane, then arrow onto Health — that transition
+	// must return a probe command.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m2m := m2.(dashboardModel)
+	// Walk right to Health (Overview→K8s→DB→Health).
+	var cmd tea.Cmd
+	var mm tea.Model = m2m
+	for i := 0; i < 3; i++ {
+		mm, cmd = mm.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	fm := mm.(dashboardModel)
+	if fm.activeTab != tabHealth {
+		t.Fatalf("expected Health tab, got %d", fm.activeTab)
+	}
+	if cmd == nil {
+		t.Fatal("landing on Health with an unprobed cell must kick a probe command")
+	}
+	if !fm.reach["aws-sandbox-usw2-dev"].inflight {
+		t.Fatal("the selected cell must be marked in-flight while probing")
+	}
+
+	// Deliver the probe result and confirm the line renders reachable.
+	done, _ := fm.Update(probeResultMsg{cell: "aws-sandbox-usw2-dev", res: reachResult{ok: true, version: "0.0.86"}})
+	dm := done.(dashboardModel)
+	if dm.reach["aws-sandbox-usw2-dev"].inflight {
+		t.Fatal("probe result must clear the in-flight flag")
+	}
+	v := dm.View()
+	if !strings.Contains(v, "Cell reachability") {
+		t.Fatal("Health tab must show the reachability line")
+	}
+	if !strings.Contains(v, "witself-server 0.0.86") {
+		t.Errorf("reachable line must show the version the Worker saw: %s", v)
+	}
+}
+
+// TestReachHealthLevels pins the level mapping for the reachability
+// line across its states.
+func TestReachHealthLevels(t *testing.T) {
+	base := func(r cellReach) dashboardModel {
+		return dashboardModel{
+			now:   func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+			reach: map[string]cellReach{"c": r},
+		}
+	}
+	st := cellState{name: "c"}
+	cases := []struct {
+		name string
+		r    cellReach
+		want healthLevel
+	}{
+		{"unprobed", cellReach{}, healthUnknown},
+		{"checking", cellReach{inflight: true}, healthUnknown},
+		{"transport error", cellReach{probed: time.Now(), err: errFake("no route")}, healthBad},
+		{"reachable", cellReach{probed: time.Now(), res: reachResult{ok: true}}, healthGood},
+		{"not serving", cellReach{probed: time.Now(), res: reachResult{ok: false, reason: "TLS handshake"}}, healthDegraded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lvl, _ := base(tc.r).cellReachHealth(st)
+			if lvl != tc.want {
+				t.Fatalf("%s: level = %d, want %d", tc.name, lvl, tc.want)
+			}
+		})
 	}
 }
 

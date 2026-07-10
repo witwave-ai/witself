@@ -312,7 +312,26 @@ type dashboardModel struct {
 	// cell cursor up and down.
 	focus     paneFocus
 	activeTab contextTab
+
+	// reach caches the last control-plane reachability probe per cell,
+	// for the Health tab. Probes fire only while that tab is showing a
+	// cell — no background cost when you're not looking.
+	reach map[string]cellReach
 }
+
+// cellReach is one cell's cached reachability state: the last probe's
+// result plus whether one is in flight right now.
+type cellReach struct {
+	probed   time.Time
+	inflight bool
+	res      reachResult
+	err      error
+}
+
+// reachTTL is how long a reachability probe stays fresh before a tab
+// re-entry or cursor move re-probes. Short — this is a live health
+// view — but long enough to avoid re-probing on every keystroke.
+const reachTTL = 15 * time.Second
 
 // paneFocus names which pane the arrow keys currently drive. Cells is
 // the default — j/k always move the cell cursor regardless — but tab
@@ -377,10 +396,23 @@ type loadResult struct {
 	configFinger  string
 }
 
+// reachResult is one control-plane reachability probe of a cell: did
+// the Worker's GET on <cell>/v1/version succeed, and what did it see.
+type reachResult struct {
+	ok      bool
+	reason  string
+	version string
+	status  int
+}
+
 // cellDataSource is what the model needs from the outside world — a
 // tiny interface so the model is testable without a control plane.
+// probe asks the control plane to reach one cell (used by the Health
+// tab); its view of reachability is authoritative because the Worker,
+// not the operator's local resolver, is what serves customers.
 type cellDataSource interface {
 	load(ctx context.Context, configPath string) (loadResult, error)
+	probe(ctx context.Context, configPath, cell string) (reachResult, error)
 }
 
 // liveDataSource reads infra.yaml, then the control plane, then runs
@@ -492,11 +524,55 @@ func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, 
 	return loadResult{states: states, controlPlanes: cps, configFinger: configFileFingerprint(configPath)}, nil
 }
 
+// probe asks the cell's control plane to reach it. It rebuilds a fleet
+// client per call — cheap, and it keeps the dashboard's probe path
+// stateless like its load path. A cell with no control plane (plain
+// self-hosted) can't be probed this way; that surfaces as an error the
+// Health line renders as unknown.
+func (liveDataSource) probe(ctx context.Context, configPath, cell string) (reachResult, error) {
+	cfg, _, err := loadInfraConfig(configPath)
+	if err != nil {
+		return reachResult{}, err
+	}
+	var cp, tokenFile string
+	if d := cfg.Defaults; d != nil {
+		if d.ControlPlane != nil {
+			cp = *d.ControlPlane
+		}
+		if d.FleetTokenFile != nil {
+			tokenFile = *d.FleetTokenFile
+		}
+	}
+	// A per-cell control-plane override wins over the default.
+	if e, ok := cfg.Cells[cell]; ok && e.ControlPlane != nil {
+		cp = *e.ControlPlane
+	}
+	if cp == "" {
+		return reachResult{}, fmt.Errorf("cell has no control plane — nothing to probe")
+	}
+	fc, err := fleet.NewClient(cp, tokenFile)
+	if err != nil {
+		return reachResult{}, err
+	}
+	pr, err := fc.Probe(ctx, cell)
+	if err != nil {
+		return reachResult{}, err
+	}
+	return reachResult{ok: pr.OK, reason: pr.Reason, version: pr.CellVersion, status: pr.CellStatus}, nil
+}
+
 type loadedMsg struct {
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
 	configFinger  string
 	err           error
+}
+
+// probeResultMsg carries one async reachability probe back to Update.
+type probeResultMsg struct {
+	cell string
+	res  reachResult
+	err  error
 }
 type refreshTickMsg struct{}
 
@@ -572,6 +648,39 @@ func (m dashboardModel) loadCmd() tea.Cmd {
 	}
 }
 
+func (m dashboardModel) probeCmd(cell string) tea.Cmd {
+	ctx, cli, path := m.ctx, m.cli, m.configPath
+	return func() tea.Msg {
+		res, err := cli.probe(ctx, path, cell)
+		return probeResultMsg{cell: cell, res: res, err: err}
+	}
+}
+
+// maybeHealthProbe kicks a reachability probe for the selected cell
+// when the Health tab is showing it and the cached result is missing
+// or stale — and nothing is already in flight for that cell. Called
+// after any key that could change the tab or the selected cell, so the
+// probe is on-demand: no background cost when the Health tab isn't up.
+func (m dashboardModel) maybeHealthProbe() (dashboardModel, tea.Cmd) {
+	if m.activeTab != tabHealth {
+		return m, nil
+	}
+	stp := m.selectedState()
+	if stp == nil {
+		return m, nil
+	}
+	r := m.reach[stp.name]
+	if r.inflight || (!r.probed.IsZero() && m.now().Sub(r.probed) < reachTTL) {
+		return m, nil
+	}
+	if m.reach == nil {
+		m.reach = map[string]cellReach{}
+	}
+	r.inflight = true
+	m.reach[stp.name] = r
+	return m, m.probeCmd(stp.name)
+}
+
 func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -621,6 +730,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.spinnerFrame++
 		return m, spinnerCmdGen(m.opGen)
+	case probeResultMsg:
+		if m.reach == nil {
+			m.reach = map[string]cellReach{}
+		}
+		m.reach[msg.cell] = cellReach{probed: m.now(), res: msg.res, err: msg.err}
+		return m, nil
 	case opLineMsg:
 		return m, nil // re-render tick; the ring buffer already holds the line
 	case opDoneMsg:
@@ -795,7 +910,10 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "end":
 		m.opsScroll = 0
 	}
-	return m, nil
+	// Any key that reaches here may have changed the tab or the selected
+	// cell — kick a reachability probe if the Health tab now needs one.
+	m, cmd := m.maybeHealthProbe()
+	return m, cmd
 }
 
 // opsSource picks which op the pane is looking at: the running one if
@@ -1274,12 +1392,45 @@ func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
 	}
 	credLvl, credMsg := cellCredentialHealth(st)
 	fleetLvl, fleetMsg := cellFleetHealth(st)
+	reachLvl, reachMsg := m.cellReachHealth(st)
 	return []string{
 		line("Cloud credentials", credLvl, credMsg),
 		line("Fleet registration", fleetLvl, fleetMsg),
+		line("Cell reachability", reachLvl, reachMsg),
 		line("Kubernetes", healthUnknown, "— not yet probed"),
 		line("Database", healthUnknown, "— not yet probed"),
 		line("Workloads · Argo CD", healthUnknown, "— not yet probed"),
+	}
+}
+
+// cellReachHealth turns the cached reachability probe into a health
+// line. No probe yet reads unknown; an in-flight probe reads
+// "checking…"; a transport error (or unreachable-cell reason) reads
+// red/orange with the diagnostic; a clean probe reads green with the
+// witself-server version the Worker saw.
+func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
+	r := m.reach[st.name] // zero value when never probed
+	switch {
+	case r.inflight:
+		return healthUnknown, "checking…"
+	case r.probed.IsZero():
+		return healthUnknown, "— not probed yet"
+	case r.err != nil:
+		return healthBad, "✗ " + oneLine(r.err.Error())
+	case r.res.ok:
+		v := "reachable"
+		if r.res.version != "" {
+			v += " · witself-server " + r.res.version
+		}
+		return healthGood, "✓ " + v
+	default:
+		// The control plane reached the fleet but the cell isn't serving
+		// yet — DNS/TLS/HTTP not ready. Degraded, not dead.
+		reason := r.res.reason
+		if reason == "" {
+			reason = fmt.Sprintf("HTTP %d", r.res.status)
+		}
+		return healthDegraded, oneLine(reason)
 	}
 }
 
