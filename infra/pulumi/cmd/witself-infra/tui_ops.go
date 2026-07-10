@@ -25,12 +25,68 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// spawnCommand builds the exec.Cmd for a child provisioning op. It
+// picks the right entry point based on how the DASHBOARD itself was
+// started:
+//
+//   - Regular install (brew, curl, `go build`): re-invoke this same
+//     compiled binary at its resolved path (os.Executable).
+//
+//   - `go run ./cmd/witself-infra` from source: os.Executable resolves
+//     to /tmp/go-build.../witself-infra, which the Go tool cleans up
+//     between builds and could vanish mid-op. Detect that and switch
+//     to `go run <main pkg>` instead, launched from the source tree
+//     the parent came from. Ops then use the current source, matching
+//     what the operator is testing — and the child gets its own fresh
+//     compile that outlives the parent's /tmp path.
+//
+// The source path is derived from runtime.Caller: this file lives at
+// infra/pulumi/cmd/witself-infra/tui_ops.go, so filepath.Dir(file)
+// gives us the same directory `go run` would want.
+func spawnCommand(ctx context.Context, args []string) (*exec.Cmd, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if runningFromSource(self) {
+		if src, ok := currentSourceDir(); ok {
+			// `go run` needs the package path OR a directory of files.
+			// We give it the directory, then append the app args after.
+			goRunArgs := append([]string{"run", src}, args...)
+			return exec.CommandContext(ctx, "go", goRunArgs...), nil
+		}
+	}
+	return exec.CommandContext(ctx, self, args...), nil
+}
+
+// runningFromSource is a conservative heuristic: `go run` writes the
+// binary under either os.TempDir()/go-build* or ~/Library/Caches/
+// go-build* (macOS variant). We check for a "go-build" component in
+// the executable path — no false positives from real installs.
+func runningFromSource(exePath string) bool {
+	return strings.Contains(exePath, string(filepath.Separator)+"go-build") ||
+		strings.HasSuffix(filepath.Dir(exePath), "go-build")
+}
+
+// currentSourceDir returns the directory of THIS source file, which
+// is where `go run` should be pointed. Empty when runtime.Caller
+// couldn't identify our own path (should never happen in practice).
+func currentSourceDir() (string, bool) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || file == "" {
+		return "", false
+	}
+	return filepath.Dir(file), true
+}
 
 // opKind names one runnable subprocess verb.
 type opKind int
@@ -94,17 +150,25 @@ func (o *opRun) snapshot(n int) []string {
 // startOp spawns witself-infra as a subprocess for the named cell/op.
 // The child's process group is SEPARATE (Setpgid) so a ctrl+c reaching
 // the dashboard doesn't cascade into the middle of `up`.
+//
+// When the dashboard runs from a `go run` build, os.Executable resolves
+// to the ephemeral /tmp/go-build.../witself-infra path — usable, but
+// fragile (a background tmp sweep during a 20-minute up would kill it).
+// spawnCommand switches to `go run` in that case so child provisions
+// use the same source tree the parent was launched from, matching the
+// operator's mental model ("I'm running from code, so my ops run from
+// code too").
 func startOp(program *tea.Program, kind opKind, cell string, configPath string) (*opRun, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
 	args := []string{kind.verb(), "-cell", cell}
 	if configPath != "" {
 		args = append(args, "-config", configPath)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, self, args...)
+	cmd, err := spawnCommand(ctx, args)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	// Own process group: signals to the dashboard don't reach the child.
 	// The child's cancel() (via context) still sends SIGKILL — that's
 	// what the "cancel operation" modal choice does.

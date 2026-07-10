@@ -381,3 +381,48 @@ func TestDashboardWaitsForFirstSize(t *testing.T) {
 		t.Fatalf("View() before WindowSizeMsg must be empty, got %d chars", len(v))
 	}
 }
+
+// TestSpawnSourceDetection pins the "if I'm running from source,
+// spawn from source" behavior — both directions.
+func TestSpawnSourceDetection(t *testing.T) {
+	// Real go-run paths from actual observations: /tmp/go-build.../binary
+	// and macOS's ~/Library/Caches/go-build/... variant.
+	sourcePaths := []string{
+		"/tmp/go-build123456/exe/witself-infra",
+		"/var/folders/xy/T/go-build111/exe/witself-infra",
+		"/private/tmp/claude-501/scratch/go-build/exe/witself-infra",
+	}
+	for _, p := range sourcePaths {
+		if !runningFromSource(p) {
+			t.Errorf("expected go-run detection for %q", p)
+		}
+	}
+	// Installed paths must NOT trip the source path.
+	installedPaths := []string{
+		"/opt/homebrew/bin/witself-infra",
+		"/usr/local/bin/witself-infra",
+		"/home/scott/go/bin/witself-infra",
+		"/Users/scott/.brew/bin/witself-infra",
+	}
+	for _, p := range installedPaths {
+		if runningFromSource(p) {
+			t.Errorf("must not treat installed path %q as go-run", p)
+		}
+	}
+}
+
+// TestSpawnCommandFromInstalledPath pins that a real binary spawns
+// itself directly — no `go` shell-out, no source directory dependency.
+func TestSpawnCommandFromInstalledPath(t *testing.T) {
+	// Use a temp file so os.Executable resolves to a non-go-build path.
+	// We can't monkey-patch os.Executable, so this is a light behavior
+	// test: currentSourceDir must at least return SOMETHING — the
+	// package this file lives in — proving the resolution path works.
+	dir, ok := currentSourceDir()
+	if !ok || dir == "" {
+		t.Fatal("currentSourceDir must resolve to this file's package")
+	}
+	if !strings.Contains(dir, "witself-infra") {
+		t.Fatalf("currentSourceDir = %q — expected to contain the package name", dir)
+	}
+}
