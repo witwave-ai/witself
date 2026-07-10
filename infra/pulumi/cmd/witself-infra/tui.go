@@ -37,7 +37,48 @@ var (
 	// the green/yellow/red state palette because it's workflow state,
 	// not cell health. Matches the focused-pane border accent.
 	styPlan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	// styOrange sits between yellow (transitional) and red (down) on the
+	// health scale — "degraded but still serving". 256-color 208.
+	styOrange = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 )
+
+// healthLevel is the four-plus-unknown scale the Health tab paints.
+// The ordering matters: worst wins when a line aggregates several
+// sub-signals.
+type healthLevel int
+
+const (
+	healthUnknown  healthLevel = iota // dim — not probed / not applicable
+	healthGood                        // green — healthy
+	healthWarn                        // yellow — transitional / in flight
+	healthDegraded                    // orange — degraded but serving
+	healthBad                         // red — down / failed
+)
+
+func (l healthLevel) style() lipgloss.Style {
+	switch l {
+	case healthGood:
+		return styOK
+	case healthWarn:
+		return styWarn
+	case healthDegraded:
+		return styOrange
+	case healthBad:
+		return styErr
+	default:
+		return styDim
+	}
+}
+
+// dot is the colored bullet for a health line. Unknown uses a hollow
+// ring to read as "no reading yet" rather than a lit indicator.
+func (l healthLevel) dot() string {
+	glyph := "●"
+	if l == healthUnknown {
+		glyph = "◌"
+	}
+	return l.style().Render(glyph)
+}
 
 // cellState is the merged view of one cell across the config file and
 // the fleet registry.
@@ -264,6 +305,46 @@ type dashboardModel struct {
 	interruptModal bool                 // ctrl+c while op running: keep/cancel/detach
 	spinnerFrame   int                  // advances every spinnerInterval while m.op != nil
 	opGen          int                  // increments on each launchOp; ticks tag their generation
+
+	// Context-pane tabs. focus governs which pane the arrow keys drive;
+	// activeTab is global state so it sticks as the operator moves the
+	// cell cursor up and down.
+	focus     paneFocus
+	activeTab contextTab
+}
+
+// paneFocus names which pane the arrow keys currently drive. Cells is
+// the default — j/k always move the cell cursor regardless — but tab
+// shifts focus to the context pane so ←/→ pick its tab.
+type paneFocus int
+
+const (
+	focusCells paneFocus = iota
+	focusContext
+)
+
+// contextTab identifies one tab of the context pane. Overview holds
+// the identity/settings/fleet content; Kubernetes and Database are
+// scaffolding for later; Health aggregates per-cell health lines.
+type contextTab int
+
+const (
+	tabOverview contextTab = iota
+	tabKubernetes
+	tabDatabase
+	tabHealth
+)
+
+// contextTabs is the ordered tab bar. The index into this slice is
+// what activeTab holds and what ←/→ step through.
+var contextTabs = []struct {
+	tab  contextTab
+	name string
+}{
+	{tabOverview, "Overview"},
+	{tabKubernetes, "Kubernetes"},
+	{tabDatabase, "Database"},
+	{tabHealth, "Health"},
 }
 
 // controlPlaneInfo carries per-CP metadata for the header context
@@ -657,6 +738,28 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+	case "tab", "shift+tab":
+		// Toggle which pane the arrow keys drive. j/k keep moving the
+		// cell cursor either way, so the active tab sticks as you scan
+		// cells with the context pane focused.
+		if m.focus == focusCells {
+			m.focus = focusContext
+		} else {
+			m.focus = focusCells
+		}
+	case "esc":
+		// esc backs focus out of the context pane to the cells list.
+		if m.focus == focusContext {
+			m.focus = focusCells
+		}
+	case "left", "h":
+		if m.focus == focusContext && int(m.activeTab) > 0 {
+			m.activeTab--
+		}
+	case "right", "l":
+		if m.focus == focusContext && int(m.activeTab) < len(contextTabs)-1 {
+			m.activeTab++
+		}
 	case "g":
 		m.loading = true
 		m.status = "refreshing…"
@@ -932,8 +1035,12 @@ func (m dashboardModel) footerHints() string {
 	// hint is redundant when already at tail (opsScroll == 0), but
 	// harmless — hint density matters less than discoverability here.
 	scrollable := m.opsSource() != nil
+	// ←/→ only do anything once the context pane holds focus; dim them
+	// until then so the footer mirrors what the keys actually do.
 	parts := []part{
 		{"j/k", "select", true},
+		{"tab", "pane", true},
+		{"←/→", "tab", m.focus == focusContext},
 		{"a", "auth", authRelevant},
 		{"p", "preview", idle && haveCell},
 		{"u", "up", idle && haveCell && previewOK},
@@ -953,146 +1060,234 @@ func (m dashboardModel) footerHints() string {
 	return strings.Join(segs, " · ")
 }
 
-// renderContext builds the right-hand pane content based on what the
-// cursor is on. A header row shows fleet metadata (URL, token file,
-// reachability, cell counts); a cell row shows the cell's full
-// context (config, settings, identity, fleet state). Empty inventory
-// gets a hint.
-func (m dashboardModel) renderContext(ctxContentW int) []string {
-	var ctxLines []string
-	put := func(k, v string) {
-		if v == "" {
-			return
-		}
-		label := styDim.Render(fmt.Sprintf("  %-14s ", k))
-		ctxLines = append(ctxLines, fitLine(label+v, ctxContentW))
+// ctxPut appends one "  label  value" row to a context slice, or
+// returns it unchanged for an empty value. The right-hand pane uses
+// this everywhere so the label column stays aligned.
+func ctxPut(lines []string, w int, k, v string) []string {
+	if v == "" {
+		return lines
 	}
+	label := styDim.Render(fmt.Sprintf("  %-14s ", k))
+	return append(lines, fitLine(label+v, w))
+}
+
+// renderContext builds the right-hand pane content based on what the
+// cursor is on. A header row shows fleet metadata (no tabs — that's a
+// control-plane view, not a cell). A cell row shows a tab bar plus the
+// active tab's body. Empty inventory gets a hint.
+func (m dashboardModel) renderContext(w int) []string {
 	if len(m.states) == 0 {
-		ctxLines = append(ctxLines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
-		return ctxLines
+		return []string{styDim.Render("no cells configured — `witself-infra config add-cell …`")}
 	}
 	r := m.currentRow()
 	switch r.kind {
 	case rowHeader:
-		// Control-plane header context.
-		info, hasInfo := m.controlPlanes[r.cp]
-		if !hasInfo {
-			info = controlPlaneInfo{url: r.cp}
-		}
-		put("control plane", groupLabel(r.cp))
-		if r.cp != "" {
-			put("url", r.cp)
-			if info.tokenFile != "" {
-				put("token file", info.tokenFile)
-			}
-			reach := styOK.Render("✓ reachable")
-			if !info.reachable {
-				reach = styErr.Render("✗ unreachable")
-			}
-			ctxLines = append(ctxLines, fitLine("  "+reach, ctxContentW))
-			if !info.reachable && info.err != nil {
-				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(info.err.Error())), ctxContentW))
-			}
-		} else {
-			ctxLines = append(ctxLines, fitLine(styDim.Render("  (no control plane — plain self-hosted deploys)"), ctxContentW))
-		}
-		ctxLines = append(ctxLines, "")
-		ctxLines = append(ctxLines, styTitle.Render("  cells"))
-		put("configured", fmt.Sprintf("%d", info.configured))
-		if r.cp != "" {
-			put("registered", fmt.Sprintf("%d", info.registered))
-			// Orphans: registered but not configured locally. Not a
-			// bug per se, but worth calling out — the operator can
-			// bring them into inventory or purge them from the fleet.
-			orphans := info.registered - info.configured
-			if orphans > 0 {
-				put("orphans", fmt.Sprintf("%d (registered but not in local infra.yaml)", orphans))
-			}
-		}
-		// Accounts across all cells this CP manages: live customers
-		// running today, plus anything sitting in the R2 archive
-		// awaiting placement. Blocked accounts are the ones no
-		// eligible cell can currently accept — worth calling out in
-		// red because they need operator attention.
-		if r.cp != "" {
-			ctxLines = append(ctxLines, "")
-			ctxLines = append(ctxLines, styTitle.Render("  accounts"))
-			if !info.hasAccounts {
-				put("status", styDim.Render("(placement status unavailable)"))
-			} else {
-				put("live", fmt.Sprintf("%d", info.liveAccts))
-				put("archived", fmt.Sprintf("%d awaiting placement", info.archived))
-				if info.blocked > 0 {
-					label := styDim.Render(fmt.Sprintf("  %-14s ", "blocked"))
-					val := styErr.Render(fmt.Sprintf("%d no eligible cell", info.blocked))
-					ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
-				}
-			}
-		}
-		return ctxLines
+		return m.renderCPContext(r, w)
 	case rowCell:
 		st := m.states[r.cellIdx]
-		e := st.entry
-		put("cell", st.name)
-		if e.Cloud != nil {
-			put("cloud", *e.Cloud)
+		lines := []string{m.renderTabBar(w), ""}
+		switch m.activeTab {
+		case tabOverview:
+			lines = append(lines, m.renderOverviewTab(st, w)...)
+		case tabKubernetes:
+			lines = append(lines, styDim.Render("  no Kubernetes details yet"))
+		case tabDatabase:
+			lines = append(lines, styDim.Render("  no database details yet"))
+		case tabHealth:
+			lines = append(lines, m.renderHealthTab(st, w)...)
 		}
-		if e.Region != nil {
-			put("region", *e.Region)
+		return lines
+	}
+	return nil
+}
+
+// renderTabBar draws the tab strip. The active tab is bold, and cyan
+// when the context pane holds focus (so ←/→ read as live); inactive
+// tabs are dim. A trailing hint tells the operator how to drive it.
+func (m dashboardModel) renderTabBar(w int) string {
+	segs := make([]string, 0, len(contextTabs))
+	for _, t := range contextTabs {
+		switch {
+		case t.tab == m.activeTab && m.focus == focusContext:
+			segs = append(segs, styPlan.Bold(true).Underline(true).Render(t.name))
+		case t.tab == m.activeTab:
+			segs = append(segs, styTitle.Underline(true).Render(t.name))
+		default:
+			segs = append(segs, styDim.Render(t.name))
 		}
-		put("control plane", groupLabel(st.controlPlane))
-		put("status", st.status())
-		// Plan state: spells out what the ◆ in the cells pane means, and
-		// what to press next either way. Age shown so the operator can
-		// judge how stale the diff they approved is getting.
-		if age, ok := m.planAge(st.name); ok && m.planArmed(st.name) {
-			put("plan", styPlan.Render(fmt.Sprintf("◆ previewed %s ago — press u to apply", age.Round(time.Minute))))
-		} else if ok {
-			put("plan", styDim.Render("preview expired — press p again"))
+	}
+	bar := " " + strings.Join(segs, "  ")
+	if m.focus != focusContext {
+		bar += styDim.Render("   (tab to focus)")
+	} else {
+		bar += styDim.Render("   ←/→ switch")
+	}
+	return fitLine(bar, w)
+}
+
+// renderCPContext is the control-plane header view: URL, token file,
+// reachability, cell counts, and fleet account totals.
+func (m dashboardModel) renderCPContext(r row, w int) []string {
+	info, hasInfo := m.controlPlanes[r.cp]
+	if !hasInfo {
+		info = controlPlaneInfo{url: r.cp}
+	}
+	var lines []string
+	lines = ctxPut(lines, w, "control plane", groupLabel(r.cp))
+	if r.cp != "" {
+		lines = ctxPut(lines, w, "url", r.cp)
+		lines = ctxPut(lines, w, "token file", info.tokenFile)
+		reach := styOK.Render("✓ reachable")
+		if !info.reachable {
+			reach = styErr.Render("✗ unreachable")
+		}
+		lines = append(lines, fitLine("  "+reach, w))
+		if !info.reachable && info.err != nil {
+			lines = append(lines, fitLine(styWarn.Render("  · "+oneLine(info.err.Error())), w))
+		}
+	} else {
+		lines = append(lines, fitLine(styDim.Render("  (no control plane — plain self-hosted deploys)"), w))
+	}
+	lines = append(lines, "", styTitle.Render("  cells"))
+	lines = ctxPut(lines, w, "configured", fmt.Sprintf("%d", info.configured))
+	if r.cp != "" {
+		lines = ctxPut(lines, w, "registered", fmt.Sprintf("%d", info.registered))
+		// Orphans: registered but not configured locally. Not a bug per
+		// se, but worth calling out — the operator can bring them into
+		// inventory or purge them from the fleet.
+		if orphans := info.registered - info.configured; orphans > 0 {
+			lines = ctxPut(lines, w, "orphans", fmt.Sprintf("%d (registered but not in local infra.yaml)", orphans))
+		}
+	}
+	// Accounts across all cells this CP manages: live customers running
+	// today, plus anything in the R2 archive awaiting placement. Blocked
+	// accounts are the ones no eligible cell can accept — red, they need
+	// operator attention.
+	if r.cp != "" {
+		lines = append(lines, "", styTitle.Render("  accounts"))
+		if !info.hasAccounts {
+			lines = ctxPut(lines, w, "status", styDim.Render("(placement status unavailable)"))
 		} else {
-			put("plan", styDim.Render("none — press p to preview"))
-		}
-		if st.fleet != nil {
-			if st.fleet.Endpoint != "" {
-				put("endpoint", st.fleet.Endpoint)
-			}
-			if st.fleet.Channel != "" {
-				put("channel", st.fleet.Channel)
-			}
-		}
-		if len(st.settings) > 0 {
-			ctxLines = append(ctxLines, "")
-			ctxLines = append(ctxLines, styTitle.Render("  settings"))
-			for _, srow := range st.settings {
-				val := srow.value
-				if !srow.fromEntry {
-					val = styDim.Render(val)
-				}
-				label := styDim.Render(fmt.Sprintf("  %-14s ", srow.key))
-				ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
-			}
-		}
-		ctxLines = append(ctxLines, "")
-		ctxLines = append(ctxLines, styTitle.Render("  identity"))
-		if st.err != nil {
-			ctxLines = append(ctxLines, fitLine(styErr.Render("  "+oneLine(st.err.Error())), ctxContentW))
-		} else if st.identity.Cloud != "" {
-			id := st.identity
-			put("profile", id.Profile)
-			put("account", id.Account)
-			put("tenant", id.Tenant)
-			put("actor", id.Actor)
-			ok := styOK.Render("✓ matches config pin")
-			if !id.OK {
-				ok = styErr.Render("✗ pin mismatch")
-			}
-			ctxLines = append(ctxLines, fitLine("  "+ok, ctxContentW))
-			for _, n := range id.Notes {
-				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(n)), ctxContentW))
+			lines = ctxPut(lines, w, "live", fmt.Sprintf("%d", info.liveAccts))
+			lines = ctxPut(lines, w, "archived", fmt.Sprintf("%d awaiting placement", info.archived))
+			if info.blocked > 0 {
+				label := styDim.Render(fmt.Sprintf("  %-14s ", "blocked"))
+				lines = append(lines, fitLine(label+styErr.Render(fmt.Sprintf("%d no eligible cell", info.blocked)), w))
 			}
 		}
 	}
-	return ctxLines
+	return lines
+}
+
+// renderOverviewTab is the cell's identity, config, settings, and
+// fleet state — the content the right pane showed before it became
+// tabbed.
+func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
+	e := st.entry
+	var lines []string
+	lines = ctxPut(lines, w, "cell", st.name)
+	if e.Cloud != nil {
+		lines = ctxPut(lines, w, "cloud", *e.Cloud)
+	}
+	if e.Region != nil {
+		lines = ctxPut(lines, w, "region", *e.Region)
+	}
+	lines = ctxPut(lines, w, "control plane", groupLabel(st.controlPlane))
+	lines = ctxPut(lines, w, "status", st.status())
+	// Plan state: what the ◆ in the cells pane means and what to press
+	// next either way. Age shown so the operator can judge how stale the
+	// approved diff is getting.
+	if age, ok := m.planAge(st.name); ok && m.planArmed(st.name) {
+		lines = ctxPut(lines, w, "plan", styPlan.Render(fmt.Sprintf("◆ previewed %s ago — press u to apply", age.Round(time.Minute))))
+	} else if ok {
+		lines = ctxPut(lines, w, "plan", styDim.Render("preview expired — press p again"))
+	} else {
+		lines = ctxPut(lines, w, "plan", styDim.Render("none — press p to preview"))
+	}
+	if st.fleet != nil {
+		lines = ctxPut(lines, w, "endpoint", st.fleet.Endpoint)
+		lines = ctxPut(lines, w, "channel", st.fleet.Channel)
+	}
+	if len(st.settings) > 0 {
+		lines = append(lines, "", styTitle.Render("  settings"))
+		for _, srow := range st.settings {
+			val := srow.value
+			if !srow.fromEntry {
+				val = styDim.Render(val)
+			}
+			label := styDim.Render(fmt.Sprintf("  %-14s ", srow.key))
+			lines = append(lines, fitLine(label+val, w))
+		}
+	}
+	lines = append(lines, "", styTitle.Render("  identity"))
+	if st.err != nil {
+		lines = append(lines, fitLine(styErr.Render("  "+oneLine(st.err.Error())), w))
+	} else if st.identity.Cloud != "" {
+		id := st.identity
+		lines = ctxPut(lines, w, "profile", id.Profile)
+		lines = ctxPut(lines, w, "account", id.Account)
+		lines = ctxPut(lines, w, "tenant", id.Tenant)
+		lines = ctxPut(lines, w, "actor", id.Actor)
+		ok := styOK.Render("✓ matches config pin")
+		if !id.OK {
+			ok = styErr.Render("✗ pin mismatch")
+		}
+		lines = append(lines, fitLine("  "+ok, w))
+		for _, n := range id.Notes {
+			lines = append(lines, fitLine(styWarn.Render("  · "+oneLine(n)), w))
+		}
+	}
+	return lines
+}
+
+// renderHealthTab aggregates per-cell health lines. The credential and
+// fleet lines are computed from data every refresh already carries;
+// the cluster, database, and workload lines are placeholders until the
+// probe pass wires them (they render as unknown "◌ —").
+func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
+	line := func(label string, lvl healthLevel, detail string) string {
+		s := fmt.Sprintf("  %s %-16s %s", lvl.dot(), label, lvl.style().Render(detail))
+		return fitLine(s, w)
+	}
+	credLvl, credMsg := cellCredentialHealth(st)
+	fleetLvl, fleetMsg := cellFleetHealth(st)
+	return []string{
+		line("Cloud credentials", credLvl, credMsg),
+		line("Fleet registration", fleetLvl, fleetMsg),
+		line("Kubernetes", healthUnknown, "— not yet probed"),
+		line("Database", healthUnknown, "— not yet probed"),
+		line("Workloads · Argo CD", healthUnknown, "— not yet probed"),
+	}
+}
+
+// cellCredentialHealth reads the cloud identity check that runs every
+// refresh: a load error means the CLI couldn't authenticate, a pin
+// mismatch means we're pointed at the wrong account, otherwise good.
+func cellCredentialHealth(st cellState) (healthLevel, string) {
+	switch {
+	case st.err != nil:
+		return healthBad, "✗ " + oneLine(st.err.Error())
+	case st.identity.Cloud == "":
+		return healthUnknown, "— no identity yet"
+	case !st.identity.OK:
+		return healthBad, "✗ account pin mismatch"
+	default:
+		return healthGood, "✓ valid"
+	}
+}
+
+// cellFleetHealth reads the control-plane registration: registered and
+// accepting is good, registered-but-draining is transitional, and an
+// absent fleet record is a warning (not necessarily an error — the
+// cell may simply not be provisioned yet).
+func cellFleetHealth(st cellState) (healthLevel, string) {
+	if st.fleet == nil {
+		return healthWarn, "not registered"
+	}
+	if st.fleet.Accepting != nil && !*st.fleet.Accepting {
+		return healthWarn, "draining"
+	}
+	return healthGood, "registered · accepting"
 }
 
 func (m dashboardModel) View() string {
@@ -1209,13 +1404,16 @@ func (m dashboardModel) View() string {
 	// No pane title: the group headers already carry names and counts
 	// ("witself cloud · self.witwave.ai  6 cells"), so a "cells · 6"
 	// banner was pure repetition — the row goes to content instead.
-	cellsPane := paneBox("", lines, cellsContentW, topH+1, true)
+	// The focused pane gets the cyan border; focus governs which pane
+	// the arrow keys drive.
+	cellsPane := paneBox("", lines, cellsContentW, topH+1, m.focus == focusCells)
 
-	// Context pane — dispatches on the row under the cursor. A header
-	// row renders the control-plane summary; a cell row renders the
-	// cell's full context (identity, settings, fleet state).
+	// Context pane — also untitled: its first content row is the tab
+	// bar, which names what you're looking at (Overview/Kubernetes/…)
+	// the way the group headers name the cells pane. topH+1 keeps its
+	// outer height flush with the cells pane beside it.
 	ctxLines := m.renderContext(ctxContentW)
-	contextPane := paneBox("context", ctxLines, ctxContentW, topH, false)
+	contextPane := paneBox("", ctxLines, ctxContentW, topH+1, m.focus == focusContext)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 

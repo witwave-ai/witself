@@ -70,7 +70,9 @@ func TestDashboardRendersCellsAndContext(t *testing.T) {
 		"2 cells",
 		"aws-sandbox-usw2-dev",
 		"gcp-lab-euw1-dev",
-		"context",
+		// The context pane's tab bar replaces the old "context" title.
+		"Overview",
+		"Kubernetes",
 		"123456789012",
 		"witwave-sandbox",
 		"matches config pin",
@@ -81,6 +83,129 @@ func TestDashboardRendersCellsAndContext(t *testing.T) {
 	}
 	if strings.Contains(v, "cells · 2") {
 		t.Error("redundant \"cells · N\" pane title must be gone")
+	}
+}
+
+// mkTabStates is a two-cell fixture for the context-tab tests.
+func mkTabStates() []cellState {
+	acc := true
+	return []cellState{
+		{
+			name:     "aws-sandbox-usw2-dev",
+			entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+			identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+			fleet:    &fleet.Cell{Name: "aws-sandbox-usw2-dev", Accepting: &acc},
+		},
+		{
+			name:     "gcp-sandbox-usw2-dev",
+			entry:    cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-west2")},
+			identity: identity{Cloud: "gcp", Account: "witself-sandbox", OK: true},
+		},
+	}
+}
+
+// TestContextTabBarRenders pins that all four tabs appear and Overview
+// is the default active tab holding the previous cell content.
+func TestContextTabBarRenders(t *testing.T) {
+	m := seedModel(mkTabStates(), 120, 30)
+	v := m.View()
+	for _, tab := range []string{"Overview", "Kubernetes", "Database", "Health"} {
+		if !strings.Contains(v, tab) {
+			t.Errorf("tab bar missing %q", tab)
+		}
+	}
+	// Overview (default) shows the identity/settings content.
+	if !strings.Contains(v, "matches config pin") {
+		t.Error("Overview tab must show the identity content by default")
+	}
+}
+
+// TestTabFocusAndSwitch pins the navigation model: tab moves focus to
+// the context pane, ←/→ switch tabs only while focused, and the active
+// tab sticks as the cell cursor moves.
+func TestTabFocusAndSwitch(t *testing.T) {
+	m := seedModel(mkTabStates(), 120, 30)
+
+	// Arrows do nothing until the context pane is focused.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := m2.(dashboardModel).activeTab; got != tabOverview {
+		t.Fatalf("→ must be inert while cells focused: tab = %d", got)
+	}
+
+	// tab focuses the context pane.
+	m3, _ := m2.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyTab})
+	fm := m3.(dashboardModel)
+	if fm.focus != focusContext {
+		t.Fatal("tab must move focus to the context pane")
+	}
+
+	// Now → advances the tab; the body follows.
+	m4, _ := fm.Update(tea.KeyMsg{Type: tea.KeyRight})
+	km := m4.(dashboardModel)
+	if km.activeTab != tabKubernetes {
+		t.Fatalf("→ must advance to Kubernetes: tab = %d", km.activeTab)
+	}
+	if !strings.Contains(km.View(), "no Kubernetes details yet") {
+		t.Error("Kubernetes tab body must render after switching")
+	}
+
+	// The tab sticks as the cell cursor moves down.
+	m5, _ := km.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	jm := m5.(dashboardModel)
+	if jm.activeTab != tabKubernetes {
+		t.Fatal("active tab must persist across cell navigation")
+	}
+
+	// ← walks back; it clamps at Overview.
+	m6, _ := jm.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m6, _ = m6.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if got := m6.(dashboardModel).activeTab; got != tabOverview {
+		t.Fatalf("← must clamp at Overview: tab = %d", got)
+	}
+
+	// esc backs focus out to the cells list.
+	m7, _ := m6.(dashboardModel).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m7.(dashboardModel).focus != focusCells {
+		t.Fatal("esc must return focus to the cells pane")
+	}
+}
+
+// TestHealthTabFreeLines pins phase-1 Health: the credential and fleet
+// lines reflect real state, the unprobed lines show unknown.
+func TestHealthTabFreeLines(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	m := seedModel(mkTabStates(), 120, 30)
+	m.focus = focusContext
+	m.activeTab = tabHealth
+	v := m.View()
+
+	for _, want := range []string{"Cloud credentials", "Fleet registration", "Kubernetes", "Database", "Workloads"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("Health tab missing line %q", want)
+		}
+	}
+	if !strings.Contains(v, "not yet probed") {
+		t.Error("unprobed lines must show a placeholder")
+	}
+
+	// A cell with an auth error paints its credential line red/bad.
+	lvl, msg := cellCredentialHealth(cellState{err: errFake("token expired")})
+	if lvl != healthBad {
+		t.Fatalf("credential health with an error must be healthBad, got %d", lvl)
+	}
+	if !strings.Contains(msg, "token expired") {
+		t.Errorf("credential detail must surface the error: %q", msg)
+	}
+	// A registered+accepting cell is good; an absent fleet record warns.
+	acc := true
+	if lvl, _ := cellFleetHealth(cellState{fleet: &fleet.Cell{Accepting: &acc}}); lvl != healthGood {
+		t.Fatalf("registered+accepting must be healthGood, got %d", lvl)
+	}
+	if lvl, _ := cellFleetHealth(cellState{}); lvl != healthWarn {
+		t.Fatalf("no fleet record must be healthWarn, got %d", lvl)
 	}
 }
 
@@ -786,10 +911,10 @@ func TestPendingDialogOverlaysDoesNotOverflow(t *testing.T) {
 	}
 	// Dashboard frame stays visible around the dialog.
 	if !strings.Contains(v, "cells") {
-		t.Fatal("cells pane title must still show behind the dialog")
+		t.Fatal("cells group header must still show behind the dialog")
 	}
-	if !strings.Contains(v, "context") {
-		t.Fatal("context pane title must still show behind the dialog")
+	if !strings.Contains(v, "Overview") {
+		t.Fatal("context pane tab bar must still show behind the dialog")
 	}
 }
 
