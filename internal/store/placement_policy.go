@@ -102,6 +102,60 @@ func (s *Store) SetPlacementPolicy(ctx context.Context, accountID, operatorID st
 	return next, nil
 }
 
+// SetPlacementPolicySystem restores placement metadata carried alongside an
+// archive. The provision-token caller is the fleet control plane, so this path
+// intentionally works while the imported account is evacuation-suspended.
+func (s *Store) SetPlacementPolicySystem(ctx context.Context, accountID string, next placement.Policy) (placement.Policy, error) {
+	next, err := placement.Normalize(next)
+	if err != nil {
+		return placement.Policy{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return placement.Policy{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var raw []byte
+	err = tx.QueryRow(ctx,
+		`SELECT placement_policy FROM accounts WHERE id = $1 FOR UPDATE`,
+		accountID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return placement.Policy{}, ErrAccountNotFound
+	}
+	if err != nil {
+		return placement.Policy{}, fmt.Errorf("lock placement policy for restore: %w", err)
+	}
+	current, err := placement.FromJSON(raw)
+	if err != nil {
+		return placement.Policy{}, fmt.Errorf("decode placement policy for restore: %w", err)
+	}
+	if reflect.DeepEqual(current, next) {
+		if err := tx.Commit(ctx); err != nil {
+			return placement.Policy{}, err
+		}
+		return next, nil
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET placement_policy = $2 WHERE id = $1`,
+		accountID, placement.MustJSON(next)); err != nil {
+		return placement.Policy{}, fmt.Errorf("restore placement policy: %w", err)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID,
+		ActorKind: ActorSystem,
+		Verb:      VerbAccountPlacementPolicyChanged,
+		Metadata:  placementPolicyEventMetadata(next),
+	}); err != nil {
+		return placement.Policy{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return placement.Policy{}, err
+	}
+	return next, nil
+}
+
 func placementPolicyEventMetadata(p placement.Policy) map[string]any {
 	raw := placement.MustJSON(p)
 	out := map[string]any{}

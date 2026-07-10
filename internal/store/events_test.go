@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/placement"
 )
 
 // TestMaskEmail pins the exact masking shape the whole event registry
@@ -128,6 +130,14 @@ func TestCheckEventShape(t *testing.T) {
 				AccountID: "acc_x", ActorKind: ActorControlPlane,
 				Verb:     VerbRecoveryRequested,
 				Metadata: map[string]any{"email_masked": "s***@w***.ai"},
+			},
+		},
+		{
+			name: "system actor restoring placement policy is valid",
+			input: EventInput{
+				AccountID: "acc_x", ActorKind: ActorSystem,
+				Verb:     VerbAccountPlacementPolicyChanged,
+				Metadata: placementPolicyEventMetadata(placement.DefaultPolicy()),
 			},
 		},
 		{

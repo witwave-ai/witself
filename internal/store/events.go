@@ -189,7 +189,7 @@ var verbMetadataSchema = map[string]verbSpec{
 			"allowed_clouds", "allowed_regions", "allowed_channels",
 			"rebalance_on",
 		},
-		allowedActors: []string{ActorOwner},
+		allowedActors: []string{ActorOwner, ActorSystem},
 	},
 
 	// Control-plane forwarded.

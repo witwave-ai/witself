@@ -124,6 +124,10 @@ type Config struct {
 	// GET /v1/accounts/{id}/placement-policy — the control plane reading the
 	// account-owned placement policy during evacuation, without an owner token.
 	GetPlacementPolicySystem func(ctx context.Context, accountID string) (placement.Policy, error)
+	// PATCH /v1/accounts/{id}/placement-policy — the control plane restoring an
+	// operator-rescued policy after importing an archived account. Unlike the
+	// owner route, this is allowed while the account is evacuation-suspended.
+	SetPlacementPolicySystem func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error)
 
 	// RecoverAccount, when set (with the provisioning pair), enables POST
 	// /v1/accounts/{id}:recover — after the control plane verifies inbox
@@ -650,6 +654,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.GetPlacementPolicySystem != nil {
 			mux.HandleFunc("GET /v1/accounts/", accountPlacementPolicySystemHandler(cfg.ProvisionToken, cfg.GetPlacementPolicySystem))
 		}
+		if cfg.SetPlacementPolicySystem != nil {
+			mux.HandleFunc("PATCH /v1/accounts/", accountPlacementPolicySystemSetHandler(cfg.ProvisionToken, cfg.SetPlacementPolicySystem))
+		}
 	}
 	if cfg.Authenticate != nil {
 		whoami := whoamiHandler(cfg.Authenticate)
@@ -1004,6 +1011,44 @@ func accountPlacementPolicySystemHandler(provisionToken string, get func(ctx con
 			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not read placement policy")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"account_id":       accountID,
+			"placement_policy": policy,
+		})
+	}
+}
+
+func accountPlacementPolicySystemSetHandler(provisionToken string, set func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "placement-policy")
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		var req placement.Policy
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		policy, err := set(r.Context(), accountID, req)
+		switch {
+		case errors.Is(err, placement.ErrInvalidPolicy):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not restore placement policy")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

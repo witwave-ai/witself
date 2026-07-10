@@ -186,6 +186,7 @@ func TestPlacementPolicySystemEndpoint(t *testing.T) {
 	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
+	var saved placement.Policy
 	srv := httptest.NewServer(apiMux(Config{
 		ProvisionToken:   "witself_prv_test",
 		ProvisionAccount: provision,
@@ -194,6 +195,13 @@ func TestPlacementPolicySystemEndpoint(t *testing.T) {
 				t.Fatalf("accountID = %q, want acc_1", accountID)
 			}
 			return placement.Policy{PreferredClouds: []string{"gcp"}}, nil
+		},
+		SetPlacementPolicySystem: func(_ context.Context, accountID string, policy placement.Policy) (placement.Policy, error) {
+			if accountID != "acc_1" {
+				t.Fatalf("accountID = %q, want acc_1", accountID)
+			}
+			saved = policy
+			return policy, nil
 		},
 	}))
 	defer srv.Close()
@@ -217,6 +225,20 @@ func TestPlacementPolicySystemEndpoint(t *testing.T) {
 	}
 	if out.AccountID != "acc_1" || len(out.PlacementPolicy.PreferredClouds) != 1 || out.PlacementPolicy.PreferredClouds[0] != "gcp" {
 		t.Fatalf("response = %#v", out)
+	}
+
+	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/accounts/acc_1/placement-policy", strings.NewReader(`{"preferred_clouds":[],"preferred_regions":["usw2","use1"],"preferred_channels":["stable","edge","experimental"],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":["cloud","channel"]}`))
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH system placement policy = %d, want 200", resp.StatusCode)
+	}
+	if len(saved.AllowedRegions) != 0 || len(saved.PreferredRegions) != 2 || saved.PreferredRegions[0] != "usw2" {
+		t.Fatalf("saved policy = %#v", saved)
 	}
 }
 

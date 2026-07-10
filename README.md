@@ -278,7 +278,8 @@ witself-infra placement-runner -control-plane https://self.witwave.ai -enable -r
 ```
 
 If an archived account has impossible hard pins, an operator can clear only
-the blocked axes while preserving its ranked preferences:
+the blocked axes while preserving its ranked preferences. The rescued policy
+is applied to the imported account before it resumes on its destination cell:
 
 ```sh
 witself-admin placement rescue --account-id acc_... --axes region,channel

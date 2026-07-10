@@ -680,6 +680,13 @@ func serve() int {
 				}
 				return a.PlacementPolicy, nil
 			}
+			cfg.SetPlacementPolicySystem = func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error) {
+				policy, err := st.SetPlacementPolicySystem(ctx, accountID, policy)
+				if errors.Is(err, store.ErrAccountNotFound) {
+					return placement.Policy{}, server.ErrNotFound
+				}
+				return policy, err
+			}
 			cfg.UpdateAccountEmail = func(ctx context.Context, accountID, operatorID, newEmail string) error {
 				err := st.UpdateAccountEmail(ctx, accountID, operatorID, newEmail)
 				switch {

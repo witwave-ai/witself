@@ -3877,6 +3877,30 @@ async function restoreAccount(env, cellName, cell, accountId, archived) {
     await importResp.text().catch(() => "");
   }
 
+  // (1a) The archived pointer is the placement source of truth while an
+  // account is offline. Operator rescue edits that metadata, not the immutable
+  // R2 export, so apply it after import before the account becomes routable.
+  // Retrying is safe: the system endpoint replaces the complete policy.
+  if (archived.placement_policy) {
+    const policyResp = await fetch(
+      `${cell.endpoint}/v1/accounts/${accountId}/placement-policy`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${cell.provision_token}`,
+        },
+        body: JSON.stringify(archived.placement_policy),
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    if (!policyResp.ok) {
+      const text = await policyResp.text().catch(() => "");
+      throw new Error(`placement policy ${policyResp.status}: ${text.slice(0, 200)}`);
+    }
+    await policyResp.text().catch(() => "");
+  }
+
   // (2) Lift the evacuation suspension. Owner-suspended accounts stay
   // owner-suspended — ResumeAccountSystem's category scoping guarantees the
   // authority that suspended is the authority that resumes.
