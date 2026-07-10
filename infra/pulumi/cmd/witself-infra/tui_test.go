@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+
+	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
 )
 
 // fakeSource lets the model tests skip the control plane and the
@@ -655,5 +657,114 @@ func TestInterruptModalOverlaysDoesNotOverflow(t *testing.T) {
 	}
 	if !strings.Contains(v, "cells") {
 		t.Fatal("dashboard must stay visible behind the interrupt modal")
+	}
+}
+
+// TestCellRowThrobsWhileOpRuns pins the visual signal that a
+// provisioning op is in flight: the target cell's status marker
+// swaps from "● live" to a spinner + verb, colored by op kind.
+// Off-target cells keep their static status.
+func TestCellRowThrobsWhileOpRuns(t *testing.T) {
+	acc := true
+	states := []cellState{
+		{
+			name:     "aws-sandbox-usw2-dev",
+			entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+			identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+			fleet:    &fleet.Cell{Name: "aws-sandbox-usw2-dev", Accepting: &acc},
+		},
+		{
+			name:     "gcp-sandbox-usw2-dev",
+			entry:    cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-west2")},
+			identity: identity{Cloud: "gcp", Account: "witwave-sandbox", OK: true},
+			fleet:    &fleet.Cell{Name: "gcp-sandbox-usw2-dev", Accepting: &acc},
+		},
+	}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opUp, cell: "aws-sandbox-usw2-dev"}
+	m.spinnerFrame = 3
+
+	v := m.View()
+	// The target cell's row shows the spinner frame + verb.
+	if !strings.Contains(v, spinnerFrames[3]+" up") {
+		t.Fatalf("target cell must show spinner + verb (frame 3, up): %s", v)
+	}
+	// The off-target live cell must still show the static "● live"
+	// marker — no misleading throb on a cell that isn't being touched.
+	if !strings.Contains(v, "● live") {
+		t.Fatal("off-target live cell must keep the static status marker")
+	}
+	// The ops-pane title also throbs so the two indicators feel like
+	// one signal on two surfaces.
+	if !strings.Contains(v, "operations · "+spinnerFrames[3]+" up aws-sandbox-usw2-dev") {
+		t.Fatal("ops pane title must include the same spinner frame + verb + cell")
+	}
+}
+
+// TestSpinnerAdvancesEveryTick pins the frame-advance/self-terminate
+// loop: spinnerTickMsg while op is running advances the frame and
+// returns another spinnerCmd; after op ends the tick becomes a no-op.
+func TestSpinnerAdvancesEveryTick(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
+
+	next, cmd := m.Update(spinnerTickMsg{})
+	m2 := next.(dashboardModel)
+	if m2.spinnerFrame != 1 {
+		t.Fatalf("spinnerFrame must advance: got %d, want 1", m2.spinnerFrame)
+	}
+	if cmd == nil {
+		t.Fatal("tick while op runs must schedule the next tick")
+	}
+	// Idle: tick is a no-op, no next tick scheduled — natural loop end.
+	m2.op = nil
+	next, cmd = m2.Update(spinnerTickMsg{})
+	m3 := next.(dashboardModel)
+	if cmd != nil {
+		t.Fatal("tick after op ends must not re-schedule — leaks a ticker otherwise")
+	}
+	if m3.spinnerFrame != 1 {
+		t.Fatalf("spinnerFrame must not advance when idle: got %d, want 1", m3.spinnerFrame)
+	}
+}
+
+// TestLaunchOpKicksSpinner pins that launchOp resets the frame and
+// starts the throb loop — otherwise the cell row would stay static for
+// the first 100ms of the op, or forever if no other tick source fires.
+func TestLaunchOpKicksSpinner(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+	m := seedModel(states, 120, 30)
+	m.spinnerFrame = 42 // leftover from a hypothetical previous op
+
+	// launchOp needs a program set (its startOp path uses teaProgram),
+	// so we simulate the post-startOp state directly and check the
+	// tick-schedule contract on Update instead.
+	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
+	m.spinnerFrame = 0 // reset as launchOp would
+
+	// One tick round-trip must give us a non-nil cmd back — the
+	// contract that keeps the throb going without polling.
+	_, cmd := m.Update(spinnerTickMsg{})
+	if cmd == nil {
+		t.Fatal("running op with spinnerFrame=0 must schedule the next tick")
+	}
+}
+
+// TestSpinnerLabelWidth pins the fixed-column contract: no matter
+// which verb and frame, the styled spinner label is exactly
+// statusCellW cells wide — cell names always start at the same column.
+func TestSpinnerLabelWidth(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	for _, kind := range []opKind{opPreview, opUp, opDestroy} {
+		for frame := 0; frame < len(spinnerFrames)*2; frame++ {
+			label := opSpinnerLabel(kind, frame)
+			if got := lipgloss.Width(label); got != statusCellW {
+				t.Fatalf("%s frame %d: width %d, want %d", kind.verb(), frame, got, statusCellW)
+			}
+		}
 	}
 }

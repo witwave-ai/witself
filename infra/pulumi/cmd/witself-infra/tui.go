@@ -257,6 +257,7 @@ type dashboardModel struct {
 	pending        *confirmDialog
 	previewSeen    map[string]bool // cells with a successful preview
 	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
+	spinnerFrame   int             // advances every spinnerInterval while m.op != nil
 }
 
 // controlPlaneInfo carries per-CP metadata for the header context
@@ -406,8 +407,46 @@ type loadedMsg struct {
 	err           error
 }
 type refreshTickMsg struct{}
+type spinnerTickMsg struct{}
 
 const autoRefreshInterval = 60 * time.Second
+
+// spinnerInterval controls how fast the running-op indicator throbs on
+// the cell row and ops-pane title. 100ms is the standard bubbles/spin
+// rate — fast enough to read as "alive," slow enough to not flicker.
+const spinnerInterval = 100 * time.Millisecond
+
+// spinnerFrames is the classic bubbletea braille spinner. Each frame
+// is one cell wide, so swapping mid-column doesn't shift the layout.
+var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+
+func spinnerCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+}
+
+// opSpinnerLabel returns the fixed-width spinner cell for the running
+// op — statusCellW cells wide so cell names still line up. Colored by
+// kind: preview (green, read-only), up (yellow, mutating), destroy
+// (red, irreversible) — same accents the ops pane already uses.
+func opSpinnerLabel(kind opKind, frame int) string {
+	ch := spinnerFrames[frame%len(spinnerFrames)]
+	label := ch + " " + kind.verb()
+	if pad := statusCellW - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
+	var style lipgloss.Style
+	switch kind {
+	case opPreview:
+		style = styOK
+	case opUp:
+		style = styWarn
+	case opDestroy:
+		style = styErr
+	default:
+		style = styTitle
+	}
+	return style.Render(label)
+}
 
 func (m dashboardModel) Init() tea.Cmd {
 	return tea.Batch(m.loadCmd(), tickCmd())
@@ -459,6 +498,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTickMsg:
 		return m, tea.Batch(m.loadCmd(), tickCmd())
+	case spinnerTickMsg:
+		// Advance the throb frame; keep ticking only while an op is
+		// running. Once m.op clears (opDoneMsg), the loop stops on its
+		// own without any explicit stop signal.
+		if m.op == nil {
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, spinnerCmd()
 	case opLineMsg:
 		return m, nil // re-render tick; the ring buffer already holds the line
 	case opDoneMsg:
@@ -761,12 +809,15 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 	m.op = op
 	m.lastOp = nil
 	m.opsScroll = 0
+	m.spinnerFrame = 0
 	if op.logPath != "" {
 		m.status = kind.verb() + " running on " + cell + " · logs " + op.logPath
 	} else {
 		m.status = kind.verb() + " running on " + cell
 	}
-	return m, nil
+	// Kick off the throb loop. spinnerTickMsg self-terminates when
+	// m.op clears on opDoneMsg.
+	return m, spinnerCmd()
 }
 
 // looksLikeAuthFailure scans an op's log tail for phrases the three
@@ -1060,7 +1111,16 @@ func (m dashboardModel) View() string {
 			lines = append(lines, fitLine(text, cellsContentW))
 		case rowCell:
 			st := m.states[r.cellIdx]
-			text := fmt.Sprintf("%s %s", st.statusStyled(), st.name)
+			// Throb: swap the static status marker for a live spinner on
+			// the cell currently being provisioned/de-provisioned. Same
+			// fixed statusCellW width so nothing shifts around it.
+			var marker string
+			if m.op != nil && m.op.cell == st.name {
+				marker = opSpinnerLabel(m.op.kind, m.spinnerFrame)
+			} else {
+				marker = st.statusStyled()
+			}
+			text := fmt.Sprintf("%s %s", marker, st.name)
 			if selected {
 				text = "  ▸ " + text
 			} else {
@@ -1101,6 +1161,10 @@ func (m dashboardModel) View() string {
 		state := active.kind.verb()
 		if active.isDone() {
 			state += " (done)"
+		} else {
+			// Same throb frame as the cell row — reads as one indicator
+			// on two surfaces, not two flickers out of sync.
+			state = spinnerFrames[m.spinnerFrame%len(spinnerFrames)] + " " + state
 		}
 		title = fmt.Sprintf("operations · %s %s", state, active.cell)
 		if m.opsScroll > 0 {
