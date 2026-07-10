@@ -65,7 +65,9 @@ func TestDashboardRendersCellsAndContext(t *testing.T) {
 	m := seedModel(states, 120, 24)
 	v := m.View()
 	for _, want := range []string{
-		"cells · 2",
+		// Group header carries the count — the old "cells · N" pane
+		// title was removed as redundant with it.
+		"2 cells",
 		"aws-sandbox-usw2-dev",
 		"gcp-lab-euw1-dev",
 		"context",
@@ -76,6 +78,9 @@ func TestDashboardRendersCellsAndContext(t *testing.T) {
 		if !strings.Contains(v, want) {
 			t.Errorf("View() missing %q", want)
 		}
+	}
+	if strings.Contains(v, "cells · 2") {
+		t.Error("redundant \"cells · N\" pane title must be gone")
 	}
 }
 

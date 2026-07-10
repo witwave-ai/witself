@@ -1206,7 +1206,10 @@ func (m dashboardModel) View() string {
 	if len(lines) == 0 {
 		lines = append(lines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
 	}
-	cellsPane := paneBox("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsContentW, topH, true)
+	// No pane title: the group headers already carry names and counts
+	// ("witself cloud · self.witwave.ai  6 cells"), so a "cells · 6"
+	// banner was pure repetition — the row goes to content instead.
+	cellsPane := paneBox("", lines, cellsContentW, topH+1, true)
 
 	// Context pane — dispatches on the row under the cursor. A header
 	// row renders the control-plane summary; a cell row renders the
@@ -1334,7 +1337,10 @@ func plural(n int) string {
 }
 
 // paneBox frames one pane with a thick border and bold title —
-// same idiom as the witself-admin dashboard.
+// same idiom as the witself-admin dashboard. An empty title skips the
+// title row entirely, handing that row to content; callers pairing an
+// untitled pane beside a titled one pass contentH+1 so the outer
+// heights still match.
 func paneBox(title string, lines []string, contentW, contentH int, focused bool) string {
 	if len(lines) > contentH {
 		lines = lines[:contentH]
@@ -1342,7 +1348,10 @@ func paneBox(title string, lines []string, contentW, contentH int, focused bool)
 	for len(lines) < contentH {
 		lines = append(lines, "")
 	}
-	body := styTitle.Render(fitLine(title, contentW)) + "\n" + strings.Join(lines, "\n")
+	body := strings.Join(lines, "\n")
+	if title != "" {
+		body = styTitle.Render(fitLine(title, contentW)) + "\n" + body
+	}
 	st := lipgloss.NewStyle().
 		Border(lipgloss.ThickBorder()).
 		Padding(0, 1).
