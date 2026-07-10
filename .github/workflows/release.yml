@@ -69,6 +69,11 @@ jobs:
           go test ./...
           golangci-lint run ./...
 
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
   goreleaser:
     needs: verify
     runs-on: ubuntu-latest
