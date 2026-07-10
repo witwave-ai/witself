@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
 )
@@ -422,8 +423,10 @@ func (m dashboardModel) View() string {
 	topH := h - opsH - 8
 	// Column budget. paneBox draws contentW + 4 cells (2 padding + 2
 	// border). Two panes at outer widths cellsOuter + ctxOuter must
-	// equal w exactly, so their contentW args are outer − 4.
-	cellsOuter := min(max(w/2, 30), 60)
+	// equal w exactly, so their contentW args are outer − 4. Cells
+	// content is short (cell names ~24 chars) — capping around 44
+	// keeps the pane readable and hands the rest to context.
+	cellsOuter := min(max(w/3, 30), 44)
 	ctxOuter := w - cellsOuter
 	cellsContentW, ctxContentW := cellsOuter-4, ctxOuter-4
 	opsContentW := w - 4
@@ -456,7 +459,8 @@ func (m dashboardModel) View() string {
 			if v == "" {
 				return
 			}
-			ctxLines = append(ctxLines, styDim.Render(fmt.Sprintf("  %-14s ", k))+v)
+			label := styDim.Render(fmt.Sprintf("  %-14s ", k))
+			ctxLines = append(ctxLines, fitLine(label+v, ctxContentW))
 		}
 		put("cell", st.name)
 		if e.Cloud != nil {
@@ -477,7 +481,7 @@ func (m dashboardModel) View() string {
 		ctxLines = append(ctxLines, "")
 		ctxLines = append(ctxLines, styTitle.Render("  identity"))
 		if st.err != nil {
-			ctxLines = append(ctxLines, styErr.Render("  "+oneLine(st.err.Error())))
+			ctxLines = append(ctxLines, fitLine(styErr.Render("  "+oneLine(st.err.Error())), ctxContentW))
 		} else if st.identity.Cloud != "" {
 			id := st.identity
 			put("profile", id.Profile)
@@ -488,9 +492,9 @@ func (m dashboardModel) View() string {
 			if !id.OK {
 				ok = styErr.Render("✗ pin mismatch")
 			}
-			ctxLines = append(ctxLines, "  "+ok)
+			ctxLines = append(ctxLines, fitLine("  "+ok, ctxContentW))
 			for _, n := range id.Notes {
-				ctxLines = append(ctxLines, styWarn.Render("  · "+oneLine(n)))
+				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(n)), ctxContentW))
 			}
 		}
 	} else {
@@ -587,13 +591,11 @@ func fitLine(s string, width int) string {
 	if lipgloss.Width(s) <= width {
 		return s
 	}
-	// Simple width-aware truncation — ANSI-agnostic is fine here; the
-	// styled prefixes fit the pane by construction.
-	runes := []rune(s)
-	if len(runes) <= width {
-		return s
-	}
-	return string(runes[:width-1]) + "…"
+	// ANSI-aware: styled strings (styErr.Render(...), styDim.Render(...))
+	// get their color runs preserved and the ellipsis lands OUTSIDE any
+	// SGR sequence. Rune-slicing would corrupt escape codes and break
+	// terminal rendering.
+	return xansi.Truncate(s, width, "…")
 }
 
 func oneLine(s string) string {
