@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // fakeSource lets the model tests skip the control plane and the
@@ -314,5 +315,62 @@ func TestDetachRefusesRatherThanLie(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "detach not implemented") {
 		t.Fatalf("detach error must explain the situation: %v", err)
+	}
+}
+
+// TestDashboardFitsTerminal pins the sizing invariants that shipped
+// broken in v0.0.126: every rendered row fits within the terminal
+// width (no wrap-driven jitter), and the total row count fits within
+// the height. Exercised across sizes an operator actually uses.
+func TestDashboardFitsTerminal(t *testing.T) {
+	states := []cellState{
+		{
+			name:     "aws-sandbox-usw2-dev",
+			entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+			identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+		},
+	}
+	for _, tc := range []struct {
+		w, h int
+		name string
+	}{
+		{66, 18, "minimum"}, // matches the min-size guard in View()
+		{80, 24, "small"},
+		{120, 40, "standard"},
+		{200, 60, "large"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := dashboardModel{
+				ctx:    context.Background(),
+				cli:    fakeSource{states: states},
+				width:  tc.w,
+				height: tc.h,
+				states: states,
+				now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+			}
+			v := m.View()
+			rows := strings.Split(v, "\n")
+			if got := len(rows); got > tc.h {
+				t.Errorf("%dx%d: renders %d rows, exceeds terminal height", tc.w, tc.h, got)
+			}
+			for i, r := range rows {
+				if got := lipgloss.Width(r); got > tc.w {
+					t.Errorf("%dx%d: row %d is %d cells wide, exceeds terminal width: %q", tc.w, tc.h, i, got, r)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestDashboardWaitsForFirstSize pins the pre-WindowSizeMsg render:
+// bubbletea sends the size in an initial message; before it arrives
+// m.width/height are 0 and we must not paint a wrong-size frame that
+// jumps on the next tick.
+func TestDashboardWaitsForFirstSize(t *testing.T) {
+	m := dashboardModel{ctx: context.Background(), cli: fakeSource{},
+		now: func() time.Time { return time.Time{} }}
+	if v := m.View(); v != "" {
+		t.Fatalf("View() before WindowSizeMsg must be empty, got %d chars", len(v))
 	}
 }

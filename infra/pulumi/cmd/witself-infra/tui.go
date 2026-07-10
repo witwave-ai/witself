@@ -390,16 +390,43 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 
 func (m dashboardModel) View() string {
 	w, h := m.width, m.height
-	if w < 60 {
-		w = 100
+	// bubbletea sends WindowSizeMsg on startup; skip the first render
+	// tick when we haven't heard it yet rather than paint a wrong-size
+	// frame that jumps on the next tick.
+	if w <= 0 || h <= 0 {
+		return ""
 	}
-	if h < 15 {
-		h = 30
+	// Minimum viable: hints line ~65 chars wide; top row (contentH ≥ 6
+	// + 3 for border/title) + ops (4+3) + footer (1) + newline = 17.
+	// Round up for safety.
+	if w < 66 || h < 18 {
+		return styDim.Render("terminal too small — need at least 66×18")
 	}
-	footerH := 1
-	contentH := max(h-footerH-3, 6) // -3 = pane border + title
-	cellsW := min(max(w/2, 30), 60)
-	contextW := w - cellsW - 2 // account for JoinHorizontal spacing
+
+	// Row budget. paneBox draws contentH + 3 rows (title + content + 2
+	// border rows). The frame is: top row of panes (topH+3) + ops pane
+	// (opsH+3) + one newline separator + footer row + optional status
+	// row = h. So topH + opsH = h − 8.
+	//
+	// Ops pane is adaptive: a small idle frame keeps the layout stable
+	// but hands most of the height to the panes that carry information
+	// when nothing is running. It grows to fit the log when an op is
+	// live — logs are the whole point at that moment.
+	opsH := 4
+	if m.op != nil {
+		opsH = 8
+	}
+	// The frame is: top(topH+3) + ops(opsH+3) + footer(1) + status(1
+	// when present) rows — see the invariant in the min-size check
+	// above. No floor: if this yields < 1, we already refused to draw.
+	topH := h - opsH - 8
+	// Column budget. paneBox draws contentW + 4 cells (2 padding + 2
+	// border). Two panes at outer widths cellsOuter + ctxOuter must
+	// equal w exactly, so their contentW args are outer − 4.
+	cellsOuter := min(max(w/2, 30), 60)
+	ctxOuter := w - cellsOuter
+	cellsContentW, ctxContentW := cellsOuter-4, ctxOuter-4
+	opsContentW := w - 4
 
 	// Cells pane
 	var lines []string
@@ -413,12 +440,12 @@ func (m dashboardModel) View() string {
 		} else {
 			row = "  " + row
 		}
-		lines = append(lines, fitLine(row, cellsW-2))
+		lines = append(lines, fitLine(row, cellsContentW))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
 	}
-	cellsPane := paneBox("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsW-2, contentH, true)
+	cellsPane := paneBox("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsContentW, topH, true)
 
 	// Context pane
 	var ctxLines []string
@@ -469,29 +496,28 @@ func (m dashboardModel) View() string {
 	} else {
 		ctxLines = append(ctxLines, styDim.Render("select a cell to see its identity"))
 	}
-	contextPane := paneBox("context", ctxLines, contextW-2, contentH, false)
+	contextPane := paneBox("context", ctxLines, ctxContentW, topH, false)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 
-	// Ops log pane below — takes half the remaining height when an op
-	// has been run this session, otherwise a compact hint bar.
-	var opsPane string
-	if m.op != nil || (m.states != nil) {
-		var logLines []string
-		if m.op != nil {
-			logLines = m.op.snapshot(12)
-			for i := range logLines {
-				logLines[i] = fitLine(logLines[i], w-4)
-			}
+	// Ops log pane below the two top panes. Always rendered (stable
+	// layout beats a pane that pops in and out); title carries the
+	// running op's cell when one is live.
+	var logLines []string
+	title := "operations"
+	if m.op != nil {
+		logLines = m.op.snapshot(opsH)
+		for i := range logLines {
+			logLines[i] = fitLine(logLines[i], opsContentW)
 		}
-		title := "operations"
-		if m.op != nil {
-			title = fmt.Sprintf("operations · %s %s", m.op.kind.verb(), m.op.cell)
-		}
-		opsPane = "\n" + paneBox(title, logLines, w-4, 12, m.op != nil)
+		title = fmt.Sprintf("operations · %s %s", m.op.kind.verb(), m.op.cell)
 	}
+	opsPane := "\n" + paneBox(title, logLines, opsContentW, opsH, m.op != nil)
 
-	// Footer: hints left, version tag right.
+	// Footer: hints left, version tag right. On narrow terminals the
+	// version wins over hints (hints are re-learnable; "am I current?"
+	// is the question the stamp exists to answer). Same rule the
+	// witself-admin dashboard uses.
 	hints := " j/k select · p preview · u up · D destroy · g refresh · q quit "
 	ver := " witself-infra v" + versionString() + " "
 	pad := w - lipgloss.Width(hints) - lipgloss.Width(ver)
@@ -499,7 +525,7 @@ func (m dashboardModel) View() string {
 	if pad >= 1 {
 		footer = hints + strings.Repeat(" ", pad) + ver
 	} else {
-		footer = hints + " " + ver
+		footer = fitLine(hints, max(w-lipgloss.Width(ver)-1, 10)) + " " + ver
 	}
 	status := ""
 	if m.status != "" {
