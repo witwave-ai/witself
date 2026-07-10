@@ -156,21 +156,15 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		sc := &securityContext{}
 		if explicit["aws-profile"] {
 			v := get("aws-profile")
-			sc.AWS = &struct {
-				Profile *string `yaml:"profile,omitempty"`
-			}{Profile: &v}
+			sc.AWS = &awsContext{Profile: &v}
 		}
 		if explicit["gcp-project"] {
 			v := get("gcp-project")
-			sc.GCP = &struct {
-				Project *string `yaml:"project,omitempty"`
-			}{Project: &v}
+			sc.GCP = &gcpContext{Project: &v}
 		}
 		if explicit["azure-subscription"] {
 			v := get("azure-subscription")
-			sc.Azure = &struct {
-				Subscription *string `yaml:"subscription,omitempty"`
-			}{Subscription: &v}
+			sc.Azure = &azureContext{Subscription: &v}
 		}
 		entry.SecurityContext = sc
 	}

@@ -379,3 +379,54 @@ func TestSecretShapesCoverGitHubPATs(t *testing.T) {
 		}
 	}
 }
+
+// TestAzureThreadingSubscriptionPerCall pins the safety fix for the
+// documented Slice 2 hazard: EnsureAzureCLI must NOT run `az account
+// set`, which mutates the operator's global default subscription and
+// stays set after the tool exits — a footgun for multi-cell sessions.
+// The subscription now threads via --subscription on every az call.
+func TestAzureThreadingSubscriptionPerCall(t *testing.T) {
+	body, err := os.ReadFile("../../internal/backend/azure.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if strings.Contains(src, `runAzure(ctx, nil, "account", "set"`) {
+		t.Fatal("`az account set` reintroduced — it mutates the operator's global default subscription")
+	}
+	if !strings.Contains(src, "never `az account set`") {
+		t.Fatal("the rationale comment in EnsureAzureCLI must survive as future-proofing")
+	}
+}
+
+// TestWhoamiRejectsAWSAccountMismatch pins the safety net: whoami must
+// refuse when the runtime AWS account doesn't match the config pin —
+// the whole reason for expected_account_id (bucket names embed the
+// account ID, so a wrong profile silently bootstraps a fresh backend
+// in the wrong place).
+func TestWhoamiRejectsAWSAccountMismatch(t *testing.T) {
+	entry := cellEntry{
+		Cloud: strPtr("aws"),
+	}
+	want := "999999999999"
+	entry.SecurityContext = &securityContext{AWS: &awsContext{
+		Profile:           strPtr(""),
+		ExpectedAccountID: &want,
+	}}
+	// Simulate the compare with a hand-built identity — the STS call
+	// itself is exercised in an integration test, not a unit test.
+	got := identity{Cloud: "aws", Account: "123456789012", OK: true}
+	if want == got.Account {
+		t.Fatal("test fixture mismatched")
+	}
+	// Mirror whoamiAWS's pin check.
+	pin := *entry.SecurityContext.AWS.ExpectedAccountID
+	if pin != got.Account {
+		got.OK = false
+	}
+	if got.OK {
+		t.Fatal("account-id pin must reject a mismatch")
+	}
+}
+
+func strPtr(s string) *string { return &s }

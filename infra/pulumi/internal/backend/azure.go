@@ -47,26 +47,30 @@ func azureNames(subscriptionID, regionCode string) *Info {
 	}
 }
 
-// EnsureAzureCLI verifies that Azure CLI credentials are usable. Pulumi's
-// azblob backend and azurekeyvault secrets provider can use Azure CLI auth, and
-// bootstrap uses az directly so there is one operator login path.
+// EnsureAzureCLI verifies that Azure CLI credentials are usable AND, when a
+// subscription is named, pins it to a per-invocation --subscription argument on
+// every az shell-out — never `az account set`, which would mutate the operator's
+// global CLI default and stay set after the tool exits (a footgun once the
+// dashboard drives multiple cells across subscriptions in one session).
 func EnsureAzureCLI(ctx context.Context, subscription string) error {
 	if _, err := exec.LookPath("az"); err != nil {
 		return fmt.Errorf("azure CLI is required for Azure backends: %w\nrun: brew install azure-cli && az login --tenant <tenant-id>", err)
 	}
-	if subscription != "" {
-		if _, err := runAzure(ctx, nil, "account", "set", "--subscription", subscription); err != nil {
-			return err
-		}
-	}
-	if _, err := currentAzureAccount(ctx); err != nil {
+	if _, err := currentAzureAccount(ctx, subscription); err != nil {
 		return err
 	}
 	return nil
 }
 
-func currentAzureAccount(ctx context.Context) (*azureAccount, error) {
-	out, err := runAzure(ctx, nil, "account", "show", "-o", "json")
+// currentAzureAccount reads WHICH subscription an operation will run against —
+// the pinned subscription when the caller supplied one (so multi-subscription
+// sessions can't cross wires), else the CLI default. Never mutates that default.
+func currentAzureAccount(ctx context.Context, subscription string) (*azureAccount, error) {
+	args := []string{"account", "show", "-o", "json"}
+	if subscription != "" {
+		args = append([]string{args[0], args[1], "--subscription", subscription}, args[2:]...)
+	}
+	out, err := runAzure(ctx, nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read Azure account (run `az login`): %w", err)
 	}
@@ -89,7 +93,7 @@ func ResolveAzure(ctx context.Context, subscription string, _ string, regionCode
 	if err := EnsureAzureCLI(ctx, subscription); err != nil {
 		return nil, false, err
 	}
-	acct, err := currentAzureAccount(ctx)
+	acct, err := currentAzureAccount(ctx, subscription)
 	if err != nil {
 		return nil, false, err
 	}
@@ -141,7 +145,7 @@ func BootstrapAzure(ctx context.Context, subscription, region, regionCode string
 	if err := EnsureAzureCLI(ctx, subscription); err != nil {
 		return nil, err
 	}
-	acct, err := currentAzureAccount(ctx)
+	acct, err := currentAzureAccount(ctx, subscription)
 	if err != nil {
 		return nil, err
 	}

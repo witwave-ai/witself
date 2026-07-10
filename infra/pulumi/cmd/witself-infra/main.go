@@ -117,6 +117,10 @@ commands:
   rebalance move live accounts to better eligible cells by placement policy
   placement-runner show, enable, disable, or trigger scheduled placement work
   placement-status show fleet placement, archive, and rebalance status
+  whoami    resolve a cell's security context, call the cloud identity
+              API, and refuse if it doesn't match the expected_account_id
+              / tenant pin (also runs as a pre-flight before up/preview/
+              destroy/refresh when a cell is resolved from the config)
   config    manage the local cell inventory (~/.witself/infra.yaml):
               config init                 write a skeleton file
               config add-cell [flags]     record a cell from the usual flags
@@ -278,6 +282,25 @@ func run(args []string) error {
 		}
 	}
 
+	if cmd == "whoami" {
+		return runWhoami(fs)
+	}
+	// Identity pre-flight: any command that will TOUCH cloud state
+	// runs whoami first when the cell has expected_account_id / tenant
+	// pins in its security_context. A wrong profile that resolves to a
+	// different account must fail HERE, before EnsureAWSSession or a
+	// stack Upsert lets a fresh state backend appear in the wrong
+	// account. Only fires for -cell (bare-flag invocations preserve
+	// today's zero-safety-net behavior; the safety net is opt-in via
+	// the config file).
+	if *cellSelector != "" {
+		switch cmd {
+		case "up", "preview", "destroy", "refresh", "bootstrap":
+			if err := requireIdentityMatch(context.Background(), *cellSelector, *configPath); err != nil {
+				return err
+			}
+		}
+	}
 	if cmd == "rebalance" {
 		if *controlPlane == "" {
 			return fmt.Errorf("rebalance requires -control-plane")

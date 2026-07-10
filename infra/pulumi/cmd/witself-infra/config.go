@@ -58,19 +58,39 @@ type gitopsEntry struct {
 	Revision   *string `yaml:"revision,omitempty"`
 }
 
+// awsContext names the operator identity a cell's AWS operations run
+// as. ExpectedAccountID is the safety net: whoami compares STS's
+// caller identity against this pin so a wrong profile can't quietly
+// bootstrap a fresh state backend in the wrong account (bucket names
+// embed the account ID — bakend/aws.go:36-48).
+type awsContext struct {
+	Profile           *string `yaml:"profile,omitempty"`
+	ExpectedAccountID *string `yaml:"expected_account_id,omitempty"`
+}
+
+// gcpContext names GCP identity. CredentialsFile becomes
+// GOOGLE_APPLICATION_CREDENTIALS in the workspace env — true per-cell
+// identity instead of one ambient ADC serving every cell.
+type gcpContext struct {
+	Project         *string `yaml:"project,omitempty"`
+	CredentialsFile *string `yaml:"credentials_file,omitempty"`
+}
+
+// azureContext names Azure identity. Tenant is the safety net: whoami
+// rejects if the pinned subscription belongs to a different tenant,
+// so a multi-tenant login can't cross wires.
+type azureContext struct {
+	Subscription *string `yaml:"subscription,omitempty"`
+	Tenant       *string `yaml:"tenant,omitempty"`
+}
+
 // securityContext names WHICH identity a cell's operations run as —
-// references only (profile names, subscription/project IDs), never
-// credential material. One shape per cloud.
+// references only (profile names, subscription/project IDs, credential
+// file PATHS), never credential material. One shape per cloud.
 type securityContext struct {
-	AWS *struct {
-		Profile *string `yaml:"profile,omitempty"`
-	} `yaml:"aws,omitempty"`
-	GCP *struct {
-		Project *string `yaml:"project,omitempty"`
-	} `yaml:"gcp,omitempty"`
-	Azure *struct {
-		Subscription *string `yaml:"subscription,omitempty"`
-	} `yaml:"azure,omitempty"`
+	AWS   *awsContext   `yaml:"aws,omitempty"`
+	GCP   *gcpContext   `yaml:"gcp,omitempty"`
+	Azure *azureContext `yaml:"azure,omitempty"`
 }
 
 // cellEntry is one cell's configuration — pointer fields so "absent"
