@@ -450,14 +450,60 @@ func TestFooterHintsDimUnavailable(t *testing.T) {
 	if !strings.Contains(hints, styDim.Render("u up")) {
 		t.Errorf("up hint should be dim before a successful preview: %q", hints)
 	}
-	// auth is NOT available (no error on the cell) — dim.
-	if !strings.Contains(hints, styDim.Render("a auth")) {
-		t.Errorf("auth hint should be dim on a healthy cell: %q", hints)
+	// auth IS available on a healthy cell — re-running a login is
+	// harmless, and creds can go stale between refreshes without the
+	// dashboard noticing (the ADC incident: cell green, `a` refused).
+	if strings.Contains(hints, styDim.Render("a auth")) {
+		t.Errorf("auth hint should be enabled on any selected cell while idle: %q", hints)
 	}
 	// After a successful preview, up flips to available.
 	m.previewSeen = map[string]bool{"aws-sandbox-usw2-dev": true}
 	if strings.Contains(m.footerHints(), styDim.Render("u up")) {
 		t.Errorf("up hint should be enabled after preview: %q", m.footerHints())
+	}
+	// During an op everything freezes — auth dims too (ExecProcess
+	// would fight the op's output for the terminal).
+	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
+	if !strings.Contains(m.footerHints(), styDim.Render("a auth")) {
+		t.Errorf("auth hint should be dim while an op runs: %q", m.footerHints())
+	}
+}
+
+// TestStartAuthAvailableWithoutError pins the gating fix: `a` on a
+// healthy-looking cell must launch the login flow, not refuse. The
+// ADC incident showed why — credentials expired but the cell still
+// read green, and the operator had no way to kick off a login.
+func TestStartAuthAvailableWithoutError(t *testing.T) {
+	states := []cellState{{
+		name:     "gcp-sandbox-use1-dev",
+		entry:    cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-east1")},
+		identity: identity{Cloud: "gcp", Account: "witself-sandbox", OK: true},
+	}}
+	m := seedModel(states, 120, 30)
+	next, cmd := m.startAuth()
+	if cmd == nil {
+		t.Fatalf("startAuth on a healthy cell must launch the login flow, status: %q", next.status)
+	}
+	if !strings.Contains(next.status, "application-default login") {
+		t.Errorf("status should name the login command: %q", next.status)
+	}
+}
+
+// TestStartAuthRefusesDuringOp pins the freeze: ExecProcess suspends
+// the TUI, which would fight a running op's output for the terminal.
+func TestStartAuthRefusesDuringOp(t *testing.T) {
+	states := []cellState{{
+		name:  "gcp-sandbox-use1-dev",
+		entry: cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-east1")},
+	}}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opUp, cell: "gcp-sandbox-use1-dev"}
+	next, cmd := m.startAuth()
+	if cmd != nil {
+		t.Fatal("startAuth must refuse while an op is running")
+	}
+	if !strings.Contains(next.status, "op is running") {
+		t.Errorf("status must explain the refusal: %q", next.status)
 	}
 }
 

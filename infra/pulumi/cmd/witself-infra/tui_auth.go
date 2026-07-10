@@ -80,8 +80,19 @@ type authCompletedMsg struct {
 	err  error
 }
 
-// startAuth is the `a`-key handler.
+// startAuth is the `a`-key handler. Available on ANY selected cell
+// while no op is running — not just error-state cells. Re-running a
+// login flow is harmless, and gating on st.err missed real cases:
+// ADC can expire between the last refresh and the next op, and an
+// operator who knows a login is stale shouldn't have to wait for the
+// dashboard to notice before they're allowed to fix it.
 func (m dashboardModel) startAuth() (dashboardModel, tea.Cmd) {
+	if m.op != nil {
+		// ExecProcess suspends the TUI; the running op's output would
+		// paint over the login banner and fight for the terminal.
+		m.status = "an op is running — wait for it to finish before running auth"
+		return m, nil
+	}
 	stp := m.selectedState()
 	if stp == nil {
 		if m.currentRow().kind == rowHeader {
@@ -92,10 +103,6 @@ func (m dashboardModel) startAuth() (dashboardModel, tea.Cmd) {
 		return m, nil
 	}
 	st := *stp
-	if st.err == nil {
-		m.status = "cell " + st.name + " is not in an auth-error state — nothing to do"
-		return m, nil
-	}
 	cmd, desc := authCommand(m.ctx, st)
 	if cmd == nil {
 		m.status = desc // already reads as an error explanation

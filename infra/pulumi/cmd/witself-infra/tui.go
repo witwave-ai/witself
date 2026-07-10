@@ -913,7 +913,10 @@ func (m dashboardModel) footerHints() string {
 	stp := m.selectedState()
 	haveCell := stp != nil
 	idle := m.op == nil
-	authRelevant := idle && haveCell && stp.err != nil
+	// Auth is available on any cell while idle — re-running a login is
+	// harmless, and credentials can go stale between refreshes (ADC's
+	// reauth window) without the dashboard having noticed yet.
+	authRelevant := idle && haveCell
 	previewOK := haveCell && m.previewSeen[stp.name]
 	// Ops scroll is available whenever there's something in the ops
 	// pane — during a running op or after one completed. The `end`
