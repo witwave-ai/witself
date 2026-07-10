@@ -82,10 +82,16 @@ type authCompletedMsg struct {
 
 // startAuth is the `a`-key handler.
 func (m dashboardModel) startAuth() (dashboardModel, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.states) {
+	stp := m.selectedState()
+	if stp == nil {
+		if m.currentRow().kind == rowHeader {
+			m.status = "select a cell (j/k) — auth applies to cells, not control planes"
+		} else {
+			m.status = "no cell selected"
+		}
 		return m, nil
 	}
-	st := m.states[m.cursor]
+	st := *stp
 	if st.err == nil {
 		m.status = "cell " + st.name + " is not in an auth-error state — nothing to do"
 		return m, nil

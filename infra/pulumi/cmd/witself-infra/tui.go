@@ -218,17 +218,36 @@ func gitField(g *gitopsEntry, f gitFieldKey) *string {
 	return nil
 }
 
+// rowKind names what m.cursor is pointing at right now — a cell or a
+// control-plane header. Selection is uniform: j/k move through both,
+// and the context pane dispatches on the selected row.
+type rowKind int
+
+const (
+	rowCell rowKind = iota
+	rowHeader
+)
+
+// row is one selectable line in the cells pane. Headers surface CP
+// metadata; cells surface cell state.
+type row struct {
+	kind    rowKind
+	cellIdx int    // when kind == rowCell: index into m.states
+	cp      string // when kind == rowHeader: the control-plane URL
+}
+
 type dashboardModel struct {
-	ctx        context.Context
-	cli        cellDataSource
-	configPath string
-	states     []cellState
-	cursor     int
-	width      int
-	height     int
-	loading    bool
-	status     string
-	now        func() time.Time
+	ctx           context.Context
+	cli           cellDataSource
+	configPath    string
+	states        []cellState
+	controlPlanes map[string]controlPlaneInfo
+	cursor        int
+	width         int
+	height        int
+	loading       bool
+	status        string
+	now           func() time.Time
 
 	// Slice 4 ops state.
 	program        *tea.Program
@@ -238,20 +257,39 @@ type dashboardModel struct {
 	interruptModal bool            // ctrl+c while op running: keep/cancel/detach
 }
 
+// controlPlaneInfo carries per-CP metadata for the header context
+// view — enough to answer "which fleet, is it reachable, how many
+// cells does it know about" without a second network call.
+type controlPlaneInfo struct {
+	url        string
+	tokenFile  string // resolved path or ""
+	reachable  bool   // ListCells returned without error
+	err        error  // nil when reachable, else the ListCells failure
+	registered int    // cells the CP knows about
+	configured int    // cells in the local infra.yaml belonging to this CP
+}
+
+// loadResult carries everything one refresh brings back: the merged
+// cell states AND per-CP metadata for header rows.
+type loadResult struct {
+	states        []cellState
+	controlPlanes map[string]controlPlaneInfo
+}
+
 // cellDataSource is what the model needs from the outside world — a
 // tiny interface so the model is testable without a control plane.
 type cellDataSource interface {
-	load(ctx context.Context, configPath string) ([]cellState, error)
+	load(ctx context.Context, configPath string) (loadResult, error)
 }
 
 // liveDataSource reads infra.yaml, then the control plane, then runs
 // whoami on each configured cell.
 type liveDataSource struct{}
 
-func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState, error) {
+func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, error) {
 	cfg, _, err := loadInfraConfig(configPath)
 	if err != nil {
-		return nil, err
+		return loadResult{}, err
 	}
 	// Fleet lookup: fold registered cells into the merged view so the
 	// dashboard can call out orphans (registered but not configured).
@@ -265,12 +303,22 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 			tokenFile = *d.FleetTokenFile
 		}
 	}
+	cps := map[string]controlPlaneInfo{}
 	if controlPlane != "" {
+		info := controlPlaneInfo{url: controlPlane, tokenFile: tokenFile}
 		if fc, ferr := fleet.NewClient(controlPlane, tokenFile); ferr == nil {
-			if cells, ferr := fc.ListCells(ctx); ferr == nil {
+			cells, ferr := fc.ListCells(ctx)
+			if ferr == nil {
 				registered = cells
+				info.reachable = true
+				info.registered = len(cells)
+			} else {
+				info.err = ferr
 			}
+		} else {
+			info.err = ferr
 		}
+		cps[controlPlane] = info
 	}
 	byName := map[string]*fleet.Cell{}
 	for i := range registered {
@@ -323,12 +371,20 @@ func (liveDataSource) load(ctx context.Context, configPath string) ([]cellState,
 		f := o
 		states = append(states, cellState{name: o.Name, fleet: &f, controlPlane: defaultCP})
 	}
-	return states, nil
+	// Count configured cells per CP for the header context view.
+	for _, st := range states {
+		info := cps[st.controlPlane]
+		info.url = st.controlPlane
+		info.configured++
+		cps[st.controlPlane] = info
+	}
+	return loadResult{states: states, controlPlanes: cps}, nil
 }
 
 type loadedMsg struct {
-	states []cellState
-	err    error
+	states        []cellState
+	controlPlanes map[string]controlPlaneInfo
+	err           error
 }
 type refreshTickMsg struct{}
 
@@ -345,8 +401,8 @@ func tickCmd() tea.Cmd {
 func (m dashboardModel) loadCmd() tea.Cmd {
 	ctx, cli, path := m.ctx, m.cli, m.configPath
 	return func() tea.Msg {
-		states, err := cli.load(ctx, path)
-		return loadedMsg{states: states, err: err}
+		res, err := cli.load(ctx, path)
+		return loadedMsg{states: res.states, controlPlanes: res.controlPlanes, err: err}
 	}
 }
 
@@ -360,9 +416,25 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "load failed: " + msg.err.Error()
 			return m, nil
 		}
+		firstLoad := len(m.states) == 0
 		m.states = msg.states
-		if m.cursor >= len(m.states) {
-			m.cursor = max(len(m.states)-1, 0)
+		m.controlPlanes = msg.controlPlanes
+		// Cursor indexes rows() (headers + cells). On the FIRST load,
+		// jump past the initial header so the operator can immediately
+		// act on a cell; on subsequent loads preserve position for a
+		// user who has navigated to a header on purpose. Clamp against
+		// the new row count regardless.
+		rows := m.rows()
+		if m.cursor >= len(rows) {
+			m.cursor = max(len(rows)-1, 0)
+		}
+		if firstLoad {
+			for i, r := range rows {
+				if r.kind == rowCell {
+					m.cursor = i
+					break
+				}
+			}
 		}
 		m.status = fmt.Sprintf("%d cells · %s", len(m.states), m.now().UTC().Format("15:04:05"))
 		return m, nil
@@ -466,7 +538,7 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "j", "down":
-		if m.cursor < len(m.states)-1 {
+		if m.cursor < len(m.rows())-1 {
 			m.cursor++
 		}
 	case "k", "up":
@@ -486,17 +558,60 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m dashboardModel) selectedCell() string {
-	if m.cursor >= 0 && m.cursor < len(m.states) {
-		return m.states[m.cursor].name
+// rows builds the flat selectable list: one header per control-plane
+// group followed by that group's cells. m.states is already sorted so
+// same-group cells are contiguous.
+func (m dashboardModel) rows() []row {
+	var out []row
+	prev := "\x00" // sentinel — no real CP URL can equal
+	for i, st := range m.states {
+		if st.controlPlane != prev {
+			out = append(out, row{kind: rowHeader, cp: st.controlPlane})
+			prev = st.controlPlane
+		}
+		out = append(out, row{kind: rowCell, cellIdx: i})
 	}
-	return ""
+	return out
+}
+
+// currentRow returns the row under the cursor, or a zero row when the
+// inventory is empty.
+func (m dashboardModel) currentRow() row {
+	rows := m.rows()
+	if m.cursor < 0 || m.cursor >= len(rows) {
+		return row{}
+	}
+	return rows[m.cursor]
+}
+
+// selectedCell returns the cell name the cursor points at, or "" when
+// the cursor is on a header row (or the inventory is empty).
+func (m dashboardModel) selectedCell() string {
+	r := m.currentRow()
+	if r.kind != rowCell || r.cellIdx < 0 || r.cellIdx >= len(m.states) {
+		return ""
+	}
+	return m.states[r.cellIdx].name
+}
+
+// selectedState returns the cell state the cursor points at, or nil
+// when on a header.
+func (m dashboardModel) selectedState() *cellState {
+	r := m.currentRow()
+	if r.kind != rowCell || r.cellIdx < 0 || r.cellIdx >= len(m.states) {
+		return nil
+	}
+	return &m.states[r.cellIdx]
 }
 
 func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 	cell := m.selectedCell()
 	if cell == "" {
-		m.status = "no cell selected"
+		if m.currentRow().kind == rowHeader {
+			m.status = "select a cell (j/k) — provisioning verbs don't apply to control planes"
+		} else {
+			m.status = "no cell selected"
+		}
 		return m, nil
 	}
 	if m.op != nil {
@@ -560,6 +675,118 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+// renderContext builds the right-hand pane content based on what the
+// cursor is on. A header row shows fleet metadata (URL, token file,
+// reachability, cell counts); a cell row shows the cell's full
+// context (config, settings, identity, fleet state). Empty inventory
+// gets a hint.
+func (m dashboardModel) renderContext(ctxContentW int) []string {
+	var ctxLines []string
+	put := func(k, v string) {
+		if v == "" {
+			return
+		}
+		label := styDim.Render(fmt.Sprintf("  %-14s ", k))
+		ctxLines = append(ctxLines, fitLine(label+v, ctxContentW))
+	}
+	if len(m.states) == 0 {
+		ctxLines = append(ctxLines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
+		return ctxLines
+	}
+	r := m.currentRow()
+	switch r.kind {
+	case rowHeader:
+		// Control-plane header context.
+		info, hasInfo := m.controlPlanes[r.cp]
+		if !hasInfo {
+			info = controlPlaneInfo{url: r.cp}
+		}
+		put("control plane", groupLabel(r.cp))
+		if r.cp != "" {
+			put("url", r.cp)
+			if info.tokenFile != "" {
+				put("token file", info.tokenFile)
+			}
+			reach := styOK.Render("✓ reachable")
+			if !info.reachable {
+				reach = styErr.Render("✗ unreachable")
+			}
+			ctxLines = append(ctxLines, fitLine("  "+reach, ctxContentW))
+			if !info.reachable && info.err != nil {
+				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(info.err.Error())), ctxContentW))
+			}
+		} else {
+			ctxLines = append(ctxLines, fitLine(styDim.Render("  (no control plane — plain self-hosted deploys)"), ctxContentW))
+		}
+		ctxLines = append(ctxLines, "")
+		ctxLines = append(ctxLines, styTitle.Render("  cells"))
+		put("configured", fmt.Sprintf("%d", info.configured))
+		if r.cp != "" {
+			put("registered", fmt.Sprintf("%d", info.registered))
+			// Orphans: registered but not configured locally. Not a
+			// bug per se, but worth calling out — the operator can
+			// bring them into inventory or purge them from the fleet.
+			orphans := info.registered - info.configured
+			if orphans > 0 {
+				put("orphans", fmt.Sprintf("%d (registered but not in local infra.yaml)", orphans))
+			}
+		}
+		return ctxLines
+	case rowCell:
+		st := m.states[r.cellIdx]
+		e := st.entry
+		put("cell", st.name)
+		if e.Cloud != nil {
+			put("cloud", *e.Cloud)
+		}
+		if e.Region != nil {
+			put("region", *e.Region)
+		}
+		put("control plane", groupLabel(st.controlPlane))
+		put("status", st.status())
+		if st.fleet != nil {
+			if st.fleet.Endpoint != "" {
+				put("endpoint", st.fleet.Endpoint)
+			}
+			if st.fleet.Channel != "" {
+				put("channel", st.fleet.Channel)
+			}
+		}
+		if len(st.settings) > 0 {
+			ctxLines = append(ctxLines, "")
+			ctxLines = append(ctxLines, styTitle.Render("  settings"))
+			for _, srow := range st.settings {
+				val := srow.value
+				if !srow.fromEntry {
+					val = styDim.Render(val)
+				}
+				label := styDim.Render(fmt.Sprintf("  %-14s ", srow.key))
+				ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
+			}
+		}
+		ctxLines = append(ctxLines, "")
+		ctxLines = append(ctxLines, styTitle.Render("  identity"))
+		if st.err != nil {
+			ctxLines = append(ctxLines, fitLine(styErr.Render("  "+oneLine(st.err.Error())), ctxContentW))
+		} else if st.identity.Cloud != "" {
+			id := st.identity
+			put("profile", id.Profile)
+			put("account", id.Account)
+			put("tenant", id.Tenant)
+			put("actor", id.Actor)
+			ok := styOK.Render("✓ matches config pin")
+			if !id.OK {
+				ok = styErr.Render("✗ pin mismatch")
+			}
+			ctxLines = append(ctxLines, fitLine("  "+ok, ctxContentW))
+			for _, n := range id.Notes {
+				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(n)), ctxContentW))
+			}
+		}
+	}
+	return ctxLines
+}
+
 func (m dashboardModel) View() string {
 	w, h := m.width, m.height
 	// bubbletea sends WindowSizeMsg on startup; skip the first render
@@ -607,109 +834,57 @@ func (m dashboardModel) View() string {
 	if m.loading && len(m.states) == 0 {
 		lines = append(lines, styDim.Render("loading inventory…"))
 	}
-	// Tree layout: group cells by control_plane. m.states is already
-	// sorted so members of a group are contiguous — walk and emit a
-	// header whenever the group changes. Group headers are NOT
-	// selectable (cursor indexes m.states, which has cells only), so
-	// j/k moves through cells and skips headers naturally.
-	prevGroup := "\x00" // sentinel that no real group can equal
-	for i, st := range m.states {
-		if st.controlPlane != prevGroup {
+	// Tree layout: iterate rows() so the render mirrors the selection
+	// model. Each row is either a group header (selectable, styled as
+	// a header) or a cell (selectable, indented under its header).
+	rows := m.rows()
+	for i, r := range rows {
+		selected := i == m.cursor
+		switch r.kind {
+		case rowHeader:
+			// Blank spacer above every header except the first, to
+			// separate groups.
 			if i > 0 {
 				lines = append(lines, "")
 			}
+			// Count how many cells belong to this group.
 			n := 0
-			for j := i; j < len(m.states) && m.states[j].controlPlane == st.controlPlane; j++ {
+			for j := i + 1; j < len(rows) && rows[j].kind == rowCell; j++ {
 				n++
 			}
-			header := groupLabel(st.controlPlane)
-			if st.controlPlane != "" {
-				header = header + " · " + shortHost(st.controlPlane)
+			label := groupLabel(r.cp)
+			if r.cp != "" {
+				label = label + " · " + shortHost(r.cp)
 			}
-			header = fmt.Sprintf("%s  %d cell%s", header, n, plural(n))
-			lines = append(lines, styTitle.Render(fitLine(header, cellsContentW)))
-			prevGroup = st.controlPlane
+			label = fmt.Sprintf("%s  %d cell%s", label, n, plural(n))
+			// Bold always; the cursor arrow calls out selection.
+			text := styTitle.Render(label)
+			if selected {
+				text = "▸ " + text
+			} else {
+				text = "  " + text
+			}
+			lines = append(lines, fitLine(text, cellsContentW))
+		case rowCell:
+			st := m.states[r.cellIdx]
+			text := fmt.Sprintf("%s %s", st.statusStyled(), st.name)
+			if selected {
+				text = "  ▸ " + text
+			} else {
+				text = "    " + text
+			}
+			lines = append(lines, fitLine(text, cellsContentW))
 		}
-		row := fmt.Sprintf("%s %s", st.statusStyled(), st.name)
-		if i == m.cursor {
-			row = "  ▸ " + row
-		} else {
-			row = "    " + row
-		}
-		lines = append(lines, fitLine(row, cellsContentW))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, styDim.Render("no cells configured — `witself-infra config add-cell …`"))
 	}
 	cellsPane := paneBox("cells · "+fmt.Sprintf("%d", len(m.states)), lines, cellsContentW, topH, true)
 
-	// Context pane
-	var ctxLines []string
-	if len(m.states) > 0 && m.cursor >= 0 && m.cursor < len(m.states) {
-		st := m.states[m.cursor]
-		e := st.entry
-		put := func(k, v string) {
-			if v == "" {
-				return
-			}
-			label := styDim.Render(fmt.Sprintf("  %-14s ", k))
-			ctxLines = append(ctxLines, fitLine(label+v, ctxContentW))
-		}
-		put("cell", st.name)
-		if e.Cloud != nil {
-			put("cloud", *e.Cloud)
-		}
-		if e.Region != nil {
-			put("region", *e.Region)
-		}
-		put("control plane", groupLabel(st.controlPlane))
-		put("status", st.status())
-		if st.fleet != nil {
-			if st.fleet.Endpoint != "" {
-				put("endpoint", st.fleet.Endpoint)
-			}
-			if st.fleet.Channel != "" {
-				put("channel", st.fleet.Channel)
-			}
-		}
-		// Settings — what a provisioning verb would use. Values from
-		// the entry or defaults block render normal; values falling
-		// back to a built-in render dim so an operator can scan for
-		// what was deliberately configured before pressing `p`/`u`.
-		if len(st.settings) > 0 {
-			ctxLines = append(ctxLines, "")
-			ctxLines = append(ctxLines, styTitle.Render("  settings"))
-			for _, row := range st.settings {
-				val := row.value
-				if !row.fromEntry {
-					val = styDim.Render(val)
-				}
-				label := styDim.Render(fmt.Sprintf("  %-14s ", row.key))
-				ctxLines = append(ctxLines, fitLine(label+val, ctxContentW))
-			}
-		}
-		ctxLines = append(ctxLines, "")
-		ctxLines = append(ctxLines, styTitle.Render("  identity"))
-		if st.err != nil {
-			ctxLines = append(ctxLines, fitLine(styErr.Render("  "+oneLine(st.err.Error())), ctxContentW))
-		} else if st.identity.Cloud != "" {
-			id := st.identity
-			put("profile", id.Profile)
-			put("account", id.Account)
-			put("tenant", id.Tenant)
-			put("actor", id.Actor)
-			ok := styOK.Render("✓ matches config pin")
-			if !id.OK {
-				ok = styErr.Render("✗ pin mismatch")
-			}
-			ctxLines = append(ctxLines, fitLine("  "+ok, ctxContentW))
-			for _, n := range id.Notes {
-				ctxLines = append(ctxLines, fitLine(styWarn.Render("  · "+oneLine(n)), ctxContentW))
-			}
-		}
-	} else {
-		ctxLines = append(ctxLines, styDim.Render("select a cell to see its identity"))
-	}
+	// Context pane — dispatches on the row under the cursor. A header
+	// row renders the control-plane summary; a cell row renders the
+	// cell's full context (identity, settings, fleet state).
+	ctxLines := m.renderContext(ctxContentW)
 	contextPane := paneBox("context", ctxLines, ctxContentW, topH, false)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
