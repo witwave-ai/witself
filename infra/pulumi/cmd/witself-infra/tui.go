@@ -472,6 +472,14 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Failed preview must NOT arm up; a failed up leaves a
 				// partial diff so the last previewed plan is stale too.
 				delete(m.previewSeen, msg.cell)
+				// Auth-error nudge: if the op's tail contains a
+				// recognizable "your credentials are expired" pattern,
+				// tell the operator to press `a` — the alternative is
+				// a manual `aws sso login` in another window and a
+				// blind guess about what went wrong.
+				if looksLikeAuthFailure(m.op.snapshot(20)) {
+					m.status = m.op.kind.verb() + " on " + msg.cell + " failed on auth — press `a` to log in and try again"
+				}
 			} else {
 				m.status = m.op.kind.verb() + " on " + msg.cell + " succeeded"
 				// ANY successful mutation invalidates the previewed
@@ -644,6 +652,14 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 	case "D":
 		kind = opDestroy
 	}
+	// Up refuses upstream of the confirm dialog when preview hasn't
+	// succeeded — matches the dimmed hint in the footer and makes the
+	// "why nothing happened" message explicit rather than hiding the
+	// answer inside a dialog the operator would have to open first.
+	if kind == opUp && !m.previewSeen[cell] {
+		m.status = "run `p` (preview) first — up won't fire until you've seen the diff for " + cell
+		return m, nil
+	}
 	if kind == opPreview {
 		return m.launchOp(kind, cell)
 	}
@@ -690,6 +706,79 @@ func (m dashboardModel) launchOp(kind opKind, cell string) (tea.Model, tea.Cmd) 
 	m.op = op
 	m.status = kind.verb() + " running on " + cell
 	return m, nil
+}
+
+// looksLikeAuthFailure scans an op's log tail for phrases the three
+// cloud CLIs print when credentials are expired or missing. Keeping
+// it phrase-based (not error-code based) so it survives Pulumi's
+// error-wrapping — the operator's error message often mentions
+// "authorization" long before Pulumi's own error struct does.
+func looksLikeAuthFailure(tail []string) bool {
+	// Case-insensitive prefix scan against the phrases each cloud CLI
+	// prints when credentials are missing or expired. Broad phrases
+	// (SSO token, sso session) catch AWS's own wording plus Pulumi's
+	// wrapping ("failed to refresh cached SSO token").
+	markers := []string{
+		"sso token",
+		"sso session",
+		"aws sso login",
+		"unable to locate credentials",
+		"expiredtoken",
+		"reauthentication is needed",
+		"gcloud auth", // covers `gcloud auth login`, `application-default login`
+		"application default credentials",
+		"authenticationfailed",
+		"az login",
+	}
+	for _, line := range tail {
+		low := strings.ToLower(line)
+		for _, m := range markers {
+			if strings.Contains(low, m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// footerHints builds the key-hint line with letters dimmed when the
+// action they trigger isn't currently available. The rules match what
+// the handlers themselves enforce, so the visual state and the
+// keyboard behavior can never disagree: an op is running (freezes
+// everything except q/ctrl+c), or the cursor is on a header (verbs
+// don't apply), or up needs a preview first.
+func (m dashboardModel) footerHints() string {
+	// Parts is a list of (letter, label, enabled) — rendered as
+	// "letter label", the letter dim when disabled, joined by " · ".
+	type part struct {
+		letter, label string
+		enabled       bool
+	}
+	// Default availability: cell-focused actions require a cell row,
+	// no op currently running, and (for `a`) an auth error on the cell.
+	stp := m.selectedState()
+	haveCell := stp != nil
+	idle := m.op == nil
+	authRelevant := idle && haveCell && stp.err != nil
+	previewOK := haveCell && m.previewSeen[stp.name]
+	parts := []part{
+		{"j/k", "select", true},
+		{"a", "auth", authRelevant},
+		{"p", "preview", idle && haveCell},
+		{"u", "up", idle && haveCell && previewOK},
+		{"D", "destroy", idle && haveCell},
+		{"g", "refresh", idle},
+		{"q", "quit", true},
+	}
+	segs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		text := p.letter + " " + p.label
+		if !p.enabled {
+			text = styDim.Render(text)
+		}
+		segs = append(segs, text)
+	}
+	return strings.Join(segs, " · ")
 }
 
 // renderContext builds the right-hand pane content based on what the
@@ -940,11 +1029,13 @@ func (m dashboardModel) View() string {
 	}
 	opsPane := "\n" + paneBox(title, logLines, opsContentW, opsH, m.op != nil)
 
-	// Footer: hints left, version tag right. On narrow terminals the
-	// version wins over hints (hints are re-learnable; "am I current?"
-	// is the question the stamp exists to answer). Same rule the
-	// witself-admin dashboard uses.
-	hints := " j/k select · a auth · p preview · u up · D destroy · g refresh · q quit "
+	// Footer: hints left, version tag right. Keys whose actions aren't
+	// currently available get their letter dimmed inline so an operator
+	// can see WHY nothing happens ("u is dim → I need to press p
+	// first") without pressing the key and reading the status line.
+	// On narrow terminals the version wins over hints (hints are
+	// re-learnable; "am I current?" isn't).
+	hints := " " + m.footerHints() + " "
 	ver := " witself-infra v" + versionString() + " "
 	pad := w - lipgloss.Width(hints) - lipgloss.Width(ver)
 	var footer string

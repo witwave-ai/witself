@@ -163,6 +163,16 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 	if configPath != "" {
 		args = append(args, "-config", configPath)
 	}
+	// Auto-bootstrap the state backend for preview/up. First-run cells
+	// otherwise fail with "state backend does not exist — run bootstrap
+	// first," which is a jarring detour from the dashboard for what's
+	// really a one-time initialization (creates a KMS key + state
+	// bucket in the target account, idempotent thereafter). Destroy
+	// never bootstraps: if the backend is missing there's nothing to
+	// destroy, and creating one during a destroy would be surprising.
+	if kind == opPreview || kind == opUp {
+		args = append(args, "-bootstrap")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd, err := spawnCommand(ctx, args)
 	if err != nil {

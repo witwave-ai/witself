@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // fakeSource lets the model tests skip the control plane and the
@@ -424,5 +425,77 @@ func TestSpawnCommandFromInstalledPath(t *testing.T) {
 	}
 	if !strings.Contains(dir, "witself-infra") {
 		t.Fatalf("currentSourceDir = %q — expected to contain the package name", dir)
+	}
+}
+
+// TestFooterHintsDimUnavailable pins the visual-availability contract:
+// letters for actions the operator can't currently take render dim so
+// the footer answers "why isn't u doing anything?" at a glance.
+func TestFooterHintsDimUnavailable(t *testing.T) {
+	// Force a color profile so styDim actually emits ANSI escape
+	// codes — the test env has no TTY, so lipgloss defaults to plain
+	// and the dim assertions would be vacuous otherwise.
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	states := []cellState{{name: "aws-sandbox-usw2-dev",
+		identity: identity{Cloud: "aws", Account: "111", OK: true}}}
+	m := seedModel(states, 120, 30)
+	hints := m.footerHints()
+	// up is NOT available (no preview yet) — its letter is dimmed.
+	if !strings.Contains(hints, styDim.Render("u up")) {
+		t.Errorf("up hint should be dim before a successful preview: %q", hints)
+	}
+	// auth is NOT available (no error on the cell) — dim.
+	if !strings.Contains(hints, styDim.Render("a auth")) {
+		t.Errorf("auth hint should be dim on a healthy cell: %q", hints)
+	}
+	// After a successful preview, up flips to available.
+	m.previewSeen = map[string]bool{"aws-sandbox-usw2-dev": true}
+	if strings.Contains(m.footerHints(), styDim.Render("u up")) {
+		t.Errorf("up hint should be enabled after preview: %q", m.footerHints())
+	}
+}
+
+// TestUpRefusesWithoutPreviewInStartOpKey pins the "why nothing
+// happened" flow: pressing u without a preview shows a helpful status
+// rather than silently opening (or not opening) a dialog.
+func TestUpRefusesWithoutPreviewInStartOpKey(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
+	m := seedModel(states, 120, 30)
+	next, _ := m.startOpKey("u")
+	m2 := next.(dashboardModel)
+	if m2.pending != nil {
+		t.Fatal("up must not open a confirm dialog without a passed preview")
+	}
+	if !strings.Contains(m2.status, "preview") {
+		t.Errorf("status must explain the missing preview: %q", m2.status)
+	}
+}
+
+// TestLooksLikeAuthFailure pins the phrase set used to nudge the
+// operator toward `a` when an op fails on credentials.
+func TestLooksLikeAuthFailure(t *testing.T) {
+	for _, tail := range [][]string{
+		{"failed to refresh cached SSO token", "some other line"},
+		{"aws sso login --profile witwave-sandbox"},
+		{"reauthentication is needed. Please run: `gcloud auth login`"},
+		{"AuthenticationFailed: The access token is invalid"},
+		{"Unable to locate credentials. You can configure credentials by running..."},
+	} {
+		if !looksLikeAuthFailure(tail) {
+			t.Errorf("auth pattern missed: %v", tail)
+		}
+	}
+	// Non-auth errors must NOT trigger.
+	for _, tail := range [][]string{
+		{"error creating EKS Cluster: InsufficientCapacity"},
+		{"stack aws-sandbox-usw2-dev is currently locked"},
+		{"connect: connection refused"},
+	} {
+		if looksLikeAuthFailure(tail) {
+			t.Errorf("false positive on: %v", tail)
+		}
 	}
 }
