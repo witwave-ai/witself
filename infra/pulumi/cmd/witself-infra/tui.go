@@ -33,6 +33,10 @@ var (
 	styOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styErr   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	// styPlan marks "previewed — up armed": cyan, deliberately outside
+	// the green/yellow/red state palette because it's workflow state,
+	// not cell health. Matches the focused-pane border accent.
+	styPlan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
 // cellState is the merged view of one cell across the config file and
@@ -1033,6 +1037,13 @@ func (m dashboardModel) renderContext(ctxContentW int) []string {
 		}
 		put("control plane", groupLabel(st.controlPlane))
 		put("status", st.status())
+		// Plan state: spells out what the ◆ in the cells pane means, and
+		// what to press next either way.
+		if m.previewSeen[st.name] {
+			put("plan", styPlan.Render("◆ previewed — press u to apply"))
+		} else {
+			put("plan", styDim.Render("none — press p to preview"))
+		}
 		if st.fleet != nil {
 			if st.fleet.Endpoint != "" {
 				put("endpoint", st.fleet.Endpoint)
@@ -1165,7 +1176,14 @@ func (m dashboardModel) View() string {
 			} else {
 				marker = st.statusStyled()
 			}
-			text := fmt.Sprintf("%s %s", marker, st.name)
+			// Plan column: ◆ when a successful preview has armed `u` for
+			// this cell, blank otherwise. Two cells wide on every row so
+			// names stay aligned whether or not the mark is present.
+			plan := "  "
+			if m.previewSeen[st.name] {
+				plan = styPlan.Render("◆") + " "
+			}
+			text := fmt.Sprintf("%s %s%s", marker, plan, st.name)
 			if selected {
 				text = "  ▸ " + text
 			} else {

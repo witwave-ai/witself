@@ -9,10 +9,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
 )
+
+// stripANSIForTest removes escape sequences so column-position
+// assertions measure what the terminal displays, not the raw bytes.
+func stripANSIForTest(s string) string { return xansi.Strip(s) }
 
 // fakeSource lets the model tests skip the control plane and the
 // cloud identity API.
@@ -466,6 +471,75 @@ func TestFooterHintsDimUnavailable(t *testing.T) {
 	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
 	if !strings.Contains(m.footerHints(), styDim.Render("a auth")) {
 		t.Errorf("auth hint should be dim while an op runs: %q", m.footerHints())
+	}
+}
+
+// TestPreviewedCellShowsPlanMark pins the ◆ plan column: a cell with
+// a passed preview shows the cyan diamond ahead of its name (and a
+// "plan" line in the context pane), a cell without one shows neither,
+// and rows stay aligned because the column is always two cells wide.
+func TestPreviewedCellShowsPlanMark(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	states := []cellState{
+		{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")}},
+		{name: "gcp-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("gcp"), Region: strPtr("us-west2")}},
+	}
+	m := seedModel(states, 120, 30)
+	m.previewSeen = map[string]bool{"aws-sandbox-usw2-dev": true}
+
+	v := m.View()
+	// Prefix match — the cells pane may ellipsize long names; the mark
+	// and the name's start are what matter.
+	if !strings.Contains(v, styPlan.Render("◆")+" aws-sandbox") {
+		t.Fatal("previewed cell must show the ◆ plan mark before its name")
+	}
+	if strings.Contains(v, "◆ gcp-sandbox") {
+		t.Fatal("unpreviewed cell must NOT show the plan mark")
+	}
+	// Alignment: in the cells pane (rows carrying the ◌ glyph — the
+	// context pane spells "absent" without it), the name must start at
+	// the same offset from the status marker whether or not the ◆ is
+	// present.
+	var awsRel, gcpRel = -1, -1
+	for _, row := range strings.Split(v, "\n") {
+		plain := stripANSIForTest(row)
+		mk := strings.Index(plain, "◌ absent")
+		if mk < 0 {
+			continue
+		}
+		// Offsets in display CELLS, not bytes — ◌ ◆ ▸ are multi-byte
+		// single-cell runes, so byte math would misreport alignment.
+		if i := strings.Index(plain, "aws-sandbox"); i >= 0 && awsRel == -1 {
+			awsRel = lipgloss.Width(plain[mk:i])
+		}
+		if i := strings.Index(plain, "gcp-sandbox"); i >= 0 && gcpRel == -1 {
+			gcpRel = lipgloss.Width(plain[mk:i])
+		}
+	}
+	if awsRel == -1 || gcpRel == -1 || awsRel != gcpRel {
+		t.Fatalf("cell names must stay aligned with and without the mark: aws offset %d, gcp offset %d", awsRel, gcpRel)
+	}
+	// Context pane spells it out for the selected (previewed) cell.
+	if !strings.Contains(v, "press u to apply") {
+		t.Fatal("context pane must explain the armed plan")
+	}
+}
+
+// TestPlanMarkClearsWhenInvalidated pins the truthfulness contract:
+// the ◆ tracks previewSeen exactly, so a successful up (which
+// invalidates the plan) must also clear the mark.
+func TestPlanMarkClearsWhenInvalidated(t *testing.T) {
+	states := []cellState{{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws")}}}
+	m := seedModel(states, 120, 30)
+	m.previewSeen = map[string]bool{"aws-sandbox-usw2-dev": true}
+	m.op = &opRun{kind: opUp, cell: "aws-sandbox-usw2-dev"}
+	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
+	m2 := next.(dashboardModel)
+	if strings.Contains(m2.View(), "◆ aws-sandbox") {
+		t.Fatal("plan mark must clear after a successful up — the previewed plan was consumed")
 	}
 }
 
