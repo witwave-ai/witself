@@ -562,3 +562,98 @@ func TestOpsPaneRetainsLastOp(t *testing.T) {
 		t.Fatal("ops pane must retain the completed op's lines")
 	}
 }
+
+// TestPendingDialogOverlaysDoesNotOverflow pins the confirmation-modal
+// fix: pressing `u` after preview must float the "apply?" dialog OVER
+// the dashboard frame (dashboard still visible around it) instead of
+// stacking below it — stacking overflowed the terminal and bubbletea's
+// altscreen sheared the top border to make room.
+func TestPendingDialogOverlaysDoesNotOverflow(t *testing.T) {
+	states := []cellState{{
+		name:     "aws-sandbox-usw2-dev",
+		entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+		identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+	}}
+	m := seedModel(states, 120, 30)
+	m.previewSeen = map[string]bool{"aws-sandbox-usw2-dev": true}
+	m.pending = startConfirm(opUp, "aws-sandbox-usw2-dev", true)
+
+	v := m.View()
+	rows := strings.Split(v, "\n")
+	if got := len(rows); got > 30 {
+		t.Fatalf("dialog must not overflow: %d rows in a 30-row terminal", got)
+	}
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w > 120 {
+			t.Fatalf("row %d width %d exceeds 120: %q", i, w, r)
+		}
+	}
+	// Dialog content is present.
+	if !strings.Contains(v, "UP aws-sandbox-usw2-dev") {
+		t.Fatal("dialog title missing")
+	}
+	if !strings.Contains(v, "press y to apply") {
+		t.Fatal("dialog body missing")
+	}
+	// Dashboard frame stays visible around the dialog.
+	if !strings.Contains(v, "cells") {
+		t.Fatal("cells pane title must still show behind the dialog")
+	}
+	if !strings.Contains(v, "context") {
+		t.Fatal("context pane title must still show behind the dialog")
+	}
+}
+
+// TestDestroyDialogOverlaysAtMinimumSize pins the tallest confirmation
+// (destroy has a multi-line body with typed-name prompt) on the
+// smallest supported terminal — the stacked layout would overflow
+// here worst.
+func TestDestroyDialogOverlaysAtMinimumSize(t *testing.T) {
+	states := []cellState{{
+		name:     "aws-sandbox-usw2-dev",
+		entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+		identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+	}}
+	m := seedModel(states, 66, 18) // minimum supported terminal
+	m.pending = startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
+
+	v := m.View()
+	rows := strings.Split(v, "\n")
+	if got := len(rows); got > 18 {
+		t.Fatalf("destroy dialog must not overflow minimum terminal: %d rows in 18-row terminal", got)
+	}
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w > 66 {
+			t.Fatalf("row %d width %d exceeds 66: %q", i, w, r)
+		}
+	}
+	if !strings.Contains(v, "DESTROY aws-sandbox-usw2-dev") {
+		t.Fatal("destroy dialog title missing")
+	}
+}
+
+// TestInterruptModalOverlaysDoesNotOverflow: same fix applies to the
+// interrupt-during-op modal — ctrl+c while an op runs pops a dialog
+// that must float over the frame, not push it off.
+func TestInterruptModalOverlaysDoesNotOverflow(t *testing.T) {
+	states := []cellState{{
+		name:     "aws-sandbox-usw2-dev",
+		entry:    cellEntry{Cloud: strPtr("aws"), Region: strPtr("us-west-2")},
+		identity: identity{Cloud: "aws", Account: "123456789012", Profile: "witwave-sandbox", OK: true},
+	}}
+	m := seedModel(states, 120, 30)
+	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
+	m.interruptModal = true
+
+	v := m.View()
+	rows := strings.Split(v, "\n")
+	if got := len(rows); got > 30 {
+		t.Fatalf("interrupt modal must not overflow: %d rows in 30-row terminal", got)
+	}
+	if !strings.Contains(v, "An operation is running") {
+		t.Fatal("interrupt modal body missing")
+	}
+	if !strings.Contains(v, "cells") {
+		t.Fatal("dashboard must stay visible behind the interrupt modal")
+	}
+}

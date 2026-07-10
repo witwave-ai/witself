@@ -1130,11 +1130,16 @@ func (m dashboardModel) View() string {
 	}
 	rendered := top + opsPane + "\n" + styDim.Render(footer) + status
 
-	// Overlay a dialog when we have one to show. Simple stacked layout
-	// (not centered-splice like witself-admin) — this binary's dialogs
-	// are safety-critical, not decorative.
+	// Float dialogs over the middle of the frame instead of stacking
+	// below it. Stacking overflowed the terminal on tall dialogs (the
+	// destroy typing prompt, the up confirmation) and bubbletea's
+	// altscreen sheared the top border to compensate. overlayCenter
+	// splices ANSI-safe, so pane borders stay intact around the box.
+	// Dialog width is capped to fit the terminal so word-wrap kicks in
+	// on narrow screens instead of overflowing the frame.
+	dlgContentW := min(max(m.width-8, 30), 76)
 	if m.pending != nil {
-		return rendered + "\n" + dialogBox(m.pending.render())
+		return overlayCenter(rendered, dialogBox(m.pending.render(), dlgContentW), m.width)
 	}
 	if m.interruptModal && m.op != nil {
 		// The "detach and quit" option promises what we can't reliably
@@ -1144,16 +1149,20 @@ func (m dashboardModel) View() string {
 		body := fmt.Sprintf(
 			"An operation is running: %s %s\n\n[k] keep it running (default)\n[c] cancel it (SIGKILL to the process group)\n\ndetaching a running op is not yet supported — see WITSELF_HOME/logs/infra after the op completes.\n",
 			m.op.kind.verb(), m.op.cell)
-		return rendered + "\n" + dialogBox(body)
+		return overlayCenter(rendered, dialogBox(body, dlgContentW), m.width)
 	}
 	return rendered
 }
 
-func dialogBox(body string) string {
+// dialogBox frames a confirmation body with a thick yellow border.
+// contentW is the max inner width; lipgloss word-wraps longer lines so
+// a 130-char destroy warning still fits inside an 80-column terminal.
+func dialogBox(body string, contentW int) string {
 	st := lipgloss.NewStyle().
 		Border(lipgloss.ThickBorder()).
 		BorderForeground(lipgloss.Color("3")).
-		Padding(0, 2)
+		Padding(0, 2).
+		Width(contentW)
 	return st.Render(body)
 }
 
