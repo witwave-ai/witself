@@ -101,10 +101,10 @@ func TestCPSettingsRenderAndEdit(t *testing.T) {
 	defer lipgloss.SetColorProfile(old)
 
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
 
 	v := m.View()
-	for _, want := range []string{"placement runner", "enabled", "restore batch", "25", "rebalance batch", "10"} {
+	for _, want := range []string{"placement runner", "enabled", "restore batch", "4", "rebalance batch", "1"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("settings form missing %q", want)
 		}
@@ -139,24 +139,35 @@ func TestCPSettingsRenderAndEdit(t *testing.T) {
 	}
 }
 
-// TestCPApplyFlow pins the whole write path: a → diff modal, y →
-// SetPlacementRunner with the draft, response becomes authoritative,
-// draft cleared.
+// pressApply presses 'a' AND delivers the pre-apply re-read that now
+// gates the confirm modal. The re-read carries the current cfg so the
+// diff is unchanged (the interesting concurrent-write case is a
+// separate test).
+func pressApply(t *testing.T, m dashboardModel) dashboardModel {
+	t.Helper()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	s := m.cpSettings[testCP]
+	next, _ = m.Update(cpSettingsMsg{cp: testCP, cfg: s.cfg, gen: s.readGen, purpose: cpReadPreApply})
+	return next.(dashboardModel)
+}
+
+// TestCPApplyFlow pins the write path: a → pre-apply re-read → diff
+// modal → y → SetPlacementRunner with the draft → response becomes
+// authoritative → draft cleared.
 func TestCPApplyFlow(t *testing.T) {
 	rec := &fakeRunnerRecorder{}
 	m := cpSeed(t, fakeSource{rec: rec})
-	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
 
 	// Toggle rebalance (field index 4) on.
 	m.cpFieldSel = 4
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = next.(dashboardModel)
 
-	// a opens the confirm modal with the diff.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = next.(dashboardModel)
+	m = pressApply(t, m)
 	if m.cpApply == nil {
-		t.Fatal("a with a dirty draft must open the apply modal")
+		t.Fatal("a with a dirty draft must open the apply modal (after re-read)")
 	}
 	if len(m.cpApply.diffs) != 1 || !strings.Contains(m.cpApply.diffs[0], "rebalance: off → on") {
 		t.Fatalf("modal must carry the diff, got %v", m.cpApply.diffs)
@@ -171,10 +182,7 @@ func TestCPApplyFlow(t *testing.T) {
 	if m.cpApply != nil {
 		t.Fatal("y must consume the modal")
 	}
-	if cmd == nil {
-		t.Fatal("y must return the apply command")
-	}
-	msg := cmd() // run the async write synchronously
+	msg := cmd()
 	applyMsg, ok := msg.(cpApplyMsg)
 	if !ok {
 		t.Fatalf("apply command must yield cpApplyMsg, got %T", msg)
@@ -183,12 +191,11 @@ func TestCPApplyFlow(t *testing.T) {
 		t.Fatalf("SetPlacementRunner must receive the draft, got %+v", rec.setCalls)
 	}
 
-	// The response becomes authoritative and the draft clears.
 	next, _ = m.Update(applyMsg)
 	m = next.(dashboardModel)
 	s := m.cpSettings[testCP]
 	if s.draft != nil {
-		t.Fatal("a successful apply must clear the draft")
+		t.Fatal("a successful apply with no mid-apply edits must clear the draft")
 	}
 	if !s.cfg.Runner.Rebalance {
 		t.Fatal("the applied config must become authoritative")
@@ -202,7 +209,7 @@ func TestCPApplyFlow(t *testing.T) {
 // write keeps the operator's edits so they can retry or discard.
 func TestCPApplyFailureKeepsDraft(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}})
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // toggle enabled → off
 	m = next.(dashboardModel)
 
@@ -221,7 +228,7 @@ func TestCPApplyFailureKeepsDraft(t *testing.T) {
 // and x discarding the whole draft.
 func TestCPIntEditAndDiscard(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{RestoreBatch: 25}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{RestoreBatch: 4, RebalanceBatch: 1}})
 
 	m.cpFieldSel = 2 // restore batch
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -243,11 +250,16 @@ func TestCPIntEditAndDiscard(t *testing.T) {
 		t.Fatalf("draft must hold the typed value, got %+v", s.draft)
 	}
 
-	// x discards everything.
+	// x opens a discard-confirm modal now (asymmetric-with-apply footgun fix).
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m = next.(dashboardModel)
+	if m.cpDiscard == nil {
+		t.Fatal("x must open the discard-confirm modal, not delete instantly")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(dashboardModel)
 	if m.cpSettings[testCP].draft != nil {
-		t.Fatal("x must discard the draft")
+		t.Fatal("y on the discard modal must clear the draft")
 	}
 }
 
@@ -258,16 +270,22 @@ func TestCPRunNow(t *testing.T) {
 	m := cpSeed(t, fakeSource{rec: rec, runResult: fleet.PlacementRunnerResult{
 		Restore: &fleet.RestoreResult{Restored: []fleet.RestoredAccount{{}, {}}},
 	}})
-	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}})
 
 	// Make a dirty draft first — run must ignore it.
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // enabled → off (draft only)
 	m = next.(dashboardModel)
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	// r now opens a confirm modal (unconfirmed-mutation fix).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(dashboardModel)
+	if m.cpRun == nil {
+		t.Fatal("r must open the run-confirm modal, not fire instantly")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	m = next.(dashboardModel)
 	if cmd == nil {
-		t.Fatal("r must fire the runner command")
+		t.Fatal("y on the run modal must fire the runner command")
 	}
 	msg := cmd()
 	if len(rec.runCalls) != 1 {
@@ -308,7 +326,7 @@ func TestCPSettingsUnreachable(t *testing.T) {
 // modal or HTTP 400.
 func TestCPReaperValidation(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, cpConfig{Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
 
 	// Field 6 = reaper enabled. Toggle on; ttl stays 0.
 	m.cpFieldSel = 6
@@ -333,8 +351,7 @@ func TestCPReaperValidation(t *testing.T) {
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(dashboardModel)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = next.(dashboardModel)
+	m = pressApply(t, m)
 	if m.cpApply == nil {
 		t.Fatal("apply modal must open once the reaper draft is valid")
 	}
@@ -354,7 +371,7 @@ func TestCPReaperValidation(t *testing.T) {
 // apply, and cycling the pinned-cell field walks the CP's cells.
 func TestCPStrategyCycleAndPinValidation(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, cpConfig{Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
 
 	m.cpFieldSel = 8 // strategy
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
@@ -384,8 +401,7 @@ func TestCPStrategyCycleAndPinValidation(t *testing.T) {
 	}
 
 	// Now apply opens.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = next.(dashboardModel)
+	m = pressApply(t, m)
 	if m.cpApply == nil {
 		t.Fatal("apply modal must open for a valid pinned draft")
 	}
@@ -398,7 +414,7 @@ func TestCPApplyWritesOnlyDirtySections(t *testing.T) {
 	rec := &fakeRunnerRecorder{}
 	m := cpSeed(t, fakeSource{rec: rec})
 	m = deliverCfg(t, m, cpConfig{
-		Runner:    fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25},
+		Runner:    fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1},
 		Reaper:    fleet.ReaperConfig{Enabled: true, TTLMinutes: 240},
 		Placement: fleet.PlacementConfig{Strategy: "weighted"},
 	})
@@ -413,8 +429,7 @@ func TestCPApplyWritesOnlyDirtySections(t *testing.T) {
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(dashboardModel)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = next.(dashboardModel)
+	m = pressApply(t, m)
 	if m.cpApply == nil {
 		t.Fatal("apply modal must open")
 	}
@@ -501,5 +516,291 @@ func TestCPHeaderSurvivesLastCellDestroyed(t *testing.T) {
 	}
 	if !sep || !cellBelow {
 		t.Fatal("the destroyed cell must still list below the separator")
+	}
+}
+
+// TestCPApplyReReadsBeforeDiff pins the stale-write fix: pressing 'a'
+// re-reads authoritatively, so a concurrent server-side change lands
+// in the modal's diff (or shifts what the operator sees) before y.
+func TestCPApplyReReadsBeforeDiff(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+
+	// Operator toggles enabled off in a draft.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	// a fires the re-read; modal doesn't open yet.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("modal must NOT open before the pre-apply re-read lands")
+	}
+	if !m.cpSettings[testCP].inflight {
+		t.Fatal("a must mark a read in flight")
+	}
+	// Meanwhile another operator changed RebalanceBatch on the server.
+	// The re-read carries the FRESH cfg. The modal must now include the
+	// server-side change in its diff (or highlight it), not the stale one.
+	s := m.cpSettings[testCP]
+	fresh := s.cfg
+	fresh.Runner.RebalanceBatch = 5 // concurrent change
+	next, _ = m.Update(cpSettingsMsg{cp: testCP, cfg: fresh, gen: s.readGen, purpose: cpReadPreApply})
+	m = next.(dashboardModel)
+	if m.cpApply == nil {
+		t.Fatal("modal must open after the re-read lands")
+	}
+	// The diff must now show BOTH the operator's toggle AND the concurrent change.
+	haveEnabled, haveBatch := false, false
+	for _, d := range m.cpApply.diffs {
+		if strings.Contains(d, "enabled: on → off") {
+			haveEnabled = true
+		}
+		if strings.Contains(d, "rebalance batch: 5 → 1") {
+			haveBatch = true
+		}
+	}
+	if !haveEnabled {
+		t.Fatal("modal must still show the operator's edit")
+	}
+	if !haveBatch {
+		t.Fatal("modal must surface the concurrent server-side change so 'y' isn't silent")
+	}
+}
+
+// TestCPReadFailureKeepsCfg pins that a failed background read does
+// NOT overwrite the last-good authoritative config with a zero struct.
+func TestCPReadFailureKeepsCfg(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	good := cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}}
+	m = deliverCfg(t, m, good)
+	s := m.cpSettings[testCP]
+	// A failed refresh arrives.
+	next, _ := m.Update(cpSettingsMsg{cp: testCP, err: errFake("cp unreachable"), gen: s.readGen, purpose: cpReadBackground})
+	m = next.(dashboardModel)
+	s = m.cpSettings[testCP]
+	if s.cfg != good {
+		t.Fatalf("failed read must NOT clobber cfg, got %+v", s.cfg)
+	}
+	if s.err == nil {
+		t.Fatal("failed read must record the error")
+	}
+	// 'a' now refuses (not editReady) rather than posting the zero draft.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("apply must refuse in an error state — no dangerous diff-against-zero modal")
+	}
+}
+
+// TestCPStaleReadDropped pins the gen fence: a read fired against an
+// older gen is dropped so an intervening apply/discard can't be
+// silently reverted.
+func TestCPStaleReadDropped(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	orig := cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}}
+	m = deliverCfg(t, m, orig)
+	s := m.cpSettings[testCP]
+	staleGen := s.readGen
+	// Discard fires readGen++ (state-changing event).
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}) // opens confirm
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}) // confirms discard
+	m = next.(dashboardModel)
+	// A stale read (gen from before the discard) lands with different data.
+	stale := orig
+	stale.Runner.Enabled = false
+	next, _ = m.Update(cpSettingsMsg{cp: testCP, cfg: stale, gen: staleGen, purpose: cpReadBackground})
+	m = next.(dashboardModel)
+	if m.cpSettings[testCP].cfg != orig {
+		t.Fatalf("stale read must be dropped, cfg = %+v", m.cpSettings[testCP].cfg)
+	}
+}
+
+// TestCPRunNeedsConfirm pins the confirm gate on 'r': one keypress can
+// no longer fire an account-moving pass.
+func TestCPRunNeedsConfirm(t *testing.T) {
+	rec := &fakeRunnerRecorder{}
+	m := cpSeed(t, fakeSource{rec: rec})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreArchives: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(dashboardModel)
+	if m.cpRun == nil {
+		t.Fatal("r must open a confirm modal, not fire directly")
+	}
+	if len(rec.runCalls) != 0 {
+		t.Fatal("no runner pass may fire before the confirm")
+	}
+	// esc cancels.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(dashboardModel)
+	if m.cpRun != nil {
+		t.Fatal("esc must cancel the run modal")
+	}
+}
+
+// TestCPRunInflightGuard pins that repeat r presses can't fire
+// concurrent passes.
+func TestCPRunInflightGuard(t *testing.T) {
+	rec := &fakeRunnerRecorder{}
+	m := cpSeed(t, fakeSource{rec: rec})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreArchives: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(dashboardModel)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(dashboardModel)
+	_ = cmd // dispatched
+	// Second r while in flight refuses cleanly.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(dashboardModel)
+	if m.cpRun != nil {
+		t.Fatal("r must refuse while a pass is in flight, not open another modal")
+	}
+	if !strings.Contains(m.status, "already in flight") {
+		t.Fatalf("status must explain the refusal: %q", m.status)
+	}
+}
+
+// TestCPDiscardNeedsConfirm pins the x-confirm modal.
+func TestCPDiscardNeedsConfirm(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = next.(dashboardModel)
+	if m.cpDiscard == nil {
+		t.Fatal("x must open the discard-confirm modal")
+	}
+	// esc keeps the draft.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(dashboardModel)
+	if m.cpSettings[testCP].draft == nil {
+		t.Fatal("esc on the discard modal must keep the draft")
+	}
+}
+
+// TestCPQuitGuardOnDirtyDraft pins that q refuses to quit silently
+// with unapplied fleet-automation edits.
+func TestCPQuitGuardOnDirtyDraft(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // dirty
+	m = next.(dashboardModel)
+	// Un-focus so 'q' hits the normal handler.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // esc backs focus out
+	m = next.(dashboardModel)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m = next.(dashboardModel)
+	if cmd != nil {
+		t.Fatal("q with a dirty draft must NOT quit directly")
+	}
+	if m.cpQuit == nil {
+		t.Fatal("q must open a quit-confirm modal instead of dropping edits")
+	}
+}
+
+// TestCPBatchClampValidation pins the pre-write clamp guard.
+func TestCPBatchClampValidation(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	// Edit restore batch to 50 (out of server 1..10 range).
+	m.cpFieldSel = 2
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	for _, d := range []string{"5", "0"} {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(d)})
+		m = next.(dashboardModel)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	// Apply refuses.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("apply must refuse out-of-clamp values before the modal")
+	}
+	if !strings.Contains(m.status, "restore batch must be") {
+		t.Fatalf("status must explain: %q", m.status)
+	}
+}
+
+// TestCPMidApplyEditsSurvive pins that edits made DURING an apply are
+// preserved (rebased onto the response) rather than silently dropped.
+func TestCPMidApplyEditsSurvive(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 4, RebalanceBatch: 1}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+	// Toggle enabled off (draft).
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	m = pressApply(t, m)
+	// Fire y.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(dashboardModel)
+	_ = cmd
+	// While apply is in flight, operator edits ANOTHER field.
+	m.cpFieldSel = 8 // strategy
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	// Response lands with the first change applied.
+	response := m.cpSettings[testCP].cfg
+	response.Runner.Enabled = false
+	next, _ = m.Update(cpApplyMsg{cp: testCP, cfg: response})
+	m = next.(dashboardModel)
+	s := m.cpSettings[testCP]
+	if s.cfg.Runner.Enabled {
+		t.Fatal("response must become authoritative")
+	}
+	if s.draft == nil {
+		t.Fatal("mid-apply strategy edit must survive on the draft")
+	}
+	if s.draft.Placement.Strategy != "pinned" {
+		t.Fatalf("mid-apply edit must persist, got strategy=%q", s.draft.Placement.Strategy)
+	}
+}
+
+// TestCPCursorFollowsCPHeaderAcrossRefresh pins the cursor-yank fix:
+// a mid-session load must keep the cursor on the CP header the
+// operator was editing settings on, not drop them onto the first cell.
+func TestCPCursorFollowsCPHeaderAcrossRefresh(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	if m.currentRow().kind != rowHeader {
+		t.Fatal("seed: cursor must be on the CP header")
+	}
+	// A refresh delivers the same states — but rows() is rebuilt from
+	// scratch. Cursor must stay on the header, not fall onto the cell.
+	acc := true
+	states := []cellState{{name: "aws-sandbox-usw2-dev", controlPlane: testCP, fleet: &fleet.Cell{Accepting: &acc}}}
+	next, _ := m.Update(loadedMsg{states: states})
+	m = next.(dashboardModel)
+	if m.currentRow().kind != rowHeader || m.currentRow().cp != testCP {
+		t.Fatalf("cursor must stick to the CP header across refresh, kind=%d cp=%q", m.currentRow().kind, m.currentRow().cp)
+	}
+}
+
+// TestCPSelfHostedArrowsInert pins that ←/→ on the self-hosted header
+// (renders untabbed) don't silently mutate cpActiveTab.
+func TestCPSelfHostedArrowsInert(t *testing.T) {
+	acc := true
+	states := []cellState{{name: "self-a", controlPlane: "", fleet: &fleet.Cell{Accepting: &acc}}}
+	m := dashboardModel{
+		ctx: t.Context(), cli: fakeSource{states: states},
+		width: 120, height: 30,
+		now: func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: states})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(dashboardModel)
+	before := m.cpActiveTab
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = next.(dashboardModel)
+	if m.cpActiveTab != before {
+		t.Fatalf("→ on a self-hosted (untabbed) header must NOT mutate cpActiveTab, got %d → %d", before, m.cpActiveTab)
 	}
 }

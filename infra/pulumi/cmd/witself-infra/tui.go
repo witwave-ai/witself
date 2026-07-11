@@ -321,6 +321,9 @@ type dashboardModel struct {
 	cpEditing   bool
 	cpEditBuf   string
 	cpApply     *cpApplyConfirm
+	cpRun       *cpRunConfirm
+	cpDiscard   *cpDiscardConfirm
+	cpQuit      *cpQuitConfirm
 
 	// reach caches the last control-plane reachability probe per cell,
 	// for the Health tab. Probes fire only while that tab is showing a
@@ -899,8 +902,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Remember what the cursor pointed at BEFORE the reorder — a cell
 		// that flips absent↔live moves between sections, and we want the
 		// cursor to follow it by identity, not jump to whatever now sits
-		// at the old index.
+		// at the old index. For header rows selectedCell() returns "" —
+		// so ALSO capture the CP URL, or a mid-session refresh would
+		// yank the operator off the Settings form and drop them on the
+		// first cell.
 		prevSelected := m.selectedCell()
+		prevHeaderCP := ""
+		if r := m.currentRow(); r.kind == rowHeader {
+			prevHeaderCP = r.cp
+		}
 		m.states = msg.states
 		m.controlPlanes = msg.controlPlanes
 		m.lastLoad = m.now()
@@ -909,12 +919,20 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// matches and planArmed drops it — so an edit that could retarget
 		// a cell forces a re-preview.
 		m.configFinger = msg.configFinger
-		// Re-place the cursor: on first load land on the first cell; on a
-		// refresh follow the previously-selected cell to its new row.
-		// Either way clamp and snap off a separator.
+		// Re-place the cursor: on first load land on the first cell; on
+		// a refresh follow the previously-selected cell or header to its
+		// new row. Either way clamp and snap off a separator.
 		rows := m.rows()
 		target := -1
-		if !firstLoad && prevSelected != "" {
+		if !firstLoad && prevHeaderCP != "" {
+			for i, r := range rows {
+				if r.kind == rowHeader && r.cp == prevHeaderCP {
+					target = i
+					break
+				}
+			}
+		}
+		if target < 0 && !firstLoad && prevSelected != "" {
 			for i, r := range rows {
 				if r.kind == rowCell && m.states[r.cellIdx].name == prevSelected {
 					target = i
@@ -971,30 +989,93 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		s := m.cpSettings[msg.cp]
 		s.inflight = false
+		// Drop stale reads: any state-changing event bumps readGen, and
+		// a read carrying an older gen can silently overwrite fresher
+		// state (an intervening apply, discard, or edit).
+		if msg.gen != s.readGen {
+			m.cpSettings[msg.cp] = s
+			return m, nil
+		}
+		if msg.err != nil {
+			// A failed read must NOT overwrite s.cfg — the previous
+			// authoritative snapshot is still the operator's best truth,
+			// and zeroing it would make the diff-modal compute against an
+			// all-zero config (finding #4/#7/#13/#21).
+			s.err = msg.err
+			m.cpSettings[msg.cp] = s
+			return m, nil
+		}
+		// Fresh authoritative read.
+		s.err = nil
+		s.cfg = msg.cfg
 		s.loaded = m.now()
-		s.cfg, s.err = msg.cfg, msg.err
 		m.cpSettings[msg.cp] = s
+		// Pre-apply purpose: the operator just pressed `a`. Compute the
+		// diff against the FRESH cfg and open the modal — surfacing any
+		// concurrent server-side changes so the confirmation isn't stale.
+		if msg.purpose == cpReadPreApply && s.draft != nil {
+			if !s.dirty() {
+				m.status = "server-side changes matched your edits — nothing to apply"
+				return m, nil
+			}
+			if why := validateDraft(*s.draft); why != "" {
+				m.status = "✗ " + why
+				return m, nil
+			}
+			// Merge any concurrent server-side changes into the draft so
+			// the operator's edits ride over the freshest base, then diff.
+			// (If a field the operator touched changed server-side, the
+			// operator's value wins — but the diff line shows both.)
+			m.cpApply = &cpApplyConfirm{
+				cp:       msg.cp,
+				next:     *s.draft,
+				base:     s.cfg,
+				sections: dirtySections(s.cfg, *s.draft),
+				diffs:    diffConfigs(s.cfg, *s.draft),
+			}
+		}
 		return m, nil
 	case cpApplyMsg:
 		s := m.cpSettings[msg.cp]
 		s.applying = false
+		s.readGen++ // fence any read in flight from before the write
 		if msg.err != nil {
 			// Keep the draft — the operator's edits survive a failed
 			// write so they can retry or discard deliberately.
 			m.status = "✗ apply failed: " + oneLine(msg.err.Error())
+			m.cpSettings[msg.cp] = s
+			return m, nil
+		}
+		// The control plane's response is the authoritative config for
+		// the sections we wrote. If the operator kept editing DURING the
+		// apply, those field changes (draft vs preDraftBase) rebase onto
+		// the response so they aren't silently lost. When there's
+		// nothing to rebase (or the rebase yielded the same result),
+		// the draft is fully consumed.
+		prevBase := s.preDraftBase
+		s.cfg = msg.cfg
+		s.loaded = m.now()
+		s.err = nil
+		if s.draft != nil {
+			merged, changed := mergeDraftEdits(prevBase, *s.draft, s.cfg)
+			if changed {
+				md := merged
+				s.draft = &md
+				s.preDraftBase = s.cfg
+				m.status = "✓ settings applied to " + shortHost(msg.cp) + " · your later edits kept — a apply to save them"
+			} else {
+				s.draft = nil
+				s.preDraftBase = cpConfig{}
+				m.status = "✓ settings applied to " + shortHost(msg.cp)
+			}
 		} else {
-			// The control plane's response is the authoritative config;
-			// the draft is consumed.
-			s.cfg = msg.cfg
-			s.loaded = m.now()
-			s.err = nil
-			s.draft = nil
 			m.status = "✓ settings applied to " + shortHost(msg.cp)
 		}
 		m.cpSettings[msg.cp] = s
 		return m, nil
 	case cpRunMsg:
 		s := m.cpSettings[msg.cp]
+		s.runInflight = false
 		if msg.err != nil {
 			s.lastRun = styErr.Render("✗ " + oneLine(msg.err.Error()))
 			m.status = "✗ runner pass failed: " + oneLine(msg.err.Error())
@@ -1134,6 +1215,18 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next, cmd := m.handleCPApplyKey(msg)
 		return next, cmd
 	}
+	if m.cpRun != nil {
+		next, cmd := m.handleCPRunKey(msg)
+		return next, cmd
+	}
+	if m.cpDiscard != nil {
+		next, cmd := m.handleCPDiscardKey(msg)
+		return next, cmd
+	}
+	if m.cpQuit != nil {
+		next, cmd := m.handleCPQuitKey(msg)
+		return next, cmd
+	}
 
 	// Settings-form keys: while the context pane holds focus on a CP
 	// Settings tab, j/k drive the FIELD cursor and enter/space/a/r/x
@@ -1155,6 +1248,14 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.op != nil {
 			m.status = "an op is running — ctrl+c for keep/cancel"
 			return m, nil
+		}
+		// A dirty CP draft is in memory only — quitting drops fleet-
+		// automation edits the operator didn't apply. Confirm first.
+		for cp, s := range m.cpSettings {
+			if s.dirty() {
+				m.cpQuit = &cpQuitConfirm{cp: cp, count: len(diffConfigs(s.cfg, *s.draft))}
+				return m, nil
+			}
 		}
 		return m, tea.Quit
 	case "j", "down":
@@ -1199,23 +1300,28 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "left", "h":
 		if m.focus == focusContext {
+			r := m.currentRow()
 			// Header rows step the CP tab set; cell rows the cell tabs.
-			if m.currentRow().kind == rowHeader {
+			// Self-hosted headers render untabbed — arrows must not
+			// silently mutate a hidden cpActiveTab that only wakes up
+			// once the operator moves onto a real CP header.
+			if r.kind == rowHeader && r.cp != "" {
 				if int(m.cpActiveTab) > 0 {
 					m.cpActiveTab--
 					m.cpEditing, m.cpEditBuf = false, ""
 				}
-			} else if int(m.activeTab) > 0 {
+			} else if r.kind == rowCell && int(m.activeTab) > 0 {
 				m.activeTab--
 			}
 		}
 	case "right", "l":
 		if m.focus == focusContext {
-			if m.currentRow().kind == rowHeader {
+			r := m.currentRow()
+			if r.kind == rowHeader && r.cp != "" {
 				if int(m.cpActiveTab) < len(cpTabNames)-1 {
 					m.cpActiveTab++
 				}
-			} else if int(m.activeTab) < len(contextTabs)-1 {
+			} else if r.kind == rowCell && int(m.activeTab) < len(contextTabs)-1 {
 				m.activeTab++
 			}
 		}
@@ -2270,6 +2376,15 @@ func (m dashboardModel) View() string {
 	}
 	if m.cpApply != nil {
 		return overlayCenter(rendered, dialogBox(m.cpApply.render(), dlgContentW), m.width)
+	}
+	if m.cpRun != nil {
+		return overlayCenter(rendered, dialogBox(m.cpRun.render(), dlgContentW), m.width)
+	}
+	if m.cpDiscard != nil {
+		return overlayCenter(rendered, dialogBox(m.cpDiscard.render(), dlgContentW), m.width)
+	}
+	if m.cpQuit != nil {
+		return overlayCenter(rendered, dialogBox(m.cpQuit.render(), dlgContentW), m.width)
 	}
 	if m.interruptModal && m.op != nil {
 		// The "detach and quit" option promises what we can't reliably
