@@ -557,6 +557,85 @@ func TestReachHealthLevels(t *testing.T) {
 
 // TestDashboardCursorMovement pins j/k navigation between cells and
 // the cursor's effect on the context pane.
+// TestAbsentCellsSinkToBottom pins the new ordering: live cells first
+// (CP-grouped), then a non-navigable separator, then absent cells
+// sorted alphabetically. The cursor skips the separator.
+func TestAbsentCellsSinkToBottom(t *testing.T) {
+	acc := true
+	live := func(name string) cellState {
+		return cellState{name: name, fleet: &fleet.Cell{Name: name, Accepting: &acc}}
+	}
+	// m.states arrives CP-then-name sorted (as load produces); the two
+	// live cells are already alphabetical, the absent ones deliberately
+	// are not, to prove rows() re-sorts them.
+	states := []cellState{live("aws-a-live"), live("aws-b-live"), {name: "aws-z-absent"}, {name: "aws-m-absent"}}
+	m := seedModel(states, 120, 30)
+
+	rows := m.rows()
+	sepAt := -1
+	for i, r := range rows {
+		if r.kind == rowSeparator {
+			sepAt = i
+		}
+	}
+	if sepAt < 0 {
+		t.Fatal("a separator must divide live cells from absent ones")
+	}
+	// Everything before the separator is a header or a live cell.
+	for i := 0; i < sepAt; i++ {
+		if rows[i].kind == rowCell && m.states[rows[i].cellIdx].status() == "absent" {
+			t.Fatalf("absent cell above the separator at row %d", i)
+		}
+	}
+	// After the separator: absent cells, alphabetical.
+	var absentNames []string
+	for i := sepAt + 1; i < len(rows); i++ {
+		if rows[i].kind == rowCell {
+			absentNames = append(absentNames, m.states[rows[i].cellIdx].name)
+		}
+	}
+	if len(absentNames) != 2 || absentNames[0] != "aws-m-absent" || absentNames[1] != "aws-z-absent" {
+		t.Fatalf("absent cells must be alphabetical below the separator: %v", absentNames)
+	}
+
+	// Cursor skips the separator: from the last live cell, j lands on the
+	// first absent cell, not the divider.
+	m.cursor = sepAt - 1 // last live cell
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m2 := next.(dashboardModel)
+	if m2.currentRow().kind != rowCell || m2.states[m2.currentRow().cellIdx].name != "aws-m-absent" {
+		t.Fatalf("j from the last live cell must skip the separator onto the first absent cell, landed on kind=%d", m2.currentRow().kind)
+	}
+}
+
+// TestCursorFollowsCellAcrossReorder pins that when a cell flips
+// absent→live (moving sections), the cursor stays on that cell by
+// identity rather than jumping to whatever now sits at its old index.
+func TestCursorFollowsCellAcrossReorder(t *testing.T) {
+	acc := true
+	live := func(name string) cellState {
+		return cellState{name: name, fleet: &fleet.Cell{Name: name, Accepting: &acc}}
+	}
+	states := []cellState{live("aws-a-live"), {name: "aws-z-absent"}}
+	m := seedModel(states, 120, 30)
+	// Select the absent cell.
+	for m.selectedCell() != "aws-z-absent" {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		nm := next.(dashboardModel)
+		if nm.cursor == m.cursor {
+			t.Fatal("could not reach the absent cell")
+		}
+		m = nm
+	}
+	// It registers (becomes live) — it moves up into the live group.
+	reloaded := []cellState{live("aws-a-live"), live("aws-z-absent")}
+	next, _ := m.Update(loadedMsg{states: reloaded})
+	m2 := next.(dashboardModel)
+	if m2.selectedCell() != "aws-z-absent" {
+		t.Fatalf("cursor must follow the cell across the reorder, now on %q", m2.selectedCell())
+	}
+}
+
 func TestDashboardCursorMovement(t *testing.T) {
 	states := []cellState{
 		{name: "aws-sandbox-usw2-dev", identity: identity{Cloud: "aws", Account: "111", OK: true}},

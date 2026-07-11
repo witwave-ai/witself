@@ -273,10 +273,11 @@ type rowKind int
 const (
 	rowCell rowKind = iota
 	rowHeader
+	rowSeparator // the non-navigable divider above the absent cells
 )
 
-// row is one selectable line in the cells pane. Headers surface CP
-// metadata; cells surface cell state.
+// row is one line in the cells pane. Headers surface CP metadata,
+// cells surface cell state, and separators are cursor-skipped dividers.
 type row struct {
 	kind    rowKind
 	cellIdx int    // when kind == rowCell: index into m.states
@@ -893,6 +894,11 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		firstLoad := len(m.states) == 0
+		// Remember what the cursor pointed at BEFORE the reorder — a cell
+		// that flips absent↔live moves between sections, and we want the
+		// cursor to follow it by identity, not jump to whatever now sits
+		// at the old index.
+		prevSelected := m.selectedCell()
 		m.states = msg.states
 		m.controlPlanes = msg.controlPlanes
 		m.lastLoad = m.now()
@@ -901,23 +907,34 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// matches and planArmed drops it — so an edit that could retarget
 		// a cell forces a re-preview.
 		m.configFinger = msg.configFinger
-		// Cursor indexes rows() (headers + cells). On the FIRST load,
-		// jump past the initial header so the operator can immediately
-		// act on a cell; on subsequent loads preserve position for a
-		// user who has navigated to a header on purpose. Clamp against
-		// the new row count regardless.
+		// Re-place the cursor: on first load land on the first cell; on a
+		// refresh follow the previously-selected cell to its new row.
+		// Either way clamp and snap off a separator.
 		rows := m.rows()
-		if m.cursor >= len(rows) {
-			m.cursor = max(len(rows)-1, 0)
-		}
-		if firstLoad {
+		target := -1
+		if !firstLoad && prevSelected != "" {
 			for i, r := range rows {
-				if r.kind == rowCell {
-					m.cursor = i
+				if r.kind == rowCell && m.states[r.cellIdx].name == prevSelected {
+					target = i
 					break
 				}
 			}
 		}
+		if target < 0 {
+			for i, r := range rows {
+				if r.kind == rowCell {
+					target = i
+					break
+				}
+			}
+		}
+		if target >= 0 {
+			m.cursor = target
+		}
+		if m.cursor >= len(rows) {
+			m.cursor = max(len(rows)-1, 0)
+		}
+		m.cursor = m.selectableCursor(m.cursor, +1)
 		m.status = fmt.Sprintf("%d cells · %s", len(m.states), m.now().UTC().Format("15:04:05"))
 		return m, nil
 	case refreshTickMsg:
@@ -1077,13 +1094,13 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "j", "down":
-		if m.cursor < len(m.rows())-1 {
-			m.cursor++
+		if next := m.selectableCursor(m.cursor+1, +1); next != m.cursor {
+			m.cursor = next
 			m.logSel, m.opsScroll = 0, 0 // new cell → newest log, at the tail
 		}
 	case "k", "up":
-		if m.cursor > 0 {
-			m.cursor--
+		if next := m.selectableCursor(m.cursor-1, -1); next != m.cursor {
+			m.cursor = next
 			m.logSel, m.opsScroll = 0, 0
 		}
 	case "[":
@@ -1184,20 +1201,71 @@ func (m dashboardModel) logsSelectedLen() int {
 	return len(m.selectedLogLines(stp.name, logs, m.clampLogSel(len(logs))))
 }
 
-// rows builds the flat selectable list: one header per control-plane
-// group followed by that group's cells. m.states is already sorted so
-// same-group cells are contiguous.
+// rows builds the cells-pane list. Live (registered) cells come first,
+// grouped by control plane. Absent cells — not yet provisioned — sink
+// below a separator, sorted alphabetically, ungrouped; they float back
+// up into their CP group the moment they register. m.states is already
+// sorted by CP-then-name, so the active pass stays grouped and
+// contiguous; the absent pass re-sorts by name across groups.
 func (m dashboardModel) rows() []row {
+	var active, absent []int
+	for i, st := range m.states {
+		if st.status() == "absent" {
+			absent = append(absent, i)
+		} else {
+			active = append(active, i)
+		}
+	}
+
 	var out []row
 	prev := "\x00" // sentinel — no real CP URL can equal
-	for i, st := range m.states {
-		if st.controlPlane != prev {
-			out = append(out, row{kind: rowHeader, cp: st.controlPlane})
-			prev = st.controlPlane
+	for _, i := range active {
+		if cp := m.states[i].controlPlane; cp != prev {
+			out = append(out, row{kind: rowHeader, cp: cp})
+			prev = cp
 		}
 		out = append(out, row{kind: rowCell, cellIdx: i})
 	}
+
+	if len(absent) > 0 {
+		sort.Slice(absent, func(a, b int) bool {
+			return m.states[absent[a]].name < m.states[absent[b]].name
+		})
+		if len(active) > 0 {
+			out = append(out, row{kind: rowSeparator})
+		}
+		for _, i := range absent {
+			out = append(out, row{kind: rowCell, cellIdx: i})
+		}
+	}
 	return out
+}
+
+// selectableCursor advances from idx in direction dir (±1) past any
+// separator rows, then clamps into the selectable range so the cursor
+// never lands on a divider or off the ends.
+func (m dashboardModel) selectableCursor(idx, dir int) int {
+	rows := m.rows()
+	n := len(rows)
+	if n == 0 {
+		return 0
+	}
+	for idx >= 0 && idx < n && rows[idx].kind == rowSeparator {
+		idx += dir
+	}
+	if idx < 0 {
+		idx = 0
+		for idx < n && rows[idx].kind == rowSeparator {
+			idx++
+		}
+	}
+	if idx >= n {
+		idx = n - 1
+		for idx >= 0 && rows[idx].kind == rowSeparator {
+			idx--
+		}
+	}
+	return idx
 }
 
 // currentRow returns the row under the cursor, or a zero row when the
@@ -1985,6 +2053,11 @@ func (m dashboardModel) View() string {
 				text = "  " + text
 			}
 			lines = append(lines, fitLine(text, cellsContentW))
+		case rowSeparator:
+			// A dim, cursor-skipped divider marking where the absent
+			// (not-yet-provisioned) cells begin.
+			rule := "─── absent " + strings.Repeat("─", max(cellsContentW-11, 0))
+			lines = append(lines, styDim.Render(fitLine(rule, cellsContentW)))
 		}
 	}
 	if len(lines) == 0 {
