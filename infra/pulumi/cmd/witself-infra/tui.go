@@ -2006,16 +2006,12 @@ func (m dashboardModel) View() string {
 			if i > 0 {
 				lines = append(lines, "")
 			}
-			// Count how many cells belong to this group.
-			n := 0
-			for j := i + 1; j < len(rows) && rows[j].kind == rowCell; j++ {
-				n++
-			}
+			// Just the group name (+ host) — the cell count was too much
+			// for one line and the cells themselves are right below it.
 			label := groupLabel(r.cp)
 			if r.cp != "" {
 				label = label + " · " + shortHost(r.cp)
 			}
-			label = fmt.Sprintf("%s  %d cell%s", label, n, plural(n))
 			// Bold always; the cursor arrow calls out selection.
 			text := styTitle.Render(label)
 			if selected {
@@ -2169,13 +2165,6 @@ func shortHost(controlPlane string) string {
 		return u.Host
 	}
 	return controlPlane
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 // paneBox frames one pane with a thick border and bold title —
