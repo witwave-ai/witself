@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"gopkg.in/yaml.v3"
 )
@@ -263,6 +265,105 @@ type tokenArgoLister struct {
 	baseURL string
 	client  *http.Client
 	token   string
+}
+
+// newAWSArgoListerFromOutputs builds a cluster prober for EKS. EKS
+// doesn't hand back a kubeconfig with an embedded token the way GKE/AKS
+// do, so we assemble one: DescribeCluster (SDK, cell profile) for the
+// apiserver endpoint + CA, and `aws eks get-token` for a short-lived
+// bearer — the same CLI-token pattern GCP (gcloud) and Azure (az)
+// already use. The result is a plain tokenArgoLister, so all its
+// readyz/nodes/argo methods work unchanged.
+func newAWSArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap, region, profile string) (*tokenArgoLister, string, error) {
+	clusterName := outputString(outs, "eksCluster")
+	if clusterName == "" {
+		return nil, "", fmt.Errorf("stack exports no eksCluster; cannot verify EKS health")
+	}
+	opts := []func(*awsconfig.LoadOptions) error{}
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	if profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, "", fmt.Errorf("load AWS config: %w", err)
+	}
+	desc, err := eks.NewFromConfig(cfg).DescribeCluster(ctx, &eks.DescribeClusterInput{Name: &clusterName})
+	if err != nil {
+		return nil, "", fmt.Errorf("describe EKS cluster: %w", err)
+	}
+	if desc.Cluster == nil || desc.Cluster.Endpoint == nil ||
+		desc.Cluster.CertificateAuthority == nil || desc.Cluster.CertificateAuthority.Data == nil {
+		return nil, "", fmt.Errorf("EKS DescribeCluster returned no endpoint/CA")
+	}
+	ca, err := base64.StdEncoding.DecodeString(*desc.Cluster.CertificateAuthority.Data)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode EKS certificate authority: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		return nil, "", fmt.Errorf("EKS certificate authority did not contain PEM data")
+	}
+	token, err := awsEKSToken(ctx, clusterName, region, profile)
+	if err != nil {
+		return nil, "", err
+	}
+	namespace := outputString(outs, "argocdNamespace")
+	if namespace == "" {
+		namespace = "argocd"
+	}
+	return &tokenArgoLister{
+		baseURL: strings.TrimRight(*desc.Cluster.Endpoint, "/"),
+		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		}},
+		token: token,
+	}, namespace, nil
+}
+
+// awsEKSToken mints an EKS bearer token via the aws CLI, threading the
+// cell's profile and region explicitly (the token-signing identity is
+// the cluster's aws-auth mapping). get-token is local — it presigns an
+// STS GetCallerIdentity, no cluster call — so it only needs valid
+// credentials for the profile.
+func awsEKSToken(ctx context.Context, cluster, region, profile string) (string, error) {
+	args := []string{"eks", "get-token", "--cluster-name", cluster, "--output", "json"}
+	if region != "" {
+		args = append(args, "--region", region)
+	}
+	if profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if d := strings.TrimSpace(stderr.String()); d != "" {
+			return "", fmt.Errorf("aws eks get-token: %s", oneLine(d))
+		}
+		return "", fmt.Errorf("aws eks get-token: %w", err)
+	}
+	return parseEKSToken(out)
+}
+
+// parseEKSToken pulls the bearer token out of `aws eks get-token
+// --output json` ({"status":{"token":"k8s-aws-v1.…"}}).
+func parseEKSToken(raw []byte) (string, error) {
+	var resp struct {
+		Status struct {
+			Token string `json:"token"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("parse eks token: %w", err)
+	}
+	if resp.Status.Token == "" {
+		return "", fmt.Errorf("aws eks get-token returned an empty token")
+	}
+	return resp.Status.Token, nil
 }
 
 func newAzureArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap) (*tokenArgoLister, string, error) {

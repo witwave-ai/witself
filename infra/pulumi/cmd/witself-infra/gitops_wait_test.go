@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
 
 func TestArgoApplicationsReady(t *testing.T) {
@@ -233,4 +235,30 @@ func testCertificateAuthorityData(t *testing.T) string {
 	}
 	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	return base64.StdEncoding.EncodeToString(pemData)
+}
+
+// TestParseEKSToken pins the get-token JSON extraction and the
+// empty-token guard.
+func TestParseEKSToken(t *testing.T) {
+	tok, err := parseEKSToken([]byte(`{"kind":"ExecCredential","status":{"token":"k8s-aws-v1.abc123","expirationTimestamp":"2026-07-11T00:00:00Z"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "k8s-aws-v1.abc123" {
+		t.Fatalf("token = %q, want k8s-aws-v1.abc123", tok)
+	}
+	if _, err := parseEKSToken([]byte(`{"status":{}}`)); err == nil {
+		t.Fatal("an empty token must be an error")
+	}
+	if _, err := parseEKSToken([]byte("not json")); err == nil {
+		t.Fatal("bad JSON must be an error")
+	}
+}
+
+// TestNewAWSArgoListerRequiresCluster pins the early guard: no
+// eksCluster output means no probe (no SDK call attempted).
+func TestNewAWSArgoListerRequiresCluster(t *testing.T) {
+	if _, _, err := newAWSArgoListerFromOutputs(context.Background(), auto.OutputMap{}, "us-east-1", ""); err == nil {
+		t.Fatal("missing eksCluster output must error before any AWS call")
+	}
 }

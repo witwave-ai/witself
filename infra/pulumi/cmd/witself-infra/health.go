@@ -122,9 +122,9 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 		prober, namespace, err = newGCPArgoListerFromOutputs(outs)
 	case "azure":
 		prober, namespace, err = newAzureArgoListerFromOutputs(ctx, outs)
+	case "aws":
+		prober, namespace, err = newAWSArgoListerFromOutputs(ctx, outs, region, awsProfile)
 	default:
-		// AWS EKS exports no CA/token for a direct apiserver call — that
-		// path needs `aws eks get-token` and is a follow-up.
 		report.Kubernetes = sh(healthUnknown, "cluster probe not yet wired for "+cloud)
 		return emitHealth(report)
 	}
