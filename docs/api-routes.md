@@ -228,6 +228,7 @@ GET  /v1/transcripts
 POST /v1/transcripts
 GET  /v1/transcripts/{transcript_id}
 POST /v1/transcripts/{transcript_id}/entries
+POST /v1/transcripts/{transcript_id}/entries:batch
 
 # Cross-realm conversation/task resource (post-v0 collaboration).
 GET  /v1/conversations
@@ -274,6 +275,17 @@ POST /v1/support/tickets/{ticket_id}:close
 
 This sketch is allowed to evolve during implementation, but the style should
 remain stable.
+
+`GET /v1/transcripts/{transcript_id}` accepts either forward paging with
+`after_sequence` and `limit` or a bounded newest-page read with `tail=true` and
+`limit`. Results remain ordered oldest-first and return `next_after_sequence`
+when another forward page exists. `limit` defaults to 100 and is capped at 500.
+
+The batch append accepts 1-100 ordered entries. Transcript creation and entry
+append are retry-safe when the caller supplies external ids. Reusing an entry
+external id with different content is a conflict; `reply_to_external_id` may
+refer to an earlier entry in the same transcript, including an earlier entry in
+the same batch.
 
 `/metrics` is intentionally outside `/v1` because it is an operational
 Prometheus scrape endpoint, not a product API resource. It should be served on

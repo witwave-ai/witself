@@ -131,18 +131,43 @@ func serve() int {
 		}
 		cfg.AppendTranscriptEntry = func(ctx context.Context, p server.DomainPrincipal, transcriptID string, in server.AppendTranscriptEntryRequest) (server.TranscriptEntry, error) {
 			entry, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID, transcriptID, store.AppendTranscriptEntryInput{
-				ExternalID:     in.ExternalID,
-				Role:           in.Role,
-				Body:           in.Body,
-				Payload:        in.Payload,
-				Model:          in.Model,
-				ReplyToEntryID: in.ReplyToEntryID,
-				Artifacts:      in.Artifacts,
+				ExternalID:        in.ExternalID,
+				Role:              in.Role,
+				Body:              in.Body,
+				Payload:           in.Payload,
+				Model:             in.Model,
+				ReplyToEntryID:    in.ReplyToEntryID,
+				ReplyToExternalID: in.ReplyToExternalID,
+				Artifacts:         in.Artifacts,
 			})
 			if err != nil {
 				return server.TranscriptEntry{}, mapTranscriptError(err)
 			}
 			return toServerTranscriptEntry(entry), nil
+		}
+		cfg.AppendTranscriptEntries = func(ctx context.Context, p server.DomainPrincipal, transcriptID string, inputs []server.AppendTranscriptEntryRequest) ([]server.TranscriptEntry, error) {
+			storeInputs := make([]store.AppendTranscriptEntryInput, len(inputs))
+			for i, in := range inputs {
+				storeInputs[i] = store.AppendTranscriptEntryInput{
+					ExternalID:        in.ExternalID,
+					Role:              in.Role,
+					Body:              in.Body,
+					Payload:           in.Payload,
+					Model:             in.Model,
+					ReplyToEntryID:    in.ReplyToEntryID,
+					ReplyToExternalID: in.ReplyToExternalID,
+					Artifacts:         in.Artifacts,
+				}
+			}
+			entries, err := st.AppendTranscriptEntries(ctx, p.AccountID, p.RealmID, p.ID, transcriptID, storeInputs)
+			if err != nil {
+				return nil, mapTranscriptError(err)
+			}
+			out := make([]server.TranscriptEntry, len(entries))
+			for i, entry := range entries {
+				out[i] = toServerTranscriptEntry(entry)
+			}
+			return out, nil
 		}
 		cfg.ListTranscripts = func(ctx context.Context, p server.DomainPrincipal) ([]server.Transcript, error) {
 			rows, err := st.ListTranscripts(ctx, toStorePrincipal(p))
@@ -165,6 +190,25 @@ func serve() int {
 				out[i] = toServerTranscriptEntry(entry)
 			}
 			return toServerTranscript(tr), out, nil
+		}
+		cfg.GetTranscriptPage = func(ctx context.Context, p server.DomainPrincipal, transcriptID string, opts server.TranscriptPageOptions) (server.TranscriptPage, error) {
+			page, err := st.GetTranscriptPage(ctx, toStorePrincipal(p), transcriptID, store.TranscriptPageOptions{
+				AfterSequence: opts.AfterSequence,
+				Limit:         opts.Limit,
+				Tail:          opts.Tail,
+			})
+			if err != nil {
+				return server.TranscriptPage{}, mapTranscriptError(err)
+			}
+			entries := make([]server.TranscriptEntry, len(page.Entries))
+			for i, entry := range page.Entries {
+				entries[i] = toServerTranscriptEntry(entry)
+			}
+			return server.TranscriptPage{
+				Transcript:        toServerTranscript(page.Transcript),
+				Entries:           entries,
+				NextAfterSequence: page.NextAfterSequence,
+			}, nil
 		}
 		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (server.Realm, error) {
 			r, err := st.CreateRealm(ctx, accountID, name)

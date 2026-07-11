@@ -59,6 +59,10 @@ func run(args []string) int {
 		return selfCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
+	case "install":
+		return installCmd(args[1:])
+	case "mcp":
+		return mcpCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -2456,7 +2460,7 @@ func selfShow(args []string) int {
 
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show ...")
+		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail ...")
 		return 2
 	}
 	switch args[0] {
@@ -2468,6 +2472,12 @@ func transcriptCmd(args []string) int {
 		return transcriptList(args[1:])
 	case "show":
 		return transcriptShow(args[1:])
+	case "tail":
+		return transcriptTail(args[1:])
+	case "hook":
+		return transcriptHook(args[1:])
+	case "flush":
+		return transcriptFlush(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself transcript: unknown subcommand %q\n", args[0])
 		return 2
@@ -2713,7 +2723,9 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
-	usageLine(w, "  witself transcript create|append|list|show  Record visible AI interactions")
+	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
+	usageLine(w, "  witself install codex|claude  Install transcript hooks and MCP access")
+	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)
 	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")

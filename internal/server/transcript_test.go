@@ -14,7 +14,7 @@ func TestTranscriptAgentWritesAndOperatorReads(t *testing.T) {
 	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
 		switch token {
 		case "agent-token":
-			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
+			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AgentName: "scott", AccountStatus: "active"}, true, nil
 		case "operator-token":
 			return DomainPrincipal{Kind: PrincipalKindOperator, ID: "opr_1", AccountID: "acc_1", AccountStatus: "active"}, true, nil
 		case "suspended-token":
@@ -32,6 +32,13 @@ func TestTranscriptAgentWritesAndOperatorReads(t *testing.T) {
 			createCalls++
 			if p.Kind != PrincipalKindAgent || p.ID != "agent_1" || in.Title != "Deployment" {
 				t.Fatalf("create input = %#v / %#v", p, in)
+			}
+			var metadata map[string]any
+			if err := json.Unmarshal(in.Metadata, &metadata); err != nil {
+				t.Fatal(err)
+			}
+			if metadata["agent_id"] != "agent_1" || metadata["agent_name"] != "scott" {
+				t.Fatalf("metadata = %#v", metadata)
 			}
 			return Transcript{ID: "trn_1", AccountID: p.AccountID, RealmID: p.RealmID, OwnerAgentID: p.ID, Title: in.Title, Metadata: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}, nil
 		},
@@ -113,6 +120,53 @@ func TestTranscriptAgentWritesAndOperatorReads(t *testing.T) {
 		t.Fatalf("suspended list = %d, want 403", resp.StatusCode)
 	}
 	closeBody(t, resp)
+}
+
+func TestTranscriptBatchAndPagedRead(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		AppendTranscriptEntries: func(_ context.Context, _ DomainPrincipal, transcriptID string, inputs []AppendTranscriptEntryRequest) ([]TranscriptEntry, error) {
+			if transcriptID != "trn_1" || len(inputs) != 2 || inputs[1].ReplyToExternalID != "evt_1:0" {
+				t.Fatalf("batch = %q / %#v", transcriptID, inputs)
+			}
+			return []TranscriptEntry{{ID: "ent_1", Sequence: 1}, {ID: "ent_2", Sequence: 2}}, nil
+		},
+		GetTranscriptPage: func(_ context.Context, _ DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error) {
+			if transcriptID != "trn_1" || opts.AfterSequence != 2 || opts.Limit != 25 || opts.Tail {
+				t.Fatalf("page = %q / %#v", transcriptID, opts)
+			}
+			return TranscriptPage{
+				Transcript:        Transcript{ID: transcriptID, Metadata: json.RawMessage(`{}`)},
+				Entries:           []TranscriptEntry{{ID: "ent_3", Sequence: 3}},
+				NextAfterSequence: 3,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := transcriptRequest(t, srv.URL, http.MethodPost, "/v1/transcripts/trn_1/entries:batch", "agent-token", `{"entries":[{"external_id":"evt_1:0","role":"user","body":"hello"},{"external_id":"evt_2:0","role":"assistant","body":"hi","reply_to_external_id":"evt_1:0"}]}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("batch status = %d", resp.StatusCode)
+	}
+	closeBody(t, resp)
+
+	resp = transcriptRequest(t, srv.URL, http.MethodGet, "/v1/transcripts/trn_1?after_sequence=2&limit=25", "agent-token", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("page status = %d", resp.StatusCode)
+	}
+	var page struct {
+		Next int64 `json:"next_after_sequence"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if page.Next != 3 {
+		t.Fatalf("next = %d", page.Next)
+	}
 }
 
 func transcriptRequest(t *testing.T, base, method, path, token, body string) *http.Response {

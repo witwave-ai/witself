@@ -277,10 +277,12 @@ type Config struct {
 	// Transcript ledger: append-only visible interaction capture. Agent tokens
 	// create/append their own transcripts. Agents read their own; operators read
 	// the whole account. Bodies and payloads are never copied into audit events.
-	CreateTranscript      func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
-	AppendTranscriptEntry func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
-	ListTranscripts       func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
-	GetTranscript         func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
+	CreateTranscript        func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
+	AppendTranscriptEntry   func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
+	AppendTranscriptEntries func(ctx context.Context, p DomainPrincipal, transcriptID string, in []AppendTranscriptEntryRequest) ([]TranscriptEntry, error)
+	ListTranscripts         func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
+	GetTranscript           func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
+	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -576,13 +578,28 @@ type CreateTranscriptRequest struct {
 
 // AppendTranscriptEntryRequest is the transcript entry append body.
 type AppendTranscriptEntryRequest struct {
-	ExternalID     string          `json:"external_id,omitempty"`
-	Role           string          `json:"role"`
-	Body           string          `json:"body,omitempty"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	Model          string          `json:"model,omitempty"`
-	ReplyToEntryID string          `json:"reply_to_entry_id,omitempty"`
-	Artifacts      json.RawMessage `json:"artifacts,omitempty"`
+	ExternalID        string          `json:"external_id,omitempty"`
+	Role              string          `json:"role"`
+	Body              string          `json:"body,omitempty"`
+	Payload           json.RawMessage `json:"payload,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	ReplyToEntryID    string          `json:"reply_to_entry_id,omitempty"`
+	ReplyToExternalID string          `json:"reply_to_external_id,omitempty"`
+	Artifacts         json.RawMessage `json:"artifacts,omitempty"`
+}
+
+// TranscriptPageOptions selects one bounded transcript read.
+type TranscriptPageOptions struct {
+	AfterSequence int64
+	Limit         int
+	Tail          bool
+}
+
+// TranscriptPage is the API-neutral result of a bounded transcript read.
+type TranscriptPage struct {
+	Transcript        Transcript
+	Entries           []TranscriptEntry
+	NextAfterSequence int64
 }
 
 // Realm is the API view of a realm.
@@ -891,11 +908,16 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ListTranscripts != nil {
 			mux.HandleFunc("GET /v1/transcripts", listTranscriptsHandler(cfg.AuthenticatePrincipal, cfg.ListTranscripts))
 		}
-		if cfg.GetTranscript != nil {
+		if cfg.GetTranscriptPage != nil {
+			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptPageHandler(cfg.AuthenticatePrincipal, cfg.GetTranscriptPage))
+		} else if cfg.GetTranscript != nil {
 			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptHandler(cfg.AuthenticatePrincipal, cfg.GetTranscript))
 		}
 		if cfg.AppendTranscriptEntry != nil {
 			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries", appendTranscriptEntryHandler(cfg.AuthenticatePrincipal, cfg.AppendTranscriptEntry))
+		}
+		if cfg.AppendTranscriptEntries != nil {
+			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries:batch", appendTranscriptEntriesHandler(cfg.AuthenticatePrincipal, cfg.AppendTranscriptEntries))
 		}
 	}
 	// Provision-token-authorized cell-wide admin ticket list (feeds
@@ -1199,6 +1221,12 @@ func createTranscriptHandler(auth PrincipalAuthFunc, create func(context.Context
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
+		metadata, err := transcriptMetadataWithPrincipal(req.Metadata, p)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "metadata must be a JSON object")
+			return
+		}
+		req.Metadata = metadata
 		tr, err := create(r.Context(), p, req)
 		switch {
 		case errors.Is(err, ErrBadInput):
@@ -1218,6 +1246,18 @@ func createTranscriptHandler(auth PrincipalAuthFunc, create func(context.Context
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "transcript": tr})
 	})
+}
+
+func transcriptMetadataWithPrincipal(raw json.RawMessage, p DomainPrincipal) (json.RawMessage, error) {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &metadata); err != nil || metadata == nil {
+			return nil, errors.New("metadata is not an object")
+		}
+	}
+	metadata["agent_id"] = p.ID
+	metadata["agent_name"] = p.AgentName
+	return json.Marshal(metadata)
 }
 
 func appendTranscriptEntryHandler(auth PrincipalAuthFunc, appendEntry func(context.Context, DomainPrincipal, string, AppendTranscriptEntryRequest) (TranscriptEntry, error)) http.HandlerFunc {
@@ -1252,6 +1292,46 @@ func appendTranscriptEntryHandler(auth PrincipalAuthFunc, appendEntry func(conte
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "entry": entry})
+	})
+}
+
+func appendTranscriptEntriesHandler(auth PrincipalAuthFunc, appendEntries func(context.Context, DomainPrincipal, string, []AppendTranscriptEntryRequest) ([]TranscriptEntry, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may append transcript entries")
+			return
+		}
+		var req struct {
+			Entries []AppendTranscriptEntryRequest `json:"entries"`
+		}
+		if err := decodeLimitedJSON(w, r, &req, 8*1024*1024); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		entries, err := appendEntries(r.Context(), p, r.PathValue("transcript"), req.Entries)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "transcript not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "a transcript entry external id was reused with different content")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not append transcript entries")
+			return
+		}
+		if entries == nil {
+			entries = []TranscriptEntry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "entries": entries})
 	})
 }
 
@@ -1298,6 +1378,71 @@ func getTranscriptHandler(auth PrincipalAuthFunc, get func(context.Context, Doma
 			"entries":        entries,
 		})
 	})
+}
+
+func getTranscriptPageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string, TranscriptPageOptions) (TranscriptPage, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		opts, err := transcriptPageOptions(r)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		page, err := get(r.Context(), p, r.PathValue("transcript"), opts)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "transcript not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read transcript")
+			return
+		}
+		if page.Entries == nil {
+			page.Entries = []TranscriptEntry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":      "witself.v0",
+			"transcript":          page.Transcript,
+			"entries":             page.Entries,
+			"next_after_sequence": page.NextAfterSequence,
+		})
+	})
+}
+
+func transcriptPageOptions(r *http.Request) (TranscriptPageOptions, error) {
+	var opts TranscriptPageOptions
+	q := r.URL.Query()
+	if raw := strings.TrimSpace(q.Get("after_sequence")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 0 {
+			return TranscriptPageOptions{}, errors.New("after_sequence must be a non-negative integer")
+		}
+		opts.AfterSequence = value
+	}
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 500 {
+			return TranscriptPageOptions{}, errors.New("limit must be between 1 and 500")
+		}
+		opts.Limit = value
+	}
+	if raw := strings.TrimSpace(q.Get("tail")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return TranscriptPageOptions{}, errors.New("tail must be true or false")
+		}
+		opts.Tail = value
+	}
+	if opts.Tail && opts.AfterSequence != 0 {
+		return TranscriptPageOptions{}, errors.New("tail and after_sequence are mutually exclusive")
+	}
+	return opts, nil
 }
 
 func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) error {

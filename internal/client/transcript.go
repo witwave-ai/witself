@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,18 +50,27 @@ type CreateTranscriptInput struct {
 
 // AppendTranscriptEntryInput carries one visible turn to append.
 type AppendTranscriptEntryInput struct {
-	ExternalID     string          `json:"external_id,omitempty"`
-	Role           string          `json:"role"`
-	Body           string          `json:"body,omitempty"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	Model          string          `json:"model,omitempty"`
-	ReplyToEntryID string          `json:"reply_to_entry_id,omitempty"`
+	ExternalID        string          `json:"external_id,omitempty"`
+	Role              string          `json:"role"`
+	Body              string          `json:"body,omitempty"`
+	Payload           json.RawMessage `json:"payload,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	ReplyToEntryID    string          `json:"reply_to_entry_id,omitempty"`
+	ReplyToExternalID string          `json:"reply_to_external_id,omitempty"`
 }
 
 // TranscriptDetail is a transcript plus its ordered entries.
 type TranscriptDetail struct {
-	Transcript Transcript        `json:"transcript"`
-	Entries    []TranscriptEntry `json:"entries"`
+	Transcript        Transcript        `json:"transcript"`
+	Entries           []TranscriptEntry `json:"entries"`
+	NextAfterSequence int64             `json:"next_after_sequence,omitempty"`
+}
+
+// TranscriptPageOptions selects one bounded transcript page.
+type TranscriptPageOptions struct {
+	AfterSequence int64
+	Limit         int
+	Tail          bool
 }
 
 // CreateTranscript creates a transcript using an agent bearer token.
@@ -94,6 +104,22 @@ func AppendTranscriptEntry(ctx context.Context, endpoint, token, transcriptID st
 	return out.Entry, nil
 }
 
+// AppendTranscriptEntries records a bounded batch in caller order.
+func AppendTranscriptEntries(ctx context.Context, endpoint, token, transcriptID string, inputs []AppendTranscriptEntryInput) ([]TranscriptEntry, error) {
+	body, err := json.Marshal(map[string]any{"entries": inputs})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Entries []TranscriptEntry `json:"entries"`
+	}
+	url := transcriptsURL(endpoint) + "/" + neturl.PathEscape(transcriptID) + "/entries:batch"
+	if err := doJSON(ctx, http.MethodPost, url, token, body, &out); err != nil {
+		return nil, err
+	}
+	return out.Entries, nil
+}
+
 // ListTranscripts lists transcripts visible to an agent or operator token.
 func ListTranscripts(ctx context.Context, endpoint, token string) ([]Transcript, error) {
 	var out struct {
@@ -105,10 +131,44 @@ func ListTranscripts(ctx context.Context, endpoint, token string) ([]Transcript,
 	return out.Transcripts, nil
 }
 
-// GetTranscript returns one transcript and its entries.
+// GetTranscript returns one transcript and all entries by following pages.
 func GetTranscript(ctx context.Context, endpoint, token, transcriptID string) (TranscriptDetail, error) {
 	var out TranscriptDetail
+	var after int64
+	for {
+		page, err := GetTranscriptPage(ctx, endpoint, token, transcriptID, TranscriptPageOptions{AfterSequence: after, Limit: 500})
+		if err != nil {
+			return TranscriptDetail{}, err
+		}
+		if out.Transcript.ID == "" {
+			out.Transcript = page.Transcript
+		}
+		out.Entries = append(out.Entries, page.Entries...)
+		if page.NextAfterSequence == 0 {
+			break
+		}
+		after = page.NextAfterSequence
+	}
+	return out, nil
+}
+
+// GetTranscriptPage returns a bounded forward page or newest tail.
+func GetTranscriptPage(ctx context.Context, endpoint, token, transcriptID string, opts TranscriptPageOptions) (TranscriptDetail, error) {
+	params := neturl.Values{}
+	if opts.AfterSequence > 0 {
+		params.Set("after_sequence", strconv.FormatInt(opts.AfterSequence, 10))
+	}
+	if opts.Limit > 0 {
+		params.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Tail {
+		params.Set("tail", "true")
+	}
 	url := transcriptsURL(endpoint) + "/" + neturl.PathEscape(transcriptID)
+	if encoded := params.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
+	var out TranscriptDetail
 	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
 		return TranscriptDetail{}, err
 	}

@@ -63,6 +63,12 @@ func root() (string, error) {
 	return filepath.Join(home, ".witself"), nil
 }
 
+// Home returns the local Witself state directory. Integrations use the same
+// WITSELF_HOME override as account and token storage.
+func Home() (string, error) {
+	return root()
+}
+
 func configPath() (string, error) {
 	r, err := root()
 	if err != nil {

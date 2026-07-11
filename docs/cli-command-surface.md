@@ -221,7 +221,8 @@ witself
   totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
-  transcript create|append|list|show
+  install codex|claude
+  transcript create|append|list|show|tail|flush
   message send|list|read|ack|listen
   federation peers|card
   reference parse|resolve
@@ -2536,20 +2537,43 @@ ws transcript append trn_123 --endpoint https://cell.example.com \
 
 ws transcript list --account default
 ws transcript show trn_123 --account default --json
+ws transcript tail trn_123 --account default --agent scott --limit 20
+ws transcript flush --runtime codex
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
 JSON object). `append` requires `--role user|assistant|system|tool` and at least
 one of `--body`, `--body-file`, `--stdin`, or `--payload-file`; it also accepts
 `--external-id` (retry-safe runtime message id), `--model`, and `--reply-to`.
-All four commands accept `--endpoint`,
+The interactive commands accept `--endpoint`,
 `--token-file`, and `--json`; `WITSELF_ENDPOINT`, `WITSELF_TOKEN_FILE`, and
 `WITSELF_TOKEN` are the unattended equivalents.
+
+`tail` performs a bounded newest-entry read. `flush` retries the durable local
+hook outbox for an installed `codex` or `claude-code` integration.
 
 Only finalized visible output should be appended. Raw hidden chain-of-thought
 and streaming chunks are out of contract. Small structured objects belong in
 `payload`; non-empty file artifacts are refused until portable object storage
 lands. See [transcript-ledger.md](transcript-ledger.md).
+
+## `witself install`
+
+Install both MCP access and transcript hooks for a supported local agent
+runtime:
+
+```sh
+witself install codex --account default --agent scott \
+  --location home --capture raw
+witself install claude --account default --agent scott \
+  --location home --capture raw
+```
+
+The installer verifies the token-bound agent before changing runtime config.
+`--capture` accepts `messages`, `trace`, or `raw`; `--location` is a human label
+paired with a stable generated local id. `--endpoint` and `--token-file` are
+optional and otherwise use the normal managed endpoint and token-file
+conventions. No token is copied into MCP or hook configuration.
 
 ## `witself message`
 
@@ -3176,6 +3200,19 @@ Expose Witself to MCP-compatible agent runtimes.
 ### `witself mcp serve`
 
 Start the MCP server.
+
+The implemented transcript slice starts it through an installed runtime
+binding:
+
+```sh
+witself mcp serve --runtime codex
+witself mcp serve --runtime claude-code
+```
+
+That slice currently exposes four read-only tools:
+`witself.self.show`, `witself.transcript.list`,
+`witself.transcript.get`, and `witself.transcript.tail`. The broader catalog and
+posture below remain the target contract as domain capabilities are wired in.
 
 The default MCP posture should be local-first. Stdio is the first target.
 Network transports are a later, explicit deployment mode and must be

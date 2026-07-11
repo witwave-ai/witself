@@ -61,6 +61,15 @@ func TestNormalizeAppendTranscriptEntryInput(t *testing.T) {
 	if string(in.Artifacts) != "[]" {
 		t.Fatalf("default artifacts = %s", in.Artifacts)
 	}
+	withReply, err := normalizeAppendTranscriptEntryInput(AppendTranscriptEntryInput{
+		Role: "assistant", Body: "done", ReplyToExternalID: "  evt_prompt:0  ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withReply.ReplyToExternalID != "evt_prompt:0" {
+		t.Fatalf("reply external id = %q", withReply.ReplyToExternalID)
+	}
 
 	tests := []struct {
 		name string
@@ -74,6 +83,7 @@ func TestNormalizeAppendTranscriptEntryInput(t *testing.T) {
 		{name: "nonempty artifacts", in: AppendTranscriptEntryInput{Role: "user", Body: "x", Artifacts: json.RawMessage(`[{"name":"report.pdf"}]`)}, want: "object storage"},
 		{name: "body too large", in: AppendTranscriptEntryInput{Role: "user", Body: strings.Repeat("x", maxTranscriptBodyBytes+1)}, want: "body exceeds"},
 		{name: "external id too large", in: AppendTranscriptEntryInput{ExternalID: strings.Repeat("x", maxTranscriptExternalIDBytes+1), Role: "user", Body: "x"}, want: "external_id exceeds"},
+		{name: "two reply targets", in: AppendTranscriptEntryInput{Role: "assistant", Body: "x", ReplyToEntryID: "ent_1", ReplyToExternalID: "evt_1"}, want: "one reply target"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,5 +95,42 @@ func TestNormalizeAppendTranscriptEntryInput(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeTranscriptPageOptions(t *testing.T) {
+	opts, err := normalizeTranscriptPageOptions(TranscriptPageOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Limit != defaultTranscriptPageSize {
+		t.Fatalf("default limit = %d", opts.Limit)
+	}
+	for _, opts := range []TranscriptPageOptions{
+		{AfterSequence: -1},
+		{Limit: maxTranscriptPageSize + 1},
+		{AfterSequence: 1, Tail: true},
+	} {
+		if _, err := normalizeTranscriptPageOptions(opts); !errors.Is(err, ErrTranscriptInputInvalid) {
+			t.Fatalf("options %#v error = %v", opts, err)
+		}
+	}
+}
+
+func TestTranscriptEntryRetryComparisonUsesJSONSemantics(t *testing.T) {
+	entry := TranscriptEntry{
+		Role: "tool", Body: "done", Model: "model",
+		Payload: json.RawMessage(`{"a":1,"b":2}`), Artifacts: json.RawMessage(`[]`),
+	}
+	in := AppendTranscriptEntryInput{
+		Role: "tool", Body: "done", Model: "model",
+		Payload: json.RawMessage(`{"b":2,"a":1}`), Artifacts: json.RawMessage(`[]`),
+	}
+	if !transcriptEntryMatches(entry, in) {
+		t.Fatal("semantically identical JSON did not match")
+	}
+	in.Body = "different"
+	if transcriptEntryMatches(entry, in) {
+		t.Fatal("different retry content matched")
 	}
 }

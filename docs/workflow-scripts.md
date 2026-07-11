@@ -849,56 +849,37 @@ Expected behavior:
 
 ## 16. MCP Stdio For An Agent Runtime
 
-Example MCP server configuration:
+Install the current read-only MCP and transcript-capture slice for a local
+runtime:
 
-```json
-{
-  "mcpServers": {
-    "witself": {
-      "command": "witself",
-      "args": ["mcp", "serve"],
-      "env": {
-        "WITSELF_TOKEN_FILE": "/run/secrets/witself-agent-token",
-        "WITSELF_REALM": "prod"
-      }
-    }
-  }
-}
+```sh
+witself install codex --account default --agent scott \
+  --location home --capture raw
+
+witself install claude --account default --agent scott \
+  --location home --capture raw
 ```
 
-Inspection-only MCP with sealed-plane value tools disabled (no reveal, no TOTP
-codes, no value-returning reference resolution):
-
-```json
-{
-  "mcpServers": {
-    "witself-readonly": {
-      "command": "witself",
-      "args": ["mcp", "serve", "--read-only", "--no-value-tools"],
-      "env": {
-        "WITSELF_TOKEN_FILE": "/run/secrets/witself-agent-token"
-      }
-    }
-  }
-}
-```
+The command validates the token-bound agent, stores only account/realm/agent
+selectors and an optional token-file path under `~/.witself`, registers the
+`witself` stdio server with the runtime, and merges the transcript hooks. It
+never embeds the token in the MCP registration. The installed server command is
+equivalent to `witself mcp serve --runtime codex` or
+`witself mcp serve --runtime claude-code`.
 
 Expected behavior:
 
 - MCP stdio is the v0 transport.
 - MCP uses the token-bound identity and the same authorization as the CLI.
-- `--read-only` restricts the session to inspection (recall/read/list, fact get,
-  secret show/list/scan, totp show, policy test, group show, message read) and
-  disables all mutations for safer agent contexts.
-- `--no-value-tools` disables the sealed-plane value-returning tools
-  (`witself.secret.reveal`, `witself.totp.code`, and value-returning
-  `witself.reference.resolve`) while leaving metadata reads available.
-- The MCP catalog covers the open plane (memory add/adjust/read/recall/list/forget,
-  fact set/get/list/delete, policy test, group list/show, message send/list/read,
-  reference parse/resolve) and the sealed plane (secret
-  create/list/show/reveal/update, totp enroll/code/show, password generate);
-  secrets are never placed in the self-digest and high-risk admin actions are
-  operator-only.
+- The implemented slice exposes `witself.self.show`,
+  `witself.transcript.list`, `witself.transcript.get`, and
+  `witself.transcript.tail`; all are reads.
+- Hooks, rather than model-invoked MCP writes, append visible prompts, finalized
+  responses, and optionally runtime-exposed tool activity.
+- Failed delivery remains in the owner-only local outbox and can be retried with
+  `witself transcript flush --runtime codex|claude-code`.
+- The broader open-plane and sealed-plane MCP catalog remains the target
+  contract in [mcp-tools.md](mcp-tools.md).
 
 ## 17. Self-Hosted Bootstrap
 

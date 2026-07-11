@@ -1,7 +1,7 @@
 # Witself MCP Tools
 
-Status: draft. This document defines the proposed MCP tool surface before
-implementation.
+Status: draft target contract. The first read-only transcript slice is
+implemented over stdio.
 
 ## Goals
 
@@ -48,6 +48,13 @@ byte-identical, and code must not paraphrase it:
 
 ```text
 You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. Memory work is not a substitute for doing the task.
+```
+
+That is the target instruction once the remaining memory tools are present.
+The implemented transcript slice advertises only the tools it actually serves:
+
+```text
+You have a persistent Witself identity and transcript ledger. Call `witself.self.show` at the start of a non-trivial task. Use `witself.transcript.list` to find prior sessions, `witself.transcript.tail` for recent context, and `witself.transcript.get` to page through a full transcript. Transcript tools are read-only and contain runtime-visible interaction data, never hidden model reasoning.
 ```
 
 It is modeled on Anthropic's memory-tool protocol and Letta's block protocol:
@@ -221,8 +228,17 @@ Tool names should use the `witself.` prefix:
 - `witself.message.listen`
 - `witself.message.list`
 - `witself.message.read`
+- `witself.transcript.list`
+- `witself.transcript.get`
+- `witself.transcript.tail`
 - `witself.reference.parse`
 - `witself.reference.resolve`
+
+The current binary implements `witself.self.show` and the three transcript read
+tools above. `witself install codex|claude` registers that stdio server and the
+separate durable hook write path. The remainder of this catalog is the target
+surface and lands incrementally behind the same token-derived authorization
+boundary.
 
 Every CLI verb is reachable via MCP with **full parity**: the CLI is the primary
 surface, and the MCP tool set mirrors it one-for-one (modulo the CLI-first
@@ -300,6 +316,9 @@ as MCP tools.
 | `witself.message.listen` | yes | yes | Long-poll receive — the live face of the durable mailbox; non-mutating beyond delivery bookkeeping; requires `message:read`. |
 | `witself.message.list` | yes | yes | Lists the session's mailbox; requires `message:read`. |
 | `witself.message.read` | yes | yes | Reads and acks a message; requires `message:read`. |
+| `witself.transcript.list` | yes | yes | Lists the token-bound agent's newest transcript conversations; operators see their authorized account scope. |
+| `witself.transcript.get` | yes | yes | Reads one bounded forward page after a transcript-local sequence. |
+| `witself.transcript.tail` | yes | yes | Reads a bounded newest page, returned oldest-first. |
 | `witself.reference.parse` | yes | yes | Validates reference syntax only. |
 | `witself.reference.resolve` | yes | yes | Open-plane refs resolve under the same authz as a direct read; a sealed `witself://secret/...` ref is reveal-gated (policy) and disabled by `--no-value-tools`. |
 | `witself.password.generate` | yes | yes | Generates a value but does not store it; not a sealed read. |
@@ -432,6 +451,45 @@ cap is hit the result sets `elided` to `true` and points the caller to
 `witself.memory.recall`; it never silently truncates. Salient-memory selection
 is defined in [memory-model.md](memory-model.md); the digest shape and cap are
 pinned in [context-hydration.md](context-hydration.md).
+
+### `witself.transcript.list`
+
+List newest transcript conversations visible to the authenticated principal.
+The optional `limit` is 1-100 and defaults to 20. Entry bodies are not returned
+by this inventory tool.
+
+Input:
+
+```json
+{ "limit": 20 }
+```
+
+### `witself.transcript.get`
+
+Read one forward page from a transcript. `after_sequence` is exclusive, `limit`
+is 1-500 and defaults to 100, and `next_after_sequence` is returned when another
+page exists.
+
+Input:
+
+```json
+{
+  "transcript_id": "trn_123",
+  "after_sequence": 0,
+  "limit": 100
+}
+```
+
+### `witself.transcript.tail`
+
+Read the newest bounded page from a transcript, ordered oldest-first. `limit`
+is 1-500 and defaults to 20.
+
+Input:
+
+```json
+{ "transcript_id": "trn_123", "limit": 20 }
+```
 
 ### `witself.remember`
 
