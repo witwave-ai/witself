@@ -1,0 +1,304 @@
+package main
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+
+	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
+)
+
+const testCP = "https://cp.test"
+
+// cpSeed builds a model with one CP-grouped live cell (so a real
+// header row exists) and the cursor moved onto that header with the
+// context pane focused on the Settings tab.
+func cpSeed(t *testing.T, src fakeSource) dashboardModel {
+	t.Helper()
+	acc := true
+	if src.states == nil {
+		src.states = []cellState{{
+			name:         "aws-sandbox-usw2-dev",
+			controlPlane: testCP,
+			fleet:        &fleet.Cell{Name: "aws-sandbox-usw2-dev", Accepting: &acc},
+		}}
+	}
+	m := dashboardModel{
+		ctx:    t.Context(),
+		cli:    src,
+		width:  120,
+		height: 30,
+		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: src.states})
+	m = next.(dashboardModel)
+	// Cursor starts on the first cell; k moves to the header.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = next.(dashboardModel)
+	if m.currentRow().kind != rowHeader {
+		t.Fatal("seed: cursor must be on the CP header")
+	}
+	// Focus the context pane, then → to Settings.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(dashboardModel)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = next.(dashboardModel)
+	if m.cpActiveTab != cpTabSettings {
+		t.Fatalf("seed: expected Settings tab, got %d", m.cpActiveTab)
+	}
+	if cmd == nil {
+		t.Fatal("seed: landing on Settings must kick a config read")
+	}
+	return m
+}
+
+// deliver runs the pending settings read result into the model.
+func deliverCfg(t *testing.T, m dashboardModel, cfg fleet.PlacementRunnerConfig) dashboardModel {
+	t.Helper()
+	next, _ := m.Update(cpSettingsMsg{cp: testCP, cfg: cfg})
+	return next.(dashboardModel)
+}
+
+// TestCPHeaderShowsTabs pins the header tab strip: a real CP header
+// shows Overview|Settings; the self-hosted group stays untabbed; cell
+// rows keep their five tabs.
+func TestCPHeaderShowsTabs(t *testing.T) {
+	acc := true
+	states := []cellState{
+		{name: "aws-a", controlPlane: testCP, fleet: &fleet.Cell{Accepting: &acc}},
+		{name: "self-z", controlPlane: "", fleet: &fleet.Cell{Accepting: &acc}},
+	}
+	m := dashboardModel{
+		ctx: t.Context(), cli: fakeSource{states: states},
+		width: 120, height: 30,
+		now: func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: states})
+	m = next.(dashboardModel)
+
+	// Onto the CP header.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m2 := next.(dashboardModel)
+	v := m2.View()
+	if !strings.Contains(v, "Settings") {
+		t.Fatal("CP header must show the Settings tab")
+	}
+	if strings.Contains(v, "Kubernetes") {
+		t.Fatal("CP header must show CP tabs, not cell tabs")
+	}
+}
+
+// TestCPSettingsRenderAndEdit pins the form: fields render from the
+// loaded config, j/k move the field cursor (NOT the cell cursor),
+// space toggles a bool into a dirty draft.
+func TestCPSettingsRenderAndEdit(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	m := cpSeed(t, fakeSource{runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10}})
+	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10})
+
+	v := m.View()
+	for _, want := range []string{"placement runner", "enabled", "restore batch", "25", "rebalance batch", "10"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("settings form missing %q", want)
+		}
+	}
+
+	// j moves the field cursor, not the cell cursor.
+	before := m.cursor
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m2 := next.(dashboardModel)
+	if m2.cursor != before {
+		t.Fatal("j on the settings form must not move the cell cursor")
+	}
+	if m2.cpFieldSel != 1 {
+		t.Fatalf("j must move the field cursor: got %d", m2.cpFieldSel)
+	}
+
+	// Space toggles the selected bool (restore archives: false → true).
+	next, _ = m2.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m3 := next.(dashboardModel)
+	s := m3.cpSettings[testCP]
+	if !s.dirty() {
+		t.Fatal("toggling a bool must create a dirty draft")
+	}
+	if !s.draft.RestoreArchives {
+		t.Fatal("the toggled field must flip in the draft")
+	}
+	if s.cfg.RestoreArchives {
+		t.Fatal("the authoritative config must NOT change before apply")
+	}
+	if !strings.Contains(m3.View(), "unapplied change") {
+		t.Fatal("the form must call out unapplied changes")
+	}
+}
+
+// TestCPApplyFlow pins the whole write path: a → diff modal, y →
+// SetPlacementRunner with the draft, response becomes authoritative,
+// draft cleared.
+func TestCPApplyFlow(t *testing.T) {
+	rec := &fakeRunnerRecorder{}
+	m := cpSeed(t, fakeSource{rec: rec})
+	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25})
+
+	// Toggle rebalance (field index 4) on.
+	m.cpFieldSel = 4
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+
+	// a opens the confirm modal with the diff.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply == nil {
+		t.Fatal("a with a dirty draft must open the apply modal")
+	}
+	if len(m.cpApply.diffs) != 1 || !strings.Contains(m.cpApply.diffs[0], "rebalance: off → on") {
+		t.Fatalf("modal must carry the diff, got %v", m.cpApply.diffs)
+	}
+	if !strings.Contains(m.View(), "APPLY SETTINGS") {
+		t.Fatal("apply modal must render over the frame")
+	}
+
+	// y fires the write.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("y must consume the modal")
+	}
+	if cmd == nil {
+		t.Fatal("y must return the apply command")
+	}
+	msg := cmd() // run the async write synchronously
+	applyMsg, ok := msg.(cpApplyMsg)
+	if !ok {
+		t.Fatalf("apply command must yield cpApplyMsg, got %T", msg)
+	}
+	if len(rec.setCalls) != 1 || !rec.setCalls[0].Rebalance {
+		t.Fatalf("SetPlacementRunner must receive the draft, got %+v", rec.setCalls)
+	}
+
+	// The response becomes authoritative and the draft clears.
+	next, _ = m.Update(applyMsg)
+	m = next.(dashboardModel)
+	s := m.cpSettings[testCP]
+	if s.draft != nil {
+		t.Fatal("a successful apply must clear the draft")
+	}
+	if !s.cfg.Rebalance {
+		t.Fatal("the applied config must become authoritative")
+	}
+	if !strings.Contains(m.status, "✓ settings applied") {
+		t.Fatalf("status must confirm the apply: %q", m.status)
+	}
+}
+
+// TestCPApplyFailureKeepsDraft pins the failure posture: a failed
+// write keeps the operator's edits so they can retry or discard.
+func TestCPApplyFailureKeepsDraft(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // toggle enabled → off
+	m = next.(dashboardModel)
+
+	next, _ = m.Update(cpApplyMsg{cp: testCP, err: errFake("cp unreachable")})
+	m = next.(dashboardModel)
+	s := m.cpSettings[testCP]
+	if s.draft == nil {
+		t.Fatal("a failed apply must keep the draft")
+	}
+	if !strings.Contains(m.status, "✗ apply failed") {
+		t.Fatalf("status must surface the failure: %q", m.status)
+	}
+}
+
+// TestCPIntEditAndDiscard pins int editing (enter → digits → enter)
+// and x discarding the whole draft.
+func TestCPIntEditAndDiscard(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{RestoreBatch: 25})
+
+	m.cpFieldSel = 2 // restore batch
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	if !m.cpEditing {
+		t.Fatal("enter on an int field must start an edit")
+	}
+	for _, d := range []string{"5", "0"} {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(d)})
+		m = next.(dashboardModel)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	if m.cpEditing {
+		t.Fatal("enter must commit the int edit")
+	}
+	s := m.cpSettings[testCP]
+	if s.draft == nil || s.draft.RestoreBatch != 50 {
+		t.Fatalf("draft must hold the typed value, got %+v", s.draft)
+	}
+
+	// x discards everything.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = next.(dashboardModel)
+	if m.cpSettings[testCP].draft != nil {
+		t.Fatal("x must discard the draft")
+	}
+}
+
+// TestCPRunNow pins the one-shot pass: r runs with the AUTHORITATIVE
+// config (never the draft) and the result lands in lastRun.
+func TestCPRunNow(t *testing.T) {
+	rec := &fakeRunnerRecorder{}
+	m := cpSeed(t, fakeSource{rec: rec, runResult: fleet.PlacementRunnerResult{
+		Restore: &fleet.RestoreResult{Restored: []fleet.RestoredAccount{{}, {}}},
+	}})
+	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25})
+
+	// Make a dirty draft first — run must ignore it.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // enabled → off (draft only)
+	m = next.(dashboardModel)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("r must fire the runner command")
+	}
+	msg := cmd()
+	if len(rec.runCalls) != 1 {
+		t.Fatalf("run must call the client once, got %d", len(rec.runCalls))
+	}
+	if !rec.runCalls[0].Enabled {
+		t.Fatal("run must use the authoritative config, not the dirty draft")
+	}
+	next, _ = m.Update(msg)
+	m = next.(dashboardModel)
+	if !strings.Contains(m.cpSettings[testCP].lastRun, "restored 2") {
+		t.Fatalf("lastRun must summarize the pass: %q", m.cpSettings[testCP].lastRun)
+	}
+}
+
+// TestCPSettingsUnreachable pins the read-only failure state.
+func TestCPSettingsUnreachable(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	next, _ := m.Update(cpSettingsMsg{cp: testCP, err: errFake("dial tcp: no route")})
+	m = next.(dashboardModel)
+	v := m.View()
+	if !strings.Contains(v, "no route") {
+		t.Fatal("the settings tab must surface the read error")
+	}
+	if !strings.Contains(v, "read-only") {
+		t.Fatal("an unreachable CP must render read-only")
+	}
+	// Editing refuses cleanly.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m2 := next.(dashboardModel)
+	if m2.cpSettings[testCP].draft != nil {
+		t.Fatal("editing must refuse while the config is unloaded/errored")
+	}
+}

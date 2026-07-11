@@ -29,6 +29,21 @@ type fakeSource struct {
 	reachErr      error
 	health        cellHealthReport
 	healthErr     error
+
+	// Placement-runner fakes. set/run record their inputs on the shared
+	// recorder so tests can assert what was written.
+	runner    fleet.PlacementRunnerConfig
+	runnerErr error
+	runResult fleet.PlacementRunnerResult
+	runErr    error
+	rec       *fakeRunnerRecorder
+}
+
+// fakeRunnerRecorder captures writes across the by-value fakeSource
+// copies the model holds.
+type fakeRunnerRecorder struct {
+	setCalls []fleet.PlacementRunnerConfig
+	runCalls []fleet.PlacementRunnerConfig
 }
 
 func (f fakeSource) load(_ context.Context, _ string) (loadResult, error) {
@@ -41,6 +56,27 @@ func (f fakeSource) probe(_ context.Context, _, _ string) (reachResult, error) {
 
 func (f fakeSource) probeHealth(_ context.Context, _, _ string) (cellHealthReport, error) {
 	return f.health, f.healthErr
+}
+
+func (f fakeSource) placementRunner(_ context.Context, _, _ string) (fleet.PlacementRunnerConfig, error) {
+	return f.runner, f.runnerErr
+}
+
+func (f fakeSource) setPlacementRunner(_ context.Context, _, _ string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerConfig, error) {
+	if f.rec != nil {
+		f.rec.setCalls = append(f.rec.setCalls, cfg)
+	}
+	if f.runnerErr != nil {
+		return fleet.PlacementRunnerConfig{}, f.runnerErr
+	}
+	return cfg, nil // echo back, like the CP does
+}
+
+func (f fakeSource) runPlacementRunner(_ context.Context, _, _ string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerResult, error) {
+	if f.rec != nil {
+		f.rec.runCalls = append(f.rec.runCalls, cfg)
+	}
+	return f.runResult, f.runErr
 }
 
 // seedModel builds a dashboardModel and runs one loadedMsg through

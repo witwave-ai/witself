@@ -309,6 +309,19 @@ type dashboardModel struct {
 	focus     paneFocus
 	activeTab contextTab
 
+	// Control-plane tabs (issue #37). Header rows get their own tab set
+	// (Overview | Settings); cpActiveTab is global the same way
+	// activeTab is. cpSettings caches per-CP placement-runner state,
+	// keyed by CP URL. cpFieldSel is the settings-form field cursor;
+	// cpEditing/cpEditBuf hold an in-progress int edit; cpApply is the
+	// pending apply-confirm modal.
+	cpActiveTab cpTab
+	cpSettings  map[string]cpSettingsState
+	cpFieldSel  int
+	cpEditing   bool
+	cpEditBuf   string
+	cpApply     *cpApplyConfirm
+
 	// reach caches the last control-plane reachability probe per cell,
 	// for the Health tab. Probes fire only while that tab is showing a
 	// cell — no background cost when you're not looking.
@@ -456,6 +469,12 @@ type cellDataSource interface {
 	// probe — it selects the Pulumi stack and reaches the cluster — so
 	// the model runs it on a longer cadence.
 	probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error)
+	// Placement-runner settings for a control plane (the CP Settings
+	// tab): read, write, and one-shot run. cp is the CP URL from the
+	// header row; the token file resolves from the config's defaults.
+	placementRunner(ctx context.Context, configPath, cp string) (fleet.PlacementRunnerConfig, error)
+	setPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerConfig, error)
+	runPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerResult, error)
 }
 
 // liveDataSource reads infra.yaml, then the control plane, then runs
@@ -945,6 +964,55 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bgProbeTickMsg:
 		return m.backgroundSweep()
+	case cpSettingsMsg:
+		if m.cpSettings == nil {
+			m.cpSettings = map[string]cpSettingsState{}
+		}
+		s := m.cpSettings[msg.cp]
+		s.inflight = false
+		s.loaded = m.now()
+		s.cfg, s.err = msg.cfg, msg.err
+		m.cpSettings[msg.cp] = s
+		return m, nil
+	case cpApplyMsg:
+		s := m.cpSettings[msg.cp]
+		s.applying = false
+		if msg.err != nil {
+			// Keep the draft — the operator's edits survive a failed
+			// write so they can retry or discard deliberately.
+			m.status = "✗ apply failed: " + oneLine(msg.err.Error())
+		} else {
+			// The control plane's response is the authoritative config;
+			// the draft is consumed.
+			s.cfg = msg.cfg
+			s.loaded = m.now()
+			s.err = nil
+			s.draft = nil
+			m.status = "✓ settings applied to " + shortHost(msg.cp)
+		}
+		m.cpSettings[msg.cp] = s
+		return m, nil
+	case cpRunMsg:
+		s := m.cpSettings[msg.cp]
+		if msg.err != nil {
+			s.lastRun = styErr.Render("✗ " + oneLine(msg.err.Error()))
+			m.status = "✗ runner pass failed: " + oneLine(msg.err.Error())
+		} else {
+			restored, rebalanced := 0, 0
+			if msg.res.Restore != nil {
+				restored = len(msg.res.Restore.Restored)
+			}
+			if msg.res.Rebalance != nil {
+				rebalanced = len(msg.res.Rebalance.Rebalanced)
+			}
+			s.lastRun = fmt.Sprintf("restored %d · rebalanced %d", restored, rebalanced)
+			if msg.res.RestoreError != nil || msg.res.RebalanceError != nil {
+				s.lastRun += styErr.Render(" (with step errors)")
+			}
+			m.status = "✓ runner pass on " + shortHost(msg.cp) + ": " + s.lastRun
+		}
+		m.cpSettings[msg.cp] = s
+		return m, nil
 	case healthAnimTickMsg:
 		// Advance the checking-state frame while a probe is still in
 		// flight; the loop self-terminates when everything has landed.
@@ -1057,9 +1125,22 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Confirmation dialog captures keys.
+	// Confirmation dialogs capture keys.
 	if m.pending != nil {
 		return m.handleConfirmKey(msg)
+	}
+	if m.cpApply != nil {
+		next, cmd := m.handleCPApplyKey(msg)
+		return next, cmd
+	}
+
+	// Settings-form keys: while the context pane holds focus on a CP
+	// Settings tab, j/k drive the FIELD cursor and enter/space/a/r/x
+	// edit-and-apply. Unhandled keys (tab, esc, ←/→, q…) fall through.
+	if m.focus == focusContext && m.onCPSettings() {
+		if next, cmd, handled := m.handleCPSettingsKey(msg); handled {
+			return next, cmd
+		}
 	}
 
 	switch msg.String() {
@@ -1079,11 +1160,13 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next := m.selectableCursor(m.cursor+1, +1); next != m.cursor {
 			m.cursor = next
 			m.logSel, m.opsScroll = 0, 0 // new cell → newest log, at the tail
+			m.cpEditing, m.cpEditBuf = false, ""
 		}
 	case "k", "up":
 		if next := m.selectableCursor(m.cursor-1, -1); next != m.cursor {
 			m.cursor = next
 			m.logSel, m.opsScroll = 0, 0
+			m.cpEditing, m.cpEditBuf = false, ""
 		}
 	case "[":
 		// Logs tab: step to an older op log.
@@ -1114,12 +1197,26 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusCells
 		}
 	case "left", "h":
-		if m.focus == focusContext && int(m.activeTab) > 0 {
-			m.activeTab--
+		if m.focus == focusContext {
+			// Header rows step the CP tab set; cell rows the cell tabs.
+			if m.currentRow().kind == rowHeader {
+				if int(m.cpActiveTab) > 0 {
+					m.cpActiveTab--
+					m.cpEditing, m.cpEditBuf = false, ""
+				}
+			} else if int(m.activeTab) > 0 {
+				m.activeTab--
+			}
 		}
 	case "right", "l":
-		if m.focus == focusContext && int(m.activeTab) < len(contextTabs)-1 {
-			m.activeTab++
+		if m.focus == focusContext {
+			if m.currentRow().kind == rowHeader {
+				if int(m.cpActiveTab) < len(cpTabNames)-1 {
+					m.cpActiveTab++
+				}
+			} else if int(m.activeTab) < len(contextTabs)-1 {
+				m.activeTab++
+			}
 		}
 	case "g":
 		m.loading = true
@@ -1148,8 +1245,12 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.opsScroll = 0 // back to the tail (freshest)
 	}
 	// Any key that reaches here may have changed the tab or the selected
-	// cell — kick a reachability probe if the Health tab now needs one.
+	// row — kick a health probe (cell Health tab) or a settings read
+	// (CP Settings tab) if the new view needs one.
 	m, cmd := m.maybeHealthProbe()
+	if cmd == nil {
+		m, cmd = m.maybeCPSettingsLoad()
+	}
 	return m, cmd
 }
 
@@ -1448,6 +1549,30 @@ func (m dashboardModel) footerHints() string {
 	// The log-browse keys ([ ] / PgUp / PgDn) only do anything on the
 	// Logs tab, so dim that hint until you're there.
 	onLogs := m.onLogsTab()
+	// The CP settings form swaps the footer wholesale: its keys are a
+	// different mode (field cursor + edit/apply), and showing dimmed
+	// cell verbs there would just be noise.
+	if m.focus == focusContext && m.onCPSettings() {
+		s := m.cpSettings[m.currentRow().cp]
+		parts := []part{
+			{"j/k", "field", true},
+			{"enter", "edit", true},
+			{"a", "apply", s.dirty()},
+			{"x", "discard", s.dirty()},
+			{"r", "run now", !s.applying && s.err == nil && !s.loaded.IsZero()},
+			{"←/→", "tab", true},
+			{"esc", "back", true},
+		}
+		segs := make([]string, 0, len(parts))
+		for _, p := range parts {
+			text := p.letter + " " + p.label
+			if !p.enabled {
+				text = styDim.Render(text)
+			}
+			segs = append(segs, text)
+		}
+		return strings.Join(segs, " · ")
+	}
 	// ←/→ only do anything once the context pane holds focus; dim them
 	// until then so the footer mirrors what the keys actually do.
 	parts := []part{
@@ -1495,10 +1620,22 @@ func (m dashboardModel) renderContext(w, h int) []string {
 	r := m.currentRow()
 	switch r.kind {
 	case rowHeader:
-		return m.renderCPContext(r, w)
+		if r.cp == "" {
+			// Self-hosted group: no control plane, nothing to configure —
+			// keep the plain untabbed summary.
+			return m.renderCPContext(r, w)
+		}
+		lines := []string{m.renderTabStrip(cpTabNames, int(m.cpActiveTab), w), ""}
+		switch m.cpActiveTab {
+		case cpTabOverview:
+			lines = append(lines, m.renderCPContext(r, w)...)
+		case cpTabSettings:
+			lines = append(lines, m.renderCPSettingsTab(r.cp, w)...)
+		}
+		return lines
 	case rowCell:
 		st := m.states[r.cellIdx]
-		lines := []string{m.renderTabBar(w), ""}
+		lines := []string{m.renderTabStrip(cellTabNames(), int(m.activeTab), w), ""}
 		switch m.activeTab {
 		case tabOverview:
 			lines = append(lines, m.renderOverviewTab(st, w)...)
@@ -1517,23 +1654,34 @@ func (m dashboardModel) renderContext(w, h int) []string {
 	return nil
 }
 
-// renderTabBar draws the tab strip. The active tab is bold, and cyan
-// when the context pane holds focus (so ←/→ read as live); inactive
-// tabs are dim. A trailing hint tells the operator how to drive it.
-func (m dashboardModel) renderTabBar(w int) string {
-	segs := make([]string, 0, len(contextTabs))
-	for _, t := range contextTabs {
+// cellTabNames lists the cell tab titles in order — the strip renderer
+// works from plain names so it can serve both tab sets.
+func cellTabNames() []string {
+	names := make([]string, len(contextTabs))
+	for i, t := range contextTabs {
+		names[i] = t.name
+	}
+	return names
+}
+
+// renderTabStrip draws a tab strip for any tab set. The active tab is
+// bold, and cyan when the context pane holds focus (so ←/→ read as
+// live); inactive tabs are dim. A trailing hint tells the operator how
+// to drive it.
+func (m dashboardModel) renderTabStrip(names []string, active, w int) string {
+	segs := make([]string, 0, len(names))
+	for i, name := range names {
 		switch {
-		case t.tab == m.activeTab && m.focus == focusContext:
-			segs = append(segs, styPlan.Bold(true).Underline(true).Render(t.name))
-		case t.tab == m.activeTab:
-			segs = append(segs, styTitle.Underline(true).Render(t.name))
+		case i == active && m.focus == focusContext:
+			segs = append(segs, styPlan.Bold(true).Underline(true).Render(name))
+		case i == active:
+			segs = append(segs, styTitle.Underline(true).Render(name))
 		default:
-			segs = append(segs, styDim.Render(t.name))
+			segs = append(segs, styDim.Render(name))
 		}
 	}
-	// Two leading spaces so "Overview" lines up with the cells pane's
-	// two-column cursor gutter.
+	// Two leading spaces so the first tab lines up with the cells
+	// pane's two-column cursor gutter.
 	bar := "  " + strings.Join(segs, "  ")
 	if m.focus != focusContext {
 		bar += styDim.Render("   (tab to focus)")
@@ -2116,6 +2264,9 @@ func (m dashboardModel) View() string {
 	dlgContentW := min(max(m.width-8, 30), 76)
 	if m.pending != nil {
 		return overlayCenter(rendered, dialogBox(m.pending.render(), dlgContentW), m.width)
+	}
+	if m.cpApply != nil {
+		return overlayCenter(rendered, dialogBox(m.cpApply.render(), dlgContentW), m.width)
 	}
 	if m.interruptModal && m.op != nil {
 		// The "detach and quit" option promises what we can't reliably
