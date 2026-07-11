@@ -1112,14 +1112,13 @@ func TestPreviewedCellShowsPlanMark(t *testing.T) {
 	if strings.Contains(v, "◆ gcp-sandbox") {
 		t.Fatal("unpreviewed cell must NOT show the plan mark")
 	}
-	// Alignment: in the cells pane (rows carrying the ◌ glyph — the
-	// context pane spells "absent" without it), the name must start at
-	// the same offset from the status marker whether or not the ◆ is
-	// present.
+	// Alignment: in the cells pane (rows carrying the ◌ absent glyph),
+	// the name must start at the same offset from the status glyph
+	// whether or not the ◆ mark is present.
 	var awsRel, gcpRel = -1, -1
 	for _, row := range strings.Split(v, "\n") {
 		plain := stripANSIForTest(row)
-		mk := strings.Index(plain, "◌ absent")
+		mk := strings.Index(plain, "◌")
 		if mk < 0 {
 			continue
 		}
@@ -1415,24 +1414,35 @@ func TestCellRowThrobsWhileOpRuns(t *testing.T) {
 			fleet:    &fleet.Cell{Name: "gcp-sandbox-usw2-dev", Accepting: &acc},
 		},
 	}
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
 	m := seedModel(states, 120, 30)
 	m.op = &opRun{kind: opUp, cell: "aws-sandbox-usw2-dev"}
 	m.spinnerFrame = 3
 
 	v := m.View()
-	// The target cell's row shows the spinner frame + verb.
-	if !strings.Contains(v, spinnerFrames[3]+" up") {
-		t.Fatalf("target cell must show spinner + verb (frame 3, up): %s", v)
+	// The target cell's row shows the colored spinner glyph (no verb —
+	// the verb lives in the strip).
+	if !strings.Contains(v, opSpinnerRune(opUp, 3)) {
+		t.Fatalf("target cell must show the running-op spinner glyph: %s", v)
 	}
-	// The off-target live cell must still show the static "● live"
-	// marker — no misleading throb on a cell that isn't being touched.
-	if !strings.Contains(v, "● live") {
-		t.Fatal("off-target live cell must keep the static status marker")
+	// The off-target live cell keeps its static green ● glyph — no
+	// misleading throb on a cell that isn't being touched.
+	if !strings.Contains(v, styOK.Render("●")) {
+		t.Fatal("off-target live cell must keep the static status glyph")
 	}
-	// The live-op strip also throbs the same frame + verb + cell, so the
-	// two indicators feel like one signal on two surfaces.
-	if !strings.Contains(v, spinnerFrames[3]+" up · aws-sandbox-usw2-dev") {
-		t.Fatal("live-op strip must include the same spinner frame + verb + cell")
+	// The glyph+word status markers are gone from the cells pane (the
+	// Overview tab still spells the word out under a "status" label,
+	// which is fine — that's the legend).
+	if strings.Contains(v, "● live") || strings.Contains(v, "◌ absent") || strings.Contains(v, "● error") {
+		t.Fatal("glyph+word status markers must not appear in the cells pane anymore")
+	}
+	// The live-op strip carries the frame + verb + cell — that's where
+	// the verb reads now. (Colored, so compare on the stripped view.)
+	if !strings.Contains(stripANSIForTest(v), spinnerFrames[3]+" up · aws-sandbox-usw2-dev") {
+		t.Fatal("live-op strip must include the spinner frame + verb + cell")
 	}
 }
 
@@ -1562,19 +1572,29 @@ func TestLaunchOpKicksSpinner(t *testing.T) {
 	}
 }
 
-// TestSpinnerLabelWidth pins the fixed-column contract: no matter
-// which verb and frame, the styled spinner label is exactly
-// statusCellW cells wide — cell names always start at the same column.
-func TestSpinnerLabelWidth(t *testing.T) {
+// TestMarkerGlyphWidth pins the alignment contract: every status glyph
+// and the running-op spinner glyph is exactly one cell wide, so the
+// cell name always starts at the same column.
+func TestMarkerGlyphWidth(t *testing.T) {
 	old := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI)
 	defer lipgloss.SetColorProfile(old)
 
+	acc := false
+	for _, st := range []cellState{
+		{fleet: &fleet.Cell{}},                // live
+		{fleet: &fleet.Cell{Accepting: &acc}}, // draining
+		{},                                    // absent
+		{err: errFake("bad creds")},           // error
+	} {
+		if got := lipgloss.Width(st.statusGlyph()); got != 1 {
+			t.Fatalf("status glyph for %q must be 1 cell, got %d", st.status(), got)
+		}
+	}
 	for _, kind := range []opKind{opPreview, opUp, opDestroy} {
 		for frame := 0; frame < len(spinnerFrames)*2; frame++ {
-			label := opSpinnerLabel(kind, frame)
-			if got := lipgloss.Width(label); got != statusCellW {
-				t.Fatalf("%s frame %d: width %d, want %d", kind.verb(), frame, got, statusCellW)
+			if got := lipgloss.Width(opSpinnerRune(kind, frame)); got != 1 {
+				t.Fatalf("%s frame %d: spinner glyph width %d, want 1", kind.verb(), frame, got)
 			}
 		}
 	}

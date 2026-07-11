@@ -153,29 +153,23 @@ func (c cellState) status() string {
 	}
 }
 
-// statusCellW is the fixed display width of the status column in the
-// cells pane. Sized to the widest label ("draining") + the dot + a
-// trailing gap so cell names always start at the same column.
-const statusCellW = 12
-
-func (c cellState) statusStyled() string {
-	label, style := "● live", styOK
+// statusGlyph is the cell's status as a single colored glyph — no
+// word, so the cell name sits right next to it. Each state is
+// SHAPE-distinct, not just color-distinct, so it still reads on a mono
+// terminal: ● live (green), ◐ draining (yellow), ◌ absent (dim), ✗
+// error (red). The Overview tab spells the word out for the selected
+// cell. All glyphs are one cell wide, so names stay aligned.
+func (c cellState) statusGlyph() string {
+	glyph, style := "●", styOK
 	switch c.status() {
 	case "draining":
-		label, style = "◐ draining", styWarn
+		glyph, style = "◐", styWarn
 	case "absent":
-		label, style = "◌ absent", styDim
+		glyph, style = "◌", styDim
 	case "error":
-		label, style = "● error", styErr
+		glyph, style = "✗", styErr
 	}
-	// Pad the PLAIN label first, then style. Padding the styled output
-	// would fold the trailing spaces into the SGR run and, more
-	// importantly, complicate width math when styles differ between
-	// terminals — cheaper and more predictable to pad in plain space.
-	if pad := statusCellW - lipgloss.Width(label); pad > 0 {
-		label += strings.Repeat(" ", pad)
-	}
-	return style.Render(label)
+	return style.Render(glyph)
 }
 
 // effectiveSettings resolves each per-cell provisioning flag through
@@ -705,20 +699,9 @@ func opKindStyle(kind opKind) lipgloss.Style {
 	return styTitle
 }
 
-// opSpinnerLabel returns the fixed-width spinner cell for the running
-// op — statusCellW cells wide so cell names still line up.
-func opSpinnerLabel(kind opKind, frame int) string {
-	ch := spinnerFrames[frame%len(spinnerFrames)]
-	label := ch + " " + kind.verb()
-	if pad := statusCellW - lipgloss.Width(label); pad > 0 {
-		label += strings.Repeat(" ", pad)
-	}
-	return opKindStyle(kind).Render(label)
-}
-
 // opSpinnerRune returns just the current braille frame, colored by
-// kind — for the ops-pane title, where we don't want the verb (it's
-// already right after) but still want the same accent as the cell row.
+// kind — used both as the running-op glyph on a cell row and in the
+// live-op strip, where the verb sits right after.
 func opSpinnerRune(kind opKind, frame int) string {
 	return opKindStyle(kind).Render(spinnerFrames[frame%len(spinnerFrames)])
 }
@@ -2022,14 +2005,14 @@ func (m dashboardModel) View() string {
 			lines = append(lines, fitLine(text, cellsContentW))
 		case rowCell:
 			st := m.states[r.cellIdx]
-			// Throb: swap the static status marker for a live spinner on
-			// the cell currently being provisioned/de-provisioned. Same
-			// fixed statusCellW width so nothing shifts around it.
+			// Throb: swap the static status glyph for the live spinner
+			// glyph on the cell being provisioned/de-provisioned. Both are
+			// one cell wide, so the name column never jogs.
 			var marker string
 			if m.op != nil && m.op.cell == st.name {
-				marker = opSpinnerLabel(m.op.kind, m.spinnerFrame)
+				marker = opSpinnerRune(m.op.kind, m.spinnerFrame)
 			} else {
-				marker = st.statusStyled()
+				marker = st.statusGlyph()
 			}
 			// Plan column: ◆ when a successful preview has armed `u` for
 			// this cell, blank otherwise. Two cells wide on every row so
