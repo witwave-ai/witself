@@ -1532,7 +1532,9 @@ func (m dashboardModel) renderTabBar(w int) string {
 			segs = append(segs, styDim.Render(t.name))
 		}
 	}
-	bar := " " + strings.Join(segs, "  ")
+	// Two leading spaces so "Overview" lines up with the cells pane's
+	// two-column cursor gutter.
+	bar := "  " + strings.Join(segs, "  ")
 	if m.focus != focusContext {
 		bar += styDim.Render("   (tab to focus)")
 	} else {
