@@ -1292,30 +1292,32 @@ func (m dashboardModel) logsSelectedLen() int {
 // sorted by CP-then-name, so the active pass stays grouped and
 // contiguous; the absent pass re-sorts by name across groups.
 func (m dashboardModel) rows() []row {
-	var active, absent []int
+	var absent []int
+	var out []row
+	// Headers come from ALL states (m.states is sorted CP-grouped, so
+	// each distinct control plane yields one header) — a group whose
+	// cells are all absent keeps its header, so destroying the last
+	// cell never makes the control-plane node vanish from navigation.
+	// Only ACTIVE cells render in place under their header; absent
+	// ones collect for the section below the separator.
+	prev := "\x00" // sentinel — no real CP URL can equal
 	for i, st := range m.states {
+		if st.controlPlane != prev {
+			out = append(out, row{kind: rowHeader, cp: st.controlPlane})
+			prev = st.controlPlane
+		}
 		if st.status() == "absent" {
 			absent = append(absent, i)
 		} else {
-			active = append(active, i)
+			out = append(out, row{kind: rowCell, cellIdx: i})
 		}
-	}
-
-	var out []row
-	prev := "\x00" // sentinel — no real CP URL can equal
-	for _, i := range active {
-		if cp := m.states[i].controlPlane; cp != prev {
-			out = append(out, row{kind: rowHeader, cp: cp})
-			prev = cp
-		}
-		out = append(out, row{kind: rowCell, cellIdx: i})
 	}
 
 	if len(absent) > 0 {
 		sort.Slice(absent, func(a, b int) bool {
 			return m.states[absent[a]].name < m.states[absent[b]].name
 		})
-		if len(active) > 0 {
+		if len(out) > 0 {
 			out = append(out, row{kind: rowSeparator})
 		}
 		for _, i := range absent {

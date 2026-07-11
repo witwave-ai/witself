@@ -432,3 +432,74 @@ func TestCPApplyWritesOnlyDirtySections(t *testing.T) {
 		t.Fatalf("written reaper ttl = %d, want 480", rec.setCalls[0].Reaper.TTLMinutes)
 	}
 }
+
+// TestCPHeaderSurvivesLastCellDestroyed pins the regression: when the
+// last cell of a control-plane group goes absent (destroyed), the CP
+// header must STAY in the navigation pane — that's precisely when the
+// operator needs the CP's Overview/Settings (checking placement state
+// mid-rebuild). It previously vanished because headers were derived
+// from active cells only.
+func TestCPHeaderSurvivesLastCellDestroyed(t *testing.T) {
+	acc := true
+	live := []cellState{{
+		name:         "aws-sandbox-usw2-dev",
+		controlPlane: testCP,
+		fleet:        &fleet.Cell{Name: "aws-sandbox-usw2-dev", Accepting: &acc},
+	}}
+	m := dashboardModel{
+		ctx: t.Context(), cli: fakeSource{states: live},
+		width: 120, height: 30,
+		now: func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, _ := m.Update(loadedMsg{states: live})
+	m = next.(dashboardModel)
+	// Park the cursor on the CP header (the state the operator was in).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = next.(dashboardModel)
+	if m.currentRow().kind != rowHeader || m.currentRow().cp != testCP {
+		t.Fatal("setup: cursor must be on the CP header")
+	}
+
+	// The destroy completes; the refresh reloads the cell as absent
+	// (deregistered).
+	gone := []cellState{{name: "aws-sandbox-usw2-dev", controlPlane: testCP}}
+	next, _ = m.Update(loadedMsg{states: gone})
+	m = next.(dashboardModel)
+
+	// The header must still exist and be reachable.
+	foundHeader := false
+	for _, r := range m.rows() {
+		if r.kind == rowHeader && r.cp == testCP {
+			foundHeader = true
+		}
+	}
+	if !foundHeader {
+		t.Fatal("the CP header must survive its last cell going absent")
+	}
+	// And its tabs must still render: walk the cursor to the header and
+	// check the tab strip.
+	for m.currentRow().kind != rowHeader {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+		nm := next.(dashboardModel)
+		if nm.cursor == m.cursor {
+			t.Fatal("could not navigate to the CP header")
+		}
+		m = nm
+	}
+	if !strings.Contains(m.View(), "Settings") {
+		t.Fatal("the CP header's tabs must still render with zero active cells")
+	}
+	// The absent cell is still listed below the separator.
+	sep, cellBelow := false, false
+	for _, r := range m.rows() {
+		if r.kind == rowSeparator {
+			sep = true
+		}
+		if sep && r.kind == rowCell {
+			cellBelow = true
+		}
+	}
+	if !sep || !cellBelow {
+		t.Fatal("the destroyed cell must still list below the separator")
+	}
+}
