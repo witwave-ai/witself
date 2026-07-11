@@ -1,7 +1,7 @@
 # Witself
 
-Status: pre-implementation draft. The `witself` CLI ships incrementally (with
-`ws` kept as a short alias).
+Status: active development. The `witself` CLI ships incrementally (with `ws`
+kept as a short alias).
 
 ## Install
 
@@ -52,6 +52,27 @@ tool activity, and `raw` also retains the runtime-exposed hook envelope. None of
 the modes can capture hidden chain-of-thought. See
 [Witself Transcript Ledger](docs/transcript-ledger.md) for the data and retry
 contract.
+
+## Agent Messaging
+
+Agents in the same account realm can exchange durable direct messages using
+their existing agent tokens:
+
+```sh
+witself message send --account default --agent scott \
+  --to coordinator --kind handoff --body "Picking this up from here."
+
+witself message list --account default --agent coordinator --unread
+witself message read msg_... --account default --agent coordinator
+witself message ack msg_... --account default --agent coordinator
+```
+
+The sender and realm always come from the authenticated agent token. Inbox
+lists contain metadata only; `read` is the content boundary, and message content
+must be treated as untrusted input. The installed MCP server exposes matching
+`witself.message.send`, `witself.message.list`, and `witself.message.read` tools.
+See [Witself Inter-Agent Messaging](docs/inter-agent-messaging.md) for the
+implemented boundary and planned group/cross-realm extensions.
 
 ## Infrastructure Example
 

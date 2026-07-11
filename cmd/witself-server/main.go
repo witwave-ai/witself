@@ -210,6 +210,57 @@ func serve() int {
 				NextAfterSequence: page.NextAfterSequence,
 			}, nil
 		}
+		cfg.SendMessage = func(ctx context.Context, p server.DomainPrincipal, in server.SendMessageRequest) (server.Message, error) {
+			if in.To.Kind != "agent" {
+				return server.Message{}, fmt.Errorf("%w: to.kind must be agent", server.ErrBadInput)
+			}
+			msg, err := st.SendMessage(ctx, toStorePrincipal(p), store.SendMessageInput{
+				ToAgent:        in.To.ID,
+				Subject:        in.Subject,
+				Kind:           in.Kind,
+				Body:           in.Body,
+				Payload:        in.Payload,
+				ThreadID:       in.ThreadID,
+				IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
+		}
+		cfg.ListMessages = func(ctx context.Context, p server.DomainPrincipal, opts server.MessageListOptions) (server.MessagePage, error) {
+			page, err := st.ListMessages(ctx, toStorePrincipal(p), store.MessageFilter{
+				Direction: opts.Direction,
+				Unread:    opts.Unread,
+				From:      opts.From,
+				ThreadID:  opts.ThreadID,
+				Kind:      opts.Kind,
+				Limit:     opts.Limit,
+				Cursor:    opts.Cursor,
+			})
+			if err != nil {
+				return server.MessagePage{}, mapMessageError(err)
+			}
+			out := make([]server.Message, len(page.Messages))
+			for i, msg := range page.Messages {
+				out[i] = toServerAgentMessage(msg)
+			}
+			return server.MessagePage{Messages: out, NextCursor: page.NextCursor}, nil
+		}
+		cfg.ReadMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
+			msg, err := st.ReadMessage(ctx, toStorePrincipal(p), messageID)
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
+		}
+		cfg.AckMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
+			msg, err := st.AckMessage(ctx, toStorePrincipal(p), messageID)
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
+		}
 		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (server.Realm, error) {
 			r, err := st.CreateRealm(ctx, accountID, name)
 			if errors.Is(err, store.ErrRealmExists) {
@@ -1056,13 +1107,54 @@ func mapTranscriptError(err error) error {
 	}
 }
 
+func mapMessageError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrMessageInputInvalid), errors.Is(err, store.ErrMessageCursorInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageInputInvalid, err)
+	case errors.Is(err, store.ErrMessageRecipientMissing), errors.Is(err, store.ErrMessageNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrMessageConflict):
+		return server.ErrConflict
+	case errors.Is(err, store.ErrMessageForbidden), errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotActive):
+		return server.ErrForbidden
+	case errors.Is(err, store.ErrAccountNotFound):
+		return server.ErrNotFound
+	default:
+		return err
+	}
+}
+
 func toStorePrincipal(p server.DomainPrincipal) store.Principal {
 	return store.Principal{
 		Kind:          p.Kind,
 		ID:            p.ID,
 		AccountID:     p.AccountID,
 		RealmID:       p.RealmID,
+		AgentName:     p.AgentName,
+		RealmName:     p.RealmName,
 		AccountStatus: p.AccountStatus,
+	}
+}
+
+func toServerAgentMessage(msg store.Message) server.Message {
+	return server.Message{
+		ID: msg.ID, AccountID: msg.AccountID, RealmID: msg.RealmID,
+		From: server.MessageAgent{
+			Kind: "agent", AgentID: msg.From.ID, AgentName: msg.From.Name,
+		},
+		To: server.MessageRecipient{
+			Kind: msg.To.Kind, AgentID: msg.To.ID, AgentName: msg.To.Name,
+		},
+		Subject: msg.Subject, Kind: msg.Kind, Body: msg.Body, Payload: msg.Payload,
+		ThreadID: msg.ThreadID, CreatedAt: msg.CreatedAt,
+		Delivery: server.MessageDelivery{
+			State: msg.Delivery.State, DeliveredAt: msg.Delivery.DeliveredAt,
+		},
+		ReadState: server.MessageReadState{
+			State: msg.ReadState.State, ReadAt: msg.ReadState.ReadAt, AckedAt: msg.ReadState.AckedAt,
+		},
 	}
 }
 

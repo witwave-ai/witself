@@ -219,6 +219,7 @@ DELETE /v1/groups/{group_id}/members/{principal}
 GET  /v1/messages
 POST /v1/messages
 GET  /v1/messages/{message_id}
+POST /v1/messages/{message_id}:read
 POST /v1/messages/{message_id}:ack
 POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
 
@@ -334,7 +335,9 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   target, and scope would be allowed under current policy, returning the
   deciding policy id or a deny reason. It is the canonical dry-run for access
   decisions and does not mutate state.
-- `POST /v1/messages/{message_id}:ack` records per-recipient acknowledgement.
+- `POST /v1/messages/{message_id}:read` returns content and records the
+  recipient read transition; `POST /v1/messages/{message_id}:ack` records
+  per-recipient acknowledgement.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
 - `POST /v1/tokens/{token_id}:rotate` issues a replacement token. The raw token

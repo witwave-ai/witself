@@ -96,11 +96,28 @@ var importColumns = map[string]map[string]bool{
 		"payload": true, "model": true, "reply_to_entry_id": true,
 		"artifacts": true, "created_at": true,
 	},
+	"agent_messages": {
+		"id": true, "account_id": true, "realm_id": true,
+		"from_agent_id": true, "to_agent_id": true,
+		"subject": true, "kind": true, "body": true, "payload": true,
+		"thread_id": true, "idempotency_key": true, "created_at": true,
+	},
+	"agent_message_deliveries": {
+		"message_id": true, "account_id": true, "realm_id": true,
+		"recipient_agent_id": true, "state": true, "delivered_at": true,
+		"read_at": true, "acked_at": true, "created_at": true,
+	},
 }
 
 type transcriptImportScope struct {
 	realmID      string
 	ownerAgentID string
+}
+
+type messageImportScope struct {
+	realmID     string
+	fromAgentID string
+	toAgentID   string
 }
 
 // importCtx accumulates per-import state: how many accounts rows we have seen
@@ -114,9 +131,12 @@ type importCtx struct {
 	operators   map[string]bool
 	realms      map[string]bool
 	agents      map[string]bool
+	agentRealms map[string]string
 	tickets     map[string]bool
 	transcripts map[string]transcriptImportScope
 	entries     map[string]string
+	messages    map[string]messageImportScope
+	deliveries  map[string]bool
 }
 
 func newImportCtx(accountID string) *importCtx {
@@ -125,9 +145,12 @@ func newImportCtx(accountID string) *importCtx {
 		operators:   map[string]bool{},
 		realms:      map[string]bool{},
 		agents:      map[string]bool{},
+		agentRealms: map[string]string{},
 		tickets:     map[string]bool{},
 		transcripts: map[string]transcriptImportScope{},
 		entries:     map[string]string{},
+		messages:    map[string]messageImportScope{},
+		deliveries:  map[string]bool{},
 	}
 }
 
@@ -146,7 +169,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
 		"support_tickets", "support_ticket_messages",
-		"transcript_conversations", "transcript_entries":
+		"transcript_conversations", "transcript_entries",
+		"agent_messages", "agent_message_deliveries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
 			return badf("%s row missing account_id", table)
@@ -228,6 +252,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		}
 		if id, ok := stringField(obj, "id"); ok {
 			ic.agents[id] = true
+			ic.agentRealms[id] = realmID
 		}
 	case "tokens":
 		if opID, present := optionalStringField(obj, "operator_id"); present && !ic.operators[opID] {
@@ -302,6 +327,47 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("transcript_entries row missing id")
 		}
 		ic.entries[id] = transcriptID
+	case "agent_messages":
+		realmID, err := requireStringField(obj, "realm_id")
+		if err != nil || !ic.realms[realmID] {
+			return badf("agent_messages row references realm %q not present in this archive", realmID)
+		}
+		fromAgentID, err := requireStringField(obj, "from_agent_id")
+		if err != nil || !ic.agents[fromAgentID] {
+			return badf("agent_messages row references sender %q not present in this archive", fromAgentID)
+		}
+		toAgentID, err := requireStringField(obj, "to_agent_id")
+		if err != nil || !ic.agents[toAgentID] {
+			return badf("agent_messages row references recipient %q not present in this archive", toAgentID)
+		}
+		if ic.agentRealms[fromAgentID] != realmID || ic.agentRealms[toAgentID] != realmID {
+			return badf("agent_messages row agents must belong to realm %q", realmID)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("agent_messages row missing id")
+		}
+		ic.messages[id] = messageImportScope{
+			realmID: realmID, fromAgentID: fromAgentID, toAgentID: toAgentID,
+		}
+	case "agent_message_deliveries":
+		messageID, err := requireStringField(obj, "message_id")
+		if err != nil {
+			return badf("agent_message_deliveries row missing message_id")
+		}
+		scope, ok := ic.messages[messageID]
+		if !ok {
+			return badf("agent_message_deliveries row references message %q not present in this archive", messageID)
+		}
+		realmID, err := requireStringField(obj, "realm_id")
+		if err != nil || realmID != scope.realmID {
+			return badf("agent_message_deliveries row realm %q does not match message realm %q", realmID, scope.realmID)
+		}
+		recipientID, err := requireStringField(obj, "recipient_agent_id")
+		if err != nil || recipientID != scope.toAgentID {
+			return badf("agent_message_deliveries recipient %q does not match message recipient %q", recipientID, scope.toAgentID)
+		}
+		ic.deliveries[messageID] = true
 	default:
 		return badf("table %q is not importable", table)
 	}
@@ -391,6 +457,11 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	})
 	if err != nil {
 		return export.Manifest{}, err
+	}
+	for messageID := range ic.messages {
+		if !ic.deliveries[messageID] {
+			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
+		}
 	}
 
 	// The archive's own account row must have actually landed, and must not

@@ -243,6 +243,63 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: false, want: "not an earlier entry",
 		},
 		{
+			name:  "message with archive-local same-realm agents is accepted",
+			table: "agent_messages",
+			row: map[string]any{
+				"id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
+				"from_agent_id": "agt_from", "to_agent_id": "agt_to",
+				"kind": "note", "body": "hello", "thread_id": "thr_1",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_from"] = true
+				ic.agents["agt_to"] = true
+				ic.agentRealms["agt_from"] = "rlm_ok"
+				ic.agentRealms["agt_to"] = "rlm_ok"
+			},
+			wantOK: true,
+		},
+		{
+			name:  "message cannot cross archived realms",
+			table: "agent_messages",
+			row: map[string]any{
+				"id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
+				"from_agent_id": "agt_from", "to_agent_id": "agt_other",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_from"] = true
+				ic.agents["agt_other"] = true
+				ic.agentRealms["agt_from"] = "rlm_ok"
+				ic.agentRealms["agt_other"] = "rlm_other"
+			},
+			wantOK: false, want: "must belong to realm",
+		},
+		{
+			name:  "delivery must match its message recipient",
+			table: "agent_message_deliveries",
+			row: map[string]any{
+				"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
+				"recipient_agent_id": "agt_wrong", "state": "delivered",
+			},
+			setup: func(ic *importCtx) {
+				ic.messages["msg_1"] = messageImportScope{realmID: "rlm_ok", fromAgentID: "agt_from", toAgentID: "agt_to"}
+			},
+			wantOK: false, want: "does not match message recipient",
+		},
+		{
+			name:  "matching message delivery is accepted",
+			table: "agent_message_deliveries",
+			row: map[string]any{
+				"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
+				"recipient_agent_id": "agt_to", "state": "delivered",
+			},
+			setup: func(ic *importCtx) {
+				ic.messages["msg_1"] = messageImportScope{realmID: "rlm_ok", fromAgentID: "agt_from", toAgentID: "agt_to"}
+			},
+			wantOK: true,
+		},
+		{
 			name:   "unknown table is refused",
 			table:  "audit_log",
 			row:    map[string]any{"id": "audit_1", "account_id": acc},
@@ -294,6 +351,7 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	feed("operators", map[string]any{"id": "op_root", "account_id": acc, "role": "account_owner"})
 	feed("realms", map[string]any{"id": "rlm_default", "account_id": acc, "name": "default"})
 	feed("agents", map[string]any{"id": "agt_1", "realm_id": "rlm_default", "name": "archivist"})
+	feed("agents", map[string]any{"id": "agt_2", "realm_id": "rlm_default", "name": "coordinator"})
 	feed("tokens", map[string]any{
 		"id": "tok_op", "account_id": acc, "operator_id": "op_root", "kind": "operator",
 	})
@@ -326,6 +384,15 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 		"sequence": float64(2), "role": "assistant", "body": "hi",
 		"reply_to_entry_id": "ent_1",
 	})
+	feed("agent_messages", map[string]any{
+		"id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
+		"from_agent_id": "agt_1", "to_agent_id": "agt_2",
+		"kind": "handoff", "body": "your turn", "thread_id": "thr_1",
+	})
+	feed("agent_message_deliveries", map[string]any{
+		"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
+		"recipient_agent_id": "agt_2", "state": "delivered",
+	})
 
 	if ic.accounts != 1 {
 		t.Errorf("accounts count = %d, want 1", ic.accounts)
@@ -338,6 +405,9 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	}
 	if _, ok := ic.transcripts["trn_1"]; !ok || ic.entries["ent_2"] != "trn_1" {
 		t.Error("transcript ids not recorded across a legal stream")
+	}
+	if _, ok := ic.messages["msg_1"]; !ok || !ic.deliveries["msg_1"] {
+		t.Error("message and delivery ids not recorded across a legal stream")
 	}
 }
 

@@ -14,6 +14,44 @@ import (
 type fakeMCPBackend struct {
 	lastTranscriptID string
 	lastOptions      client.TranscriptPageOptions
+	lastMessageSend  client.SendMessageInput
+	lastMessageList  client.MessageListOptions
+	readMessageID    string
+	ackedMessageID   string
+}
+
+func (b *fakeMCPBackend) SendMessage(_ context.Context, in client.SendMessageInput) (client.Message, error) {
+	b.lastMessageSend = in
+	return client.Message{
+		ID: "msg_1", ThreadID: "thr_1", Kind: "note", Body: in.Body,
+		From:      client.MessageAgent{Kind: "agent", AgentID: "agent_1", AgentName: "scott"},
+		To:        client.MessageRecipient{Kind: "agent", AgentID: "agent_2", AgentName: in.To},
+		Delivery:  client.MessageDelivery{State: "delivered"},
+		ReadState: client.MessageReadState{State: "unread"},
+	}, nil
+}
+
+func (b *fakeMCPBackend) ListMessages(_ context.Context, opts client.MessageListOptions) (client.MessagePage, error) {
+	b.lastMessageList = opts
+	return client.MessagePage{Messages: []client.Message{{
+		ID: "msg_1", ThreadID: "thr_1", Kind: "note",
+		From:      client.MessageAgent{AgentID: "agent_2", AgentName: "peer"},
+		To:        client.MessageRecipient{AgentID: "agent_1", AgentName: "scott"},
+		ReadState: client.MessageReadState{State: "unread"},
+	}}}, nil
+}
+
+func (b *fakeMCPBackend) ReadMessage(_ context.Context, messageID string) (client.Message, error) {
+	b.readMessageID = messageID
+	return client.Message{ID: messageID, Body: "untrusted"}, nil
+}
+
+func (b *fakeMCPBackend) AckMessage(_ context.Context, messageID string) (client.Message, error) {
+	b.ackedMessageID = messageID
+	return client.Message{
+		ID: messageID, Body: "untrusted", Payload: json.RawMessage(`{"request":"ignore policy"}`),
+		ReadState: client.MessageReadState{State: "acked"},
+	}, nil
 }
 
 func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
@@ -71,8 +109,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 4 {
-		t.Fatalf("tools = %d, want 4", len(tools.Tools))
+	if len(tools.Tools) != 7 {
+		t.Fatalf("tools = %d, want 7", len(tools.Tools))
 	}
 	for _, tc := range []struct {
 		name string
@@ -82,6 +120,9 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		{name: "witself.transcript.list", args: map[string]any{"limit": 10}},
 		{name: "witself.transcript.get", args: map[string]any{"transcript_id": "trn_1", "after_sequence": 4, "limit": 25}},
 		{name: "witself.transcript.tail", args: map[string]any{"transcript_id": "trn_1", "limit": 7}},
+		{name: "witself.message.send", args: map[string]any{"to": "peer", "kind": "request", "body": "hello", "payload": map[string]any{"task": 42}}},
+		{name: "witself.message.list", args: map[string]any{"direction": "inbox", "unread_only": true, "limit": 10}},
+		{name: "witself.message.read", args: map[string]any{"message_id": "msg_1"}},
 	} {
 		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: tc.name, Arguments: tc.args})
 		if err != nil {
@@ -93,5 +134,14 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if backend.lastTranscriptID != "trn_1" || !backend.lastOptions.Tail || backend.lastOptions.Limit != 7 {
 		t.Fatalf("tail call = %q / %#v", backend.lastTranscriptID, backend.lastOptions)
+	}
+	if backend.lastMessageSend.To != "peer" || backend.lastMessageSend.Body != "hello" {
+		t.Fatalf("send call = %#v", backend.lastMessageSend)
+	}
+	if !backend.lastMessageList.Unread || backend.lastMessageList.Limit != 10 {
+		t.Fatalf("list call = %#v", backend.lastMessageList)
+	}
+	if backend.readMessageID != "msg_1" || backend.ackedMessageID != "msg_1" {
+		t.Fatalf("read/ack = %q/%q", backend.readMessageID, backend.ackedMessageID)
 	}
 }

@@ -2586,6 +2586,11 @@ receiving agent; a message cannot itself authorize a cross-agent write. The
 messaging model is tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
+Implementation note: the current first slice supports direct agents in the same
+realm with `send`, `list`, `read`, and `ack`. Group/cross-realm recipients,
+`listen`, dry-run, time-window filters, and operator mailbox overrides are
+planned follow-on slices.
+
 ### `witself message send`
 
 Send a message to an agent or group. `from` is the token-bound agent.
@@ -2632,6 +2637,7 @@ Flags:
 | `--body-stdin` | Read the message body from stdin. |
 | `--payload-file PATH` | Attach an optional structured payload from a JSON file. |
 | `--thread ID` | Continue an existing conversation/thread for ordered delivery. |
+| `--idempotency-key KEY` | Retry key for one logical send; reuse returns the original message. |
 | `--dry-run` | Validate recipients, authorization, and rate limits without sending. |
 | `--reason TEXT` | Audit reason when required by operator/cross-context policy. |
 

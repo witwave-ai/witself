@@ -461,6 +461,13 @@ Exit criteria:
 
 Goal: deliver full durable inter-agent messaging in v0 (not a stub).
 
+Status: first slice complete. Direct same-realm agent delivery now includes the
+durable message/delivery schema, token-derived sender, idempotent send,
+metadata-only inbox/outbox listing, read/ack transitions, content-free audit,
+archive/restore, and API/CLI/MCP adapters. Group fan-out, policy scopes,
+rate/meter enforcement, dry-run, and long-poll listen remain before the full
+milestone exit criteria are met.
+
 Deliverables:
 
 - Message object shape (`msg_…`): `from` (always derived from the token, never

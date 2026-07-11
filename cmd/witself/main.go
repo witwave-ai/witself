@@ -59,6 +59,8 @@ func run(args []string) int {
 		return selfCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
+	case "message":
+		return messageCmd(args[1:])
 	case "install":
 		return installCmd(args[1:])
 	case "mcp":
@@ -2724,6 +2726,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
+	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install codex|claude  Install transcript hooks and MCP access")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	usageLine(w, "  witself help                 Show this help")

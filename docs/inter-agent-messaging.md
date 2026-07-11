@@ -1,15 +1,33 @@
 # Witself Inter-Agent Messaging
 
-Status: pre-implementation draft. Last reviewed 2026-06-29. This document is the
-authority for the durable messaging model, message shape, delivery and ordering
-semantics, the anti-spoofing trust boundary, rate limits, scopes, audit, and
-metering. It binds the message shapes pinned in
+Status: first implementation slice. Last reviewed 2026-07-11. This document is
+the authority for the durable messaging model, message shape, delivery and
+ordering semantics, the anti-spoofing trust boundary, rate limits, scopes,
+audit, and metering. It binds the message shapes pinned in
 [json-contracts.md](json-contracts.md) and conforms to the master spec in
 [requirements.md](requirements.md).
 
 Inter-agent messaging is **fully in scope for v0**, not a stub. It ships a
 durable mailbox/queue with at-least-once delivery, per-recipient ordering, and
 explicit read/acknowledgement state.
+
+## Implementation Status
+
+The first slice ships direct agent-to-agent messaging inside one realm:
+
+- Postgres-backed immutable messages and per-recipient delivery/read/ack state.
+- Token-derived sender, account, and realm; caller-supplied actor fields are
+  rejected.
+- Idempotent send, metadata-only cursor-paginated inbox/outbox list, recipient
+  read, and recipient ack through API, CLI, and MCP.
+- Content-free send/deliver/read/ack audit events and complete account
+  archive/restore coverage.
+- MCP read acknowledges after a successful read; CLI read and ack remain
+  separate explicit commands.
+
+Group fan-out, cross-realm delivery, long-poll listen, dry-run, operator
+metadata inspection, policy scopes, metering, and rate limits remain later
+slices of this v0 design.
 
 ## Goal
 

@@ -283,6 +283,14 @@ type Config struct {
 	ListTranscripts         func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
 	GetTranscript           func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
+
+	// Realm-local direct messaging. All hooks require an agent principal; the
+	// store derives sender/account/realm from that principal and never from the
+	// request body. List is metadata-only; Read is the content boundary.
+	SendMessage  func(ctx context.Context, p DomainPrincipal, in SendMessageRequest) (Message, error)
+	ListMessages func(ctx context.Context, p DomainPrincipal, opts MessageListOptions) (MessagePage, error)
+	ReadMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
+	AckMessage   func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -602,6 +610,95 @@ type TranscriptPage struct {
 	NextAfterSequence int64
 }
 
+// Message is one durable realm-local direct message and the recipient's
+// delivery/read state. Body and Payload are omitted from list responses.
+type Message struct {
+	ID        string           `json:"id"`
+	AccountID string           `json:"account_id"`
+	RealmID   string           `json:"realm_id"`
+	From      MessageAgent     `json:"from"`
+	To        MessageRecipient `json:"to"`
+	Subject   string           `json:"subject,omitempty"`
+	Kind      string           `json:"kind"`
+	Body      string           `json:"body,omitempty"`
+	Payload   json.RawMessage  `json:"payload,omitempty"`
+	ThreadID  string           `json:"thread_id"`
+	CreatedAt time.Time        `json:"created_at"`
+	Delivery  MessageDelivery  `json:"delivery"`
+	ReadState MessageReadState `json:"read_state"`
+}
+
+// MessageAgent identifies the token-derived sender in the wire shape.
+type MessageAgent struct {
+	Kind      string `json:"kind"`
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
+}
+
+// MessageRecipient identifies the resolved direct recipient in the wire shape.
+type MessageRecipient struct {
+	Kind      string `json:"kind"`
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
+}
+
+// MessageDelivery is the recipient delivery state in the wire shape.
+type MessageDelivery struct {
+	State       string     `json:"state"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+}
+
+// MessageReadState is the recipient's unread/read/acked state.
+type MessageReadState struct {
+	State   string     `json:"state"`
+	ReadAt  *time.Time `json:"read_at,omitempty"`
+	AckedAt *time.Time `json:"acked_at,omitempty"`
+}
+
+// MessageRecipientRequest selects a direct recipient by name or id.
+type MessageRecipientRequest struct {
+	Kind      string          `json:"kind"`
+	ID        string          `json:"id"`
+	Realm     json.RawMessage `json:"realm,omitempty"`
+	RealmID   json.RawMessage `json:"realm_id,omitempty"`
+	AccountID json.RawMessage `json:"account_id,omitempty"`
+}
+
+// SendMessageRequest intentionally includes rejected actor fields so a caller
+// cannot rely on permissive JSON decoding to smuggle or spoof identity.
+type SendMessageRequest struct {
+	To             MessageRecipientRequest `json:"to"`
+	Subject        string                  `json:"subject,omitempty"`
+	Kind           string                  `json:"kind,omitempty"`
+	Body           string                  `json:"body"`
+	Payload        json.RawMessage         `json:"payload,omitempty"`
+	ThreadID       string                  `json:"thread_id,omitempty"`
+	IdempotencyKey string                  `json:"-"`
+	DryRun         bool                    `json:"dry_run,omitempty"`
+	From           json.RawMessage         `json:"from,omitempty"`
+	Sender         json.RawMessage         `json:"sender,omitempty"`
+	Actor          json.RawMessage         `json:"actor,omitempty"`
+	Realm          json.RawMessage         `json:"realm,omitempty"`
+	RealmID        json.RawMessage         `json:"realm_id,omitempty"`
+}
+
+// MessageListOptions selects one bounded inbox or outbox page.
+type MessageListOptions struct {
+	Direction string
+	Unread    bool
+	From      string
+	ThreadID  string
+	Kind      string
+	Limit     int
+	Cursor    string
+}
+
+// MessagePage is the API-neutral mailbox page returned by the store adapter.
+type MessagePage struct {
+	Messages   []Message
+	NextCursor string
+}
+
 // Realm is the API view of a realm.
 type Realm struct {
 	ID   string `json:"id"`
@@ -804,7 +901,9 @@ func apiMux(cfg Config) http.Handler {
 	transcriptsSupported := selfDigestSupported &&
 		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
 		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo, selfDigestSupported, transcriptsSupported))
+	messagingSupported := selfDigestSupported && cfg.SendMessage != nil &&
+		cfg.ListMessages != nil && cfg.ReadMessage != nil && cfg.AckMessage != nil
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo, selfDigestSupported, transcriptsSupported, messagingSupported))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -919,6 +1018,15 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.AppendTranscriptEntries != nil {
 			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries:batch", appendTranscriptEntriesHandler(cfg.AuthenticatePrincipal, cfg.AppendTranscriptEntries))
 		}
+		if cfg.SendMessage != nil {
+			mux.HandleFunc("POST /v1/messages", sendMessageHandler(cfg.AuthenticatePrincipal, cfg.SendMessage))
+		}
+		if cfg.ListMessages != nil {
+			mux.HandleFunc("GET /v1/messages", listMessagesHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
+		}
+		if cfg.ReadMessage != nil && cfg.AckMessage != nil {
+			mux.HandleFunc("POST /v1/messages/{action}", messageActionHandler(cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage))
+		}
 	}
 	// Provision-token-authorized cell-wide admin ticket list (feeds
 	// the CP's fan-out for /v1/admin/tickets). Mounted independently of
@@ -1025,7 +1133,7 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		caps := capabilities{
@@ -1042,7 +1150,7 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				"semantic_recall": notImpl,
 				"policies":        notImpl,
 				"groups":          notImpl,
-				"messaging":       notImpl,
+				"messaging":       {Supported: messagingSupported},
 				"transcripts":     {Supported: transcriptsSupported},
 				"audit":           notImpl,
 			},
@@ -1057,6 +1165,9 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 		}
 		if !selfDigestSupported {
 			caps.Features["self_digest"] = notImpl
+		}
+		if !messagingSupported {
+			caps.Features["messaging"] = notImpl
 		}
 		if accountID != "" {
 			caps.Account = &accountInfo{ID: accountID}

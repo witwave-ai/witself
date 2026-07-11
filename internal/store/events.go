@@ -82,6 +82,14 @@ const (
 	VerbAccountReaped            = "account.reaped"
 	VerbAccountClosed            = "account.closed"
 
+	// Realm-local agent messaging. Message bodies and payloads deliberately
+	// never enter the account audit ledger; the message id and routing metadata
+	// are enough to establish lifecycle without duplicating private content.
+	VerbMessageSent      = "message.sent"
+	VerbMessageDelivered = "message.delivered"
+	VerbMessageRead      = "message.read"
+	VerbMessageAcked     = "message.acked"
+
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
 	// owner's audit ledger surfaces "you filed a ticket / support
@@ -264,6 +272,51 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbAccountClosed: {
 		allowedKeys:   []string{"reason"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorSystem},
+	},
+
+	VerbMessageSent: {
+		requiredKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id",
+		},
+		allowedKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "subject_present",
+		},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbMessageDelivered: {
+		requiredKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id",
+		},
+		allowedKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "subject_present",
+		},
+		allowedActors: []string{ActorSystem},
+	},
+	VerbMessageRead: {
+		requiredKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id",
+		},
+		allowedKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "subject_present",
+		},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbMessageAcked: {
+		requiredKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id",
+		},
+		allowedKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "subject_present",
+		},
+		allowedActors: []string{ActorAgent},
 	},
 
 	// Support-ticket verbs. ticket_id is required on all four so the

@@ -125,6 +125,27 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'artifacts', artifacts, 'created_at', created_at)
 			FROM transcript_entries WHERE account_id = $1
 			ORDER BY transcript_id, sequence, id`, arg: accountID},
+		// Messages depend on realms + agents; recipient delivery state depends
+		// on its message. Preserve bodies here because the account archive is
+		// the durable, encrypted migration unit for all account-owned data.
+		&querySource{s: s, table: "agent_messages", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'from_agent_id', from_agent_id, 'to_agent_id', to_agent_id,
+			  'subject', subject, 'kind', kind, 'body', body,
+			  'payload', payload, 'thread_id', thread_id,
+			  'idempotency_key', idempotency_key, 'created_at', created_at)
+			FROM agent_messages WHERE account_id = $1
+			ORDER BY created_at, id`, arg: accountID},
+		&querySource{s: s, table: "agent_message_deliveries", q: `
+			SELECT jsonb_build_object(
+			  'message_id', message_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'recipient_agent_id', recipient_agent_id,
+			  'state', state, 'delivered_at', delivered_at,
+			  'read_at', read_at, 'acked_at', acked_at,
+			  'created_at', created_at)
+			FROM agent_message_deliveries WHERE account_id = $1
+			ORDER BY created_at, message_id, recipient_agent_id`, arg: accountID},
 		// account_events streams last because it has no outbound FKs
 		// beyond account_id, and it is the append-only ledger — its rows
 		// point AT the state changes recorded above, not the other way
