@@ -124,7 +124,6 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	str("cidr", &entry.CIDR)
 	str("k8s-version", &entry.K8sVersion)
 	str("db-version", &entry.DBVersion)
-	str("ingress", &entry.Ingress)
 	str("domain", &entry.Domain)
 	str("bootstrap-token-file", &entry.BootstrapTokenFile)
 	// Backend is ALWAYS recorded, explicit or not: it addresses WHICH

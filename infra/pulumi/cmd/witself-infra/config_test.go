@@ -22,7 +22,6 @@ func newTestFlagSet() *flag.FlagSet {
 	fs.String("cidr", "10.20.0.0/16", "")
 	fs.String("k8s-version", "1.36", "")
 	fs.String("db-version", "18", "")
-	fs.String("ingress", "cloudflare-tunnel", "")
 	fs.Bool("argocd", false, "")
 	fs.String("gitops-repo", "https://github.com/witwave-ai/witself", "")
 	fs.String("gitops-path", ".gitops/charts/bootstrap", "")

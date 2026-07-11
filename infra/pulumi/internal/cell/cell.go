@@ -15,7 +15,7 @@
 //	slice 1 — [done] module + CLI + Automation API loop
 //	slice 2 — [done] AWS substrate: dedicated VPC + RDS Postgres (private subnets)
 //	slice 3 — install the OCI chart (oci://ghcr.io/witwave-ai/charts/witself-server)
-//	slice 4 — ingress modes: cloudflare-tunnel | alb | none
+//	slice 4 — ingress: cloud-native L7 LB (ALB / GKE Ingress / App Gateway) via GitOps
 //	slice 5 — sealed-plane KMS (prod profile), IRSA, NAT/egress, GCP
 package cell
 
@@ -106,7 +106,6 @@ func Program(ctx *pulumi.Context) error {
 
 	cloud := w.Get("cloud")     // aws | gcp | azure
 	profile := w.Get("profile") // minimal | prod
-	ingress := w.Get("ingress") // cloudflare-tunnel | alb | none
 	cidr := w.Get("cidr")
 	if cidr == "" {
 		cidr = "10.20.0.0/16"
@@ -144,7 +143,6 @@ func Program(ctx *pulumi.Context) error {
 	ctx.Export("cell", pulumi.String(cellName))
 	ctx.Export("cloud", pulumi.String(cloud))
 	ctx.Export("profile", pulumi.String(profile))
-	ctx.Export("ingress", pulumi.String(ingress))
 
 	switch cloud {
 	case "", "aws":

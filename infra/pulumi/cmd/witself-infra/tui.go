@@ -221,7 +221,6 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	str("k8s version", "1.36", e.K8sVersion, func(x *cellEntry) *string { return x.K8sVersion })
 	str("db version", "18", e.DBVersion, func(x *cellEntry) *string { return x.DBVersion })
 	str("cidr", "10.20.0.0/16", e.CIDR, func(x *cellEntry) *string { return x.CIDR })
-	str("ingress", "cloudflare-tunnel", e.Ingress, func(x *cellEntry) *string { return x.Ingress })
 	argocdOn := boolean("argocd", false, e.ArgoCD, func(x *cellEntry) *bool { return x.ArgoCD })
 	if argocdOn {
 		str("gitops repo", "https://github.com/witwave-ai/witself",

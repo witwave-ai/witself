@@ -50,7 +50,6 @@ witself-infra up \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
   -gitops-values-path .gitops/cells/aws-sandbox-usw2-dev/values.yaml \
-  -ingress alb \
   -k8s-version 1.36 \
   -profile minimal \
   -region us-west-2 \
@@ -123,7 +122,6 @@ witself-infra up \
   -gitops-repo https://github.com/witwave-ai/witself \
   -gitops-revision main \
   -gitops-values-path .gitops/cells/azure-sandbox-use2-dev/values.yaml \
-  -ingress none \
   -k8s-version 1.36 \
   -profile minimal \
   -region eastus2 \
@@ -229,7 +227,6 @@ witself-infra destroy \
   -azure-subscription witwave-sandbox \
   -backend azblob \
   -cloud azure \
-  -ingress none \
   -profile minimal \
   -region eastus2 \
   -role dev

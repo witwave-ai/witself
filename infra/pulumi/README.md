@@ -248,7 +248,6 @@ witself-infra up \
   -backend azblob \
   -cloud azure \
   -db-version 18 \
-  -ingress none \
   -k8s-version 1.36 \
   -profile minimal \
   -region eastus2 \

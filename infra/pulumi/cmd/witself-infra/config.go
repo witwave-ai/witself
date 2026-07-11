@@ -115,7 +115,6 @@ type cellEntry struct {
 	CIDR               *string          `yaml:"cidr,omitempty"`
 	K8sVersion         *string          `yaml:"k8s_version,omitempty"`
 	DBVersion          *string          `yaml:"db_version,omitempty"`
-	Ingress            *string          `yaml:"ingress,omitempty"`
 	ArgoCD             *bool            `yaml:"argocd,omitempty"`
 	Gitops             *gitopsEntry     `yaml:"gitops,omitempty"`
 	Domain             *string          `yaml:"domain,omitempty"`
@@ -156,7 +155,6 @@ func (e *cellEntry) flagValues() map[string]string {
 	set("cidr", e.CIDR)
 	set("k8s-version", e.K8sVersion)
 	set("db-version", e.DBVersion)
-	set("ingress", e.Ingress)
 	set("domain", e.Domain)
 	set("bootstrap-token-file", e.BootstrapTokenFile)
 	set("backend", e.Backend)

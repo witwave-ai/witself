@@ -154,7 +154,6 @@ flags:
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -k8s-version    EKS Kubernetes version                       (default "1.36")
   -db-version     PostgreSQL major version                     (default "18")
-  -ingress        cloudflare-tunnel|alb|none                   (default "cloudflare-tunnel")
   -argocd         install Argo CD (GitOps control plane)        (default false)
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
@@ -268,7 +267,6 @@ func run(args []string) error {
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	k8sVersion := fs.String("k8s-version", "1.36", "EKS Kubernetes version")
 	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
-	ingress := fs.String("ingress", "cloudflare-tunnel", "ingress mode: cloudflare-tunnel|alb|none")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
 	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
 	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path to the root bootstrap chart")
@@ -601,12 +599,11 @@ func run(args []string) error {
 		}
 	}
 
-	// Behavior config (cloud/profile/cidr/ingress) + the real region for the
+	// Behavior config (cloud/profile/cidr) + the real region for the
 	// provider. The name components are encoded in the cell/stack name itself.
 	for k, v := range map[string]string{
 		"witself:cloud":            *cloud,
 		"witself:profile":          *profile,
-		"witself:ingress":          *ingress,
 		"witself:cidr":             *cidr,
 		"witself:accountAlias":     *accountAlias,
 		"witself:role":             *role,
