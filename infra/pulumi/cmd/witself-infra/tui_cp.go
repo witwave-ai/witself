@@ -1,12 +1,19 @@
 package main
 
 // Control-plane tabs (issue #37). A header row's context pane gets its
-// own tab set — Overview (the existing CP summary) and Settings (the
-// placement runner's knobs, editable). Edits accumulate in a DRAFT
-// copy per CP; nothing writes until the operator applies, which pops a
-// diff-confirm modal, PUTs via SetPlacementRunner, and then renders
-// the control plane's authoritative response — never the optimistic
-// draft. `r` fires a one-shot runner pass.
+// own tab set — Overview (the existing CP summary) and Settings: every
+// runtime-configurable knob the control plane exposes today, as one
+// editable form in three sections:
+//
+//   placement runner — the cron pass (enabled, restore/rebalance + batches)
+//   reaper           — pending-account sweep (enabled, ttl minutes)
+//   placement        — strategy weighted|pinned (+ pinned cell)
+//
+// Edits accumulate in a DRAFT copy per CP; nothing writes until the
+// operator applies, which pops a diff-confirm modal, POSTs ONLY the
+// dirty sections, and then renders the control plane's authoritative
+// responses — never the optimistic draft. `r` fires a one-shot runner
+// pass with the authoritative runner config.
 //
 // Key model: while the context pane holds focus on the Settings tab,
 // j/k move the FIELD cursor (you're editing a form, not scanning
@@ -38,32 +45,59 @@ var cpTabNames = []string{"Overview", "Settings"}
 // the Settings tab re-reads it.
 const cpSettingsTTL = 15 * time.Second
 
-// cpSettingsState is one control plane's placement-runner settings as
-// the dashboard knows them: the authoritative config (last read or
-// last apply response), an optional draft holding unapplied edits, and
-// the async bookkeeping.
+// cpConfig bundles every runtime-configurable CP setting the Settings
+// tab edits. All fields are comparable, so drafts diff with ==.
+type cpConfig struct {
+	Runner    fleet.PlacementRunnerConfig
+	Reaper    fleet.ReaperConfig
+	Placement fleet.PlacementConfig
+}
+
+// cpSections flags which sections of a cpConfig an apply should write —
+// only the dirty ones go over the wire, so an untouched section can
+// never clobber a concurrent change to it.
+type cpSections struct {
+	Runner    bool
+	Reaper    bool
+	Placement bool
+}
+
+// dirtySections reports which sections differ between the
+// authoritative config and the draft.
+func dirtySections(cur, next cpConfig) cpSections {
+	return cpSections{
+		Runner:    cur.Runner != next.Runner,
+		Reaper:    cur.Reaper != next.Reaper,
+		Placement: cur.Placement != next.Placement,
+	}
+}
+
+// cpSettingsState is one control plane's settings as the dashboard
+// knows them: the authoritative config (last read or last apply
+// response), an optional draft holding unapplied edits, and the async
+// bookkeeping.
 type cpSettingsState struct {
 	loaded   time.Time
 	inflight bool
 	applying bool
-	cfg      fleet.PlacementRunnerConfig
+	cfg      cpConfig
 	err      error
-	draft    *fleet.PlacementRunnerConfig // nil = no edits in progress
-	lastRun  string                       // one-line summary of the last `r` pass
+	draft    *cpConfig // nil = no edits in progress
+	lastRun  string    // one-line summary of the last `r` pass
 }
 
-// dirty reports whether the draft differs from the authoritative
-// config (PlacementRunnerConfig is all bools/ints — comparable).
+// dirty reports whether the draft differs from the authoritative config.
 func (s cpSettingsState) dirty() bool {
 	return s.draft != nil && *s.draft != s.cfg
 }
 
-// cpApplyConfirm is the pending apply-confirm modal: which CP, and the
-// human-readable diff lines shown for confirmation.
+// cpApplyConfirm is the pending apply-confirm modal: which CP, the
+// draft to write, which sections are dirty, and the diff lines.
 type cpApplyConfirm struct {
-	cp    string
-	next  fleet.PlacementRunnerConfig
-	diffs []string
+	cp       string
+	next     cpConfig
+	sections cpSections
+	diffs    []string
 }
 
 // --- field table -----------------------------------------------------
@@ -73,48 +107,113 @@ type cpFieldKind int
 const (
 	cpFieldBool cpFieldKind = iota
 	cpFieldInt
+	cpFieldEnum // space/enter cycles through options
 )
 
-// cpField describes one editable row of the Settings form.
+// cpField describes one editable row of the Settings form. section
+// groups fields under their header and maps to the wire write.
 type cpField struct {
-	name string
-	kind cpFieldKind
-	getB func(fleet.PlacementRunnerConfig) bool
-	setB func(*fleet.PlacementRunnerConfig, bool)
-	getI func(fleet.PlacementRunnerConfig) int
-	setI func(*fleet.PlacementRunnerConfig, int)
+	section string
+	name    string
+	kind    cpFieldKind
+	getB    func(cpConfig) bool
+	setB    func(*cpConfig, bool)
+	getI    func(cpConfig) int
+	setI    func(*cpConfig, int)
+	getS    func(cpConfig) string
+	setS    func(*cpConfig, string)
+	// options returns the enum's choices; for pinned cell it's the
+	// CP's registered cells, so it needs the model + CP.
+	options func(m *dashboardModel, cp string) []string
 }
 
 var cpFields = []cpField{
-	{name: "enabled", kind: cpFieldBool,
-		getB: func(c fleet.PlacementRunnerConfig) bool { return c.Enabled },
-		setB: func(c *fleet.PlacementRunnerConfig, v bool) { c.Enabled = v }},
-	{name: "restore archives", kind: cpFieldBool,
-		getB: func(c fleet.PlacementRunnerConfig) bool { return c.RestoreArchives },
-		setB: func(c *fleet.PlacementRunnerConfig, v bool) { c.RestoreArchives = v }},
-	{name: "restore batch", kind: cpFieldInt,
-		getI: func(c fleet.PlacementRunnerConfig) int { return c.RestoreBatch },
-		setI: func(c *fleet.PlacementRunnerConfig, v int) { c.RestoreBatch = v }},
-	{name: "restore any-region", kind: cpFieldBool,
-		getB: func(c fleet.PlacementRunnerConfig) bool { return c.RestoreAnyRegion },
-		setB: func(c *fleet.PlacementRunnerConfig, v bool) { c.RestoreAnyRegion = v }},
-	{name: "rebalance", kind: cpFieldBool,
-		getB: func(c fleet.PlacementRunnerConfig) bool { return c.Rebalance },
-		setB: func(c *fleet.PlacementRunnerConfig, v bool) { c.Rebalance = v }},
-	{name: "rebalance batch", kind: cpFieldInt,
-		getI: func(c fleet.PlacementRunnerConfig) int { return c.RebalanceBatch },
-		setI: func(c *fleet.PlacementRunnerConfig, v int) { c.RebalanceBatch = v }},
+	{section: "placement runner", name: "enabled", kind: cpFieldBool,
+		getB: func(c cpConfig) bool { return c.Runner.Enabled },
+		setB: func(c *cpConfig, v bool) { c.Runner.Enabled = v }},
+	{section: "placement runner", name: "restore archives", kind: cpFieldBool,
+		getB: func(c cpConfig) bool { return c.Runner.RestoreArchives },
+		setB: func(c *cpConfig, v bool) { c.Runner.RestoreArchives = v }},
+	{section: "placement runner", name: "restore batch", kind: cpFieldInt,
+		getI: func(c cpConfig) int { return c.Runner.RestoreBatch },
+		setI: func(c *cpConfig, v int) { c.Runner.RestoreBatch = v }},
+	{section: "placement runner", name: "restore any-region", kind: cpFieldBool,
+		getB: func(c cpConfig) bool { return c.Runner.RestoreAnyRegion },
+		setB: func(c *cpConfig, v bool) { c.Runner.RestoreAnyRegion = v }},
+	{section: "placement runner", name: "rebalance", kind: cpFieldBool,
+		getB: func(c cpConfig) bool { return c.Runner.Rebalance },
+		setB: func(c *cpConfig, v bool) { c.Runner.Rebalance = v }},
+	{section: "placement runner", name: "rebalance batch", kind: cpFieldInt,
+		getI: func(c cpConfig) int { return c.Runner.RebalanceBatch },
+		setI: func(c *cpConfig, v int) { c.Runner.RebalanceBatch = v }},
+
+	{section: "reaper", name: "enabled", kind: cpFieldBool,
+		getB: func(c cpConfig) bool { return c.Reaper.Enabled },
+		setB: func(c *cpConfig, v bool) { c.Reaper.Enabled = v }},
+	{section: "reaper", name: "ttl (minutes)", kind: cpFieldInt,
+		getI: func(c cpConfig) int { return c.Reaper.TTLMinutes },
+		setI: func(c *cpConfig, v int) { c.Reaper.TTLMinutes = v }},
+
+	{section: "placement", name: "strategy", kind: cpFieldEnum,
+		getS:    func(c cpConfig) string { return c.Placement.Strategy },
+		setS:    func(c *cpConfig, v string) { c.Placement.Strategy = v },
+		options: func(*dashboardModel, string) []string { return []string{"weighted", "pinned"} }},
+	{section: "placement", name: "pinned cell", kind: cpFieldEnum,
+		getS:    func(c cpConfig) string { return c.Placement.PinnedCell },
+		setS:    func(c *cpConfig, v string) { c.Placement.PinnedCell = v },
+		options: func(m *dashboardModel, cp string) []string { return m.cpGroupCells(cp) }},
 }
 
-// fieldValue renders one field's value from a config.
-func (f cpField) value(c fleet.PlacementRunnerConfig) string {
-	if f.kind == cpFieldBool {
+// value renders one field's value from a config.
+func (f cpField) value(c cpConfig) string {
+	switch f.kind {
+	case cpFieldBool:
 		if f.getB(c) {
 			return "on"
 		}
 		return "off"
+	case cpFieldInt:
+		return strconv.Itoa(f.getI(c))
+	default:
+		s := f.getS(c)
+		if s == "" {
+			return "—"
+		}
+		return s
 	}
-	return strconv.Itoa(f.getI(c))
+}
+
+// cpGroupCells lists the registered cells in this CP's group — the
+// candidates for a pin. Falls back to every configured cell in the
+// group when none are registered yet.
+func (m *dashboardModel) cpGroupCells(cp string) []string {
+	var registered, all []string
+	for _, st := range m.states {
+		if st.controlPlane != cp {
+			continue
+		}
+		all = append(all, st.name)
+		if st.fleet != nil {
+			registered = append(registered, st.name)
+		}
+	}
+	if len(registered) > 0 {
+		return registered
+	}
+	return all
+}
+
+// validateDraft pre-checks the control plane's own rules so the
+// operator hears about a bad combination before the confirm modal, not
+// as an HTTP 400 after it.
+func validateDraft(c cpConfig) string {
+	if c.Reaper.Enabled && c.Reaper.TTLMinutes < 1 {
+		return "reaper ttl must be ≥ 1 minute when the reaper is enabled"
+	}
+	if c.Placement.Strategy == "pinned" && c.Placement.PinnedCell == "" {
+		return "pinned strategy needs a pinned cell"
+	}
+	return ""
 }
 
 // --- live data source ------------------------------------------------
@@ -134,20 +233,50 @@ func fleetClientFor(configPath, cp string) (*fleet.Client, error) {
 	return fleet.NewClient(cp, tokenFile)
 }
 
-func (liveDataSource) placementRunner(ctx context.Context, configPath, cp string) (fleet.PlacementRunnerConfig, error) {
+// readCPConfig fetches all three settings sections.
+func (liveDataSource) readCPConfig(ctx context.Context, configPath, cp string) (cpConfig, error) {
 	fc, err := fleetClientFor(configPath, cp)
 	if err != nil {
-		return fleet.PlacementRunnerConfig{}, err
+		return cpConfig{}, err
 	}
-	return fc.GetPlacementRunner(ctx)
+	var out cpConfig
+	if out.Runner, err = fc.GetPlacementRunner(ctx); err != nil {
+		return cpConfig{}, err
+	}
+	if out.Reaper, err = fc.GetReaper(ctx); err != nil {
+		return cpConfig{}, err
+	}
+	if out.Placement, err = fc.GetPlacement(ctx); err != nil {
+		return cpConfig{}, err
+	}
+	return out, nil
 }
 
-func (liveDataSource) setPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerConfig, error) {
+// writeCPConfig POSTs only the dirty sections and returns the merged
+// authoritative result (server responses for written sections, the
+// passed config for untouched ones).
+func (liveDataSource) writeCPConfig(ctx context.Context, configPath, cp string, cfg cpConfig, sections cpSections) (cpConfig, error) {
 	fc, err := fleetClientFor(configPath, cp)
 	if err != nil {
-		return fleet.PlacementRunnerConfig{}, err
+		return cpConfig{}, err
 	}
-	return fc.SetPlacementRunner(ctx, cfg)
+	out := cfg
+	if sections.Runner {
+		if out.Runner, err = fc.SetPlacementRunner(ctx, cfg.Runner); err != nil {
+			return cpConfig{}, err
+		}
+	}
+	if sections.Reaper {
+		if out.Reaper, err = fc.SetReaper(ctx, cfg.Reaper); err != nil {
+			return cpConfig{}, err
+		}
+	}
+	if sections.Placement {
+		if out.Placement, err = fc.SetPlacement(ctx, cfg.Placement); err != nil {
+			return cpConfig{}, err
+		}
+	}
+	return out, nil
 }
 
 func (liveDataSource) runPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerResult, error) {
@@ -160,18 +289,17 @@ func (liveDataSource) runPlacementRunner(ctx context.Context, configPath, cp str
 
 // --- async plumbing ----------------------------------------------------
 
-// cpSettingsMsg carries a placement-runner read back to Update.
+// cpSettingsMsg carries a settings read back to Update.
 type cpSettingsMsg struct {
 	cp  string
-	cfg fleet.PlacementRunnerConfig
+	cfg cpConfig
 	err error
 }
 
-// cpApplyMsg carries a SetPlacementRunner result back. cfg is the
-// control plane's authoritative response.
+// cpApplyMsg carries a write result back. cfg is authoritative.
 type cpApplyMsg struct {
 	cp  string
-	cfg fleet.PlacementRunnerConfig
+	cfg cpConfig
 	err error
 }
 
@@ -185,15 +313,15 @@ type cpRunMsg struct {
 func (m dashboardModel) cpSettingsCmd(cp string) tea.Cmd {
 	ctx, cli, path := m.ctx, m.cli, m.configPath
 	return func() tea.Msg {
-		cfg, err := cli.placementRunner(ctx, path, cp)
+		cfg, err := cli.readCPConfig(ctx, path, cp)
 		return cpSettingsMsg{cp: cp, cfg: cfg, err: err}
 	}
 }
 
-func (m dashboardModel) cpApplyCmd(cp string, cfg fleet.PlacementRunnerConfig) tea.Cmd {
+func (m dashboardModel) cpApplyCmd(cp string, cfg cpConfig, sections cpSections) tea.Cmd {
 	ctx, cli, path := m.ctx, m.cli, m.configPath
 	return func() tea.Msg {
-		got, err := cli.setPlacementRunner(ctx, path, cp, cfg)
+		got, err := cli.writeCPConfig(ctx, path, cp, cfg, sections)
 		return cpApplyMsg{cp: cp, cfg: got, err: err}
 	}
 }
@@ -255,7 +383,7 @@ func (m dashboardModel) handleCPSettingsKey(msg tea.KeyMsg) (dashboardModel, tea
 				d := m.draftFor(cp)
 				cpFields[m.cpFieldSel].setI(d, v)
 			} else {
-				m.status = "batch must be a positive number — edit cancelled"
+				m.status = "value must be a positive number — edit cancelled"
 			}
 			m.cpEditing, m.cpEditBuf = false, ""
 			return m, nil, true
@@ -291,12 +419,21 @@ func (m dashboardModel) handleCPSettingsKey(msg tea.KeyMsg) (dashboardModel, tea
 			return m, nil, true
 		}
 		f := cpFields[m.cpFieldSel]
-		if f.kind == cpFieldBool {
+		switch f.kind {
+		case cpFieldBool:
 			d := m.draftFor(cp)
 			f.setB(d, !f.getB(*d))
-		} else {
+		case cpFieldInt:
 			m.cpEditing = true
 			m.cpEditBuf = ""
+		case cpFieldEnum:
+			opts := f.options(&m, cp)
+			if len(opts) == 0 {
+				m.status = "no choices available for " + f.name
+				return m, nil, true
+			}
+			d := m.draftFor(cp)
+			f.setS(d, nextOption(opts, f.getS(*d)))
 		}
 		return m, nil, true
 	case "x":
@@ -318,7 +455,16 @@ func (m dashboardModel) handleCPSettingsKey(msg tea.KeyMsg) (dashboardModel, tea
 			m.status = "an apply is already in flight"
 			return m, nil, true
 		}
-		m.cpApply = &cpApplyConfirm{cp: cp, next: *s.draft, diffs: diffConfigs(s.cfg, *s.draft)}
+		if why := validateDraft(*s.draft); why != "" {
+			m.status = "✗ " + why
+			return m, nil, true
+		}
+		m.cpApply = &cpApplyConfirm{
+			cp:       cp,
+			next:     *s.draft,
+			sections: dirtySections(s.cfg, *s.draft),
+			diffs:    diffConfigs(s.cfg, *s.draft),
+		}
 		return m, nil, true
 	case "r":
 		// One-shot runner pass with the AUTHORITATIVE config (never the
@@ -332,9 +478,20 @@ func (m dashboardModel) handleCPSettingsKey(msg tea.KeyMsg) (dashboardModel, tea
 			return m, nil, true
 		}
 		m.status = "runner pass started on " + shortHost(cp) + "…"
-		return m, m.cpRunCmd(cp, s.cfg), true
+		return m, m.cpRunCmd(cp, s.cfg.Runner), true
 	}
 	return m, nil, false
+}
+
+// nextOption cycles to the choice after cur (wrapping); an unknown or
+// empty cur lands on the first option.
+func nextOption(opts []string, cur string) string {
+	for i, o := range opts {
+		if o == cur {
+			return opts[(i+1)%len(opts)]
+		}
+	}
+	return opts[0]
 }
 
 // handleCPApplyKey drives the apply-confirm modal: y writes, esc/q/n
@@ -348,7 +505,7 @@ func (m dashboardModel) handleCPApplyKey(msg tea.KeyMsg) (dashboardModel, tea.Cm
 		s.applying = true
 		m.cpSettings[ap.cp] = s
 		m.status = "applying settings to " + shortHost(ap.cp) + "…"
-		return m, m.cpApplyCmd(ap.cp, ap.next)
+		return m, m.cpApplyCmd(ap.cp, ap.next, ap.sections)
 	case "esc", "q", "n", "ctrl+c":
 		m.cpApply = nil
 		m.status = "apply cancelled"
@@ -359,7 +516,7 @@ func (m dashboardModel) handleCPApplyKey(msg tea.KeyMsg) (dashboardModel, tea.Cm
 
 // draftFor returns the CP's draft config, creating it from the
 // authoritative config on first edit.
-func (m *dashboardModel) draftFor(cp string) *fleet.PlacementRunnerConfig {
+func (m *dashboardModel) draftFor(cp string) *cpConfig {
 	if m.cpSettings == nil {
 		m.cpSettings = map[string]cpSettingsState{}
 	}
@@ -373,13 +530,14 @@ func (m *dashboardModel) draftFor(cp string) *fleet.PlacementRunnerConfig {
 }
 
 // diffConfigs renders the field-by-field changes between the
-// authoritative config and the draft for the confirm modal.
-func diffConfigs(cur, next fleet.PlacementRunnerConfig) []string {
+// authoritative config and the draft for the confirm modal, prefixed
+// by section so "enabled" is unambiguous.
+func diffConfigs(cur, next cpConfig) []string {
 	var out []string
 	for _, f := range cpFields {
 		a, b := f.value(cur), f.value(next)
 		if a != b {
-			out = append(out, fmt.Sprintf("%s: %s → %s", f.name, a, b))
+			out = append(out, fmt.Sprintf("%s · %s: %s → %s", f.section, f.name, a, b))
 		}
 	}
 	return out
@@ -387,8 +545,8 @@ func diffConfigs(cur, next fleet.PlacementRunnerConfig) []string {
 
 // --- rendering ----------------------------------------------------------
 
-// renderCPSettingsTab paints the Settings form: the placement runner's
-// fields with the field cursor, dirty marks on edited fields, the
+// renderCPSettingsTab paints the Settings form: every section's fields
+// with the field cursor, dirty marks on edited fields, the
 // unapplied-changes note, and the last run's summary.
 func (m dashboardModel) renderCPSettingsTab(cp string, w int) []string {
 	s := m.cpSettings[cp]
@@ -411,8 +569,15 @@ func (m dashboardModel) renderCPSettingsTab(cp string, w int) []string {
 	if s.draft != nil {
 		shown = *s.draft
 	}
-	out = append(out, fitLine("  "+styTitle.Render("placement runner"), w))
+	prevSection := ""
 	for i, f := range cpFields {
+		if f.section != prevSection {
+			if prevSection != "" {
+				out = append(out, "")
+			}
+			out = append(out, fitLine("  "+styTitle.Render(f.section), w))
+			prevSection = f.section
+		}
 		marker := "  "
 		if i == m.cpFieldSel && m.focus == focusContext {
 			marker = styPlan.Render("▸") + " "
@@ -454,11 +619,11 @@ func (m dashboardModel) renderCPSettingsTab(cp string, w int) []string {
 	return out
 }
 
-// renderCPApplyDialog is the confirm modal's body.
+// render is the confirm modal's body.
 func (c *cpApplyConfirm) render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "APPLY SETTINGS %s\n\n", shortHost(c.cp))
-	b.WriteString("these changes drive fleet-wide automation (restores move live customer accounts):\n\n")
+	b.WriteString("these changes drive fleet-wide automation (restores and the reaper act on live accounts):\n\n")
 	for _, d := range c.diffs {
 		b.WriteString("  " + d + "\n")
 	}

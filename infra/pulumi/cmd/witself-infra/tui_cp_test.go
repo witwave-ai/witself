@@ -57,7 +57,7 @@ func cpSeed(t *testing.T, src fakeSource) dashboardModel {
 }
 
 // deliver runs the pending settings read result into the model.
-func deliverCfg(t *testing.T, m dashboardModel, cfg fleet.PlacementRunnerConfig) dashboardModel {
+func deliverCfg(t *testing.T, m dashboardModel, cfg cpConfig) dashboardModel {
 	t.Helper()
 	next, _ := m.Update(cpSettingsMsg{cp: testCP, cfg: cfg})
 	return next.(dashboardModel)
@@ -100,8 +100,8 @@ func TestCPSettingsRenderAndEdit(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI)
 	defer lipgloss.SetColorProfile(old)
 
-	m := cpSeed(t, fakeSource{runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10}})
-	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10})
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25, RebalanceBatch: 10}, Placement: fleet.PlacementConfig{Strategy: "weighted"}})
 
 	v := m.View()
 	for _, want := range []string{"placement runner", "enabled", "restore batch", "25", "rebalance batch", "10"} {
@@ -128,10 +128,10 @@ func TestCPSettingsRenderAndEdit(t *testing.T) {
 	if !s.dirty() {
 		t.Fatal("toggling a bool must create a dirty draft")
 	}
-	if !s.draft.RestoreArchives {
+	if !s.draft.Runner.RestoreArchives {
 		t.Fatal("the toggled field must flip in the draft")
 	}
-	if s.cfg.RestoreArchives {
+	if s.cfg.Runner.RestoreArchives {
 		t.Fatal("the authoritative config must NOT change before apply")
 	}
 	if !strings.Contains(m3.View(), "unapplied change") {
@@ -145,7 +145,7 @@ func TestCPSettingsRenderAndEdit(t *testing.T) {
 func TestCPApplyFlow(t *testing.T) {
 	rec := &fakeRunnerRecorder{}
 	m := cpSeed(t, fakeSource{rec: rec})
-	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25}})
 
 	// Toggle rebalance (field index 4) on.
 	m.cpFieldSel = 4
@@ -179,7 +179,7 @@ func TestCPApplyFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("apply command must yield cpApplyMsg, got %T", msg)
 	}
-	if len(rec.setCalls) != 1 || !rec.setCalls[0].Rebalance {
+	if len(rec.setCalls) != 1 || !rec.setCalls[0].Runner.Rebalance {
 		t.Fatalf("SetPlacementRunner must receive the draft, got %+v", rec.setCalls)
 	}
 
@@ -190,7 +190,7 @@ func TestCPApplyFlow(t *testing.T) {
 	if s.draft != nil {
 		t.Fatal("a successful apply must clear the draft")
 	}
-	if !s.cfg.Rebalance {
+	if !s.cfg.Runner.Rebalance {
 		t.Fatal("the applied config must become authoritative")
 	}
 	if !strings.Contains(m.status, "✓ settings applied") {
@@ -202,7 +202,7 @@ func TestCPApplyFlow(t *testing.T) {
 // write keeps the operator's edits so they can retry or discard.
 func TestCPApplyFailureKeepsDraft(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true}})
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // toggle enabled → off
 	m = next.(dashboardModel)
 
@@ -221,7 +221,7 @@ func TestCPApplyFailureKeepsDraft(t *testing.T) {
 // and x discarding the whole draft.
 func TestCPIntEditAndDiscard(t *testing.T) {
 	m := cpSeed(t, fakeSource{})
-	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{RestoreBatch: 25})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{RestoreBatch: 25}})
 
 	m.cpFieldSel = 2 // restore batch
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -239,7 +239,7 @@ func TestCPIntEditAndDiscard(t *testing.T) {
 		t.Fatal("enter must commit the int edit")
 	}
 	s := m.cpSettings[testCP]
-	if s.draft == nil || s.draft.RestoreBatch != 50 {
+	if s.draft == nil || s.draft.Runner.RestoreBatch != 50 {
 		t.Fatalf("draft must hold the typed value, got %+v", s.draft)
 	}
 
@@ -258,7 +258,7 @@ func TestCPRunNow(t *testing.T) {
 	m := cpSeed(t, fakeSource{rec: rec, runResult: fleet.PlacementRunnerResult{
 		Restore: &fleet.RestoreResult{Restored: []fleet.RestoredAccount{{}, {}}},
 	}})
-	m = deliverCfg(t, m, fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25})
+	m = deliverCfg(t, m, cpConfig{Runner: fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25}})
 
 	// Make a dirty draft first — run must ignore it.
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // enabled → off (draft only)
@@ -300,5 +300,135 @@ func TestCPSettingsUnreachable(t *testing.T) {
 	m2 := next.(dashboardModel)
 	if m2.cpSettings[testCP].draft != nil {
 		t.Fatal("editing must refuse while the config is unloaded/errored")
+	}
+}
+
+// TestCPReaperValidation pins the pre-write guard: enabling the reaper
+// without a TTL refuses at apply time with a clear message, before any
+// modal or HTTP 400.
+func TestCPReaperValidation(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+
+	// Field 6 = reaper enabled. Toggle on; ttl stays 0.
+	m.cpFieldSel = 6
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("apply must refuse an enabled reaper with no ttl")
+	}
+	if !strings.Contains(m.status, "ttl must be ≥ 1") {
+		t.Fatalf("status must explain the validation failure: %q", m.status)
+	}
+
+	// Give it a TTL (field 7) and the apply modal opens.
+	m.cpFieldSel = 7
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	for _, d := range []string{"2", "4", "0"} {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(d)})
+		m = next.(dashboardModel)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply == nil {
+		t.Fatal("apply modal must open once the reaper draft is valid")
+	}
+	found := false
+	for _, d := range m.cpApply.diffs {
+		if strings.Contains(d, "reaper · ttl (minutes): 0 → 240") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("diff must show the reaper ttl change, got %v", m.cpApply.diffs)
+	}
+}
+
+// TestCPStrategyCycleAndPinValidation pins the enum field: space
+// cycles weighted→pinned, a pinned strategy without a cell refuses
+// apply, and cycling the pinned-cell field walks the CP's cells.
+func TestCPStrategyCycleAndPinValidation(t *testing.T) {
+	m := cpSeed(t, fakeSource{})
+	m = deliverCfg(t, m, cpConfig{Placement: fleet.PlacementConfig{Strategy: "weighted"}})
+
+	m.cpFieldSel = 8 // strategy
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	s := m.cpSettings[testCP]
+	if s.draft.Placement.Strategy != "pinned" {
+		t.Fatalf("space must cycle strategy to pinned, got %q", s.draft.Placement.Strategy)
+	}
+
+	// Pinned without a cell refuses apply.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply != nil {
+		t.Fatal("apply must refuse pinned strategy without a pinned cell")
+	}
+	if !strings.Contains(m.status, "pinned") {
+		t.Fatalf("status must explain: %q", m.status)
+	}
+
+	// Cycle the pinned-cell field: options come from this CP's cells.
+	m.cpFieldSel = 9
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(dashboardModel)
+	s = m.cpSettings[testCP]
+	if s.draft.Placement.PinnedCell != "aws-sandbox-usw2-dev" {
+		t.Fatalf("pinned cell must cycle to the CP's registered cell, got %q", s.draft.Placement.PinnedCell)
+	}
+
+	// Now apply opens.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply == nil {
+		t.Fatal("apply modal must open for a valid pinned draft")
+	}
+}
+
+// TestCPApplyWritesOnlyDirtySections pins the blast-radius contract:
+// editing only the reaper must write ONLY the reaper section — an
+// untouched section can never clobber a concurrent change to it.
+func TestCPApplyWritesOnlyDirtySections(t *testing.T) {
+	rec := &fakeRunnerRecorder{}
+	m := cpSeed(t, fakeSource{rec: rec})
+	m = deliverCfg(t, m, cpConfig{
+		Runner:    fleet.PlacementRunnerConfig{Enabled: true, RestoreBatch: 25},
+		Reaper:    fleet.ReaperConfig{Enabled: true, TTLMinutes: 240},
+		Placement: fleet.PlacementConfig{Strategy: "weighted"},
+	})
+
+	// Edit only the reaper ttl (field 7).
+	m.cpFieldSel = 7
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	for _, d := range []string{"4", "8", "0"} {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(d)})
+		m = next.(dashboardModel)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(dashboardModel)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = next.(dashboardModel)
+	if m.cpApply == nil {
+		t.Fatal("apply modal must open")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(dashboardModel)
+	_ = cmd()
+	if len(rec.setSections) != 1 {
+		t.Fatalf("exactly one write expected, got %d", len(rec.setSections))
+	}
+	got := rec.setSections[0]
+	if !got.Reaper || got.Runner || got.Placement {
+		t.Fatalf("only the reaper section must be written, got %+v", got)
+	}
+	if rec.setCalls[0].Reaper.TTLMinutes != 480 {
+		t.Fatalf("written reaper ttl = %d, want 480", rec.setCalls[0].Reaper.TTLMinutes)
 	}
 }

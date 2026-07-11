@@ -620,6 +620,83 @@ func (c *Client) SetPlacementRunner(ctx context.Context, cfg PlacementRunnerConf
 	return out.PlacementRunner, nil
 }
 
+// ReaperConfig is the pending-account reaper's state: whether the
+// cron-driven sweep closes accounts that never activated, and the
+// activation window in minutes. ttl_minutes is required (≥ 1) when
+// enabled; the control plane drops it when disabled.
+type ReaperConfig struct {
+	Enabled    bool `json:"enabled"`
+	TTLMinutes int  `json:"ttl_minutes,omitempty"`
+}
+
+// GetReaper reads the pending-account reaper's configuration.
+func (c *Client) GetReaper(ctx context.Context) (ReaperConfig, error) {
+	var out struct {
+		Reaper ReaperConfig `json:"reaper"`
+	}
+	code, body, err := c.do(ctx, http.MethodGet, "/v1/reaper", nil, &out)
+	if err != nil {
+		return ReaperConfig{}, err
+	}
+	if code != http.StatusOK {
+		return ReaperConfig{}, fmt.Errorf("reaper: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.Reaper, nil
+}
+
+// SetReaper writes the pending-account reaper's configuration.
+func (c *Client) SetReaper(ctx context.Context, cfg ReaperConfig) (ReaperConfig, error) {
+	var out struct {
+		Reaper ReaperConfig `json:"reaper"`
+	}
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/reaper", cfg, &out)
+	if err != nil {
+		return ReaperConfig{}, err
+	}
+	if code != http.StatusOK {
+		return ReaperConfig{}, fmt.Errorf("set reaper: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.Reaper, nil
+}
+
+// PlacementConfig is the fleet's account-placement strategy: weighted
+// random across eligible cells (default) or soft-pinned to one cell.
+// pinned_cell is required when strategy is "pinned".
+type PlacementConfig struct {
+	Strategy   string `json:"strategy"`
+	PinnedCell string `json:"pinned_cell,omitempty"`
+}
+
+// GetPlacement reads the placement strategy.
+func (c *Client) GetPlacement(ctx context.Context) (PlacementConfig, error) {
+	var out struct {
+		Placement PlacementConfig `json:"placement"`
+	}
+	code, body, err := c.do(ctx, http.MethodGet, "/v1/placement", nil, &out)
+	if err != nil {
+		return PlacementConfig{}, err
+	}
+	if code != http.StatusOK {
+		return PlacementConfig{}, fmt.Errorf("placement: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.Placement, nil
+}
+
+// SetPlacement writes the placement strategy.
+func (c *Client) SetPlacement(ctx context.Context, cfg PlacementConfig) (PlacementConfig, error) {
+	var out struct {
+		Placement PlacementConfig `json:"placement"`
+	}
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/placement", cfg, &out)
+	if err != nil {
+		return PlacementConfig{}, err
+	}
+	if code != http.StatusOK {
+		return PlacementConfig{}, fmt.Errorf("set placement: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	return out.Placement, nil
+}
+
 // RunPlacementRunner triggers one manual restore/rebalance pass.
 func (c *Client) RunPlacementRunner(ctx context.Context, cfg PlacementRunnerConfig) (PlacementRunnerResult, error) {
 	rdr, err := marshalBody(cfg)

@@ -30,10 +30,10 @@ type fakeSource struct {
 	health        cellHealthReport
 	healthErr     error
 
-	// Placement-runner fakes. set/run record their inputs on the shared
+	// CP-settings fakes. write/run record their inputs on the shared
 	// recorder so tests can assert what was written.
-	runner    fleet.PlacementRunnerConfig
-	runnerErr error
+	cpCfg     cpConfig
+	cpErr     error
 	runResult fleet.PlacementRunnerResult
 	runErr    error
 	rec       *fakeRunnerRecorder
@@ -42,8 +42,9 @@ type fakeSource struct {
 // fakeRunnerRecorder captures writes across the by-value fakeSource
 // copies the model holds.
 type fakeRunnerRecorder struct {
-	setCalls []fleet.PlacementRunnerConfig
-	runCalls []fleet.PlacementRunnerConfig
+	setCalls    []cpConfig
+	setSections []cpSections
+	runCalls    []fleet.PlacementRunnerConfig
 }
 
 func (f fakeSource) load(_ context.Context, _ string) (loadResult, error) {
@@ -58,16 +59,17 @@ func (f fakeSource) probeHealth(_ context.Context, _, _ string) (cellHealthRepor
 	return f.health, f.healthErr
 }
 
-func (f fakeSource) placementRunner(_ context.Context, _, _ string) (fleet.PlacementRunnerConfig, error) {
-	return f.runner, f.runnerErr
+func (f fakeSource) readCPConfig(_ context.Context, _, _ string) (cpConfig, error) {
+	return f.cpCfg, f.cpErr
 }
 
-func (f fakeSource) setPlacementRunner(_ context.Context, _, _ string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerConfig, error) {
+func (f fakeSource) writeCPConfig(_ context.Context, _, _ string, cfg cpConfig, sections cpSections) (cpConfig, error) {
 	if f.rec != nil {
 		f.rec.setCalls = append(f.rec.setCalls, cfg)
+		f.rec.setSections = append(f.rec.setSections, sections)
 	}
-	if f.runnerErr != nil {
-		return fleet.PlacementRunnerConfig{}, f.runnerErr
+	if f.cpErr != nil {
+		return cpConfig{}, f.cpErr
 	}
 	return cfg, nil // echo back, like the CP does
 }

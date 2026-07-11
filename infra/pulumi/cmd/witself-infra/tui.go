@@ -469,11 +469,12 @@ type cellDataSource interface {
 	// probe — it selects the Pulumi stack and reaches the cluster — so
 	// the model runs it on a longer cadence.
 	probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error)
-	// Placement-runner settings for a control plane (the CP Settings
-	// tab): read, write, and one-shot run. cp is the CP URL from the
+	// Control-plane settings for the CP Settings tab: read all sections
+	// (placement runner, reaper, placement strategy), write the dirty
+	// ones, and fire a one-shot runner pass. cp is the CP URL from the
 	// header row; the token file resolves from the config's defaults.
-	placementRunner(ctx context.Context, configPath, cp string) (fleet.PlacementRunnerConfig, error)
-	setPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerConfig, error)
+	readCPConfig(ctx context.Context, configPath, cp string) (cpConfig, error)
+	writeCPConfig(ctx context.Context, configPath, cp string, cfg cpConfig, sections cpSections) (cpConfig, error)
 	runPlacementRunner(ctx context.Context, configPath, cp string, cfg fleet.PlacementRunnerConfig) (fleet.PlacementRunnerResult, error)
 }
 
