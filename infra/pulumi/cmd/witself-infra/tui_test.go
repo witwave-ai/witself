@@ -1199,10 +1199,10 @@ func TestOpsScrollFollowsAndPauses(t *testing.T) {
 	}
 }
 
-// TestOpsPaneRetainsLastOp pins the "don't blank the pane the moment
-// the child exits" behavior — the operator wants to scroll through
-// what just happened, not lose it.
-func TestOpsPaneRetainsLastOp(t *testing.T) {
+// TestLastOpRetainedAfterDone pins that a finished op's buffer is kept
+// on m.lastOp — the Logs tab streams the just-completed op's live
+// buffer (fresher than the on-disk file) until another op starts.
+func TestLastOpRetainedAfterDone(t *testing.T) {
 	states := []cellState{{name: "aws-sandbox-usw2-dev"}}
 	m := seedModel(states, 120, 40)
 	m.op = &opRun{kind: opPreview, cell: "aws-sandbox-usw2-dev"}
@@ -1210,16 +1210,14 @@ func TestOpsPaneRetainsLastOp(t *testing.T) {
 	m.op.appendLine("+ aws:eks:Cluster witself-aws-sandbox-usw2-dev  create")
 	next, _ := m.Update(opDoneMsg{cell: "aws-sandbox-usw2-dev", err: nil})
 	m2 := next.(dashboardModel)
-	// After done: m.op is nil (guards say no op running), but the
-	// pane still has content to render from m.lastOp.
 	if m2.op != nil {
 		t.Fatal("m.op must clear after opDone")
 	}
 	if m2.lastOp == nil {
-		t.Fatal("m.lastOp must hold the completed op so scroll still works")
+		t.Fatal("m.lastOp must hold the completed op so its output survives")
 	}
-	if src := m2.opsSource(); src == nil || len(src.tailFrom(0, 8)) == 0 {
-		t.Fatal("ops pane must retain the completed op's lines")
+	if len(m2.lastOp.snapshot(8)) == 0 {
+		t.Fatal("the completed op must retain its lines")
 	}
 }
 
@@ -1352,10 +1350,10 @@ func TestCellRowThrobsWhileOpRuns(t *testing.T) {
 	if !strings.Contains(v, "● live") {
 		t.Fatal("off-target live cell must keep the static status marker")
 	}
-	// The ops-pane title also throbs so the two indicators feel like
-	// one signal on two surfaces.
-	if !strings.Contains(v, "operations · "+spinnerFrames[3]+" up aws-sandbox-usw2-dev") {
-		t.Fatal("ops pane title must include the same spinner frame + verb + cell")
+	// The live-op strip also throbs the same frame + verb + cell, so the
+	// two indicators feel like one signal on two surfaces.
+	if !strings.Contains(v, spinnerFrames[3]+" up · aws-sandbox-usw2-dev") {
+		t.Fatal("live-op strip must include the same spinner frame + verb + cell")
 	}
 }
 

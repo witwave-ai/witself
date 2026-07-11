@@ -1132,27 +1132,21 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next, cmd := m.startAuth()
 		return next, cmd
 	case "pgup":
+		// Scroll the Logs tab's selected log back through its history.
 		if m.onLogsTab() {
 			m.opsScroll = min(m.opsScroll+10, max(0, m.logsSelectedLen()-1))
-			return m, nil
 		}
-		return m.scrollOps(+1), nil
 	case "pgdown":
 		if m.onLogsTab() {
 			m.opsScroll = max(0, m.opsScroll-10)
-			return m, nil
 		}
-		return m.scrollOps(-1), nil
 	case "home":
-		// Oldest lines. On the Logs tab this jumps to the top of the
-		// selected log; on the bottom pane, the oldest kept ring line.
+		// Jump to the top (oldest) of the selected log.
 		if m.onLogsTab() {
 			m.opsScroll = max(0, m.logsSelectedLen()-1)
-		} else if op := m.opsSource(); op != nil {
-			m.opsScroll = op.maxScroll(m.opsViewH())
 		}
 	case "end":
-		m.opsScroll = 0
+		m.opsScroll = 0 // back to the tail (freshest)
 	}
 	// Any key that reaches here may have changed the tab or the selected
 	// cell — kick a reachability probe if the Health tab now needs one.
@@ -1188,43 +1182,6 @@ func (m dashboardModel) logsSelectedLen() int {
 		return 0
 	}
 	return len(m.selectedLogLines(stp.name, logs, m.clampLogSel(len(logs))))
-}
-
-// opsSource picks which op the pane is looking at: the running one if
-// there is one, else the last completed one. Same rule as the render.
-func (m dashboardModel) opsSource() *opRun {
-	if m.op != nil {
-		return m.op
-	}
-	return m.lastOp
-}
-
-// opsViewH returns the ops pane's content height (rows). Matches the
-// adaptive rule the View uses so scroll math and paint math agree.
-func (m dashboardModel) opsViewH() int {
-	if m.op != nil {
-		return 8
-	}
-	return 4
-}
-
-// scrollOps steps the ops-pane view by `pages` view-heights (positive
-// = further into history, negative = back toward tail). Clamped so we
-// never scroll past the oldest kept line or below the live tail.
-func (m dashboardModel) scrollOps(pages int) dashboardModel {
-	op := m.opsSource()
-	if op == nil {
-		return m
-	}
-	view := m.opsViewH()
-	m.opsScroll += pages * view
-	if m.opsScroll < 0 {
-		m.opsScroll = 0
-	}
-	if maxOff := op.maxScroll(view); m.opsScroll > maxOff {
-		m.opsScroll = maxOff
-	}
-	return m
 }
 
 // rows builds the flat selectable list: one header per control-plane
@@ -1438,11 +1395,9 @@ func (m dashboardModel) footerHints() string {
 	// reauth window) without the dashboard having noticed yet.
 	authRelevant := idle && haveCell
 	previewOK := haveCell && m.planArmed(stp.name)
-	// Ops scroll is available whenever there's something in the ops
-	// pane — during a running op or after one completed. The `end`
-	// hint is redundant when already at tail (opsScroll == 0), but
-	// harmless — hint density matters less than discoverability here.
-	scrollable := m.opsSource() != nil
+	// The log-browse keys ([ ] / PgUp / PgDn) only do anything on the
+	// Logs tab, so dim that hint until you're there.
+	onLogs := m.onLogsTab()
 	// ←/→ only do anything once the context pane holds focus; dim them
 	// until then so the footer mirrors what the keys actually do.
 	parts := []part{
@@ -1454,7 +1409,7 @@ func (m dashboardModel) footerHints() string {
 		{"u", "up", idle && haveCell && previewOK},
 		{"D", "destroy", idle && haveCell},
 		{"g", "refresh", idle},
-		{"PgUp/Dn", "log", scrollable},
+		{"[ ]", "logs", onLogs},
 		{"q", "quit", true},
 	}
 	segs := make([]string, 0, len(parts))
@@ -1936,30 +1891,27 @@ func (m dashboardModel) View() string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
-	// Minimum viable: hints line ~65 chars wide; top row (contentH ≥ 6
-	// + 3 for border/title) + ops (4+3) + footer (1) + newline = 17.
-	// Round up for safety.
+	// Minimum viable: hints line ~65 chars wide; the two top panes fill
+	// the frame with a footer/status below and an optional one-line op
+	// strip. 66×18 leaves the panes comfortably readable.
 	if w < 66 || h < 18 {
 		return styDim.Render("terminal too small — need at least 66×18")
 	}
 
-	// Row budget. paneBox draws contentH + 3 rows (title + content + 2
-	// border rows). The frame is: top row of panes (topH+3) + ops pane
-	// (opsH+3) + one newline separator + footer row + optional status
-	// row = h. So topH + opsH = h − 8.
-	//
-	// Ops pane is adaptive: a small idle frame keeps the layout stable
-	// but hands most of the height to the panes that carry information
-	// when nothing is running. It grows to fit the log when an op is
-	// live — logs are the whole point at that moment.
-	opsH := 4
+	// Row budget. The two top panes fill the frame; a running op adds a
+	// one-line live strip below them (op scrollback lives in the Logs
+	// tab now, not a persistent pane). Rows: top(topH+3) + strip(0|1) +
+	// footer(1) + status(0|1) = h. Untitled panes draw contentH+2, and
+	// we pass topH+1 content, so their outer height is topH+3.
+	stripRows := 0
 	if m.op != nil {
-		opsH = 8
+		stripRows = 1
 	}
-	// The frame is: top(topH+3) + ops(opsH+3) + footer(1) + status(1
-	// when present) rows — see the invariant in the min-size check
-	// above. No floor: if this yields < 1, we already refused to draw.
-	topH := h - opsH - 8
+	statusRows := 0
+	if m.status != "" {
+		statusRows = 1
+	}
+	topH := h - 4 - stripRows - statusRows
 	// Column budget. paneBox draws contentW + 4 cells (2 padding + 2
 	// border). Two panes at outer widths cellsOuter + ctxOuter must
 	// equal w exactly, so their contentW args are outer − 4. Cells
@@ -1968,7 +1920,6 @@ func (m dashboardModel) View() string {
 	cellsOuter := min(max(w/3, 30), 44)
 	ctxOuter := w - cellsOuter
 	cellsContentW, ctxContentW := cellsOuter-4, ctxOuter-4
-	opsContentW := w - 4
 
 	// Cells pane
 	var lines []string
@@ -2055,37 +2006,19 @@ func (m dashboardModel) View() string {
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
 
-	// Ops log pane below the two top panes. Renders the live op if
-	// there is one, else the last completed op's tail so its output
-	// stays scrollable until you launch something else. Scroll offset
-	// travels back through the ring buffer; new lines land at the
-	// bottom without yanking the view when scrolled up.
-	var logLines []string
-	title := "operations"
-	active := m.op
-	if active == nil {
-		active = m.lastOp
+	// Live op strip: a single line, shown only while an op runs, so the
+	// "is my op alive" signal stays visible from any tab/cell while the
+	// full scrollback lives in that cell's Logs tab. Idle reclaims the
+	// row for the panes.
+	opStrip := ""
+	if m.op != nil {
+		elapsed := humanAge(m.now(), m.op.started)
+		head := opSpinnerRune(m.op.kind, m.spinnerFrame) + " " +
+			opKindStyle(m.op.kind).Render(m.op.kind.verb()) + " · " +
+			m.op.cell + " · " + elapsed
+		tailHint := styDim.Render(" · Logs tab to watch · " + m.op.logPath)
+		opStrip = "\n" + fitLine(" "+head+tailHint, w)
 	}
-	if active != nil {
-		logLines = active.tailFrom(m.opsScroll, opsH)
-		for i := range logLines {
-			logLines[i] = fitLine(logLines[i], opsContentW)
-		}
-		state := active.kind.verb()
-		if active.isDone() {
-			state += " (done)"
-		} else {
-			// Same frame AND color as the cell row — reads as one
-			// indicator on two surfaces, not two flickers with mismatched
-			// accents.
-			state = opSpinnerRune(active.kind, m.spinnerFrame) + " " + state
-		}
-		title = fmt.Sprintf("operations · %s %s", state, active.cell)
-		if m.opsScroll > 0 {
-			title += fmt.Sprintf(" · scrolled %d lines (End to follow)", m.opsScroll)
-		}
-	}
-	opsPane := "\n" + paneBox(title, logLines, opsContentW, opsH, m.op != nil)
 
 	// Footer: hints left, version tag right. Keys whose actions aren't
 	// currently available get their letter dimmed inline so an operator
@@ -2117,7 +2050,7 @@ func (m dashboardModel) View() string {
 			status = "\n" + styDim.Render(" "+m.status)
 		}
 	}
-	rendered := top + opsPane + "\n" + styDim.Render(footer) + status
+	rendered := top + opStrip + "\n" + styDim.Render(footer) + status
 
 	// Float dialogs over the middle of the frame instead of stacking
 	// below it. Stacking overflowed the terminal on tall dialogs (the

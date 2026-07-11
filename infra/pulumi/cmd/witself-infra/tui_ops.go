@@ -123,6 +123,7 @@ type opRun struct {
 	logPath string       // absolute path of the persistent log file
 	logFile *os.File     // open handle for tee'ing every line as it arrives
 	done    bool         // set by wait() once cmd.Wait returns
+	started time.Time    // when the op launched — for the live strip's elapsed
 }
 
 const opLineCap = 2000
@@ -251,7 +252,7 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 	// buffer alone — we don't fail the op over a logging failure.
 	logPath, logFile := openOpLog(cell, kind.verb())
 	op := &opRun{kind: kind, cell: cell, cmd: cmd, cancel: cancel, program: program,
-		logPath: logPath, logFile: logFile}
+		logPath: logPath, logFile: logFile, started: timeNowFn()}
 	go op.pump(stdout)
 	go op.pump(stderr)
 	go op.wait()
@@ -314,14 +315,6 @@ func (o *opRun) wait() {
 	if o.program != nil {
 		o.program.Send(opDoneMsg{cell: o.cell, err: err})
 	}
-}
-
-// isDone reports whether the child has exited. Racy-free — done is
-// under the same mutex the appendLine + log-close paths use.
-func (o *opRun) isDone() bool {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.done
 }
 
 // detach would let the dashboard exit while the op keeps running.
