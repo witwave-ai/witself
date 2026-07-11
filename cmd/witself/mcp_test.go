@@ -46,13 +46,13 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer serverSession.Close()
+	defer func() { _ = serverSession.Close() }()
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
 	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer clientSession.Close()
+	defer func() { _ = clientSession.Close() }()
 	if got := clientSession.InitializeResult().Instructions; got != witselfMCPInstructions {
 		t.Fatalf("instructions = %q", got)
 	}

@@ -16,8 +16,10 @@ import (
 	"github.com/witwave-ai/witself/internal/local"
 )
 
+// SchemaVersion identifies the durable local capture envelope.
 const SchemaVersion = "witself.capture.v1"
 
+// Runtime and capture-mode names form the local integration contract.
 const (
 	RuntimeCodex      = "codex"
 	RuntimeClaudeCode = "claude-code"
