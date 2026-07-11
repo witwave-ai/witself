@@ -30,11 +30,29 @@ func TestArgoHealthLevel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lvl, detail := argoHealthLevel(tc.apps)
-			if lvl != tc.want {
-				t.Fatalf("level = %d, want %d (detail %q)", lvl, tc.want, detail)
+			got := argoHealth(tc.apps)
+			if got.Level != tc.want {
+				t.Fatalf("level = %d, want %d (detail %q)", got.Level, tc.want, got.Detail)
 			}
 		})
+	}
+	// The gauge counts must be populated: 1 of 2 healthy in the
+	// "progressing" case.
+	if got := argoHealth([]argoApplication{
+		func() argoApplication {
+			var a argoApplication
+			a.Status.Sync.Status = "Synced"
+			a.Status.Health.Status = "Healthy"
+			return a
+		}(),
+		func() argoApplication {
+			var a argoApplication
+			a.Status.Sync.Status = "Synced"
+			a.Status.Health.Status = "Progressing"
+			return a
+		}(),
+	}); got.Have != 1 || got.Total != 2 {
+		t.Fatalf("argo gauge counts = %d/%d, want 1/2", got.Have, got.Total)
 	}
 }
 
@@ -42,9 +60,9 @@ func TestArgoHealthLevel(t *testing.T) {
 // their stable string names and back, so the CLI and dashboard agree.
 func TestHealthLevelJSONRoundTrip(t *testing.T) {
 	report := cellHealthReport{
-		Kubernetes: subsystemHealth{healthGood, "apiserver ready"},
-		Database:   subsystemHealth{healthUnknown, "not wired"},
-		Argo:       subsystemHealth{healthDegraded, "app x Progressing"},
+		Kubernetes: subsystemHealth{Level: healthGood, Detail: "apiserver ready", Have: 3, Total: 3},
+		Database:   subsystemHealth{Level: healthUnknown, Detail: "not wired"},
+		Argo:       subsystemHealth{Level: healthDegraded, Detail: "app x Progressing", Have: 2, Total: 3},
 	}
 	raw, err := json.Marshal(report)
 	if err != nil {

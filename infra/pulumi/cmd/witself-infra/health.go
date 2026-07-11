@@ -59,10 +59,14 @@ func (l *healthLevel) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// subsystemHealth is one line of the report.
+// subsystemHealth is one line of the report. Have/Total are optional
+// counts (ready nodes / total nodes, healthy apps / total apps) that
+// the dashboard renders as a gauge bar; both zero means "no gauge".
 type subsystemHealth struct {
 	Level  healthLevel `json:"level"`
 	Detail string      `json:"detail"`
+	Have   int         `json:"have,omitempty"`
+	Total  int         `json:"total,omitempty"`
 }
 
 // cellHealthReport is the whole probe result — one entry per Health-tab
@@ -80,6 +84,7 @@ type cellHealthReport struct {
 type argoClusterProber interface {
 	argoApplicationLister
 	clusterReadyz(ctx context.Context) (bool, string)
+	clusterNodes(ctx context.Context) (total, ready int, ok bool)
 }
 
 // printCellHealth reads the stack's outputs, probes each subsystem it
@@ -89,14 +94,14 @@ type argoClusterProber interface {
 // gets a parseable report.
 func printCellHealth(ctx context.Context, stack auto.Stack, cloud string, argocd bool) error {
 	report := cellHealthReport{
-		Kubernetes: subsystemHealth{healthUnknown, "not probed"},
-		Database:   subsystemHealth{healthUnknown, "status probe not yet wired"},
-		Argo:       subsystemHealth{healthUnknown, "argocd not enabled for this cell"},
+		Kubernetes: sh(healthUnknown, "not probed"),
+		Database:   sh(healthUnknown, "status probe not yet wired"),
+		Argo:       sh(healthUnknown, "argocd not enabled for this cell"),
 	}
 
 	outs, err := stack.Outputs(ctx)
 	if err != nil {
-		report.Kubernetes = subsystemHealth{healthBad, "read stack outputs: " + oneLine(err.Error())}
+		report.Kubernetes = sh(healthBad, "read stack outputs: "+oneLine(err.Error()))
 		return emitHealth(report)
 	}
 
@@ -110,35 +115,55 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud string, argocd
 	default:
 		// AWS EKS exports no CA/token for a direct apiserver call — that
 		// path needs `aws eks get-token` and is a follow-up.
-		report.Kubernetes = subsystemHealth{healthUnknown, "cluster probe not yet wired for " + cloud}
+		report.Kubernetes = sh(healthUnknown, "cluster probe not yet wired for "+cloud)
 		return emitHealth(report)
 	}
 	if err != nil {
-		report.Kubernetes = subsystemHealth{healthBad, "build cluster client: " + oneLine(err.Error())}
+		report.Kubernetes = sh(healthBad, "build cluster client: "+oneLine(err.Error()))
 		return emitHealth(report)
 	}
 
-	// Kubernetes: apiserver readiness.
-	if ready, why := prober.clusterReadyz(ctx); ready {
-		report.Kubernetes = subsystemHealth{healthGood, "apiserver ready"}
-	} else if why == "" {
-		report.Kubernetes = subsystemHealth{healthBad, "apiserver unreachable"}
-	} else {
-		report.Kubernetes = subsystemHealth{healthDegraded, oneLine(why)}
+	// Kubernetes: apiserver readiness, with a node ready/total gauge.
+	k8s := sh(healthGood, "apiserver ready")
+	if ready, why := prober.clusterReadyz(ctx); !ready {
+		if why == "" {
+			k8s = sh(healthBad, "apiserver unreachable")
+		} else {
+			k8s = sh(healthDegraded, oneLine(why))
+		}
 	}
+	if total, nready, ok := prober.clusterNodes(ctx); ok {
+		k8s.Have, k8s.Total = nready, total
+		if k8s.Level == healthGood {
+			// Cluster is up but a node is down → degrade and say so. The
+			// gauge already carries the ratio, so the detail is
+			// complementary, not a repeat of the count.
+			if nready < total {
+				k8s.Level = healthDegraded
+				k8s.Detail = fmt.Sprintf("%d node(s) not Ready", total-nready)
+			} else {
+				k8s.Detail = "apiserver ready · all nodes up"
+			}
+		}
+	}
+	report.Kubernetes = k8s
 
 	// Workloads: Argo application health (only when the cell runs Argo).
 	if argocd {
 		apps, aerr := prober.ListArgoApplications(ctx, namespace)
 		if aerr != nil {
-			report.Argo = subsystemHealth{healthBad, oneLine(aerr.Error())}
+			report.Argo = sh(healthBad, oneLine(aerr.Error()))
 		} else {
-			lvl, detail := argoHealthLevel(apps)
-			report.Argo = subsystemHealth{lvl, detail}
+			report.Argo = argoHealth(apps)
 		}
 	}
 
 	return emitHealth(report)
+}
+
+// sh is a keyed-literal shorthand for a countless subsystem line.
+func sh(l healthLevel, detail string) subsystemHealth {
+	return subsystemHealth{Level: l, Detail: detail}
 }
 
 func emitHealth(r cellHealthReport) error {
@@ -146,20 +171,23 @@ func emitHealth(r cellHealthReport) error {
 	return enc.Encode(r)
 }
 
-// argoHealthLevel collapses the per-application Argo status into one
-// level. A Degraded or Missing app is bad; anything merely in flight
-// (Progressing, OutOfSync) is a warning; all Synced+Healthy is good.
-// Worst status wins, and the detail names the offenders.
-func argoHealthLevel(apps []argoApplication) (healthLevel, string) {
+// argoHealth collapses the per-application Argo status into one line,
+// with a healthy/total gauge. A Degraded or Missing app is bad;
+// anything merely in flight (Progressing, OutOfSync) is a warning; all
+// Synced+Healthy is good. Worst status wins, and the detail names the
+// offenders.
+func argoHealth(apps []argoApplication) subsystemHealth {
 	if len(apps) == 0 {
-		return healthUnknown, "no Argo applications reported"
+		return sh(healthUnknown, "no Argo applications reported")
 	}
 	worst := healthGood
+	healthy := 0
 	var notes []string
 	for _, app := range apps {
 		sync := app.Status.Sync.Status
 		health := app.Status.Health.Status
 		if sync == "Synced" && health == "Healthy" {
+			healthy++
 			continue
 		}
 		name := app.Metadata.Name
@@ -184,8 +212,12 @@ func argoHealthLevel(apps []argoApplication) (healthLevel, string) {
 			}
 		}
 	}
+	out := subsystemHealth{Level: worst, Have: healthy, Total: len(apps)}
 	if worst == healthGood {
-		return healthGood, fmt.Sprintf("%d applications Synced/Healthy", len(apps))
+		// Gauge shows N/N; detail stays complementary.
+		out.Detail = "all Synced/Healthy"
+	} else {
+		out.Detail = strings.Join(notes, "; ")
 	}
-	return worst, strings.Join(notes, "; ")
+	return out
 }

@@ -323,6 +323,11 @@ type dashboardModel struct {
 	// (Kubernetes / Database / Argo). Heavier than reach, so it runs on
 	// a longer cadence (healthReportTTL).
 	health map[string]cellHealthState
+	// healthFrame advances while a Health-tab probe is in flight so the
+	// "checking…" lines animate; healthAnimGen fences stale ticks the
+	// same way opGen does for the op spinner.
+	healthFrame   int
+	healthAnimGen int
 }
 
 // cellHealthState is one cell's cached subsystem-health report plus the
@@ -634,6 +639,9 @@ type healthResultMsg struct {
 	report cellHealthReport
 	err    error
 }
+
+// healthAnimTickMsg drives the "checking…" animation on the Health tab.
+type healthAnimTickMsg struct{ gen int }
 type refreshTickMsg struct{}
 
 // spinnerTickMsg carries the op generation that scheduled it. On
@@ -758,7 +766,34 @@ func (m dashboardModel) maybeHealthProbe() (dashboardModel, tea.Cmd) {
 	if len(cmds) == 0 {
 		return m, nil
 	}
+	// Something is now in flight — start (or restart) the checking-state
+	// animation so the "checking…" lines pulse until results land.
+	m.healthAnimGen++
+	cmds = append(cmds, healthAnimCmd(m.healthAnimGen))
 	return m, tea.Batch(cmds...)
+}
+
+func healthAnimCmd(gen int) tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return healthAnimTickMsg{gen: gen} })
+}
+
+// healthAnimating reports whether the selected cell has a probe in
+// flight while the Health tab is up — the condition that keeps the
+// checking-state animation ticking.
+func (m dashboardModel) healthAnimating() bool {
+	if m.activeTab != tabHealth {
+		return false
+	}
+	stp := m.selectedState()
+	if stp == nil {
+		return false
+	}
+	return m.reach[stp.name].inflight || m.health[stp.name].inflight
+}
+
+// spinGlyph is the current animation frame for the checking state.
+func (m dashboardModel) spinGlyph() string {
+	return spinnerFrames[m.healthFrame%len(spinnerFrames)]
 }
 
 func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -822,6 +857,14 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.health[msg.cell] = cellHealthState{probed: m.now(), report: msg.report, err: msg.err}
 		return m, nil
+	case healthAnimTickMsg:
+		// Advance the checking-state frame while a probe is still in
+		// flight; the loop self-terminates when everything has landed.
+		if msg.gen != m.healthAnimGen || !m.healthAnimating() {
+			return m, nil
+		}
+		m.healthFrame++
+		return m, healthAnimCmd(m.healthAnimGen)
 	case opLineMsg:
 		return m, nil // re-render tick; the ring buffer already holds the line
 	case opDoneMsg:
@@ -1388,8 +1431,18 @@ func (m dashboardModel) renderCPContext(r row, w int) []string {
 		if !info.hasAccounts {
 			lines = ctxPut(lines, w, "status", styDim.Render("(placement status unavailable)"))
 		} else {
-			lines = ctxPut(lines, w, "live", fmt.Sprintf("%d", info.liveAccts))
-			lines = ctxPut(lines, w, "archived", fmt.Sprintf("%d awaiting placement", info.archived))
+			// A stacked load bar: live (green) fills first, then archived
+			// (yellow) awaiting placement, then blocked (red). At a glance
+			// the operator sees how full the fleet is and how much of that
+			// is stuck.
+			total := info.liveAccts + info.archived + info.blocked
+			bar := stackedBar(24,
+				barSeg{info.liveAccts, styOK},
+				barSeg{info.archived, styWarn},
+				barSeg{info.blocked, styErr})
+			lines = append(lines, fitLine("  "+bar+styDim.Render(fmt.Sprintf("  %d total", total)), w))
+			lines = ctxPut(lines, w, "live", styOK.Render(fmt.Sprintf("%d", info.liveAccts)))
+			lines = ctxPut(lines, w, "archived", styWarn.Render(fmt.Sprintf("%d", info.archived))+styDim.Render(" awaiting placement"))
 			if info.blocked > 0 {
 				label := styDim.Render(fmt.Sprintf("  %-14s ", "blocked"))
 				lines = append(lines, fitLine(label+styErr.Render(fmt.Sprintf("%d no eligible cell", info.blocked)), w))
@@ -1397,6 +1450,51 @@ func (m dashboardModel) renderCPContext(r row, w int) []string {
 		}
 	}
 	return lines
+}
+
+// barSeg is one colored segment of a stacked bar.
+type barSeg struct {
+	n     int
+	style lipgloss.Style
+}
+
+// stackedBar draws proportional colored segments filling `width` cells,
+// remainder dim. An all-zero total renders empty. The last non-empty
+// segment absorbs rounding so the bar always sums to exactly width.
+func stackedBar(width int, segs ...barSeg) string {
+	total := 0
+	for _, s := range segs {
+		total += s.n
+	}
+	if total <= 0 || width <= 0 {
+		return styDim.Render(strings.Repeat("░", max(width, 0)))
+	}
+	var b strings.Builder
+	used := 0
+	lastNonEmpty := -1
+	for i, s := range segs {
+		if s.n > 0 {
+			lastNonEmpty = i
+		}
+	}
+	for i, s := range segs {
+		if s.n == 0 {
+			continue
+		}
+		seg := s.n * width / total
+		if i == lastNonEmpty {
+			seg = width - used // absorb rounding
+		}
+		if seg < 0 {
+			seg = 0
+		}
+		b.WriteString(s.style.Render(strings.Repeat("█", seg)))
+		used += seg
+	}
+	if used < width {
+		b.WriteString(styDim.Render(strings.Repeat("░", width-used)))
+	}
+	return b.String()
 }
 
 // renderOverviewTab is the cell's identity, config, settings, and
@@ -1467,47 +1565,131 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 	return lines
 }
 
-// renderHealthTab aggregates per-cell health lines. The credential and
-// fleet lines are computed from data every refresh already carries;
-// the cluster, database, and workload lines are placeholders until the
-// probe pass wires them (they render as unknown "◌ —").
+// healthRow pairs a label with its resolved subsystem reading for the
+// Health board.
+type healthRow struct {
+	label string
+	sh    subsystemHealth
+}
+
+// renderHealthTab paints the Health board: a status-pip summary line
+// (one colored dot per subsystem) with a rolled-up verdict, then a
+// connection tree of the cell's subsystems, each with its indicator,
+// an optional fill gauge (nodes Ready, apps Healthy), and detail.
 func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
-	line := func(label string, lvl healthLevel, detail string) string {
-		s := fmt.Sprintf("  %s %-16s %s", lvl.dot(), label, lvl.style().Render(detail))
-		return fitLine(s, w)
-	}
 	credLvl, credMsg := cellCredentialHealth(st)
 	fleetLvl, fleetMsg := cellFleetHealth(st)
 	reachLvl, reachMsg := m.cellReachHealth(st)
-	k8sLvl, k8sMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Kubernetes })
-	dbLvl, dbMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Database })
-	argoLvl, argoMsg := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Argo })
-	return []string{
-		line("Cloud credentials", credLvl, credMsg),
-		line("Fleet registration", fleetLvl, fleetMsg),
-		line("Cell reachability", reachLvl, reachMsg),
-		line("Kubernetes", k8sLvl, k8sMsg),
-		line("Database", dbLvl, dbMsg),
-		line("Workloads · Argo CD", argoLvl, argoMsg),
+	rows := []healthRow{
+		{"credentials", subsystemHealth{Level: credLvl, Detail: credMsg}},
+		{"fleet", subsystemHealth{Level: fleetLvl, Detail: fleetMsg}},
+		{"reachability", subsystemHealth{Level: reachLvl, Detail: reachMsg}},
+		{"kubernetes", m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Kubernetes })},
+		{"database", m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Database })},
+		{"workloads", m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Argo })},
 	}
+
+	levels := make([]healthLevel, len(rows))
+	for i, r := range rows {
+		levels[i] = r.sh.Level
+	}
+	overall := rollupLevel(levels...)
+
+	var out []string
+	// Summary: the cell name, a row of one pip per subsystem, and the
+	// rolled-up verdict — the whole cell's health at a glance.
+	out = append(out, fitLine("  "+healthPips(levels)+"  "+styTitle.Render(st.name), w))
+	out = append(out, fitLine("  "+styDim.Render("overall")+"  "+overall.style().Render("● "+overallWord(overall)), w))
+	out = append(out, "")
+
+	// Connection tree: the cell branching to each subsystem.
+	for i, r := range rows {
+		branch := "├─"
+		if i == len(rows)-1 {
+			branch = "└─"
+		}
+		seg := "  " + styDim.Render(branch) + " " + r.sh.Level.dot() + " " + fmt.Sprintf("%-13s", r.label)
+		if r.sh.Total > 0 {
+			seg += gaugeBar(r.sh.Have, r.sh.Total, 6, r.sh.Level.style()) + "  "
+		}
+		seg += r.sh.Level.style().Render(r.sh.Detail)
+		out = append(out, fitLine(seg, w))
+	}
+	return out
 }
 
-// cellSubsystem reads one subsystem line from the cached cell-health
-// report: unknown/"checking…" before or during a probe, red if the
-// subprocess itself failed, else the report's own level and detail.
-func (m dashboardModel) cellSubsystem(st cellState, pick func(cellHealthReport) subsystemHealth) (healthLevel, string) {
+// cellSubsystem reads one subsystem line (with its gauge counts) from
+// the cached cell-health report: unknown/"checking…" before or during
+// a probe, red if the subprocess itself failed, else the report's own
+// reading.
+func (m dashboardModel) cellSubsystem(st cellState, pick func(cellHealthReport) subsystemHealth) subsystemHealth {
 	h := m.health[st.name]
 	switch {
 	case h.inflight:
-		return healthUnknown, "checking…"
+		return subsystemHealth{Level: healthUnknown, Detail: m.spinGlyph() + " checking…"}
 	case h.probed.IsZero():
-		return healthUnknown, "— not probed yet"
+		return subsystemHealth{Level: healthUnknown, Detail: "— not probed yet"}
 	case h.err != nil:
-		return healthBad, "✗ probe failed: " + oneLine(h.err.Error())
+		return subsystemHealth{Level: healthBad, Detail: "✗ probe failed: " + oneLine(h.err.Error())}
 	default:
-		s := pick(h.report)
-		return s.Level, s.Detail
+		return pick(h.report)
 	}
+}
+
+// rollupLevel returns the worst non-unknown level — the whole-cell
+// verdict. All-unknown (nothing probed) stays unknown.
+func rollupLevel(levels ...healthLevel) healthLevel {
+	worst := healthUnknown
+	for _, l := range levels {
+		if l != healthUnknown && l > worst {
+			worst = l
+		}
+	}
+	return worst
+}
+
+func overallWord(l healthLevel) string {
+	switch l {
+	case healthGood:
+		return "all good"
+	case healthWarn:
+		return "settling"
+	case healthDegraded:
+		return "degraded"
+	case healthBad:
+		return "needs attention"
+	default:
+		return "unprobed"
+	}
+}
+
+// healthPips renders one colored dot per subsystem — a compact status
+// strip you can read in a glance before diving into the tree.
+func healthPips(levels []healthLevel) string {
+	var b strings.Builder
+	for _, l := range levels {
+		b.WriteString(l.dot())
+	}
+	return b.String()
+}
+
+// gaugeBar draws a fill meter: `▰▰▰▱▱▱ 3/6`, the filled part in the
+// level's color and the remainder dim. Integer-rounded so a single
+// down node visibly drops the bar.
+func gaugeBar(have, total, width int, style lipgloss.Style) string {
+	if total <= 0 || width <= 0 {
+		return ""
+	}
+	filled := (have*width + total/2) / total
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	return style.Render(strings.Repeat("▰", filled)) +
+		styDim.Render(strings.Repeat("▱", width-filled)) +
+		" " + style.Render(fmt.Sprintf("%d/%d", have, total))
 }
 
 // cellReachHealth turns the cached reachability probe into a health
@@ -1519,7 +1701,7 @@ func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
 	r := m.reach[st.name] // zero value when never probed
 	switch {
 	case r.inflight:
-		return healthUnknown, "checking…"
+		return healthUnknown, m.spinGlyph() + " checking…"
 	case r.probed.IsZero():
 		return healthUnknown, "— not probed yet"
 	case r.err != nil:

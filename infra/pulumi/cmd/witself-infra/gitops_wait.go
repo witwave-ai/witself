@@ -212,6 +212,14 @@ func newGCPArgoListerFromOutputs(outs auto.OutputMap) (*gcpArgoLister, string, e
 	}, namespace, nil
 }
 
+func (l *gcpArgoLister) clusterNodes(ctx context.Context) (total, ready int, ok bool) {
+	token, err := l.tokenCmd(ctx, l.project)
+	if err != nil {
+		return 0, 0, false
+	}
+	return clusterNodesGet(ctx, l.client, l.baseURL, token)
+}
+
 // clusterReadyz probes the kube-apiserver's /readyz through the same
 // authenticated client. A 200 "ok" is ready; a non-200 (500 lists the
 // failing checks) is degraded; a transport error is "" reason, which
@@ -352,6 +360,53 @@ func azureAKSKubeconfig(ctx context.Context, resourceGroup, clusterName string) 
 
 func (l *tokenArgoLister) clusterReadyz(ctx context.Context) (bool, string) {
 	return clusterReadyzGet(ctx, l.client, l.baseURL, l.token)
+}
+
+func (l *tokenArgoLister) clusterNodes(ctx context.Context) (total, ready int, ok bool) {
+	return clusterNodesGet(ctx, l.client, l.baseURL, l.token)
+}
+
+// clusterNodesGet lists nodes and counts how many are Ready. ok is
+// false on any transport/decoding error so the caller can leave the
+// gauge blank rather than show a misleading 0/0.
+func clusterNodesGet(ctx context.Context, client *http.Client, baseURL, token string) (total, ready int, ok bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/v1/nodes", nil)
+	if err != nil {
+		return 0, 0, false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, false
+	}
+	var out struct {
+		Items []struct {
+			Status struct {
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, 0, false
+	}
+	for _, n := range out.Items {
+		total++
+		for _, c := range n.Status.Conditions {
+			if c.Type == "Ready" && c.Status == "True" {
+				ready++
+				break
+			}
+		}
+	}
+	return total, ready, true
 }
 
 // clusterReadyzGet performs the authenticated GET on /readyz shared by

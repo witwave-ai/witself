@@ -194,9 +194,9 @@ func TestHealthTabFreeLines(t *testing.T) {
 	m.activeTab = tabHealth
 	v := m.View()
 
-	for _, want := range []string{"Cloud credentials", "Fleet registration", "Kubernetes", "Database", "Workloads"} {
+	for _, want := range []string{"credentials", "fleet", "reachability", "kubernetes", "database", "workloads", "overall"} {
 		if !strings.Contains(v, want) {
-			t.Errorf("Health tab missing line %q", want)
+			t.Errorf("Health board missing line %q", want)
 		}
 	}
 	if !strings.Contains(v, "not probed yet") {
@@ -268,8 +268,8 @@ func TestReachProbeFiresAndRenders(t *testing.T) {
 		t.Fatal("probe result must clear the in-flight flag")
 	}
 	v := dm.View()
-	if !strings.Contains(v, "Cell reachability") {
-		t.Fatal("Health tab must show the reachability line")
+	if !strings.Contains(v, "reachability") {
+		t.Fatal("Health board must show the reachability line")
 	}
 	if !strings.Contains(v, "witself-server 0.0.86") {
 		t.Errorf("reachable line must show the version the Worker saw: %s", v)
@@ -286,9 +286,9 @@ func TestHealthReportProbeAndRender(t *testing.T) {
 
 	states := mkTabStates()
 	report := cellHealthReport{
-		Kubernetes: subsystemHealth{healthGood, "apiserver ready"},
-		Database:   subsystemHealth{healthUnknown, "status probe not yet wired"},
-		Argo:       subsystemHealth{healthDegraded, "witself-server OutOfSync/Progressing"},
+		Kubernetes: subsystemHealth{Level: healthGood, Detail: "apiserver ready", Have: 3, Total: 3},
+		Database:   subsystemHealth{Level: healthUnknown, Detail: "status probe not yet wired"},
+		Argo:       subsystemHealth{Level: healthDegraded, Detail: "witself-server OutOfSync/Progressing", Have: 2, Total: 3},
 	}
 	m := dashboardModel{
 		ctx:    context.Background(),
@@ -327,6 +327,109 @@ func TestHealthReportProbeAndRender(t *testing.T) {
 	}
 	if !strings.Contains(v, "status probe not yet wired") {
 		t.Error("Database line must show its placeholder detail from the report")
+	}
+}
+
+// TestHealthBoardVisuals pins the graphical pieces: the gauge bar
+// fills proportionally, the pip strip has one dot per subsystem, and
+// the rolled-up verdict is worst-wins.
+func TestHealthBoardVisuals(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	// Gauge: 3 of 4 → 5 filled of 6 (rounded), and shows the count.
+	g := stripANSIForTest(gaugeBar(3, 4, 6, styOK))
+	if !strings.Contains(g, "3/4") {
+		t.Errorf("gauge must show the count: %q", g)
+	}
+	if fill := strings.Count(g, "▰"); fill == 0 || fill == 6 {
+		t.Errorf("gauge for 3/4 must be partially filled, got %d of 6", fill)
+	}
+	if strings.Count(g, "▱") == 0 {
+		t.Error("gauge for 3/4 must have an empty remainder")
+	}
+
+	// Rollup is worst-wins, ignoring unknowns.
+	if got := rollupLevel(healthGood, healthUnknown, healthDegraded, healthGood); got != healthDegraded {
+		t.Fatalf("rollup = %d, want degraded", got)
+	}
+	if got := rollupLevel(healthUnknown, healthUnknown); got != healthUnknown {
+		t.Fatalf("all-unknown rollup must stay unknown, got %d", got)
+	}
+
+	// Pip strip: one dot per subsystem (6 rows) appears in the board.
+	m := seedModel(mkTabStates(), 120, 30)
+	m.activeTab = tabHealth
+	v := stripANSIForTest(m.View())
+	if strings.Count(v, "●")+strings.Count(v, "◌") < 6 {
+		t.Errorf("board must show a pip per subsystem plus tree dots: %q", v)
+	}
+	if !strings.Contains(v, "├─") || !strings.Contains(v, "└─") {
+		t.Error("board must draw the connection tree")
+	}
+}
+
+// TestHealthAnimTick pins the checking-state animation: a tick while a
+// probe is in flight advances the frame and re-arms; once the result
+// lands (nothing in flight) the loop stops.
+func TestHealthAnimTick(t *testing.T) {
+	states := mkTabStates()
+	m := seedModel(states, 120, 30)
+	m.activeTab = tabHealth
+	m.health = map[string]cellHealthState{"aws-sandbox-usw2-dev": {inflight: true}}
+	m.healthAnimGen = 7
+
+	next, cmd := m.Update(healthAnimTickMsg{gen: 7})
+	m2 := next.(dashboardModel)
+	if m2.healthFrame != 1 {
+		t.Fatalf("frame must advance while in flight: got %d", m2.healthFrame)
+	}
+	if cmd == nil {
+		t.Fatal("animation must re-arm while a probe is in flight")
+	}
+	// A stale-gen tick is ignored.
+	if _, c := m2.Update(healthAnimTickMsg{gen: 6}); c != nil {
+		t.Fatal("stale-gen anim tick must not re-arm")
+	}
+	// Result lands → not in flight → loop stops.
+	m2.health = map[string]cellHealthState{"aws-sandbox-usw2-dev": {probed: m2.now()}}
+	if _, c := m2.Update(healthAnimTickMsg{gen: 7}); c != nil {
+		t.Fatal("animation must stop once nothing is in flight")
+	}
+}
+
+// TestStackedBarProportions pins the fleet load bar: it fills exactly
+// `width` cells and gives each non-zero class at least its share.
+func TestStackedBarProportions(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	bar := stripANSIForTest(stackedBar(24, barSeg{6, styOK}, barSeg{2, styWarn}, barSeg{0, styErr}))
+	if got := lipgloss.Width(bar); got != 24 {
+		t.Fatalf("stacked bar must be exactly 24 cells, got %d", got)
+	}
+	if strings.Count(bar, "█") != 24 {
+		t.Errorf("8 of 8 accounts present → bar fully filled: %q", bar)
+	}
+	// All-zero renders empty, not a crash.
+	empty := stripANSIForTest(stackedBar(10))
+	if strings.Count(empty, "░") != 10 {
+		t.Errorf("empty fleet must render an empty bar: %q", empty)
+	}
+}
+
+// TestGaugeFullVsEmpty pins the extremes: 0/N is all-empty, N/N is
+// all-filled.
+func TestGaugeFullVsEmpty(t *testing.T) {
+	full := stripANSIForTest(gaugeBar(4, 4, 6, styOK))
+	if strings.Count(full, "▰") != 6 || strings.Contains(full, "▱") {
+		t.Errorf("4/4 must be fully filled: %q", full)
+	}
+	empty := stripANSIForTest(gaugeBar(0, 4, 6, styErr))
+	if strings.Count(empty, "▰") != 0 || strings.Count(empty, "▱") != 6 {
+		t.Errorf("0/4 must be fully empty: %q", empty)
 	}
 }
 
