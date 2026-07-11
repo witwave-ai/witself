@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -25,15 +26,24 @@ func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
 }
 
 func (b *fakeMCPBackend) ListTranscripts(context.Context) ([]client.Transcript, error) {
-	return []client.Transcript{{ID: "trn_1", OwnerAgentID: "agent_1", CreatedAt: time.Now()}}, nil
+	return []client.Transcript{{
+		ID: "trn_1", OwnerAgentID: "agent_1", CreatedAt: time.Now(),
+		Metadata: json.RawMessage(`{"source_session_id":"session-1"}`),
+	}}, nil
 }
 
 func (b *fakeMCPBackend) GetTranscriptPage(_ context.Context, transcriptID string, opts client.TranscriptPageOptions) (client.TranscriptDetail, error) {
 	b.lastTranscriptID = transcriptID
 	b.lastOptions = opts
 	return client.TranscriptDetail{
-		Transcript: client.Transcript{ID: transcriptID},
-		Entries:    []client.TranscriptEntry{{ID: "ent_1", TranscriptID: transcriptID, Sequence: 1, Role: "user", Body: "hello"}},
+		Transcript: client.Transcript{
+			ID:       transcriptID,
+			Metadata: json.RawMessage(`{"source_session_id":"session-1"}`),
+		},
+		Entries: []client.TranscriptEntry{{
+			ID: "ent_1", TranscriptID: transcriptID, Sequence: 1, Role: "user", Body: "hello",
+			Payload: json.RawMessage(`{"kind":"message.user"}`), Artifacts: json.RawMessage(`[]`),
+		}},
 	}, nil
 }
 

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -60,7 +62,36 @@ type mcpTranscriptListInput struct {
 }
 
 type mcpTranscriptListOutput struct {
-	Transcripts []client.Transcript `json:"transcripts"`
+	Transcripts []mcpTranscript `json:"transcripts"`
+}
+
+type mcpTranscript struct {
+	ID           string    `json:"id"`
+	AccountID    string    `json:"account_id"`
+	RealmID      string    `json:"realm_id"`
+	OwnerAgentID string    `json:"owner_agent_id"`
+	ExternalID   string    `json:"external_id,omitempty"`
+	Title        string    `json:"title,omitempty"`
+	Metadata     any       `json:"metadata"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type mcpTranscriptEntry struct {
+	ID                string    `json:"id"`
+	AccountID         string    `json:"account_id"`
+	TranscriptID      string    `json:"transcript_id"`
+	RealmID           string    `json:"realm_id"`
+	RecordedByAgentID string    `json:"recorded_by_agent_id"`
+	Sequence          int64     `json:"sequence"`
+	ExternalID        string    `json:"external_id,omitempty"`
+	Role              string    `json:"role"`
+	Body              string    `json:"body,omitempty"`
+	Payload           any       `json:"payload,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	ReplyToEntryID    string    `json:"reply_to_entry_id,omitempty"`
+	Artifacts         any       `json:"artifacts"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type mcpTranscriptReadInput struct {
@@ -70,9 +101,9 @@ type mcpTranscriptReadInput struct {
 }
 
 type mcpTranscriptReadOutput struct {
-	Transcript        client.Transcript        `json:"transcript"`
-	Entries           []client.TranscriptEntry `json:"entries"`
-	NextAfterSequence int64                    `json:"next_after_sequence,omitempty"`
+	Transcript        mcpTranscript        `json:"transcript"`
+	Entries           []mcpTranscriptEntry `json:"entries"`
+	NextAfterSequence int64                `json:"next_after_sequence,omitempty"`
 }
 
 type mcpTranscriptTailInput struct {
@@ -136,7 +167,7 @@ func newWitselfMCPServer(backend witselfMCPBackend) *mcp.Server {
 		if rows == nil {
 			rows = []client.Transcript{}
 		}
-		return nil, mcpTranscriptListOutput{Transcripts: rows}, nil
+		return nil, mcpTranscriptListOutput{Transcripts: toMCPTranscripts(rows)}, nil
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "witself.transcript.get",
@@ -155,7 +186,11 @@ func newWitselfMCPServer(backend witselfMCPBackend) *mcp.Server {
 		if err != nil {
 			return nil, mcpTranscriptReadOutput{}, err
 		}
-		return nil, mcpTranscriptReadOutput{Transcript: page.Transcript, Entries: page.Entries, NextAfterSequence: page.NextAfterSequence}, nil
+		return nil, mcpTranscriptReadOutput{
+			Transcript:        toMCPTranscript(page.Transcript),
+			Entries:           toMCPTranscriptEntries(page.Entries),
+			NextAfterSequence: page.NextAfterSequence,
+		}, nil
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "witself.transcript.tail",
@@ -174,7 +209,51 @@ func newWitselfMCPServer(backend witselfMCPBackend) *mcp.Server {
 		if err != nil {
 			return nil, mcpTranscriptReadOutput{}, err
 		}
-		return nil, mcpTranscriptReadOutput{Transcript: page.Transcript, Entries: page.Entries}, nil
+		return nil, mcpTranscriptReadOutput{
+			Transcript: toMCPTranscript(page.Transcript),
+			Entries:    toMCPTranscriptEntries(page.Entries),
+		}, nil
 	})
 	return server
+}
+
+func toMCPTranscripts(rows []client.Transcript) []mcpTranscript {
+	out := make([]mcpTranscript, len(rows))
+	for i, row := range rows {
+		out[i] = toMCPTranscript(row)
+	}
+	return out
+}
+
+func toMCPTranscript(row client.Transcript) mcpTranscript {
+	return mcpTranscript{
+		ID: row.ID, AccountID: row.AccountID, RealmID: row.RealmID,
+		OwnerAgentID: row.OwnerAgentID, ExternalID: row.ExternalID, Title: row.Title,
+		Metadata: decodeMCPJSON(row.Metadata), CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+	}
+}
+
+func toMCPTranscriptEntries(rows []client.TranscriptEntry) []mcpTranscriptEntry {
+	out := make([]mcpTranscriptEntry, len(rows))
+	for i, row := range rows {
+		out[i] = mcpTranscriptEntry{
+			ID: row.ID, AccountID: row.AccountID, TranscriptID: row.TranscriptID,
+			RealmID: row.RealmID, RecordedByAgentID: row.RecordedByAgentID,
+			Sequence: row.Sequence, ExternalID: row.ExternalID, Role: row.Role, Body: row.Body,
+			Payload: decodeMCPJSON(row.Payload), Model: row.Model, ReplyToEntryID: row.ReplyToEntryID,
+			Artifacts: decodeMCPJSON(row.Artifacts), CreatedAt: row.CreatedAt,
+		}
+	}
+	return out
+}
+
+func decodeMCPJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return value
 }
