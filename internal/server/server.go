@@ -45,6 +45,13 @@ type Config struct {
 	// it resolves an operator token to its principal.
 	Authenticate AuthFunc
 
+	// AuthenticatePrincipal accepts either an operator or agent token for
+	// domain surfaces that intentionally support both. Transcript writes still
+	// require an agent principal; operators receive read-only account-wide
+	// visibility. Keeping this separate from Authenticate prevents agent tokens
+	// from widening any existing operator-only route.
+	AuthenticatePrincipal PrincipalAuthFunc
+
 	// CreateRealm / ListRealms, when set (with Authenticate), enable the
 	// operator-authenticated /v1/realms endpoints, scoped to the caller's account.
 	CreateRealm func(ctx context.Context, accountID, name string) (Realm, error)
@@ -266,6 +273,14 @@ type Config struct {
 	// filter + cursor semantics as the owner's per-account view; the
 	// fleet-wide scope is exactly the point.
 	ListAdminEventsAll func(ctx context.Context, filter EventFilter) (EventPage, error)
+
+	// Transcript ledger: append-only visible interaction capture. Agent tokens
+	// create/append their own transcripts. Agents read their own; operators read
+	// the whole account. Bodies and payloads are never copied into audit events.
+	CreateTranscript      func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
+	AppendTranscriptEntry func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
+	ListTranscripts       func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
+	GetTranscript         func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -448,6 +463,128 @@ type LoginFunc func(ctx context.Context, bootstrapToken string) (operatorToken, 
 // server fault.
 type AuthFunc func(ctx context.Context, token string) (operatorID, accountID, accountStatus string, ok bool, err error)
 
+// PrincipalKind values distinguish operator and agent bearer credentials.
+const (
+	PrincipalKindOperator = "operator"
+	PrincipalKindAgent    = "agent"
+)
+
+// DomainPrincipal is a bearer-token-derived identity. RealmID is populated for
+// agents and empty for operators.
+type DomainPrincipal struct {
+	Kind          string
+	ID            string
+	AccountID     string
+	RealmID       string
+	AgentName     string
+	RealmName     string
+	AccountStatus string
+}
+
+// PrincipalAuthFunc resolves either an operator or agent bearer token.
+type PrincipalAuthFunc func(ctx context.Context, token string) (DomainPrincipal, bool, error)
+
+// SelfDigest is the bounded, token-derived agent identity and open-plane
+// session-start view returned by GET /v1/self. Facts and memories are empty in
+// the identity-only slice and can be populated without changing this envelope.
+type SelfDigest struct {
+	SchemaVersion   string       `json:"schema_version"`
+	Identity        SelfIdentity `json:"identity"`
+	PrimaryFacts    []SelfFact   `json:"primary_facts"`
+	SalientMemories []SelfMemory `json:"salient_memories"`
+	Index           SelfIndex    `json:"index"`
+	Elided          bool         `json:"elided"`
+}
+
+// SelfIdentity is the account, realm, and agent identity derived from the
+// bearer token used to request a self digest.
+type SelfIdentity struct {
+	AccountID string `json:"account_id"`
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
+	RealmID   string `json:"realm_id"`
+	RealmName string `json:"realm_name"`
+}
+
+// SelfFact is the bounded primary-fact representation included in a self
+// digest once the fact store is implemented.
+type SelfFact struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Value     any    `json:"value,omitempty"`
+	Primary   bool   `json:"primary"`
+	Sensitive bool   `json:"sensitive,omitempty"`
+	Redacted  bool   `json:"redacted,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
+// SelfMemory is the bounded salient-memory representation included in a self
+// digest once the memory store is implemented.
+type SelfMemory struct {
+	ID       string  `json:"id"`
+	Snippet  string  `json:"snippet"`
+	Kind     string  `json:"kind"`
+	Salience float64 `json:"salience"`
+	Source   string  `json:"source,omitempty"`
+}
+
+// SelfIndex summarizes the kinds, tags, and open-plane record counts available
+// to the authenticated agent.
+type SelfIndex struct {
+	Kinds  []string       `json:"kinds"`
+	Tags   []string       `json:"tags"`
+	Counts map[string]int `json:"counts"`
+}
+
+// Transcript is the API view of one visible interaction thread.
+type Transcript struct {
+	ID           string          `json:"id"`
+	AccountID    string          `json:"account_id"`
+	RealmID      string          `json:"realm_id"`
+	OwnerAgentID string          `json:"owner_agent_id"`
+	ExternalID   string          `json:"external_id,omitempty"`
+	Title        string          `json:"title,omitempty"`
+	Metadata     json.RawMessage `json:"metadata"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// TranscriptEntry is one immutable visible turn or explicit system/tool trace.
+type TranscriptEntry struct {
+	ID                string          `json:"id"`
+	AccountID         string          `json:"account_id"`
+	TranscriptID      string          `json:"transcript_id"`
+	RealmID           string          `json:"realm_id"`
+	RecordedByAgentID string          `json:"recorded_by_agent_id"`
+	Sequence          int64           `json:"sequence"`
+	ExternalID        string          `json:"external_id,omitempty"`
+	Role              string          `json:"role"`
+	Body              string          `json:"body,omitempty"`
+	Payload           json.RawMessage `json:"payload,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	ReplyToEntryID    string          `json:"reply_to_entry_id,omitempty"`
+	Artifacts         json.RawMessage `json:"artifacts"`
+	CreatedAt         time.Time       `json:"created_at"`
+}
+
+// CreateTranscriptRequest is the POST /v1/transcripts body.
+type CreateTranscriptRequest struct {
+	ExternalID string          `json:"external_id,omitempty"`
+	Title      string          `json:"title,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+// AppendTranscriptEntryRequest is the transcript entry append body.
+type AppendTranscriptEntryRequest struct {
+	ExternalID     string          `json:"external_id,omitempty"`
+	Role           string          `json:"role"`
+	Body           string          `json:"body,omitempty"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	Model          string          `json:"model,omitempty"`
+	ReplyToEntryID string          `json:"reply_to_entry_id,omitempty"`
+	Artifacts      json.RawMessage `json:"artifacts,omitempty"`
+}
+
 // Realm is the API view of a realm.
 type Realm struct {
 	ID   string `json:"id"`
@@ -499,6 +636,10 @@ var ErrResumeWrongCategory = errors.New("suspension category does not match")
 // (malformed pagination cursor, out-of-range parameter, unparseable
 // filter). Maps to 400.
 var ErrBadInput = errors.New("bad input")
+
+// ErrForbidden signals an authenticated principal crossing a resource's
+// authorization boundary (-> 403).
+var ErrForbidden = errors.New("forbidden")
 
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
@@ -642,7 +783,11 @@ func apiMux(cfg Config) http.Handler {
 		_, _ = fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo))
+	selfDigestSupported := cfg.AuthenticatePrincipal != nil
+	transcriptsSupported := selfDigestSupported &&
+		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
+		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo, selfDigestSupported, transcriptsSupported))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -736,6 +881,21 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.ChangeSupportTicketState != nil {
 			mux.HandleFunc("PATCH /v1/support/tickets/{ticket}/state", changeSupportTicketStateHandler(cfg.Authenticate, cfg.ChangeSupportTicketState))
+		}
+	}
+	if cfg.AuthenticatePrincipal != nil {
+		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal))
+		if cfg.CreateTranscript != nil {
+			mux.HandleFunc("POST /v1/transcripts", createTranscriptHandler(cfg.AuthenticatePrincipal, cfg.CreateTranscript))
+		}
+		if cfg.ListTranscripts != nil {
+			mux.HandleFunc("GET /v1/transcripts", listTranscriptsHandler(cfg.AuthenticatePrincipal, cfg.ListTranscripts))
+		}
+		if cfg.GetTranscript != nil {
+			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptHandler(cfg.AuthenticatePrincipal, cfg.GetTranscript))
+		}
+		if cfg.AppendTranscriptEntry != nil {
+			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries", appendTranscriptEntryHandler(cfg.AuthenticatePrincipal, cfg.AppendTranscriptEntry))
 		}
 	}
 	// Provision-token-authorized cell-wide admin ticket list (feeds
@@ -843,7 +1003,7 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error)) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		caps := capabilities{
@@ -856,10 +1016,12 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 			Features: map[string]feature{
 				"memories":        notImpl,
 				"facts":           notImpl,
+				"self_digest":     {Supported: selfDigestSupported},
 				"semantic_recall": notImpl,
 				"policies":        notImpl,
 				"groups":          notImpl,
 				"messaging":       notImpl,
+				"transcripts":     {Supported: transcriptsSupported},
 				"audit":           notImpl,
 			},
 			Limits:  map[string]any{},
@@ -867,6 +1029,12 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 		}
 		if ep := envOr("WITSELF_BILLING_ENDPOINT", ""); ep != "" {
 			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
+		}
+		if !transcriptsSupported {
+			caps.Features["transcripts"] = notImpl
+		}
+		if !selfDigestSupported {
+			caps.Features["self_digest"] = notImpl
 		}
 		if accountID != "" {
 			caps.Account = &accountInfo{ID: accountID}
@@ -936,6 +1104,213 @@ func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.R
 		}
 		h(w, r, principal{operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})
 	}
+}
+
+// requireDomainPrincipal authenticates an operator-or-agent token for domain
+// surfaces and requires an active account. Authorization within the account is
+// still the resource handler/store's job.
+func requireDomainPrincipal(auth PrincipalAuthFunc, h func(http.ResponseWriter, *http.Request, DomainPrincipal)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok {
+			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
+		p, ok, err := auth(r.Context(), tok)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		if p.AccountStatus != "active" {
+			writeJSONError(w, http.StatusForbidden,
+				fmt.Sprintf("account is %s — this action requires an active account", p.AccountStatus))
+			return
+		}
+		h(w, r, p)
+	}
+}
+
+func selfHandler(auth PrincipalAuthFunc) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may show self")
+			return
+		}
+
+		q := r.URL.Query()
+		for _, name := range []string{"include_facts", "include_salient"} {
+			if value := q.Get(name); value != "" {
+				if _, err := strconv.ParseBool(value); err != nil {
+					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
+					return
+				}
+			}
+		}
+		if value := q.Get("salient_limit"); value != "" {
+			limit, err := strconv.Atoi(value)
+			if err != nil || limit < 1 || limit > 100 {
+				writeJSONError(w, http.StatusBadRequest, "salient_limit must be between 1 and 100")
+				return
+			}
+		}
+		if value := q.Get("max_bytes"); value != "" {
+			maximum, err := strconv.Atoi(value)
+			if err != nil || maximum < 1024 || maximum > 65536 {
+				writeJSONError(w, http.StatusBadRequest, "max_bytes must be between 1024 and 65536")
+				return
+			}
+		}
+
+		digest := SelfDigest{
+			SchemaVersion: "witself.v0",
+			Identity: SelfIdentity{
+				AccountID: p.AccountID,
+				AgentID:   p.ID,
+				AgentName: p.AgentName,
+				RealmID:   p.RealmID,
+				RealmName: p.RealmName,
+			},
+			PrimaryFacts:    []SelfFact{},
+			SalientMemories: []SelfMemory{},
+			Index: SelfIndex{
+				Kinds:  []string{},
+				Tags:   []string{},
+				Counts: map[string]int{"facts": 0, "memories": 0},
+			},
+			Elided: false,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(digest)
+	})
+}
+
+func createTranscriptHandler(auth PrincipalAuthFunc, create func(context.Context, DomainPrincipal, CreateTranscriptRequest) (Transcript, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may create a transcript")
+			return
+		}
+		var req CreateTranscriptRequest
+		if err := decodeLimitedJSON(w, r, &req, 64*1024); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		tr, err := create(r.Context(), p, req)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "a transcript with that external id already exists")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not create transcript")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "transcript": tr})
+	})
+}
+
+func appendTranscriptEntryHandler(auth PrincipalAuthFunc, appendEntry func(context.Context, DomainPrincipal, string, AppendTranscriptEntryRequest) (TranscriptEntry, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may append a transcript entry")
+			return
+		}
+		var req AppendTranscriptEntryRequest
+		if err := decodeLimitedJSON(w, r, &req, 512*1024); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		entry, err := appendEntry(r.Context(), p, r.PathValue("transcript"), req)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "transcript not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "a transcript entry with that external id already exists")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not append transcript entry")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "entry": entry})
+	})
+}
+
+func listTranscriptsHandler(auth PrincipalAuthFunc, list func(context.Context, DomainPrincipal) ([]Transcript, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		transcripts, err := list(r.Context(), p)
+		if errors.Is(err, ErrForbidden) {
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not list transcripts")
+			return
+		}
+		if transcripts == nil {
+			transcripts = []Transcript{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "transcripts": transcripts})
+	})
+}
+
+func getTranscriptHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string) (Transcript, []TranscriptEntry, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		tr, entries, err := get(r.Context(), p, r.PathValue("transcript"))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "transcript not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "transcript access forbidden")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read transcript")
+			return
+		}
+		if entries == nil {
+			entries = []TranscriptEntry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"transcript":     tr,
+			"entries":        entries,
+		})
+	})
+}
+
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("multiple JSON values")
+	}
+	return nil
 }
 
 func bearerToken(r *http.Request) (string, bool) {

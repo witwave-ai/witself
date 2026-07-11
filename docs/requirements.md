@@ -81,7 +81,7 @@ not the production model.
   are pinned in [Secret References](#secret-references). The former Witpass `wp://`
   scheme is fully retired.
 - ID prefixes: `acct_`, `realm_`, `agent_`, `opr_`, `tok_`, `mem_`, `fact_`,
-  `grp_`, `pol_`, `msg_`, `thr_`, `aud_`, and the sealed-plane prefixes `sec_`
+  `grp_`, `pol_`, `trn_`, `ent_`, `msg_`, `thr_`, `aud_`, and the sealed-plane prefixes `sec_`
   (secret), `fld_` (secret field), `grt_` (secret grant), `totp_` (TOTP
   enrollment), `kek_` (per-realm key-encryption key), `dek_` (per-secret/field
   data-encryption key), `att_` (attachment), `usg_` (usage counter), and `idem_`
@@ -100,6 +100,9 @@ not the production model.
 - Let agents and operators organize agents into named security groups that act as
   both policy subjects and policy targets, and that can own group-scoped shared
   memories and facts.
+- Let agent runtimes record an append-only ledger of visible user prompts,
+  finalized assistant responses, and explicit system/tool traces, with
+  account-operator read-only visibility and no raw hidden chain-of-thought.
 - Let agents exchange durable messages with other agents and groups through a
   mailbox/queue model with delivery, ordering, and acknowledgement.
 - Let agents create, store, reveal, and inject their own sealed-plane secrets
@@ -726,6 +729,29 @@ Group behavior:
   records use the same `mem_`/`fact_` shapes with a group owner.
 - Group-owned destructive actions follow the same guardrails as cross-agent
   actions: `--reason`, `--dry-run`, confirmation, and soft-delete by default.
+
+### Transcript Ledger
+
+Agent runtimes may record the visible model-boundary interaction as an
+append-only transcript. This is separate from inter-agent delivery: the agent
+token derives who recorded the entry, while `role` (`user`, `assistant`,
+`system`, or `tool`) is asserted transcript data.
+
+- A prompt and finalized response are two immutable entries ordered by a
+  transcript-local sequence and optionally linked by `reply_to_entry_id`.
+- An optional external id on transcripts and entries provides retry-safe
+  integration with vendor/runtime conversation and message ids.
+- Small structured objects live in bounded `jsonb` metadata/payload fields.
+- Raw hidden chain-of-thought and streaming token chunks are never stored.
+- File artifacts are reserved until a portable object-store path can move bytes
+  with the account; arbitrary binary data is not stored in ordinary Postgres
+  rows.
+- Agent tokens write/read their own transcripts. Account operator tokens can
+  list/read all transcripts in the account but cannot append as an agent.
+- Transcript rows participate in the account logical export/import stream.
+
+The authoritative contract is
+[transcript-ledger.md](transcript-ledger.md).
 
 ### Inter-Agent Messaging
 

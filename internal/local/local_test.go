@@ -117,3 +117,62 @@ func TestTokenLayoutAndLegacyFallback(t *testing.T) {
 		t.Errorf("legacy file survived delete: %v", err)
 	}
 }
+
+func TestAgentTokenLayoutAndLegacyFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+
+	canonical, err := AgentTokenPath("default", "default", "scott")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "tokens", "accounts", "default", "realms", "default", "agents", "scott.token")
+	if canonical != want {
+		t.Fatalf("agent token path = %q, want %q", canonical, want)
+	}
+	if err := os.MkdirAll(filepath.Dir(canonical), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canonical, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, path, err := ReadAgentToken("default", "default", "scott")
+	if err != nil || tok != "witself_agt_scott" || path != canonical {
+		t.Fatalf("canonical agent token = %q from %q, err %v", tok, path, err)
+	}
+
+	if err := os.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := legacyAgentTokenPath("default", "scott")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("witself_agt_legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, path, err = ReadAgentToken("default", "default", "scott")
+	if err != nil || tok != "witself_agt_legacy" || path != legacy {
+		t.Fatalf("legacy agent token = %q from %q, err %v", tok, path, err)
+	}
+}
+
+func TestAgentTokenPathRejectsTraversal(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	for _, tc := range []struct {
+		account string
+		realm   string
+		agent   string
+	}{
+		{account: "../other", realm: "default", agent: "scott"},
+		{account: "default", realm: "../other", agent: "scott"},
+		{account: "default", realm: "default", agent: "../other"},
+	} {
+		if _, err := AgentTokenPath(tc.account, tc.realm, tc.agent); err == nil {
+			t.Fatalf("AgentTokenPath(%q, %q, %q) succeeded", tc.account, tc.realm, tc.agent)
+		}
+	}
+}

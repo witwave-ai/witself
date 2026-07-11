@@ -10,8 +10,9 @@
 //
 // Layout (WITSELF_HOME overrides ~/.witself):
 //
-//	~/.witself/config.json                          non-secret bindings, CLI-managed
-//	~/.witself/tokens/accounts/<name>/owner.token   the owner's operator token, 0600
+//	~/.witself/config.json                                                     non-secret bindings, CLI-managed
+//	~/.witself/tokens/accounts/<name>/owner.token                              the owner's operator token, 0600
+//	~/.witself/tokens/accounts/<name>/realms/<realm>/agents/<agent>.token      agent tokens, 0600
 //
 // Each account gets a directory so future per-operator tokens have a home
 // beside the owner's. (One legacy generation is still read: the flat
@@ -77,6 +78,68 @@ func TokenPath(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(r, "tokens", "accounts", name, "owner.token"), nil
+}
+
+// AgentTokenPath returns the canonical realm-scoped token path for a named
+// agent. Every component is a local selector, not a server-side identity
+// claim; the token loaded from the path remains the authenticated identity.
+func AgentTokenPath(account, realm, agent string) (string, error) {
+	for label, value := range map[string]string{
+		"account": account,
+		"realm":   realm,
+		"agent":   agent,
+	} {
+		if !namePattern.MatchString(value) {
+			return "", fmt.Errorf("invalid local %s name %q (lowercase letters, digits, hyphens)", label, value)
+		}
+	}
+	r, err := root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(r, "tokens", "accounts", account, "realms", realm, "agents", agent+".token"), nil
+}
+
+// legacyAgentTokenPath is the pre-realm agent token layout emitted by the
+// first token-create implementation. Reads retain this fallback so upgrading
+// the CLI does not strand an existing agent credential.
+func legacyAgentTokenPath(account, agent string) (string, error) {
+	r, err := root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(r, "tokens", "accounts", account, "agents", agent+".token"), nil
+}
+
+// ReadAgentToken loads a named agent's credential from the canonical path,
+// falling back to the original account-level agent path. The returned path is
+// the file that supplied the credential and is safe to report in errors.
+func ReadAgentToken(account, realm, agent string) (token, path string, err error) {
+	tp, err := AgentTokenPath(account, realm, agent)
+	if err != nil {
+		return "", "", err
+	}
+	b, err := os.ReadFile(tp)
+	if errors.Is(err, os.ErrNotExist) {
+		lp, lerr := legacyAgentTokenPath(account, agent)
+		if lerr == nil {
+			if lb, lerr := os.ReadFile(lp); lerr == nil {
+				tok := strings.TrimSpace(string(lb))
+				if tok == "" {
+					return "", "", fmt.Errorf("agent token file %s is empty", lp)
+				}
+				return tok, lp, nil
+			}
+		}
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("agent token %s: %w", tp, err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", "", fmt.Errorf("agent token file %s is empty", tp)
+	}
+	return tok, tp, nil
 }
 
 // legacyTokenPath is the flat pre-directory layout, still honored on reads.
@@ -267,9 +330,9 @@ func Delete(name string) error {
 	return nil
 }
 
-// Resolve picks a named account — explicit flag, then WITSELF_ACCOUNT, then
-// "default" — and returns its binding plus the operator token.
-func Resolve(explicit string) (name string, acct Account, operatorToken string, err error) {
+// ResolveAccount picks a named account — explicit flag, then WITSELF_ACCOUNT,
+// then "default" — and returns its non-secret binding.
+func ResolveAccount(explicit string) (name string, acct Account, err error) {
 	name = explicit
 	if name == "" {
 		name = strings.TrimSpace(os.Getenv("WITSELF_ACCOUNT"))
@@ -279,11 +342,20 @@ func Resolve(explicit string) (name string, acct Account, operatorToken string, 
 	}
 	cfg, err := Load()
 	if err != nil {
-		return "", Account{}, "", err
+		return "", Account{}, err
 	}
 	a, ok := cfg.Accounts[name]
 	if !ok {
-		return "", Account{}, "", fmt.Errorf("no local account named %q (create one with `witself account create --name %s …`, or pass --endpoint/--token-file)", name, name)
+		return "", Account{}, fmt.Errorf("no local account named %q (create one with `witself account create --name %s …`, or pass --endpoint/--token-file)", name, name)
+	}
+	return name, a, nil
+}
+
+// Resolve returns a named account binding plus its owner/operator token.
+func Resolve(explicit string) (name string, acct Account, operatorToken string, err error) {
+	name, a, err := ResolveAccount(explicit)
+	if err != nil {
+		return "", Account{}, "", err
 	}
 	raw, tp, err := readTokenFile(name)
 	if err != nil {

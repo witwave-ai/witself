@@ -25,6 +25,24 @@ var ErrOperatorNotFound = errors.New("operator not found")
 // already revoked, or is not a revocable credential token.
 var ErrTokenNotFound = errors.New("token not found")
 
+// Principal kinds returned by AuthenticatePrincipal.
+const (
+	PrincipalOperator = "operator"
+	PrincipalAgent    = "agent"
+)
+
+// Principal is the token-derived identity used by domain surfaces that accept
+// both agent and operator tokens. RealmID is populated only for agents.
+type Principal struct {
+	Kind          string
+	ID            string
+	AccountID     string
+	RealmID       string
+	AgentName     string
+	RealmName     string
+	AccountStatus string
+}
+
 func hashToken(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
@@ -145,6 +163,61 @@ func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (ope
 		return "", "", "", false, fmt.Errorf("authenticate: %w", err)
 	}
 	return operatorID, accountID, accountStatus, true, nil
+}
+
+// AuthenticatePrincipal resolves either a live operator or a live agent token.
+// The returned kind and ids are derived entirely from the token row and its FK
+// targets. It is intentionally separate from AuthenticateOperator so existing
+// operator-only routes cannot accidentally begin accepting agent credentials.
+func (s *Store) AuthenticatePrincipal(ctx context.Context, plaintext string) (Principal, bool, error) {
+	var p Principal
+	var realmID, agentName, realmName *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT principal_kind, principal_id, account_id, realm_id,
+		       agent_name, realm_name, account_status
+		FROM (
+		  SELECT 'operator'::text AS principal_kind, o.id AS principal_id,
+		         t.account_id, NULL::text AS realm_id,
+		         NULL::text AS agent_name, NULL::text AS realm_name,
+		         a.status AS account_status
+		  FROM tokens t
+		  JOIN operators o ON o.id = t.operator_id AND o.account_id = t.account_id
+		  JOIN accounts a ON a.id = t.account_id
+		  WHERE t.token_hash = $1 AND t.kind = 'operator'
+		    AND t.consumed_at IS NULL
+		    AND (t.expires_at IS NULL OR t.expires_at > now())
+		    AND o.deleted_at IS NULL
+		  UNION ALL
+		  SELECT 'agent'::text AS principal_kind, ag.id AS principal_id,
+		         t.account_id, ag.realm_id, ag.name AS agent_name,
+		         r.name AS realm_name, a.status AS account_status
+		  FROM tokens t
+		  JOIN agents ag ON ag.id = t.agent_id
+		  JOIN realms r ON r.id = ag.realm_id AND r.account_id = t.account_id
+		  JOIN accounts a ON a.id = t.account_id
+		  WHERE t.token_hash = $1 AND t.kind = 'agent'
+		    AND t.consumed_at IS NULL
+		    AND (t.expires_at IS NULL OR t.expires_at > now())
+		    AND ag.deleted_at IS NULL AND r.deleted_at IS NULL
+		) principals
+		LIMIT 1`, hashToken(plaintext)).
+		Scan(&p.Kind, &p.ID, &p.AccountID, &realmID, &agentName, &realmName, &p.AccountStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Principal{}, false, nil
+	}
+	if err != nil {
+		return Principal{}, false, fmt.Errorf("authenticate principal: %w", err)
+	}
+	if realmID != nil {
+		p.RealmID = *realmID
+	}
+	if agentName != nil {
+		p.AgentName = *agentName
+	}
+	if realmName != nil {
+		p.RealmName = *realmName
+	}
+	return p, true, nil
 }
 
 // CreateOperatorToken mints a durable operator token bound to an operator that

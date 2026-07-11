@@ -60,6 +60,9 @@ V0 should prove the end-to-end product boundary:
   access policies under a default-deny stance.
 - The CLI can create, list, show, and manage membership of security groups,
   including group-scoped shared memories and facts.
+- The CLI can create, append, list, and show visible interaction transcripts;
+  agents write their own ledger and account operators have read-only audit
+  visibility.
 - The CLI can send, list, read, and acknowledge durable inter-agent messages,
   with sender identity derived from the token.
 - The CLI can export an agent's self as structured plaintext and import it back
@@ -168,7 +171,7 @@ Core backend capabilities:
 - `/v1/version`, `/livez`, `/readyz`,
   `/startupz`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
 - Initial `/v1/realms`, `/v1/agents`, `/v1/tokens`, `/v1/memories`,
-  `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/messages`, and `/v1/audit`
+  `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/transcripts`, `/v1/messages`, and `/v1/audit`
   route groups.
 - Self-management routes including `/v1/remember`, `/v1/self`,
   `/v1/sessions:start`, `/v1/sessions:end`, and `/v1/memories:consolidate`,

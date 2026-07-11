@@ -1038,6 +1038,44 @@ func TestCapabilitiesIncludesAccount(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesReportsTranscriptSupport(t *testing.T) {
+	principalAuth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{}, false, nil
+	}
+	cfg := Config{
+		AuthenticatePrincipal: principalAuth,
+		CreateTranscript: func(context.Context, DomainPrincipal, CreateTranscriptRequest) (Transcript, error) {
+			return Transcript{}, nil
+		},
+		AppendTranscriptEntry: func(context.Context, DomainPrincipal, string, AppendTranscriptEntryRequest) (TranscriptEntry, error) {
+			return TranscriptEntry{}, nil
+		},
+		ListTranscripts: func(context.Context, DomainPrincipal) ([]Transcript, error) {
+			return nil, nil
+		},
+		GetTranscript: func(context.Context, DomainPrincipal, string) (Transcript, []TranscriptEntry, error) {
+			return Transcript{}, nil, nil
+		},
+	}
+	srv := httptest.NewServer(apiMux(cfg))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, resp)
+	var c capabilities
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		t.Fatal(err)
+	}
+	if f := c.Features["transcripts"]; !f.Supported || f.Reason != "" {
+		t.Errorf("transcripts feature = %+v, want supported", f)
+	}
+	if f := c.Features["self_digest"]; !f.Supported || f.Reason != "" {
+		t.Errorf("self_digest feature = %+v, want supported", f)
+	}
+}
+
 func closeBody(t *testing.T, resp *http.Response) {
 	t.Helper()
 	if err := resp.Body.Close(); err != nil {

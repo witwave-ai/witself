@@ -78,6 +78,7 @@ otherwise.
 | `WITSELF_PROFILE` | Default profile name. |
 | `WITSELF_CONFIG` | Default config path. |
 | `WITSELF_REALM` | Default realm name or ID. |
+| `WITSELF_AGENT` | Default local agent name. |
 | `WITSELF_STORE_FILE` | Default local development store file path. |
 | `WITSELF_EMBEDDINGS_PROVIDER` | Embedding provider for semantic recall: `voyage` (default), `openai`, or `local-dev`. |
 | `WITSELF_EMBEDDINGS_MODEL` | Embedding model within the selected provider. |
@@ -86,20 +87,20 @@ Token file conventions:
 
 - Production: set `WITSELF_TOKEN_FILE` to an explicit secret mount, such as
   `/run/secrets/witself-agent-token`.
-- Local development fallback:
-  `${XDG_CONFIG_HOME:-~/.config}/witself/tokens/<profile-or-agent>.token`.
+- Managed local-agent fallback:
+  `~/.witself/tokens/accounts/<account>/realms/<realm>/agents/<agent>.token`
+  (`WITSELF_HOME` replaces `~/.witself` when set).
 - Token files created by Witself should be owner-readable and owner-writable
   only on platforms that support POSIX-style permissions, such as mode `0600`.
 - Directories created by Witself for token files should be owner-only on
   platforms that support POSIX-style permissions, such as mode `0700`.
 
-Agent tokens are bound to a realm and a named agent, either by embedded token
-claims or server-side token lookup. Agent identity comes from the token, never
-from a caller-supplied agent name. `--agent` can select an acting agent only
-when the authenticated token/operator credential is allowed to do so; it is not
-proof of identity by itself. This is load-bearing for cross-agent access and
-inter-agent messaging: the actor and message sender are derived server-side from
-the token.
+Agent tokens are bound server-side to a realm and a named agent. Agent identity
+comes from the token, never from a caller-supplied agent name. For managed local
+commands, `--account`, `--realm`, and `--agent` select the credential file; the
+server derives the identity from that credential and the CLI rejects any
+mismatch. This is load-bearing for cross-agent access and inter-agent messaging:
+the actor and message sender are derived server-side from the token.
 
 V0 token files contain plain token text. Token metadata is available through
 token commands, not embedded in the token file.
@@ -220,6 +221,7 @@ witself
   totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
+  transcript create|append|list|show
   message send|list|read|ack|listen
   federation peers|card
   reference parse|resolve
@@ -1285,15 +1287,23 @@ via `--max-bytes`). When capped, output sets `elided=true` and points to
 `memory recall`; it is never silently truncated.
 
 ```sh
-ws self show
+ws self show --account default --agent scott
 ws self show --salient-limit 5 --json
 ws self show --no-salient --max-bytes 4096
+
+# Run the current source tree without waiting for a CLI release.
+go run ./cmd/witself self show --account default --agent scott
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
+| `--account NAME` | Local account binding. Default: `WITSELF_ACCOUNT` or `default`. |
+| `--realm NAME` | Local realm selector. Default: `WITSELF_REALM` or `default`. |
+| `--agent NAME` | Local agent selector. Default: `WITSELF_AGENT`; required for managed credential lookup. |
+| `--endpoint URL` | Explicit cell endpoint; use with `--token-file` for an unmanaged credential. |
+| `--token-file PATH` | Explicit agent token file; requires `--endpoint`. |
 | `--no-facts` | Omit `primary` facts from the digest. |
 | `--no-salient` | Omit salient memories from the digest. |
 | `--salient-limit N` | Maximum salient memories to include. Default: `10`. |
@@ -2502,6 +2512,44 @@ Flags:
 | `--dry-run` | Show deletion impact, bound policies, members, and owned-record handling without deleting anything. |
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
+
+## `witself transcript`
+
+Record the visible interaction between a user and an AI system. A transcript is
+an append-only enterprise ledger, not an addressed A2A mailbox. The agent token
+is the token-derived recorder; `role` is recorded data. Account operator tokens
+may list/show for audit but cannot create or append.
+
+```sh
+ws transcript create \
+  --endpoint https://cell.example.com \
+  --token-file ./agent.token \
+  --title "Deployment review" \
+  --external-id vendor-thread-42
+
+ws transcript append trn_123 --endpoint https://cell.example.com \
+  --token-file ./agent.token --role user --body "Is the rollout healthy?"
+
+ws transcript append trn_123 --endpoint https://cell.example.com \
+  --token-file ./agent.token --role assistant --body-file ./answer.txt \
+  --reply-to ent_123 --model model-version
+
+ws transcript list --account default
+ws transcript show trn_123 --account default --json
+```
+
+`create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
+JSON object). `append` requires `--role user|assistant|system|tool` and at least
+one of `--body`, `--body-file`, `--stdin`, or `--payload-file`; it also accepts
+`--external-id` (retry-safe runtime message id), `--model`, and `--reply-to`.
+All four commands accept `--endpoint`,
+`--token-file`, and `--json`; `WITSELF_ENDPOINT`, `WITSELF_TOKEN_FILE`, and
+`WITSELF_TOKEN` are the unattended equivalents.
+
+Only finalized visible output should be appended. Raw hidden chain-of-thought
+and streaming chunks are out of contract. Small structured objects belong in
+`payload`; non-empty file artifacts are refused until portable object storage
+lands. See [transcript-ledger.md](transcript-ledger.md).
 
 ## `witself message`
 

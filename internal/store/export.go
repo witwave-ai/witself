@@ -101,6 +101,30 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'display_name', display_name, 'created_at', created_at,
 			  'expires_at', expires_at, 'consumed_at', consumed_at)
 			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		// Transcript conversations depend on realms + agents; entries depend
+		// on their conversation and may reply only to an earlier entry. Stable
+		// sequence order therefore makes this stream directly insertable.
+		&querySource{s: s, table: "transcript_conversations", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'external_id', external_id,
+			  'title', title, 'metadata', metadata,
+			  'next_sequence', next_sequence,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM transcript_conversations WHERE account_id = $1
+			ORDER BY created_at, id`, arg: accountID},
+		&querySource{s: s, table: "transcript_entries", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id,
+			  'transcript_id', transcript_id, 'realm_id', realm_id,
+			  'recorded_by_agent_id', recorded_by_agent_id,
+			  'sequence', sequence, 'external_id', external_id,
+			  'role', role, 'body', body,
+			  'payload', payload, 'model', model,
+			  'reply_to_entry_id', reply_to_entry_id,
+			  'artifacts', artifacts, 'created_at', created_at)
+			FROM transcript_entries WHERE account_id = $1
+			ORDER BY transcript_id, sequence, id`, arg: accountID},
 		// account_events streams last because it has no outbound FKs
 		// beyond account_id, and it is the append-only ledger — its rows
 		// point AT the state changes recorded above, not the other way

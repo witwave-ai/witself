@@ -47,6 +47,9 @@ plane.
   subjects and targets, membership, and group-owned shared identity data.
 - [inter-agent-messaging.md](inter-agent-messaging.md): the durable mailbox
   model, token-derived sender identity, delivery/ack state, and message threats.
+- [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
+  capture, its boundary from A2A messaging and memory, and the structured-object
+  versus file-artifact storage decision.
 - [agent-collaboration.md](agent-collaboration.md): the cross-realm /
   cross-account agent collaboration substrate — realm-authority addressing,
   signed realm/agent discovery, the blind cloud relay, cross-realm conversations,

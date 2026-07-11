@@ -7,6 +7,12 @@ plane (secrets + TOTP) is backed up **encrypted-only** — envelope ciphertext
 plus KMS key identity and rotation metadata, never plaintext, never key
 material — and is **excluded from the plaintext identity export** entirely.
 
+Visible transcript conversations and entries are account-owned open-plane data.
+They travel in the logical account export/import stream in conversation then
+entry order. When file artifacts land, an export is complete only when its blob
+manifest/content travels with the relational metadata; restoring dangling
+object references is not acceptable.
+
 ## Decision
 
 Witself treats backup, export, and recovery as two distinct postures matched to

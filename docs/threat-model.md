@@ -134,6 +134,11 @@ Open-plane (identity) high-value assets:
   memory-poisoning detectable.
 - **Message authenticity** — the `from` field, which is always derived from the
   authenticated token. Sender forgery must be structurally impossible.
+- **Transcript integrity and confidentiality** — the ordered visible
+  prompt/response record, token-derived recorder attribution, and any PII in
+  entry bodies or payloads. A caller-supplied `role` never substitutes for the
+  authenticated recorder identity. Raw hidden chain-of-thought is deliberately
+  not an asset because Witself does not request or store it.
 - **Identity availability** — memories and facts staying present and
   recallable; tombstones being reversible within the retention window; the
   embedding index supporting semantic recall.

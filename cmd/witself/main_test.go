@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -103,6 +104,117 @@ func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	}
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--name", "deploy bot"}); code != 2 {
 		t.Fatalf("agent name code = %d, want 2", code)
+	}
+}
+
+func TestSelfShowUsesAgentToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/self" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_scott" {
+			t.Errorf("Authorization = %q", got)
+		}
+		q := r.URL.Query()
+		if q.Get("include_facts") != "true" || q.Get("include_salient") != "true" || q.Get("salient_limit") != "10" || q.Get("max_bytes") != "8192" {
+			t.Errorf("query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agent_1","agent_name":"scott","realm_id":"realm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{"facts":0,"memories":0}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"self", "show",
+		"--endpoint", srv.URL,
+		"--token-file", tokenFile,
+		"--realm", "default",
+		"--agent", "scott",
+		"--json",
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+}
+
+func TestConnectAgentResolvesManagedAccountAndCanonicalToken(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_AGENT", "scott")
+	if err := local.Save("default", local.Account{ID: "acc_1"}, "witself_opr_owner"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := local.AgentTokenPath("default", "default", "scott")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := connectAgentWithLocator(context.Background(), "", "", "", "", "", func(_ context.Context, controlPlane, accountID string) (string, string, error) {
+		if controlPlane != defaultControlPlane || accountID != "acc_1" {
+			t.Fatalf("locator = %q / %q", controlPlane, accountID)
+		}
+		return "gcp-sandbox-use1-dev", "https://cell.example.test", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn.Endpoint != "https://cell.example.test" || conn.Token != "witself_agt_scott" || conn.AccountID != "acc_1" || conn.AccountName != "default" || conn.RealmName != "default" || conn.AgentName != "scott" {
+		t.Fatalf("connection = %+v", conn)
+	}
+}
+
+func TestTranscriptAppendAcceptsIDBeforeFlags(t *testing.T) {
+	var gotPath string
+	var got struct {
+		ExternalID     string `json:"external_id"`
+		Role           string `json:"role"`
+		Body           string `json:"body"`
+		ReplyToEntryID string `json:"reply_to_entry_id"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer witself_agt_recorder" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"entry":{"id":"ent_2","transcript_id":"trn_1","sequence":2,"role":"assistant","artifacts":[],"created_at":"2026-07-10T00:00:00Z"}}`))
+	}))
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_recorder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"transcript", "append", "trn_1",
+		"--endpoint", srv.URL,
+		"--token-file", tokenFile,
+		"--external-id", "vendor-message-2",
+		"--role", "assistant",
+		"--body", "done",
+		"--reply-to", "ent_1",
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+	if gotPath != "/v1/transcripts/trn_1/entries" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if got.ExternalID != "vendor-message-2" || got.Role != "assistant" || got.Body != "done" || got.ReplyToEntryID != "ent_1" {
+		t.Fatalf("request = %+v", got)
 	}
 }
 

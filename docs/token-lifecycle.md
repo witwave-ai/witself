@@ -123,8 +123,9 @@ Recommended token locations mirror the bootstrap guidance in
 
 - Production container or service: an explicit secret mount such as
   `/run/secrets/witself-agent-token`.
-- Local development fallback:
-  `${XDG_CONFIG_HOME:-~/.config}/witself/tokens/<profile-or-agent>.token`.
+- Managed local-agent fallback:
+  `~/.witself/tokens/accounts/<account>/realms/<realm>/agents/<agent>.token`.
+  Set `WITSELF_HOME` to replace the `~/.witself` root.
 
 ## Authentication Source Precedence
 
@@ -134,7 +135,8 @@ present, in this order:
 1. Explicit CLI flag, such as `--token-file`.
 2. `WITSELF_TOKEN_FILE`.
 3. `WITSELF_TOKEN`.
-4. Stored local profile auth, when available for human/operator use.
+4. The realm-scoped local agent token selected by account, realm, and agent;
+   stored local profile auth remains the human/operator path.
 
 `WITSELF_TOKEN` is convenient for tests and short-lived local use, but should be
 documented as the least-safe unattended option. Production deployments should

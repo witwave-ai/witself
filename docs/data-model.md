@@ -683,6 +683,56 @@ CREATE UNIQUE INDEX ux_group_members_group_agent
 every permission the agent held *through* the group (membership is evaluated at
 decision time).
 
+### `transcript_conversations`
+
+Purpose: own one append-only visible interaction transcript. This is an
+enterprise conversation ledger, not the addressed A2A mailbox. Semantics and
+the private-reasoning boundary live in
+[transcript-ledger.md](transcript-ledger.md).
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `trn_` prefix |
+| `account_id` | `text NOT NULL` FK -> `accounts(id)` | account archive boundary |
+| `realm_id` | `text NOT NULL` FK -> `realms(id)` | owning agent realm |
+| `owner_agent_id` | `text NOT NULL` FK -> `agents(id)` | token-derived creator/recorder |
+| `external_id` | `text NULL` | optional runtime/vendor conversation key |
+| `title` | `text NULL` | optional short label |
+| `metadata` | `jsonb NOT NULL DEFAULT '{}'` | bounded small object |
+| `next_sequence` | `bigint NOT NULL DEFAULT 1` | row-locked allocator for entries |
+| `created_at` / `updated_at` | `timestamptz` | |
+
+An external id, when present, is unique per owning agent. Agent tokens can only
+read their own rows; account operators can read every row in the account.
+
+### `transcript_entries`
+
+Purpose: immutable visible turns and explicit system/tool trace entries inside
+a transcript. An integration records a prompt and finalized response as two
+rows. Raw hidden chain-of-thought and streaming token chunks are never rows.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `ent_` prefix |
+| `account_id` | `text NOT NULL` FK -> `accounts(id)` | archive scoping |
+| `transcript_id` | `text NOT NULL` FK -> `transcript_conversations(id)` | |
+| `realm_id` | `text NOT NULL` FK -> `realms(id)` | denormalized scope boundary |
+| `recorded_by_agent_id` | `text NOT NULL` FK -> `agents(id)` | always token-derived |
+| `sequence` | `bigint NOT NULL` | monotonic within transcript |
+| `external_id` | `text NULL` | optional runtime/vendor message id, unique per transcript |
+| `role` | `text NOT NULL` | `user` \| `assistant` \| `system` \| `tool` |
+| `body` | `text NOT NULL DEFAULT ''` | visible text, <= 64 KiB |
+| `payload` | `jsonb NULL` | optional structured object, <= 16 KiB serialized |
+| `model` | `text NULL` | optional model/version label |
+| `reply_to_entry_id` | `text NULL` FK -> `transcript_entries(id)` | must be in the same transcript |
+| `artifacts` | `jsonb NOT NULL DEFAULT '[]'` | reserved; empty until object storage lands |
+| `created_at` | `timestamptz NOT NULL` | server-assigned |
+
+Unique `(transcript_id, sequence)` provides deterministic order, and unique
+`(transcript_id, external_id)` makes retry-safe capture possible. Entry bodies
+and payloads never appear in logs, metrics, errors, or account-event metadata.
+Small structured artifacts fit in `payload`; file bytes do not go in Postgres.
+
 ### `messages`
 
 Purpose: durable inter-agent messages with a per-recipient mailbox. `from` is

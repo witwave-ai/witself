@@ -103,6 +103,69 @@ func serve() int {
 			return ot, oid, true, nil
 		}
 		cfg.Authenticate = st.AuthenticateOperator
+		cfg.AuthenticatePrincipal = func(ctx context.Context, plaintext string) (server.DomainPrincipal, bool, error) {
+			p, ok, err := st.AuthenticatePrincipal(ctx, plaintext)
+			if err != nil || !ok {
+				return server.DomainPrincipal{}, ok, err
+			}
+			return server.DomainPrincipal{
+				Kind:          p.Kind,
+				ID:            p.ID,
+				AccountID:     p.AccountID,
+				RealmID:       p.RealmID,
+				AgentName:     p.AgentName,
+				RealmName:     p.RealmName,
+				AccountStatus: p.AccountStatus,
+			}, true, nil
+		}
+		cfg.CreateTranscript = func(ctx context.Context, p server.DomainPrincipal, in server.CreateTranscriptRequest) (server.Transcript, error) {
+			tr, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID, store.CreateTranscriptInput{
+				ExternalID: in.ExternalID,
+				Title:      in.Title,
+				Metadata:   in.Metadata,
+			})
+			if err != nil {
+				return server.Transcript{}, mapTranscriptError(err)
+			}
+			return toServerTranscript(tr), nil
+		}
+		cfg.AppendTranscriptEntry = func(ctx context.Context, p server.DomainPrincipal, transcriptID string, in server.AppendTranscriptEntryRequest) (server.TranscriptEntry, error) {
+			entry, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID, transcriptID, store.AppendTranscriptEntryInput{
+				ExternalID:     in.ExternalID,
+				Role:           in.Role,
+				Body:           in.Body,
+				Payload:        in.Payload,
+				Model:          in.Model,
+				ReplyToEntryID: in.ReplyToEntryID,
+				Artifacts:      in.Artifacts,
+			})
+			if err != nil {
+				return server.TranscriptEntry{}, mapTranscriptError(err)
+			}
+			return toServerTranscriptEntry(entry), nil
+		}
+		cfg.ListTranscripts = func(ctx context.Context, p server.DomainPrincipal) ([]server.Transcript, error) {
+			rows, err := st.ListTranscripts(ctx, toStorePrincipal(p))
+			if err != nil {
+				return nil, mapTranscriptError(err)
+			}
+			out := make([]server.Transcript, len(rows))
+			for i, tr := range rows {
+				out[i] = toServerTranscript(tr)
+			}
+			return out, nil
+		}
+		cfg.GetTranscript = func(ctx context.Context, p server.DomainPrincipal, transcriptID string) (server.Transcript, []server.TranscriptEntry, error) {
+			tr, entries, err := st.GetTranscript(ctx, toStorePrincipal(p), transcriptID)
+			if err != nil {
+				return server.Transcript{}, nil, mapTranscriptError(err)
+			}
+			out := make([]server.TranscriptEntry, len(entries))
+			for i, entry := range entries {
+				out[i] = toServerTranscriptEntry(entry)
+			}
+			return toServerTranscript(tr), out, nil
+		}
 		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (server.Realm, error) {
 			r, err := st.CreateRealm(ctx, accountID, name)
 			if errors.Is(err, store.ErrRealmExists) {
@@ -927,5 +990,67 @@ func toServerMessage(m store.TicketMessage) server.SupportTicketMessage {
 		Body:        m.Body,
 		Attachments: m.Attachments,
 		Metadata:    m.Metadata,
+	}
+}
+
+func mapTranscriptError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrTranscriptInputInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrTranscriptInputInvalid, err)
+	case errors.Is(err, store.ErrTranscriptExists):
+		return server.ErrConflict
+	case errors.Is(err, store.ErrTranscriptNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrTranscriptForbidden), errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotActive):
+		return server.ErrForbidden
+	case errors.Is(err, store.ErrAccountNotFound):
+		return server.ErrNotFound
+	default:
+		return err
+	}
+}
+
+func toStorePrincipal(p server.DomainPrincipal) store.Principal {
+	return store.Principal{
+		Kind:          p.Kind,
+		ID:            p.ID,
+		AccountID:     p.AccountID,
+		RealmID:       p.RealmID,
+		AccountStatus: p.AccountStatus,
+	}
+}
+
+func toServerTranscript(tr store.Transcript) server.Transcript {
+	return server.Transcript{
+		ID:           tr.ID,
+		AccountID:    tr.AccountID,
+		RealmID:      tr.RealmID,
+		OwnerAgentID: tr.OwnerAgentID,
+		ExternalID:   tr.ExternalID,
+		Title:        tr.Title,
+		Metadata:     tr.Metadata,
+		CreatedAt:    tr.CreatedAt,
+		UpdatedAt:    tr.UpdatedAt,
+	}
+}
+
+func toServerTranscriptEntry(entry store.TranscriptEntry) server.TranscriptEntry {
+	return server.TranscriptEntry{
+		ID:                entry.ID,
+		AccountID:         entry.AccountID,
+		TranscriptID:      entry.TranscriptID,
+		RealmID:           entry.RealmID,
+		RecordedByAgentID: entry.RecordedByAgentID,
+		Sequence:          entry.Sequence,
+		ExternalID:        entry.ExternalID,
+		Role:              entry.Role,
+		Body:              entry.Body,
+		Payload:           entry.Payload,
+		Model:             entry.Model,
+		ReplyToEntryID:    entry.ReplyToEntryID,
+		Artifacts:         entry.Artifacts,
+		CreatedAt:         entry.CreatedAt,
 	}
 }

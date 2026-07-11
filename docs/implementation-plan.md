@@ -431,6 +431,32 @@ Exit criteria:
   non-members.
 - The model matches [security-groups.md](security-groups.md).
 
+## Milestone 5.5: Transcript Ledger
+
+Goal: persist the visible prompt/response record before adding addressed
+delivery semantics.
+
+Deliverables:
+
+- Append-only transcripts with ordered `user`, `assistant`, `system`, and
+  `tool` entries.
+- Token-derived recorder identity; agent write/own-read and account-operator
+  audit-read boundaries.
+- Reply links, small `jsonb` payloads, model labels, and account archive/restore.
+- No raw hidden chain-of-thought or streaming chunks.
+- Reserve artifact references while deferring binary bytes to portable object
+  storage.
+- `witself transcript create/append/list/show` and `/v1/transcripts`.
+
+Exit criteria:
+
+- An agent runtime records a user prompt and finalized assistant response as
+  two immutable, ordered entries and can read them after restart/restore.
+- An account operator can inspect the account's transcripts but cannot append as
+  an agent.
+- Structured JSON round-trips through Postgres and account migration; non-empty
+  file attachments fail explicitly until object storage exists.
+
 ## Milestone 6: Inter-Agent Messaging
 
 Goal: deliver full durable inter-agent messaging in v0 (not a stub).

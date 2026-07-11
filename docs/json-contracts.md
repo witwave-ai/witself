@@ -725,7 +725,9 @@ digest shape, hard cap, and `elided` behavior are defined in
 
 ```json
 {
+  "schema_version": "witself.v0",
   "identity": {
+    "account_id": "acc_123",
     "agent_id": "agent_123",
     "agent_name": "browser-agent",
     "realm_id": "realm_123",
@@ -1099,6 +1101,63 @@ Rules:
   `group show` returns the full membership.
 
 Security groups are tracked in [security-groups.md](security-groups.md).
+
+## Transcript
+
+Used by `transcript list`/`transcript show` and `/v1/transcripts`. The owning
+agent is derived from the token that created the transcript.
+
+```json
+{
+  "id": "trn_123",
+  "account_id": "acc_123",
+  "realm_id": "realm_123",
+  "owner_agent_id": "agent_123",
+  "external_id": "vendor-thread-42",
+  "title": "Deployment review",
+  "metadata": {"environment": "sandbox"},
+  "created_at": "2026-07-10T18:00:00Z",
+  "updated_at": "2026-07-10T18:00:04Z"
+}
+```
+
+## Transcript Entry
+
+```json
+{
+  "id": "ent_124",
+  "account_id": "acc_123",
+  "transcript_id": "trn_123",
+  "realm_id": "realm_123",
+  "recorded_by_agent_id": "agent_123",
+  "sequence": 2,
+  "external_id": "vendor-message-43",
+  "role": "assistant",
+  "body": "The rollout is healthy.",
+  "payload": {"checks": 8, "failed": 0},
+  "model": "model-version",
+  "reply_to_entry_id": "ent_123",
+  "artifacts": [],
+  "created_at": "2026-07-10T18:00:04Z"
+}
+```
+
+Rules:
+
+- `role` is `user`, `assistant`, `system`, or `tool`; it is recorded content,
+  while `recorded_by_agent_id` is always token-derived.
+- A prompt and final answer are two entries. `sequence` orders all entries and
+  `reply_to_entry_id` links the answer to the prompt.
+- An optional `external_id` is unique within the transcript and is the
+  integration's retry/idempotency key for one visible message.
+- Bodies and payloads are explicit visible content. Raw hidden chain-of-thought
+  and streaming chunks are not stored.
+- `payload` is an optional bounded JSON object. `artifacts` is an empty reserved
+  array until portable object storage is implemented.
+- Agent tokens write/read their own transcripts. Account operators may read all
+  transcripts in the account but cannot append as an agent.
+
+See [transcript-ledger.md](transcript-ledger.md).
 
 ## Message
 

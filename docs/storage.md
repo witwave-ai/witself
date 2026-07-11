@@ -26,6 +26,8 @@ Postgres holds both planes. OPEN-plane state:
 - Cross-agent access policies (the rename of Witpass's per-secret grants).
 - Security groups and group membership.
 - Inter-agent messages, per-recipient delivery, and read/ack state.
+- Visible transcript conversations and append-only user/assistant/system/tool
+  entries, including bounded structured JSON payloads.
 - Audit events.
 - Usage counters and rate-limit state.
 - Idempotency records.
@@ -109,6 +111,11 @@ source of truth.
   thread/conversation id, `created_at`.
 - `message_deliveries` — per-recipient delivery rows with ordering, read, and
   ack state for the mailbox/queue model.
+- `transcript_conversations` — `trn_…` id, account/realm, owning recorder agent,
+  optional external conversation id/title/metadata, and sequence allocator.
+- `transcript_entries` — `ent_…` id, transcript, monotonically ordered role,
+  visible body, optional bounded JSON payload/model/reply link, and the
+  token-derived recorder. Raw hidden model reasoning is never stored.
 - `audit_events` — `aud_…` id, realm, actor, event name, target ids, decision
   outcome, reason, timestamp. Never identity content. See
   [audit-retention.md](audit-retention.md).

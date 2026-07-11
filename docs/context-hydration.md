@@ -53,11 +53,13 @@ it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ```json
 {
-  "schema": "witself.v0",
+  "schema_version": "witself.v0",
   "identity": {
-    "agent": "agent_atlas",
-    "realm": "realm_acme",
-    "display_name": "Atlas"
+    "account_id": "acc_acme",
+    "agent_id": "agent_atlas",
+    "agent_name": "atlas",
+    "realm_id": "realm_acme",
+    "realm_name": "prod"
   },
   "primary_facts": [
     { "id": "fact_001", "name": "display-name", "value": "Atlas", "primary": true, "source": "self" },
@@ -78,8 +80,9 @@ it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 Field rules:
 
-- `identity` — the token-derived agent, its realm, and the `display-name`
-  primary fact if present. Never caller-supplied.
+- `identity` — the token-derived account, agent, and realm identifiers and
+  names. Never caller-supplied. A display-name primary fact, when present,
+  remains in `primary_facts`.
 - `primary_facts` — the agent's identity anchors first, in primary order. Omit
   with `--no-facts` / `include_facts:false`.
 - `salient_memories` — the top-N salient memories as `{ id, snippet, kind,

@@ -433,6 +433,7 @@ Initial route groups:
 | `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
+| `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
 | `/v1/messages` | Inter-agent and cross-realm message send, list, read, long-poll receive (`:listen`), and acknowledgement. |
 | `/v1/conversations` | Cross-realm conversation/task resource: list and show participants, state, and turn/cost budgets. |
 | `/v1/federation/peers` | Federation allow-list: list, add, and remove the accepted peer realms for cross-realm collaboration. |

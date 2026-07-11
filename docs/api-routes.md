@@ -20,6 +20,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
+- `/v1/transcripts`
 - `/v1/conversations`
 - `/v1/federation`
 - `/v1/tokens`
@@ -220,6 +221,13 @@ POST /v1/messages
 GET  /v1/messages/{message_id}
 POST /v1/messages/{message_id}:ack
 POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
+
+# Append-only visible conversation ledger. Agent tokens write their own;
+# account operators may read every transcript in their account.
+GET  /v1/transcripts
+POST /v1/transcripts
+GET  /v1/transcripts/{transcript_id}
+POST /v1/transcripts/{transcript_id}/entries
 
 # Cross-realm conversation/task resource (post-v0 collaboration).
 GET  /v1/conversations

@@ -83,6 +83,24 @@ var importColumns = map[string]map[string]bool{
 		"author_kind": true, "author_id": true,
 		"body": true, "attachments": true, "metadata": true,
 	},
+	"transcript_conversations": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "external_id": true, "title": true,
+		"metadata": true, "next_sequence": true,
+		"created_at": true, "updated_at": true,
+	},
+	"transcript_entries": {
+		"id": true, "account_id": true, "transcript_id": true,
+		"realm_id": true, "recorded_by_agent_id": true,
+		"sequence": true, "external_id": true, "role": true, "body": true,
+		"payload": true, "model": true, "reply_to_entry_id": true,
+		"artifacts": true, "created_at": true,
+	},
+}
+
+type transcriptImportScope struct {
+	realmID      string
+	ownerAgentID string
 }
 
 // importCtx accumulates per-import state: how many accounts rows we have seen
@@ -91,21 +109,25 @@ var importColumns = map[string]map[string]bool{
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID string
-	accounts  int
-	operators map[string]bool
-	realms    map[string]bool
-	agents    map[string]bool
-	tickets   map[string]bool
+	accountID   string
+	accounts    int
+	operators   map[string]bool
+	realms      map[string]bool
+	agents      map[string]bool
+	tickets     map[string]bool
+	transcripts map[string]transcriptImportScope
+	entries     map[string]string
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID: accountID,
-		operators: map[string]bool{},
-		realms:    map[string]bool{},
-		agents:    map[string]bool{},
-		tickets:   map[string]bool{},
+		accountID:   accountID,
+		operators:   map[string]bool{},
+		realms:      map[string]bool{},
+		agents:      map[string]bool{},
+		tickets:     map[string]bool{},
+		transcripts: map[string]transcriptImportScope{},
+		entries:     map[string]string{},
 	}
 }
 
@@ -123,7 +145,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
-		"support_tickets", "support_ticket_messages":
+		"support_tickets", "support_ticket_messages",
+		"transcript_conversations", "transcript_entries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
 			return badf("%s row missing account_id", table)
@@ -238,6 +261,47 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if !ic.tickets[ticketID] {
 			return badf("support_ticket_messages row references ticket %q not present in this archive", ticketID)
 		}
+	case "transcript_conversations":
+		realmID, err := requireStringField(obj, "realm_id")
+		if err != nil || !ic.realms[realmID] {
+			return badf("transcript_conversations row references realm %q not present in this archive", realmID)
+		}
+		agentID, err := requireStringField(obj, "owner_agent_id")
+		if err != nil || !ic.agents[agentID] {
+			return badf("transcript_conversations row references agent %q not present in this archive", agentID)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("transcript_conversations row missing id")
+		}
+		ic.transcripts[id] = transcriptImportScope{realmID: realmID, ownerAgentID: agentID}
+	case "transcript_entries":
+		transcriptID, err := requireStringField(obj, "transcript_id")
+		if err != nil {
+			return badf("transcript_entries row missing transcript_id")
+		}
+		scope, ok := ic.transcripts[transcriptID]
+		if !ok {
+			return badf("transcript_entries row references transcript %q not present in this archive", transcriptID)
+		}
+		realmID, err := requireStringField(obj, "realm_id")
+		if err != nil || realmID != scope.realmID {
+			return badf("transcript_entries row realm %q does not match transcript realm %q", realmID, scope.realmID)
+		}
+		agentID, err := requireStringField(obj, "recorded_by_agent_id")
+		if err != nil || agentID != scope.ownerAgentID || !ic.agents[agentID] {
+			return badf("transcript_entries row recorder %q does not match transcript owner %q", agentID, scope.ownerAgentID)
+		}
+		if replyID, present := optionalStringField(obj, "reply_to_entry_id"); present {
+			if parentTranscript, ok := ic.entries[replyID]; !ok || parentTranscript != transcriptID {
+				return badf("transcript_entries row reply target %q is not an earlier entry in transcript %q", replyID, transcriptID)
+			}
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("transcript_entries row missing id")
+		}
+		ic.entries[id] = transcriptID
 	default:
 		return badf("table %q is not importable", table)
 	}

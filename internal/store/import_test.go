@@ -190,6 +190,59 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: false, want: "missing ticket_id",
 		},
 		{
+			name:  "transcript conversation with archive-local realm and agent is accepted",
+			table: "transcript_conversations",
+			row: map[string]any{
+				"id": "trn_1", "account_id": acc, "realm_id": "rlm_ok",
+				"owner_agent_id": "agt_ok",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_ok"] = true
+			},
+			wantOK: true,
+		},
+		{
+			name:  "transcript conversation cannot graft a foreign agent",
+			table: "transcript_conversations",
+			row: map[string]any{
+				"id": "trn_1", "account_id": acc, "realm_id": "rlm_ok",
+				"owner_agent_id": "agt_victim",
+			},
+			setup:  func(ic *importCtx) { ic.realms["rlm_ok"] = true },
+			wantOK: false, want: "agent",
+		},
+		{
+			name:  "transcript entry with matching scope is accepted",
+			table: "transcript_entries",
+			row: map[string]any{
+				"id": "ent_1", "account_id": acc, "transcript_id": "trn_1",
+				"realm_id": "rlm_ok", "recorded_by_agent_id": "agt_ok",
+				"sequence": float64(1), "role": "user", "body": "hello",
+			},
+			setup: func(ic *importCtx) {
+				ic.agents["agt_ok"] = true
+				ic.transcripts["trn_1"] = transcriptImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
+			},
+			wantOK: true,
+		},
+		{
+			name:  "transcript reply must target an earlier entry in the same transcript",
+			table: "transcript_entries",
+			row: map[string]any{
+				"id": "ent_2", "account_id": acc, "transcript_id": "trn_1",
+				"realm_id": "rlm_ok", "recorded_by_agent_id": "agt_ok",
+				"sequence": float64(2), "role": "assistant", "body": "hello",
+				"reply_to_entry_id": "ent_foreign",
+			},
+			setup: func(ic *importCtx) {
+				ic.agents["agt_ok"] = true
+				ic.transcripts["trn_1"] = transcriptImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
+				ic.entries["ent_foreign"] = "trn_other"
+			},
+			wantOK: false, want: "not an earlier entry",
+		},
+		{
 			name:   "unknown table is refused",
 			table:  "audit_log",
 			row:    map[string]any{"id": "audit_1", "account_id": acc},
@@ -258,6 +311,21 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 		"id": "tkm_1", "ticket_id": "tkt_1", "account_id": acc,
 		"author_kind": "owner", "author_id": "op_root", "body": "please",
 	})
+	feed("transcript_conversations", map[string]any{
+		"id": "trn_1", "account_id": acc, "realm_id": "rlm_default",
+		"owner_agent_id": "agt_1",
+	})
+	feed("transcript_entries", map[string]any{
+		"id": "ent_1", "account_id": acc, "transcript_id": "trn_1",
+		"realm_id": "rlm_default", "recorded_by_agent_id": "agt_1",
+		"sequence": float64(1), "role": "user", "body": "hello",
+	})
+	feed("transcript_entries", map[string]any{
+		"id": "ent_2", "account_id": acc, "transcript_id": "trn_1",
+		"realm_id": "rlm_default", "recorded_by_agent_id": "agt_1",
+		"sequence": float64(2), "role": "assistant", "body": "hi",
+		"reply_to_entry_id": "ent_1",
+	})
 
 	if ic.accounts != 1 {
 		t.Errorf("accounts count = %d, want 1", ic.accounts)
@@ -267,6 +335,9 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	}
 	if !ic.tickets["tkt_1"] {
 		t.Error("support ticket id not recorded across a legal stream")
+	}
+	if _, ok := ic.transcripts["trn_1"]; !ok || ic.entries["ent_2"] != "trn_1" {
+		t.Error("transcript ids not recorded across a legal stream")
 	}
 }
 

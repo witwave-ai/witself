@@ -55,6 +55,10 @@ func run(args []string) int {
 		return operatorCmd(args[1:])
 	case "token":
 		return tokenCmd(args[1:])
+	case "self":
+		return selfCmd(args[1:])
+	case "transcript":
+		return transcriptCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -199,6 +203,71 @@ func connect(ctx context.Context, accountName, endpoint, tokenFile string) (stri
 		return "", "", fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
 	}
 	return cellEndpoint, tok, nil
+}
+
+type accountLocator func(context.Context, string, string) (string, string, error)
+
+type agentConnection struct {
+	Endpoint    string
+	Token       string
+	AccountID   string
+	AccountName string
+	RealmName   string
+	AgentName   string
+}
+
+// connectAgent resolves a local agent selector to a realm-scoped token file.
+// The selector chooses local credential material only; the server derives the
+// authenticated identity from that token and selfShow verifies the result.
+func connectAgent(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string) (agentConnection, error) {
+	return connectAgentWithLocator(ctx, accountName, realmName, agentName, endpoint, tokenFile, client.LookupAccount)
+}
+
+func connectAgentWithLocator(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string, locate accountLocator) (agentConnection, error) {
+	realmName = strings.TrimSpace(realmName)
+	if realmName == "" {
+		realmName = strings.TrimSpace(os.Getenv("WITSELF_REALM"))
+	}
+	if realmName == "" {
+		realmName = "default"
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		agentName = strings.TrimSpace(os.Getenv("WITSELF_AGENT"))
+	}
+
+	if tokenFile != "" {
+		if endpoint == "" {
+			return agentConnection{}, fmt.Errorf("--token-file needs --endpoint (or use --account/--agent to resolve managed credentials)")
+		}
+		tok, err := readToken(tokenFile)
+		if err != nil {
+			return agentConnection{}, err
+		}
+		return agentConnection{Endpoint: endpoint, Token: tok, RealmName: realmName, AgentName: agentName}, nil
+	}
+	if agentName == "" {
+		return agentConnection{}, fmt.Errorf("--agent is required when --token-file is not supplied")
+	}
+
+	name, acct, err := local.ResolveAccount(accountName)
+	if err != nil {
+		return agentConnection{}, err
+	}
+	tok, _, err := local.ReadAgentToken(name, realmName, agentName)
+	if err != nil {
+		return agentConnection{}, err
+	}
+	if endpoint == "" {
+		_, endpoint, err = locate(ctx, defaultControlPlane, acct.ID)
+		if err != nil {
+			return agentConnection{}, fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
+		}
+	}
+	return agentConnection{
+		Endpoint: endpoint, Token: tok, AccountID: acct.ID, AccountName: name,
+		RealmName: realmName, AgentName: agentName,
+	}, nil
 }
 
 // accountFlag registers the shared --account flag on a cell command.
@@ -916,6 +985,44 @@ func readToken(file string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// connectDomain resolves the endpoint plus an operator-or-agent token used by
+// domain commands. An explicit/env token can still use a local account solely
+// for fresh cell routing; without an override, the account's operator token is
+// used (read-only on transcript surfaces).
+func connectDomain(ctx context.Context, accountName, endpoint, tokenFile string) (string, string, error) {
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("WITSELF_ENDPOINT"))
+	}
+	if tokenFile == "" {
+		tokenFile = strings.TrimSpace(os.Getenv("WITSELF_TOKEN_FILE"))
+	}
+	var tok string
+	var err error
+	if tokenFile != "" {
+		tok, err = readToken(tokenFile)
+		if err != nil {
+			return "", "", err
+		}
+	} else if envToken := strings.TrimSpace(os.Getenv("WITSELF_TOKEN")); envToken != "" {
+		tok = envToken
+	}
+	if tok == "" {
+		return connect(ctx, accountName, endpoint, "")
+	}
+	if endpoint != "" {
+		return endpoint, tok, nil
+	}
+	name, acct, _, err := local.Resolve(accountName)
+	if err != nil {
+		return "", "", fmt.Errorf("an agent token without --endpoint needs a local account for routing: %w", err)
+	}
+	_, endpoint, err = client.LookupAccount(ctx, defaultControlPlane, acct.ID)
+	if err != nil {
+		return "", "", fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
+	}
+	return endpoint, tok, nil
 }
 
 func operatorTokenSummary(tokens []client.OperatorToken) string {
@@ -2267,6 +2374,320 @@ func accountAdopt(args []string) int {
 	return 0
 }
 
+func selfCmd(args []string) int {
+	if len(args) == 0 || args[0] != "show" {
+		fmt.Fprintln(os.Stderr, "usage: witself self show [--account NAME] [--realm NAME] (--agent NAME | --endpoint URL --token-file FILE)")
+		return 2
+	}
+	return selfShow(args[1:])
+}
+
+func selfShow(args []string) int {
+	fs := flag.NewFlagSet("self show", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	realm := fs.String("realm", "", `local realm name (default: WITSELF_REALM or "default")`)
+	agent := fs.String("agent", "", "local agent name (default: WITSELF_AGENT)")
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent token")
+	noFacts := fs.Bool("no-facts", false, "omit primary facts")
+	noSalient := fs.Bool("no-salient", false, "omit salient memories")
+	salientLimit := fs.Int("salient-limit", 10, "maximum salient memories")
+	maxBytes := fs.Int("max-bytes", 8192, "maximum digest size")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself self show [--account NAME] [--realm NAME] (--agent NAME | --endpoint URL --token-file FILE)")
+		return 2
+	}
+	if *salientLimit < 1 || *salientLimit > 100 {
+		fmt.Fprintln(os.Stderr, "witself: --salient-limit must be between 1 and 100")
+		return 2
+	}
+	if *maxBytes < 1024 || *maxBytes > 65536 {
+		fmt.Fprintln(os.Stderr, "witself: --max-bytes must be between 1024 and 65536")
+		return 2
+	}
+
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	digest, err := client.GetSelf(ctx, conn.Endpoint, conn.Token, client.SelfOptions{
+		IncludeFacts:    !*noFacts,
+		IncludeSalient:  !*noSalient,
+		SalientLimit:    *salientLimit,
+		MaximumByteSize: *maxBytes,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if conn.AccountID != "" && digest.Identity.AccountID != conn.AccountID {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to account %s, not local account %s (%s)\n",
+			digest.Identity.AccountID, conn.AccountName, conn.AccountID)
+		return 1
+	}
+	if conn.RealmName != "" && digest.Identity.RealmName != conn.RealmName {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to realm %q, not %q\n", digest.Identity.RealmName, conn.RealmName)
+		return 1
+	}
+	if conn.AgentName != "" && digest.Identity.AgentName != conn.AgentName {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to agent %q, not %q\n", digest.Identity.AgentName, conn.AgentName)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(digest)
+	}
+	fmt.Printf("agent:\t%s (%s)\n", safeText(digest.Identity.AgentName), digest.Identity.AgentID)
+	fmt.Printf("realm:\t%s (%s)\n", safeText(digest.Identity.RealmName), digest.Identity.RealmID)
+	fmt.Printf("account:\t%s\n", digest.Identity.AccountID)
+	fmt.Printf("facts:\t%d\n", digest.Index.Counts["facts"])
+	fmt.Printf("memories:\t%d\n", digest.Index.Counts["memories"])
+	if digest.Elided {
+		fmt.Println("elided:\ttrue")
+	}
+	return 0
+}
+
+func transcriptCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show ...")
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return transcriptCreate(args[1:])
+	case "append":
+		return transcriptAppend(args[1:])
+	case "list":
+		return transcriptList(args[1:])
+	case "show":
+		return transcriptShow(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself transcript: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func transcriptCreate(args []string) int {
+	fs := flag.NewFlagSet("transcript create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent token")
+	title := fs.String("title", "", "short transcript title")
+	externalID := fs.String("external-id", "", "runtime/vendor conversation id")
+	metadataFile := fs.String("metadata-file", "", "file containing a small JSON object")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	metadata, err := readJSONFile(*metadataFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connectDomain(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	tr, err := client.CreateTranscript(ctx, ep, tok, client.CreateTranscriptInput{
+		ExternalID: *externalID,
+		Title:      *title,
+		Metadata:   metadata,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"transcript": tr})
+	}
+	fmt.Printf("%s\t%s\n", tr.ID, tabSafe(safeText(tr.Title)))
+	return 0
+}
+
+func transcriptAppend(args []string) int {
+	transcriptID := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		transcriptID = strings.TrimSpace(args[0])
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("transcript append", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent token")
+	role := fs.String("role", "", "user|assistant|system|tool (required)")
+	body := fs.String("body", "", "visible entry text")
+	bodyFile := fs.String("body-file", "", "read visible text from FILE ('-' means stdin)")
+	stdin := fs.Bool("stdin", false, "read visible text from stdin")
+	payloadFile := fs.String("payload-file", "", "file containing a small JSON object")
+	externalID := fs.String("external-id", "", "runtime/vendor message id for idempotency")
+	model := fs.String("model", "", "optional model/version label")
+	replyTo := fs.String("reply-to", "", "earlier entry id in this transcript")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if transcriptID == "" {
+		transcriptID = strings.TrimSpace(fs.Arg(0))
+	}
+	if transcriptID == "" || strings.TrimSpace(*role) == "" {
+		fmt.Fprintln(os.Stderr, "usage: witself transcript append TRANSCRIPT_ID --role user|assistant|system|tool (--body TEXT|--body-file FILE|--stdin|--payload-file FILE)")
+		return 2
+	}
+	text, err := readBodyFromFlags(*body, *bodyFile, *stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+	payload, err := readJSONFile(*payloadFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+	if text == "" && len(payload) == 0 {
+		fmt.Fprintln(os.Stderr, "witself: --body/--body-file/--stdin or --payload-file is required")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connectDomain(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	entry, err := client.AppendTranscriptEntry(ctx, ep, tok, transcriptID, client.AppendTranscriptEntryInput{
+		ExternalID:     *externalID,
+		Role:           *role,
+		Body:           text,
+		Payload:        payload,
+		Model:          *model,
+		ReplyToEntryID: *replyTo,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"entry": entry})
+	}
+	fmt.Printf("%d\t%s\t%s\n", entry.Sequence, entry.Role, entry.ID)
+	return 0
+}
+
+func transcriptList(args []string) int {
+	fs := flag.NewFlagSet("transcript list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent or operator token")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connectDomain(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	transcripts, err := client.ListTranscripts(ctx, ep, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"transcripts": transcripts})
+	}
+	if len(transcripts) == 0 {
+		fmt.Fprintln(os.Stderr, "no transcripts")
+		return 0
+	}
+	w, flush := tableWriter("updated\tid\tagent\ttitle")
+	for _, tr := range transcripts {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			formatTime(tr.UpdatedAt), tr.ID, tr.OwnerAgentID, tabSafe(safeText(tr.Title)))
+	}
+	flush()
+	return 0
+}
+
+func transcriptShow(args []string) int {
+	transcriptID := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		transcriptID = strings.TrimSpace(args[0])
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("transcript show", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent or operator token")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if transcriptID == "" {
+		transcriptID = strings.TrimSpace(fs.Arg(0))
+	}
+	if transcriptID == "" {
+		fmt.Fprintln(os.Stderr, "usage: witself transcript show TRANSCRIPT_ID")
+		return 2
+	}
+	ctx := context.Background()
+	ep, tok, err := connectDomain(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	detail, err := client.GetTranscript(ctx, ep, tok, transcriptID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(detail)
+	}
+	fmt.Printf("transcript %s", detail.Transcript.ID)
+	if detail.Transcript.Title != "" {
+		fmt.Printf(" - %s", safeText(detail.Transcript.Title))
+	}
+	fmt.Printf("\nagent: %s\ncreated: %s\n\n", detail.Transcript.OwnerAgentID, formatTime(detail.Transcript.CreatedAt))
+	for _, entry := range detail.Entries {
+		fmt.Printf("--- %d  %s  %s  %s ---\n", entry.Sequence, entry.Role, entry.ID, formatTime(entry.CreatedAt))
+		if entry.Body != "" {
+			fmt.Printf("%s\n", safeText(entry.Body))
+		}
+		if len(entry.Payload) > 0 && string(entry.Payload) != "null" {
+			fmt.Printf("payload: %s\n", safeText(string(entry.Payload)))
+		}
+		fmt.Println()
+	}
+	return 0
+}
+
+func readJSONFile(path string) (json.RawMessage, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read JSON file: %w", err)
+	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("%s does not contain valid JSON", path)
+	}
+	return json.RawMessage(raw), nil
+}
+
 func usage(w io.Writer) {
 	usageLine(w, "witself — the Witself CLI (alias: ws)")
 	usageLine(w)
@@ -2291,6 +2712,8 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself agent create|list|delete")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
+	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
+	usageLine(w, "  witself transcript create|append|list|show  Record visible AI interactions")
 	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)
 	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")
