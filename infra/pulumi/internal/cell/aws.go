@@ -171,6 +171,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	ctx.Export("vpcId", net.vpcID)
 	ctx.Export("eksCluster", eksCluster.name)
 	ctx.Export("eksEndpoint", eksCluster.endpoint)
+	ctx.Export("dbInstance", db.Identifier)
 	ctx.Export("dbEndpoint", db.Endpoint)
 	ctx.Export("dbName", pulumi.String("witself"))
 	ctx.Export("dbUsername", pulumi.String("witself"))

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
@@ -92,10 +93,10 @@ type argoClusterProber interface {
 // process for a probe that couldn't run — an unreachable subsystem is
 // data (level bad/unknown), not an error — so the dashboard always
 // gets a parseable report.
-func printCellHealth(ctx context.Context, stack auto.Stack, cloud string, argocd bool) error {
+func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region string, argocd bool) error {
 	report := cellHealthReport{
 		Kubernetes: sh(healthUnknown, "not probed"),
-		Database:   sh(healthUnknown, "status probe not yet wired"),
+		Database:   sh(healthUnknown, "not probed"),
 		Argo:       sh(healthUnknown, "argocd not enabled for this cell"),
 	}
 
@@ -104,6 +105,10 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud string, argocd
 		report.Kubernetes = sh(healthBad, "read stack outputs: "+oneLine(err.Error()))
 		return emitHealth(report)
 	}
+
+	// Database status — available for every cloud (provider status API),
+	// independent of the cluster path.
+	report.Database = probeDatabase(ctx, cloud, region, outs)
 
 	var prober argoClusterProber
 	var namespace string
@@ -169,6 +174,124 @@ func sh(l healthLevel, detail string) subsystemHealth {
 func emitHealth(r cellHealthReport) error {
 	enc := json.NewEncoder(os.Stdout)
 	return enc.Encode(r)
+}
+
+// probeDatabase queries the managed-database provider for its instance
+// status via the cloud CLI (the same tools whoami / provisioning
+// already rely on for auth), then maps the provider's status string to
+// a health level. The raw status rides along as the detail.
+func probeDatabase(ctx context.Context, cloud, region string, outs auto.OutputMap) subsystemHealth {
+	id := outputString(outs, "dbInstance")
+	if id == "" {
+		return sh(healthUnknown, "no dbInstance output — cannot query status")
+	}
+	switch cloud {
+	case "aws":
+		status, err := dbStatusCmd(ctx, "aws", "rds", "describe-db-instances",
+			"--db-instance-identifier", id, "--region", region,
+			"--query", "DBInstances[0].DBInstanceStatus", "--output", "text")
+		if err != nil {
+			return sh(healthBad, "rds status query failed: "+err.Error())
+		}
+		return dbLevel(status, awsDBLevel)
+	case "gcp":
+		project := outputString(outs, "gcpProject")
+		status, err := dbStatusCmd(ctx, "gcloud", "sql", "instances", "describe", id,
+			"--project", project, "--format", "value(state)")
+		if err != nil {
+			return sh(healthBad, "cloud sql status query failed: "+err.Error())
+		}
+		return dbLevel(status, gcpDBLevel)
+	case "azure":
+		rg := outputString(outs, "resourceGroup")
+		status, err := dbStatusCmd(ctx, "az", "postgres", "flexible-server", "show",
+			"--name", id, "--resource-group", rg, "--query", "state", "-o", "tsv")
+		if err != nil {
+			return sh(healthBad, "postgres status query failed: "+err.Error())
+		}
+		return dbLevel(status, azureDBLevel)
+	}
+	return sh(healthUnknown, "database status not wired for "+cloud)
+}
+
+// dbStatusCmd runs a cloud-CLI status query and returns the trimmed
+// stdout. On failure it returns the trimmed stderr (or the error) so
+// the Health line can show something actionable.
+func dbStatusCmd(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = os.Environ()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return "", fmt.Errorf("%s", oneLine(detail))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// dbLevel wraps a per-cloud status→level mapper: an empty status is
+// unknown, otherwise the mapper decides and the raw status is the
+// detail.
+func dbLevel(status string, mapper func(string) healthLevel) subsystemHealth {
+	if status == "" {
+		return sh(healthUnknown, "empty status")
+	}
+	return subsystemHealth{Level: mapper(status), Detail: status}
+}
+
+// awsDBLevel maps an RDS DBInstanceStatus to a level.
+// https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/accessing-monitoring.html#Overview.DBInstance.Status
+func awsDBLevel(status string) healthLevel {
+	switch strings.ToLower(status) {
+	case "available":
+		return healthGood
+	case "backing-up", "maintenance", "modifying", "upgrading", "starting",
+		"configuring-enhanced-monitoring", "configuring-iam-database-auth",
+		"configuring-log-exports", "converting-to-vpc", "renaming",
+		"resetting-master-credentials", "storage-optimization", "rebooting":
+		return healthWarn
+	case "storage-full", "insufficient-capacity", "incompatible-parameters",
+		"incompatible-option-group", "incompatible-restore":
+		return healthDegraded
+	case "stopped", "stopping", "failed", "deleting",
+		"inaccessible-encryption-credentials", "restore-error":
+		return healthBad
+	default:
+		return healthUnknown
+	}
+}
+
+// gcpDBLevel maps a Cloud SQL instance state to a level.
+func gcpDBLevel(status string) healthLevel {
+	switch strings.ToUpper(status) {
+	case "RUNNABLE":
+		return healthGood
+	case "MAINTENANCE", "PENDING_CREATE", "PENDING_DELETE":
+		return healthWarn
+	case "SUSPENDED", "FAILED":
+		return healthBad
+	default:
+		return healthUnknown
+	}
+}
+
+// azureDBLevel maps a Postgres Flexible Server state to a level.
+func azureDBLevel(status string) healthLevel {
+	switch strings.ToLower(status) {
+	case "ready":
+		return healthGood
+	case "updating", "starting", "provisioning", "restarting":
+		return healthWarn
+	case "stopped", "stopping":
+		return healthDegraded
+	case "disabled", "dropping", "inaccessible":
+		return healthBad
+	default:
+		return healthUnknown
+	}
 }
 
 // argoHealth collapses the per-application Argo status into one line,

@@ -56,6 +56,52 @@ func TestArgoHealthLevel(t *testing.T) {
 	}
 }
 
+// TestDBStatusLevels pins the per-cloud status→level maps across the
+// healthy, transitional, and failed states of each provider.
+func TestDBStatusLevels(t *testing.T) {
+	cases := []struct {
+		name   string
+		mapper func(string) healthLevel
+		status string
+		want   healthLevel
+	}{
+		{"rds available", awsDBLevel, "available", healthGood},
+		{"rds backing-up", awsDBLevel, "backing-up", healthWarn},
+		{"rds modifying caps", awsDBLevel, "MODIFYING", healthWarn},
+		{"rds storage-full", awsDBLevel, "storage-full", healthDegraded},
+		{"rds failed", awsDBLevel, "failed", healthBad},
+		{"rds stopped", awsDBLevel, "stopped", healthBad},
+		{"rds unknown", awsDBLevel, "who-knows", healthUnknown},
+		{"sql runnable", gcpDBLevel, "RUNNABLE", healthGood},
+		{"sql maintenance", gcpDBLevel, "MAINTENANCE", healthWarn},
+		{"sql suspended", gcpDBLevel, "SUSPENDED", healthBad},
+		{"sql failed", gcpDBLevel, "FAILED", healthBad},
+		{"pg ready", azureDBLevel, "Ready", healthGood},
+		{"pg updating", azureDBLevel, "Updating", healthWarn},
+		{"pg stopped", azureDBLevel, "Stopped", healthDegraded},
+		{"pg dropping", azureDBLevel, "Dropping", healthBad},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.mapper(tc.status); got != tc.want {
+				t.Fatalf("%s: level = %d, want %d", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDBLevelWrap pins the wrapper: the raw status becomes the detail,
+// and an empty status is unknown.
+func TestDBLevelWrap(t *testing.T) {
+	got := dbLevel("available", awsDBLevel)
+	if got.Level != healthGood || got.Detail != "available" {
+		t.Fatalf("wrap = %+v, want good/available", got)
+	}
+	if got := dbLevel("", awsDBLevel); got.Level != healthUnknown {
+		t.Fatalf("empty status must be unknown, got %d", got.Level)
+	}
+}
+
 // TestHealthLevelJSONRoundTrip pins the wire form: levels marshal to
 // their stable string names and back, so the CLI and dashboard agree.
 func TestHealthLevelJSONRoundTrip(t *testing.T) {
