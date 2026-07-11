@@ -370,6 +370,97 @@ func TestHealthBoardVisuals(t *testing.T) {
 	}
 }
 
+// TestBackgroundSweep pins the continuous probing: a sweep re-probes
+// reachability for every registered (live) cell, refreshes exactly one
+// cell's heavy health report, skips unregistered cells, and re-arms.
+func TestBackgroundSweep(t *testing.T) {
+	acc := true
+	states := []cellState{
+		{name: "live-a", fleet: &fleet.Cell{Name: "live-a", Accepting: &acc}},
+		{name: "live-b", fleet: &fleet.Cell{Name: "live-b", Accepting: &acc}},
+		{name: "absent-c"}, // not registered — must be skipped
+	}
+	m := dashboardModel{
+		ctx:    context.Background(),
+		cli:    fakeSource{states: states},
+		width:  120,
+		height: 30,
+		states: states,
+		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	next, cmd := m.Update(bgProbeTickMsg{})
+	m2 := next.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("sweep must re-arm and kick probes")
+	}
+	if !m2.reach["live-a"].inflight || !m2.reach["live-b"].inflight {
+		t.Fatal("both live cells must have reachability probes in flight")
+	}
+	if _, probed := m2.reach["absent-c"]; probed {
+		t.Fatal("unregistered cell must not be probed")
+	}
+	// Exactly one health probe this sweep (serialized).
+	inflight := 0
+	for _, h := range m2.health {
+		if h.inflight {
+			inflight++
+		}
+	}
+	if inflight != 1 {
+		t.Fatalf("exactly one health probe per sweep, got %d", inflight)
+	}
+
+	// With a health probe already busy, the next sweep starts no more.
+	next2, _ := m2.Update(bgProbeTickMsg{})
+	m3 := next2.(dashboardModel)
+	busy := 0
+	for _, h := range m3.health {
+		if h.inflight {
+			busy++
+		}
+	}
+	if busy != 1 {
+		t.Fatalf("health probes must stay serialized across sweeps, got %d", busy)
+	}
+}
+
+// TestHumanAge pins the compact age formatting used on the board.
+func TestHumanAge(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		ago  time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{8 * time.Second, "8s"},
+		{3 * time.Minute, "3m"},
+		{2 * time.Hour, "2h"},
+	}
+	for _, tc := range cases {
+		if got := humanAge(now, now.Add(-tc.ago)); got != tc.want {
+			t.Errorf("humanAge(%s) = %q, want %q", tc.ago, got, tc.want)
+		}
+	}
+	if got := humanAge(now, time.Time{}); got != "never" {
+		t.Errorf("zero time must read 'never', got %q", got)
+	}
+}
+
+// TestBoardShowsFreshness pins that the board surfaces data age so a
+// stale reading is visible rather than silently trusted.
+func TestBoardShowsFreshness(t *testing.T) {
+	m := seedModel(mkTabStates(), 120, 30)
+	m.activeTab = tabHealth
+	m.reach = map[string]cellReach{"aws-sandbox-usw2-dev": {probed: m.now().Add(-8 * time.Second), res: reachResult{ok: true}}}
+	v := m.View()
+	if !strings.Contains(v, "reach 8s") {
+		t.Errorf("board must show the reachability data age: %s", stripANSIForTest(v))
+	}
+	if !strings.Contains(v, "fleet") {
+		t.Error("board must show the inventory (fleet) data age")
+	}
+}
+
 // TestHealthAnimTick pins the checking-state animation: a tick while a
 // probe is in flight advances the frame and re-arms; once the result
 // lands (nothing in flight) the loop stops.

@@ -328,6 +328,9 @@ type dashboardModel struct {
 	// same way opGen does for the op spinner.
 	healthFrame   int
 	healthAnimGen int
+	// lastLoad is when the inventory (credentials/fleet data) last
+	// refreshed — the age shown for those lines.
+	lastLoad time.Time
 }
 
 // cellHealthState is one cell's cached subsystem-health report plus the
@@ -357,6 +360,17 @@ const reachTTL = 15 * time.Second
 // subprocess. Longer than reachTTL because each run selects a Pulumi
 // stack and reaches the cluster — not something to repeat on a hover.
 const healthReportTTL = 45 * time.Second
+
+// Background probing keeps live cells' health warm so the Health tab
+// shows fresh data instead of a "checking…" wait. bgProbeInterval is
+// the sweep cadence; bgHealthTTL is how stale a cell's report may get
+// before the sweep refreshes it. Reach (cheap) refreshes every sweep;
+// health (a Pulumi stack select) is rate-limited to one probe per
+// sweep across the whole fleet so we never spawn six at once.
+const (
+	bgProbeInterval = 30 * time.Second
+	bgHealthTTL     = 60 * time.Second
+)
 
 // paneFocus names which pane the arrow keys currently drive. Cells is
 // the default — j/k always move the cell cursor regardless — but tab
@@ -642,6 +656,10 @@ type healthResultMsg struct {
 
 // healthAnimTickMsg drives the "checking…" animation on the Health tab.
 type healthAnimTickMsg struct{ gen int }
+
+// bgProbeTickMsg drives the background probe sweep that keeps live
+// cells' health warm regardless of which tab is showing.
+type bgProbeTickMsg struct{}
 type refreshTickMsg struct{}
 
 // spinnerTickMsg carries the op generation that scheduled it. On
@@ -701,11 +719,15 @@ func opSpinnerRune(kind opKind, frame int) string {
 }
 
 func (m dashboardModel) Init() tea.Cmd {
-	return tea.Batch(m.loadCmd(), tickCmd())
+	return tea.Batch(m.loadCmd(), tickCmd(), bgProbeCmd())
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return refreshTickMsg{} })
+}
+
+func bgProbeCmd() tea.Cmd {
+	return tea.Tick(bgProbeInterval, func(time.Time) tea.Msg { return bgProbeTickMsg{} })
 }
 
 func (m dashboardModel) loadCmd() tea.Cmd {
@@ -777,6 +799,65 @@ func healthAnimCmd(gen int) tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return healthAnimTickMsg{gen: gen} })
 }
 
+// backgroundSweep refreshes live cells' probes off-tab so their data
+// is already warm when the operator opens the Health tab. It re-probes
+// reachability (cheap) for every registered cell whose reading is
+// stale, and refreshes at most ONE cell's health report per sweep —
+// the stalest — so a fleet of cells never spawns a burst of Pulumi
+// stack selects at once. The sweep re-arms itself regardless of the
+// active tab. Only registered cells (st.fleet != nil) are live enough
+// to be worth probing.
+func (m dashboardModel) backgroundSweep() (tea.Model, tea.Cmd) {
+	if m.reach == nil {
+		m.reach = map[string]cellReach{}
+	}
+	if m.health == nil {
+		m.health = map[string]cellHealthState{}
+	}
+	var cmds []tea.Cmd
+
+	// One health probe may already be running (background or on-demand);
+	// don't start a second — serialize the expensive path.
+	healthBusy := false
+	for _, h := range m.health {
+		if h.inflight {
+			healthBusy = true
+			break
+		}
+	}
+
+	staleHealth := "" // the stalest live cell whose report needs a refresh
+	var stalest time.Time
+	for _, st := range m.states {
+		if st.fleet == nil {
+			continue // not registered — nothing live to probe
+		}
+		// Reachability: cheap, refresh every stale cell.
+		if r := m.reach[st.name]; !r.inflight && (r.probed.IsZero() || m.now().Sub(r.probed) >= reachTTL) {
+			r.inflight = true
+			m.reach[st.name] = r
+			cmds = append(cmds, m.probeCmd(st.name))
+		}
+		// Health: pick the single stalest candidate this sweep.
+		if !healthBusy {
+			if h := m.health[st.name]; !h.inflight && (h.probed.IsZero() || m.now().Sub(h.probed) >= bgHealthTTL) {
+				if staleHealth == "" || h.probed.Before(stalest) {
+					staleHealth, stalest = st.name, h.probed
+				}
+			}
+		}
+	}
+	if staleHealth != "" {
+		h := m.health[staleHealth]
+		h.inflight = true
+		m.health[staleHealth] = h
+		cmds = append(cmds, m.healthCmd(staleHealth))
+	}
+
+	cmds = append(cmds, bgProbeCmd()) // keep the sweep going
+	return m, tea.Batch(cmds...)
+}
+
 // healthAnimating reports whether the selected cell has a probe in
 // flight while the Health tab is up — the condition that keeps the
 // checking-state animation ticking.
@@ -809,6 +890,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		firstLoad := len(m.states) == 0
 		m.states = msg.states
 		m.controlPlanes = msg.controlPlanes
+		m.lastLoad = m.now()
 		// Rebind plan state to the freshly-read config: if the file
 		// changed since a preview armed a cell, its fingerprint no longer
 		// matches and planArmed drops it — so an edit that could retarget
@@ -857,6 +939,8 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.health[msg.cell] = cellHealthState{probed: m.now(), report: msg.report, err: msg.err}
 		return m, nil
+	case bgProbeTickMsg:
+		return m.backgroundSweep()
 	case healthAnimTickMsg:
 		// Advance the checking-state frame while a probe is still in
 		// flight; the loop self-terminates when everything has landed.
@@ -1600,6 +1684,14 @@ func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
 	// rolled-up verdict — the whole cell's health at a glance.
 	out = append(out, fitLine("  "+healthPips(levels)+"  "+styTitle.Render(st.name), w))
 	out = append(out, fitLine("  "+styDim.Render("overall")+"  "+overall.style().Render("● "+overallWord(overall)), w))
+	// Data freshness: background sweeps keep these warm, so say how old
+	// each source is. reach and the cluster report refresh on their own
+	// clocks; the credential/fleet lines ride the inventory load.
+	fresh := fmt.Sprintf("reach %s · cluster %s · fleet %s ago",
+		humanAge(m.now(), m.reach[st.name].probed),
+		humanAge(m.now(), m.health[st.name].probed),
+		humanAge(m.now(), m.lastLoad))
+	out = append(out, fitLine("  "+styDim.Render(fresh), w))
 	out = append(out, "")
 
 	// Connection tree: the cell branching to each subsystem.
@@ -1660,6 +1752,25 @@ func overallWord(l healthLevel) string {
 		return "needs attention"
 	default:
 		return "unprobed"
+	}
+}
+
+// humanAge is a compact "how long ago" for a probe timestamp: "8s",
+// "3m", "1h". A zero time (never probed) reads "never".
+func humanAge(now, then time.Time) string {
+	if then.IsZero() {
+		return "never"
+	}
+	d := now.Sub(then)
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 }
 
