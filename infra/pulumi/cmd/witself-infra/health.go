@@ -15,9 +15,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
@@ -195,13 +198,16 @@ func probeDatabase(ctx context.Context, cloud, region string, outs auto.OutputMa
 		}
 		return dbLevel(status, awsDBLevel)
 	case "gcp":
+		// Use the Cloud SQL Admin REST API with the ADC token — the same
+		// credential the cluster probe uses — NOT `gcloud sql describe`,
+		// which authenticates with gcloud's separate user login that goes
+		// stale independently (and did: "problem refreshing auth tokens").
 		project := outputString(outs, "gcpProject")
-		status, err := dbStatusCmd(ctx, "gcloud", "sql", "instances", "describe", id,
-			"--project", project, "--format", "value(state)")
+		state, err := gcpCloudSQLState(ctx, project, id)
 		if err != nil {
-			return sh(healthBad, "cloud sql status query failed: "+err.Error())
+			return sh(healthBad, "cloud sql status query failed: "+oneLine(err.Error()))
 		}
-		return dbLevel(status, gcpDBLevel)
+		return dbLevel(state, gcpDBLevel)
 	case "azure":
 		rg := outputString(outs, "resourceGroup")
 		status, err := dbStatusCmd(ctx, "az", "postgres", "flexible-server", "show",
@@ -212,6 +218,45 @@ func probeDatabase(ctx context.Context, cloud, region string, outs auto.OutputMa
 		return dbLevel(status, azureDBLevel)
 	}
 	return sh(healthUnknown, "database status not wired for "+cloud)
+}
+
+// gcpCloudSQLState queries the Cloud SQL Admin API for one instance's
+// state (RUNNABLE / MAINTENANCE / SUSPENDED / …) using the ADC token —
+// the application-default credential, which is the one the cluster
+// probe already authenticates with and which survives independently of
+// `gcloud auth login`. Reusing it avoids the CLI's stale-user-token
+// failure mode.
+func gcpCloudSQLState(ctx context.Context, project, instance string) (string, error) {
+	if project == "" {
+		return "", fmt.Errorf("no gcpProject output — cannot address the instance")
+	}
+	token, err := gcpADCAccessToken(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	url := fmt.Sprintf("https://sqladmin.googleapis.com/v1/projects/%s/instances/%s?fields=state", project, instance)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("cloud SQL Admin API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode Cloud SQL response: %w", err)
+	}
+	return out.State, nil
 }
 
 // dbStatusCmd runs a cloud-CLI status query and returns the trimmed
