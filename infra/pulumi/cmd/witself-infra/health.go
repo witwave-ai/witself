@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
 
@@ -96,7 +98,7 @@ type argoClusterProber interface {
 // process for a probe that couldn't run — an unreachable subsystem is
 // data (level bad/unknown), not an error — so the dashboard always
 // gets a parseable report.
-func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region string, argocd bool) error {
+func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsProfile string, argocd bool) error {
 	report := cellHealthReport{
 		Kubernetes: sh(healthUnknown, "not probed"),
 		Database:   sh(healthUnknown, "not probed"),
@@ -111,7 +113,7 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region string
 
 	// Database status — available for every cloud (provider status API),
 	// independent of the cluster path.
-	report.Database = probeDatabase(ctx, cloud, region, outs)
+	report.Database = probeDatabase(ctx, cloud, region, awsProfile, outs)
 
 	var prober argoClusterProber
 	var namespace string
@@ -183,18 +185,20 @@ func emitHealth(r cellHealthReport) error {
 // status via the cloud CLI (the same tools whoami / provisioning
 // already rely on for auth), then maps the provider's status string to
 // a health level. The raw status rides along as the detail.
-func probeDatabase(ctx context.Context, cloud, region string, outs auto.OutputMap) subsystemHealth {
+func probeDatabase(ctx context.Context, cloud, region, awsProfile string, outs auto.OutputMap) subsystemHealth {
 	id := outputString(outs, "dbInstance")
 	if id == "" {
 		return sh(healthUnknown, "no dbInstance output — cannot query status")
 	}
 	switch cloud {
 	case "aws":
-		status, err := dbStatusCmd(ctx, "aws", "rds", "describe-db-instances",
-			"--db-instance-identifier", id, "--region", region,
-			"--query", "DBInstances[0].DBInstanceStatus", "--output", "text")
+		// Use the RDS SDK with the cell's profile — the same credential
+		// path whoami uses (and which works) — NOT the `aws` CLI, which
+		// read the ambient environment without the cell's profile and hit
+		// an InvalidClientTokenId on the wrong/absent credentials.
+		status, err := awsRDSStatus(ctx, region, awsProfile, id)
 		if err != nil {
-			return sh(healthBad, "rds status query failed: "+err.Error())
+			return sh(healthBad, "rds status query failed: "+oneLine(err.Error()))
 		}
 		return dbLevel(status, awsDBLevel)
 	case "gcp":
@@ -218,6 +222,35 @@ func probeDatabase(ctx context.Context, cloud, region string, outs auto.OutputMa
 		return dbLevel(status, azureDBLevel)
 	}
 	return sh(healthUnknown, "database status not wired for "+cloud)
+}
+
+// awsRDSStatus reads one RDS instance's DBInstanceStatus via the SDK,
+// loading config with the cell's profile and region — mirroring the
+// working whoami path. Threading the profile is the whole point: the
+// old CLI call inherited the ambient environment (no profile) and
+// failed with InvalidClientTokenId.
+func awsRDSStatus(ctx context.Context, region, profile, id string) (string, error) {
+	opts := []func(*awsconfig.LoadOptions) error{}
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	if profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return "", fmt.Errorf("load AWS config: %w", err)
+	}
+	out, err := rds.NewFromConfig(cfg).DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
+		DBInstanceIdentifier: &id,
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(out.DBInstances) == 0 || out.DBInstances[0].DBInstanceStatus == nil {
+		return "", fmt.Errorf("no status reported for instance %q", id)
+	}
+	return *out.DBInstances[0].DBInstanceStatus, nil
 }
 
 // gcpCloudSQLState queries the Cloud SQL Admin API for one instance's

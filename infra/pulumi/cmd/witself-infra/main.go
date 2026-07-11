@@ -746,7 +746,7 @@ func run(args []string) error {
 	case "outputs":
 		return printOutputs(ctx, stack)
 	case "cell-health":
-		return printCellHealth(ctx, stack, *cloud, *region, *argocd)
+		return printCellHealth(ctx, stack, *cloud, *region, *awsProfile, *argocd)
 	default:
 		return fmt.Errorf("unknown command %q (see: witself-infra help)", cmd)
 	}
