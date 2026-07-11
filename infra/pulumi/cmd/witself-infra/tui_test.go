@@ -121,7 +121,7 @@ func mkTabStates() []cellState {
 func TestContextTabBarRenders(t *testing.T) {
 	m := seedModel(mkTabStates(), 120, 30)
 	v := m.View()
-	for _, tab := range []string{"Overview", "Kubernetes", "Database", "Health"} {
+	for _, tab := range []string{"Overview", "Kubernetes", "Database", "Health", "Logs"} {
 		if !strings.Contains(v, tab) {
 			t.Errorf("tab bar missing %q", tab)
 		}

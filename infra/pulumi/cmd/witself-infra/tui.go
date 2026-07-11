@@ -331,6 +331,9 @@ type dashboardModel struct {
 	// lastLoad is when the inventory (credentials/fleet data) last
 	// refreshed — the age shown for those lines.
 	lastLoad time.Time
+	// logSel is which of the selected cell's op logs the Logs tab is
+	// viewing (0 = newest). Reset when the cell changes.
+	logSel int
 }
 
 // cellHealthState is one cell's cached subsystem-health report plus the
@@ -392,6 +395,7 @@ const (
 	tabKubernetes
 	tabDatabase
 	tabHealth
+	tabLogs
 )
 
 // contextTabs is the ordered tab bar. The index into this slice is
@@ -404,6 +408,7 @@ var contextTabs = []struct {
 	{tabKubernetes, "Kubernetes"},
 	{tabDatabase, "Database"},
 	{tabHealth, "Health"},
+	{tabLogs, "Logs"},
 }
 
 // controlPlaneInfo carries per-CP metadata for the header context
@@ -1074,10 +1079,26 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		if m.cursor < len(m.rows())-1 {
 			m.cursor++
+			m.logSel, m.opsScroll = 0, 0 // new cell → newest log, at the tail
 		}
 	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
+			m.logSel, m.opsScroll = 0, 0
+		}
+	case "[":
+		// Logs tab: step to an older op log.
+		if m.activeTab == tabLogs {
+			if n := m.logsCount(); n > 0 && m.logSel < n-1 {
+				m.logSel++
+				m.opsScroll = 0
+			}
+		}
+	case "]":
+		// Logs tab: step to a newer op log.
+		if m.activeTab == tabLogs && m.logSel > 0 {
+			m.logSel--
+			m.opsScroll = 0
 		}
 	case "tab", "shift+tab":
 		// Toggle which pane the arrow keys drive. j/k keep moving the
@@ -1111,13 +1132,23 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next, cmd := m.startAuth()
 		return next, cmd
 	case "pgup":
+		if m.onLogsTab() {
+			m.opsScroll = min(m.opsScroll+10, max(0, m.logsSelectedLen()-1))
+			return m, nil
+		}
 		return m.scrollOps(+1), nil
 	case "pgdown":
+		if m.onLogsTab() {
+			m.opsScroll = max(0, m.opsScroll-10)
+			return m, nil
+		}
 		return m.scrollOps(-1), nil
 	case "home":
-		// End of history — oldest lines. Rare want for a live log,
-		// but symmetric with End (below) and cheap.
-		if op := m.opsSource(); op != nil {
+		// Oldest lines. On the Logs tab this jumps to the top of the
+		// selected log; on the bottom pane, the oldest kept ring line.
+		if m.onLogsTab() {
+			m.opsScroll = max(0, m.logsSelectedLen()-1)
+		} else if op := m.opsSource(); op != nil {
 			m.opsScroll = op.maxScroll(m.opsViewH())
 		}
 	case "end":
@@ -1127,6 +1158,36 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cell — kick a reachability probe if the Health tab now needs one.
 	m, cmd := m.maybeHealthProbe()
 	return m, cmd
+}
+
+// onLogsTab reports whether the Logs tab is showing a cell — the state
+// in which `[`/`]` and the scroll keys drive the log browser rather
+// than the bottom ops pane.
+func (m dashboardModel) onLogsTab() bool {
+	return m.activeTab == tabLogs && m.currentRow().kind == rowCell
+}
+
+// logsCount is the number of op logs for the selected cell.
+func (m dashboardModel) logsCount() int {
+	stp := m.selectedState()
+	if stp == nil {
+		return 0
+	}
+	return len(cellOpLogs(stp.name))
+}
+
+// logsSelectedLen is the line count of the log the Logs tab is
+// viewing — the scroll upper bound.
+func (m dashboardModel) logsSelectedLen() int {
+	stp := m.selectedState()
+	if stp == nil {
+		return 0
+	}
+	logs := cellOpLogs(stp.name)
+	if len(logs) == 0 {
+		return 0
+	}
+	return len(m.selectedLogLines(stp.name, logs, m.clampLogSel(len(logs))))
 }
 
 // opsSource picks which op the pane is looking at: the running one if
@@ -1422,7 +1483,7 @@ func ctxPut(lines []string, w int, k, v string) []string {
 // cursor is on. A header row shows fleet metadata (no tabs — that's a
 // control-plane view, not a cell). A cell row shows a tab bar plus the
 // active tab's body. Empty inventory gets a hint.
-func (m dashboardModel) renderContext(w int) []string {
+func (m dashboardModel) renderContext(w, h int) []string {
 	if len(m.states) == 0 {
 		return []string{styDim.Render("no cells configured — `witself-infra config add-cell …`")}
 	}
@@ -1442,6 +1503,9 @@ func (m dashboardModel) renderContext(w int) []string {
 			lines = append(lines, styDim.Render("  no database details yet"))
 		case tabHealth:
 			lines = append(lines, m.renderHealthTab(st, w)...)
+		case tabLogs:
+			// The tab bar + spacer already consumed 2 rows of the pane.
+			lines = append(lines, m.renderLogsTab(st, w, h-2)...)
 		}
 		return lines
 	}
@@ -1986,7 +2050,7 @@ func (m dashboardModel) View() string {
 	// bar, which names what you're looking at (Overview/Kubernetes/…)
 	// the way the group headers name the cells pane. topH+1 keeps its
 	// outer height flush with the cells pane beside it.
-	ctxLines := m.renderContext(ctxContentW)
+	ctxLines := m.renderContext(ctxContentW, topH+1)
 	contextPane := paneBox("", ctxLines, ctxContentW, topH+1, m.focus == focusContext)
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cellsPane, contextPane)
