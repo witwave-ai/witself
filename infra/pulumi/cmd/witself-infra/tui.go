@@ -2054,8 +2054,9 @@ func (m dashboardModel) View() string {
 			lines = append(lines, fitLine(text, cellsContentW))
 		case rowSeparator:
 			// A dim, cursor-skipped divider marking where the absent
-			// (not-yet-provisioned) cells begin.
-			rule := "─── absent " + strings.Repeat("─", max(cellsContentW-11, 0))
+			// (not-yet-provisioned) cells begin. Indented past the
+			// two-column cursor gutter so it lines up with the cell text.
+			rule := "  " + strings.Repeat("─", max(cellsContentW-2, 0))
 			lines = append(lines, styDim.Render(fitLine(rule, cellsContentW)))
 		}
 	}
