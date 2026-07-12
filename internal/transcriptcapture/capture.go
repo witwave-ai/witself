@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1015,6 +1017,13 @@ func AcquireFlushLock(runtime string) (release func(), acquired bool, err error)
 		if !errors.Is(err, os.ErrExist) {
 			return nil, false, err
 		}
+		if running, known := flushLockOwnerRunning(path); known {
+			if running {
+				return func() {}, false, nil
+			}
+			_ = os.Remove(path)
+			continue
+		}
 		info, statErr := os.Stat(path)
 		if statErr != nil || time.Since(info.ModTime()) <= staleFlushLockAge {
 			return func() {}, false, nil
@@ -1022,6 +1031,23 @@ func AcquireFlushLock(runtime string) (release func(), acquired bool, err error)
 		_ = os.Remove(path)
 	}
 	return func() {}, false, nil
+}
+
+func flushLockOwnerRunning(path string) (running, known bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return false, false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, true
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || os.IsPermission(err), true
 }
 
 func outboxDir(runtime string) (string, error) {

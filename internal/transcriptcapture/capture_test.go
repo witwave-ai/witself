@@ -623,6 +623,41 @@ func TestRuntimeVersionIsPinnedToRun(t *testing.T) {
 	}
 }
 
+func TestFlushLockReclaimsDeadOwnerAndPreservesLiveOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pid          int
+		wantAcquired bool
+	}{
+		{name: "dead owner", pid: 2147483647, wantAcquired: true},
+		{name: "live owner", pid: os.Getpid(), wantAcquired: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+			dir, err := outboxDir(RuntimeCursor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".flush.lock")
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", tc.pid)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			release, acquired, err := AcquireFlushLock(RuntimeCursor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			if acquired != tc.wantAcquired {
+				t.Fatalf("acquired = %v, want %v", acquired, tc.wantAcquired)
+			}
+		})
+	}
+}
+
 func assertNullableProvenance(t *testing.T, value map[string]any, key, want string) {
 	t.Helper()
 	got, ok := value[key]
