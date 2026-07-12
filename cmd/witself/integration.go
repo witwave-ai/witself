@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -121,6 +122,10 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
+	runtimeVersion := detectRuntimeVersion(runtimeCLI)
+	if runtimeVersion == "" && previousConfigErr == nil {
+		runtimeVersion = previousConfig.RuntimeVersion
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -159,7 +164,7 @@ func installCmd(args []string) int {
 		}
 	}
 	cfg := transcriptcapture.Config{
-		Runtime: runtime, CaptureMode: captureMode, HookMode: hookMode,
+		Runtime: runtime, RuntimeVersion: runtimeVersion, CaptureMode: captureMode, HookMode: hookMode,
 		Account: accountName, Realm: conn.RealmName, Agent: self.Identity.AgentName,
 		AgentID: self.Identity.AgentID, AgentName: self.Identity.AgentName,
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
@@ -586,6 +591,31 @@ func currentExecutablePath() (string, error) {
 
 func supportsManagedHooks(runtime string) bool {
 	return runtime == transcriptcapture.RuntimeCodex || runtime == transcriptcapture.RuntimeClaudeCode
+}
+
+var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-+][0-9a-z][0-9a-z.-]*)?)\b`)
+
+func detectRuntimeVersion(runtimeCLI string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, runtimeCLI, "--version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	if match := semanticVersionPattern.FindSubmatch(output); len(match) == 2 {
+		return string(match[1])
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 256 {
+			line = line[:256]
+		}
+		return line
+	}
+	return ""
 }
 
 func findRuntimeCLI(runtime string) (string, error) {

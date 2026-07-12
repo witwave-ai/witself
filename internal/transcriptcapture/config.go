@@ -45,19 +45,20 @@ type Location struct {
 
 // Config is the non-secret integration binding for one runtime.
 type Config struct {
-	SchemaVersion string    `json:"schema_version"`
-	Runtime       string    `json:"runtime"`
-	CaptureMode   string    `json:"capture_mode"`
-	HookMode      string    `json:"hook_mode"`
-	Account       string    `json:"account"`
-	Realm         string    `json:"realm"`
-	Agent         string    `json:"agent"`
-	AgentID       string    `json:"agent_id"`
-	AgentName     string    `json:"agent_name"`
-	Endpoint      string    `json:"endpoint,omitempty"`
-	TokenFile     string    `json:"token_file,omitempty"`
-	Location      Location  `json:"location"`
-	InstalledAt   time.Time `json:"installed_at"`
+	SchemaVersion  string    `json:"schema_version"`
+	Runtime        string    `json:"runtime"`
+	RuntimeVersion string    `json:"runtime_version,omitempty"`
+	CaptureMode    string    `json:"capture_mode"`
+	HookMode       string    `json:"hook_mode"`
+	Account        string    `json:"account"`
+	Realm          string    `json:"realm"`
+	Agent          string    `json:"agent"`
+	AgentID        string    `json:"agent_id"`
+	AgentName      string    `json:"agent_name"`
+	Endpoint       string    `json:"endpoint,omitempty"`
+	TokenFile      string    `json:"token_file,omitempty"`
+	Location       Location  `json:"location"`
+	InstalledAt    time.Time `json:"installed_at"`
 }
 
 // NormalizeRuntime returns the stable runtime namespace used in transcript ids.
@@ -162,6 +163,10 @@ func SaveConfig(cfg Config) error {
 	}
 	cfg.SchemaVersion = SchemaVersion
 	cfg.Runtime = runtime
+	cfg.RuntimeVersion = strings.TrimSpace(cfg.RuntimeVersion)
+	if len(cfg.RuntimeVersion) > 256 {
+		return errors.New("runtime_version must be 256 bytes or fewer")
+	}
 	cfg.CaptureMode = mode
 	cfg.HookMode = hookMode
 	if cfg.Account == "" {

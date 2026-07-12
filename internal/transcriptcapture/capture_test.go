@@ -427,6 +427,133 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	}
 }
 
+func TestFourRuntimeProvenanceUsesOneNullableContract(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		runtime            string
+		configuredVersion  string
+		hook               string
+		wantRuntimeVersion string
+		wantVersionSource  string
+		wantModel          string
+		wantModelSource    string
+		wantModelProvider  string
+		wantProviderSource string
+	}{
+		{
+			name: "codex", runtime: RuntimeCodex, configuredVersion: "0.30.0",
+			hook:               `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"hello","model":"gpt-5.6-sol"}`,
+			wantRuntimeVersion: "0.30.0", wantVersionSource: "cli", wantModel: "gpt-5.6-sol", wantModelSource: "hook",
+		},
+		{
+			name: "claude", runtime: RuntimeClaudeCode, configuredVersion: "2.1.197",
+			hook:               `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"hello"}`,
+			wantRuntimeVersion: "2.1.197", wantVersionSource: "cli",
+		},
+		{
+			name: "grok", runtime: RuntimeGrokBuild, configuredVersion: "0.2.93",
+			hook:               `{"sessionId":"session-1","hookEventName":"user_prompt_submit","promptId":"prompt-1","prompt":"<user_query>\nhello\n</user_query>"}`,
+			wantRuntimeVersion: "0.2.93", wantVersionSource: "cli",
+		},
+		{
+			name: "cursor", runtime: RuntimeCursor, configuredVersion: "3.10.0",
+			hook:               `{"conversation_id":"session-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","prompt":"hello","model":"grok-4.5","cursor_version":"3.11.13"}`,
+			wantRuntimeVersion: "3.11.13", wantVersionSource: "hook", wantModel: "grok-4.5", wantModelSource: "hook",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+			loc, err := EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(Config{
+				Runtime: tc.runtime, RuntimeVersion: tc.configuredVersion, CaptureMode: ModeRaw,
+				Account: "default", Realm: "default", Agent: "scott",
+				AgentID: "agent_1", AgentName: "scott", Location: loc,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			event := enqueueTestHook(t, tc.runtime, tc.hook)
+			entries := event.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("entries = %d", len(entries))
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(entries[0].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			provenance, ok := payload["provenance"].(map[string]any)
+			if !ok {
+				t.Fatalf("provenance = %#v", payload["provenance"])
+			}
+			assertNullableProvenance(t, provenance, "runtime", tc.runtime)
+			assertNullableProvenance(t, provenance, "runtime_version", tc.wantRuntimeVersion)
+			assertNullableProvenance(t, provenance, "model_provider", tc.wantModelProvider)
+			assertNullableProvenance(t, provenance, "model", tc.wantModel)
+			sources, ok := provenance["sources"].(map[string]any)
+			if !ok {
+				t.Fatalf("sources = %#v", provenance["sources"])
+			}
+			assertNullableProvenance(t, sources, "runtime", "integration")
+			assertNullableProvenance(t, sources, "runtime_version", tc.wantVersionSource)
+			assertNullableProvenance(t, sources, "model_provider", tc.wantProviderSource)
+			assertNullableProvenance(t, sources, "model", tc.wantModelSource)
+			if entries[0].Model != tc.wantModel {
+				t.Fatalf("entry model = %q, want %q", entries[0].Model, tc.wantModel)
+			}
+		})
+	}
+}
+
+func TestRuntimeVersionIsPinnedToRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := func(version string) {
+		t.Helper()
+		if err := SaveConfig(Config{
+			Runtime: RuntimeCodex, RuntimeVersion: version, CaptureMode: ModeRaw,
+			Account: "default", Realm: "default", Agent: "scott",
+			AgentID: "agent_1", AgentName: "scott", Location: loc,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("1.0.0")
+	start := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"SessionStart"}`)
+	save("2.0.0")
+	prompt := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"hello"}`)
+	if prompt.RunID != start.RunID || prompt.RuntimeVersion != "1.0.0" {
+		t.Fatalf("same run provenance changed: start=%#v prompt=%#v", start, prompt)
+	}
+	resumed := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"SessionStart"}`)
+	if resumed.RunID == start.RunID || resumed.RuntimeVersion != "2.0.0" {
+		t.Fatalf("resumed run = %#v", resumed)
+	}
+}
+
+func assertNullableProvenance(t *testing.T, value map[string]any, key, want string) {
+	t.Helper()
+	got, ok := value[key]
+	if !ok {
+		t.Fatalf("missing provenance key %q", key)
+	}
+	if want == "" {
+		if got != nil {
+			t.Fatalf("%s = %#v, want null", key, got)
+		}
+		return
+	}
+	if got != want {
+		t.Fatalf("%s = %#v, want %q", key, got, want)
+	}
+}
+
 func enqueueTestHook(t *testing.T, runtime, raw string) Event {
 	t.Helper()
 	event, err := EnqueueHook(runtime, []byte(raw))

@@ -32,6 +32,8 @@ type Event struct {
 	SchemaVersion        string          `json:"schema_version"`
 	ID                   string          `json:"id"`
 	Runtime              string          `json:"runtime"`
+	RuntimeVersion       string          `json:"runtime_version,omitempty"`
+	RuntimeVersionSource string          `json:"runtime_version_source,omitempty"`
 	CaptureMode          string          `json:"capture_mode"`
 	Account              string          `json:"account"`
 	Realm                string          `json:"realm"`
@@ -49,6 +51,9 @@ type Event struct {
 	Body                 string          `json:"body,omitempty"`
 	Data                 json.RawMessage `json:"data,omitempty"`
 	Model                string          `json:"model,omitempty"`
+	ModelSource          string          `json:"model_source,omitempty"`
+	ModelProvider        string          `json:"model_provider,omitempty"`
+	ModelProviderSource  string          `json:"model_provider_source,omitempty"`
 	CWD                  string          `json:"cwd,omitempty"`
 	SourceTranscriptPath string          `json:"source_transcript_path,omitempty"`
 	ReplyToEventID       string          `json:"reply_to_event_id,omitempty"`
@@ -84,6 +89,11 @@ type hookInput struct {
 	HookEventName        string          `json:"hook_event_name"`
 	HookEventNameCamel   string          `json:"hookEventName"`
 	Model                string          `json:"model"`
+	ModelProvider        string          `json:"model_provider"`
+	ModelProviderCamel   string          `json:"modelProvider"`
+	RuntimeVersion       string          `json:"runtime_version"`
+	RuntimeVersionCamel  string          `json:"runtimeVersion"`
+	CursorVersion        string          `json:"cursor_version"`
 	TurnID               string          `json:"turn_id"`
 	GenerationID         string          `json:"generation_id"`
 	PromptID             string          `json:"promptId"`
@@ -120,9 +130,11 @@ type hookInput struct {
 }
 
 type sessionState struct {
-	RunID         string `json:"run_id"`
-	TurnID        string `json:"turn_id,omitempty"`
-	PromptEventID string `json:"prompt_event_id,omitempty"`
+	RunID                string `json:"run_id"`
+	RuntimeVersion       string `json:"runtime_version,omitempty"`
+	RuntimeVersionSource string `json:"runtime_version_source,omitempty"`
+	TurnID               string `json:"turn_id,omitempty"`
+	PromptEventID        string `json:"prompt_event_id,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -185,7 +197,10 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		}
 		state.TurnID = ""
 		state.PromptEventID = ""
+		state.RuntimeVersion = ""
+		state.RuntimeVersionSource = ""
 	}
+	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
 	switch input.HookEventName {
@@ -208,10 +223,22 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		}
 	}
 
+	model := strings.TrimSpace(input.Model)
+	modelSource := "hook"
+	if model == "" {
+		modelSource = ""
+	}
+	modelProvider := strings.TrimSpace(input.ModelProvider)
+	modelProviderSource := "hook"
+	if modelProvider == "" {
+		modelProviderSource = ""
+	}
 	event := Event{
 		SchemaVersion:        SchemaVersion,
 		ID:                   eventID,
 		Runtime:              cfg.Runtime,
+		RuntimeVersion:       state.RuntimeVersion,
+		RuntimeVersionSource: state.RuntimeVersionSource,
 		CaptureMode:          cfg.CaptureMode,
 		Account:              cfg.Account,
 		Realm:                cfg.Realm,
@@ -224,7 +251,10 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		TurnID:               turnID,
 		HookEvent:            input.HookEventName,
 		NativeHookEvent:      input.NativeHookEvent,
-		Model:                strings.TrimSpace(input.Model),
+		Model:                model,
+		ModelSource:          modelSource,
+		ModelProvider:        modelProvider,
+		ModelProviderSource:  modelProviderSource,
 		CWD:                  input.CWD,
 		SourceTranscriptPath: input.TranscriptPath,
 		OccurredAt:           time.Now().UTC(),
@@ -256,6 +286,9 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 	input.CWD = firstNonempty(input.CWD, input.WorkspaceRoot)
 	input.NativeHookEvent = strings.TrimSpace(firstNonempty(input.HookEventName, input.HookEventNameCamel))
 	input.HookEventName = canonicalHookEvent(input.NativeHookEvent)
+	input.RuntimeVersion = truncateUTF8(strings.TrimSpace(firstNonempty(input.RuntimeVersion, input.RuntimeVersionCamel, input.CursorVersion)), 256)
+	input.Model = truncateUTF8(strings.TrimSpace(input.Model), 256)
+	input.ModelProvider = truncateUTF8(strings.TrimSpace(firstNonempty(input.ModelProvider, input.ModelProviderCamel)), 256)
 	input.TurnID = strings.TrimSpace(firstNonempty(input.TurnID, input.GenerationID, input.PromptID, input.PromptIDSnake))
 	input.PromptID = strings.TrimSpace(firstNonempty(input.PromptID, input.PromptIDSnake, input.GenerationID))
 	input.LastAssistantMessage = firstNonempty(input.LastAssistantMessage, input.LastAssistantCamel)
@@ -288,6 +321,21 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		}
 	}
 	return nil
+}
+
+func pinRunRuntimeVersion(state *sessionState, nativeVersion, configuredVersion string) {
+	if state.RuntimeVersion != "" {
+		return
+	}
+	if nativeVersion != "" {
+		state.RuntimeVersion = nativeVersion
+		state.RuntimeVersionSource = "hook"
+		return
+	}
+	if configuredVersion != "" {
+		state.RuntimeVersion = configuredVersion
+		state.RuntimeVersionSource = "cli"
+	}
 }
 
 func canonicalHookEvent(event string) string {
@@ -557,6 +605,28 @@ func compactMap(value map[string]any) map[string]any {
 	return value
 }
 
+func (e Event) provenancePayload() map[string]any {
+	return map[string]any{
+		"runtime":         e.Runtime,
+		"runtime_version": nullableString(e.RuntimeVersion),
+		"model_provider":  nullableString(e.ModelProvider),
+		"model":           nullableString(e.Model),
+		"sources": map[string]any{
+			"runtime":         "integration",
+			"runtime_version": nullableString(e.RuntimeVersionSource),
+			"model_provider":  nullableString(e.ModelProviderSource),
+			"model":           nullableString(e.ModelSource),
+		},
+	}
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func boundedJSON(raw json.RawMessage) any {
 	if len(raw) <= maxStructuredBytes {
 		var value any
@@ -692,6 +762,7 @@ func (e Event) Entries() []Entry {
 			"occurred_at":    e.OccurredAt,
 			"chunk_index":    i,
 			"chunk_count":    len(chunks),
+			"provenance":     e.provenancePayload(),
 		}
 		if e.TurnID != "" {
 			payload["turn_id"] = e.TurnID

@@ -186,6 +186,16 @@ turn entries keep status, reason, duration, and token usage when supplied.
 Large structured values retain a digest and byte count instead of overrunning
 the 16 KiB payload limit.
 
+Every entry uses the same nullable `provenance` object across Codex, Claude
+Code, Grok Build, and Cursor. `runtime` is always the installed integration;
+`runtime_version` is captured from the native CLI at installation and may be
+overridden by a version explicitly supplied by the hook. `model_provider` and
+`model` are recorded only when a runtime supplies them. A parallel `sources`
+object identifies `integration`, `cli`, or `hook` provenance for each value;
+unavailable values and sources are JSON `null` rather than inferred. Runtime
+version remains associated with each entry's `run_id`, so resumed transcripts
+can accurately span runtime upgrades without adding a separate run table.
+
 The common lifecycle is session start, user prompt, turn stop, tool call/result,
 subagent start/stop, and pre-compaction. Witself also records session end,
 turn/tool failures, post-compaction, permission events, notifications, and

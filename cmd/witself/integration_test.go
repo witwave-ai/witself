@@ -552,6 +552,31 @@ func TestCurrentExecutablePathRejectsGoRunBinary(t *testing.T) {
 	}
 }
 
+func TestDetectRuntimeVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{"codex", "codex-cli 0.30.0", "0.30.0"},
+		{"claude", "2.1.197 (Claude Code)", "2.1.197"},
+		{"grok", "grok 0.2.93 (f00f96316d4b) [stable]", "0.2.93"},
+		{"cursor", "3.11.13\ncommit\narm64", "3.11.13"},
+		{"fallback", "development-build", "development-build"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "runtime")
+			script := "#!/bin/sh\nprintf '%s\\n' '" + tc.output + "'\n"
+			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if got := detectRuntimeVersion(path); got != tc.want {
+				t.Fatalf("version = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func setInstallExecutableForTest(t *testing.T) {
 	t.Helper()
 	executable, err := os.Executable()
