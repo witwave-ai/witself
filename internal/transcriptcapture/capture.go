@@ -175,6 +175,9 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return Event{}, fmt.Errorf("parse hook JSON: %w", err)
 	}
+	if err := validateNativeHookInput(cfg.Runtime, input); err != nil {
+		return Event{}, err
+	}
 	if err := normalizeHookInput(cfg.Runtime, &input); err != nil {
 		return Event{}, err
 	}
@@ -278,6 +281,20 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		_ = removeSessionState(cfg.Runtime, input.SessionID)
 	}
 	return event, nil
+}
+
+func validateNativeHookInput(runtime string, input hookInput) error {
+	switch runtime {
+	case RuntimeGrokBuild:
+		if strings.TrimSpace(input.SessionIDCamel) == "" || strings.TrimSpace(input.HookEventNameCamel) == "" {
+			return fmt.Errorf("hook input does not match a native %s payload", runtime)
+		}
+	case RuntimeCursor:
+		if strings.TrimSpace(input.ConversationID) == "" {
+			return fmt.Errorf("hook input does not match a native %s payload", runtime)
+		}
+	}
+	return nil
 }
 
 func normalizeHookInput(runtime string, input *hookInput) error {

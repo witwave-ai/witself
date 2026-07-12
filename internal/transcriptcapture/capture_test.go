@@ -427,6 +427,51 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	}
 }
 
+func TestGrokAndCursorRejectCrossRuntimeHookPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		runtime string
+		raw     string
+	}{
+		{
+			name:    "Grok payload sent to Cursor",
+			runtime: RuntimeCursor,
+			raw:     `{"sessionId":"session-1","hookEventName":"user_prompt_submit","prompt":"hello"}`,
+		},
+		{
+			name:    "Cursor payload sent to Grok",
+			runtime: RuntimeGrokBuild,
+			raw:     `{"conversation_id":"conversation-1","hook_event_name":"beforeSubmitPrompt","prompt":"hello"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+			loc, err := EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(Config{
+				Runtime: tc.runtime, CaptureMode: ModeRaw,
+				Account: "default", Realm: "default", Agent: "scott",
+				AgentID: "agent_1", AgentName: "scott", Location: loc,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnqueueHook(tc.runtime, []byte(tc.raw)); err == nil || !strings.Contains(err.Error(), "native "+tc.runtime+" payload") {
+				t.Fatalf("cross-runtime hook error = %v", err)
+			}
+			pending, err := Pending(tc.runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pending) != 0 {
+				t.Fatalf("cross-runtime hook queued %d events", len(pending))
+			}
+		})
+	}
+}
+
 func TestFourRuntimeProvenanceUsesOneNullableContract(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
