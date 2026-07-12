@@ -20,11 +20,11 @@ import (
 )
 
 const (
-	maxRawPayloadBytes = 8 * 1024
-	maxStructuredBytes = 4 * 1024
-	maxGrokTailBytes   = 16 * 1024 * 1024
-	entryBodyChunkSize = 60 * 1024
-	staleFlushLockAge  = 5 * time.Minute
+	maxRawPayloadBytes           = 8 * 1024
+	maxStructuredBytes           = 4 * 1024
+	maxNativeTranscriptTailBytes = 16 * 1024 * 1024
+	entryBodyChunkSize           = 60 * 1024
+	staleFlushLockAge            = 5 * time.Minute
 )
 
 // Event is one durable, provider-neutral hook event in the local outbox.
@@ -89,6 +89,7 @@ type hookInput struct {
 	HookEventName        string          `json:"hook_event_name"`
 	HookEventNameCamel   string          `json:"hookEventName"`
 	Model                string          `json:"model"`
+	ModelSource          string          `json:"-"`
 	ModelProvider        string          `json:"model_provider"`
 	ModelProviderCamel   string          `json:"modelProvider"`
 	RuntimeVersion       string          `json:"runtime_version"`
@@ -227,9 +228,11 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 
 	model := strings.TrimSpace(input.Model)
-	modelSource := "hook"
+	modelSource := strings.TrimSpace(input.ModelSource)
 	if model == "" {
 		modelSource = ""
+	} else if modelSource == "" {
+		modelSource = "hook"
 	}
 	modelProvider := strings.TrimSpace(input.ModelProvider)
 	modelProviderSource := "hook"
@@ -330,11 +333,24 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		if input.HookEventName == "UserPromptSubmit" {
 			input.Prompt = unwrapGrokPrompt(input.Prompt)
 		}
-		if input.HookEventName == "Stop" && input.LastAssistantMessage == "" && input.TranscriptPath != "" {
-			body, err := readGrokAssistantMessage(input.TranscriptPath, input.PromptID)
+		if input.HookEventName == "Stop" && input.TranscriptPath != "" {
+			body, model, err := readGrokAssistantMessage(input.TranscriptPath, input.PromptID)
 			if err == nil {
-				input.LastAssistantMessage = body
+				if input.LastAssistantMessage == "" {
+					input.LastAssistantMessage = body
+				}
+				if input.Model == "" && model != "" {
+					input.Model = model
+					input.ModelSource = "native_transcript"
+				}
 			}
+		}
+	}
+	if runtime == RuntimeClaudeCode && input.HookEventName == "Stop" && input.Model == "" && input.TranscriptPath != "" {
+		model, err := readClaudeModel(input.TranscriptPath)
+		if err == nil && model != "" {
+			input.Model = model
+			input.ModelSource = "native_transcript"
 		}
 	}
 	return nil
@@ -420,51 +436,54 @@ type grokSessionUpdate struct {
 		} `json:"_meta"`
 		Update struct {
 			SessionUpdate string `json:"sessionUpdate"`
-			Content       struct {
+			Meta          struct {
+				ModelID string `json:"modelId"`
+			} `json:"_meta"`
+			Content struct {
 				Text string `json:"text"`
 			} `json:"content"`
 		} `json:"update"`
 	} `json:"params"`
 }
 
-func readGrokAssistantMessage(path, promptID string) (string, error) {
+func readGrokAssistantMessage(path, promptID string) (string, string, error) {
 	home := strings.TrimSpace(os.Getenv("GROK_HOME"))
 	if home == "" {
 		userHome, err := os.UserHomeDir()
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		home = filepath.Join(userHome, ".grok")
 	}
 	sessionsRoot, err := filepath.EvalSymlinks(filepath.Join(home, "sessions"))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	rel, err := filepath.Rel(sessionsRoot, resolvedPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Base(resolvedPath) != "updates.jsonl" {
-		return "", errors.New("grok transcript path is outside the session store")
+		return "", "", errors.New("grok transcript path is outside the session store")
 	}
 
 	file, err := os.Open(resolvedPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	start := max(info.Size()-maxGrokTailBytes, 0)
+	start := max(info.Size()-maxNativeTranscriptTailBytes, 0)
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return "", err
+		return "", "", err
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxGrokTailBytes))
+	raw, err := io.ReadAll(io.LimitReader(file, maxNativeTranscriptTailBytes))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if start > 0 {
 		if newline := bytes.IndexByte(raw, '\n'); newline >= 0 {
@@ -473,10 +492,14 @@ func readGrokAssistantMessage(path, promptID string) (string, error) {
 	}
 
 	var chunks []string
+	model := ""
 	for _, line := range bytes.Split(raw, []byte{'\n'}) {
 		var update grokSessionUpdate
 		if len(line) == 0 || json.Unmarshal(line, &update) != nil {
 			continue
+		}
+		if value := strings.TrimSpace(update.Params.Update.Meta.ModelID); value != "" {
+			model = truncateUTF8(value, 256)
 		}
 		kind := update.Params.Update.SessionUpdate
 		if promptID == "" && kind == "user_message_chunk" {
@@ -490,7 +513,73 @@ func readGrokAssistantMessage(path, promptID string) (string, error) {
 			chunks = append(chunks, text)
 		}
 	}
-	return strings.Join(chunks, "\n\n"), nil
+	return strings.Join(chunks, "\n\n"), model, nil
+}
+
+type claudeTranscriptRecord struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role  string `json:"role"`
+		Model string `json:"model"`
+	} `json:"message"`
+}
+
+func readClaudeModel(path string) (string, error) {
+	home := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(userHome, ".claude")
+	}
+	projectsRoot, err := filepath.EvalSymlinks(filepath.Join(home, "projects"))
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(projectsRoot, resolvedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Ext(resolvedPath) != ".jsonl" {
+		return "", errors.New("claude transcript path is outside the project session store")
+	}
+
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	start := max(info.Size()-maxNativeTranscriptTailBytes, 0)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return "", err
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxNativeTranscriptTailBytes))
+	if err != nil {
+		return "", err
+	}
+	if start > 0 {
+		if newline := bytes.IndexByte(raw, '\n'); newline >= 0 {
+			raw = raw[newline+1:]
+		}
+	}
+
+	model := ""
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		var record claudeTranscriptRecord
+		if len(line) == 0 || json.Unmarshal(line, &record) != nil {
+			continue
+		}
+		if record.Type == "assistant" && record.Message.Role == "assistant" && strings.TrimSpace(record.Message.Model) != "" {
+			model = truncateUTF8(strings.TrimSpace(record.Message.Model), 256)
+		}
+	}
+	return model, nil
 }
 
 func setEventContent(event *Event, input hookInput, raw []byte) {

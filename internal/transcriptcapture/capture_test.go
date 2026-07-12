@@ -403,7 +403,7 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	}
 	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
 	updates := strings.Join([]string{
-		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
@@ -422,8 +422,49 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	if prompt.Body != "hello" || prompt.TurnID != "prompt-1" {
 		t.Fatalf("prompt = %#v", prompt)
 	}
-	if stop.Body != "first\n\nsecond" || stop.Kind != "message.assistant" || stop.ReplyToEventID != prompt.ID {
+	if stop.Body != "first\n\nsecond" || stop.Kind != "message.assistant" || stop.ReplyToEventID != prompt.ID || stop.Model != "grok-4.5" || stop.ModelSource != "native_transcript" {
 		t.Fatalf("stop = %#v", stop)
+	}
+}
+
+func TestClaudeCaptureReadsModelFromNativeTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeClaudeCode, RuntimeVersion: "2.1.197", CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", "workspace")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(projectDir, "session-1.jsonl")
+	transcript := strings.Join([]string{
+		`{"type":"user","message":{"role":"user"}}`,
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"session_id": "session-1", "hook_event_name": "Stop",
+		"last_assistant_message": "done", "transcript_path": transcriptPath,
+	})
+	event := enqueueTestHook(t, RuntimeClaudeCode, string(raw))
+	if event.Model != "claude-opus-4-7" || event.ModelSource != "native_transcript" {
+		t.Fatalf("event model provenance = %q / %q", event.Model, event.ModelSource)
+	}
+	entries := event.Entries()
+	if len(entries) != 1 || entries[0].Model != "claude-opus-4-7" || !strings.Contains(string(entries[0].Payload), `"model":"claude-opus-4-7"`) || !strings.Contains(string(entries[0].Payload), `"model":"native_transcript"`) {
+		t.Fatalf("entry = %#v", entries)
 	}
 }
 

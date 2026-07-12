@@ -190,11 +190,14 @@ Every entry uses the same nullable `provenance` object across Codex, Claude
 Code, Grok Build, and Cursor. `runtime` is always the installed integration;
 `runtime_version` is captured from the native CLI at installation and may be
 overridden by a version explicitly supplied by the hook. `model_provider` and
-`model` are recorded only when a runtime supplies them. A parallel `sources`
-object identifies `integration`, `cli`, or `hook` provenance for each value;
-unavailable values and sources are JSON `null` rather than inferred. Runtime
-version remains associated with each entry's `run_id`, so resumed transcripts
-can accurately span runtime upgrades without adding a separate run table.
+`model` are recorded only when a runtime supplies them. When a response hook
+omits the model but the runtime's bounded native session transcript contains
+it, Witself records that exact value with source `native_transcript`. A parallel
+`sources` object identifies `integration`, `cli`, `hook`, or
+`native_transcript` provenance for each value; unavailable values and sources
+are JSON `null` rather than inferred. Runtime version remains associated with
+each entry's `run_id`, so resumed transcripts can accurately span runtime
+upgrades without adding a separate run table.
 
 The common lifecycle is session start, user prompt, turn stop, tool call/result,
 subagent start/stop, and pre-compaction. Witself also records session end,
