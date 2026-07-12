@@ -63,6 +63,10 @@ func run(args []string) int {
 		return messageCmd(args[1:])
 	case "install":
 		return installCmd(args[1:])
+	case "uninstall":
+		return uninstallCmd(args[1:])
+	case "_managed-hooks":
+		return managedHooksCmd(args[1:])
 	case "mcp":
 		return mcpCmd(args[1:])
 	case "help", "--help", "-h":
@@ -2728,6 +2732,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install codex|claude  Install transcript hooks and MCP access")
+	usageLine(w, "  witself uninstall codex|claude  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)

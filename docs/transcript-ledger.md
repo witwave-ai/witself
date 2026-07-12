@@ -87,11 +87,8 @@ reference to the immutable same-transcript entry id.
 The supported local installation commands are:
 
 ```sh
-witself install codex \
-  --account default --agent scott --location home --capture raw
-
-witself install claude \
-  --account default --agent scott --location home --capture raw
+witself install codex
+witself install claude
 ```
 
 Each command verifies the agent token against `/v1/self`, installs a stdio MCP
@@ -101,16 +98,47 @@ The local binding stores the account, realm, agent selector, endpoint, optional
 token-file path, capture mode, and server-confirmed agent identity under
 `~/.witself/integrations/<runtime>/config.json`.
 
-`~/.witself/location.json` contains one stable generated `loc_` id plus the
-human label (`home`, `work`, and so on). This distinguishes the same named agent
-running in several places. The runtime name, native session id, generated run
-id, turn id, and event id then distinguish overlapping Codex and Claude Code
-sessions at that location. `WITSELF_HOME` replaces `~/.witself` when set.
+The command reuses the existing runtime binding or the only local agent
+credential. If multiple local agents exist, pass `--agent NAME`. The selected
+account, realm, and agent are written explicitly into every hook and MCP command
+and checked again when either entry point runs. `--location home` is optional;
+when supplied it is also written into both commands, and when omitted no
+location argument is written. `~/.witself/location.json` always contains a
+stable generated `loc_` id and includes a human label only when one is supplied.
+The runtime name, native session id, generated run id, turn id, and event id
+distinguish overlapping Codex and Claude Code sessions at that location.
+`WITSELF_HOME` replaces `~/.witself` when set.
 
 Installing again replaces only Witself's MCP registration and hook handlers for
 that runtime; unrelated runtime configuration is preserved. One local binding
-per runtime is supported in this slice. Codex also requires reviewing and
-trusting the installed command hook through `/hooks` once.
+per runtime is supported in this slice. Administrator-managed hooks are the
+default. The CLI keeps identity and MCP configuration user-scoped, then uses a
+narrow administrator elevation to install the system hook policy. Do not run
+the whole command with `sudo`, because that would target the root user's runtime
+and Witself homes. Pass `--user-hooks` when system policy installation is not
+available; Codex then requires reviewing the command through `/hooks` once.
+
+On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
+existing managed hook directory is reused when one is already defined. Claude
+Code receives an isolated drop-in at
+`/Library/Application Support/ClaudeCode/managed-settings.d/50-witself.json`.
+Linux uses `/etc/codex/requirements.toml` and
+`/etc/claude-code/managed-settings.d/50-witself.json`. The hook policy invokes
+an administrator-owned runner, and the runner records the absolute Witself
+executable selected at installation. Reinstalling updates that path and the
+capture-mode event set without duplicating handlers.
+
+The installer does not set Codex `allow_managed_hooks_only` or Claude Code
+`allowManagedHooksOnly`, so unrelated user, project, and plugin hooks remain
+available. If Claude Code is already governed by a higher-precedence server or
+MDM managed-settings source, deploy the same hook object through that active
+source instead; Claude Code does not merge separate managed tiers.
+
+`witself uninstall codex|claude` removes the MCP registration, integration
+binding, and the recorded user or managed hooks. Agent tokens and pending local
+transcript events are deliberately preserved. `--managed-hooks` can be passed
+to uninstall as a recovery override when the local integration record is
+missing.
 
 ## Capture And Delivery
 

@@ -93,9 +93,37 @@ type sessionState struct {
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
 func EnqueueHook(runtime string, raw []byte) (Event, error) {
+	return EnqueueHookForBinding(runtime, "", "", "", "", raw)
+}
+
+// EnqueueHookForAgent also verifies that the hook's pinned agent matches the
+// installed runtime binding.
+func EnqueueHookForAgent(runtime, expectedAgent string, raw []byte) (Event, error) {
+	return EnqueueHookForBinding(runtime, "", "", expectedAgent, "", raw)
+}
+
+// EnqueueHookForBinding verifies the hook's pinned identity and optional
+// location against the installed runtime binding.
+func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgent, expectedLocation string, raw []byte) (Event, error) {
 	cfg, err := LoadConfig(runtime)
 	if err != nil {
 		return Event{}, err
+	}
+	expectedAccount = strings.TrimSpace(expectedAccount)
+	if expectedAccount != "" && expectedAccount != cfg.Account {
+		return Event{}, fmt.Errorf("hook account %q does not match installed account %q", expectedAccount, cfg.Account)
+	}
+	expectedRealm = strings.TrimSpace(expectedRealm)
+	if expectedRealm != "" && expectedRealm != cfg.Realm {
+		return Event{}, fmt.Errorf("hook realm %q does not match installed realm %q", expectedRealm, cfg.Realm)
+	}
+	expectedAgent = strings.TrimSpace(expectedAgent)
+	if expectedAgent != "" && expectedAgent != cfg.Agent {
+		return Event{}, fmt.Errorf("hook agent %q does not match installed agent %q", expectedAgent, cfg.Agent)
+	}
+	expectedLocation = strings.TrimSpace(expectedLocation)
+	if expectedLocation != "" && expectedLocation != cfg.Location.Name {
+		return Event{}, fmt.Errorf("hook location %q does not match installed location %q", expectedLocation, cfg.Location.Name)
 	}
 	var input hookInput
 	if err := json.Unmarshal(raw, &input); err != nil {
@@ -281,7 +309,13 @@ func (e Event) TranscriptTitle() string {
 	if workspace == "." || workspace == string(filepath.Separator) || workspace == "" {
 		workspace = "session"
 	}
-	title := strings.Join([]string{e.AgentName, e.Runtime, e.Location.Name, workspace}, " / ")
+	parts := make([]string, 0, 4)
+	for _, value := range []string{e.AgentName, e.Runtime, e.Location.Name, workspace} {
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	title := strings.Join(parts, " / ")
 	return truncateUTF8(title, 256)
 }
 

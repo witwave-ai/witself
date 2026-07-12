@@ -222,6 +222,7 @@ witself
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
   install codex|claude
+  uninstall codex|claude
   transcript create|append|list|show|tail|flush
   message send|list|read|ack|listen
   federation peers|card
@@ -2563,17 +2564,36 @@ Install both MCP access and transcript hooks for a supported local agent
 runtime:
 
 ```sh
-witself install codex --account default --agent scott \
-  --location home --capture raw
-witself install claude --account default --agent scott \
-  --location home --capture raw
+witself install codex
+witself install claude
 ```
 
-The installer verifies the token-bound agent before changing runtime config.
-`--capture` accepts `messages`, `trace`, or `raw`; `--location` is a human label
-paired with a stable generated local id. `--endpoint` and `--token-file` are
-optional and otherwise use the normal managed endpoint and token-file
-conventions. No token is copied into MCP or hook configuration.
+The installer reuses an existing binding or the only local agent credential. If
+selection is ambiguous, pass `--agent NAME`; the resolved account, realm, and
+agent are pinned in the installed hook and MCP commands. The token-bound
+identity is verified before runtime configuration changes. `--capture` accepts
+`messages`, `trace`, or `raw`; `--location` is an optional human label paired
+with a stable generated local id. A supplied label is pinned in both commands;
+when omitted, no `--location` argument is written. `--endpoint` and
+`--token-file` are optional and otherwise use the normal managed endpoint and
+token-file conventions. No token is copied into MCP or hook configuration.
+
+Administrator-managed hooks are the default while identity and MCP registration
+remain user-scoped. The command prompts for administrator access only for that
+system policy write. Codex uses `/etc/codex/requirements.toml`; Claude Code uses
+the platform `managed-settings.d/50-witself.json` drop-in. Existing policy is
+preserved, Witself handlers are idempotent, and unrelated hooks are not
+disabled. Pass `--user-hooks` to use runtime user settings instead; Codex asks
+for one-time approval through `/hooks` in that mode.
+
+```sh
+witself uninstall codex
+witself uninstall claude
+```
+
+Uninstall infers user versus managed hook mode from the local integration
+record and preserves tokens and pending transcript events. Pass
+`--managed-hooks` only as a recovery override when that record is unavailable.
 
 ## `witself message`
 

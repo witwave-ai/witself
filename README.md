@@ -34,18 +34,40 @@ Once an agent token exists under the normal `~/.witself` account layout, one
 command installs both the Witself stdio MCP server and durable transcript hooks:
 
 ```sh
-witself install codex \
-  --account default --agent scott --location home --capture raw
-
-witself install claude \
-  --account default --agent scott --location home --capture raw
+witself install codex
+witself install claude
 ```
 
-The installer verifies the token-bound agent, preserves unrelated runtime hook
-configuration, and never copies a token into the MCP or hook command. Local
+The installer reuses an existing integration or the only local agent credential.
+When more than one agent is available, select one explicitly; a location label
+is optional:
+
+```sh
+witself install codex --agent scott --location home
+```
+
+The resolved account, realm, and agent are pinned explicitly in every installed
+hook and MCP command. A supplied location is pinned in both places; when
+omitted, no `--location` argument is written. The installer verifies that
+token-bound identity, preserves unrelated runtime hook configuration, and never
+copies a token into the MCP or hook command. Local
 integration identity and the retryable transcript outbox live under
-`~/.witself/` (`WITSELF_HOME` overrides it). Codex asks you to review the
-installed command hook through `/hooks` once.
+`~/.witself/` (`WITSELF_HOME` overrides it).
+
+Administrator-managed hooks are the default. Run the command as your normal
+user; Witself requests administrator access only for the system hook policy,
+while identity, tokens, and MCP registration stay in the user's configuration.
+Codex uses `/etc/codex/requirements.toml`; Claude Code uses its platform-managed
+`managed-settings.d/` directory. On a workstation where system policy cannot be
+installed, pass `--user-hooks`; Codex then asks you to review the command hook
+through `/hooks` once.
+
+Remove an integration without deleting tokens or queued transcript events:
+
+```sh
+witself uninstall codex
+witself uninstall claude
+```
 
 `messages` captures visible prompts and final responses, `trace` adds exposed
 tool activity, and `raw` also retains the runtime-exposed hook envelope. None of

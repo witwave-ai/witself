@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -174,5 +175,29 @@ func TestAgentTokenPathRejectsTraversal(t *testing.T) {
 		if _, err := AgentTokenPath(tc.account, tc.realm, tc.agent); err == nil {
 			t.Fatalf("AgentTokenPath(%q, %q, %q) succeeded", tc.account, tc.realm, tc.agent)
 		}
+	}
+}
+
+func TestAgentNamesIncludesCanonicalAndLegacyTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+	for _, path := range []string{
+		filepath.Join(home, "tokens", "accounts", "default", "realms", "default", "agents", "scott.token"),
+		filepath.Join(home, "tokens", "accounts", "default", "agents", "alex.token"),
+		filepath.Join(home, "tokens", "accounts", "default", "agents", "scott.token"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, err := AgentNames("default", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"alex", "scott"}) {
+		t.Fatalf("agent names = %#v", names)
 	}
 }

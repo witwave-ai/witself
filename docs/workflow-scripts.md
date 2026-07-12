@@ -853,11 +853,24 @@ Install the current read-only MCP and transcript-capture slice for a local
 runtime:
 
 ```sh
-witself install codex --account default --agent scott \
-  --location home --capture raw
+witself install codex
+witself install claude
+```
 
-witself install claude --account default --agent scott \
-  --location home --capture raw
+The installer reuses an existing binding or the only local agent credential.
+Pass `--agent scott` when multiple agents exist, and add `--location home` only
+when a human location label is useful. The resolved account, realm, and agent
+are pinned explicitly in the hook and MCP commands. A supplied location is
+pinned in both; an omitted location is left out of both commands.
+
+Administrator-managed hooks are the default and do not move the user's identity,
+token lookup, or MCP registration into the administrator account. Run the
+command normally; Witself performs the narrow privilege elevation. Use
+`--user-hooks` only where the system policy layer is unavailable.
+
+```sh
+witself uninstall codex
+witself uninstall claude
 ```
 
 The command validates the token-bound agent, stores only account/realm/agent

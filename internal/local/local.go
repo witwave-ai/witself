@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -146,6 +147,49 @@ func ReadAgentToken(account, realm, agent string) (token, path string, err error
 		return "", "", fmt.Errorf("agent token file %s is empty", tp)
 	}
 	return tok, tp, nil
+}
+
+// AgentNames lists locally stored agent credentials for one account realm.
+// It includes the legacy pre-realm directory so upgrades can infer the same
+// unambiguous agent that ReadAgentToken can load.
+func AgentNames(account, realm string) ([]string, error) {
+	probe, err := AgentTokenPath(account, realm, "agent")
+	if err != nil {
+		return nil, err
+	}
+	r, err := root()
+	if err != nil {
+		return nil, err
+	}
+	dirs := []string{
+		filepath.Dir(probe),
+		filepath.Join(r, "tokens", "accounts", account, "agents"),
+	}
+	names := map[string]bool{}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".token" {
+				continue
+			}
+			name := strings.TrimSuffix(entry.Name(), ".token")
+			if namePattern.MatchString(name) {
+				names[name] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // legacyTokenPath is the flat pre-directory layout, still honored on reads.

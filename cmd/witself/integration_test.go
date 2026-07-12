@@ -11,11 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
 func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	home := t.TempDir()
+	setInstallExecutableForTest(t)
 	witselfHome := filepath.Join(home, ".witself")
 	codexHome := filepath.Join(home, ".codex")
 	t.Setenv("HOME", home)
@@ -45,7 +47,7 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	if code := installCmd([]string{
 		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
 		"--location", "home", "--capture", "raw", "--endpoint", srv.URL,
-		"--token-file", tokenPath,
+		"--token-file", tokenPath, "--user-hooks",
 	}); code != 0 {
 		t.Fatalf("install code = %d", code)
 	}
@@ -69,10 +71,226 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 		t.Fatal("agent token was embedded in runtime configuration")
 	}
 	if !strings.Contains(string(hooks), "transcript hook --runtime codex") ||
+		!strings.Contains(string(hooks), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") ||
 		!strings.Contains(string(cliLog), "mcp add witself --") ||
-		!strings.Contains(string(cliLog), "mcp serve --runtime codex") {
+		!strings.Contains(string(cliLog), "mcp serve --runtime codex --account default --realm default --agent scott --location home") {
 		t.Fatalf("hooks/log = %s\n---\n%s", hooks, cliLog)
 	}
+}
+
+func TestBareInstallReusesBindingAndDefaultsToManagedHooks(t *testing.T) {
+	home := t.TempDir()
+	setInstallExecutableForTest(t)
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv(managedHooksTestRootEnv, filepath.Join(home, "managed"))
+	logPath := filepath.Join(home, "codex-args.log")
+	t.Setenv("FAKE_CLI_LOG", logPath)
+	fakeCLI := filepath.Join(home, "codex")
+	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_CLI_PATH", fakeCLI)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","realm_id":"realm_1","realm_name":"default","agent_id":"agent_1","agent_name":"scott"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(home, "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loc, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex, CaptureMode: transcriptcapture.ModeRaw,
+		HookMode: transcriptcapture.HookModeUser, Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Endpoint: srv.URL, TokenFile: tokenPath, Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if code := installCmd([]string{"codex"}); code != 0 {
+		t.Fatalf("bare install code = %d", code)
+	}
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HookMode != transcriptcapture.HookModeManaged || cfg.Agent != "scott" || cfg.Location.Name != "home" {
+		t.Fatalf("config = %#v", cfg)
+	}
+}
+
+func TestInferInstallAgentRequiresOnlyAmbiguousChoice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+	if err := local.Save("default", local.Account{ID: "acc_1"}, "owner-token"); err != nil {
+		t.Fatal(err)
+	}
+	writeAgent := func(name string) {
+		t.Helper()
+		path, err := local.AgentTokenPath("default", "default", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeAgent("scott")
+	name, err := inferInstallAgent("", "")
+	if err != nil || name != "scott" {
+		t.Fatalf("inferred %q, err %v", name, err)
+	}
+	writeAgent("alex")
+	if _, err := inferInstallAgent("", ""); err == nil || !strings.Contains(err.Error(), "multiple local agents") {
+		t.Fatalf("ambiguous error = %v", err)
+	}
+}
+
+func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		installName   string
+		runtime       string
+		cliEnv        string
+		configRootEnv string
+		configDir     string
+		policyPath    func(string) string
+	}{
+		{
+			name: "codex", installName: "codex", runtime: transcriptcapture.RuntimeCodex,
+			cliEnv: "CODEX_CLI_PATH", configRootEnv: "CODEX_HOME", configDir: ".codex",
+			policyPath: func(root string) string { return filepath.Join(root, "codex", "requirements.toml") },
+		},
+		{
+			name: "claude", installName: "claude", runtime: transcriptcapture.RuntimeClaudeCode,
+			cliEnv: "CLAUDE_CLI_PATH", configRootEnv: "CLAUDE_CONFIG_DIR", configDir: ".claude",
+			policyPath: func(root string) string {
+				return filepath.Join(root, "claude-code", "managed-settings.d", "50-witself.json")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			setInstallExecutableForTest(t)
+			witselfHome := filepath.Join(home, ".witself")
+			runtimeRoot := filepath.Join(home, tc.configDir)
+			managedRoot := filepath.Join(home, "managed")
+			t.Setenv("HOME", home)
+			t.Setenv("WITSELF_HOME", witselfHome)
+			t.Setenv(tc.configRootEnv, runtimeRoot)
+			t.Setenv(managedHooksTestRootEnv, managedRoot)
+
+			logPath := filepath.Join(home, tc.name+"-args.log")
+			t.Setenv("FAKE_CLI_LOG", logPath)
+			fakeCLI := filepath.Join(home, tc.name)
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"
+			if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(tc.cliEnv, fakeCLI)
+
+			settingsPath := filepath.Join(runtimeRoot, "settings.json")
+			if tc.runtime == transcriptcapture.RuntimeCodex {
+				settingsPath = filepath.Join(runtimeRoot, "hooks.json")
+			}
+			if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unrelated := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"custom-check"}]}]}}`
+			if err := os.WriteFile(settingsPath, []byte(unrelated), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","realm_id":"realm_1","realm_name":"default","agent_id":"agent_1","agent_name":"scott"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+			}))
+			defer srv.Close()
+			tokenPath := filepath.Join(home, "agent.token")
+			if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if code := installCmd([]string{
+				tc.installName, "--account", "default", "--realm", "default", "--agent", "scott",
+				"--location", "home", "--capture", "raw", "--endpoint", srv.URL,
+				"--token-file", tokenPath, "--managed-hooks",
+			}); code != 0 {
+				t.Fatalf("install code = %d", code)
+			}
+			cfg, err := transcriptcapture.LoadConfig(tc.runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HookMode != transcriptcapture.HookModeManaged {
+				t.Fatalf("hook mode = %q", cfg.HookMode)
+			}
+			policy, err := os.ReadFile(tc.policyPath(managedRoot))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(policy), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") {
+				t.Fatalf("managed hook does not pin verified binding:\n%s", policy)
+			}
+			raw, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), "custom-check") || strings.Contains(string(raw), "transcript hook --runtime") {
+				t.Fatalf("user settings = %s", raw)
+			}
+
+			if code := uninstallCmd([]string{tc.installName}); code != 0 {
+				t.Fatalf("uninstall code = %d", code)
+			}
+			if _, err := os.Stat(tc.policyPath(managedRoot)); !os.IsNotExist(err) {
+				t.Fatalf("managed policy still exists: %v", err)
+			}
+			configPath, err := transcriptcapture.ConfigPath(tc.runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("integration config still exists: %v", err)
+			}
+			if _, err := os.Stat(tokenPath); err != nil {
+				t.Fatalf("token was removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCurrentExecutablePathRejectsGoRunBinary(t *testing.T) {
+	t.Setenv(witselfExecutableTestEnv, "")
+	original := os.Args[0]
+	os.Args[0] = filepath.Join(t.TempDir(), "go-build123", "b001", "exe", "witself")
+	t.Cleanup(func() { os.Args[0] = original })
+	if _, err := currentExecutablePath(); err == nil || !strings.Contains(err.Error(), "temporary executable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func setInstallExecutableForTest(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(witselfExecutableTestEnv, executable)
 }
 
 func TestRegisterMCPClaudeUsesUserScopedStdio(t *testing.T) {
@@ -84,7 +302,7 @@ func TestRegisterMCPClaudeUsesUserScopedStdio(t *testing.T) {
 	if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := registerMCP(transcriptcapture.RuntimeClaudeCode, fakeCLI, "/usr/local/bin/witself"); err != nil {
+	if err := registerMCP(transcriptcapture.RuntimeClaudeCode, fakeCLI, "/usr/local/bin/witself", "account-under-test", "realm-under-test", "agent-under-test", "home"); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(logPath)
@@ -94,11 +312,24 @@ func TestRegisterMCPClaudeUsesUserScopedStdio(t *testing.T) {
 	log := string(raw)
 	for _, want := range []string{
 		"mcp remove --scope user witself",
-		"mcp add --scope user --transport stdio witself -- /usr/local/bin/witself mcp serve --runtime claude-code",
+		"mcp add --scope user --transport stdio witself -- /usr/local/bin/witself mcp serve --runtime claude-code --account account-under-test --realm realm-under-test --agent agent-under-test --location home",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("Claude registration log %q does not contain %q", log, want)
 		}
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerMCP(transcriptcapture.RuntimeClaudeCode, fakeCLI, "/usr/local/bin/witself", "account-under-test", "realm-under-test", "agent-under-test", ""); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "--account account-under-test --realm realm-under-test --agent agent-under-test") || strings.Contains(string(raw), "--location") {
+		t.Fatalf("unlabeled MCP registration = %q", raw)
 	}
 }
 

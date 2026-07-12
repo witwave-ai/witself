@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -206,12 +207,32 @@ func mcpCmd(args []string) int {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	runtime := fs.String("runtime", "", "installed integration: codex|claude-code")
+	account := fs.String("account", "", "installed account name")
+	realm := fs.String("realm", "", "installed realm name")
+	agent := fs.String("agent", "", "installed agent name")
+	location := fs.String("location", "", "optional installation location label")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 	cfg, err := transcriptcapture.LoadConfig(*runtime)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+		return 1
+	}
+	if expected := strings.TrimSpace(*account); expected != "" && expected != cfg.Account {
+		fmt.Fprintf(os.Stderr, "witself mcp: account %q does not match installed account %q\n", expected, cfg.Account)
+		return 1
+	}
+	if expected := strings.TrimSpace(*realm); expected != "" && expected != cfg.Realm {
+		fmt.Fprintf(os.Stderr, "witself mcp: realm %q does not match installed realm %q\n", expected, cfg.Realm)
+		return 1
+	}
+	if expected := strings.TrimSpace(*agent); expected != "" && expected != cfg.Agent {
+		fmt.Fprintf(os.Stderr, "witself mcp: agent %q does not match installed agent %q\n", expected, cfg.Agent)
+		return 1
+	}
+	if expected := strings.TrimSpace(*location); expected != "" && expected != cfg.Location.Name {
+		fmt.Fprintf(os.Stderr, "witself mcp: location %q does not match installed location %q\n", expected, cfg.Location.Name)
 		return 1
 	}
 	server := newWitselfMCPServer(configuredMCPBackend{cfg: cfg})

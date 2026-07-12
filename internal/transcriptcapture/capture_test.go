@@ -59,6 +59,72 @@ func TestClaudeCaptureCorrelatesSessionTurnAndLocation(t *testing.T) {
 	}
 }
 
+func TestLocationLabelIsOptionalAndPreserved(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.ID == "" || loc.Name != "" {
+		t.Fatalf("unlabeled location = %#v", loc)
+	}
+	loc, err = EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc, err = EnsureLocation("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.Name != "home" {
+		t.Fatalf("location label = %q", loc.Name)
+	}
+	title := Event{AgentName: "scott", Runtime: RuntimeCodex, Location: Location{ID: loc.ID}, CWD: "/src/witself"}.TranscriptTitle()
+	if title != "scott / codex / witself" {
+		t.Fatalf("title = %q", title)
+	}
+}
+
+func TestPinnedHookAgentMustMatchInstalledBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCodex, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "agent-under-test",
+		AgentID: "agent_1", AgentName: "agent-under-test", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"session_id":"session-1","hook_event_name":"SessionStart"}`)
+	if _, err := EnqueueHookForAgent(RuntimeCodex, "different-agent", raw); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatch error = %v", err)
+	}
+	if _, err := EnqueueHookForBinding(RuntimeCodex, "default", "default", "agent-under-test", "work", raw); err == nil || !strings.Contains(err.Error(), "location") {
+		t.Fatalf("location mismatch error = %v", err)
+	}
+	if _, err := EnqueueHookForBinding(RuntimeCodex, "another-account", "default", "agent-under-test", "", raw); err == nil || !strings.Contains(err.Error(), "account") {
+		t.Fatalf("account mismatch error = %v", err)
+	}
+	if _, err := EnqueueHookForBinding(RuntimeCodex, "default", "another-realm", "agent-under-test", "", raw); err == nil || !strings.Contains(err.Error(), "realm") {
+		t.Fatalf("realm mismatch error = %v", err)
+	}
+	pending, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("mismatched hook queued %d events", len(pending))
+	}
+	if _, err := EnqueueHookForAgent(RuntimeCodex, "agent-under-test", raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCaptureChunksWithoutTruncation(t *testing.T) {
 	body := strings.Repeat("abcd", entryBodyChunkSize/2)
 	event := Event{
@@ -121,7 +187,7 @@ func TestInstallHooksPreservesOthersAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := InstallHooks(RuntimeClaudeCode, ModeRaw, "/usr/local/bin/witself"); err != nil {
+		if _, err := InstallHooks(RuntimeClaudeCode, ModeRaw, "/usr/local/bin/witself", "default", "default", "scott", "home"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -135,13 +201,22 @@ func TestInstallHooksPreservesOthersAndIsIdempotent(t *testing.T) {
 	if !strings.Contains(string(raw), "custom-check") || !strings.Contains(string(raw), "EXISTING") {
 		t.Fatalf("unrelated settings were lost:\n%s", raw)
 	}
+	if !strings.Contains(string(raw), "--agent 'scott'") {
+		t.Fatalf("hook does not pin its agent:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "--account 'default' --realm 'default'") {
+		t.Fatalf("hook does not pin its account and realm:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "--location 'home'") {
+		t.Fatalf("hook does not pin its supplied location:\n%s", raw)
+	}
 }
 
 func TestCodexHookSetUsesOnlySupportedEvents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
-	path, err := InstallHooks(RuntimeCodex, ModeRaw, "/usr/local/bin/witself")
+	path, err := InstallHooks(RuntimeCodex, ModeRaw, "/usr/local/bin/witself", "default", "default", "scott", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +233,9 @@ func TestCodexHookSetUsesOnlySupportedEvents(t *testing.T) {
 		if strings.Contains(string(raw), `"`+event+`"`) {
 			t.Errorf("unsupported Codex event %s was installed", event)
 		}
+	}
+	if strings.Contains(string(raw), "--location") {
+		t.Fatalf("unlabeled install contains a location flag:\n%s", raw)
 	}
 }
 

@@ -27,6 +27,9 @@ const (
 	ModeMessages = "messages"
 	ModeTrace    = "trace"
 	ModeRaw      = "raw"
+
+	HookModeUser    = "user"
+	HookModeManaged = "managed"
 )
 
 var locationNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -35,7 +38,7 @@ var locationNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 // names, IP addresses, or filesystem paths.
 type Location struct {
 	ID   string `json:"id"`
-	Name string `json:"name"`
+	Name string `json:"name,omitempty"`
 }
 
 // Config is the non-secret integration binding for one runtime.
@@ -43,6 +46,7 @@ type Config struct {
 	SchemaVersion string    `json:"schema_version"`
 	Runtime       string    `json:"runtime"`
 	CaptureMode   string    `json:"capture_mode"`
+	HookMode      string    `json:"hook_mode"`
 	Account       string    `json:"account"`
 	Realm         string    `json:"realm"`
 	Agent         string    `json:"agent"`
@@ -80,13 +84,22 @@ func NormalizeMode(mode string) (string, error) {
 	}
 }
 
+// NormalizeHookMode validates where runtime hooks are installed.
+func NormalizeHookMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", HookModeUser:
+		return HookModeUser, nil
+	case HookModeManaged:
+		return HookModeManaged, nil
+	default:
+		return "", fmt.Errorf("hook mode must be %s or %s", HookModeUser, HookModeManaged)
+	}
+}
+
 // EnsureLocation loads this installation's stable id and updates its label.
 func EnsureLocation(name string) (Location, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
-		name = "default"
-	}
-	if !locationNamePattern.MatchString(name) {
+	if name != "" && !locationNamePattern.MatchString(name) {
 		return Location{}, fmt.Errorf("invalid location %q (use lowercase letters, digits, and hyphens)", name)
 	}
 	path, err := locationPath()
@@ -109,7 +122,9 @@ func EnsureLocation(name string) (Location, error) {
 			return Location{}, err
 		}
 	}
-	loc.Name = name
+	if name != "" {
+		loc.Name = name
+	}
 	if err := writeJSONAtomic(path, loc); err != nil {
 		return Location{}, err
 	}
@@ -126,15 +141,23 @@ func SaveConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
+	hookMode, err := NormalizeHookMode(cfg.HookMode)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(cfg.Agent) == "" || strings.TrimSpace(cfg.AgentID) == "" || strings.TrimSpace(cfg.AgentName) == "" {
 		return errors.New("agent, agent_id, and agent_name are required")
 	}
-	if cfg.Location.ID == "" || cfg.Location.Name == "" {
+	if cfg.Location.ID == "" {
 		return errors.New("location is required")
+	}
+	if cfg.Location.Name != "" && !locationNamePattern.MatchString(cfg.Location.Name) {
+		return fmt.Errorf("invalid location %q (use lowercase letters, digits, and hyphens)", cfg.Location.Name)
 	}
 	cfg.SchemaVersion = SchemaVersion
 	cfg.Runtime = runtime
 	cfg.CaptureMode = mode
+	cfg.HookMode = hookMode
 	if cfg.Account == "" {
 		cfg.Account = "default"
 	}
@@ -172,7 +195,25 @@ func LoadConfig(runtime string) (Config, error) {
 	if cfg.SchemaVersion != SchemaVersion {
 		return Config{}, fmt.Errorf("unsupported integration config schema %q", cfg.SchemaVersion)
 	}
+	cfg.HookMode, err = NormalizeHookMode(cfg.HookMode)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+// RemoveConfig removes one runtime binding without touching tokens or pending
+// transcript events.
+func RemoveConfig(runtime string) error {
+	path, err := ConfigPath(runtime)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_ = os.Remove(filepath.Dir(path))
+	return nil
 }
 
 // ConfigPath returns one runtime's non-secret binding path.

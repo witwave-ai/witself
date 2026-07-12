@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,14 +13,17 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
 const maxHookInputBytes = 16 * 1024 * 1024
 
+const witselfExecutableTestEnv = "WITSELF_TEST_EXECUTABLE_PATH"
+
 func installCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself install codex|claude --agent NAME [--location home|work]")
+		fmt.Fprintln(os.Stderr, "usage: witself install codex|claude [--agent NAME] [--location home|work]")
 		return 2
 	}
 	runtime, err := transcriptcapture.NormalizeRuntime(args[0])
@@ -30,23 +34,74 @@ func installCmd(args []string) int {
 	fs := flag.NewFlagSet("install "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
-	realm := fs.String("realm", "default", "local realm name")
+	realm := fs.String("realm", "", `local realm name (default: WITSELF_REALM or "default")`)
 	agent := fs.String("agent", "", "local agent name")
 	location := fs.String("location", strings.TrimSpace(os.Getenv("WITSELF_LOCATION")), "stable human label for this machine, such as home or work")
 	mode := fs.String("capture", transcriptcapture.ModeRaw, "messages|trace|raw")
+	managedHooks := fs.Bool("managed-hooks", true, "install administrator-managed hooks without per-hook runtime approval")
+	userHooks := fs.Bool("user-hooks", false, "install user-scoped hooks instead of requesting administrator access")
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing an agent token")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if strings.TrimSpace(*agent) == "" && strings.TrimSpace(*tokenFile) == "" {
-		fmt.Fprintln(os.Stderr, "witself: --agent is required when --token-file is not supplied")
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	if *userHooks && setFlags["managed-hooks"] && *managedHooks {
+		fmt.Fprintln(os.Stderr, "witself: --user-hooks conflicts with --managed-hooks")
 		return 2
+	}
+	useManagedHooks := *managedHooks && !*userHooks
+
+	previousConfig, previousConfigErr := transcriptcapture.LoadConfig(runtime)
+	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", previousConfigErr)
+		return 1
+	}
+	if previousConfigErr == nil {
+		accountProvided := setFlags["account"] || strings.TrimSpace(os.Getenv("WITSELF_ACCOUNT")) != ""
+		realmProvided := setFlags["realm"] || strings.TrimSpace(os.Getenv("WITSELF_REALM")) != ""
+		agentProvided := setFlags["agent"] || strings.TrimSpace(os.Getenv("WITSELF_AGENT")) != ""
+		locationProvided := setFlags["location"] || strings.TrimSpace(os.Getenv("WITSELF_LOCATION")) != ""
+		credentialsProvided := setFlags["endpoint"] || setFlags["token-file"]
+		if !accountProvided {
+			*account = previousConfig.Account
+		}
+		if !realmProvided {
+			*realm = previousConfig.Realm
+		}
+		if !agentProvided && !credentialsProvided {
+			*agent = previousConfig.Agent
+		}
+		if !locationProvided {
+			*location = previousConfig.Location.Name
+		}
+		if !setFlags["capture"] {
+			*mode = previousConfig.CaptureMode
+		}
+		if !setFlags["endpoint"] {
+			*endpoint = previousConfig.Endpoint
+		}
+		if !setFlags["token-file"] {
+			*tokenFile = previousConfig.TokenFile
+		}
+	}
+	if strings.TrimSpace(*agent) == "" && strings.TrimSpace(os.Getenv("WITSELF_AGENT")) == "" && strings.TrimSpace(*tokenFile) == "" {
+		inferredAgent, err := inferInstallAgent(*account, *realm)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 2
+		}
+		*agent = inferredAgent
 	}
 	captureMode, err := transcriptcapture.NormalizeMode(*mode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
+	}
+	hookMode := transcriptcapture.HookModeUser
+	if useManagedHooks {
+		hookMode = transcriptcapture.HookModeManaged
 	}
 	runtimeCLI, err := findRuntimeCLI(runtime)
 	if err != nil {
@@ -91,37 +146,147 @@ func installCmd(args []string) int {
 		}
 	}
 	cfg := transcriptcapture.Config{
-		Runtime: runtime, CaptureMode: captureMode,
+		Runtime: runtime, CaptureMode: captureMode, HookMode: hookMode,
 		Account: accountName, Realm: conn.RealmName, Agent: self.Identity.AgentName,
 		AgentID: self.Identity.AgentID, AgentName: self.Identity.AgentName,
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
-	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+	stagedConfig := cfg
+	if previousConfigErr == nil {
+		stagedConfig.HookMode = previousConfig.HookMode
+	}
+	if err := transcriptcapture.SaveConfig(stagedConfig); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
 		return 1
 	}
+	restoreConfig := func() {
+		if previousConfigErr == nil {
+			_ = transcriptcapture.SaveConfig(previousConfig)
+		} else {
+			_ = transcriptcapture.RemoveConfig(runtime)
+		}
+	}
 	witselfExecutable, err := currentExecutablePath()
 	if err != nil {
+		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: locate current executable: %v\n", err)
 		return 1
 	}
-	if err := registerMCP(runtime, runtimeCLI, witselfExecutable); err != nil {
+	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
+		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
 		return 1
 	}
-	hookPath, err := transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable)
+	var hookPath string
+	if useManagedHooks {
+		hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+		if err == nil {
+			_, err = transcriptcapture.RemoveHooks(runtime)
+		}
+	} else {
+		hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+		if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
+			_, err = removeManagedRuntimeHooks(runtime)
+		}
+	}
 	if err != nil {
+		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
 		return 1
 	}
+	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		restoreConfig()
+		fmt.Fprintf(os.Stderr, "witself: finalize integration: %v\n", err)
+		return 1
+	}
 
-	fmt.Printf("installed %s for agent %s at %s\n", runtime, self.Identity.AgentName, loc.Name)
-	fmt.Printf("hooks: %s\n", hookPath)
+	if loc.Name == "" {
+		fmt.Printf("installed %s for agent %s\n", runtime, self.Identity.AgentName)
+	} else {
+		fmt.Printf("installed %s for agent %s at %s\n", runtime, self.Identity.AgentName, loc.Name)
+	}
+	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
 	fmt.Println("mcp: witself")
-	if runtime == transcriptcapture.RuntimeCodex {
+	if useManagedHooks {
+		fmt.Printf("next: restart %s; managed hooks require no per-hook review\n", runtime)
+	} else if runtime == transcriptcapture.RuntimeCodex {
 		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook")
 	}
+	return 0
+}
+
+func inferInstallAgent(accountName, realmName string) (string, error) {
+	resolvedAccount, _, err := local.ResolveAccount(accountName)
+	if err != nil {
+		return "", err
+	}
+	realmName = strings.TrimSpace(realmName)
+	if realmName == "" {
+		realmName = strings.TrimSpace(os.Getenv("WITSELF_REALM"))
+	}
+	if realmName == "" {
+		realmName = "default"
+	}
+	names, err := local.AgentNames(resolvedAccount, realmName)
+	if err != nil {
+		return "", err
+	}
+	switch len(names) {
+	case 0:
+		return "", fmt.Errorf("no local agent credential found for %s/%s; pass --agent after creating its token", resolvedAccount, realmName)
+	case 1:
+		return names[0], nil
+	default:
+		return "", fmt.Errorf("multiple local agents found for %s/%s (%s); pass --agent NAME", resolvedAccount, realmName, strings.Join(names, ", "))
+	}
+}
+
+func uninstallCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself uninstall codex|claude [--managed-hooks]")
+		return 2
+	}
+	runtime, err := transcriptcapture.NormalizeRuntime(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+	fs := flag.NewFlagSet("uninstall "+args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	managedHooks := fs.Bool("managed-hooks", false, "remove administrator-managed hooks even if no integration record exists")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	cfg, cfgErr := transcriptcapture.LoadConfig(runtime)
+	if cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "witself: read integration: %v\n", cfgErr)
+		return 1
+	}
+	removeManaged := *managedHooks || (cfgErr == nil && cfg.HookMode == transcriptcapture.HookModeManaged)
+	if removeManaged {
+		if _, err := removeManagedRuntimeHooks(runtime); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: remove managed hooks: %v\n", err)
+			return 1
+		}
+	}
+	if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
+		return 1
+	}
+	if runtimeCLI, err := findRuntimeCLI(runtime); err == nil {
+		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", err)
+	}
+	if err := transcriptcapture.RemoveConfig(runtime); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: remove integration: %v\n", err)
+		return 1
+	}
+	fmt.Printf("uninstalled %s integration; tokens and pending transcript events were preserved\n", runtime)
 	return 0
 }
 
@@ -129,6 +294,10 @@ func transcriptHook(args []string) int {
 	fs := flag.NewFlagSet("transcript hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	runtime := fs.String("runtime", "", "codex|claude-code")
+	account := fs.String("account", "", "installed account name")
+	realm := fs.String("realm", "", "installed realm name")
+	agent := fs.String("agent", "", "installed agent name")
+	location := fs.String("location", "", "optional installation location label")
 	if err := fs.Parse(args); err != nil {
 		return 0
 	}
@@ -137,7 +306,7 @@ func transcriptHook(args []string) int {
 		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
 		return 0
 	}
-	if _, err := transcriptcapture.EnqueueHook(*runtime, raw); err != nil {
+	if _, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw); err != nil {
 		fmt.Fprintf(os.Stderr, "witself capture: %v\n", err)
 		return 0
 	}
@@ -342,10 +511,25 @@ func startBackgroundFlush(runtime string) error {
 }
 
 func currentExecutablePath() (string, error) {
-	if strings.ContainsRune(os.Args[0], filepath.Separator) {
-		return filepath.Abs(os.Args[0])
+	if override := strings.TrimSpace(os.Getenv(witselfExecutableTestEnv)); override != "" {
+		return filepath.Abs(override)
 	}
-	return exec.LookPath(os.Args[0])
+	var path string
+	var err error
+	if strings.ContainsRune(os.Args[0], filepath.Separator) {
+		path, err = filepath.Abs(os.Args[0])
+	} else {
+		path, err = exec.LookPath(os.Args[0])
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, part := range strings.Split(filepath.Clean(path), string(filepath.Separator)) {
+		if strings.HasPrefix(part, "go-build") {
+			return "", errors.New("go run uses a temporary executable; build Witself to a persistent path before installing")
+		}
+	}
+	return path, nil
 }
 
 func findRuntimeCLI(runtime string) (string, error) {
@@ -378,19 +562,40 @@ func findRuntimeCLI(runtime string) (string, error) {
 	return "", fmt.Errorf("no %s executable with MCP support was found", runtime)
 }
 
-func registerMCP(runtime, runtimeCLI, witselfExecutable string) error {
+func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, location string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var removeArgs, addArgs []string
+	serveArgs := []string{
+		witselfExecutable, "mcp", "serve", "--runtime", runtime,
+		"--account", account, "--realm", realm, "--agent", agent,
+	}
+	if location != "" {
+		serveArgs = append(serveArgs, "--location", location)
+	}
 	if runtime == transcriptcapture.RuntimeCodex {
 		removeArgs = []string{"mcp", "remove", "witself"}
-		addArgs = []string{"mcp", "add", "witself", "--", witselfExecutable, "mcp", "serve", "--runtime", runtime}
+		addArgs = append([]string{"mcp", "add", "witself", "--"}, serveArgs...)
 	} else {
 		removeArgs = []string{"mcp", "remove", "--scope", "user", "witself"}
-		addArgs = []string{"mcp", "add", "--scope", "user", "--transport", "stdio", "witself", "--", witselfExecutable, "mcp", "serve", "--runtime", runtime}
+		addArgs = append([]string{"mcp", "add", "--scope", "user", "--transport", "stdio", "witself", "--"}, serveArgs...)
 	}
 	_ = exec.CommandContext(ctx, runtimeCLI, removeArgs...).Run()
 	output, err := exec.CommandContext(ctx, runtimeCLI, addArgs...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func unregisterMCP(runtime, runtimeCLI string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	args := []string{"mcp", "remove", "witself"}
+	if runtime == transcriptcapture.RuntimeClaudeCode {
+		args = []string{"mcp", "remove", "--scope", "user", "witself"}
+	}
+	output, err := exec.CommandContext(ctx, runtimeCLI, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
