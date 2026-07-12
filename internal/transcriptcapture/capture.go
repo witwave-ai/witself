@@ -1,11 +1,13 @@
 package transcriptcapture
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +21,8 @@ import (
 
 const (
 	maxRawPayloadBytes = 8 * 1024
+	maxStructuredBytes = 4 * 1024
+	maxGrokTailBytes   = 16 * 1024 * 1024
 	entryBodyChunkSize = 60 * 1024
 	staleFlushLockAge  = 5 * time.Minute
 )
@@ -39,9 +43,11 @@ type Event struct {
 	RunID                string          `json:"run_id"`
 	TurnID               string          `json:"turn_id,omitempty"`
 	HookEvent            string          `json:"hook_event"`
+	NativeHookEvent      string          `json:"native_hook_event"`
 	Kind                 string          `json:"kind"`
 	Role                 string          `json:"role"`
 	Body                 string          `json:"body,omitempty"`
+	Data                 json.RawMessage `json:"data,omitempty"`
 	Model                string          `json:"model,omitempty"`
 	CWD                  string          `json:"cwd,omitempty"`
 	SourceTranscriptPath string          `json:"source_transcript_path,omitempty"`
@@ -69,20 +75,48 @@ type PendingEvent struct {
 
 type hookInput struct {
 	SessionID            string          `json:"session_id"`
+	SessionIDCamel       string          `json:"sessionId"`
+	ConversationID       string          `json:"conversation_id"`
 	TranscriptPath       string          `json:"transcript_path"`
+	TranscriptPathCamel  string          `json:"transcriptPath"`
 	CWD                  string          `json:"cwd"`
+	WorkspaceRoot        string          `json:"workspaceRoot"`
 	HookEventName        string          `json:"hook_event_name"`
+	HookEventNameCamel   string          `json:"hookEventName"`
 	Model                string          `json:"model"`
 	TurnID               string          `json:"turn_id"`
+	GenerationID         string          `json:"generation_id"`
+	PromptID             string          `json:"promptId"`
+	PromptIDSnake        string          `json:"prompt_id"`
 	Prompt               string          `json:"prompt"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	LastAssistantCamel   string          `json:"lastAssistantMessage"`
+	Text                 string          `json:"text"`
 	ToolName             string          `json:"tool_name"`
+	ToolNameCamel        string          `json:"toolName"`
 	ToolUseID            string          `json:"tool_use_id"`
+	ToolUseIDCamel       string          `json:"toolUseId"`
 	ToolInput            json.RawMessage `json:"tool_input"`
+	ToolInputCamel       json.RawMessage `json:"toolInput"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
+	ToolOutput           json.RawMessage `json:"tool_output"`
+	ToolOutputCamel      json.RawMessage `json:"toolOutput"`
 	Source               string          `json:"source"`
 	Reason               string          `json:"reason"`
+	Status               string          `json:"status"`
+	FailureType          string          `json:"failure_type"`
+	ErrorMessage         string          `json:"error_message"`
+	DurationMS           int64           `json:"duration_ms"`
+	Duration             int64           `json:"duration"`
+	InputTokens          int64           `json:"input_tokens"`
+	OutputTokens         int64           `json:"output_tokens"`
+	CacheReadTokens      int64           `json:"cache_read_tokens"`
+	CacheWriteTokens     int64           `json:"cache_write_tokens"`
+	AgentID              string          `json:"agent_id"`
+	AgentType            string          `json:"agent_type"`
+	SubagentType         string          `json:"subagent_type"`
 	Error                json.RawMessage `json:"error"`
+	NativeHookEvent      string          `json:"-"`
 }
 
 type sessionState struct {
@@ -129,8 +163,9 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return Event{}, fmt.Errorf("parse hook JSON: %w", err)
 	}
-	input.SessionID = strings.TrimSpace(input.SessionID)
-	input.HookEventName = strings.TrimSpace(input.HookEventName)
+	if err := normalizeHookInput(cfg.Runtime, &input); err != nil {
+		return Event{}, err
+	}
 	if input.SessionID == "" || input.HookEventName == "" {
 		return Event{}, errors.New("hook input requires session_id and hook_event_name")
 	}
@@ -163,11 +198,11 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		}
 		state.TurnID = turnID
 		state.PromptEventID = eventID
-	case "Stop", "StopFailure":
+	case "AgentResponse", "AgentThought", "Stop", "StopFailure":
 		if turnID == "" {
 			turnID = state.TurnID
 		}
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure":
+	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact":
 		if turnID == "" {
 			turnID = state.TurnID
 		}
@@ -188,12 +223,16 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		RunID:                state.RunID,
 		TurnID:               turnID,
 		HookEvent:            input.HookEventName,
+		NativeHookEvent:      input.NativeHookEvent,
 		Model:                strings.TrimSpace(input.Model),
 		CWD:                  input.CWD,
 		SourceTranscriptPath: input.TranscriptPath,
 		OccurredAt:           time.Now().UTC(),
 	}
 	setEventContent(&event, input, raw)
+	if input.HookEventName == "AgentResponse" {
+		event.ReplyToEventID = state.PromptEventID
+	}
 	if input.HookEventName == "Stop" || input.HookEventName == "StopFailure" {
 		event.ReplyToEventID = state.PromptEventID
 		state.TurnID = ""
@@ -211,18 +250,218 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	return event, nil
 }
 
+func normalizeHookInput(runtime string, input *hookInput) error {
+	input.SessionID = strings.TrimSpace(firstNonempty(input.SessionID, input.SessionIDCamel, input.ConversationID))
+	input.TranscriptPath = firstNonempty(input.TranscriptPath, input.TranscriptPathCamel)
+	input.CWD = firstNonempty(input.CWD, input.WorkspaceRoot)
+	input.NativeHookEvent = strings.TrimSpace(firstNonempty(input.HookEventName, input.HookEventNameCamel))
+	input.HookEventName = canonicalHookEvent(input.NativeHookEvent)
+	input.TurnID = strings.TrimSpace(firstNonempty(input.TurnID, input.GenerationID, input.PromptID, input.PromptIDSnake))
+	input.PromptID = strings.TrimSpace(firstNonempty(input.PromptID, input.PromptIDSnake, input.GenerationID))
+	input.LastAssistantMessage = firstNonempty(input.LastAssistantMessage, input.LastAssistantCamel)
+	input.ToolName = firstNonempty(input.ToolName, input.ToolNameCamel)
+	input.ToolUseID = firstNonempty(input.ToolUseID, input.ToolUseIDCamel)
+	if len(input.ToolInput) == 0 {
+		input.ToolInput = input.ToolInputCamel
+	}
+	if len(input.ToolResponse) == 0 {
+		input.ToolResponse = firstRaw(input.ToolOutput, input.ToolOutputCamel)
+	}
+	if input.DurationMS == 0 {
+		input.DurationMS = input.Duration
+	}
+	if input.ErrorMessage != "" && len(input.Error) == 0 {
+		input.Error, _ = json.Marshal(input.ErrorMessage)
+	}
+	if input.HookEventName == "AgentResponse" || input.HookEventName == "AgentThought" {
+		input.LastAssistantMessage = firstNonempty(input.LastAssistantMessage, input.Text)
+	}
+	if runtime == RuntimeGrokBuild {
+		if input.HookEventName == "UserPromptSubmit" {
+			input.Prompt = unwrapGrokPrompt(input.Prompt)
+		}
+		if input.HookEventName == "Stop" && input.LastAssistantMessage == "" && input.TranscriptPath != "" {
+			body, err := readGrokAssistantMessage(input.TranscriptPath, input.PromptID)
+			if err == nil {
+				input.LastAssistantMessage = body
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalHookEvent(event string) string {
+	switch strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(event), "_", ""), "-", "")) {
+	case "sessionstart":
+		return "SessionStart"
+	case "sessionend":
+		return "SessionEnd"
+	case "userpromptsubmit", "beforesubmitprompt":
+		return "UserPromptSubmit"
+	case "afteragentresponse", "agentresponse":
+		return "AgentResponse"
+	case "afteragentthought", "agentthought":
+		return "AgentThought"
+	case "stop":
+		return "Stop"
+	case "stopfailure":
+		return "StopFailure"
+	case "pretooluse":
+		return "PreToolUse"
+	case "posttooluse":
+		return "PostToolUse"
+	case "posttoolusefailure":
+		return "PostToolUseFailure"
+	case "subagentstart":
+		return "SubagentStart"
+	case "subagentstop":
+		return "SubagentStop"
+	case "precompact":
+		return "PreCompact"
+	case "postcompact":
+		return "PostCompact"
+	case "permissionrequest":
+		return "PermissionRequest"
+	case "permissiondenied":
+		return "PermissionDenied"
+	case "notification":
+		return "Notification"
+	default:
+		return strings.TrimSpace(event)
+	}
+}
+
+func firstRaw(values ...json.RawMessage) json.RawMessage {
+	for _, value := range values {
+		if len(value) != 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func unwrapGrokPrompt(prompt string) string {
+	const prefix, suffix = "<user_query>\n", "\n</user_query>"
+	if strings.HasPrefix(prompt, prefix) && strings.HasSuffix(prompt, suffix) {
+		return strings.TrimSuffix(strings.TrimPrefix(prompt, prefix), suffix)
+	}
+	return prompt
+}
+
+type grokSessionUpdate struct {
+	Params struct {
+		Meta struct {
+			PromptID string `json:"promptId"`
+		} `json:"_meta"`
+		Update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Content       struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"update"`
+	} `json:"params"`
+}
+
+func readGrokAssistantMessage(path, promptID string) (string, error) {
+	home := strings.TrimSpace(os.Getenv("GROK_HOME"))
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(userHome, ".grok")
+	}
+	sessionsRoot, err := filepath.EvalSymlinks(filepath.Join(home, "sessions"))
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(sessionsRoot, resolvedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Base(resolvedPath) != "updates.jsonl" {
+		return "", errors.New("grok transcript path is outside the session store")
+	}
+
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	start := max(info.Size()-maxGrokTailBytes, 0)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return "", err
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxGrokTailBytes))
+	if err != nil {
+		return "", err
+	}
+	if start > 0 {
+		if newline := bytes.IndexByte(raw, '\n'); newline >= 0 {
+			raw = raw[newline+1:]
+		}
+	}
+
+	var chunks []string
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		var update grokSessionUpdate
+		if len(line) == 0 || json.Unmarshal(line, &update) != nil {
+			continue
+		}
+		kind := update.Params.Update.SessionUpdate
+		if promptID == "" && kind == "user_message_chunk" {
+			chunks = nil
+			continue
+		}
+		if kind != "agent_message_chunk" || (promptID != "" && update.Params.Meta.PromptID != promptID) {
+			continue
+		}
+		if text := update.Params.Update.Content.Text; text != "" {
+			chunks = append(chunks, text)
+		}
+	}
+	return strings.Join(chunks, "\n\n"), nil
+}
+
 func setEventContent(event *Event, input hookInput, raw []byte) {
 	switch input.HookEventName {
 	case "SessionStart":
 		event.Kind, event.Role, event.Body = "session.started", "system", "session started"
 	case "UserPromptSubmit":
 		event.Kind, event.Role, event.Body = "message.user", "user", input.Prompt
-	case "Stop":
+	case "AgentResponse":
 		event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
+	case "AgentThought":
+		event.Kind, event.Role, event.Body = "agent.thought", "system", input.LastAssistantMessage
+	case "Stop":
+		if input.LastAssistantMessage != "" {
+			event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
+		} else {
+			event.Kind, event.Role, event.Body = "turn.completed", "system", firstNonempty(input.Status, input.Reason, "turn completed")
+		}
 	case "StopFailure":
-		event.Kind, event.Role, event.Body = "turn.failed", "system", firstNonempty(errorText(input.Error), input.Reason, "turn failed")
+		event.Kind, event.Role, event.Body = "turn.failed", "system", firstNonempty(errorText(input.Error), input.ErrorMessage, input.Reason, "turn failed")
 	case "SessionEnd":
 		event.Kind, event.Role, event.Body = "session.ended", "system", firstNonempty(input.Reason, "session ended")
+	case "SubagentStart":
+		event.Kind, event.Role, event.Body = "subagent.started", "system", firstNonempty(input.AgentType, input.SubagentType, "subagent started")
+	case "SubagentStop":
+		event.Kind, event.Role, event.Body = "subagent.stopped", "system", firstNonempty(input.AgentType, input.SubagentType, input.Reason, "subagent stopped")
+	case "PreCompact":
+		event.Kind, event.Role, event.Body = "compaction.started", "system", "conversation compaction started"
+	case "PostCompact":
+		event.Kind, event.Role, event.Body = "compaction.completed", "system", "conversation compaction completed"
+	case "PermissionRequest":
+		event.Kind, event.Role, event.Body = "permission.requested", "system", firstNonempty(input.ToolName, "permission requested")
+	case "PermissionDenied":
+		event.Kind, event.Role, event.Body = "permission.denied", "system", firstNonempty(input.Reason, input.ToolName, "permission denied")
+	case "Notification":
+		event.Kind, event.Role, event.Body = "runtime.notification", "system", firstNonempty(input.Reason, "runtime notification")
 	case "PreToolUse":
 		event.Kind, event.Role = "tool.call", "tool"
 		event.Body = toolBody(input.ToolName, input.ToolUseID, input.ToolInput)
@@ -236,8 +475,100 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 	default:
 		event.Kind, event.Role, event.Body = "runtime.event", "system", input.HookEventName
 	}
+	event.Data = structuredEventData(input)
 	if event.CaptureMode == ModeRaw {
 		event.Raw = append(json.RawMessage(nil), raw...)
+	}
+}
+
+func structuredEventData(input hookInput) json.RawMessage {
+	data := map[string]any{}
+	if input.PromptID != "" {
+		data["prompt_id"] = input.PromptID
+	}
+	if input.Status != "" {
+		data["status"] = input.Status
+	}
+	if input.Reason != "" {
+		data["reason"] = input.Reason
+	}
+	if input.FailureType != "" {
+		data["failure_type"] = input.FailureType
+	}
+	if input.DurationMS != 0 {
+		data["duration_ms"] = input.DurationMS
+	}
+	usage := map[string]any{}
+	if input.InputTokens != 0 {
+		usage["input_tokens"] = input.InputTokens
+	}
+	if input.OutputTokens != 0 {
+		usage["output_tokens"] = input.OutputTokens
+	}
+	if input.CacheReadTokens != 0 {
+		usage["cache_read_tokens"] = input.CacheReadTokens
+	}
+	if input.CacheWriteTokens != 0 {
+		usage["cache_write_tokens"] = input.CacheWriteTokens
+	}
+	if len(usage) != 0 {
+		data["usage"] = usage
+	}
+	if input.AgentID != "" || input.AgentType != "" || input.SubagentType != "" {
+		data["subagent"] = compactMap(map[string]any{
+			"id":   input.AgentID,
+			"type": firstNonempty(input.AgentType, input.SubagentType),
+		})
+	}
+	if input.ToolName != "" || input.ToolUseID != "" || len(input.ToolInput) != 0 || len(input.ToolResponse) != 0 {
+		tool := map[string]any{
+			"name":   input.ToolName,
+			"use_id": input.ToolUseID,
+		}
+		if len(input.ToolInput) != 0 {
+			tool["input"] = boundedJSON(input.ToolInput)
+		}
+		if len(input.ToolResponse) != 0 {
+			tool["output"] = boundedJSON(input.ToolResponse)
+		}
+		if message := firstNonempty(input.ErrorMessage, errorText(input.Error)); message != "" {
+			tool["error"] = message
+		}
+		data["tool"] = compactMap(tool)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(data)
+	return raw
+}
+
+func compactMap(value map[string]any) map[string]any {
+	for key, item := range value {
+		switch typed := item.(type) {
+		case string:
+			if typed == "" {
+				delete(value, key)
+			}
+		case nil:
+			delete(value, key)
+		}
+	}
+	return value
+}
+
+func boundedJSON(raw json.RawMessage) any {
+	if len(raw) <= maxStructuredBytes {
+		var value any
+		if json.Unmarshal(raw, &value) == nil {
+			return value
+		}
+	}
+	sum := sha256.Sum256(raw)
+	return map[string]any{
+		"omitted": true,
+		"bytes":   len(raw),
+		"sha256":  hex.EncodeToString(sum[:]),
 	}
 }
 
@@ -352,6 +683,7 @@ func (e Event) Entries() []Entry {
 			"event_id":       e.ID,
 			"runtime":        e.Runtime,
 			"hook_event":     e.HookEvent,
+			"native_event":   e.NativeHookEvent,
 			"kind":           e.Kind,
 			"capture_mode":   e.CaptureMode,
 			"location":       e.Location,
@@ -381,6 +713,12 @@ func (e Event) Entries() []Entry {
 				payload["raw_omitted"] = true
 				payload["raw_bytes"] = len(e.Raw)
 				payload["raw_sha256"] = hex.EncodeToString(sum[:])
+			}
+		}
+		if i == 0 && len(e.Data) > 0 {
+			var value any
+			if json.Unmarshal(e.Data, &value) == nil {
+				payload["data"] = value
 			}
 		}
 		raw, _ := json.Marshal(payload)

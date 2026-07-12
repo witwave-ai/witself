@@ -195,8 +195,8 @@ func TestInstallHooksPreservesOthersAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(raw), hookCommandMarker) != 8 {
-		t.Fatalf("witself hook count = %d, want 8\n%s", strings.Count(string(raw), hookCommandMarker), raw)
+	if strings.Count(string(raw), hookCommandMarker) != 15 {
+		t.Fatalf("witself hook count = %d, want 15\n%s", strings.Count(string(raw), hookCommandMarker), raw)
 	}
 	if !strings.Contains(string(raw), "custom-check") || !strings.Contains(string(raw), "EXISTING") {
 		t.Fatalf("unrelated settings were lost:\n%s", raw)
@@ -224,7 +224,10 @@ func TestCodexHookSetUsesOnlySupportedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse"} {
+	for _, event := range []string{
+		"SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
+		"PreCompact", "PostCompact", "PreToolUse", "PermissionRequest", "PostToolUse",
+	} {
 		if !strings.Contains(string(raw), `"`+event+`"`) {
 			t.Errorf("missing %s", event)
 		}
@@ -236,6 +239,191 @@ func TestCodexHookSetUsesOnlySupportedEvents(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "--location") {
 		t.Fatalf("unlabeled install contains a location flag:\n%s", raw)
+	}
+}
+
+func TestRawHookCoverageByRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		runtime string
+		want    []string
+	}{
+		{RuntimeCodex, []string{
+			"SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+			"PreToolUse", "PermissionRequest", "PostToolUse",
+		}},
+		{RuntimeClaudeCode, []string{
+			"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+			"PreToolUse", "PermissionRequest", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "Notification",
+		}},
+		{RuntimeGrokBuild, []string{
+			"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+			"PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "Notification",
+		}},
+		{RuntimeCursor, []string{
+			"sessionStart", "beforeSubmitPrompt", "afterAgentResponse", "stop", "sessionEnd", "subagentStart", "subagentStop", "preCompact",
+			"afterAgentThought", "preToolUse", "postToolUse", "postToolUseFailure",
+		}},
+	} {
+		t.Run(tc.runtime, func(t *testing.T) {
+			got := hookEvents(tc.runtime, ModeRaw)
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Fatalf("hook events:\n got: %v\nwant: %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGrokHooksUseDedicatedGlobalFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", filepath.Join(home, ".grok"))
+	path, err := InstallHooks(RuntimeGrokBuild, ModeRaw, "/usr/local/bin/witself", "default", "default", "scott", "home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(home, ".grok", "hooks", "witself.json") {
+		t.Fatalf("path = %q", path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{
+		"SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "StopFailure",
+		"SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+		"PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "Notification",
+	} {
+		if !strings.Contains(string(raw), `"`+event+`"`) {
+			t.Errorf("missing %s", event)
+		}
+	}
+	if strings.Count(string(raw), hookCommandMarker) != 14 {
+		t.Fatalf("hook count = %d\n%s", strings.Count(string(raw), hookCommandMarker), raw)
+	}
+	if _, err := RemoveHooks(RuntimeGrokBuild); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Grok hook file still exists: %v", err)
+	}
+}
+
+func TestCursorHooksPreserveUnrelatedGlobalHandlers(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	path := filepath.Join(cursorHome, "hooks.json")
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"hooks":{"stop":[{"command":"custom-check"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := InstallHooks(RuntimeCursor, ModeRaw, "/usr/local/bin/witself", "default", "default", "scott", "home"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "custom-check") || strings.Count(string(raw), hookCommandMarker) != 12 {
+		t.Fatalf("Cursor hooks were not merged idempotently:\n%s", raw)
+	}
+	for _, event := range []string{
+		"sessionStart", "sessionEnd", "beforeSubmitPrompt", "afterAgentResponse", "afterAgentThought",
+		"stop", "subagentStart", "subagentStop", "preCompact", "preToolUse", "postToolUse", "postToolUseFailure",
+	} {
+		if !strings.Contains(string(raw), `"`+event+`"`) {
+			t.Errorf("missing %s", event)
+		}
+	}
+	if _, err := RemoveHooks(RuntimeCursor); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "custom-check") || strings.Contains(string(raw), hookCommandMarker) {
+		t.Fatalf("Cursor uninstall damaged unrelated hooks:\n%s", raw)
+	}
+}
+
+func TestCursorCaptureNormalizesConversationAndStructuredResponse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCursor, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prompt := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","cwd":"/src/witself","prompt":"hello"}`)
+	response := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"afterAgentResponse","cwd":"/src/witself","text":"hi there","input_tokens":12,"output_tokens":4}`)
+	if prompt.HookEvent != "UserPromptSubmit" || prompt.NativeHookEvent != "beforeSubmitPrompt" || prompt.TurnID != "generation-1" {
+		t.Fatalf("prompt = %#v", prompt)
+	}
+	if response.Kind != "message.assistant" || response.Body != "hi there" || response.ReplyToEventID != prompt.ID {
+		t.Fatalf("response = %#v", response)
+	}
+	entries := response.Entries()
+	if len(entries) != 1 || !strings.Contains(string(entries[0].Payload), `"input_tokens":12`) || !strings.Contains(string(entries[0].Payload), `"native_event":"afterAgentResponse"`) {
+		t.Fatalf("payload = %s", entries[0].Payload)
+	}
+}
+
+func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
+	home := t.TempDir()
+	grokHome := filepath.Join(home, ".grok")
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeGrokBuild, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "user_prompt_submit", "promptId": "prompt-1",
+		"prompt": "<user_query>\nhello\n</user_query>", "transcriptPath": transcriptPath,
+	})
+	prompt := enqueueTestHook(t, RuntimeGrokBuild, string(promptRaw))
+	stopRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "stop", "promptId": "prompt-1",
+		"reason": "end_turn", "transcriptPath": transcriptPath,
+	})
+	stop := enqueueTestHook(t, RuntimeGrokBuild, string(stopRaw))
+	if prompt.Body != "hello" || prompt.TurnID != "prompt-1" {
+		t.Fatalf("prompt = %#v", prompt)
+	}
+	if stop.Body != "first\n\nsecond" || stop.Kind != "message.assistant" || stop.ReplyToEventID != prompt.ID {
+		t.Fatalf("stop = %#v", stop)
 	}
 }
 

@@ -49,8 +49,8 @@ messages and lets each resource have independent retention and access policy.
 
 - `trn_` id, account, realm, and owning/recording agent.
 - Optional external conversation id, title, and small JSON metadata object.
-- The recorder's authenticated agent id and name, runtime (`codex` or
-  `claude-code`), stable installation/location id and label, native session id,
+- The recorder's authenticated agent id and name, runtime (`codex`,
+  `claude-code`, `grok-build`, or `cursor`), stable installation/location id and label, native session id,
   and workspace label are captured as metadata. The agent name is display
   metadata; the token-bound agent id remains authoritative.
 - `next_sequence`, created time, and last-updated time.
@@ -89,6 +89,9 @@ The supported local installation commands are:
 ```sh
 witself install codex
 witself install claude
+witself install grok
+witself install cursor
+witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
 Each command verifies the agent token against `/v1/self`, installs a stdio MCP
@@ -106,17 +109,17 @@ when supplied it is also written into both commands, and when omitted no
 location argument is written. `~/.witself/location.json` always contains a
 stable generated `loc_` id and includes a human label only when one is supplied.
 The runtime name, native session id, generated run id, turn id, and event id
-distinguish overlapping Codex and Claude Code sessions at that location.
+distinguish overlapping sessions across all four runtimes at that location.
 `WITSELF_HOME` replaces `~/.witself` when set.
 
 Installing again replaces only Witself's MCP registration and hook handlers for
 that runtime; unrelated runtime configuration is preserved. One local binding
-per runtime is supported in this slice. Administrator-managed hooks are the
-default. The CLI keeps identity and MCP configuration user-scoped, then uses a
-narrow administrator elevation to install the system hook policy. Do not run
-the whole command with `sudo`, because that would target the root user's runtime
-and Witself homes. Pass `--user-hooks` when system policy installation is not
-available; Codex then requires reviewing the command through `/hooks` once.
+per runtime is supported in this slice. Codex and Claude Code default to
+administrator-managed hooks; the CLI keeps identity and MCP configuration
+user-scoped, then uses a narrow elevation only for system policy. Do not run
+the whole command with `sudo`. Grok Build and Cursor use their native
+approval-free global user hook locations and require neither elevation nor
+project trust.
 
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude
@@ -128,13 +131,18 @@ an administrator-owned runner, and the runner records the absolute Witself
 executable selected at installation. Reinstalling updates that path and the
 capture-mode event set without duplicating handlers.
 
+Grok Build receives `~/.grok/hooks/witself.json` and a native MCP entry in
+`~/.grok/config.toml`. Cursor merges handlers into `~/.cursor/hooks.json`,
+preserves unrelated entries in `~/.cursor/mcp.json`, and asks the Cursor CLI to
+enable the `witself` MCP registration.
+
 The installer does not set Codex `allow_managed_hooks_only` or Claude Code
 `allowManagedHooksOnly`, so unrelated user, project, and plugin hooks remain
 available. If Claude Code is already governed by a higher-precedence server or
 MDM managed-settings source, deploy the same hook object through that active
 source instead; Claude Code does not merge separate managed tiers.
 
-`witself uninstall codex|claude` removes the MCP registration, integration
+`witself uninstall codex|claude|grok|cursor` removes the MCP registration, integration
 binding, and the recorded user or managed hooks. Agent tokens and pending local
 transcript events are deliberately preserved. `--managed-hooks` can be passed
 to uninstall as a recovery override when the local integration record is
@@ -151,13 +159,16 @@ the outbox; the next hook retries it, or it can be retried explicitly:
 ```sh
 witself transcript flush --runtime codex
 witself transcript flush --runtime claude-code
+witself transcript flush --runtime grok-build
+witself transcript flush --runtime cursor
 ```
 
 Capture modes are cumulative:
 
-- `messages` records session markers, user prompts, and finalized assistant
-  responses.
-- `trace` also records runtime-exposed tool calls and results.
+- `messages` records session, prompt, response, subagent, and compaction
+  lifecycle events that the runtime exposes.
+- `trace` also records runtime-exposed tool calls/results, failures,
+  permissions, notifications, and Cursor thought summaries.
 - `raw` also retains the hook envelope, local transcript path, and other
   runtime-exposed fields. It still cannot expose hidden chain-of-thought.
 
@@ -168,10 +179,19 @@ while the complete pending event remains in the local outbox. There are no
 per-token or streaming writes. Flushes use batches of at most 100 entries, and
 reads use bounded forward pages or a bounded tail.
 
-Codex and Claude Code both provide the common successful session, prompt, and
-response lifecycle. Claude Code currently exposes additional session-end,
-failure, and tool-failure hooks; those events are recorded when available and
-are not fabricated for Codex.
+Every entry also has a provider-neutral JSON payload with `kind`, canonical and
+native event names, runtime/session/run/turn ids, location, model, cwd, and
+typed `data`. Tool entries keep structured name, use id, input/output or error;
+turn entries keep status, reason, duration, and token usage when supplied.
+Large structured values retain a digest and byte count instead of overrunning
+the 16 KiB payload limit.
+
+The common lifecycle is session start, user prompt, turn stop, tool call/result,
+subagent start/stop, and pre-compaction. Witself also records session end,
+turn/tool failures, post-compaction, permission events, notifications, and
+Cursor thought summaries where the runtime exposes them. Missing provider
+events are never fabricated, and a thought summary is not treated as hidden
+chain-of-thought.
 
 ## Reasoning And Execution Traces
 
@@ -229,7 +249,7 @@ witself transcript append TRANSCRIPT_ID
 witself transcript list
 witself transcript show TRANSCRIPT_ID
 witself transcript tail TRANSCRIPT_ID --limit 20
-witself transcript flush --runtime codex|claude-code
+witself transcript flush --runtime codex|claude-code|grok-build|cursor
 ```
 
 The installed stdio MCP server exposes the read-only

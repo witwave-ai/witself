@@ -36,6 +36,8 @@ command installs both the Witself stdio MCP server and durable transcript hooks:
 ```sh
 witself install codex
 witself install claude
+witself install grok
+witself install cursor
 ```
 
 The installer reuses an existing integration or the only local agent credential.
@@ -43,7 +45,7 @@ When more than one agent is available, select one explicitly; a location label
 is optional:
 
 ```sh
-witself install codex --agent scott --location home
+witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
 The resolved account, realm, and agent are pinned explicitly in every installed
@@ -54,24 +56,25 @@ copies a token into the MCP or hook command. Local
 integration identity and the retryable transcript outbox live under
 `~/.witself/` (`WITSELF_HOME` overrides it).
 
-Administrator-managed hooks are the default. Run the command as your normal
-user; Witself requests administrator access only for the system hook policy,
-while identity, tokens, and MCP registration stay in the user's configuration.
-Codex uses `/etc/codex/requirements.toml`; Claude Code uses its platform-managed
-`managed-settings.d/` directory. On a workstation where system policy cannot be
+Administrator-managed hooks are the Codex and Claude Code default. Run the
+command as your normal user; Witself requests administrator access only for the
+system hook policy, while identity, tokens, and MCP registration stay in the
+user's configuration. Grok Build and Cursor use approval-free global user
+hooks. On a workstation where Codex or Claude system policy cannot be
 installed, pass `--user-hooks`; Codex then asks you to review the command hook
 through `/hooks` once.
 
 Remove an integration without deleting tokens or queued transcript events:
 
 ```sh
-witself uninstall codex
-witself uninstall claude
+witself uninstall claude,codex,grok,cursor
 ```
 
-`messages` captures visible prompts and final responses, `trace` adds exposed
-tool activity, and `raw` also retains the runtime-exposed hook envelope. None of
-the modes can capture hidden chain-of-thought. See
+`messages` captures visible conversation and lifecycle events, `trace` adds
+exposed tool, failure, permission, and subagent activity, and `raw` also retains
+the runtime-exposed hook envelope. Entries include a normalized structured JSON
+payload alongside readable text. None of the modes can capture hidden
+chain-of-thought. See
 [Witself Transcript Ledger](docs/transcript-ledger.md) for the data and retry
 contract.
 

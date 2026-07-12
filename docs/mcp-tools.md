@@ -234,11 +234,13 @@ Tool names should use the `witself.` prefix:
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The current binary implements `witself.self.show` and the three transcript read
-tools above. `witself install codex|claude` registers that stdio server and the
-separate durable hook write path. The remainder of this catalog is the target
-surface and lands incrementally behind the same token-derived authorization
-boundary.
+The current binary implements `witself.self.show`, the three transcript read
+tools above, and the direct-agent message tools. `witself install
+codex|claude|grok|cursor` registers that stdio server and the separate durable
+hook write path. Grok receives underscore-safe tool names because its MCP client
+rejects periods; the tool schemas and behavior are otherwise identical. The
+remainder of this catalog is the target surface and lands incrementally behind
+the same token-derived authorization boundary.
 
 Every CLI verb is reachable via MCP with **full parity**: the CLI is the primary
 surface, and the MCP tool set mirrors it one-for-one (modulo the CLI-first

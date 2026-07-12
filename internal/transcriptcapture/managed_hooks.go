@@ -277,7 +277,7 @@ func codexManagedFragment(runtimeName, mode, account, realm, agent, location, ma
 	}
 	for _, event := range hookEvents(runtimeName, mode) {
 		fmt.Fprintf(&out, "[[hooks.%s]]\n", event)
-		if event == "PreToolUse" || event == "PostToolUse" || event == "PostToolUseFailure" {
+		if eventNeedsToolMatcher(event) {
 			out.WriteString("matcher = \"*\"\n")
 		}
 		fmt.Fprintf(&out, "[[hooks.%s.hooks]]\n", event)

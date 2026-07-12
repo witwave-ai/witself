@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
 type fakeMCPBackend struct {
@@ -18,6 +20,39 @@ type fakeMCPBackend struct {
 	lastMessageList  client.MessageListOptions
 	readMessageID    string
 	ackedMessageID   string
+}
+
+func TestGrokMCPUsesPortableToolNames(t *testing.T) {
+	ctx := context.Background()
+	server := newWitselfMCPServerForRuntime(&fakeMCPBackend{}, transcriptcapture.RuntimeGrokBuild)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.Tools) != 7 {
+		t.Fatalf("tools = %d, want 7", len(tools.Tools))
+	}
+	for _, tool := range tools.Tools {
+		if strings.Contains(tool.Name, ".") || !strings.HasPrefix(tool.Name, "witself_") {
+			t.Errorf("non-portable Grok tool name %q", tool.Name)
+		}
+	}
+	instructions := clientSession.InitializeResult().Instructions
+	if !strings.Contains(instructions, "witself_self_show") || strings.Contains(instructions, "witself.self.show") {
+		t.Fatalf("instructions = %q", instructions)
+	}
 }
 
 func (b *fakeMCPBackend) SendMessage(_ context.Context, in client.SendMessageInput) (client.Message, error) {

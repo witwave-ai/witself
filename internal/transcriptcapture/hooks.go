@@ -33,6 +33,15 @@ func InstallHooks(runtime, mode, executable, account, realm, agent, location str
 	if err != nil {
 		return "", err
 	}
+	command := shellQuote(executable) + " transcript hook " + hookBindingArgs(runtime, account, realm, agent, location)
+	if runtime == RuntimeGrokBuild {
+		hooks := map[string]any{}
+		addWitselfHandlers(hooks, runtime, mode, command)
+		if err := writeJSONAtomic(path, map[string]any{"hooks": hooks}); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
 	switch {
@@ -49,8 +58,14 @@ func InstallHooks(runtime, mode, executable, account, realm, agent, location str
 	}
 	removeWitselfHandlers(hooks)
 
-	command := shellQuote(executable) + " transcript hook " + hookBindingArgs(runtime, account, realm, agent, location)
-	addWitselfHandlers(hooks, runtime, mode, command)
+	if runtime == RuntimeCursor {
+		addCursorWitselfHandlers(hooks, mode, command)
+		if _, ok := root["version"]; !ok {
+			root["version"] = 1
+		}
+	} else {
+		addWitselfHandlers(hooks, runtime, mode, command)
+	}
 	root["hooks"] = hooks
 	if err := writeJSONAtomic(path, root); err != nil {
 		return "", err
@@ -80,6 +95,13 @@ func RemoveHooks(runtime string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if runtime == RuntimeGrokBuild {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		_ = os.Remove(filepath.Dir(path))
+		return path, nil
+	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return path, nil
@@ -100,7 +122,7 @@ func RemoveHooks(runtime string) (string, error) {
 			root["hooks"] = hooks
 		}
 	}
-	if len(root) == 0 {
+	if len(root) == 0 || (runtime == RuntimeCursor && len(root) == 1 && root["version"] != nil) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
@@ -121,7 +143,7 @@ func addWitselfHandlers(hooks map[string]any, runtime, mode, command string) {
 				"timeout": 10,
 			}},
 		}
-		if event == "PreToolUse" || event == "PostToolUse" || event == "PostToolUseFailure" {
+		if eventNeedsToolMatcher(event) {
 			group["matcher"] = "*"
 		}
 		groups, _ := hooks[event].([]any)
@@ -129,18 +151,61 @@ func addWitselfHandlers(hooks map[string]any, runtime, mode, command string) {
 	}
 }
 
-func hookEvents(runtime, mode string) []string {
-	events := []string{"SessionStart", "UserPromptSubmit", "Stop"}
-	if runtime == RuntimeClaudeCode {
-		events = append(events, "StopFailure", "SessionEnd")
+func addCursorWitselfHandlers(hooks map[string]any, mode, command string) {
+	for _, event := range hookEvents(RuntimeCursor, mode) {
+		handler := map[string]any{
+			"command": command,
+			"timeout": 10,
+		}
+		handlers, _ := hooks[event].([]any)
+		hooks[event] = append(handlers, handler)
 	}
-	if mode == ModeTrace || mode == ModeRaw {
-		events = append(events, "PreToolUse", "PostToolUse")
-		if runtime == RuntimeClaudeCode {
-			events = append(events, "PostToolUseFailure")
+}
+
+func hookEvents(runtime, mode string) []string {
+	var events []string
+	switch runtime {
+	case RuntimeCodex:
+		events = []string{
+			"SessionStart", "UserPromptSubmit", "Stop",
+			"SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+		}
+	case RuntimeClaudeCode, RuntimeGrokBuild:
+		events = []string{
+			"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd",
+			"SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+		}
+	case RuntimeCursor:
+		events = []string{
+			"sessionStart", "beforeSubmitPrompt", "afterAgentResponse", "stop", "sessionEnd",
+			"subagentStart", "subagentStop", "preCompact",
 		}
 	}
-	return events
+	if mode != ModeTrace && mode != ModeRaw {
+		return events
+	}
+	switch runtime {
+	case RuntimeCodex:
+		return append(events, "PreToolUse", "PermissionRequest", "PostToolUse")
+	case RuntimeClaudeCode:
+		return append(events,
+			"PreToolUse", "PermissionRequest", "PermissionDenied",
+			"PostToolUse", "PostToolUseFailure", "Notification",
+		)
+	case RuntimeGrokBuild:
+		return append(events,
+			"PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "Notification",
+		)
+	case RuntimeCursor:
+		return append(events, "afterAgentThought", "preToolUse", "postToolUse", "postToolUseFailure")
+	default:
+		return events
+	}
+}
+
+func eventNeedsToolMatcher(event string) bool {
+	return event == "PreToolUse" || event == "PermissionRequest" || event == "PermissionDenied" ||
+		event == "PostToolUse" || event == "PostToolUseFailure"
 }
 
 func removeWitselfHandlers(hooks map[string]any) {
@@ -154,6 +219,9 @@ func removeWitselfHandlers(hooks map[string]any) {
 			group, ok := rawGroup.(map[string]any)
 			if !ok {
 				keptGroups = append(keptGroups, rawGroup)
+				continue
+			}
+			if command, _ := group["command"].(string); strings.Contains(command, hookCommandMarker) {
 				continue
 			}
 			handlers, ok := group["hooks"].([]any)
@@ -202,6 +270,18 @@ func hookSettingsPath(runtime string) (string, error) {
 			root = filepath.Join(home, ".claude")
 		}
 		return filepath.Join(root, "settings.json"), nil
+	case RuntimeGrokBuild:
+		root := strings.TrimSpace(os.Getenv("GROK_HOME"))
+		if root == "" {
+			root = filepath.Join(home, ".grok")
+		}
+		return filepath.Join(root, "hooks", "witself.json"), nil
+	case RuntimeCursor:
+		root := strings.TrimSpace(os.Getenv("CURSOR_CONFIG_DIR"))
+		if root == "" {
+			root = filepath.Join(home, ".cursor")
+		}
+		return filepath.Join(root, "hooks.json"), nil
 	default:
 		return "", fmt.Errorf("unsupported runtime %q", runtime)
 	}

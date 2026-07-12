@@ -23,14 +23,23 @@ const witselfExecutableTestEnv = "WITSELF_TEST_EXECUTABLE_PATH"
 
 func installCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself install codex|claude [--agent NAME] [--location home|work]")
+		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...] [--agent NAME] [--location home|work]")
 		return 2
 	}
-	runtime, err := transcriptcapture.NormalizeRuntime(args[0])
+	targets, err := runtimeTargets(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
+	if len(targets) > 1 {
+		for _, target := range targets {
+			if code := installCmd(append([]string{target}, args[1:]...)); code != 0 {
+				return code
+			}
+		}
+		return 0
+	}
+	runtime := targets[0]
 	fs := flag.NewFlagSet("install "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
@@ -38,7 +47,7 @@ func installCmd(args []string) int {
 	agent := fs.String("agent", "", "local agent name")
 	location := fs.String("location", strings.TrimSpace(os.Getenv("WITSELF_LOCATION")), "stable human label for this machine, such as home or work")
 	mode := fs.String("capture", transcriptcapture.ModeRaw, "messages|trace|raw")
-	managedHooks := fs.Bool("managed-hooks", true, "install administrator-managed hooks without per-hook runtime approval")
+	managedHooks := fs.Bool("managed-hooks", supportsManagedHooks(runtime), "install administrator-managed hooks without per-hook runtime approval")
 	userHooks := fs.Bool("user-hooks", false, "install user-scoped hooks instead of requesting administrator access")
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing an agent token")
@@ -49,6 +58,10 @@ func installCmd(args []string) int {
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 	if *userHooks && setFlags["managed-hooks"] && *managedHooks {
 		fmt.Fprintln(os.Stderr, "witself: --user-hooks conflicts with --managed-hooks")
+		return 2
+	}
+	if *managedHooks && !supportsManagedHooks(runtime) {
+		fmt.Fprintf(os.Stderr, "witself: %s uses approval-free global user hooks; --managed-hooks is not supported\n", runtime)
 		return 2
 	}
 	useManagedHooks := *managedHooks && !*userHooks
@@ -212,6 +225,8 @@ func installCmd(args []string) int {
 		fmt.Printf("next: restart %s; managed hooks require no per-hook review\n", runtime)
 	} else if runtime == transcriptcapture.RuntimeCodex {
 		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook")
+	} else {
+		fmt.Printf("next: restart %s; global user hooks require no project trust\n", runtime)
 	}
 	return 0
 }
@@ -244,14 +259,24 @@ func inferInstallAgent(accountName, realmName string) (string, error) {
 
 func uninstallCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself uninstall codex|claude [--managed-hooks]")
+		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]")
 		return 2
 	}
-	runtime, err := transcriptcapture.NormalizeRuntime(args[0])
+	targets, err := runtimeTargets(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
+	if len(targets) > 1 {
+		code := 0
+		for _, target := range targets {
+			if targetCode := uninstallCmd(append([]string{target}, args[1:]...)); targetCode != 0 {
+				code = targetCode
+			}
+		}
+		return code
+	}
+	runtime := targets[0]
 	fs := flag.NewFlagSet("uninstall "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	managedHooks := fs.Bool("managed-hooks", false, "remove administrator-managed hooks even if no integration record exists")
@@ -274,7 +299,13 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
 		return 1
 	}
-	if runtimeCLI, err := findRuntimeCLI(runtime); err == nil {
+	if runtime == transcriptcapture.RuntimeCursor {
+		runtimeCLI, _ := findRuntimeCLI(runtime)
+		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+	} else if runtimeCLI, err := findRuntimeCLI(runtime); err == nil {
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
@@ -290,10 +321,31 @@ func uninstallCmd(args []string) int {
 	return 0
 }
 
+func runtimeTargets(value string) ([]string, error) {
+	parts := strings.Split(value, ",")
+	targets := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New("runtime list contains an empty item")
+		}
+		runtimeName, err := transcriptcapture.NormalizeRuntime(part)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[runtimeName] {
+			targets = append(targets, runtimeName)
+			seen[runtimeName] = true
+		}
+	}
+	return targets, nil
+}
+
 func transcriptHook(args []string) int {
 	fs := flag.NewFlagSet("transcript hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	runtime := fs.String("runtime", "", "codex|claude-code")
+	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
@@ -321,7 +373,7 @@ func transcriptHook(args []string) int {
 func transcriptFlush(args []string) int {
 	fs := flag.NewFlagSet("transcript flush", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	runtime := fs.String("runtime", "", "codex|claude-code")
+	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -532,19 +584,39 @@ func currentExecutablePath() (string, error) {
 	return path, nil
 }
 
+func supportsManagedHooks(runtime string) bool {
+	return runtime == transcriptcapture.RuntimeCodex || runtime == transcriptcapture.RuntimeClaudeCode
+}
+
 func findRuntimeCLI(runtime string) (string, error) {
 	candidates := []string{}
-	if runtime == transcriptcapture.RuntimeCodex {
+	var probeArgs []string
+	switch runtime {
+	case transcriptcapture.RuntimeCodex:
 		candidates = append(candidates, strings.TrimSpace(os.Getenv("CODEX_CLI_PATH")))
 		if path, err := exec.LookPath("codex"); err == nil {
 			candidates = append(candidates, path)
 		}
 		candidates = append(candidates, "/Applications/ChatGPT.app/Contents/Resources/codex")
-	} else {
+		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeClaudeCode:
 		candidates = append(candidates, strings.TrimSpace(os.Getenv("CLAUDE_CLI_PATH")))
 		if path, err := exec.LookPath("claude"); err == nil {
 			candidates = append(candidates, path)
 		}
+		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeGrokBuild:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("GROK_CLI_PATH")))
+		if path, err := exec.LookPath("grok"); err == nil {
+			candidates = append(candidates, path)
+		}
+		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeCursor:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("CURSOR_CLI_PATH")))
+		if path, err := exec.LookPath("cursor"); err == nil {
+			candidates = append(candidates, path)
+		}
+		probeArgs = []string{"agent", "mcp", "list", "--help"}
 	}
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
@@ -553,7 +625,7 @@ func findRuntimeCLI(runtime string) (string, error) {
 		}
 		seen[candidate] = true
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := exec.CommandContext(ctx, candidate, "mcp", "add", "--help").Run()
+		err := exec.CommandContext(ctx, candidate, probeArgs...).Run()
 		cancel()
 		if err == nil {
 			return candidate, nil
@@ -563,9 +635,6 @@ func findRuntimeCLI(runtime string) (string, error) {
 }
 
 func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, location string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	var removeArgs, addArgs []string
 	serveArgs := []string{
 		witselfExecutable, "mcp", "serve", "--runtime", runtime,
 		"--account", account, "--realm", realm, "--agent", agent,
@@ -573,12 +642,34 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	if location != "" {
 		serveArgs = append(serveArgs, "--location", location)
 	}
-	if runtime == transcriptcapture.RuntimeCodex {
+	if runtime == transcriptcapture.RuntimeCursor {
+		if err := registerCursorMCP(serveArgs); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		output, err := exec.CommandContext(ctx, runtimeCLI, "agent", "mcp", "enable", "witself").CombinedOutput()
+		if err != nil {
+			_ = unregisterCursorMCP()
+			return fmt.Errorf("approve Cursor MCP: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var removeArgs, addArgs []string
+	switch runtime {
+	case transcriptcapture.RuntimeCodex:
 		removeArgs = []string{"mcp", "remove", "witself"}
 		addArgs = append([]string{"mcp", "add", "witself", "--"}, serveArgs...)
-	} else {
+	case transcriptcapture.RuntimeClaudeCode:
 		removeArgs = []string{"mcp", "remove", "--scope", "user", "witself"}
 		addArgs = append([]string{"mcp", "add", "--scope", "user", "--transport", "stdio", "witself", "--"}, serveArgs...)
+	case transcriptcapture.RuntimeGrokBuild:
+		removeArgs = []string{"mcp", "remove", "--scope", "user", "witself"}
+		addArgs = append([]string{"mcp", "add", "--scope", "user", "witself", "--"}, serveArgs...)
+	default:
+		return fmt.Errorf("unsupported runtime %q", runtime)
 	}
 	_ = exec.CommandContext(ctx, runtimeCLI, removeArgs...).Run()
 	output, err := exec.CommandContext(ctx, runtimeCLI, addArgs...).CombinedOutput()
@@ -589,10 +680,22 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 }
 
 func unregisterMCP(runtime, runtimeCLI string) error {
+	if runtime == transcriptcapture.RuntimeCursor {
+		if runtimeCLI != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_, _ = exec.CommandContext(ctx, runtimeCLI, "agent", "mcp", "disable", "witself").CombinedOutput()
+			cancel()
+		}
+		removeErr := unregisterCursorMCP()
+		if removeErr != nil {
+			return removeErr
+		}
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	args := []string{"mcp", "remove", "witself"}
-	if runtime == transcriptcapture.RuntimeClaudeCode {
+	if runtime == transcriptcapture.RuntimeClaudeCode || runtime == transcriptcapture.RuntimeGrokBuild {
 		args = []string{"mcp", "remove", "--scope", "user", "witself"}
 	}
 	output, err := exec.CommandContext(ctx, runtimeCLI, args...).CombinedOutput()

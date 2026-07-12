@@ -23,6 +23,8 @@ const SchemaVersion = "witself.capture.v1"
 const (
 	RuntimeCodex      = "codex"
 	RuntimeClaudeCode = "claude-code"
+	RuntimeGrokBuild  = "grok-build"
+	RuntimeCursor     = "cursor"
 
 	ModeMessages = "messages"
 	ModeTrace    = "trace"
@@ -65,8 +67,12 @@ func NormalizeRuntime(runtime string) (string, error) {
 		return RuntimeCodex, nil
 	case "claude", RuntimeClaudeCode:
 		return RuntimeClaudeCode, nil
+	case "grok", RuntimeGrokBuild:
+		return RuntimeGrokBuild, nil
+	case RuntimeCursor:
+		return RuntimeCursor, nil
 	default:
-		return "", fmt.Errorf("runtime must be %s or %s", RuntimeCodex, RuntimeClaudeCode)
+		return "", fmt.Errorf("runtime must be %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor)
 	}
 }
 

@@ -221,8 +221,8 @@ witself
   totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
-  install codex|claude
-  uninstall codex|claude
+  install RUNTIME[,RUNTIME...]
+  uninstall RUNTIME[,RUNTIME...]
   transcript create|append|list|show|tail|flush
   message send|list|read|ack|listen
   federation peers|card
@@ -2551,7 +2551,8 @@ The interactive commands accept `--endpoint`,
 `WITSELF_TOKEN` are the unattended equivalents.
 
 `tail` performs a bounded newest-entry read. `flush` retries the durable local
-hook outbox for an installed `codex` or `claude-code` integration.
+hook outbox for an installed `codex`, `claude-code`, `grok-build`, or `cursor`
+integration.
 
 Only finalized visible output should be appended. Raw hidden chain-of-thought
 and streaming chunks are out of contract. Small structured objects belong in
@@ -2566,6 +2567,9 @@ runtime:
 ```sh
 witself install codex
 witself install claude
+witself install grok
+witself install cursor
+witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
 The installer reuses an existing binding or the only local agent credential. If
@@ -2578,17 +2582,22 @@ when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
 
-Administrator-managed hooks are the default while identity and MCP registration
-remain user-scoped. The command prompts for administrator access only for that
-system policy write. Codex uses `/etc/codex/requirements.toml`; Claude Code uses
-the platform `managed-settings.d/50-witself.json` drop-in. Existing policy is
-preserved, Witself handlers are idempotent, and unrelated hooks are not
-disabled. Pass `--user-hooks` to use runtime user settings instead; Codex asks
-for one-time approval through `/hooks` in that mode.
+Administrator-managed hooks are the default for Codex and Claude Code while
+identity and MCP registration remain user-scoped. The command prompts for
+administrator access only for that system policy write. Codex uses
+`/etc/codex/requirements.toml`; Claude Code uses the platform
+`managed-settings.d/50-witself.json` drop-in. Grok Build and Cursor use their
+approval-free global user hook locations. Existing configuration is preserved,
+Witself handlers are idempotent, and unrelated hooks are not disabled. Pass
+`--user-hooks` to use Codex or Claude user settings instead; Codex asks for
+one-time approval through `/hooks` in that mode.
 
 ```sh
 witself uninstall codex
 witself uninstall claude
+witself uninstall grok
+witself uninstall cursor
+witself uninstall claude,codex,grok,cursor
 ```
 
 Uninstall infers user versus managed hook mode from the local integration

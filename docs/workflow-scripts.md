@@ -855,6 +855,9 @@ runtime:
 ```sh
 witself install codex
 witself install claude
+witself install grok
+witself install cursor
+witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
 The installer reuses an existing binding or the only local agent credential.
@@ -863,22 +866,27 @@ when a human location label is useful. The resolved account, realm, and agent
 are pinned explicitly in the hook and MCP commands. A supplied location is
 pinned in both; an omitted location is left out of both commands.
 
-Administrator-managed hooks are the default and do not move the user's identity,
-token lookup, or MCP registration into the administrator account. Run the
-command normally; Witself performs the narrow privilege elevation. Use
-`--user-hooks` only where the system policy layer is unavailable.
+Administrator-managed hooks are the Codex and Claude Code default and do not
+move the user's identity, token lookup, or MCP registration into the
+administrator account. Grok Build and Cursor use approval-free global user
+hooks. Run the command normally; Witself performs narrow privilege elevation
+only where needed. Use `--user-hooks` for Codex or Claude where the system
+policy layer is unavailable.
 
 ```sh
 witself uninstall codex
 witself uninstall claude
+witself uninstall grok
+witself uninstall cursor
+witself uninstall claude,codex,grok,cursor
 ```
 
 The command validates the token-bound agent, stores only account/realm/agent
 selectors and an optional token-file path under `~/.witself`, registers the
 `witself` stdio server with the runtime, and merges the transcript hooks. It
 never embeds the token in the MCP registration. The installed server command is
-equivalent to `witself mcp serve --runtime codex` or
-`witself mcp serve --runtime claude-code`.
+equivalent to `witself mcp serve --runtime` with `codex`, `claude-code`,
+`grok-build`, or `cursor`.
 
 Expected behavior:
 
@@ -890,7 +898,7 @@ Expected behavior:
 - Hooks, rather than model-invoked MCP writes, append visible prompts, finalized
   responses, and optionally runtime-exposed tool activity.
 - Failed delivery remains in the owner-only local outbox and can be retried with
-  `witself transcript flush --runtime codex|claude-code`.
+  `witself transcript flush --runtime codex|claude-code|grok-build|cursor`.
 - The broader open-plane and sealed-plane MCP catalog remains the target
   contract in [mcp-tools.md](mcp-tools.md).
 

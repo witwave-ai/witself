@@ -124,10 +124,15 @@ func TestClaudeManagedHooksUseIsolatedDropIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	hooks, ok := root["hooks"].(map[string]any)
-	if !ok || len(hooks) != 8 {
+	if !ok || len(hooks) != 15 {
 		t.Fatalf("hooks = %#v", root["hooks"])
 	}
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd", "PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+	for _, event := range []string{
+		"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd",
+		"SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+		"PreToolUse", "PermissionRequest", "PermissionDenied",
+		"PostToolUse", "PostToolUseFailure", "Notification",
+	} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("missing %s", event)
 		}
