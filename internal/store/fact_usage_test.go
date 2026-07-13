@@ -74,12 +74,15 @@ func TestFactListOrderClause(t *testing.T) {
 	}
 	ranked := factListOrderClause(true)
 	for _, want := range []string{
-		"usage_count DESC",
+		"COALESCE(u.usage_count, 0) DESC",
 		"u.last_used_at DESC NULLS LAST",
 		"f.predicate, s.canonical_key, f.id",
 	} {
 		if !strings.Contains(ranked, want) {
 			t.Errorf("ranked order %q does not contain %q", ranked, want)
 		}
+	}
+	if strings.Contains(ranked, "ORDER BY u.usage_count DESC") {
+		t.Fatal("nullable usage count would sort unused facts first")
 	}
 }

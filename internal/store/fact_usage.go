@@ -19,7 +19,7 @@ const factUsageSelect = `
 	       a.id, a.value_type, a.value, a.recurrence, a.source_kind, a.source_ref,
 	       a.confidence, a.observed_at, a.confirmed_at, a.valid_from,
 	       a.valid_until, f.created_at, f.updated_at,
-	       COALESCE(u.usage_count, 0)::bigint, u.last_used_at
+	       COALESCE(u.usage_count, 0)::bigint AS usage_count, u.last_used_at
 	FROM facts f
 	JOIN fact_subjects s ON s.id = f.subject_id
 	JOIN fact_assertions a ON a.id = f.resolved_assertion_id
@@ -212,7 +212,10 @@ func (s *Store) recordFactRetrievals(ctx context.Context, p Principal, mode Fact
 
 func factListOrderClause(orderByUsage bool) string {
 	if orderByUsage {
-		return " ORDER BY usage_count DESC, u.last_used_at DESC NULLS LAST, f.predicate, s.canonical_key, f.id"
+		// Refer to the nullable join input explicitly. PostgreSQL sorts NULLs
+		// first for DESC, so ordering by u.usage_count directly would put facts
+		// with no usage ahead of used facts.
+		return " ORDER BY COALESCE(u.usage_count, 0) DESC, u.last_used_at DESC NULLS LAST, f.predicate, s.canonical_key, f.id"
 	}
 	return " ORDER BY f.predicate, s.canonical_key, f.id"
 }
