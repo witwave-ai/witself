@@ -1,6 +1,13 @@
 # Witself Facts Model
 
-Status: pre-implementation draft. Last reviewed 2026-06-26.
+Status: implementation in progress. Last reviewed 2026-07-12.
+
+> **Current implementation contract:** the first service slice replaces the
+> original owner/name-only draft with subject + namespaced predicate identity,
+> typed JSON values, immutable source assertions, temporal validity, and
+> resolved values. See [fact-service.md](fact-service.md). Sections below that
+> still describe `name`, `primary`, group ownership, delete, or consolidation
+> are forward-looking until reconciled with the subject/assertion model.
 
 A fact is a `name`→`value` identity attribute: the canonical, queryable identity
 card for an agent. Facts are the deterministic counterpart to memories. Where a

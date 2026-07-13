@@ -284,6 +284,10 @@ type Config struct {
 	GetTranscript           func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
 	GetUsage                func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
+	SetFact                 func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
+	GetFact                 func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
+	ListFacts               func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
+	GetFactHistory          func(ctx context.Context, p DomainPrincipal, factID string) ([]FactAssertion, error)
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
@@ -1041,6 +1045,15 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.AuthenticatePrincipal != nil {
 		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal))
+		if cfg.SetFact != nil {
+			mux.HandleFunc("POST /v1/facts", setFactHandler(cfg.AuthenticatePrincipal, cfg.SetFact))
+		}
+		if cfg.GetFact != nil && cfg.ListFacts != nil {
+			mux.HandleFunc("GET /v1/facts", factsReadHandler(cfg.AuthenticatePrincipal, cfg.GetFact, cfg.ListFacts))
+		}
+		if cfg.GetFactHistory != nil {
+			mux.HandleFunc("GET /v1/facts/{fact}/history", factHistoryHandler(cfg.AuthenticatePrincipal, cfg.GetFactHistory))
+		}
 		if cfg.GetUsage != nil {
 			mux.HandleFunc("GET /v1/usage", usageHandler(cfg.AuthenticatePrincipal, cfg.GetUsage))
 		}

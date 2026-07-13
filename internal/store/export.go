@@ -94,6 +94,33 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		&querySource{s: s, table: "fact_subjects", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'canonical_key', canonical_key,
+			  'display_name', display_name, 'aliases', aliases,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM fact_subjects WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		&querySource{s: s, table: "facts", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'subject_id', subject_id,
+			  'predicate', predicate, 'cardinality', cardinality,
+			  'sensitive', sensitive, 'resolved_assertion_id', resolved_assertion_id,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM facts WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		&querySource{s: s, table: "fact_assertions", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'fact_id', fact_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'asserted_by_agent_id', asserted_by_agent_id,
+			  'value_type', value_type, 'value', value,
+			  'source_kind', source_kind, 'source_ref', source_ref,
+			  'confidence', confidence, 'observed_at', observed_at,
+			  'confirmed_at', confirmed_at, 'valid_from', valid_from,
+			  'valid_until', valid_until, 'supersedes_id', supersedes_id,
+			  'created_at', created_at)
+			FROM fact_assertions WHERE account_id = $1
+			ORDER BY fact_id, created_at, id`, arg: accountID},
 		&querySource{s: s, table: "tokens", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'operator_id', operator_id,

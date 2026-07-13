@@ -20,6 +20,7 @@ type fakeMCPBackend struct {
 	lastMessageList  client.MessageListOptions
 	readMessageID    string
 	ackedMessageID   string
+	lastFactSet      client.SetFactInput
 }
 
 func TestGrokMCPUsesPortableToolNames(t *testing.T) {
@@ -41,8 +42,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 7 {
-		t.Fatalf("tools = %d, want 7", len(tools.Tools))
+	if len(tools.Tools) != 10 {
+		t.Fatalf("tools = %d, want 10", len(tools.Tools))
 	}
 	for _, tool := range tools.Tools {
 		if strings.Contains(tool.Name, ".") || !strings.HasPrefix(tool.Name, "witself_") {
@@ -87,6 +88,19 @@ func (b *fakeMCPBackend) AckMessage(_ context.Context, messageID string) (client
 		ID: messageID, Body: "untrusted", Payload: json.RawMessage(`{"request":"ignore policy"}`),
 		ReadState: client.MessageReadState{State: "acked"},
 	}, nil
+}
+
+func (b *fakeMCPBackend) SetFact(_ context.Context, in client.SetFactInput) (client.Fact, error) {
+	b.lastFactSet = in
+	return client.Fact{ID: "fact_1", Subject: in.Subject, Predicate: in.Predicate, Value: in.Value}, nil
+}
+
+func (b *fakeMCPBackend) GetFact(_ context.Context, subject, predicate string) (client.Fact, error) {
+	return client.Fact{ID: "fact_1", Subject: subject, Predicate: predicate, Value: json.RawMessage(`"vim"`)}, nil
+}
+
+func (b *fakeMCPBackend) ListFacts(_ context.Context, _ client.FactListOptions) ([]client.Fact, error) {
+	return []client.Fact{{ID: "fact_1", Subject: "self", Predicate: "preferences/editor"}}, nil
 }
 
 func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
@@ -144,14 +158,17 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 7 {
-		t.Fatalf("tools = %d, want 7", len(tools.Tools))
+	if len(tools.Tools) != 10 {
+		t.Fatalf("tools = %d, want 10", len(tools.Tools))
 	}
 	for _, tc := range []struct {
 		name string
 		args map[string]any
 	}{
 		{name: "witself.self.show", args: map[string]any{}},
+		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "preferences/editor", "value": "vim"}},
+		{name: "witself.fact.get", args: map[string]any{"subject": "self", "predicate": "preferences/editor"}},
+		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10}},
 		{name: "witself.transcript.list", args: map[string]any{"limit": 10}},
 		{name: "witself.transcript.get", args: map[string]any{"transcript_id": "trn_1", "after_sequence": 4, "limit": 25}},
 		{name: "witself.transcript.tail", args: map[string]any{"transcript_id": "trn_1", "limit": 7}},

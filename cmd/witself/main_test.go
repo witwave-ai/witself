@@ -202,6 +202,50 @@ func TestSelfShowUsesAgentToken(t *testing.T) {
 	}
 }
 
+func TestFactSetAndListUseAgentToken(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_scott" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/facts":
+			var body client.SetFactInput
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Subject != "self" || body.Predicate != "preferences/editor" || string(body.Value) != `"vim"` {
+				t.Errorf("body = %#v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"fact":{"id":"fact_1","subject":"self","predicate":"preferences/editor","value_type":"string","value":"vim"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/facts":
+			if r.URL.Query().Get("predicate_prefix") != "preferences" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"facts":[{"id":"fact_1","subject":"self","predicate":"preferences/editor","value_type":"string","value":"vim","updated_at":"2026-07-12T00:00:00Z"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "preferences/editor", "vim"}); code != 0 {
+		t.Fatalf("fact set code = %d", code)
+	}
+	if code := run([]string{"fact", "list", "--endpoint", srv.URL, "--token-file", tokenFile, "--category", "preferences"}); code != 0 {
+		t.Fatalf("fact list code = %d", code)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestConnectAgentResolvesManagedAccountAndCanonicalToken(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("WITSELF_AGENT", "scott")

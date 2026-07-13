@@ -224,6 +224,51 @@ func serve() int {
 			}
 			return toServerUsageReport(report), nil
 		}
+		cfg.SetFact = func(ctx context.Context, p server.DomainPrincipal, in server.SetFactRequest) (server.Fact, error) {
+			fact, err := st.SetFact(ctx, toStorePrincipal(p), store.SetFactInput{
+				Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType,
+				Value: in.Value, Cardinality: in.Cardinality, Sensitive: in.Sensitive,
+				SourceKind: store.FactSourceAgent, SourceRef: in.SourceRef, Confidence: in.Confidence,
+				ObservedAt: in.ObservedAt, ConfirmedAt: in.ConfirmedAt,
+				ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil,
+			})
+			if err != nil {
+				return server.Fact{}, mapFactError(err)
+			}
+			return toServerFact(fact), nil
+		}
+		cfg.GetFact = func(ctx context.Context, p server.DomainPrincipal, subject, predicate string) (server.Fact, error) {
+			fact, err := st.GetFact(ctx, toStorePrincipal(p), subject, predicate)
+			if err != nil {
+				return server.Fact{}, mapFactError(err)
+			}
+			return toServerFact(fact), nil
+		}
+		cfg.ListFacts = func(ctx context.Context, p server.DomainPrincipal, opts server.FactListOptions) ([]server.Fact, error) {
+			facts, err := st.ListFacts(ctx, toStorePrincipal(p), store.FactListOptions{
+				Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix,
+				Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive,
+			})
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.Fact, len(facts))
+			for i, fact := range facts {
+				out[i] = toServerFact(fact)
+			}
+			return out, nil
+		}
+		cfg.GetFactHistory = func(ctx context.Context, p server.DomainPrincipal, factID string) ([]server.FactAssertion, error) {
+			assertions, err := st.FactHistory(ctx, toStorePrincipal(p), factID)
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.FactAssertion, len(assertions))
+			for i, assertion := range assertions {
+				out[i] = toServerFactAssertion(assertion)
+			}
+			return out, nil
+		}
 		cfg.SendMessage = func(ctx context.Context, p server.DomainPrincipal, in server.SendMessageRequest) (server.Message, error) {
 			if in.To.Kind != "agent" {
 				return server.Message{}, fmt.Errorf("%w: to.kind must be agent", server.ErrBadInput)
@@ -1140,6 +1185,21 @@ func mapMessageError(err error) error {
 	}
 }
 
+func mapFactError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrFactInputInvalid):
+		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
+	case errors.Is(err, store.ErrFactNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrFactForbidden), errors.Is(err, store.ErrAccountNotActive):
+		return server.ErrForbidden
+	default:
+		return err
+	}
+}
+
 func toStorePrincipal(p server.DomainPrincipal) store.Principal {
 	return store.Principal{
 		Kind:          p.Kind,
@@ -1183,6 +1243,26 @@ func toServerTranscript(tr store.Transcript) server.Transcript {
 		Metadata:     tr.Metadata,
 		CreatedAt:    tr.CreatedAt,
 		UpdatedAt:    tr.UpdatedAt,
+	}
+}
+
+func toServerFact(f store.Fact) server.Fact {
+	return server.Fact{
+		ID: f.ID, SubjectID: f.SubjectID, Subject: f.Subject,
+		Predicate: f.Predicate, Cardinality: f.Cardinality, Sensitive: f.Sensitive,
+		ResolvedAssertionID: f.ResolvedAssertionID, ValueType: f.ValueType, Value: f.Value,
+		SourceKind: f.SourceKind, SourceRef: f.SourceRef, Confidence: f.Confidence,
+		ObservedAt: f.ObservedAt, ConfirmedAt: f.ConfirmedAt, ValidFrom: f.ValidFrom,
+		ValidUntil: f.ValidUntil, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
+	}
+}
+
+func toServerFactAssertion(a store.FactAssertion) server.FactAssertion {
+	return server.FactAssertion{
+		ID: a.ID, FactID: a.FactID, ValueType: a.ValueType, Value: a.Value,
+		SourceKind: a.SourceKind, SourceRef: a.SourceRef, Confidence: a.Confidence,
+		ObservedAt: a.ObservedAt, ConfirmedAt: a.ConfirmedAt, ValidFrom: a.ValidFrom,
+		ValidUntil: a.ValidUntil, SupersedesID: a.SupersedesID, CreatedAt: a.CreatedAt,
 	}
 }
 

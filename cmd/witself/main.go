@@ -60,6 +60,8 @@ func run(args []string) int {
 		return selfCmd(args[1:])
 	case "usage":
 		return usageCmd(args[1:])
+	case "fact":
+		return factCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
 	case "message":
@@ -2581,6 +2583,199 @@ func parseUsageStart(raw string, now time.Time) (time.Time, error) {
 	return now.Add(-duration), nil
 }
 
+func factCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history ...")
+		return 2
+	}
+	switch args[0] {
+	case "set":
+		return factSet(args[1:])
+	case "get":
+		return factGet(args[1:])
+	case "list":
+		return factList(args[1:])
+	case "history":
+		return factHistory(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself: unknown fact command %q\n", args[0])
+		return 2
+	}
+}
+
+func factConnectionFlags(fs *flag.FlagSet) (*string, *string, *string, *string, *string) {
+	account := accountFlag(fs)
+	realm := fs.String("realm", "", `local realm name (default: WITSELF_REALM or "default")`)
+	agent := fs.String("agent", "", "local agent name (default: WITSELF_AGENT)")
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent token")
+	return account, realm, agent, endpoint, tokenFile
+}
+
+func factSet(args []string) int {
+	fs := flag.NewFlagSet("fact set", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	subject := fs.String("subject", "self", "stable subject key")
+	valueType := fs.String("type", "", "logical value type (inferred when omitted)")
+	cardinality := fs.String("cardinality", "one", "one, many, or one_at_a_time")
+	sensitive := fs.Bool("sensitive", false, "redact the value in broad listings")
+	jsonValue := fs.Bool("json-value", false, "parse VALUE as JSON instead of a string")
+	sourceRef := fs.String("source-ref", "", "evidence reference such as a transcript entry")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact set [flags] PREDICATE VALUE")
+		return 2
+	}
+	value := json.RawMessage(nil)
+	if *jsonValue {
+		value = json.RawMessage(fs.Arg(1))
+		if !json.Valid(value) {
+			fmt.Fprintln(os.Stderr, "witself: VALUE is not valid JSON")
+			return 2
+		}
+	} else {
+		value, _ = json.Marshal(fs.Arg(1))
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	fact, err := client.SetFact(ctx, conn.Endpoint, conn.Token, client.SetFactInput{
+		Subject: *subject, Predicate: fs.Arg(0), ValueType: *valueType, Value: value,
+		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(fact)
+	}
+	fmt.Printf("%s\t%s\t%s\n", fact.Subject, fact.Predicate, string(fact.Value))
+	return 0
+}
+
+func factGet(args []string) int {
+	fs := flag.NewFlagSet("fact get", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	subject := fs.String("subject", "self", "stable subject key")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact get [flags] PREDICATE")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	fact, err := client.GetFact(ctx, conn.Endpoint, conn.Token, *subject, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(fact)
+	}
+	fmt.Println(string(fact.Value))
+	return 0
+}
+
+func factList(args []string) int {
+	fs := flag.NewFlagSet("fact list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	subject := fs.String("subject", "", "filter by stable subject key")
+	category := fs.String("category", "", "filter by predicate namespace")
+	limit := fs.Int("limit", 100, "maximum facts to return")
+	includeSensitive := fs.Bool("include-sensitive", false, "include sensitive values")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact list [flags]")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	facts, err := client.ListFacts(ctx, conn.Endpoint, conn.Token, client.FactListOptions{
+		Subject: *subject, PredicatePrefix: *category, Limit: *limit, IncludeSensitive: *includeSensitive,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"facts": facts})
+	}
+	if len(facts) == 0 {
+		fmt.Fprintln(os.Stderr, "no facts")
+		return 0
+	}
+	w, flush := tableWriter("subject\tpredicate\tvalue\ttype\tsource\tupdated")
+	for _, fact := range facts {
+		value := string(fact.Value)
+		if fact.Sensitive && value == "null" {
+			value = "[redacted]"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fact.Subject, fact.Predicate,
+			tabSafe(value), fact.ValueType, fact.SourceKind, fact.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+	flush()
+	return 0
+}
+
+func factHistory(args []string) int {
+	fs := flag.NewFlagSet("fact history", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact history [flags] FACT_ID")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	assertions, err := client.GetFactHistory(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"assertions": assertions})
+	}
+	w, flush := tableWriter("created\tvalue\ttype\tsource\tsupersedes")
+	for _, assertion := range assertions {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", assertion.CreatedAt.UTC().Format(time.RFC3339),
+			tabSafe(string(assertion.Value)), assertion.ValueType, assertion.SourceKind, assertion.SupersedesID)
+	}
+	flush()
+	return 0
+}
+
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail ...")
@@ -2847,6 +3042,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
+	usageLine(w, "  witself fact set|get|list|history  Store and review durable facts")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")

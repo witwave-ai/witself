@@ -22,8 +22,10 @@ plane.
   capability-gated surfaces, non-goals, and exit criteria.
 - [memory-model.md](memory-model.md): the memory payload, lifecycle, edit
   history, semantic recall, and the embedding-provider abstraction.
-- [facts-model.md](facts-model.md): name→value facts, deterministic lookup,
-  primary promotion, and sensitivity/redaction posture.
+- [facts-model.md](facts-model.md): planned fact capabilities and the transition
+  from the original name/value identity-card draft.
+- [fact-service.md](fact-service.md): the implemented subject/predicate core,
+  typed assertions, provenance/history, CLI/API/MCP surfaces, and deferred work.
 - [secret-model.md](secret-model.md): the sealed-plane secret data model and
   lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
   templates, references, password generation, runtime injection, and the

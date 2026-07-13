@@ -108,6 +108,25 @@ var importColumns = map[string]map[string]bool{
 		"bucket_start": true, "quantity": true, "event_count": true,
 		"updated_at": true,
 	},
+	"fact_subjects": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "canonical_key": true,
+		"display_name": true, "aliases": true,
+		"created_at": true, "updated_at": true,
+	},
+	"facts": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "subject_id": true, "predicate": true,
+		"cardinality": true, "sensitive": true, "resolved_assertion_id": true,
+		"created_at": true, "updated_at": true,
+	},
+	"fact_assertions": {
+		"id": true, "fact_id": true, "account_id": true, "realm_id": true,
+		"asserted_by_agent_id": true, "value_type": true, "value": true,
+		"source_kind": true, "source_ref": true, "confidence": true,
+		"observed_at": true, "confirmed_at": true, "valid_from": true,
+		"valid_until": true, "supersedes_id": true, "created_at": true,
+	},
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
 		"from_agent_id": true, "to_agent_id": true,
@@ -132,37 +151,49 @@ type messageImportScope struct {
 	toAgentID   string
 }
 
+type factImportScope struct {
+	realmID             string
+	ownerAgentID        string
+	resolvedAssertionID string
+}
+
 // importCtx accumulates per-import state: how many accounts rows we have seen
 // (must be exactly one), and the set of ids inserted for each table. The FK
 // targets an incoming row references (agents.realm_id, tokens.operator_id,
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID   string
-	accounts    int
-	operators   map[string]bool
-	realms      map[string]bool
-	agents      map[string]bool
-	agentRealms map[string]string
-	tickets     map[string]bool
-	transcripts map[string]transcriptImportScope
-	entries     map[string]string
-	messages    map[string]messageImportScope
-	deliveries  map[string]bool
+	accountID    string
+	accounts     int
+	operators    map[string]bool
+	realms       map[string]bool
+	agents       map[string]bool
+	agentRealms  map[string]string
+	tickets      map[string]bool
+	transcripts  map[string]transcriptImportScope
+	entries      map[string]string
+	factSubjects map[string]factImportScope
+	facts        map[string]factImportScope
+	assertions   map[string]string
+	messages     map[string]messageImportScope
+	deliveries   map[string]bool
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID:   accountID,
-		operators:   map[string]bool{},
-		realms:      map[string]bool{},
-		agents:      map[string]bool{},
-		agentRealms: map[string]string{},
-		tickets:     map[string]bool{},
-		transcripts: map[string]transcriptImportScope{},
-		entries:     map[string]string{},
-		messages:    map[string]messageImportScope{},
-		deliveries:  map[string]bool{},
+		accountID:    accountID,
+		operators:    map[string]bool{},
+		realms:       map[string]bool{},
+		agents:       map[string]bool{},
+		agentRealms:  map[string]string{},
+		tickets:      map[string]bool{},
+		transcripts:  map[string]transcriptImportScope{},
+		entries:      map[string]string{},
+		factSubjects: map[string]factImportScope{},
+		facts:        map[string]factImportScope{},
+		assertions:   map[string]string{},
+		messages:     map[string]messageImportScope{},
+		deliveries:   map[string]bool{},
 	}
 }
 
@@ -183,6 +214,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"support_tickets", "support_ticket_messages",
 		"transcript_conversations", "transcript_entries",
 		"usage_events", "usage_rollups",
+		"fact_subjects", "facts", "fact_assertions",
 		"agent_messages", "agent_message_deliveries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
@@ -274,6 +306,56 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if agID, present := optionalStringField(obj, "agent_id"); present && !ic.agents[agID] {
 			return badf("tokens row references agent %q not present in this archive", agID)
 		}
+	case "fact_subjects":
+		realmID, err := requireStringField(obj, "realm_id")
+		agentID, agentErr := requireStringField(obj, "owner_agent_id")
+		if err != nil || agentErr != nil || !ic.agents[agentID] || ic.agentRealms[agentID] != realmID {
+			return badf("fact_subjects row owner %q is outside realm %q", agentID, realmID)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("fact_subjects row missing id")
+		}
+		ic.factSubjects[id] = factImportScope{realmID: realmID, ownerAgentID: agentID}
+	case "facts":
+		subjectID, err := requireStringField(obj, "subject_id")
+		scope, ok := ic.factSubjects[subjectID]
+		if err != nil || !ok {
+			return badf("facts row references subject %q not present in this archive", subjectID)
+		}
+		realmID, _ := requireStringField(obj, "realm_id")
+		agentID, _ := requireStringField(obj, "owner_agent_id")
+		if realmID != scope.realmID || agentID != scope.ownerAgentID {
+			return badf("facts row scope does not match subject %q", subjectID)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("facts row missing id")
+		}
+		resolvedID, _ := optionalStringField(obj, "resolved_assertion_id")
+		scope.resolvedAssertionID = resolvedID
+		ic.facts[id] = scope
+	case "fact_assertions":
+		factID, err := requireStringField(obj, "fact_id")
+		scope, ok := ic.facts[factID]
+		if err != nil || !ok {
+			return badf("fact_assertions row references fact %q not present in this archive", factID)
+		}
+		realmID, _ := requireStringField(obj, "realm_id")
+		if realmID != scope.realmID {
+			return badf("fact_assertions row realm does not match fact %q", factID)
+		}
+		if agentID, present := optionalStringField(obj, "asserted_by_agent_id"); present && agentID != scope.ownerAgentID {
+			return badf("fact_assertions row actor %q does not own fact %q", agentID, factID)
+		}
+		if prior, present := optionalStringField(obj, "supersedes_id"); present && ic.assertions[prior] != factID {
+			return badf("fact_assertions row supersedes %q outside fact %q", prior, factID)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil {
+			return badf("fact_assertions row missing id")
+		}
+		ic.assertions[id] = factID
 	case "account_events":
 		// The account_id scoping check already ran in the first switch;
 		// no downstream table references account_events, so nothing to
@@ -353,6 +435,16 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			realmID, _ := stringField(obj, "realm_id")
 			if subjectType != "transcript" || !ok || scope.ownerAgentID != agentID || scope.realmID != realmID {
 				return badf("usage_events row transcript subject %q does not belong to its agent scope", subjectID)
+			}
+		}
+		if strings.HasPrefix(dimension, "fact_") {
+			subjectType, _ := stringField(obj, "subject_type")
+			subjectID, _ := stringField(obj, "subject_id")
+			scope, ok := ic.facts[subjectID]
+			agentID, _ := stringField(obj, "agent_id")
+			realmID, _ := stringField(obj, "realm_id")
+			if subjectType != "fact" || !ok || scope.ownerAgentID != agentID || scope.realmID != realmID {
+				return badf("usage_events row fact subject %q does not belong to its agent scope", subjectID)
 			}
 		}
 	case "usage_rollups":
@@ -505,6 +597,11 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	for messageID := range ic.messages {
 		if !ic.deliveries[messageID] {
 			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
+		}
+	}
+	for factID, scope := range ic.facts {
+		if scope.resolvedAssertionID == "" || ic.assertions[scope.resolvedAssertionID] != factID {
+			return export.Manifest{}, fmt.Errorf("%w: fact %q has no valid resolved assertion", ErrArchiveContent, factID)
 		}
 	}
 	if err := validateImportedUsageRollups(ctx, tx, m.AccountID); err != nil {
