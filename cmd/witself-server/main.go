@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -227,7 +228,7 @@ func serve() int {
 		cfg.SetFact = func(ctx context.Context, p server.DomainPrincipal, in server.SetFactRequest) (server.Fact, error) {
 			fact, err := st.SetFact(ctx, toStorePrincipal(p), store.SetFactInput{
 				Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType,
-				Value: in.Value, Cardinality: in.Cardinality, Sensitive: in.Sensitive,
+				Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive,
 				SourceKind: store.FactSourceAgent, SourceRef: in.SourceRef, Confidence: in.Confidence,
 				ObservedAt: in.ObservedAt, ConfirmedAt: in.ConfirmedAt,
 				ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil,
@@ -245,9 +246,15 @@ func serve() int {
 			return toServerFact(fact), nil
 		}
 		cfg.ListFacts = func(ctx context.Context, p server.DomainPrincipal, opts server.FactListOptions) ([]server.Fact, error) {
+			retrievalMode := store.FactRetrievalModeSearch
+			if opts.RetrievalMode != "" {
+				retrievalMode = store.FactRetrievalMode(opts.RetrievalMode)
+			}
 			facts, err := st.ListFacts(ctx, toStorePrincipal(p), store.FactListOptions{
 				Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix,
 				Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive,
+				OrderByUsage: opts.OrderByUsage, UnusedOnly: opts.UnusedOnly,
+				RetrievalMode: retrievalMode,
 			})
 			if err != nil {
 				return nil, mapFactError(err)
@@ -266,6 +273,123 @@ func serve() int {
 			out := make([]server.FactAssertion, len(assertions))
 			for i, assertion := range assertions {
 				out[i] = toServerFactAssertion(assertion)
+			}
+			return out, nil
+		}
+		cfg.ProposeFact = func(ctx context.Context, p server.DomainPrincipal, in server.ProposeFactRequest) (server.FactCandidate, error) {
+			c, err := st.ProposeFact(ctx, toStorePrincipal(p), store.ProposeFactInput{SetFactInput: store.SetFactInput{Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType, Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive, SourceKind: store.FactSourceInference, SourceRef: in.SourceRef, Confidence: in.Confidence, ObservedAt: in.ObservedAt, ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil}, Reason: in.Reason})
+			if err != nil {
+				return server.FactCandidate{}, mapFactError(err)
+			}
+			return toServerFactCandidate(c), nil
+		}
+		cfg.GetFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id string) (server.FactCandidate, error) {
+			c, err := st.GetFactCandidate(ctx, toStorePrincipal(p), id)
+			if err != nil {
+				return server.FactCandidate{}, mapFactError(err)
+			}
+			return toServerFactCandidate(c), nil
+		}
+		cfg.ListFactCandidates = func(ctx context.Context, p server.DomainPrincipal, opts server.FactCandidateListOptions) ([]server.FactCandidate, error) {
+			rows, err := st.ListFactCandidatesWithOptions(ctx, toStorePrincipal(p), store.FactCandidateListOptions{Status: opts.Status, Limit: opts.Limit})
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.FactCandidate, len(rows))
+			for i := range rows {
+				out[i] = toServerFactCandidate(rows[i])
+			}
+			return out, nil
+		}
+		cfg.ConfirmFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id string) (server.Fact, error) {
+			f, err := st.ConfirmFactCandidate(ctx, toStorePrincipal(p), id)
+			if err != nil {
+				return server.Fact{}, mapFactError(err)
+			}
+			return toServerFact(f), nil
+		}
+		cfg.RejectFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id string) (server.FactCandidate, error) {
+			c, err := st.RejectFactCandidate(ctx, toStorePrincipal(p), id)
+			if err != nil {
+				return server.FactCandidate{}, mapFactError(err)
+			}
+			return toServerFactCandidate(c), nil
+		}
+		cfg.UpsertFactSubject = func(ctx context.Context, p server.DomainPrincipal, canonicalKey string, in server.UpsertFactSubjectRequest) (server.FactSubject, error) {
+			subject, err := st.UpsertFactSubject(ctx, toStorePrincipal(p), store.UpsertFactSubjectInput{
+				CanonicalKey: canonicalKey,
+				DisplayName:  in.DisplayName,
+			})
+			if err != nil {
+				return server.FactSubject{}, mapFactError(err)
+			}
+			return toServerFactSubject(subject), nil
+		}
+		cfg.AddFactSubjectAlias = func(ctx context.Context, p server.DomainPrincipal, canonicalKey, alias string) (server.FactSubject, error) {
+			subject, err := st.AddFactSubjectAlias(ctx, toStorePrincipal(p), canonicalKey, alias)
+			if err != nil {
+				return server.FactSubject{}, mapFactError(err)
+			}
+			return toServerFactSubject(subject), nil
+		}
+		cfg.ListFactSubjects = func(ctx context.Context, p server.DomainPrincipal) ([]server.FactSubject, error) {
+			subjects, err := st.ListFactSubjects(ctx, toStorePrincipal(p))
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.FactSubject, len(subjects))
+			for i, subject := range subjects {
+				out[i] = toServerFactSubject(subject)
+			}
+			return out, nil
+		}
+		cfg.GetSelfFacts = func(ctx context.Context, p server.DomainPrincipal, limit int) ([]server.SelfFact, int, error) {
+			principal := toStorePrincipal(p)
+			opts := store.FactListOptions{
+				Subject:       "self",
+				Limit:         limit,
+				OrderByUsage:  true,
+				RetrievalMode: store.FactRetrievalModeSelfHydration,
+			}
+			facts, err := st.ListFacts(ctx, principal, opts)
+			if err != nil {
+				return nil, 0, mapFactError(err)
+			}
+			total, err := st.CountFacts(ctx, principal, opts)
+			if err != nil {
+				return nil, 0, mapFactError(err)
+			}
+			out := make([]server.SelfFact, len(facts))
+			for i, f := range facts {
+				var value any
+				_ = json.Unmarshal(f.Value, &value)
+				out[i] = server.SelfFact{ID: f.ID, Name: f.Predicate, Value: value, Primary: true, Sensitive: f.Sensitive, Redacted: f.Sensitive, Source: f.SourceKind}
+			}
+			return out, total, nil
+		}
+		cfg.CountSelfFacts = func(ctx context.Context, p server.DomainPrincipal) (int, error) {
+			count, err := st.CountFacts(ctx, toStorePrincipal(p), store.FactListOptions{Subject: "self"})
+			if err != nil {
+				return 0, mapFactError(err)
+			}
+			return count, nil
+		}
+		cfg.UpcomingFacts = func(ctx context.Context, p server.DomainPrincipal, opts server.UpcomingFactOptions) ([]server.FactOccurrence, error) {
+			loc := time.UTC
+			var err error
+			if opts.Timezone != "" {
+				loc, err = time.LoadLocation(opts.Timezone)
+				if err != nil {
+					return nil, fmt.Errorf("%w: invalid timezone", server.ErrBadInput)
+				}
+			}
+			rows, err := st.UpcomingFacts(ctx, toStorePrincipal(p), store.UpcomingFactOptions{From: opts.From, Until: opts.Until, Location: loc, Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix, Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive})
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.FactOccurrence, len(rows))
+			for i, row := range rows {
+				out[i] = server.FactOccurrence{Fact: toServerFact(row.Fact), OccursOn: row.OccursOn, OccursAt: row.OccursAt}
 			}
 			return out, nil
 		}
@@ -1193,7 +1317,9 @@ func mapFactError(err error) error {
 		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
 	case errors.Is(err, store.ErrFactNotFound):
 		return server.ErrNotFound
-	case errors.Is(err, store.ErrFactForbidden), errors.Is(err, store.ErrAccountNotActive):
+	case errors.Is(err, store.ErrFactConflict):
+		return server.ErrConflict
+	case errors.Is(err, store.ErrFactForbidden), errors.Is(err, store.ErrAccountNotActive), errors.Is(err, store.ErrAgentNotFound):
 		return server.ErrForbidden
 	default:
 		return err
@@ -1251,18 +1377,36 @@ func toServerFact(f store.Fact) server.Fact {
 		ID: f.ID, SubjectID: f.SubjectID, Subject: f.Subject,
 		Predicate: f.Predicate, Cardinality: f.Cardinality, Sensitive: f.Sensitive,
 		ResolvedAssertionID: f.ResolvedAssertionID, ValueType: f.ValueType, Value: f.Value,
+		Recurrence: f.Recurrence,
 		SourceKind: f.SourceKind, SourceRef: f.SourceRef, Confidence: f.Confidence,
 		ObservedAt: f.ObservedAt, ConfirmedAt: f.ConfirmedAt, ValidFrom: f.ValidFrom,
 		ValidUntil: f.ValidUntil, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
+		UsageCount: f.UsageCount, LastUsedAt: f.LastUsedAt,
 	}
 }
 
 func toServerFactAssertion(a store.FactAssertion) server.FactAssertion {
 	return server.FactAssertion{
 		ID: a.ID, FactID: a.FactID, ValueType: a.ValueType, Value: a.Value,
+		Recurrence: a.Recurrence,
 		SourceKind: a.SourceKind, SourceRef: a.SourceRef, Confidence: a.Confidence,
 		ObservedAt: a.ObservedAt, ConfirmedAt: a.ConfirmedAt, ValidFrom: a.ValidFrom,
 		ValidUntil: a.ValidUntil, SupersedesID: a.SupersedesID, CreatedAt: a.CreatedAt,
+	}
+}
+
+func toServerFactCandidate(c store.FactCandidate) server.FactCandidate {
+	return server.FactCandidate{ID: c.ID, Subject: c.Subject, Predicate: c.Predicate, ValueType: c.ValueType, Value: c.Value, Recurrence: c.Recurrence, Cardinality: c.Cardinality, Sensitive: c.Sensitive, SourceRef: c.SourceRef, Confidence: c.Confidence, ObservedAt: c.ObservedAt, ValidFrom: c.ValidFrom, ValidUntil: c.ValidUntil, Reason: c.Reason, Status: c.Status, ConflictFactID: c.ConflictFactID, ObservedAssertionID: c.ObservedAssertionID, ResolvedFactID: c.ResolvedFactID, ProposedAt: c.ProposedAt, DecidedAt: c.DecidedAt}
+}
+
+func toServerFactSubject(s store.FactSubject) server.FactSubject {
+	return server.FactSubject{
+		ID:           s.ID,
+		CanonicalKey: s.CanonicalKey,
+		DisplayName:  s.DisplayName,
+		Aliases:      s.Aliases,
+		CreatedAt:    s.CreatedAt,
+		UpdatedAt:    s.UpdatedAt,
 	}
 }
 

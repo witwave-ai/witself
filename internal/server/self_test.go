@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +91,104 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
 			}
 		})
+	}
+}
+
+func TestSelfDigestHydratesFacts(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: auth, GetSelfFacts: func(_ context.Context, _ DomainPrincipal, limit int) ([]SelfFact, int, error) {
+		if limit != 50 {
+			t.Fatalf("limit=%d", limit)
+		}
+		return []SelfFact{{ID: "fact_1", Name: "preferences/editor", Value: "vim"}}, 3, nil
+	}}))
+	defer srv.Close()
+	resp := selfRequest(t, srv.URL+"/v1/self?include_facts=true", "token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PrimaryFacts) != 1 || !digest.PrimaryFacts[0].Primary || digest.Index.Counts["facts"] != 3 || !digest.Elided {
+		t.Fatalf("digest=%+v", digest)
+	}
+}
+
+func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
+	}
+	facts := make([]SelfFact, 8)
+	for i := range facts {
+		facts[i] = SelfFact{ID: "fact_" + strings.Repeat("x", 20), Name: "profile/description", Value: strings.Repeat("v", 300)}
+	}
+	srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: auth, GetSelfFacts: func(context.Context, DomainPrincipal, int) ([]SelfFact, int, error) {
+		return facts, len(facts), nil
+	}}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?max_bytes=1024", "token")
+	defer closeBody(t, resp)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > 1024 {
+		t.Fatalf("encoded digest is %d bytes, want <= 1024", len(body))
+	}
+	var digest SelfDigest
+	if err := json.Unmarshal(body, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if !digest.Elided || len(digest.PrimaryFacts) >= len(facts) || digest.Index.Counts["facts"] != len(facts) {
+		t.Fatalf("bounded digest = %+v", digest)
+	}
+}
+
+func TestSelfDigestReportsCountWhenFactsExcludedAndRedactsSensitiveValues(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
+	}
+	getCalls := 0
+	getFacts := func(context.Context, DomainPrincipal, int) ([]SelfFact, int, error) {
+		getCalls++
+		return []SelfFact{{ID: "fact_secret", Name: "identity/private", Value: "must-not-leak", Sensitive: true}}, 7, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfFacts:          getFacts,
+		CountSelfFacts: func(context.Context, DomainPrincipal) (int, error) {
+			return 7, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_facts=true", "token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PrimaryFacts) != 1 || digest.PrimaryFacts[0].Value != nil || !digest.PrimaryFacts[0].Redacted {
+		t.Fatalf("sensitive fact was not redacted: %+v", digest.PrimaryFacts)
+	}
+	if digest.Index.Counts["facts"] != 7 {
+		t.Fatalf("fact count = %d, want 7", digest.Index.Counts["facts"])
+	}
+
+	resp = selfRequest(t, srv.URL+"/v1/self?include_facts=false", "token")
+	defer closeBody(t, resp)
+	digest = SelfDigest{}
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PrimaryFacts) != 0 || digest.Index.Counts["facts"] != 7 || digest.Elided {
+		t.Fatalf("excluded-facts digest = %+v", digest)
+	}
+	if getCalls != 1 {
+		t.Fatalf("fact values loaded %d times, want only the included request", getCalls)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -123,9 +124,21 @@ var importColumns = map[string]map[string]bool{
 	"fact_assertions": {
 		"id": true, "fact_id": true, "account_id": true, "realm_id": true,
 		"asserted_by_agent_id": true, "value_type": true, "value": true,
+		"recurrence":  true,
 		"source_kind": true, "source_ref": true, "confidence": true,
 		"observed_at": true, "confirmed_at": true, "valid_from": true,
 		"valid_until": true, "supersedes_id": true, "created_at": true,
+	},
+	"fact_candidates": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "subject_key": true, "predicate": true,
+		"value_type": true, "value": true, "cardinality": true,
+		"recurrence": true,
+		"sensitive":  true, "source_ref": true, "confidence": true,
+		"observed_at": true, "valid_from": true, "valid_until": true,
+		"reason": true, "status": true, "conflict_fact_id": true,
+		"observed_assertion_id": true,
+		"resolved_fact_id":      true, "proposed_at": true, "decided_at": true,
 	},
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -163,37 +176,39 @@ type factImportScope struct {
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID    string
-	accounts     int
-	operators    map[string]bool
-	realms       map[string]bool
-	agents       map[string]bool
-	agentRealms  map[string]string
-	tickets      map[string]bool
-	transcripts  map[string]transcriptImportScope
-	entries      map[string]string
-	factSubjects map[string]factImportScope
-	facts        map[string]factImportScope
-	assertions   map[string]string
-	messages     map[string]messageImportScope
-	deliveries   map[string]bool
+	accountID        string
+	accounts         int
+	operators        map[string]bool
+	realms           map[string]bool
+	agents           map[string]bool
+	agentRealms      map[string]string
+	tickets          map[string]bool
+	transcripts      map[string]transcriptImportScope
+	entries          map[string]string
+	factSubjects     map[string]factImportScope
+	factSubjectNames map[string]map[string]string
+	facts            map[string]factImportScope
+	assertions       map[string]string
+	messages         map[string]messageImportScope
+	deliveries       map[string]bool
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID:    accountID,
-		operators:    map[string]bool{},
-		realms:       map[string]bool{},
-		agents:       map[string]bool{},
-		agentRealms:  map[string]string{},
-		tickets:      map[string]bool{},
-		transcripts:  map[string]transcriptImportScope{},
-		entries:      map[string]string{},
-		factSubjects: map[string]factImportScope{},
-		facts:        map[string]factImportScope{},
-		assertions:   map[string]string{},
-		messages:     map[string]messageImportScope{},
-		deliveries:   map[string]bool{},
+		accountID:        accountID,
+		operators:        map[string]bool{},
+		realms:           map[string]bool{},
+		agents:           map[string]bool{},
+		agentRealms:      map[string]string{},
+		tickets:          map[string]bool{},
+		transcripts:      map[string]transcriptImportScope{},
+		entries:          map[string]string{},
+		factSubjects:     map[string]factImportScope{},
+		factSubjectNames: map[string]map[string]string{},
+		facts:            map[string]factImportScope{},
+		assertions:       map[string]string{},
+		messages:         map[string]messageImportScope{},
+		deliveries:       map[string]bool{},
 	}
 }
 
@@ -214,7 +229,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"support_tickets", "support_ticket_messages",
 		"transcript_conversations", "transcript_entries",
 		"usage_events", "usage_rollups",
-		"fact_subjects", "facts", "fact_assertions",
+		"fact_subjects", "facts", "fact_assertions", "fact_candidates",
 		"agent_messages", "agent_message_deliveries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
@@ -316,6 +331,25 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("fact_subjects row missing id")
 		}
+		canonicalKey, err := validateImportedFactSubjectContent(obj)
+		if err != nil {
+			return badf("fact_subjects row %v", err)
+		}
+		namespace := ic.factSubjectNames[agentID]
+		if namespace == nil {
+			namespace = map[string]string{}
+			ic.factSubjectNames[agentID] = namespace
+		}
+		names := []string{canonicalKey}
+		for _, raw := range obj["aliases"].([]any) {
+			names = append(names, raw.(string))
+		}
+		for _, name := range names {
+			if existing := namespace[name]; existing != "" && existing != id {
+				return badf("fact_subjects row name %q conflicts with subject %q", name, existing)
+			}
+			namespace[name] = id
+		}
 		ic.factSubjects[id] = factImportScope{realmID: realmID, ownerAgentID: agentID}
 	case "facts":
 		subjectID, err := requireStringField(obj, "subject_id")
@@ -348,6 +382,9 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if agentID, present := optionalStringField(obj, "asserted_by_agent_id"); present && agentID != scope.ownerAgentID {
 			return badf("fact_assertions row actor %q does not own fact %q", agentID, factID)
 		}
+		if err := validateImportedFactAssertionContent(obj); err != nil {
+			return badf("fact_assertions row %v", err)
+		}
 		if prior, present := optionalStringField(obj, "supersedes_id"); present && ic.assertions[prior] != factID {
 			return badf("fact_assertions row supersedes %q outside fact %q", prior, factID)
 		}
@@ -356,6 +393,36 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("fact_assertions row missing id")
 		}
 		ic.assertions[id] = factID
+	case "fact_candidates":
+		realmID, err := requireStringField(obj, "realm_id")
+		agentID, agentErr := requireStringField(obj, "owner_agent_id")
+		if err != nil || agentErr != nil || !ic.agents[agentID] || ic.agentRealms[agentID] != realmID {
+			return badf("fact_candidates row owner %q is outside realm %q", agentID, realmID)
+		}
+		if err := validateImportedFactCandidateContent(obj); err != nil {
+			return badf("fact_candidates row %v", err)
+		}
+		for _, field := range []string{"conflict_fact_id", "resolved_fact_id"} {
+			factID, present := optionalStringField(obj, field)
+			if !present {
+				continue
+			}
+			scope, ok := ic.facts[factID]
+			if !ok || scope.realmID != realmID || scope.ownerAgentID != agentID {
+				return badf("fact_candidates row %s %q is outside its agent scope", field, factID)
+			}
+		}
+		observedAssertionID, observed := optionalStringField(obj, "observed_assertion_id")
+		if observed {
+			factID, ok := ic.assertions[observedAssertionID]
+			scope, scoped := ic.facts[factID]
+			if !ok || !scoped || scope.realmID != realmID || scope.ownerAgentID != agentID {
+				return badf("fact_candidates row observed_assertion_id %q is outside its agent scope", observedAssertionID)
+			}
+			if conflictFactID, conflict := optionalStringField(obj, "conflict_fact_id"); conflict && factID != conflictFactID {
+				return badf("fact_candidates row observed_assertion_id %q does not belong to conflict fact %q", observedAssertionID, conflictFactID)
+			}
+		}
 	case "account_events":
 		// The account_id scoping check already ran in the first switch;
 		// no downstream table references account_events, so nothing to
@@ -537,6 +604,317 @@ func stringField(obj map[string]any, key string) (string, bool) {
 // valid FK target anyway; the subsequent INSERT will fail its type coercion.
 func optionalStringField(obj map[string]any, key string) (string, bool) {
 	return stringField(obj, key)
+}
+
+func validateImportedFactSubjectContent(obj map[string]any) (string, error) {
+	canonicalKey, ok := obj["canonical_key"].(string)
+	if !ok || !factSubjectPattern.MatchString(canonicalKey) || normalizeFactSubject(canonicalKey) != canonicalKey {
+		return "", fmt.Errorf("canonical_key is invalid")
+	}
+	displayName, ok := obj["display_name"].(string)
+	if !ok || !validFactSubjectDisplayName(displayName) {
+		return "", fmt.Errorf("display_name is invalid")
+	}
+	aliases, ok := obj["aliases"].([]any)
+	if !ok {
+		return "", fmt.Errorf("aliases must be an array of strings")
+	}
+	encodedAliases, err := json.Marshal(aliases)
+	if err != nil || len(encodedAliases) > maxFactSubjectAliasesJSONBytes {
+		return "", fmt.Errorf("aliases exceed the size limit")
+	}
+	seen := map[string]bool{canonicalKey: true}
+	for _, raw := range aliases {
+		alias, ok := raw.(string)
+		if !ok || !validFactSubjectAlias(alias) || normalizeFactSubjectAlias(alias) != alias {
+			return "", fmt.Errorf("aliases must contain normalized strings")
+		}
+		if normalizeFactSubject(alias) == "self" && canonicalKey != "self" {
+			return "", fmt.Errorf("alias %q is reserved for self", alias)
+		}
+		if seen[alias] {
+			return "", fmt.Errorf("alias %q is duplicated", alias)
+		}
+		seen[alias] = true
+	}
+	return canonicalKey, nil
+}
+
+func validateImportedFactAssertionContent(obj map[string]any) error {
+	requiredString := func(key string) (string, error) {
+		value, ok := obj[key].(string)
+		if !ok || value == "" {
+			return "", fmt.Errorf("%s must be a non-empty string", key)
+		}
+		return value, nil
+	}
+	stringValue := func(key string) (string, error) {
+		value, ok := obj[key].(string)
+		if !ok {
+			return "", fmt.Errorf("%s must be a string", key)
+		}
+		return value, nil
+	}
+	parseTimestamp := func(key string, required bool) (*time.Time, error) {
+		raw, present := obj[key]
+		if !present || raw == nil {
+			if required {
+				return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+			}
+			return nil, nil
+		}
+		value, ok := raw.(string)
+		if !ok || value == "" {
+			return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+		}
+		return &parsed, nil
+	}
+
+	valueType, err := requiredString("value_type")
+	if err != nil {
+		return err
+	}
+	recurrence := ""
+	if raw, present := obj["recurrence"]; present {
+		var ok bool
+		recurrence, ok = raw.(string)
+		if !ok {
+			return fmt.Errorf("recurrence must be a string")
+		}
+	}
+	sourceKind, err := requiredString("source_kind")
+	if err != nil {
+		return err
+	}
+	sourceRef, err := stringValue("source_ref")
+	if err != nil {
+		return err
+	}
+	confidence, ok := obj["confidence"].(float64)
+	if !ok {
+		return fmt.Errorf("confidence must be a number")
+	}
+	value, present := obj["value"]
+	if !present {
+		return fmt.Errorf("value is required")
+	}
+	rawValue, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("value is not JSON: %v", err)
+	}
+	observedAt, err := parseTimestamp("observed_at", true)
+	if err != nil {
+		return err
+	}
+	confirmedAt, err := parseTimestamp("confirmed_at", false)
+	if err != nil {
+		return err
+	}
+	validFrom, err := parseTimestamp("valid_from", false)
+	if err != nil {
+		return err
+	}
+	validUntil, err := parseTimestamp("valid_until", false)
+	if err != nil {
+		return err
+	}
+	if _, err := parseTimestamp("created_at", true); err != nil {
+		return err
+	}
+	normalized, err := normalizeSetFactInput(SetFactInput{
+		Subject: "self", Predicate: "archive/value", ValueType: valueType,
+		Value: rawValue, Recurrence: recurrence, Cardinality: FactCardinalityOne,
+		SourceKind: sourceKind, SourceRef: sourceRef, Confidence: &confidence,
+		ObservedAt: *observedAt, ConfirmedAt: confirmedAt,
+		ValidFrom: validFrom, ValidUntil: validUntil,
+	})
+	if err != nil {
+		return err
+	}
+	if normalized.ValueType != valueType || normalized.Recurrence != recurrence ||
+		normalized.SourceKind != sourceKind || !jsonValuesEqual(normalized.Value, rawValue) {
+		return fmt.Errorf("logical content is not canonical")
+	}
+	return nil
+}
+
+func validateImportedFactCandidateContent(obj map[string]any) error {
+	required := func(key string) (string, error) {
+		value, ok := obj[key].(string)
+		if !ok || value == "" {
+			return "", fmt.Errorf("%s must be a non-empty string", key)
+		}
+		return value, nil
+	}
+	stringValue := func(key string) (string, error) {
+		value, ok := obj[key].(string)
+		if !ok {
+			return "", fmt.Errorf("%s must be a string", key)
+		}
+		return value, nil
+	}
+	parseTimestamp := func(key string, required bool) (*time.Time, error) {
+		raw, present := obj[key]
+		if !present || raw == nil {
+			if required {
+				return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+			}
+			return nil, nil
+		}
+		value, ok := raw.(string)
+		if !ok || value == "" {
+			return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return nil, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+		}
+		return &parsed, nil
+	}
+	optionalID := func(key string) (string, bool, error) {
+		raw, present := obj[key]
+		if !present || raw == nil {
+			return "", false, nil
+		}
+		value, ok := raw.(string)
+		if !ok || value == "" {
+			return "", false, fmt.Errorf("%s must be null or a non-empty string", key)
+		}
+		return value, true, nil
+	}
+
+	subject, err := required("subject_key")
+	if err != nil {
+		return err
+	}
+	predicate, err := required("predicate")
+	if err != nil {
+		return err
+	}
+	valueType, err := required("value_type")
+	if err != nil {
+		return err
+	}
+	recurrence := ""
+	if raw, present := obj["recurrence"]; present {
+		var ok bool
+		recurrence, ok = raw.(string)
+		if !ok {
+			return fmt.Errorf("recurrence must be a string")
+		}
+	}
+	cardinality, err := required("cardinality")
+	if err != nil {
+		return err
+	}
+	sourceRef, err := stringValue("source_ref")
+	if err != nil {
+		return err
+	}
+	reason, err := stringValue("reason")
+	if err != nil {
+		return err
+	}
+	if len(reason) > 1024 {
+		return fmt.Errorf("reason exceeds 1024 bytes")
+	}
+	sensitive, ok := obj["sensitive"].(bool)
+	if !ok {
+		return fmt.Errorf("sensitive must be a boolean")
+	}
+	confidence, ok := obj["confidence"].(float64)
+	if !ok {
+		return fmt.Errorf("confidence must be a number")
+	}
+	value, present := obj["value"]
+	if !present {
+		return fmt.Errorf("value is required")
+	}
+	rawValue, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("value is not JSON: %v", err)
+	}
+	observedAt, err := parseTimestamp("observed_at", true)
+	if err != nil {
+		return err
+	}
+	validFrom, err := parseTimestamp("valid_from", false)
+	if err != nil {
+		return err
+	}
+	validUntil, err := parseTimestamp("valid_until", false)
+	if err != nil {
+		return err
+	}
+	proposedAt, err := parseTimestamp("proposed_at", true)
+	if err != nil {
+		return err
+	}
+	decidedAt, err := parseTimestamp("decided_at", false)
+	if err != nil {
+		return err
+	}
+	if decidedAt != nil && decidedAt.Before(*proposedAt) {
+		return fmt.Errorf("decided_at precedes proposed_at")
+	}
+	normalized, err := normalizeSetFactInput(SetFactInput{
+		Subject: subject, Predicate: predicate, ValueType: valueType,
+		Recurrence: recurrence,
+		Value:      rawValue, Cardinality: cardinality, Sensitive: sensitive,
+		SourceKind: FactSourceInference, SourceRef: sourceRef,
+		Confidence: &confidence, ObservedAt: *observedAt,
+		ValidFrom: validFrom, ValidUntil: validUntil,
+	})
+	if err != nil {
+		return err
+	}
+	if normalized.Subject != subject || normalized.Predicate != predicate ||
+		normalized.ValueType != valueType || normalized.Recurrence != recurrence || normalized.Cardinality != cardinality ||
+		!jsonValuesEqual(normalized.Value, rawValue) {
+		return fmt.Errorf("logical content is not canonical")
+	}
+
+	status, err := required("status")
+	if err != nil {
+		return err
+	}
+	_, hasConflict, err := optionalID("conflict_fact_id")
+	if err != nil {
+		return err
+	}
+	_, hasObserved, err := optionalID("observed_assertion_id")
+	if err != nil {
+		return err
+	}
+	_, hasResolved, err := optionalID("resolved_fact_id")
+	if err != nil {
+		return err
+	}
+	switch status {
+	case "pending":
+		if hasConflict || hasResolved || decidedAt != nil {
+			return fmt.Errorf("pending lifecycle fields are inconsistent")
+		}
+	case "conflict":
+		if !hasConflict || !hasObserved || hasResolved || decidedAt != nil {
+			return fmt.Errorf("conflict lifecycle fields are inconsistent")
+		}
+	case "confirmed":
+		if !hasResolved || decidedAt == nil {
+			return fmt.Errorf("confirmed lifecycle fields are inconsistent")
+		}
+	case "rejected":
+		if hasResolved || decidedAt == nil {
+			return fmt.Errorf("rejected lifecycle fields are inconsistent")
+		}
+	default:
+		return fmt.Errorf("status %q is invalid", status)
+	}
+	return nil
 }
 
 // ImportAccount restores one account's logical archive from r into this cell.

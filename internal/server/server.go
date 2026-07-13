@@ -288,6 +288,17 @@ type Config struct {
 	GetFact                 func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
 	ListFacts               func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
 	GetFactHistory          func(ctx context.Context, p DomainPrincipal, factID string) ([]FactAssertion, error)
+	ProposeFact             func(ctx context.Context, p DomainPrincipal, in ProposeFactRequest) (FactCandidate, error)
+	GetFactCandidate        func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
+	ListFactCandidates      func(ctx context.Context, p DomainPrincipal, opts FactCandidateListOptions) ([]FactCandidate, error)
+	ConfirmFactCandidate    func(ctx context.Context, p DomainPrincipal, candidateID string) (Fact, error)
+	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
+	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfFact, int, error)
+	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
+	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
+	UpsertFactSubject       func(ctx context.Context, p DomainPrincipal, canonicalKey string, in UpsertFactSubjectRequest) (FactSubject, error)
+	AddFactSubjectAlias     func(ctx context.Context, p DomainPrincipal, canonicalKey, alias string) (FactSubject, error)
+	ListFactSubjects        func(ctx context.Context, p DomainPrincipal) ([]FactSubject, error)
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
@@ -526,7 +537,7 @@ type SelfIdentity struct {
 type SelfFact struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	Value     any    `json:"value,omitempty"`
+	Value     any    `json:"value"`
 	Primary   bool   `json:"primary"`
 	Sensitive bool   `json:"sensitive,omitempty"`
 	Redacted  bool   `json:"redacted,omitempty"`
@@ -1044,7 +1055,7 @@ func apiMux(cfg Config) http.Handler {
 		}
 	}
 	if cfg.AuthenticatePrincipal != nil {
-		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal))
+		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal, cfg.GetSelfFacts, cfg.CountSelfFacts))
 		if cfg.SetFact != nil {
 			mux.HandleFunc("POST /v1/facts", setFactHandler(cfg.AuthenticatePrincipal, cfg.SetFact))
 		}
@@ -1053,6 +1064,30 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.GetFactHistory != nil {
 			mux.HandleFunc("GET /v1/facts/{fact}/history", factHistoryHandler(cfg.AuthenticatePrincipal, cfg.GetFactHistory))
+		}
+		if cfg.UpcomingFacts != nil {
+			mux.HandleFunc("GET /v1/fact-occurrences", upcomingFactsHandler(cfg.AuthenticatePrincipal, cfg.UpcomingFacts))
+		}
+		if cfg.ProposeFact != nil {
+			mux.HandleFunc("POST /v1/fact-candidates", proposeFactHandler(cfg.AuthenticatePrincipal, cfg.ProposeFact))
+		}
+		if cfg.ListFactCandidates != nil {
+			mux.HandleFunc("GET /v1/fact-candidates", listFactCandidatesHandler(cfg.AuthenticatePrincipal, cfg.ListFactCandidates))
+		}
+		if cfg.GetFactCandidate != nil {
+			mux.HandleFunc("GET /v1/fact-candidates/{candidate}", getFactCandidateHandler(cfg.AuthenticatePrincipal, cfg.GetFactCandidate))
+		}
+		if cfg.ConfirmFactCandidate != nil && cfg.RejectFactCandidate != nil {
+			mux.HandleFunc("POST /v1/fact-candidates/{action}", factCandidateActionHandler(cfg.AuthenticatePrincipal, cfg.ConfirmFactCandidate, cfg.RejectFactCandidate))
+		}
+		if cfg.UpsertFactSubject != nil {
+			mux.HandleFunc("PUT /v1/fact-subjects/{subject}", upsertFactSubjectHandler(cfg.AuthenticatePrincipal, cfg.UpsertFactSubject))
+		}
+		if cfg.AddFactSubjectAlias != nil {
+			mux.HandleFunc("POST /v1/fact-subjects/{subject}/aliases", addFactSubjectAliasHandler(cfg.AuthenticatePrincipal, cfg.AddFactSubjectAlias))
+		}
+		if cfg.ListFactSubjects != nil {
+			mux.HandleFunc("GET /v1/fact-subjects", listFactSubjectsHandler(cfg.AuthenticatePrincipal, cfg.ListFactSubjects))
 		}
 		if cfg.GetUsage != nil {
 			mux.HandleFunc("GET /v1/usage", usageHandler(cfg.AuthenticatePrincipal, cfg.GetUsage))
@@ -1323,7 +1358,11 @@ func requireDomainPrincipal(auth PrincipalAuthFunc, h func(http.ResponseWriter, 
 	}
 }
 
-func selfHandler(auth PrincipalAuthFunc) http.HandlerFunc {
+func selfHandler(
+	auth PrincipalAuthFunc,
+	getFacts func(context.Context, DomainPrincipal, int) ([]SelfFact, int, error),
+	countFacts func(context.Context, DomainPrincipal) (int, error),
+) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may show self")
@@ -1346,14 +1385,56 @@ func selfHandler(auth PrincipalAuthFunc) http.HandlerFunc {
 				return
 			}
 		}
+		maximumBytes := 8192
 		if value := q.Get("max_bytes"); value != "" {
 			maximum, err := strconv.Atoi(value)
 			if err != nil || maximum < 1024 || maximum > 65536 {
 				writeJSONError(w, http.StatusBadRequest, "max_bytes must be between 1024 and 65536")
 				return
 			}
+			maximumBytes = maximum
 		}
 
+		facts := []SelfFact{}
+		factCount := 0
+		includeFacts := true
+		if raw := q.Get("include_facts"); raw != "" {
+			includeFacts, _ = strconv.ParseBool(raw)
+		}
+		if includeFacts && getFacts != nil {
+			hydratedFacts, total, err := getFacts(r.Context(), p, 50)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not hydrate facts")
+				return
+			}
+			factCount = total
+			if hydratedFacts != nil {
+				facts = hydratedFacts
+			}
+			for i := range facts {
+				facts[i].Primary = true
+				if facts[i].Sensitive {
+					facts[i].Value = nil
+					facts[i].Redacted = true
+				}
+			}
+		} else if countFacts != nil {
+			var err error
+			factCount, err = countFacts(r.Context(), p)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
+				return
+			}
+		} else if getFacts != nil {
+			// Compatibility fallback for embedders that have not yet supplied the
+			// count-only hook. The production adapter avoids loading fact values.
+			_, total, err := getFacts(r.Context(), p, 50)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
+				return
+			}
+			factCount = total
+		}
 		digest := SelfDigest{
 			SchemaVersion: "witself.v0",
 			Identity: SelfIdentity{
@@ -1363,18 +1444,51 @@ func selfHandler(auth PrincipalAuthFunc) http.HandlerFunc {
 				RealmID:   p.RealmID,
 				RealmName: p.RealmName,
 			},
-			PrimaryFacts:    []SelfFact{},
+			PrimaryFacts:    facts,
 			SalientMemories: []SelfMemory{},
 			Index: SelfIndex{
 				Kinds:  []string{},
 				Tags:   []string{},
-				Counts: map[string]int{"facts": 0, "memories": 0},
+				Counts: map[string]int{"facts": factCount, "memories": 0},
 			},
-			Elided: false,
+			Elided: includeFacts && factCount > len(facts),
+		}
+		encoded, err := marshalBoundedSelfDigest(digest, maximumBytes)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "could not render self digest")
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(digest)
+		_, _ = w.Write(encoded)
 	})
+}
+
+// marshalBoundedSelfDigest applies the wire-size budget to the encoded JSON,
+// preserving identity and the index while dropping the least essential
+// hydrated entries from the end. A selected section that was already bounded
+// by its store query must set Elided before calling this helper.
+func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, error) {
+	for {
+		encoded, err := json.Marshal(digest)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= maximumBytes {
+			return encoded, nil
+		}
+		if !digest.Elided {
+			digest.Elided = true
+			continue
+		}
+		switch {
+		case len(digest.SalientMemories) > 0:
+			digest.SalientMemories = digest.SalientMemories[:len(digest.SalientMemories)-1]
+		case len(digest.PrimaryFacts) > 0:
+			digest.PrimaryFacts = digest.PrimaryFacts[:len(digest.PrimaryFacts)-1]
+		default:
+			return nil, fmt.Errorf("self digest identity and index exceed %d bytes", maximumBytes)
+		}
+	}
 }
 
 func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, UsageQuery) (UsageReport, error)) http.HandlerFunc {

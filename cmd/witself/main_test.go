@@ -49,6 +49,20 @@ func TestParseUsageStart(t *testing.T) {
 	}
 }
 
+func TestFactMetadataFlags(t *testing.T) {
+	confidence, err := factConfidenceFlag(0)
+	if err != nil || confidence == nil || *confidence != 0 {
+		t.Fatalf("zero confidence = %#v / %v", confidence, err)
+	}
+	if _, err := factConfidenceFlag(1.1); err == nil {
+		t.Fatal("confidence above one was accepted")
+	}
+	observed, err := factTimeFlag("2026-07-12T12:30:00-06:00")
+	if err != nil || observed == nil || observed.Format(time.RFC3339) != "2026-07-12T18:30:00Z" {
+		t.Fatalf("observed time = %#v / %v", observed, err)
+	}
+}
+
 func TestCSVListFlagAcceptsRepeatedAndCommaSeparatedValues(t *testing.T) {
 	var values csvListFlag
 	if err := values.Set("transcript_created,transcript_entry_write"); err != nil {
@@ -216,11 +230,11 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body.Subject != "self" || body.Predicate != "preferences/editor" || string(body.Value) != `"vim"` {
+			if body.Subject != "self" || body.Predicate != "identity/birth-date" || string(body.Value) != `"1980-02-29"` || body.ValueType != "date" || body.Recurrence != "annual" {
 				t.Errorf("body = %#v", body)
 			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"fact":{"id":"fact_1","subject":"self","predicate":"preferences/editor","value_type":"string","value":"vim"}}`))
+			_, _ = w.Write([]byte(`{"fact":{"id":"fact_1","subject":"self","predicate":"identity/birth-date","value_type":"date","value":"1980-02-29","recurrence":"annual"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/facts":
 			if r.URL.Query().Get("predicate_prefix") != "preferences" {
 				t.Errorf("query = %s", r.URL.RawQuery)
@@ -235,7 +249,7 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "preferences/editor", "vim"}); code != 0 {
+	if code := run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "--type", "date", "--recurrence", "annual", "identity/birth-date", "1980-02-29"}); code != 0 {
 		t.Fatalf("fact set code = %d", code)
 	}
 	if code := run([]string{"fact", "list", "--endpoint", srv.URL, "--token-file", tokenFile, "--category", "preferences"}); code != 0 {
@@ -243,6 +257,115 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestFactCandidateReviewAndDetailUseAgentToken(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_scott" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fact-candidates":
+			if r.URL.Query().Get("status") != "open" || r.URL.Query().Get("limit") != "25" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"candidates":[{"id":"fcand_1","subject":"person_spouse","predicate":"identity/name","value_type":"string","value":null,"sensitive":true,"status":"pending","observed_at":"2026-07-12T00:00:00Z","proposed_at":"2026-07-12T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fact-candidates/fcand_1":
+			_, _ = w.Write([]byte(`{"candidate":{"id":"fcand_1","subject":"person_spouse","predicate":"identity/name","value_type":"string","value":"Arina Pavlova Habich","sensitive":true,"status":"pending","observed_at":"2026-07-12T00:00:00Z","proposed_at":"2026-07-12T00:00:00Z"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"fact", "review", "--endpoint", srv.URL, "--token-file", tokenFile, "--limit", "25"}); code != 0 {
+		t.Fatalf("fact review code = %d", code)
+	}
+	if code := run([]string{"fact", "candidate", "--endpoint", srv.URL, "--token-file", tokenFile, "fcand_1"}); code != 0 {
+		t.Fatalf("fact candidate code = %d", code)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestFactUpcomingCanIncludeSensitiveDates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/fact-occurrences" || r.URL.Query().Get("include_sensitive") != "true" {
+			t.Fatalf("request = %s", r.URL.RequestURI())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_scott" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"occurrences":[]}`))
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"fact", "upcoming", "--endpoint", srv.URL, "--token-file", tokenFile, "--days", "14", "--include-sensitive"}); code != 0 {
+		t.Fatalf("fact upcoming code = %d", code)
+	}
+}
+
+func TestFactSubjectCommandsUseAgentToken(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_scott" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/fact-subjects/person_spouse":
+			var body client.UpsertFactSubjectInput
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.DisplayName != "Spouse" {
+				t.Errorf("subject body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"subject":{"id":"sub_1","canonical_key":"person_spouse","display_name":"Spouse","aliases":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/fact-subjects/person_spouse/aliases":
+			var body client.AddFactSubjectAliasInput
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Alias != "my wife" {
+				t.Errorf("alias body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"subject":{"id":"sub_1","canonical_key":"person_spouse","display_name":"Spouse","aliases":["my wife"]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fact-subjects":
+			_, _ = w.Write([]byte(`{"subjects":[{"id":"sub_1","canonical_key":"person_spouse","display_name":"Spouse","aliases":["my wife"]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"fact", "subject", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "--display-name", "Spouse", "person_spouse"},
+		{"fact", "subject", "alias", "--endpoint", srv.URL, "--token-file", tokenFile, "person_spouse", "my wife"},
+		{"fact", "subject", "list", "--endpoint", srv.URL, "--token-file", tokenFile},
+	} {
+		if code := run(args); code != 0 {
+			t.Fatalf("%v code = %d", args, code)
+		}
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
 	}
 }
 

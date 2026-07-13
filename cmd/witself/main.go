@@ -2585,7 +2585,7 @@ func parseUsageStart(raw string, now time.Time) (time.Time, error) {
 
 func factCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history ...")
+		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history|propose|review|candidate|confirm|reject|upcoming|subject ...")
 		return 2
 	}
 	switch args[0] {
@@ -2597,8 +2597,38 @@ func factCmd(args []string) int {
 		return factList(args[1:])
 	case "history":
 		return factHistory(args[1:])
+	case "propose":
+		return factPropose(args[1:])
+	case "review":
+		return factReview(args[1:])
+	case "candidate":
+		return factCandidate(args[1:])
+	case "confirm", "reject":
+		return factCandidateDecision(args[0], args[1:])
+	case "upcoming":
+		return factUpcoming(args[1:])
+	case "subject":
+		return factSubjectCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself: unknown fact command %q\n", args[0])
+		return 2
+	}
+}
+
+func factSubjectCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact subject set|list|alias ...")
+		return 2
+	}
+	switch args[0] {
+	case "set":
+		return factSubjectSet(args[1:])
+	case "list":
+		return factSubjectList(args[1:])
+	case "alias":
+		return factSubjectAlias(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself: unknown fact subject command %q\n", args[0])
 		return 2
 	}
 }
@@ -2612,16 +2642,143 @@ func factConnectionFlags(fs *flag.FlagSet) (*string, *string, *string, *string, 
 	return account, realm, agent, endpoint, tokenFile
 }
 
+func factConfidenceFlag(value float64) (*float64, error) {
+	if value == -1 {
+		return nil, nil
+	}
+	if value < 0 || value > 1 {
+		return nil, fmt.Errorf("must be between 0 and 1")
+	}
+	return &value, nil
+}
+
+func factTimeFlag(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("must be RFC3339: %w", err)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func factSubjectSet(args []string) int {
+	fs := flag.NewFlagSet("fact subject set", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	displayName := fs.String("display-name", "", "human-readable subject name")
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact subject set [flags] CANONICAL_KEY")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	subject, err := client.UpsertFactSubject(ctx, conn.Endpoint, conn.Token, client.UpsertFactSubjectInput{
+		CanonicalKey: fs.Arg(0), DisplayName: *displayName,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(subject)
+	}
+	fmt.Printf("%s\t%s\n", subject.CanonicalKey, subject.DisplayName)
+	return 0
+}
+
+func factSubjectList(args []string) int {
+	fs := flag.NewFlagSet("fact subject list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact subject list [flags]")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	subjects, err := client.ListFactSubjects(ctx, conn.Endpoint, conn.Token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"subjects": subjects})
+	}
+	w, flush := tableWriter("subject\tdisplay name\taliases")
+	for _, subject := range subjects {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", subject.CanonicalKey, tabSafe(subject.DisplayName), tabSafe(strings.Join(subject.Aliases, ", ")))
+	}
+	flush()
+	return 0
+}
+
+func factSubjectAlias(args []string) int {
+	fs := flag.NewFlagSet("fact subject alias", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact subject alias [flags] CANONICAL_KEY ALIAS")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	subject, err := client.AddFactSubjectAlias(ctx, conn.Endpoint, conn.Token, client.AddFactSubjectAliasInput{
+		CanonicalKey: fs.Arg(0), Alias: fs.Arg(1),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(subject)
+	}
+	fmt.Printf("%s\t%s\n", subject.CanonicalKey, strings.Join(subject.Aliases, ", "))
+	return 0
+}
+
 func factSet(args []string) int {
 	fs := flag.NewFlagSet("fact set", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	subject := fs.String("subject", "self", "stable subject key")
 	valueType := fs.String("type", "", "logical value type (inferred when omitted)")
+	recurrence := fs.String("recurrence", "", `recurrence rule; currently "annual" for date values`)
 	cardinality := fs.String("cardinality", "one", "one, many, or one_at_a_time")
 	sensitive := fs.Bool("sensitive", false, "redact the value in broad listings")
 	jsonValue := fs.Bool("json-value", false, "parse VALUE as JSON instead of a string")
 	sourceRef := fs.String("source-ref", "", "evidence reference such as a transcript entry")
+	confidenceRaw := fs.Float64("confidence", -1, "confidence from 0 to 1")
+	observedAtRaw := fs.String("observed-at", "", "observation time in RFC3339")
+	validFromRaw := fs.String("valid-from", "", "validity start in RFC3339")
+	validUntilRaw := fs.String("valid-until", "", "validity end in RFC3339")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2640,16 +2797,42 @@ func factSet(args []string) int {
 	} else {
 		value, _ = json.Marshal(fs.Arg(1))
 	}
+	confidence, err := factConfidenceFlag(*confidenceRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --confidence %v\n", err)
+		return 2
+	}
+	observedAt, err := factTimeFlag(*observedAtRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --observed-at %v\n", err)
+		return 2
+	}
+	validFrom, err := factTimeFlag(*validFromRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --valid-from %v\n", err)
+		return 2
+	}
+	validUntil, err := factTimeFlag(*validUntilRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --valid-until %v\n", err)
+		return 2
+	}
 	ctx := context.Background()
 	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	fact, err := client.SetFact(ctx, conn.Endpoint, conn.Token, client.SetFactInput{
+	factInput := client.SetFactInput{
 		Subject: *subject, Predicate: fs.Arg(0), ValueType: *valueType, Value: value,
+		Recurrence:  *recurrence,
 		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
-	})
+		Confidence: confidence, ValidFrom: validFrom, ValidUntil: validUntil,
+	}
+	if observedAt != nil {
+		factInput.ObservedAt = *observedAt
+	}
+	fact, err := client.SetFact(ctx, conn.Endpoint, conn.Token, factInput)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
@@ -2700,6 +2883,8 @@ func factList(args []string) int {
 	category := fs.String("category", "", "filter by predicate namespace")
 	limit := fs.Int("limit", 100, "maximum facts to return")
 	includeSensitive := fs.Bool("include-sensitive", false, "include sensitive values")
+	sortUsage := fs.Bool("sort-usage", false, "order by most-used facts")
+	unused := fs.Bool("unused", false, "show only facts never returned")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2715,7 +2900,7 @@ func factList(args []string) int {
 		return 1
 	}
 	facts, err := client.ListFacts(ctx, conn.Endpoint, conn.Token, client.FactListOptions{
-		Subject: *subject, PredicatePrefix: *category, Limit: *limit, IncludeSensitive: *includeSensitive,
+		Subject: *subject, PredicatePrefix: *category, Limit: *limit, IncludeSensitive: *includeSensitive, OrderByUsage: *sortUsage, UnusedOnly: *unused,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -2728,14 +2913,19 @@ func factList(args []string) int {
 		fmt.Fprintln(os.Stderr, "no facts")
 		return 0
 	}
-	w, flush := tableWriter("subject\tpredicate\tvalue\ttype\tsource\tupdated")
+	w, flush := tableWriter("subject\tpredicate\tvalue\ttype\trecurrence\tsource\tuses\tlast used\tupdated")
 	for _, fact := range facts {
 		value := string(fact.Value)
 		if fact.Sensitive && value == "null" {
 			value = "[redacted]"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fact.Subject, fact.Predicate,
-			tabSafe(value), fact.ValueType, fact.SourceKind, fact.UpdatedAt.UTC().Format(time.RFC3339))
+		lastUsed := ""
+		if fact.LastUsedAt != nil {
+			lastUsed = fact.LastUsedAt.UTC().Format(time.RFC3339)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", fact.Subject, fact.Predicate,
+			tabSafe(value), fact.ValueType, fact.Recurrence, fact.SourceKind, fact.UsageCount, lastUsed,
+			fact.UpdatedAt.UTC().Format(time.RFC3339))
 	}
 	flush()
 	return 0
@@ -2767,10 +2957,262 @@ func factHistory(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"assertions": assertions})
 	}
-	w, flush := tableWriter("created\tvalue\ttype\tsource\tsupersedes")
+	w, flush := tableWriter("created\tvalue\ttype\trecurrence\tsource\tsupersedes")
 	for _, assertion := range assertions {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", assertion.CreatedAt.UTC().Format(time.RFC3339),
-			tabSafe(string(assertion.Value)), assertion.ValueType, assertion.SourceKind, assertion.SupersedesID)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", assertion.CreatedAt.UTC().Format(time.RFC3339),
+			tabSafe(string(assertion.Value)), assertion.ValueType, assertion.Recurrence, assertion.SourceKind, assertion.SupersedesID)
+	}
+	flush()
+	return 0
+}
+
+func factPropose(args []string) int {
+	fs := flag.NewFlagSet("fact propose", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	subject := fs.String("subject", "self", "stable subject key")
+	valueType := fs.String("type", "", "logical value type (inferred when omitted)")
+	recurrence := fs.String("recurrence", "", `recurrence rule; currently "annual" for date values`)
+	cardinality := fs.String("cardinality", "one", "one, many, or one_at_a_time")
+	reason := fs.String("reason", "", "why this may be durable")
+	sensitive := fs.Bool("sensitive", false, "redact in inventory")
+	jsonValue := fs.Bool("json-value", false, "parse VALUE as JSON instead of a string")
+	sourceRef := fs.String("source-ref", "", "evidence reference such as a transcript entry")
+	confidenceRaw := fs.Float64("confidence", -1, "confidence from 0 to 1")
+	observedAtRaw := fs.String("observed-at", "", "observation time in RFC3339")
+	validFromRaw := fs.String("valid-from", "", "validity start in RFC3339")
+	validUntilRaw := fs.String("valid-until", "", "validity end in RFC3339")
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact propose [flags] PREDICATE VALUE")
+		return 2
+	}
+	var raw json.RawMessage
+	if *jsonValue {
+		raw = json.RawMessage(fs.Arg(1))
+		if !json.Valid(raw) {
+			fmt.Fprintln(os.Stderr, "witself: VALUE is not valid JSON")
+			return 2
+		}
+	} else {
+		raw, _ = json.Marshal(fs.Arg(1))
+	}
+	confidence, err := factConfidenceFlag(*confidenceRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --confidence %v\n", err)
+		return 2
+	}
+	observedAt, err := factTimeFlag(*observedAtRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --observed-at %v\n", err)
+		return 2
+	}
+	validFrom, err := factTimeFlag(*validFromRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --valid-from %v\n", err)
+		return 2
+	}
+	validUntil, err := factTimeFlag(*validUntilRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --valid-until %v\n", err)
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	factInput := client.SetFactInput{
+		Subject: *subject, Predicate: fs.Arg(0), ValueType: *valueType, Value: raw,
+		Recurrence:  *recurrence,
+		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
+		Confidence: confidence, ValidFrom: validFrom, ValidUntil: validUntil,
+	}
+	if observedAt != nil {
+		factInput.ObservedAt = *observedAt
+	}
+	c, err := client.ProposeFact(ctx, conn.Endpoint, conn.Token, client.ProposeFactInput{SetFactInput: factInput, Reason: *reason})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(c)
+	}
+	fmt.Printf("%s\t%s\n", c.ID, c.Status)
+	return 0
+}
+
+func factReview(args []string) int {
+	fs := flag.NewFlagSet("fact review", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	status := fs.String("status", "open", "open, pending, conflict, confirmed, or rejected")
+	limit := fs.Int("limit", 100, "maximum candidates to return, from 1 to 500")
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact review [flags]")
+		return 2
+	}
+	if *limit < 1 || *limit > 500 {
+		fmt.Fprintln(os.Stderr, "witself: --limit must be between 1 and 500")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	rows, err := client.ListFactCandidatesWithOptions(ctx, conn.Endpoint, conn.Token, client.FactCandidateListOptions{
+		Status: *status,
+		Limit:  *limit,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"candidates": rows})
+	}
+	w, flush := tableWriter("id\tstatus\tsubject\tpredicate\tvalue\tsensitive\tconflict")
+	for _, c := range rows {
+		value := string(c.Value)
+		if c.Sensitive && value == "null" {
+			value = "[redacted]"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%s\n", c.ID, c.Status, c.Subject, c.Predicate, tabSafe(value), c.Sensitive, c.ConflictFactID)
+	}
+	flush()
+	return 0
+}
+
+func factCandidate(args []string) int {
+	fs := flag.NewFlagSet("fact candidate", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: witself fact candidate [flags] CANDIDATE_ID")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	candidate, err := client.GetFactCandidate(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(candidate)
+	}
+	w, flush := tableWriter("id\tstatus\tsubject\tpredicate\tvalue\ttype\trecurrence\tsensitive\tsource\tconfidence\tobserved\tproposed\tconflict")
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%t\t%s\t%g\t%s\t%s\t%s\n",
+		candidate.ID, candidate.Status, candidate.Subject, candidate.Predicate,
+		tabSafe(string(candidate.Value)), candidate.ValueType, candidate.Recurrence,
+		candidate.Sensitive, tabSafe(candidate.SourceRef), candidate.Confidence,
+		candidate.ObservedAt.UTC().Format(time.RFC3339), candidate.ProposedAt.UTC().Format(time.RFC3339),
+		candidate.ConflictFactID)
+	flush()
+	return 0
+}
+
+func factCandidateDecision(action string, args []string) int {
+	fs := flag.NewFlagSet("fact "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "usage: witself fact %s CANDIDATE_ID\n", action)
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if action == "confirm" {
+		out, err := client.ConfirmFactCandidate(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return printJSON(out)
+		}
+		fmt.Printf("confirmed %s as %s\n", fs.Arg(0), out.ID)
+		return 0
+	}
+	out, err := client.RejectFactCandidate(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(out)
+	}
+	fmt.Printf("rejected %s\n", out.ID)
+	return 0
+}
+
+func factUpcoming(args []string) int {
+	fs := flag.NewFlagSet("fact upcoming", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	days := fs.Int("days", 30, "future window in days")
+	timezone := fs.String("timezone", "", "IANA timezone")
+	includeSensitive := fs.Bool("include-sensitive", false, "include sensitive dates and datetimes")
+	jsonOut := jsonFlag(fs)
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	if *days < 1 {
+		fmt.Fprintln(os.Stderr, "witself: --days must be positive")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	from := time.Now().UTC()
+	rows, err := client.UpcomingFactsWithOptions(ctx, conn.Endpoint, conn.Token, client.FactUpcomingOptions{
+		From: from, Until: from.Add(time.Duration(*days) * 24 * time.Hour),
+		Timezone: *timezone, IncludeSensitive: *includeSensitive,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"occurrences": rows})
+	}
+	w, flush := tableWriter("when\tsubject\tpredicate\tvalue")
+	for _, row := range rows {
+		when := row.OccursOn
+		if row.OccursAt != nil {
+			when = row.OccursAt.Format(time.RFC3339)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", when, row.Fact.Subject, row.Fact.Predicate, tabSafe(string(row.Fact.Value)))
 	}
 	flush()
 	return 0

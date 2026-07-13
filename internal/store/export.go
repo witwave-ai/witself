@@ -110,17 +110,45 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM facts WHERE account_id = $1 ORDER BY id`, arg: accountID},
 		&querySource{s: s, table: "fact_assertions", q: `
+			WITH RECURSIVE assertion_order AS (
+			  SELECT a.*, 0 AS chain_depth
+			  FROM fact_assertions a
+			  WHERE a.account_id = $1 AND a.supersedes_id IS NULL
+			  UNION ALL
+			  SELECT child.*, parent.chain_depth + 1
+			  FROM fact_assertions child
+			  JOIN assertion_order parent ON child.supersedes_id = parent.id
+			  WHERE child.account_id = $1
+			)
 			SELECT jsonb_build_object(
 			  'id', id, 'fact_id', fact_id, 'account_id', account_id,
 			  'realm_id', realm_id, 'asserted_by_agent_id', asserted_by_agent_id,
 			  'value_type', value_type, 'value', value,
+			  'recurrence', recurrence,
 			  'source_kind', source_kind, 'source_ref', source_ref,
 			  'confidence', confidence, 'observed_at', observed_at,
 			  'confirmed_at', confirmed_at, 'valid_from', valid_from,
 			  'valid_until', valid_until, 'supersedes_id', supersedes_id,
 			  'created_at', created_at)
-			FROM fact_assertions WHERE account_id = $1
-			ORDER BY fact_id, created_at, id`, arg: accountID},
+			FROM assertion_order
+			ORDER BY fact_id, chain_depth, created_at, id`, arg: accountID},
+		&querySource{s: s, table: "fact_candidates", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'subject_key', subject_key,
+			  'predicate', predicate, 'value_type', value_type, 'value', value,
+			  'recurrence', recurrence,
+			  'cardinality', cardinality, 'sensitive', sensitive,
+			  'source_ref', source_ref, 'confidence', confidence,
+			  'observed_at', observed_at, 'valid_from', valid_from,
+			  'valid_until', valid_until,
+			  'reason', reason, 'status', status,
+			  'conflict_fact_id', conflict_fact_id,
+			  'observed_assertion_id', observed_assertion_id,
+			  'resolved_fact_id', resolved_fact_id,
+			  'proposed_at', proposed_at, 'decided_at', decided_at)
+			FROM fact_candidates WHERE account_id = $1
+			ORDER BY proposed_at, id`, arg: accountID},
 		&querySource{s: s, table: "tokens", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'operator_id', operator_id,

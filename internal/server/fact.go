@@ -21,6 +21,7 @@ type Fact struct {
 	ResolvedAssertionID string          `json:"resolved_assertion_id"`
 	ValueType           string          `json:"value_type"`
 	Value               json.RawMessage `json:"value"`
+	Recurrence          string          `json:"recurrence,omitempty"`
 	SourceKind          string          `json:"source_kind"`
 	SourceRef           string          `json:"source_ref,omitempty"`
 	Confidence          float64         `json:"confidence"`
@@ -30,6 +31,8 @@ type Fact struct {
 	ValidUntil          *time.Time      `json:"valid_until,omitempty"`
 	CreatedAt           time.Time       `json:"created_at"`
 	UpdatedAt           time.Time       `json:"updated_at"`
+	UsageCount          int64           `json:"usage_count"`
+	LastUsedAt          *time.Time      `json:"last_used_at,omitempty"`
 }
 
 // FactAssertion is one immutable historical source claim.
@@ -38,6 +41,7 @@ type FactAssertion struct {
 	FactID       string          `json:"fact_id"`
 	ValueType    string          `json:"value_type"`
 	Value        json.RawMessage `json:"value"`
+	Recurrence   string          `json:"recurrence,omitempty"`
 	SourceKind   string          `json:"source_kind"`
 	SourceRef    string          `json:"source_ref,omitempty"`
 	Confidence   float64         `json:"confidence"`
@@ -55,6 +59,7 @@ type SetFactRequest struct {
 	Predicate   string          `json:"predicate"`
 	ValueType   string          `json:"value_type,omitempty"`
 	Value       json.RawMessage `json:"value"`
+	Recurrence  string          `json:"recurrence,omitempty"`
 	Cardinality string          `json:"cardinality,omitempty"`
 	Sensitive   bool            `json:"sensitive,omitempty"`
 	SourceKind  string          `json:"source_kind,omitempty"`
@@ -72,6 +77,71 @@ type FactListOptions struct {
 	PredicatePrefix  string
 	Limit            int
 	IncludeSensitive bool
+	OrderByUsage     bool
+	UnusedOnly       bool
+	RetrievalMode    FactRetrievalMode
+}
+
+// FactRetrievalMode identifies why facts were returned. Public list/search
+// requests use search; automatic self hydration is kept separate by its
+// dedicated server hook.
+type FactRetrievalMode string
+
+// FactRetrievalModeSearch marks an authenticated inventory or search result.
+const FactRetrievalModeSearch FactRetrievalMode = "search"
+
+// FactCandidate is an unresolved agent observation awaiting review.
+type FactCandidate struct {
+	ID                  string          `json:"id"`
+	Subject             string          `json:"subject"`
+	Predicate           string          `json:"predicate"`
+	ValueType           string          `json:"value_type"`
+	Value               json.RawMessage `json:"value"`
+	Recurrence          string          `json:"recurrence,omitempty"`
+	Cardinality         string          `json:"cardinality"`
+	Sensitive           bool            `json:"sensitive"`
+	SourceRef           string          `json:"source_ref,omitempty"`
+	Confidence          float64         `json:"confidence"`
+	ObservedAt          time.Time       `json:"observed_at"`
+	ValidFrom           *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil          *time.Time      `json:"valid_until,omitempty"`
+	Reason              string          `json:"reason,omitempty"`
+	Status              string          `json:"status"`
+	ConflictFactID      string          `json:"conflict_fact_id,omitempty"`
+	ObservedAssertionID string          `json:"observed_assertion_id,omitempty"`
+	ResolvedFactID      string          `json:"resolved_fact_id,omitempty"`
+	ProposedAt          time.Time       `json:"proposed_at"`
+	DecidedAt           *time.Time      `json:"decided_at,omitempty"`
+}
+
+// ProposeFactRequest is the POST /v1/fact-candidates body.
+type ProposeFactRequest struct {
+	SetFactRequest
+	Reason string `json:"reason,omitempty"`
+}
+
+// FactCandidateListOptions selects a bounded candidate review inventory.
+type FactCandidateListOptions struct {
+	Status string
+	Limit  int
+}
+
+// UpcomingFactOptions selects a temporal projection window.
+type UpcomingFactOptions struct {
+	From             time.Time
+	Until            time.Time
+	Timezone         string
+	Subject          string
+	PredicatePrefix  string
+	Limit            int
+	IncludeSensitive bool
+}
+
+// FactOccurrence is a derived temporal view that never mutates the fact.
+type FactOccurrence struct {
+	Fact     Fact       `json:"fact"`
+	OccursOn string     `json:"occurs_on,omitempty"`
+	OccursAt *time.Time `json:"occurs_at,omitempty"`
 }
 
 func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrincipal, SetFactRequest) (Fact, error)) http.HandlerFunc {
@@ -102,6 +172,7 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "fact": fact})
 	})
@@ -121,10 +192,23 @@ func factsReadHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPr
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "private, no-store")
 			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "fact": fact})
 			return
 		}
-		opts := FactListOptions{Subject: q.Get("subject"), PredicatePrefix: q.Get("predicate_prefix")}
+		opts := FactListOptions{
+			Subject: q.Get("subject"), PredicatePrefix: q.Get("predicate_prefix"),
+			RetrievalMode: FactRetrievalModeSearch,
+		}
+		opts.OrderByUsage = q.Get("sort") == "usage"
+		if raw := q.Get("unused"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, 400, "unused must be true or false")
+				return
+			}
+			opts.UnusedOnly = value
+		}
 		if raw := q.Get("limit"); raw != "" {
 			limit, err := strconv.Atoi(raw)
 			if err != nil {
@@ -146,6 +230,7 @@ func factsReadHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPr
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "facts": facts})
 	})
 }
@@ -161,6 +246,7 @@ func factHistoryHandler(auth PrincipalAuthFunc, history func(context.Context, Do
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "assertions": assertions})
 	})
 }
@@ -175,8 +261,149 @@ func writeFactError(w http.ResponseWriter, err error) bool {
 		writeJSONError(w, http.StatusNotFound, "fact not found")
 	case errors.Is(err, ErrForbidden):
 		writeJSONError(w, http.StatusForbidden, "fact access forbidden")
+	case errors.Is(err, ErrConflict):
+		writeJSONError(w, http.StatusConflict, "fact changed since candidate proposal")
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "could not read facts")
 	}
 	return true
+}
+
+func proposeFactHandler(auth PrincipalAuthFunc, propose func(context.Context, DomainPrincipal, ProposeFactRequest) (FactCandidate, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, 403, "only an agent token may propose facts")
+			return
+		}
+		var in ProposeFactRequest
+		if decodeLimitedJSON(w, r, &in, 96*1024) != nil || len(in.Value) == 0 {
+			writeJSONError(w, 400, "invalid fact proposal")
+			return
+		}
+		out, err := propose(r.Context(), p, in)
+		if writeFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "candidate": out})
+	})
+}
+
+func getFactCandidateHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string) (FactCandidate, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may review fact candidates")
+			return
+		}
+		out, err := get(r.Context(), p, r.PathValue("candidate"))
+		if writeFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "candidate": out})
+	})
+}
+
+func listFactCandidatesHandler(auth PrincipalAuthFunc, list func(context.Context, DomainPrincipal, FactCandidateListOptions) ([]FactCandidate, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may review fact candidates")
+			return
+		}
+		opts := FactCandidateListOptions{Status: r.URL.Query().Get("status"), Limit: 100}
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			limit, err := strconv.Atoi(raw)
+			if err != nil || limit < 1 || limit > 500 {
+				writeJSONError(w, http.StatusBadRequest, "limit must be between 1 and 500")
+				return
+			}
+			opts.Limit = limit
+		}
+		rows, err := list(r.Context(), p, opts)
+		if writeFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "candidates": rows})
+	})
+}
+
+func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Context, DomainPrincipal, string) (Fact, error), reject func(context.Context, DomainPrincipal, string) (FactCandidate, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may decide fact candidates")
+			return
+		}
+		candidateID, action, ok := strings.Cut(r.PathValue("action"), ":")
+		if !ok || candidateID == "" || (action != "confirm" && action != "reject") {
+			writeJSONError(w, 404, "candidate action not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		if action == "confirm" {
+			out, err := confirm(r.Context(), p, candidateID)
+			if writeFactError(w, err) {
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "fact": out})
+			return
+		}
+		out, err := reject(r.Context(), p, candidateID)
+		if writeFactError(w, err) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "candidate": out})
+	})
+}
+
+func upcomingFactsHandler(auth PrincipalAuthFunc, upcoming func(context.Context, DomainPrincipal, UpcomingFactOptions) ([]FactOccurrence, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may review upcoming facts")
+			return
+		}
+		q := r.URL.Query()
+		opts := UpcomingFactOptions{Timezone: q.Get("timezone"), Subject: q.Get("subject"), PredicatePrefix: q.Get("predicate_prefix")}
+		var err error
+		if raw := q.Get("include_sensitive"); raw != "" {
+			opts.IncludeSensitive, err = strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "include_sensitive must be true or false")
+				return
+			}
+		}
+		if raw := q.Get("from"); raw != "" {
+			opts.From, err = time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeJSONError(w, 400, "from must be RFC3339")
+				return
+			}
+		}
+		if raw := q.Get("until"); raw != "" {
+			opts.Until, err = time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeJSONError(w, 400, "until must be RFC3339")
+				return
+			}
+		}
+		if raw := q.Get("limit"); raw != "" {
+			opts.Limit, err = strconv.Atoi(raw)
+			if err != nil {
+				writeJSONError(w, 400, "limit must be an integer")
+				return
+			}
+		}
+		rows, err := upcoming(r.Context(), p, opts)
+		if writeFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "occurrences": rows})
+	})
 }

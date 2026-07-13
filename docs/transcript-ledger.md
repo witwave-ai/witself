@@ -286,10 +286,19 @@ witself transcript tail TRANSCRIPT_ID --limit 20
 witself transcript flush --runtime codex|claude-code|grok-build|cursor
 ```
 
-The installed stdio MCP server exposes the read-only
-`witself.self.show`, `witself.transcript.list`, `witself.transcript.get`, and
-`witself.transcript.tail` tools. Hook capture is the write path; model-initiated
-MCP transcript mutation is intentionally not part of this slice.
+The installed stdio MCP server exposes read-only transcript tools through
+`witself.transcript.list`, `witself.transcript.get`, and
+`witself.transcript.tail`. Hook capture remains the transcript write path;
+model-initiated MCP transcript mutation is intentionally not part of this
+slice.
+
+The separate `witself.fact.propose_from_transcript` tool lets a supported agent
+turn one explicit durable claim from one exact user entry into a fact candidate.
+It fetches only that sequence, verifies the immutable transcript/entry
+relationship and user role, and stores an evidence reference. It never mutates
+the transcript or promotes the candidate to canonical truth. Semantic
+interpretation stays in the supported agent integration, so transcript capture
+remains provider-neutral and the service gains no model dependency.
 
 Transcript rows are included in the account's logical export/import stream in
 foreign-key order. Bodies and payloads must never appear in logs, metrics,

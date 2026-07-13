@@ -14,13 +14,23 @@ import (
 )
 
 type fakeMCPBackend struct {
-	lastTranscriptID string
-	lastOptions      client.TranscriptPageOptions
-	lastMessageSend  client.SendMessageInput
-	lastMessageList  client.MessageListOptions
-	readMessageID    string
-	ackedMessageID   string
-	lastFactSet      client.SetFactInput
+	lastTranscriptID  string
+	lastOptions       client.TranscriptPageOptions
+	lastMessageSend   client.SendMessageInput
+	lastMessageList   client.MessageListOptions
+	readMessageID     string
+	ackedMessageID    string
+	lastFactSet       client.SetFactInput
+	lastFactProposal  client.ProposeFactInput
+	lastFactList      client.FactListOptions
+	lastCandidateID   string
+	lastReview        client.FactCandidateListOptions
+	lastUpcomingFrom  time.Time
+	sensitiveUpcoming bool
+	lastSubjectSet    client.UpsertFactSubjectInput
+	lastSubjectAlias  client.AddFactSubjectAliasInput
+	zeroConfidence    bool
+	annualRecurrence  bool
 }
 
 func TestGrokMCPUsesPortableToolNames(t *testing.T) {
@@ -42,8 +52,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 10 {
-		t.Fatalf("tools = %d, want 10", len(tools.Tools))
+	if len(tools.Tools) != 20 {
+		t.Fatalf("tools = %d, want 20", len(tools.Tools))
 	}
 	for _, tool := range tools.Tools {
 		if strings.Contains(tool.Name, ".") || !strings.HasPrefix(tool.Name, "witself_") {
@@ -92,6 +102,9 @@ func (b *fakeMCPBackend) AckMessage(_ context.Context, messageID string) (client
 
 func (b *fakeMCPBackend) SetFact(_ context.Context, in client.SetFactInput) (client.Fact, error) {
 	b.lastFactSet = in
+	if in.Recurrence == "annual" {
+		b.annualRecurrence = true
+	}
 	return client.Fact{ID: "fact_1", Subject: in.Subject, Predicate: in.Predicate, Value: in.Value}, nil
 }
 
@@ -99,8 +112,54 @@ func (b *fakeMCPBackend) GetFact(_ context.Context, subject, predicate string) (
 	return client.Fact{ID: "fact_1", Subject: subject, Predicate: predicate, Value: json.RawMessage(`"vim"`)}, nil
 }
 
-func (b *fakeMCPBackend) ListFacts(_ context.Context, _ client.FactListOptions) ([]client.Fact, error) {
+func (b *fakeMCPBackend) ListFacts(_ context.Context, opts client.FactListOptions) ([]client.Fact, error) {
+	b.lastFactList = opts
 	return []client.Fact{{ID: "fact_1", Subject: "self", Predicate: "preferences/editor"}}, nil
+}
+func (b *fakeMCPBackend) ProposeFact(_ context.Context, in client.ProposeFactInput) (client.FactCandidate, error) {
+	b.lastFactProposal = in
+	if in.Confidence != nil && *in.Confidence == 0 {
+		b.zeroConfidence = true
+	}
+	if in.Recurrence == "annual" {
+		b.annualRecurrence = true
+	}
+	return client.FactCandidate{ID: "fcand_1", Subject: in.Subject, Predicate: in.Predicate, Value: in.Value, Status: "pending"}, nil
+}
+func (b *fakeMCPBackend) GetFactCandidate(_ context.Context, id string) (client.FactCandidate, error) {
+	b.lastCandidateID = id
+	return client.FactCandidate{ID: id, Subject: "self", Predicate: "identity/name", Value: json.RawMessage(`"Scott"`), Sensitive: true, Status: "pending"}, nil
+}
+func (b *fakeMCPBackend) ListFactCandidates(_ context.Context, opts client.FactCandidateListOptions) ([]client.FactCandidate, error) {
+	b.lastReview = opts
+	return []client.FactCandidate{{ID: "fcand_1", Status: "pending"}}, nil
+}
+func (b *fakeMCPBackend) ConfirmFactCandidate(context.Context, string) (client.Fact, error) {
+	return client.Fact{ID: "fact_1", Value: json.RawMessage(`"vim"`)}, nil
+}
+func (b *fakeMCPBackend) RejectFactCandidate(context.Context, string) (client.FactCandidate, error) {
+	return client.FactCandidate{ID: "fcand_1", Status: "rejected"}, nil
+}
+
+func (b *fakeMCPBackend) UpcomingFacts(_ context.Context, from, _ time.Time, _ string, includeSensitive bool) ([]client.FactOccurrence, error) {
+	b.lastUpcomingFrom = from
+	b.sensitiveUpcoming = includeSensitive
+	at := from.Add(time.Hour)
+	return []client.FactOccurrence{{Fact: client.Fact{ID: "fact_date", Subject: "self", Predicate: "schedule/appointment", Value: json.RawMessage(`"soon"`)}, OccursAt: &at}}, nil
+}
+
+func (b *fakeMCPBackend) UpsertFactSubject(_ context.Context, in client.UpsertFactSubjectInput) (client.FactSubject, error) {
+	b.lastSubjectSet = in
+	return client.FactSubject{ID: "sub_1", CanonicalKey: in.CanonicalKey, DisplayName: in.DisplayName, Aliases: []string{}}, nil
+}
+
+func (b *fakeMCPBackend) AddFactSubjectAlias(_ context.Context, in client.AddFactSubjectAliasInput) (client.FactSubject, error) {
+	b.lastSubjectAlias = in
+	return client.FactSubject{ID: "sub_1", CanonicalKey: in.CanonicalKey, Aliases: []string{in.Alias}}, nil
+}
+
+func (b *fakeMCPBackend) ListFactSubjects(context.Context) ([]client.FactSubject, error) {
+	return []client.FactSubject{{ID: "sub_1", CanonicalKey: "person_spouse", Aliases: []string{"my wife"}}}, nil
 }
 
 func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
@@ -130,6 +189,7 @@ func (b *fakeMCPBackend) GetTranscriptPage(_ context.Context, transcriptID strin
 		Entries: []client.TranscriptEntry{{
 			ID: "ent_1", TranscriptID: transcriptID, Sequence: 1, Role: "user", Body: "hello",
 			Payload: json.RawMessage(`{"kind":"message.user"}`), Artifacts: json.RawMessage(`[]`),
+			CreatedAt: time.Date(2026, 7, 12, 17, 30, 0, 0, time.UTC),
 		}},
 	}, nil
 }
@@ -158,17 +218,27 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 10 {
-		t.Fatalf("tools = %d, want 10", len(tools.Tools))
+	if len(tools.Tools) != 20 {
+		t.Fatalf("tools = %d, want 20", len(tools.Tools))
 	}
 	for _, tc := range []struct {
 		name string
 		args map[string]any
 	}{
 		{name: "witself.self.show", args: map[string]any{}},
-		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "preferences/editor", "value": "vim"}},
+		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00"}},
 		{name: "witself.fact.get", args: map[string]any{"subject": "self", "predicate": "preferences/editor"}},
-		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10}},
+		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10, "sort_usage": true, "unused_only": true}},
+		{name: "witself.fact.propose", args: map[string]any{"subject": "self", "predicate": "preferences/theme", "value": "dark", "reason": "explicit preference", "confidence": 0.0}},
+		{name: "witself.fact.propose_from_transcript", args: map[string]any{"transcript_id": "trn_1", "entry_sequence": 1, "subject": "self", "predicate": "preferences/editor", "value": "helix", "reason": "the user explicitly stated a durable editor preference", "valid_from": "2026-07-01T00:00:00Z"}},
+		{name: "witself.fact.review", args: map[string]any{"status": "open", "limit": 25}},
+		{name: "witself.fact.candidate.get", args: map[string]any{"candidate_id": "fcand_1"}},
+		{name: "witself.fact.confirm", args: map[string]any{"candidate_id": "fcand_1"}},
+		{name: "witself.fact.reject", args: map[string]any{"candidate_id": "fcand_1"}},
+		{name: "witself.fact.upcoming", args: map[string]any{"days": 14, "timezone": "America/Denver", "include_sensitive": true}},
+		{name: "witself.fact.subject.set", args: map[string]any{"canonical_key": "person_spouse", "display_name": "Spouse"}},
+		{name: "witself.fact.subject.alias", args: map[string]any{"canonical_key": "person_spouse", "alias": "my wife"}},
+		{name: "witself.fact.subject.list", args: map[string]any{}},
 		{name: "witself.transcript.list", args: map[string]any{"limit": 10}},
 		{name: "witself.transcript.get", args: map[string]any{"transcript_id": "trn_1", "after_sequence": 4, "limit": 25}},
 		{name: "witself.transcript.tail", args: map[string]any{"transcript_id": "trn_1", "limit": 7}},
@@ -195,5 +265,80 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if backend.readMessageID != "msg_1" || backend.ackedMessageID != "msg_1" {
 		t.Fatalf("read/ack = %q/%q", backend.readMessageID, backend.ackedMessageID)
+	}
+	if !backend.lastFactList.OrderByUsage || !backend.lastFactList.UnusedOnly || backend.lastUpcomingFrom.IsZero() {
+		t.Fatalf("fact list/upcoming calls = %#v / %s", backend.lastFactList, backend.lastUpcomingFrom)
+	}
+	if !backend.sensitiveUpcoming {
+		t.Fatal("fact upcoming dropped include_sensitive")
+	}
+	if backend.lastReview.Status != "open" || backend.lastReview.Limit != 25 || backend.lastCandidateID != "fcand_1" {
+		t.Fatalf("candidate review/detail calls = %#v / %q", backend.lastReview, backend.lastCandidateID)
+	}
+	if backend.lastSubjectSet.CanonicalKey != "person_spouse" || backend.lastSubjectAlias.Alias != "my wife" {
+		t.Fatalf("subject calls = %#v / %#v", backend.lastSubjectSet, backend.lastSubjectAlias)
+	}
+	if got := backend.lastFactProposal.SourceRef; got != "witself://transcript/trn_1/entry/ent_1" {
+		t.Fatalf("proposal source_ref = %q", got)
+	}
+	if backend.lastFactProposal.Predicate != "preferences/editor" || string(backend.lastFactProposal.Value) != `"helix"` {
+		t.Fatalf("proposal = %#v", backend.lastFactProposal)
+	}
+	if !backend.zeroConfidence {
+		t.Fatal("explicit zero proposal confidence was treated as omitted")
+	}
+	if !backend.annualRecurrence {
+		t.Fatal("explicit annual recurrence was not passed to the fact backend")
+	}
+	if got := backend.lastFactSet.ObservedAt.Format(time.RFC3339); got != "2026-07-12T18:00:00Z" {
+		t.Fatalf("fact set observed_at = %q", got)
+	}
+	if got := backend.lastFactProposal.ObservedAt.Format(time.RFC3339); got != "2026-07-12T17:30:00Z" {
+		t.Fatalf("transcript proposal observed_at = %q", got)
+	}
+	if backend.lastFactProposal.ValidFrom == nil || backend.lastFactProposal.ValidFrom.Format(time.RFC3339) != "2026-07-01T00:00:00Z" {
+		t.Fatalf("transcript proposal valid_from = %#v", backend.lastFactProposal.ValidFrom)
+	}
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.propose_from_transcript",
+		Arguments: map[string]any{
+			"transcript_id": "trn_1", "entry_sequence": 2,
+			"predicate": "preferences/editor", "value": "vim", "reason": "missing evidence",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("missing transcript evidence result = %#v", result)
+	}
+}
+
+func TestToMCPFactPreservesValidityAndUsage(t *testing.T) {
+	confirmed := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
+	validFrom := confirmed.Add(-24 * time.Hour)
+	validUntil := confirmed.Add(24 * time.Hour)
+	lastUsed := confirmed.Add(time.Hour)
+	out := toMCPFact(client.Fact{
+		ID: "fact_1", ResolvedAssertionID: "fas_1", Subject: "self", Predicate: "identity/address",
+		Value: json.RawMessage(`"old address"`), ConfirmedAt: &confirmed,
+		ValidFrom: &validFrom, ValidUntil: &validUntil, UsageCount: 7, LastUsedAt: &lastUsed,
+	})
+	if out.ResolvedAssertionID != "fas_1" || out.ConfirmedAt == nil || out.ValidFrom == nil ||
+		out.ValidUntil == nil || out.UsageCount != 7 || out.LastUsedAt == nil {
+		t.Fatalf("MCP fact metadata = %#v", out)
+	}
+}
+
+func TestParseMCPFactTimes(t *testing.T) {
+	observed, validFrom, validUntil, err := parseMCPFactTimes(
+		"2026-07-12T12:00:00-06:00", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z",
+	)
+	if err != nil || observed.Format(time.RFC3339) != "2026-07-12T18:00:00Z" || validFrom == nil || validUntil == nil {
+		t.Fatalf("parsed fact times = %s / %#v / %#v / %v", observed, validFrom, validUntil, err)
+	}
+	if _, _, _, err := parseMCPFactTimes("", "2026-08-01T00:00:00Z", "2026-07-01T00:00:00Z"); err == nil {
+		t.Fatal("inverted validity interval was accepted")
 	}
 }
