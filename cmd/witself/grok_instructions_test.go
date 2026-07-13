@@ -66,6 +66,30 @@ func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
 	}
 }
 
+func TestGrokMemoryRoutingCanonicalizesSpouseNameAsOneFact(t *testing.T) {
+	for _, want := range []string{
+		"relationship phrase can identify the subject without becoming another fact",
+		"resolve or create subject `person_spouse` with non-sensitive display name `Spouse` and alias `my wife`",
+		"write the supplied name as exactly one sensitive string fact on that subject at predicate `identity/name`",
+		"relationship wording is subject inventory only",
+		"do not derive or store a second relationship fact",
+		"do not use another name predicate such as `identity/full_name`",
+	} {
+		if !strings.Contains(grokMemoryRoutingInstructions, want) {
+			t.Errorf("spouse-name routing contract does not contain %q", want)
+		}
+		if !strings.Contains(grokPortableMemoryRoutingInstructions, want) {
+			t.Errorf("portable spouse-name routing contract does not contain %q", want)
+		}
+		if !strings.Contains(mcpInstructions("grok-build", "witself_self_show", "witself_message_list"), want) {
+			t.Errorf("Grok MCP instructions do not contain %q", want)
+		}
+	}
+	if !strings.Contains(mcpInstructions("grok-build", "witself_self_show", "witself_message_list"), "witself_fact_set") {
+		t.Fatal("Grok MCP spouse-name contract does not use the portable fact-set tool name")
+	}
+}
+
 func TestGrokAgentsPath(t *testing.T) {
 	t.Run("GROK_HOME", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "custom-grok")
