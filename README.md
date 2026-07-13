@@ -31,9 +31,17 @@ witself version
 ## Agent Runtime Integration
 
 Once an agent token exists under the normal `~/.witself` account layout, one
-command installs the Witself stdio MCP server and durable transcript hooks. For
-Codex it also installs a managed fact-versus-native-memory routing block in the
-global `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`):
+command installs the Witself stdio MCP server and durable transcript hooks.
+Codex, Claude Code, and Grok Build also receive managed
+fact-versus-native-memory routing guidance:
+
+- Codex: `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`)
+- Claude Code: `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md` (normally
+  `~/.claude/rules/witself-memory-routing.md`)
+- Grok Build: `$GROK_HOME/AGENTS.md` (normally `~/.grok/AGENTS.md`)
+
+Cursor receives the MCP server and transcript hooks but no managed routing
+file.
 
 ```sh
 witself install codex
@@ -58,11 +66,13 @@ copies a token into the MCP or hook command. Local
 integration identity and the retryable transcript outbox live under
 `~/.witself/` (`WITSELF_HOME` overrides it).
 
-The Codex managed block contains policy only, never personal facts. Installation
-preserves unrelated instructions and refuses to proceed when a non-empty global
-`AGENTS.override.md` would shadow the managed file. Uninstall removes only the
-managed block. Start a new Codex task (or restart Codex) after installing so the
-global instructions and MCP initialization are refreshed. See
+Managed guidance contains policy only, never personal facts. Reinstall updates
+the marker-delimited policy without duplicating it. Codex and Grok preserve
+unrelated content in their shared `AGENTS.md` files; Claude uses a dedicated
+rule file that uninstall removes when empty. Codex installation refuses to
+proceed when a non-empty global `AGENTS.override.md` would shadow its managed
+file. After installing, restart the runtime and start a new task so the file
+guidance and MCP initialization are refreshed. See
 [Agent Memory Routing](docs/agent-memory-routing.md).
 
 Administrator-managed hooks are the Codex and Claude Code default. Run the

@@ -1,0 +1,204 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/witwave-ai/witself/internal/transcriptcapture"
+)
+
+// mcpRegistrationAlreadyMissing recognizes only the runtime CLIs' explicit
+// response for an absent named MCP server. Other remove failures remain fatal so
+// uninstall cannot silently leave an ambiguous or partially modified binding.
+func mcpRegistrationAlreadyMissing(output []byte) bool {
+	message := strings.ToLower(strings.TrimSpace(string(output)))
+	return strings.Contains(message, "no mcp server named") && strings.Contains(message, "witself")
+}
+
+// preflightRuntimeMemoryRoutingRemoval validates that the managed routing block
+// can be parsed without changing it. Uninstall uses this before probing the
+// runtime CLI so malformed local state wins deterministically and no external
+// command runs until local teardown is known to be safe.
+func preflightRuntimeMemoryRoutingRemoval(runtimeName string) error {
+	spec, displayName, managed, err := runtimeMemoryRoutingSpec(runtimeName)
+	if err != nil {
+		return fmt.Errorf("resolve %s memory routing instructions: %w", displayName, err)
+	}
+	if !managed {
+		return nil
+	}
+	spec, err = normalizeManagedInstructionsSpec(spec)
+	if err != nil {
+		return fmt.Errorf("remove %s memory routing instructions: %w", displayName, err)
+	}
+	snapshot, err := readManagedInstructionsSnapshot(spec)
+	if err != nil {
+		return fmt.Errorf("remove %s memory routing instructions: %w", displayName, err)
+	}
+	if !snapshot.existed {
+		return nil
+	}
+	if _, _, err := removeManagedInstructionsBlock(snapshot.data, spec); err != nil {
+		return fmt.Errorf("remove %s memory routing instructions: %w", displayName, err)
+	}
+	return nil
+}
+
+func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previous *transcriptcapture.Config) error {
+	if previous == nil {
+		return unregisterMCP(runtimeName, runtimeCLI)
+	}
+	account := strings.TrimSpace(previous.Account)
+	if account == "" {
+		account = "default"
+	}
+	realm := strings.TrimSpace(previous.Realm)
+	if realm == "" {
+		realm = "default"
+	}
+	agent := strings.TrimSpace(previous.Agent)
+	if agent == "" {
+		agent = strings.TrimSpace(previous.AgentName)
+	}
+	if agent == "" {
+		return errors.New("previous integration has no agent name")
+	}
+	if runtimeName == transcriptcapture.RuntimeCursor && runtimeCLI == "" {
+		serveArgs := []string{
+			executable, "mcp", "serve", "--runtime", runtimeName,
+			"--account", account, "--realm", realm, "--agent", agent,
+		}
+		if previous.Location.Name != "" {
+			serveArgs = append(serveArgs, "--location", previous.Location.Name)
+		}
+		if err := registerCursorMCP(serveArgs); err != nil {
+			return err
+		}
+		return errors.New("restored Cursor MCP configuration but could not re-enable it because the Cursor CLI is unavailable")
+	}
+	return registerMCP(runtimeName, runtimeCLI, executable, account, realm, agent, previous.Location.Name)
+}
+
+type runtimeHooksSnapshot struct {
+	userPresent    bool
+	managedPresent bool
+}
+
+func snapshotRuntimeHooks(runtimeName string) (runtimeHooksSnapshot, error) {
+	userPresent, err := transcriptcapture.HooksInstalled(runtimeName)
+	if err != nil {
+		return runtimeHooksSnapshot{}, fmt.Errorf("inspect user hooks: %w", err)
+	}
+	snapshot := runtimeHooksSnapshot{userPresent: userPresent}
+	if !supportsManagedHooks(runtimeName) {
+		return snapshot, nil
+	}
+	opts, err := managedHooksOptions(runtimeName, transcriptcapture.ModeRaw, "", "", "", "", "")
+	if err != nil {
+		return runtimeHooksSnapshot{}, fmt.Errorf("resolve managed hooks: %w", err)
+	}
+	snapshot.managedPresent, err = transcriptcapture.ManagedHooksInstalled(opts)
+	if err != nil {
+		return runtimeHooksSnapshot{}, fmt.Errorf("inspect managed hooks: %w", err)
+	}
+	return snapshot, nil
+}
+
+func restoreRuntimeHooksBinding(runtimeName, executable string, previous *transcriptcapture.Config) error {
+	snapshot := runtimeHooksSnapshot{}
+	if previous != nil {
+		hookMode, err := transcriptcapture.NormalizeHookMode(previous.HookMode)
+		if err != nil {
+			return err
+		}
+		snapshot.userPresent = hookMode == transcriptcapture.HookModeUser
+		snapshot.managedPresent = hookMode == transcriptcapture.HookModeManaged
+	}
+	return restoreRuntimeHooksSnapshot(runtimeName, executable, previous, snapshot)
+}
+
+func restoreRuntimeHooksSnapshot(runtimeName, executable string, previous *transcriptcapture.Config, snapshot runtimeHooksSnapshot) error {
+	if previous == nil && (snapshot.userPresent || snapshot.managedPresent) {
+		return errors.New("cannot reconstruct pre-existing hooks without an integration binding")
+	}
+	var rollbackErrs []error
+	if previous == nil || !snapshot.userPresent {
+		if _, err := transcriptcapture.RemoveHooks(runtimeName); err != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("remove user hooks: %w", err))
+		}
+	} else if err := installUserRuntimeHooks(runtimeName, executable, previous); err != nil {
+		rollbackErrs = append(rollbackErrs, err)
+	}
+
+	if supportsManagedHooks(runtimeName) {
+		if previous == nil || !snapshot.managedPresent {
+			if _, err := removeManagedRuntimeHooks(runtimeName); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove managed hooks: %w", err))
+			}
+		} else if err := installManagedRuntimeHooksBinding(runtimeName, executable, previous); err != nil {
+			rollbackErrs = append(rollbackErrs, err)
+		}
+	}
+	return errors.Join(rollbackErrs...)
+}
+
+func installUserRuntimeHooks(runtimeName, executable string, previous *transcriptcapture.Config) error {
+	account := strings.TrimSpace(previous.Account)
+	if account == "" {
+		account = "default"
+	}
+	realm := strings.TrimSpace(previous.Realm)
+	if realm == "" {
+		realm = "default"
+	}
+	agent := strings.TrimSpace(previous.Agent)
+	if agent == "" {
+		agent = strings.TrimSpace(previous.AgentName)
+	}
+	if agent == "" {
+		return errors.New("previous integration has no agent name")
+	}
+	if _, err := transcriptcapture.InstallHooks(
+		runtimeName,
+		previous.CaptureMode,
+		executable,
+		account,
+		realm,
+		agent,
+		previous.Location.Name,
+	); err != nil {
+		return fmt.Errorf("restore user hooks: %w", err)
+	}
+	return nil
+}
+
+func installManagedRuntimeHooksBinding(runtimeName, executable string, previous *transcriptcapture.Config) error {
+	account := strings.TrimSpace(previous.Account)
+	if account == "" {
+		account = "default"
+	}
+	realm := strings.TrimSpace(previous.Realm)
+	if realm == "" {
+		realm = "default"
+	}
+	agent := strings.TrimSpace(previous.Agent)
+	if agent == "" {
+		agent = strings.TrimSpace(previous.AgentName)
+	}
+	if agent == "" {
+		return errors.New("previous integration has no agent name")
+	}
+	if _, err := installManagedRuntimeHooks(
+		runtimeName,
+		previous.CaptureMode,
+		executable,
+		account,
+		realm,
+		agent,
+		previous.Location.Name,
+	); err != nil {
+		return fmt.Errorf("restore managed hooks: %w", err)
+	}
+	return nil
+}

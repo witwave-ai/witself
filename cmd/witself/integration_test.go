@@ -353,11 +353,16 @@ func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
 		configRootEnv string
 		configDir     string
 		policyPath    func(string) string
+		routingPath   func(string) string
+		routingText   string
+		removeRouting bool
 	}{
 		{
 			name: "codex", installName: "codex", runtime: transcriptcapture.RuntimeCodex,
 			cliEnv: "CODEX_CLI_PATH", configRootEnv: "CODEX_HOME", configDir: ".codex",
-			policyPath: func(root string) string { return filepath.Join(root, "codex", "requirements.toml") },
+			policyPath:  func(root string) string { return filepath.Join(root, "codex", "requirements.toml") },
+			routingPath: func(root string) string { return filepath.Join(root, "AGENTS.md") },
+			routingText: codexMemoryRoutingInstructions,
 		},
 		{
 			name: "claude", installName: "claude", runtime: transcriptcapture.RuntimeClaudeCode,
@@ -365,6 +370,9 @@ func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
 			policyPath: func(root string) string {
 				return filepath.Join(root, "claude-code", "managed-settings.d", "50-witself.json")
 			},
+			routingPath:   func(root string) string { return filepath.Join(root, "rules", claudeMemoryRoutingRuleFile) },
+			routingText:   runtimeNeutralMemoryRoutingInstructions,
+			removeRouting: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -440,6 +448,13 @@ func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
 			if !strings.Contains(string(raw), "custom-check") || strings.Contains(string(raw), "transcript hook --runtime") {
 				t.Fatalf("user settings = %s", raw)
 			}
+			routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(routing), tc.routingText) {
+				t.Fatalf("managed memory routing = %s", routing)
+			}
 
 			if code := uninstallCmd([]string{tc.installName}); code != 0 {
 				t.Fatalf("uninstall code = %d", code)
@@ -457,6 +472,19 @@ func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
 			if _, err := os.Stat(tokenPath); err != nil {
 				t.Fatalf("token was removed: %v", err)
 			}
+			if tc.removeRouting {
+				if _, err := os.Stat(tc.routingPath(runtimeRoot)); !os.IsNotExist(err) {
+					t.Fatalf("dedicated memory-routing rule still exists: %v", err)
+				}
+			} else {
+				routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(routing) != 0 {
+					t.Fatalf("shared instruction file retained managed bytes: %q", routing)
+				}
+			}
 		})
 	}
 }
@@ -469,11 +497,15 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 		cliEnv        string
 		configRootEnv string
 		hookPath      func(string) string
+		routingPath   func(string) string
+		routingText   string
 	}{
 		{
 			name: "grok", installName: "grok", runtime: transcriptcapture.RuntimeGrokBuild,
 			cliEnv: "GROK_CLI_PATH", configRootEnv: "GROK_HOME",
-			hookPath: func(root string) string { return filepath.Join(root, "hooks", "witself.json") },
+			hookPath:    func(root string) string { return filepath.Join(root, "hooks", "witself.json") },
+			routingPath: func(root string) string { return filepath.Join(root, "AGENTS.md") },
+			routingText: grokPortableMemoryRoutingInstructions,
 		},
 		{
 			name: "cursor", installName: "cursor", runtime: transcriptcapture.RuntimeCursor,
@@ -530,6 +562,15 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 			if !strings.Contains(string(hooks), "--runtime "+tc.runtime) || !strings.Contains(string(hooks), "--agent 'scott' --location 'home'") {
 				t.Fatalf("hooks = %s", hooks)
 			}
+			if tc.routingPath != nil {
+				routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(routing), tc.routingText) {
+					t.Fatalf("managed memory routing = %s", routing)
+				}
+			}
 			if tc.runtime == transcriptcapture.RuntimeGrokBuild {
 				log, err := os.ReadFile(logPath)
 				if err != nil {
@@ -570,6 +611,15 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 			}
 			if _, err := os.Stat(tokenPath); err != nil {
 				t.Fatalf("token was removed: %v", err)
+			}
+			if tc.routingPath != nil {
+				routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(routing) != 0 {
+					t.Fatalf("shared instruction file retained managed bytes: %q", routing)
+				}
 			}
 			if tc.runtime == transcriptcapture.RuntimeCursor {
 				log, err := os.ReadFile(logPath)

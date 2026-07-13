@@ -1,0 +1,803 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/witwave-ai/witself/internal/transcriptcapture"
+)
+
+type rollbackIntegrationFixture struct {
+	home          string
+	codexHome     string
+	witselfHome   string
+	serverURL     string
+	tokenPath     string
+	runtimeCLI    string
+	mcpStatePath  string
+	mcpLogPath    string
+	removeFailLog string
+}
+
+func setupRollbackIntegrationFixture(t *testing.T, authenticatedAgent string) rollbackIntegrationFixture {
+	t.Helper()
+
+	home := t.TempDir()
+	fixture := rollbackIntegrationFixture{
+		home:          home,
+		codexHome:     filepath.Join(home, ".codex"),
+		witselfHome:   filepath.Join(home, ".witself"),
+		tokenPath:     filepath.Join(home, "agent.token"),
+		runtimeCLI:    filepath.Join(home, "codex"),
+		mcpStatePath:  filepath.Join(home, "mcp-state"),
+		mcpLogPath:    filepath.Join(home, "mcp-args.log"),
+		removeFailLog: filepath.Join(home, "remove-failed-once"),
+	}
+	t.Setenv("HOME", fixture.home)
+	t.Setenv("WITSELF_HOME", fixture.witselfHome)
+	t.Setenv("CODEX_HOME", fixture.codexHome)
+	t.Setenv("CODEX_CLI_PATH", fixture.runtimeCLI)
+	t.Setenv(managedHooksTestRootEnv, filepath.Join(home, "managed"))
+	t.Setenv("FAKE_MCP_STATE", fixture.mcpStatePath)
+	t.Setenv("FAKE_MCP_LOG", fixture.mcpLogPath)
+	t.Setenv("FAKE_REMOVE_FAILED", fixture.removeFailLog)
+	t.Setenv("FAKE_FAIL_ADD_AGENT", "")
+	t.Setenv("FAKE_FAIL_REMOVE_ONCE", "")
+	setInstallExecutableForTest(t)
+
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MCP_LOG"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'codex-cli 1.0.0'
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "remove" ] && [ "$3" = "witself" ]; then
+  if [ "${FAKE_FAIL_REMOVE_ONCE:-}" = "1" ] && [ ! -f "$FAKE_REMOVE_FAILED" ]; then
+    : > "$FAKE_REMOVE_FAILED"
+    printf '%s\n' 'forced MCP removal failure' >&2
+    exit 19
+  fi
+  rm -f "$FAKE_MCP_STATE"
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "add" ] && [ "$3" = "witself" ]; then
+  if [ -n "${FAKE_FAIL_ADD_AGENT:-}" ]; then
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = "--agent" ] && [ "$argument" = "$FAKE_FAIL_ADD_AGENT" ]; then
+        printf '%s\n' 'forced MCP add failure' >&2
+        exit 9
+      fi
+      previous="$argument"
+    done
+  fi
+  printf '%s\n' "$*" > "$FAKE_MCP_STATE"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fixture.runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"schema_version":"witself.v0","identity":{"account_id":"acc_1","realm_id":"realm_1","realm_name":"default","agent_id":"agent_authenticated","agent_name":%q},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`, authenticatedAgent)
+	}))
+	t.Cleanup(srv.Close)
+	fixture.serverURL = srv.URL
+	return fixture
+}
+
+func saveRollbackBinding(t *testing.T, fixture rollbackIntegrationFixture, agent string) transcriptcapture.Config {
+	t.Helper()
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex, RuntimeVersion: "0.9.0",
+		CaptureMode: transcriptcapture.ModeRaw, HookMode: transcriptcapture.HookModeUser,
+		Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "realm_1",
+		Agent: agent, AgentID: "agent_previous", AgentName: agent,
+		Endpoint: fixture.serverURL, TokenFile: fixture.tokenPath, Location: location,
+	}
+	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+func rollbackTestExecutable(t *testing.T) string {
+	t.Helper()
+	executable, err := currentExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return executable
+}
+
+func TestFailedReinstallRestoresPriorMCPBinding(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "new-agent")
+	previous := saveRollbackBinding(t, fixture, "prior-agent")
+	executable := rollbackTestExecutable(t)
+	if err := registerMCP(
+		transcriptcapture.RuntimeCodex,
+		fixture.runtimeCLI,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantMCP, err := os.ReadFile(fixture.mcpStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_FAIL_ADD_AGENT", "new-agent")
+
+	if code := installCmd([]string{
+		"codex", "--account", "default", "--realm", "default", "--agent", "new-agent",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath, "--user-hooks",
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	gotMCP, err := os.ReadFile(fixture.mcpStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotMCP, wantMCP) {
+		t.Fatalf("restored MCP binding = %q, want %q", gotMCP, wantMCP)
+	}
+	if strings.Contains(string(gotMCP), "--agent new-agent") || !strings.Contains(string(gotMCP), "--agent prior-agent") {
+		t.Fatalf("failed reinstall retained the wrong MCP principal: %q", gotMCP)
+	}
+	restoredConfig, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig.Agent != previous.Agent || restoredConfig.AgentID != previous.AgentID ||
+		restoredConfig.Location.Name != previous.Location.Name {
+		t.Fatalf("restored config = %#v, want prior binding %#v", restoredConfig, previous)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.codexHome, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("failed reinstall retained newly installed routing file: %v", err)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "--agent new-agent") || !strings.Contains(string(log), "--agent prior-agent") {
+		t.Fatalf("MCP rollback was not exercised: %s", log)
+	}
+}
+
+func TestGrokFailedReinstallRestoresUserScopedMCPBindingAndAgentsFile(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "new-agent")
+	grokHome := filepath.Join(fixture.home, ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("GROK_CLI_PATH", fixture.runtimeCLI)
+	grokScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MCP_LOG"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'grok 0.2.99 (test) [stable]'
+  exit 0
+fi
+if [ "$1 $2 $3 $4 $5" = "mcp remove --scope user witself" ]; then
+  rm -f "$FAKE_MCP_STATE"
+  exit 0
+fi
+if [ "$1 $2 $3 $4 $5" = "mcp add --scope user witself" ]; then
+  if [ -n "${FAKE_FAIL_ADD_AGENT:-}" ]; then
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = "--agent" ] && [ "$argument" = "$FAKE_FAIL_ADD_AGENT" ]; then
+        printf '%s\n' 'forced Grok MCP add failure' >&2
+        exit 9
+      fi
+      previous="$argument"
+    done
+  fi
+  printf '%s\n' "$*" > "$FAKE_MCP_STATE"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fixture.runtimeCLI, []byte(grokScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeGrokBuild, RuntimeVersion: "0.2.98",
+		CaptureMode: transcriptcapture.ModeRaw, HookMode: transcriptcapture.HookModeUser,
+		Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "realm_1",
+		Agent: "prior-agent", AgentID: "agent_previous", AgentName: "prior-agent",
+		Endpoint: fixture.serverURL, TokenFile: fixture.tokenPath, Location: location,
+	}
+	if err := transcriptcapture.SaveConfig(previous); err != nil {
+		t.Fatal(err)
+	}
+	previous, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := rollbackTestExecutable(t)
+	if err := registerMCP(
+		transcriptcapture.RuntimeGrokBuild,
+		fixture.runtimeCLI,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantMCP, err := os.ReadFile(fixture.mcpStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wantMCP), "mcp add --scope user witself --") ||
+		!strings.Contains(string(wantMCP), "--runtime grok-build") {
+		t.Fatalf("seeded Grok binding does not use portable user scope: %q", wantMCP)
+	}
+	if err := os.MkdirAll(grokHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	routingPath := filepath.Join(grokHome, "AGENTS.md")
+	originalRouting := []byte("# Personal Grok rules\n")
+	if err := os.WriteFile(routingPath, originalRouting, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_FAIL_ADD_AGENT", "new-agent")
+
+	if code := installCmd([]string{
+		"grok", "--account", "default", "--realm", "default", "--agent", "new-agent",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	gotMCP, err := os.ReadFile(fixture.mcpStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotMCP, wantMCP) || !strings.Contains(string(gotMCP), "--agent prior-agent") {
+		t.Fatalf("restored Grok MCP binding = %q, want %q", gotMCP, wantMCP)
+	}
+	gotRouting, err := os.ReadFile(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotRouting, originalRouting) {
+		t.Fatalf("restored Grok AGENTS.md = %q, want %q", gotRouting, originalRouting)
+	}
+	if info, err := os.Stat(routingPath); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("Grok AGENTS.md mode after rollback: info=%v err=%v", info, err)
+	}
+	restoredConfig, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig.Agent != previous.Agent || restoredConfig.AgentID != previous.AgentID {
+		t.Fatalf("restored Grok config = %#v, want prior binding %#v", restoredConfig, previous)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "mcp remove --scope user witself") != 2 ||
+		strings.Count(string(log), "mcp add --scope user witself") != 2 ||
+		!strings.Contains(string(log), "--agent new-agent") ||
+		!strings.Contains(string(log), "--agent prior-agent") {
+		t.Fatalf("unexpected Grok reinstall rollback sequence: %s", log)
+	}
+}
+
+func TestHookInstallFailureRollsBackMCPConfigAndRouting(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "scott")
+	if err := os.MkdirAll(fixture.codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	routingPath := filepath.Join(fixture.codexHome, "AGENTS.md")
+	originalRouting := []byte("# Personal routing instructions\n")
+	if err := os.WriteFile(routingPath, originalRouting, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath := filepath.Join(fixture.codexHome, "hooks.json")
+	originalHooks := []byte("{not valid json\n")
+	if err := os.WriteFile(hooksPath, originalHooks, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath, "--user-hooks",
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	if _, err := os.Stat(fixture.mcpStatePath); !os.IsNotExist(err) {
+		t.Fatalf("failed install retained MCP binding: %v", err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("failed install retained integration config: %v", err)
+	}
+	gotRouting, err := os.ReadFile(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotRouting, originalRouting) {
+		t.Fatalf("routing rollback = %q, want %q", gotRouting, originalRouting)
+	}
+	if info, err := os.Stat(routingPath); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("routing mode after rollback: info=%v err=%v", info, err)
+	}
+	gotHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotHooks, originalHooks) {
+		t.Fatalf("failed hook install changed original hooks: %q", gotHooks)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "mcp add witself") || strings.Count(string(log), "mcp remove witself") < 2 {
+		t.Fatalf("expected successful MCP add followed by rollback removal: %s", log)
+	}
+}
+
+func TestFailedUninstallMCPRemovalRestoresHooksRoutingAndBinding(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "scott")
+	if err := os.MkdirAll(fixture.codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	routingPath := filepath.Join(fixture.codexHome, "AGENTS.md")
+	if err := os.WriteFile(routingPath, []byte("# Keep this personal rule\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code := installCmd([]string{
+		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath, "--user-hooks",
+	}); code != 0 {
+		t.Fatalf("initial install code = %d", code)
+	}
+
+	hooksPath := filepath.Join(fixture.codexHome, "hooks.json")
+	wantHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRouting, err := os.ReadFile(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMCP, err := os.ReadFile(fixture.mcpStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_FAIL_REMOVE_ONCE", "1")
+
+	if code := uninstallCmd([]string{"codex"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+	if _, err := os.Stat(fixture.removeFailLog); err != nil {
+		t.Fatalf("MCP removal failure was not exercised: %v", err)
+	}
+
+	for name, tc := range map[string]struct {
+		path string
+		want []byte
+	}{
+		"hooks":   {hooksPath, wantHooks},
+		"routing": {routingPath, wantRouting},
+		"MCP":     {fixture.mcpStatePath, wantMCP},
+		"config":  {configPath, wantConfig},
+	} {
+		got, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read restored %s: %v", name, err)
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Fatalf("restored %s = %q, want %q", name, got, tc.want)
+		}
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "mcp remove witself") != 2 || !strings.Contains(string(log), "mcp add witself") {
+		t.Fatalf("unexpected MCP rollback sequence: %s", log)
+	}
+}
+
+func TestFailedUninstallRestoresPreexistingUserAndManagedHookTiers(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "scott")
+	if code := installCmd([]string{
+		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath, "--user-hooks",
+	}); code != 0 {
+		t.Fatalf("initial install code = %d", code)
+	}
+	executable := rollbackTestExecutable(t)
+	managedPath, err := installManagedRuntimeHooks(
+		transcriptcapture.RuntimeCodex,
+		transcriptcapture.ModeRaw,
+		executable,
+		"default",
+		"default",
+		"scott",
+		"home",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(fixture.codexHome, "hooks.json")
+	wantUser, err := os.ReadFile(userPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantManaged, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := snapshotRuntimeHooks(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.userPresent || !state.managedPresent {
+		t.Fatalf("pre-mutation hook snapshot = %#v, want both tiers", state)
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_FAIL_REMOVE_ONCE", "1")
+
+	if code := uninstallCmd([]string{"codex", "--managed-hooks"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+	for name, tc := range map[string]struct {
+		path string
+		want []byte
+	}{
+		"user hooks":    {path: userPath, want: wantUser},
+		"managed hooks": {path: managedPath, want: wantManaged},
+	} {
+		got, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read restored %s: %v", name, err)
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Fatalf("restored %s = %q, want %q", name, got, tc.want)
+		}
+	}
+	state, err = snapshotRuntimeHooks(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.userPresent || !state.managedPresent {
+		t.Fatalf("restored hook snapshot = %#v, want both tiers", state)
+	}
+}
+
+type claudeUninstallFixture struct {
+	routingPath string
+	hooksPath   string
+	configPath  string
+}
+
+func setupClaudeUninstallFixture(t *testing.T, runtimeCLI string) claudeUninstallFixture {
+	t.Helper()
+	home := t.TempDir()
+	claudeHome := filepath.Join(home, ".claude")
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	t.Setenv("CLAUDE_CLI_PATH", runtimeCLI)
+	setInstallExecutableForTest(t)
+
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeClaudeCode, CaptureMode: transcriptcapture.ModeRaw,
+		HookMode: transcriptcapture.HookModeUser, Account: "default", Realm: "default",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott", Location: location,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable := rollbackTestExecutable(t)
+	hooksPath, err := transcriptcapture.InstallHooks(
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.ModeRaw,
+		executable,
+		"default",
+		"default",
+		"scott",
+		"home",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := installRuntimeMemoryRoutingInstructions(transcriptcapture.RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claudeUninstallFixture{
+		routingPath: routing.path,
+		hooksPath:   hooksPath,
+		configPath:  configPath,
+	}
+}
+
+func TestUninstallMissingRuntimeCLIPreservesLocalIntegration(t *testing.T) {
+	home := t.TempDir()
+	missingCLI := filepath.Join(home, "missing-claude")
+	t.Setenv("PATH", filepath.Join(home, "empty-path"))
+	fixture := setupClaudeUninstallFixture(t, missingCLI)
+
+	want := map[string][]byte{}
+	for name, path := range map[string]string{
+		"routing": fixture.routingPath,
+		"hooks":   fixture.hooksPath,
+		"config":  fixture.configPath,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[name] = raw
+	}
+
+	if code := uninstallCmd([]string{"claude"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+	for name, path := range map[string]string{
+		"routing": fixture.routingPath,
+		"hooks":   fixture.hooksPath,
+		"config":  fixture.configPath,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read preserved %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want[name]) {
+			t.Fatalf("%s changed without a runtime CLI: got %q want %q", name, got, want[name])
+		}
+	}
+}
+
+func TestUninstallAlreadyMissingMCPCompletesLocalCleanup(t *testing.T) {
+	home := t.TempDir()
+	logPath := filepath.Join(home, "claude-args.log")
+	runtimeCLI := filepath.Join(home, "claude")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_CLAUDE_LOG"
+if [ "$1" = "mcp" ] && [ "$2" = "add" ] && [ "$3" = "--help" ]; then
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "remove" ]; then
+  printf '%s\n' 'No MCP server named "witself" in user scope' >&2
+  exit 1
+fi
+exit 1
+`
+	if err := os.WriteFile(runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_CLAUDE_LOG", logPath)
+	t.Setenv("PATH", filepath.Join(home, "empty-path"))
+	fixture := setupClaudeUninstallFixture(t, runtimeCLI)
+
+	if code := uninstallCmd([]string{"claude"}); code != 0 {
+		t.Fatalf("uninstall code = %d, want 0", code)
+	}
+	for name, path := range map[string]string{
+		"routing": fixture.routingPath,
+		"hooks":   fixture.hooksPath,
+		"config":  fixture.configPath,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s remains after idempotent uninstall: %v", name, err)
+		}
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "mcp remove --scope user witself") {
+		t.Fatalf("missing MCP removal was not attempted: %s", log)
+	}
+}
+
+func TestMCPRegistrationAlreadyMissingIsNarrow(t *testing.T) {
+	for _, output := range [][]byte{
+		[]byte("No MCP server named 'witself' found."),
+		[]byte(`No MCP server named "witself" in user scope`),
+		[]byte("No MCP server named 'witself' in user config"),
+	} {
+		if !mcpRegistrationAlreadyMissing(output) {
+			t.Errorf("did not recognize missing Witself registration: %q", output)
+		}
+	}
+	for _, output := range [][]byte{
+		nil,
+		[]byte("permission denied while removing witself"),
+		[]byte("No MCP server named 'other' in user scope"),
+		[]byte("configuration parse failure"),
+	} {
+		if mcpRegistrationAlreadyMissing(output) {
+			t.Errorf("misclassified MCP removal failure: %q", output)
+		}
+	}
+}
+
+func TestUninstallWithoutConfigRefusesUnsafeCleanup(t *testing.T) {
+	home := t.TempDir()
+	claudeHome := filepath.Join(home, ".claude")
+	runtimeCLI := filepath.Join(home, "claude")
+	script := `#!/bin/sh
+if [ "$1" = "mcp" ] && [ "$2" = "add" ] && [ "$3" = "--help" ]; then
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "remove" ]; then
+  printf '%s\n' 'forced MCP removal failure' >&2
+  exit 19
+fi
+exit 1
+`
+	if err := os.WriteFile(runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	t.Setenv("CLAUDE_CLI_PATH", runtimeCLI)
+	t.Setenv("PATH", filepath.Join(home, "empty-path"))
+	setInstallExecutableForTest(t)
+	executable := rollbackTestExecutable(t)
+	hooksPath, err := transcriptcapture.InstallHooks(
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.ModeRaw,
+		executable,
+		"default",
+		"default",
+		"scott",
+		"home",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := installRuntimeMemoryRoutingInstructions(transcriptcapture.RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRouting, err := os.ReadFile(routing.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code := uninstallCmd([]string{"claude"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+	for name, tc := range map[string]struct {
+		path string
+		want []byte
+	}{
+		"hooks":   {hooksPath, wantHooks},
+		"routing": {routing.path, wantRouting},
+	} {
+		got, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read preserved %s: %v", name, err)
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Fatalf("%s changed after failed no-config uninstall: got %q want %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestRestoreUserHooksRemovesManagedHooksWhenUserRestoreFails(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	managedRoot := filepath.Join(home, "managed")
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv(managedHooksTestRootEnv, managedRoot)
+	setInstallExecutableForTest(t)
+	executable := rollbackTestExecutable(t)
+
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte("{malformed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyPath, err := installManagedRuntimeHooks(
+		transcriptcapture.RuntimeCodex,
+		transcriptcapture.ModeRaw,
+		executable,
+		"default",
+		"default",
+		"scott",
+		"home",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(policyPath); err != nil {
+		t.Fatal(err)
+	}
+	previous := &transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex, CaptureMode: transcriptcapture.ModeRaw,
+		HookMode: transcriptcapture.HookModeUser, Account: "default", Realm: "default",
+		Agent: "scott", AgentName: "scott", Location: transcriptcapture.Location{Name: "home"},
+	}
+	if err := restoreRuntimeHooksBinding(transcriptcapture.RuntimeCodex, executable, previous); err == nil {
+		t.Fatal("hook restoration unexpectedly accepted malformed user hooks")
+	}
+	if _, err := os.Stat(policyPath); !os.IsNotExist(err) {
+		t.Fatalf("managed hook policy remained after rollback: %v", err)
+	}
+}

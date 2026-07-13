@@ -2614,8 +2614,12 @@ witself uninstall claude,codex,grok,cursor
 ```
 
 Uninstall infers user versus managed hook mode from the local integration
-record and preserves tokens and pending transcript events. Pass
-`--managed-hooks` only as a recovery override when that record is unavailable.
+record and preserves tokens and pending transcript events. `--managed-hooks`
+forces removal of the administrator-managed policy for a supported runtime.
+If the integration record is missing, uninstall fails closed without changing
+MCP, hook, or routing state because it cannot reconstruct a rollback-safe
+binding. Reinstall the runtime integration to rebuild that record, then
+uninstall it.
 
 ## `witself message`
 
@@ -3249,18 +3253,17 @@ Expose Witself to MCP-compatible agent runtimes.
 
 Start the MCP server.
 
-The implemented transcript slice starts it through an installed runtime
-binding:
+The implemented server starts through an installed runtime binding:
 
 ```sh
 witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-That slice currently exposes four read-only tools:
-`witself.self.show`, `witself.transcript.list`,
-`witself.transcript.get`, and `witself.transcript.tail`. The broader catalog and
-posture below remain the target contract as domain capabilities are wired in.
+The current server exposes the 20-tool self, deterministic fact read/write and
+candidate-review, transcript read, and direct-agent message surface documented
+in [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
+target contract as additional domain capabilities are wired in.
 
 The default MCP posture should be local-first. Stdio is the first target.
 Network transports are a later, explicit deployment mode and must be

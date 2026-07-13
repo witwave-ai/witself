@@ -134,6 +134,38 @@ func RemoveHooks(runtime string) (string, error) {
 	return path, nil
 }
 
+// HooksInstalled reports whether the runtime's user-scoped settings currently
+// contain at least one Witself transcript hook. It parses the same settings
+// shape used by InstallHooks and RemoveHooks so integration rollback can
+// snapshot actual tier presence without treating unrelated hooks as Witself's.
+func HooksInstalled(runtime string) (bool, error) {
+	runtime, err := NormalizeRuntime(runtime)
+	if err != nil {
+		return false, err
+	}
+	path, err := hookSettingsPath(runtime)
+	if err != nil {
+		return false, err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	root := map[string]any{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		// Preserve the existing install/remove behavior for malformed settings:
+		// the mutating operation will report the parse error at its established
+		// point in the transaction. A bounded raw marker check is sufficient for
+		// rollback to remember whether Witself handlers may have been present.
+		return strings.Contains(string(raw), hookCommandMarker), nil
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	return hasWitselfHandlers(hooks), nil
+}
+
 func addWitselfHandlers(hooks map[string]any, runtime, mode, command string) {
 	for _, event := range hookEvents(runtime, mode) {
 		group := map[string]any{
@@ -250,6 +282,35 @@ func removeWitselfHandlers(hooks map[string]any) {
 			hooks[event] = keptGroups
 		}
 	}
+}
+
+func hasWitselfHandlers(hooks map[string]any) bool {
+	for _, rawGroups := range hooks {
+		groups, ok := rawGroups.([]any)
+		if !ok {
+			continue
+		}
+		for _, rawGroup := range groups {
+			group, ok := rawGroup.(map[string]any)
+			if !ok {
+				continue
+			}
+			if command, _ := group["command"].(string); strings.Contains(command, hookCommandMarker) {
+				return true
+			}
+			handlers, _ := group["hooks"].([]any)
+			for _, rawHandler := range handlers {
+				handler, ok := rawHandler.(map[string]any)
+				if !ok {
+					continue
+				}
+				if command, _ := handler["command"].(string); strings.Contains(command, hookCommandMarker) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func hookSettingsPath(runtime string) (string, error) {

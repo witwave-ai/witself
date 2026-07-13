@@ -144,9 +144,10 @@ source instead; Claude Code does not merge separate managed tiers.
 
 `witself uninstall codex|claude|grok|cursor` removes the MCP registration, integration
 binding, and the recorded user or managed hooks. Agent tokens and pending local
-transcript events are deliberately preserved. `--managed-hooks` can be passed
-to uninstall as a recovery override when the local integration record is
-missing.
+transcript events are deliberately preserved. `--managed-hooks` forces removal
+of the administrator-managed policy for a supported runtime. If the local
+integration record is missing, uninstall makes no changes; reinstall that
+runtime integration to reconstruct a rollback-safe binding, then uninstall it.
 
 ## Capture And Delivery
 

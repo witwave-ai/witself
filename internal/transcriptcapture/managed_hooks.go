@@ -142,6 +142,35 @@ func RemoveManagedHooks(opts ManagedHooksOptions) (string, error) {
 	}
 }
 
+// ManagedHooksInstalled reports whether Witself's administrator-managed hook
+// policy is present. Codex shares requirements.toml with unrelated policy, so
+// only its marker-delimited Witself fragment counts; Claude's policy path is a
+// dedicated Witself-owned settings fragment.
+func ManagedHooksInstalled(opts ManagedHooksOptions) (bool, error) {
+	var err error
+	opts.Runtime, err = NormalizeRuntime(opts.Runtime)
+	if err != nil {
+		return false, err
+	}
+	switch opts.Runtime {
+	case RuntimeCodex:
+		raw, err := readOptionalFile(opts.CodexRequirementsPath)
+		if err != nil || len(raw) == 0 {
+			return false, err
+		}
+		_, found, err := stripCodexManagedBlock(raw)
+		return found, err
+	case RuntimeClaudeCode:
+		_, err := os.Lstat(opts.ClaudeSettingsPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return err == nil, err
+	default:
+		return false, fmt.Errorf("unsupported runtime %q", opts.Runtime)
+	}
+}
+
 func installCodexManagedHooks(opts ManagedHooksOptions) (string, error) {
 	raw, err := readOptionalFile(opts.CodexRequirementsPath)
 	if err != nil {

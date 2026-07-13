@@ -1,0 +1,126 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestGrokMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
+	for _, want := range []string{
+		"call witself.fact.set in the same turn",
+		"one atomic durable assertion",
+		"merely stated fact is only a review candidate",
+		"private personal values sensitive",
+		"Grok native cross-session memory only when it is enabled and available",
+		"say the narrative was not stored",
+		"never fall back to a Witself fact or transcript",
+		"Never silently duplicate across providers",
+		"do not change Grok memory settings",
+		"Do not also save it in Grok memory unless the user explicitly requests both",
+		"do not edit its memory files directly or claim success without confirmation",
+		"Split a clearly mixed request",
+		"Ask before storing when the boundary is genuinely ambiguous",
+		"Honor an explicit destination",
+		"call witself.fact.get",
+		"call witself.fact.list with sensitive values redacted",
+		"report partial coverage",
+		"transcripts are interaction records, not memories",
+		"never use them as a fallback",
+		"present Witself facts as canonical assertions and memories as advisory context",
+		"surface conflicts or uncertainty",
+	} {
+		if !strings.Contains(grokMemoryRoutingInstructions, want) {
+			t.Errorf("routing contract does not contain %q", want)
+		}
+	}
+	if strings.Contains(grokMemoryRoutingInstructions, "Codex") {
+		t.Fatal("Grok routing contract contains Codex-specific wording")
+	}
+	for _, portableName := range []string{"witself_fact_set", "witself_fact_get", "witself_fact_list"} {
+		if strings.Contains(grokMemoryRoutingInstructions, portableName) {
+			t.Errorf("canonical contract contains runtime-rewritten tool name %q", portableName)
+		}
+	}
+}
+
+func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
+	if bytes.Count(grokMemoryRoutingBlock, []byte(grokMemoryRoutingBeginMarker)) != 1 ||
+		bytes.Count(grokMemoryRoutingBlock, []byte(grokMemoryRoutingEndMarker)) != 1 {
+		t.Fatalf("managed block has invalid marker count:\n%s", grokMemoryRoutingBlock)
+	}
+	if !bytes.Contains(grokMemoryRoutingBlock, []byte(grokPortableMemoryRoutingInstructions)) {
+		t.Fatal("managed block does not contain the portable Grok contract")
+	}
+	for _, dotted := range []string{"witself.fact.set", "witself.fact.get", "witself.fact.list"} {
+		if bytes.Contains(grokMemoryRoutingBlock, []byte(dotted)) {
+			t.Errorf("managed Grok block contains invalid dotted tool name %q", dotted)
+		}
+	}
+	for _, portable := range []string{"witself_fact_set", "witself_fact_get", "witself_fact_list"} {
+		if !bytes.Contains(grokMemoryRoutingBlock, []byte(portable)) {
+			t.Errorf("managed Grok block is missing portable tool name %q", portable)
+		}
+	}
+}
+
+func TestGrokAgentsPath(t *testing.T) {
+	t.Run("GROK_HOME", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "custom-grok")
+		t.Setenv("GROK_HOME", "  "+root+"  ")
+		got, err := grokAgentsPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(root, "AGENTS.md"); got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("default", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("GROK_HOME", "")
+		got, err := grokAgentsPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(home, ".grok", "AGENTS.md"); got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestGrokManagedInstructionsSpec(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "grok")
+	t.Setenv("GROK_HOME", root)
+	spec, err := grokManagedInstructionsSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.path != filepath.Join(root, "AGENTS.md") || spec.fileName != "AGENTS.md" ||
+		spec.tempPattern != ".AGENTS.md.witself-*" || spec.beginMarker != grokMemoryRoutingBeginMarker ||
+		spec.endMarker != grokMemoryRoutingEndMarker || !bytes.Equal(spec.block, grokMemoryRoutingBlock) {
+		t.Fatalf("unexpected managed instruction spec: %#v", spec)
+	}
+}
+
+func TestGrokAgentsPathDefaultUsesUserHome(t *testing.T) {
+	// os.UserHomeDir reads HOME on Unix. Keep this separate from the table test so
+	// a future platform-specific implementation cannot accidentally use GROK_HOME.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", " \t\n")
+	path, err := grokAgentsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatalf("path resolution unexpectedly created the Grok home: %v", err)
+	}
+	if path != filepath.Join(home, ".grok", "AGENTS.md") {
+		t.Fatalf("path = %q", path)
+	}
+}

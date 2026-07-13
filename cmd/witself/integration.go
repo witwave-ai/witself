@@ -171,6 +171,11 @@ func installCmd(args []string) int {
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
+	previousHooks, err := snapshotRuntimeHooks(runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: inspect existing runtime hooks: %v\n", err)
+		return 1
+	}
 	stagedConfig := cfg
 	if previousConfigErr == nil {
 		stagedConfig.HookMode = previousConfig.HookMode
@@ -179,41 +184,61 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
 		return 1
 	}
-	restoreConfig := func() {
+	restoreConfig := func() error {
 		if previousConfigErr == nil {
-			_ = transcriptcapture.SaveConfig(previousConfig)
-		} else {
-			_ = transcriptcapture.RemoveConfig(runtime)
+			return transcriptcapture.SaveConfig(previousConfig)
 		}
+		return transcriptcapture.RemoveConfig(runtime)
 	}
 	witselfExecutable, err := currentExecutablePath()
 	if err != nil {
-		restoreConfig()
+		if rollbackErr := restoreConfig(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+		}
 		fmt.Fprintf(os.Stderr, "witself: locate current executable: %v\n", err)
 		return 1
 	}
-	var codexInstructions codexInstructionsSnapshot
-	codexInstructionsInstalled := false
-	rollbackCodexInstructions := func() {
-		if !codexInstructionsInstalled {
+	memoryRouting, err := installRuntimeMemoryRoutingInstructions(runtime)
+	if err != nil {
+		if rollbackErr := restoreConfig(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+		}
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	var previousBinding *transcriptcapture.Config
+	if previousConfigErr == nil {
+		previous := previousConfig
+		previousBinding = &previous
+	}
+	rollbackInstall := func(mcpTouched, hooksTouched bool) {
+		if rollbackErr := restoreConfig(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+		}
+		if hooksTouched {
+			hookBinding := previousBinding
+			if hookBinding == nil && (previousHooks.userPresent || previousHooks.managedPresent) {
+				current := cfg
+				hookBinding = &current
+			}
+			if rollbackErr := restoreRuntimeHooksSnapshot(runtime, witselfExecutable, hookBinding, previousHooks); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
+			}
+		}
+		if mcpTouched {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
+			}
+		}
+		if !memoryRouting.managed {
 			return
 		}
-		if rollbackErr := codexInstructions.restore(); rollbackErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: warning: restore Codex memory routing instructions: %v\n", rollbackErr)
+		if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
 		}
-	}
-	if runtime == transcriptcapture.RuntimeCodex {
-		codexInstructions, err = installCodexMemoryRoutingInstructions()
-		if err != nil {
-			restoreConfig()
-			fmt.Fprintf(os.Stderr, "witself: install Codex memory routing instructions: %v\n", err)
-			return 1
-		}
-		codexInstructionsInstalled = true
 	}
 	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
-		rollbackCodexInstructions()
-		restoreConfig()
+		rollbackInstall(true, false)
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
 		return 1
 	}
@@ -230,14 +255,12 @@ func installCmd(args []string) int {
 		}
 	}
 	if err != nil {
-		rollbackCodexInstructions()
-		restoreConfig()
+		rollbackInstall(true, true)
 		fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
 		return 1
 	}
 	if err := transcriptcapture.SaveConfig(cfg); err != nil {
-		rollbackCodexInstructions()
-		restoreConfig()
+		rollbackInstall(true, true)
 		fmt.Fprintf(os.Stderr, "witself: finalize integration: %v\n", err)
 		return 1
 	}
@@ -249,19 +272,19 @@ func installCmd(args []string) int {
 	}
 	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
 	fmt.Println("mcp: witself")
-	if runtime == transcriptcapture.RuntimeCodex {
-		if instructionsPath, pathErr := codexAgentsPath(); pathErr == nil {
-			fmt.Printf("memory routing: %s (managed)\n", instructionsPath)
-		}
+	if memoryRouting.managed {
+		fmt.Printf("memory routing: %s (managed)\n", memoryRouting.path)
 	}
 	if useManagedHooks {
-		if runtime == transcriptcapture.RuntimeCodex {
-			fmt.Println("next: restart Codex and start a new task to load the managed memory-routing instructions; managed hooks require no per-hook review")
+		if memoryRouting.managed {
+			fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; managed hooks require no per-hook review\n", memoryRouting.displayName)
 		} else {
 			fmt.Printf("next: restart %s; managed hooks require no per-hook review\n", runtime)
 		}
 	} else if runtime == transcriptcapture.RuntimeCodex {
 		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook; then start a new Codex task (or restart Codex) to load the managed memory-routing instructions")
+	} else if memoryRouting.managed {
+		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
 		fmt.Printf("next: restart %s; global user hooks require no project trust\n", runtime)
 	}
@@ -339,8 +362,12 @@ func uninstallCmd(args []string) int {
 	runtime := targets[0]
 	fs := flag.NewFlagSet("uninstall "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	managedHooks := fs.Bool("managed-hooks", false, "remove administrator-managed hooks even if no integration record exists")
+	managedHooks := fs.Bool("managed-hooks", false, "also remove administrator-managed hooks")
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *managedHooks && !supportsManagedHooks(runtime) {
+		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks\n", runtime)
 		return 2
 	}
 	cfg, cfgErr := transcriptcapture.LoadConfig(runtime)
@@ -348,59 +375,102 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: read integration: %v\n", cfgErr)
 		return 1
 	}
-	// Validate and remove the managed instruction block before any irreversible
-	// teardown. Its snapshot is cheap to restore if a later hook, MCP, or config
-	// operation fails; malformed markers therefore cannot leave a half-removed
-	// Codex integration.
-	var codexInstructions codexInstructionsSnapshot
-	codexInstructionsRemoved := false
-	rollbackCodexInstructions := func() {
-		if !codexInstructionsRemoved {
-			return
-		}
-		if rollbackErr := codexInstructions.restore(); rollbackErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: warning: restore Codex memory routing instructions: %v\n", rollbackErr)
+	if errors.Is(cfgErr, os.ErrNotExist) {
+		fmt.Fprintf(
+			os.Stderr,
+			"witself: no %s integration record; no changes made (reinstall it to reconstruct a rollback-safe binding, then uninstall)\n",
+			runtime,
+		)
+		return 1
+	}
+	// Reject malformed managed routing before invoking any runtime CLI. This is
+	// intentionally read-only: CLI availability is the second preflight, and no
+	// local integration state is changed unless both checks pass.
+	if err := preflightRuntimeMemoryRoutingRemoval(runtime); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	previousHooks, err := snapshotRuntimeHooks(runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: inspect existing runtime hooks: %v\n", err)
+		return 1
+	}
+	var previousBinding *transcriptcapture.Config
+	witselfExecutable := ""
+	if cfgErr == nil {
+		previous := cfg
+		previousBinding = &previous
+		witselfExecutable, err = currentExecutablePath()
+		if err != nil {
+			witselfExecutable, err = os.Executable()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: locate current executable for rollback: %v\n", err)
+				return 1
+			}
 		}
 	}
-	if runtime == transcriptcapture.RuntimeCodex {
-		codexInstructions, err = removeCodexMemoryRoutingInstructions()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "witself: remove Codex memory routing instructions: %v\n", err)
-			return 1
+	runtimeCLI, runtimeCLIErr := findRuntimeCLI(runtime)
+	if runtime != transcriptcapture.RuntimeCursor && runtimeCLIErr != nil {
+		// Non-Cursor MCP registrations are owned by the runtime CLI. Preserve all
+		// local state so a later retry can remove the complete integration.
+		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
+		return 1
+	}
+	// Remove the preflighted managed instruction block before irreversible
+	// teardown. Its snapshot is cheap to restore if a later hook, MCP, or config
+	// operation fails.
+	memoryRouting, err := removeRuntimeMemoryRoutingInstructions(runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	rollbackUninstall := func(hooksTouched, mcpTouched bool) {
+		if mcpTouched && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
+			}
 		}
-		codexInstructionsRemoved = true
+		if hooksTouched && previousBinding != nil {
+			if rollbackErr := restoreRuntimeHooksSnapshot(runtime, witselfExecutable, previousBinding, previousHooks); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
+			}
+		}
+		if memoryRouting.managed {
+			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+			}
+		}
 	}
 	removeManaged := *managedHooks || (cfgErr == nil && cfg.HookMode == transcriptcapture.HookModeManaged)
 	if removeManaged {
 		if _, err := removeManagedRuntimeHooks(runtime); err != nil {
-			rollbackCodexInstructions()
+			rollbackUninstall(true, false)
 			fmt.Fprintf(os.Stderr, "witself: remove managed hooks: %v\n", err)
 			return 1
 		}
 	}
 	if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
-		rollbackCodexInstructions()
+		rollbackUninstall(true, false)
 		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
 		return 1
 	}
 	if runtime == transcriptcapture.RuntimeCursor {
-		runtimeCLI, _ := findRuntimeCLI(runtime)
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
-			rollbackCodexInstructions()
+			rollbackUninstall(true, true)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
-	} else if runtimeCLI, err := findRuntimeCLI(runtime); err == nil {
+	} else if runtimeCLIErr == nil {
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
-			rollbackCodexInstructions()
+			rollbackUninstall(true, true)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", runtimeCLIErr)
 	}
 	if err := transcriptcapture.RemoveConfig(runtime); err != nil {
-		rollbackCodexInstructions()
+		rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
 		fmt.Fprintf(os.Stderr, "witself: remove integration: %v\n", err)
 		return 1
 	}
@@ -812,6 +882,9 @@ func unregisterMCP(runtime, runtimeCLI string) error {
 	}
 	output, err := exec.CommandContext(ctx, runtimeCLI, args...).CombinedOutput()
 	if err != nil {
+		if mcpRegistrationAlreadyMissing(output) {
+			return nil
+		}
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil

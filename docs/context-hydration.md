@@ -172,16 +172,24 @@ same way it never enters the self-digest or the file bridge (see
 ### 1. MCP Server `instructions` (the canonical standing protocol)
 
 The MCP server returns an `instructions` string on connect (emitted by
-`witself mcp serve`). This is the canonical standing protocol. The exact string
-is pinned **verbatim** here and in [mcp-tools.md](mcp-tools.md); the two copies
-must stay byte-identical. Do not paraphrase it in code:
+`witself mcp serve`). The block below is the full target once the deferred
+Witself memory tools exist. The current implementation instead returns the base
+fact/self/transcript/message protocol documented in
+[mcp-tools.md](mcp-tools.md), with a selective provider policy for each managed
+runtime:
 
-The block below is the full target once the deferred Witself memory tools exist.
-The current Codex integration instead prepends the implemented, selective
-provider policy from [Agent Memory Routing](agent-memory-routing.md): atomic
-assertions use Witself facts, while narrative context stays on Codex's
-best-effort native-memory path. It does not use a nonexistent
-`witself.remember` tool as the natural-language router.
+- Codex receives its full fact-versus-background-memory policy before the base
+  protocol.
+- Claude Code receives a concise Claude auto-memory policy plus an operational
+  suffix, kept within its 2 KiB MCP server-instruction limit.
+- Grok Build receives its provider policy plus the suffix, with tool names
+  rewritten to the runtime's underscore-safe namespace.
+
+In every case, atomic assertions use Witself facts while narrative capture stays
+on the current runtime's supported native-memory path. The router does not call
+a nonexistent `witself.remember` tool. The exact implemented strings are
+canonical in code; [Agent Memory Routing](agent-memory-routing.md) defines their
+shared behavior and provider-specific guarantees.
 
 ```text
 You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. To hear from other agents, call `witself.message.listen` each loop; reply with `witself.message.send`. Memory work is not a substitute for doing the task.
@@ -216,8 +224,9 @@ habit installs even for agents taught only through AGENTS.md/CLAUDE.md.
 this verbatim:
 
 This is a target stanza for the deferred unified Witself memory surface. For the
-implemented Codex coexistence behavior, `witself install codex` owns a separate
-managed global block whose exact contract is documented in
+implemented coexistence behavior, `witself install codex`, `witself install
+claude`, and `witself install grok` own separate managed routing guidance whose
+lifecycle and provider contracts are documented in
 [Agent Memory Routing](agent-memory-routing.md).
 
 ```markdown

@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,12 +45,7 @@ var codexMemoryRoutingBlock = []byte(
 		codexMemoryRoutingEndMarker,
 )
 
-type codexInstructionsSnapshot struct {
-	path    string
-	data    []byte
-	mode    fs.FileMode
-	existed bool
-}
+type codexInstructionsSnapshot = managedInstructionsSnapshot
 
 func installCodexMemoryRoutingInstructions() (codexInstructionsSnapshot, error) {
 	path, err := codexAgentsPath()
@@ -62,25 +55,7 @@ func installCodexMemoryRoutingInstructions() (codexInstructionsSnapshot, error) 
 	if err := validateCodexAgentsFileIsActive(path); err != nil {
 		return codexInstructionsSnapshot{}, err
 	}
-	snapshot, err := readCodexInstructionsSnapshot(path)
-	if err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	updated, changed, err := upsertCodexMemoryRoutingBlock(snapshot.data)
-	if err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	if !changed {
-		return snapshot, nil
-	}
-	mode := snapshot.mode
-	if !snapshot.existed {
-		mode = 0o600
-	}
-	if err := writeCodexInstructionsFile(snapshot.path, updated, mode); err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	return snapshot, nil
+	return installManagedInstructions(codexManagedInstructionsSpec(path))
 }
 
 func removeCodexMemoryRoutingInstructions() (codexInstructionsSnapshot, error) {
@@ -88,40 +63,21 @@ func removeCodexMemoryRoutingInstructions() (codexInstructionsSnapshot, error) {
 	if err != nil {
 		return codexInstructionsSnapshot{}, err
 	}
-	snapshot, err := readCodexInstructionsSnapshot(path)
-	if err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	if !snapshot.existed {
-		return snapshot, nil
-	}
-	updated, changed, err := removeCodexMemoryRoutingBlock(snapshot.data)
-	if err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	if !changed {
-		return snapshot, nil
-	}
 	// Retain an empty AGENTS.md rather than guessing whether Witself created it.
 	// This preserves a pre-existing empty file and still removes every managed
 	// byte when the block was the file's only content.
-	if err := writeCodexInstructionsFile(snapshot.path, updated, snapshot.mode); err != nil {
-		return codexInstructionsSnapshot{}, err
-	}
-	return snapshot, nil
+	return removeManagedInstructions(codexManagedInstructionsSpec(path))
 }
 
-func (snapshot codexInstructionsSnapshot) restore() error {
-	if snapshot.path == "" {
-		return nil
+func codexManagedInstructionsSpec(path string) managedInstructionsSpec {
+	return managedInstructionsSpec{
+		path:        path,
+		fileName:    "AGENTS.md",
+		tempPattern: ".AGENTS.md.witself-*",
+		beginMarker: codexMemoryRoutingBeginMarker,
+		endMarker:   codexMemoryRoutingEndMarker,
+		block:       codexMemoryRoutingBlock,
 	}
-	if !snapshot.existed {
-		if err := os.Remove(snapshot.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove %s: %w", snapshot.path, err)
-		}
-		return nil
-	}
-	return writeCodexInstructionsFile(snapshot.path, snapshot.data, snapshot.mode)
 }
 
 func codexAgentsPath() (string, error) {
@@ -147,142 +103,6 @@ func validateCodexAgentsFileIsActive(path string) error {
 	}
 	if strings.TrimSpace(string(raw)) != "" {
 		return fmt.Errorf("%s is non-empty and shadows %s; remove it or merge its instructions into AGENTS.md before installing Witself", overridePath, path)
-	}
-	return nil
-}
-
-func readCodexInstructionsSnapshot(path string) (codexInstructionsSnapshot, error) {
-	snapshot := codexInstructionsSnapshot{path: path, mode: 0o600}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return snapshot, nil
-	}
-	if err != nil {
-		return codexInstructionsSnapshot{}, fmt.Errorf("inspect %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return codexInstructionsSnapshot{}, fmt.Errorf("resolve %s: %w", path, err)
-		}
-		path, err = filepath.Abs(resolved)
-		if err != nil {
-			return codexInstructionsSnapshot{}, fmt.Errorf("resolve %s: %w", resolved, err)
-		}
-		info, err = os.Stat(path)
-		if err != nil {
-			return codexInstructionsSnapshot{}, fmt.Errorf("inspect %s: %w", path, err)
-		}
-		snapshot.path = path
-	}
-	if !info.Mode().IsRegular() {
-		return codexInstructionsSnapshot{}, fmt.Errorf("%s is not a regular file", path)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return codexInstructionsSnapshot{}, fmt.Errorf("read %s: %w", path, err)
-	}
-	snapshot.data = raw
-	snapshot.mode = info.Mode()
-	snapshot.existed = true
-	return snapshot, nil
-}
-
-func upsertCodexMemoryRoutingBlock(raw []byte) ([]byte, bool, error) {
-	start, end, found, err := codexMemoryRoutingBlockRange(raw)
-	if err != nil {
-		return nil, false, err
-	}
-	if found {
-		if bytes.Equal(raw[start:end], codexMemoryRoutingBlock) {
-			return raw, false, nil
-		}
-		updated := make([]byte, 0, len(raw)-(end-start)+len(codexMemoryRoutingBlock))
-		updated = append(updated, raw[:start]...)
-		updated = append(updated, codexMemoryRoutingBlock...)
-		updated = append(updated, raw[end:]...)
-		return updated, true, nil
-	}
-	updated := make([]byte, 0, len(codexMemoryRoutingBlock)+2+len(raw))
-	updated = append(updated, codexMemoryRoutingBlock...)
-	if len(raw) == 0 {
-		updated = append(updated, '\n')
-	} else {
-		updated = append(updated, '\n', '\n')
-		updated = append(updated, raw...)
-	}
-	return updated, true, nil
-}
-
-func removeCodexMemoryRoutingBlock(raw []byte) ([]byte, bool, error) {
-	start, end, found, err := codexMemoryRoutingBlockRange(raw)
-	if err != nil {
-		return nil, false, err
-	}
-	if !found {
-		return raw, false, nil
-	}
-	// The installer owns the separator immediately following its managed block.
-	// Removing it restores a pre-existing AGENTS.md byte-for-byte in the normal
-	// prefix installation layout while leaving all unrelated content untouched.
-	if bytes.HasPrefix(raw[end:], []byte("\n\n")) {
-		end += 2
-	} else if bytes.HasPrefix(raw[end:], []byte("\n")) {
-		end++
-	}
-	updated := make([]byte, 0, len(raw)-(end-start))
-	updated = append(updated, raw[:start]...)
-	updated = append(updated, raw[end:]...)
-	return updated, true, nil
-}
-
-func codexMemoryRoutingBlockRange(raw []byte) (int, int, bool, error) {
-	begin := []byte(codexMemoryRoutingBeginMarker)
-	endMarker := []byte(codexMemoryRoutingEndMarker)
-	start := bytes.Index(raw, begin)
-	endStart := bytes.Index(raw, endMarker)
-	if start == -1 && endStart == -1 {
-		return 0, 0, false, nil
-	}
-	if start == -1 || endStart == -1 || endStart < start {
-		return 0, 0, false, errors.New("AGENTS.md contains an incomplete Witself managed memory routing block")
-	}
-	end := endStart + len(endMarker)
-	if bytes.Contains(raw[start+len(begin):endStart], begin) ||
-		bytes.Contains(raw[end:], begin) ||
-		bytes.Contains(raw[end:], endMarker) {
-		return 0, 0, false, errors.New("AGENTS.md contains multiple Witself managed memory routing markers")
-	}
-	return start, end, true, nil
-}
-
-func writeCodexInstructionsFile(path string, data []byte, mode fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
-	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".AGENTS.md.witself-*")
-	if err != nil {
-		return fmt.Errorf("create temporary AGENTS.md: %w", err)
-	}
-	tempPath := temp.Name()
-	defer func() { _ = os.Remove(tempPath) }()
-	if err := temp.Chmod(mode.Perm()); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("set temporary AGENTS.md permissions: %w", err)
-	}
-	if _, err := temp.Write(data); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("write temporary AGENTS.md: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sync temporary AGENTS.md: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close temporary AGENTS.md: %w", err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
 }
