@@ -232,7 +232,7 @@ func (snapshot managedInstructionsSnapshot) verifySourceSymlink() error {
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink == 0 || snapshot.sourceInfo == nil || !os.SameFile(info, snapshot.sourceInfo) {
+	if info.Mode()&os.ModeSymlink == 0 || !sameManagedInstructionsFileIdentity(info, snapshot.sourceInfo) {
 		return errors.New("path is no longer the original symlink")
 	}
 	target, err := os.Readlink(snapshot.sourcePath)
@@ -264,7 +264,7 @@ func verifyManagedInstructionsFileState(path string, expected []byte, expectedIn
 	if !before.Mode().IsRegular() {
 		return fmt.Errorf("%s is no longer a regular file", path)
 	}
-	if expectedInfo == nil || !os.SameFile(before, expectedInfo) {
+	if !sameManagedInstructionsFileIdentity(before, expectedInfo) {
 		return fmt.Errorf("%s was replaced", path)
 	}
 	if before.Mode().Perm() != expectedInfo.Mode().Perm() {
@@ -279,7 +279,7 @@ func verifyManagedInstructionsFileState(path string, expected []byte, expectedIn
 	if err != nil {
 		return err
 	}
-	if !os.SameFile(before, opened) {
+	if !sameManagedInstructionsFileIdentity(before, opened) {
 		return fmt.Errorf("%s changed while it was opened", path)
 	}
 	raw, err := io.ReadAll(file)
@@ -290,7 +290,7 @@ func verifyManagedInstructionsFileState(path string, expected []byte, expectedIn
 	if err != nil {
 		return err
 	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+	if !after.Mode().IsRegular() || !sameManagedInstructionsFileIdentity(before, after) {
 		return fmt.Errorf("%s changed while it was read", path)
 	}
 	if after.Mode().Perm() != expectedInfo.Mode().Perm() {
@@ -682,9 +682,9 @@ func recoverManagedInstructionsExchange(
 func recoverManagedInstructionsCreate(path, tempPath string, tempInfo fs.FileInfo) ([]string, error) {
 	pathInfo, pathErr := os.Lstat(path)
 	tempCurrent, tempErr := os.Lstat(tempPath)
-	linkedByWitself := pathErr == nil && tempInfo != nil && os.SameFile(pathInfo, tempInfo)
+	linkedByWitself := pathErr == nil && sameManagedInstructionsFileIdentity(pathInfo, tempInfo)
 	if !linkedByWitself && pathErr == nil && tempErr == nil {
-		linkedByWitself = os.SameFile(pathInfo, tempCurrent)
+		linkedByWitself = sameManagedInstructionsFileIdentity(pathInfo, tempCurrent)
 	}
 	if !linkedByWitself {
 		return preservedManagedInstructionsCreatePaths(path, tempPath, tempInfo), errors.New("new destination could not be identified safely")
@@ -699,7 +699,7 @@ func recoverManagedInstructionsCreate(path, tempPath string, tempInfo fs.FileInf
 	if err := managedInstructionsSyncDirectory(path); err != nil {
 		return existingManagedInstructionsPaths(tempPath), err
 	}
-	if tempErr == nil && (tempInfo == nil || !os.SameFile(tempCurrent, tempInfo)) {
+	if tempErr == nil && !sameManagedInstructionsFileIdentity(tempCurrent, tempInfo) {
 		return []string{tempPath}, nil
 	}
 	return nil, nil
@@ -708,7 +708,7 @@ func recoverManagedInstructionsCreate(path, tempPath string, tempInfo fs.FileInf
 func preservedManagedInstructionsCreatePaths(path, tempPath string, tempInfo fs.FileInfo) []string {
 	preserved := existingManagedInstructionsPaths(path)
 	current, err := os.Lstat(tempPath)
-	if err == nil && (tempInfo == nil || !os.SameFile(current, tempInfo)) {
+	if err == nil && !sameManagedInstructionsFileIdentity(current, tempInfo) {
 		preserved = append(preserved, tempPath)
 	}
 	return preserved
@@ -817,13 +817,26 @@ func removeManagedInstructionsEntryIfSame(path string, expectedInfo fs.FileInfo)
 	if err != nil {
 		return false, err
 	}
-	if expectedInfo == nil || !os.SameFile(info, expectedInfo) {
+	if !sameManagedInstructionsFileIdentity(info, expectedInfo) {
 		return false, nil
 	}
 	if err := os.Remove(path); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// os.SameFile compares only device and inode. Linux may immediately reuse an
+// inode after a remove-and-recreate boundary race, which made a replacement
+// look identical to the snapshot in fast tests and, more importantly, in real
+// concurrent edits. Size and modification time are stable across the hard-link
+// and rename operations used here but change on ordinary replacement writes,
+// so include them in the optimistic identity token.
+func sameManagedInstructionsFileIdentity(current, expected fs.FileInfo) bool {
+	return current != nil && expected != nil &&
+		os.SameFile(current, expected) &&
+		current.Size() == expected.Size() &&
+		current.ModTime().Equal(expected.ModTime())
 }
 
 func existingManagedInstructionsPaths(paths ...string) []string {
