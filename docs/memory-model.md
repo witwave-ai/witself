@@ -126,12 +126,12 @@ MCP equivalents in [mcp-tools.md](mcp-tools.md).
   reuse or `adjust` the existing record. Larger-scale duplicate collapse and
   supersede is the job of [Consolidation](#consolidation); `fact set` is already
   upsert and never near-dups (see [facts-model.md](facts-model.md)).
-- The convenience `remember` verb auto-routes to `add` for anything that is not a
-  clear name→value assertion (those upsert a fact instead). A routed `remember`
-  takes this same `add` path — same validation, limits, dedup/supersede, and
-  `memory.added` audit; it is not a silent bypass. See
-  [context-hydration.md](context-hydration.md) and
-  [cli-command-surface.md](cli-command-surface.md).
+- Runtime-natural `remember` requests do not automatically select Witself
+  memory. Atomic durable assertions use Witself facts; narrative context stays
+  on the runtime-native memory path unless the user explicitly selects
+  Witself. A future explicit Witself memory capture command must still take this
+  same validated `add` path. See
+  [Agent Memory Routing](agent-memory-routing.md).
 - Audited as `memory.added`.
 
 ### adjust

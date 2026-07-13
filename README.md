@@ -31,7 +31,9 @@ witself version
 ## Agent Runtime Integration
 
 Once an agent token exists under the normal `~/.witself` account layout, one
-command installs both the Witself stdio MCP server and durable transcript hooks:
+command installs the Witself stdio MCP server and durable transcript hooks. For
+Codex it also installs a managed fact-versus-native-memory routing block in the
+global `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`):
 
 ```sh
 witself install codex
@@ -55,6 +57,13 @@ token-bound identity, preserves unrelated runtime hook configuration, and never
 copies a token into the MCP or hook command. Local
 integration identity and the retryable transcript outbox live under
 `~/.witself/` (`WITSELF_HOME` overrides it).
+
+The Codex managed block contains policy only, never personal facts. Installation
+preserves unrelated instructions and refuses to proceed when a non-empty global
+`AGENTS.override.md` would shadow the managed file. Uninstall removes only the
+managed block. Start a new Codex task (or restart Codex) after installing so the
+global instructions and MCP initialization are refreshed. See
+[Agent Memory Routing](docs/agent-memory-routing.md).
 
 Administrator-managed hooks are the Codex and Claude Code default. Run the
 command as your normal user; Witself requests administrator access only for the
@@ -418,9 +427,9 @@ The product goal is a CLI-first agent durable-state service spanning both planes
 - First-class structured/plaintext identity export and round-trippable import.
 - Identity references such as `witself://fact/email` and
   `witself://agent/archivist/memory/mem_...`.
-- Agent self-managed memory and hydration: an always-loaded self-digest, recall
-  before acting, and a `remember` quick-add — plus being a good CLAUDE.md/AGENTS.md
-  citizen via two-way `digest emit` / `ingest`.
+- Agent self-managed memory and hydration: an always-loaded self-digest,
+  provider-aware natural capture, and recall across available sources — plus
+  being a good CLAUDE.md/AGENTS.md citizen via two-way `digest emit` / `ingest`.
 - MCP compatibility for agent runtimes.
 - Managed Witself Cloud by default.
 - A multi-cloud cell platform: each cell is one complete, independent Witself

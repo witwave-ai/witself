@@ -26,6 +26,9 @@ plane.
   from the original name/value identity-card draft.
 - [fact-service.md](fact-service.md): the implemented subject/predicate core,
   typed assertions, provenance/history, CLI/API/MCP surfaces, and deferred work.
+- [agent-memory-routing.md](agent-memory-routing.md): the implemented Codex
+  fact-versus-native-memory routing policy and provider-aware retrieval
+  contract.
 - [secret-model.md](secret-model.md): the sealed-plane secret data model and
   lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
   templates, references, password generation, runtime injection, and the

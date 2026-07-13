@@ -430,7 +430,7 @@ Initial route groups:
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery, limits, and embedding-provider state. |
 | `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
-| `/v1/remember` | Convenience capture action; the core auto-routes the input to a fact or a memory. |
+| `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
 | `/v1/sessions` | Multi-session bootstrap: hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
 | `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
 | `/v1/bootstrap` | One-time self-hosted first-operator bootstrap. |
@@ -569,13 +569,13 @@ POST /v1/password:generate
 
 Notes on specific actions:
 
-- `POST /v1/remember` is the tested primary capture path. It is a `POST` because
-  the captured text travels in the body and must never appear in a URL. The core
-  auto-routes: a clear name-to-value assertion upserts a fact (idempotent by
-  name), anything else adds a memory with dedup/supersede. It creates no new
-  resource kind — it composes the existing fact and memory create paths — and
-  returns the created or merged resource plus its `kind` and the deterministic
-  `echo`.
+- `POST /v1/remember` is deferred. If implemented, calling it explicitly selects
+  Witself, so it may route a clear name-to-value assertion to a fact and other
+  text to Witself memory with dedup/supersede. It is a `POST` because captured
+  text belongs in the body, and it composes existing fact and memory resources.
+  It is not the router for an agent's natural-language remember request; that
+  provider-aware behavior is defined in
+  [Agent Memory Routing](agent-memory-routing.md).
 - `:recall` is a query against the caller's accessible memories. It is a `POST`
   because the query and filters travel in the body and because cross-agent
   recall is metered and policy-gated. Recall over another agent's or group's

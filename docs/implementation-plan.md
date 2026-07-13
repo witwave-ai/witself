@@ -270,12 +270,13 @@ Exit criteria:
 
 ## Milestone 3.5: Agent Self-Management And Hydration
 
-Goal: make Witself reliable for the agent that owns it. Witself is a service the
-agent must be *taught* to call, unlike CLAUDE.md/AGENTS.md which the harness
-auto-loads. This milestone lands the self-management surface — quick capture, an
-always-loaded self-digest, multi-session bootstrap, consolidation, the file
-bridge, and the teaching layer — directly on top of the core memory/fact CRUD
-(M1) and recall (M3) it composes, before cross-agent policy (M4).
+Goal: make Witself reliable for the agent that owns it without silently
+replacing memory supplied by the agent runtime. Witself is a service the agent
+must be *taught* to call, unlike CLAUDE.md/AGENTS.md which the harness
+auto-loads. This milestone lands provider-aware capture, an always-loaded
+self-digest, multi-session bootstrap, consolidation, the file bridge, and the
+teaching layer directly on top of the core memory/fact CRUD (M1) and recall (M3)
+it composes, before cross-agent policy (M4).
 
 These verbs add no new resources: they route to the existing fact and memory
 create/update/recall paths. The work is convergence and teaching, not a new
@@ -283,11 +284,14 @@ store.
 
 Deliverables:
 
-- `witself remember "<text>" [--scope] [--sensitive] [--reason]` and
-  `witself.remember`/`POST /v1/remember`: a single auto-routing capture path —
-  a clear name→value assertion upserts a fact (idempotent by name), anything
-  else adds a verbatim memory with dedup/supersede. Tested primary capture path,
-  not a thin alias; never bypasses validation/limits.
+- Natural-language provider routing: an explicit request to remember one atomic
+  durable assertion calls `witself.fact.set` in the same turn; a merely stated
+  fact follows the candidate/review path; narrative context stays eligible for
+  runtime-native memory; mixed requests split; and explicit destinations win.
+  Codex receives this contract through both its managed global `AGENTS.md` block
+  and MCP runtime instructions. `witself remember`, `witself.remember`, and
+  `POST /v1/remember` remain deferred; if implemented, invoking them explicitly
+  selects Witself and never masquerades as the runtime's native-memory path.
 - `witself self show` / `witself.self.show` / `GET /v1/self`: the bounded,
   always-loaded self-digest — primary facts first, then top-N salient memories
   (blended salience + recency), then a one-line index of kinds/tags/counts.
@@ -328,19 +332,23 @@ Deliverables:
   to ship the paste-able teaching stanza into a project AGENTS.md.
 - Audit events: `memory.consolidated`, `session.started`, `session.ended`,
   `memory.imported`, `fact.imported`, and optional `self.digest.emitted`.
-  `remember` routes to existing `memory.added`/`fact.created`/`fact.updated`.
+  Natural fact routing uses the existing `fact.created`/`fact.updated` events;
+  a future explicit Witself capture action would use the existing fact or memory
+  mutation events rather than inventing its own.
 - Scopes reuse: `self show`/`session start`/`digest emit` need
-  `memory:read` + `fact:read`; `remember`/`session end`/`ingest` need
-  `memory:create`/`fact:create`; `consolidate` needs `memory:update`
-  (+ `memory:forget` for supersede). `--read-only` MCP mode excludes the
-  mutating verbs (`remember`, `session.end`, `consolidate`, `ingest`) while
-  `self.show`, `session.start`, `recall`, and `digest.emit` remain.
+  `memory:read` + `fact:read`; routed `fact.set` needs `fact:create`;
+  `session end`/`ingest` need their existing write scopes; and `consolidate`
+  needs `memory:update` (+ `memory:forget` for supersede). `--read-only` MCP
+  mode excludes every mutating verb while `self.show`, `session.start`,
+  `recall`, and `digest.emit` remain when implemented.
 
 Exit criteria:
 
-- `witself remember` auto-routes a name→value assertion to an upserted fact and
-  free-form text to a deduped memory, returning a deterministic `echo` and
-  `duplicate_of` when merged.
+- For Codex, a natural explicit fact-capture request reaches `fact.set` in the
+  same turn, a narrative request is not converted into a Witself fact or manual
+  Markdown file, and merely stated facts remain candidates rather than
+  canonical truth. The managed `AGENTS.md` and MCP instruction surfaces use one
+  canonical contract.
 - `witself self show` returns a digest under its byte cap without the embedding
   provider, sets `elided=true` when capped, and points to `memory.recall`.
 - A session can be started and ended across process restarts so resuming is one

@@ -192,7 +192,27 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: locate current executable: %v\n", err)
 		return 1
 	}
+	var codexInstructions codexInstructionsSnapshot
+	codexInstructionsInstalled := false
+	rollbackCodexInstructions := func() {
+		if !codexInstructionsInstalled {
+			return
+		}
+		if rollbackErr := codexInstructions.restore(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore Codex memory routing instructions: %v\n", rollbackErr)
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCodex {
+		codexInstructions, err = installCodexMemoryRoutingInstructions()
+		if err != nil {
+			restoreConfig()
+			fmt.Fprintf(os.Stderr, "witself: install Codex memory routing instructions: %v\n", err)
+			return 1
+		}
+		codexInstructionsInstalled = true
+	}
 	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
+		rollbackCodexInstructions()
 		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
 		return 1
@@ -210,11 +230,13 @@ func installCmd(args []string) int {
 		}
 	}
 	if err != nil {
+		rollbackCodexInstructions()
 		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
 		return 1
 	}
 	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		rollbackCodexInstructions()
 		restoreConfig()
 		fmt.Fprintf(os.Stderr, "witself: finalize integration: %v\n", err)
 		return 1
@@ -227,10 +249,19 @@ func installCmd(args []string) int {
 	}
 	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
 	fmt.Println("mcp: witself")
+	if runtime == transcriptcapture.RuntimeCodex {
+		if instructionsPath, pathErr := codexAgentsPath(); pathErr == nil {
+			fmt.Printf("memory routing: %s (managed)\n", instructionsPath)
+		}
+	}
 	if useManagedHooks {
-		fmt.Printf("next: restart %s; managed hooks require no per-hook review\n", runtime)
+		if runtime == transcriptcapture.RuntimeCodex {
+			fmt.Println("next: restart Codex and start a new task to load the managed memory-routing instructions; managed hooks require no per-hook review")
+		} else {
+			fmt.Printf("next: restart %s; managed hooks require no per-hook review\n", runtime)
+		}
 	} else if runtime == transcriptcapture.RuntimeCodex {
-		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook")
+		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook; then start a new Codex task (or restart Codex) to load the managed memory-routing instructions")
 	} else {
 		fmt.Printf("next: restart %s; global user hooks require no project trust\n", runtime)
 	}
@@ -317,25 +348,51 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: read integration: %v\n", cfgErr)
 		return 1
 	}
+	// Validate and remove the managed instruction block before any irreversible
+	// teardown. Its snapshot is cheap to restore if a later hook, MCP, or config
+	// operation fails; malformed markers therefore cannot leave a half-removed
+	// Codex integration.
+	var codexInstructions codexInstructionsSnapshot
+	codexInstructionsRemoved := false
+	rollbackCodexInstructions := func() {
+		if !codexInstructionsRemoved {
+			return
+		}
+		if rollbackErr := codexInstructions.restore(); rollbackErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: restore Codex memory routing instructions: %v\n", rollbackErr)
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCodex {
+		codexInstructions, err = removeCodexMemoryRoutingInstructions()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: remove Codex memory routing instructions: %v\n", err)
+			return 1
+		}
+		codexInstructionsRemoved = true
+	}
 	removeManaged := *managedHooks || (cfgErr == nil && cfg.HookMode == transcriptcapture.HookModeManaged)
 	if removeManaged {
 		if _, err := removeManagedRuntimeHooks(runtime); err != nil {
+			rollbackCodexInstructions()
 			fmt.Fprintf(os.Stderr, "witself: remove managed hooks: %v\n", err)
 			return 1
 		}
 	}
 	if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
+		rollbackCodexInstructions()
 		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
 		return 1
 	}
 	if runtime == transcriptcapture.RuntimeCursor {
 		runtimeCLI, _ := findRuntimeCLI(runtime)
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
+			rollbackCodexInstructions()
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
 	} else if runtimeCLI, err := findRuntimeCLI(runtime); err == nil {
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
+			rollbackCodexInstructions()
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
@@ -343,6 +400,7 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", err)
 	}
 	if err := transcriptcapture.RemoveConfig(runtime); err != nil {
+		rollbackCodexInstructions()
 		fmt.Fprintf(os.Stderr, "witself: remove integration: %v\n", err)
 		return 1
 	}

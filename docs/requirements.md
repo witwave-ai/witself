@@ -147,7 +147,7 @@ Open-plane core (ships first). A usable cloud-shaped slice that proves the CLI,
 MCP stdio, the backend API boundary, a local development adapter, the agent token
 lifecycle, the memory model with semantic recall, the facts model with primary
 promotion, agent self-managed memory and context hydration (the always-loaded
-self-digest, quick-add capture, session bootstrap, memory consolidation, the
+self-digest, provider-aware capture, session bootstrap, memory consolidation, the
 two-way CLAUDE.md/AGENTS.md file bridge, and the teaching layer that gets agents
 to call Witself), the cross-agent access policy engine, security groups, full
 inter-agent messaging, identity export/import, audit events, Prometheus metrics,
@@ -490,10 +490,12 @@ doc is [context-hydration.md](context-hydration.md).
 Hydration and self-management verbs (each a thin, tested path over the existing
 memory/fact core — never a bypass of validation, limits, scopes, or audit):
 
-- `remember` — the dead-simple quick-add. It **auto-routes**: a clear name→value
-  assertion upserts a fact (idempotent by name); anything else adds a verbatim
-  memory with dedup/supersede. It is the tested primary capture path, not a thin
-  alias to be left to rot; `fact set` and `memory add` remain for explicit control.
+- Natural-language remember routing is provider-aware. An atomic durable
+  assertion synchronously upserts a Witself fact; narrative context stays on
+  the runtime-native memory path unless the user explicitly selects Witself.
+  Clearly mixed requests may be split, genuinely ambiguous requests are
+  clarified, and the same content is never silently duplicated. See
+  [Agent Memory Routing](agent-memory-routing.md).
 - `self show` — the always-loaded self-digest: primary facts first, then top-N
   salient memories, then a one-line index of kinds/tags/counts. It is the MCP
   analogue of an auto-loaded `CLAUDE.md` head: cheap, never requiring the embedding
@@ -523,18 +525,17 @@ Teaching layer (three reinforcing surfaces that all say the same thing, because 
 service the agent forgets to call is worthless):
 
 1. **MCP server `instructions` field** — returned on connect by `witself mcp
-   serve`. This is the canonical standing protocol (pinned verbatim in
-   [mcp-tools.md](mcp-tools.md) and [context-hydration.md](context-hydration.md)):
-   call `self show` and `memory recall` before acting; `remember` after learning a
-   durable fact, preference, decision, or reusable context; `adjust`/`forget`
-   rather than adding a contradicting memory; and flush state with `session end` /
-   `remember` before long operations, assuming context may be cleared at any moment.
-2. **Tool descriptions as instruction** — every memory/fact/self tool's prose
-   embeds an explicit when-to-call trigger list (recall/`self show` at task start
-   and whenever the past is referenced; `remember` on learning/being asked/finding
-   reusable context/finding a record wrong; `adjust`/`forget` instead of
-   contradicting; `consolidate` when memory feels noisy). Signatures stay tiny so
-   the trigger text dominates.
+   serve`. For Codex it begins with the canonical provider policy from
+   [Agent Memory Routing](agent-memory-routing.md): explicitly requested atomic
+   assertions use `fact.set`, narrative capture stays native, and broad recall
+   reports partial provider coverage. The remaining standing protocol covers
+   implemented self, fact, transcript, and message tools.
+2. **Tool descriptions as instruction** — every implemented fact/self tool's
+   prose embeds an explicit when-to-call trigger list, including the distinction
+   between a requested canonical write and a merely observed fact candidate.
+   Deferred memory tools will carry the corresponding recall, correction, and
+   consolidation triggers when they exist. Signatures stay small so trigger
+   text dominates.
 3. **Bootstrap stanza** — a paste-able `AGENTS.md`/`CLAUDE.md` block (emitted by
    `bootstrap-instructions`) carrying the same recall-before-act,
    write-after-learn, consolidate-when-noisy heuristics, so the habit installs
@@ -546,8 +547,9 @@ Cross-cutting contract changes that make these verbs self-verifiable and safe:
   human-readable `echo` string (for example, `Remembered fact display-name=Atlas`
   or `Added mem_123 (kind=profile, salience=0.6)`) so the model can self-verify and
   chain operations.
-- **Dedup/supersede on write.** `memory add` (and `remember` when it routes to a
-  memory) checks for near-duplicates; on a hit it returns the existing `mem_` id
+- **Dedup/supersede on write.** `memory add` (and a future explicit Witself
+  capture action when it routes to a memory) checks for near-duplicates; on a
+  hit it returns the existing `mem_` id
   plus a `memory_duplicate`/`memory_merged` warning in `warnings[]` and a
   `duplicate_of` reference instead of silently creating a near-duplicate. `fact set`
   is already upsert.
@@ -563,13 +565,11 @@ and `session`), excluding archived/forgotten records. It is deterministic and ne
 calls the embedding provider, so the digest works even when embeddings are degraded.
 The selection rule is defined once in [memory-model.md](memory-model.md).
 
-Scopes and read-only: these verbs reuse the existing scopes (no new scope). `self
-show`/`session start`/`digest emit` need `memory:read` + `fact:read`;
-`remember`/`session end`/`ingest` need `memory:create`/`fact:create`;
-`consolidate` needs `memory:update` (plus `memory:forget` for supersede).
-`--read-only` MCP mode excludes the mutating verbs (`remember`, `session end`,
-`consolidate`, `ingest`) while keeping `self show`, `session start`, `recall`, and
-`digest emit`.
+Scopes and read-only: these verbs reuse the existing scopes (no new scope).
+Routed `fact.set` needs `fact:create`; `self show`/`session start`/`digest emit`
+need `memory:read` + `fact:read`; `session end`/`ingest` need their existing
+write scopes; and `consolidate` needs `memory:update` (plus `memory:forget` for
+supersede). `--read-only` MCP mode excludes every mutating verb.
 
 ### Facts Model
 
@@ -1683,7 +1683,8 @@ Open plane:
 - `memory` (`add`/`adjust`/`read`/`recall`/`list`/`forget`/`restore`/`delete`/
   `consolidate`).
 - `fact` (`set`/`get`/`list`/`delete`, with `--primary`).
-- `remember` (the auto-routing quick-add over `fact set`/`memory add`).
+- `remember` (a future explicit Witself quick-add, not the runtime-natural
+  provider router).
 - `self` (`show`, the always-loaded self-digest).
 - `session` (`start`/`end`, multi-session bootstrap).
 - `digest` (`emit`, the self-digest rendered as a `CLAUDE.md`/`AGENTS.md` fragment).
@@ -1713,7 +1714,7 @@ The MCP tool catalog spans both planes:
 - `witself.version`, `witself.whoami`, `witself.capabilities`.
 - `witself.memory.add/adjust/read/recall/list/forget/consolidate`.
 - `witself.fact.set/get/list/delete`.
-- `witself.remember` (auto-routing quick-add).
+- `witself.remember` (deferred; if exposed, explicitly Witself-scoped).
 - `witself.self.show` (the always-loaded self-digest; never includes secrets).
 - `witself.session.start/end` (multi-session bootstrap).
 - `witself.digest.emit` (ingest is CLI-first; an MCP `ingest` tool is optional;
@@ -2057,8 +2058,8 @@ API contract requirements:
   `/v1/secrets/{secret_id}:revoke`, `/v1/totp/{totp_id}:code` (returns a current
   code), and `/v1/password:generate` (password/passphrase generation). All use
   `POST`, never `GET`.
-- Expose the self-management and hydration routes: `POST /v1/remember` (the
-  convenience action that the core routes to a fact or memory), `GET /v1/self` (the
+- Expose the self-management and hydration routes: the deferred explicit
+  Witself-only `POST /v1/remember` convenience action, `GET /v1/self` (the
   self-digest; `?format=` renders the `digest emit` fragment), and
   `POST /v1/sessions:start` / `POST /v1/sessions:end`. `ingest` composes the
   existing `POST /v1/facts` and `POST /v1/memories` create paths (with dedup) rather

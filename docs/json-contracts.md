@@ -677,9 +677,11 @@ Rules:
 
 ## Remember Result
 
-Used by `remember` and `/v1/remember`. `remember` auto-routes a quick capture to
-either a fact upsert (a clear name→value assertion) or a verbatim memory add, and
-returns which one happened. See [context-hydration.md](context-hydration.md).
+Target response for the deferred explicit Witself `remember` command and
+`/v1/remember` route. Because invoking that surface selects Witself, it may
+route to either a fact upsert or a Witself memory add and returns which happened.
+It is not the natural-language cross-provider router; see
+[Agent Memory Routing](agent-memory-routing.md).
 
 ```json
 {

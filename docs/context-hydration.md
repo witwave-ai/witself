@@ -176,6 +176,13 @@ The MCP server returns an `instructions` string on connect (emitted by
 is pinned **verbatim** here and in [mcp-tools.md](mcp-tools.md); the two copies
 must stay byte-identical. Do not paraphrase it in code:
 
+The block below is the full target once the deferred Witself memory tools exist.
+The current Codex integration instead prepends the implemented, selective
+provider policy from [Agent Memory Routing](agent-memory-routing.md): atomic
+assertions use Witself facts, while narrative context stays on Codex's
+best-effort native-memory path. It does not use a nonexistent
+`witself.remember` tool as the natural-language router.
+
 ```text
 You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. To hear from other agents, call `witself.message.listen` each loop; reply with `witself.message.send`. Memory work is not a substitute for doing the task.
 ```
@@ -208,6 +215,11 @@ habit installs even for agents taught only through AGENTS.md/CLAUDE.md.
 `witself setup --write-agents-md` installs it into the project AGENTS.md. Paste
 this verbatim:
 
+This is a target stanza for the deferred unified Witself memory surface. For the
+implemented Codex coexistence behavior, `witself install codex` owns a separate
+managed global block whose exact contract is documented in
+[Agent Memory Routing](agent-memory-routing.md).
+
 ```markdown
 ## Self / Memory (Witself)
 
@@ -219,14 +231,16 @@ tools (or the `witself` CLI). Use it:
   `witself.memory.recall <topic>` for anything you may have learned before.
   Resuming work? `witself.session.start` hydrates identity, open goals, and last
   progress in one call.
-- **Write after learning.** When you learn a durable fact, preference, decision,
-  or reusable bit of context — or are asked to remember something — call
-  `witself.remember "<text>"`. It auto-routes: a name→value assertion becomes a
-  fact (upsert), anything else becomes a memory.
+- **Route after learning.** When asked to remember one atomic durable assertion,
+  call `witself.fact.set` in the same turn. Narrative context stays on the
+  runtime-native memory path unless the user explicitly selects Witself. Split
+  clearly mixed requests, clarify genuinely ambiguous ones, and never silently
+  duplicate the same content across providers.
 - **Fix, don't contradict.** If a memory is wrong or outdated, `adjust` or
   `forget` it. Do not add a new memory that contradicts an old one.
-- **Assume interruption.** Your context may be cleared at any moment. Before long
-  operations, flush state with `witself.remember` or `witself.session.end`.
+- **Assume interruption.** Your context may be cleared at any moment. Native
+  memory is background and best-effort; use an explicit Witself checkpoint such
+  as `witself.session.end` when that tool exists and durable progress is needed.
 - **Tidy when noisy.** After a large session, or when memory feels cluttered,
   run `witself.memory.consolidate` (dry-run first).
 - **Hear before you reply.** To hear from other agents, call the

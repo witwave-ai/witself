@@ -153,7 +153,7 @@ Initial metric families should include:
 | `witself_embedding_failures_total` | Embedding provider failures by provider and reason class. |
 | `witself_embedding_degrade_events_total` | Recall degrade-to-lexical events by provider and reason class. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
-| `witself_remember_total` | `remember` quick-add operations by `routed_kind` (`fact`, `memory`), owner kind, and result. The `routed_kind` label records auto-routing only; it never carries the captured text. |
+| `witself_remember_total` | Deferred metric for a future explicit Witself `remember` action, by `routed_kind` (`fact`, `memory`), owner kind, and result. It never carries captured text. |
 | `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
 | `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path never calls the embedding provider. |
 | `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
@@ -270,8 +270,8 @@ Allowed labels should be low cardinality and pre-normalized, such as:
 - `scope`, such as `memory`, `fact`, or `both`.
 - `mode`, such as `semantic` or `degraded`, for recall, and `dry_run` or
   `apply` for consolidation and ingest.
-- `routed_kind`, such as `fact` or `memory`, recording how `remember`
-  auto-routed a quick-add; it never carries the captured text.
+- `routed_kind`, such as `fact` or `memory`, reserved for a future explicit
+  Witself `remember` action; it never carries the captured text.
 - `phase`, such as `start` or `end`, for session lifecycle operations.
 - `action`, such as `merged`, `superseded`, or `conflict`, for consolidation
   outcomes.

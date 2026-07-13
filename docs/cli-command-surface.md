@@ -1242,38 +1242,18 @@ Flags:
 | `--dry-run` | Show planned close action without closing the ticket. |
 | `--yes` | Skip confirmation. |
 
-## `witself remember`
+## `witself remember` (deferred)
 
-Quick-add self-knowledge. `remember` is the tested primary capture path for
-agents and humans: it auto-routes a single piece of text to either a fact or a
-memory so callers do not have to choose. A clear name→value assertion (such as
-`package manager is pnpm`, `email = a@b.com`, or `display name is Atlas`) upserts
-a fact (idempotent by name); anything else is added as a verbatim memory with
-dedup/supersede. It never bypasses validation, limits, or the dedup contract.
-`fact set` and `memory add` remain for explicit control; `remember` is a
-first-class, tested command, not a thin alias. The auto-routing rules are tracked
-in [context-hydration.md](context-hydration.md).
+The current CLI does not expose this command. Earlier drafts described a
+provider-agnostic quick-add that sent non-facts to Witself memory, but that is
+not the desired behavior for runtimes such as Codex that already have native
+memory.
 
-```sh
-ws remember "package manager is pnpm"
-ws remember "Operator prefers terse summaries." --scope self
-ws remember "shared on-call rotation starts Mondays" --scope group --reason "team context"
-```
-
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--scope self\|project\|group` | Routing scope for the captured fact/memory. Default: `self`. |
-| `--sensitive` | Mark the created fact or memory as `sensitive` (PII); content/value is redacted in list/recall by default. |
-| `--reason TEXT` | Audit reason, required for cross-context (e.g. group) capture. |
-| `--json` | Emit the created/updated resource, its `kind` (`fact` or `memory`), the `echo` line, and `duplicate_of` when merged. |
-
-When `remember` adds a memory that near-duplicates an existing one, it returns
-the existing `mem_` id and a `memory_duplicate`/`memory_merged` warning plus
-`duplicate_of`, rather than silently creating a near-dup. `remember` does not emit
-its own audit event; it routes to the existing `memory.added` / `fact.created` /
-`fact.updated` events.
+Natural-language routing is currently an integration responsibility: an atomic
+durable assertion calls `witself.fact.set`, while narrative context stays on the
+runtime-native memory path. If this CLI command is implemented later, invoking
+it will be an explicit choice of Witself rather than a silent replacement for
+native memory. See [Agent Memory Routing](agent-memory-routing.md).
 
 ## `witself self show`
 

@@ -126,12 +126,11 @@ fuzzy-matching step.
   owner). Optional flags set `--primary`, `--sensitive`, `--format`, and
   `--source`. Setting `NAME` when it already exists updates `value` and the
   named fields and appends to edit history; it never creates a duplicate.
-- `remember` auto-routes to `fact set`: a clear `name`→`value` assertion (for
-  example "package manager is pnpm" or "email = a@b.example") upserts a fact
-  idempotently by `name`, while free-form text adds a
-  [memory](memory-model.md) instead. `remember` is convenience capture over the
-  same upsert path; `fact set` remains the explicit-control verb. See
-  [context-hydration.md](context-hydration.md).
+- Natural-language `remember` routing is provider-aware at the agent boundary.
+  Atomic durable assertions use the fact upsert path; free-form narrative stays
+  on the runtime-native memory path unless the user explicitly selects
+  Witself. The current CLI does not expose the earlier provider-agnostic
+  `remember` command. See [Agent Memory Routing](agent-memory-routing.md).
 - `fact list` enumerates the caller's facts with metadata and filters (by
   `name` prefix/namespace, `primary`, `sensitive`, `format`, `source`), with
   cursor pagination. `sensitive` values are redacted in list output by default.

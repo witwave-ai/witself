@@ -151,8 +151,10 @@ exports.
 - `memory.consolidated` (GC verb; records counts of merged/superseded memories and
   surfaced conflicts, plus the resolved-against `source` provenance, never content)
 
-The `remember` quick-add does not emit its own event; it routes to `memory.added`,
-`fact.created`, or `fact.updated` depending on what the core resolves it to.
+A future explicit Witself `remember` action would not emit its own event; it
+would route to `memory.added`, `fact.created`, or `fact.updated` depending on
+what the core resolves it to. Natural provider routing uses the event emitted by
+the actual selected operation.
 
 ### Session
 

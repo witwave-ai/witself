@@ -107,7 +107,7 @@ GET  /v1/auth/whoami         # compatibility alias for authenticated whoami
 GET  /v1/capabilities
 
 GET  /v1/self                # the always-loaded self-digest; ?format= renders an emit fragment
-POST /v1/remember            # convenience capture; core routes to a fact or a memory
+POST /v1/remember            # deferred explicit Witself-only capture action
 
 POST /v1/auth/sessions
 GET  /v1/auth/sessions/{session_id}
@@ -497,13 +497,12 @@ POST /v1/memories:consolidate
   renders the digest as a CLAUDE.md/AGENTS.md/Markdown fragment with witself
   provenance comments — this is the HTTP surface for `witself digest emit`; no
   separate emit resource exists.
-- `POST /v1/remember` is the convenience capture path (`witself remember`). It
-  auto-routes: a clear name→value assertion upserts a fact, anything else adds a
-  verbatim memory with dedup/supersede. It never bypasses validation or limits,
-  composes the same create paths as `POST /v1/facts` and `POST /v1/memories`, and
-  returns the created/updated resource plus a `kind` discriminator (and
-  `duplicate_of` when merged). It emits no event of its own; it routes to the
-  existing `fact.created`/`fact.updated`/`memory.added` events.
+- `POST /v1/remember` is deferred. If implemented, invoking it is an explicit
+  choice of Witself: a clear name→value assertion may upsert a fact and other
+  text may add Witself memory with dedup/supersede. It never bypasses validation
+  or limits and composes the existing fact and memory create paths. It is not
+  the natural-language provider router described in
+  [Agent Memory Routing](agent-memory-routing.md).
 - `POST /v1/sessions:start` hydrates identity, open goals, and last progress in
   one round-trip (`witself session start`), audited as `session.started`.
 - `POST /v1/sessions:end` persists a progress memory (kind `session`) and updates

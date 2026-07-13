@@ -497,6 +497,72 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 }
 
+func TestCodexMCPInstructionsLeadWithCanonicalMemoryRouting(t *testing.T) {
+	got := mcpInstructions(
+		transcriptcapture.RuntimeCodex,
+		"witself.self.show",
+		"witself.message.list",
+	)
+	if !strings.HasPrefix(got, codexMemoryRoutingInstructions+"\n\n") {
+		t.Fatal("Codex MCP instructions do not lead with the installed canonical routing contract")
+	}
+	first := got
+	if len(first) > 512 {
+		first = first[:512]
+	}
+	for _, want := range []string{"explicit remember/save/store request", "witself.fact.set", "merely stated fact", "not authority for canonical truth", "private personal values sensitive", "Codex native memory", "Never silently duplicate"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("first 512 Codex instruction bytes do not contain %q: %q", want, first)
+		}
+	}
+	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions {
+		t.Fatal("provider-specific Codex routing leaked into generic MCP instructions")
+	}
+}
+
+func TestCodexMCPFactDescriptionsReinforceProviderRouting(t *testing.T) {
+	ctx := context.Background()
+	server := newWitselfMCPServerForRuntime(&fakeMCPBackend{}, transcriptcapture.RuntimeCodex)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	listed, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptions := make(map[string]string, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		descriptions[tool.Name] = tool.Description
+	}
+	checks := map[string][]string{
+		"witself.fact.set":  {"same turn", "atomic durable assertion", "private personal values sensitive", "never put them in subject metadata", "Do not also write it to Markdown", "Never use for credentials"},
+		"witself.fact.get":  {"exact fact-shaped lookup", "canonical Witself fact", "runtime memory as advisory"},
+		"witself.fact.list": {"broad recall request", "sensitive values redacted", "runtime-native memory", "partial provider coverage"},
+	}
+	for name, wants := range checks {
+		description, ok := descriptions[name]
+		if !ok {
+			t.Errorf("missing %s", name)
+			continue
+		}
+		for _, want := range wants {
+			if !strings.Contains(description, want) {
+				t.Errorf("%s description does not contain %q: %q", name, want, description)
+			}
+		}
+	}
+}
+
 func TestToMCPFactPreservesValidityAndUsage(t *testing.T) {
 	confirmed := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 	validFrom := confirmed.Add(-24 * time.Hour)

@@ -118,8 +118,15 @@ witself.fact.subject.alias
 witself.fact.subject.list
 ```
 
-The installed MCP instructions tell supported agents to write a canonical fact
-in the same turn when the user explicitly says to remember, save, or store it.
+The installed routing instructions tell supported agents to write a canonical
+fact in the same turn when the user explicitly says to remember, save, or store
+one atomic durable assertion. They do not claim every use of “remember”:
+narrative rationale, project history, lessons, and multi-step incidents stay on
+the runtime-native memory path. A clearly mixed request is split without
+duplicating the same content; an ambiguous one is clarified. See
+[Agent Memory Routing](agent-memory-routing.md) for the provider-aware capture
+and retrieval contract.
+
 A durable statement without that immediate-write request becomes a review
 candidate. Before storing facts about another entity, the agent lists or
 creates one stable subject and attaches conversational aliases such as
@@ -148,8 +155,10 @@ For example, “Remember that my wife's name is …” is a direct-write request
 The agent resolves or creates canonical subject `person_spouse`, attaches alias
 `my wife`, and writes one sensitive string fact at predicate `identity/name`.
 The private name belongs only in the fact value, not in subject inventory
-metadata. The same sentence without remember/save/store intent is proposed for
-review instead of changing canonical truth.
+metadata. It is not also written to runtime-native Markdown memory unless the
+user explicitly requests both destinations. The same sentence without
+remember/save/store intent is proposed for review instead of changing
+canonical truth.
 
 ## Candidate lifecycle
 

@@ -607,14 +607,14 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 	)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        selfTool,
-		Description: "Return the authenticated Witself agent identity and bounded self digest.",
+		Description: "Return the authenticated Witself agent identity and bounded self digest. Use this for the Witself side of identity recall; broad memory retrieval must also consult any available runtime-native memory and report partial coverage.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, client.SelfDigest, error) {
 		out, err := backend.Self(ctx)
 		return nil, out, err
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.fact.set"),
-		Description: "Store an explicit durable fact with subject, typed value, provenance, and immutable history. Never use for credentials or guesses.",
+		Description: "Call in the same turn when the user explicitly asks to remember, save, or store one atomic durable assertion or preference. Store it as a Witself fact with subject, typed value, provenance, and immutable history; mark private personal values sensitive and never put them in subject metadata. Do not also write it to Markdown or runtime-native memory unless the user explicitly asks for both. Never use for credentials, guesses, or narrative context.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpFactSetInput) (*mcp.CallToolResult, mcpFactOutput, error) {
 		if in.Predicate == "" || in.Value == nil {
 			return nil, mcpFactOutput{}, fmt.Errorf("predicate and value are required")
@@ -733,7 +733,7 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.fact.get"),
-		Description: "Deterministically retrieve one resolved fact by subject and predicate.",
+		Description: "Use for an exact fact-shaped lookup after resolving any subject alias. Deterministically retrieve one canonical Witself fact by subject and predicate; label any conflicting runtime memory as advisory rather than silently replacing the fact.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpFactGetInput) (*mcp.CallToolResult, mcpFactOutput, error) {
 		if in.Predicate == "" {
 			return nil, mcpFactOutput{}, fmt.Errorf("predicate is required")
@@ -743,7 +743,7 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.fact.list"),
-		Description: "Review a bounded fact inventory; sensitive values are redacted unless explicitly included.",
+		Description: "Use for the Witself fact portion of a broad recall request. Review a bounded inventory with sensitive values redacted unless explicitly requested; also consult available runtime-native memory when the user asks broadly, label provenance, and report partial provider coverage.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpFactListInput) (*mcp.CallToolResult, mcpFactListOutput, error) {
 		if in.Limit == 0 {
 			in.Limit = 100
@@ -942,8 +942,15 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 }
 
 func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
+	instructions := witselfMCPInstructions
+	if runtimeName == transcriptcapture.RuntimeCodex {
+		// Codex asks MCP servers to keep their first 512 instruction characters
+		// self-contained while it decides how to use the server. Put the same
+		// canonical policy installed in global AGENTS.md first.
+		instructions = codexMemoryRoutingInstructions + "\n\n" + instructions
+	}
 	if runtimeName != transcriptcapture.RuntimeGrokBuild {
-		return witselfMCPInstructions
+		return instructions
 	}
 	return strings.NewReplacer(
 		"witself.self.show", selfTool,
@@ -955,7 +962,7 @@ func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
 		"witself.fact.subject.list", mcpToolName(runtimeName, "witself.fact.subject.list"),
 		"witself.fact.subject.set", mcpToolName(runtimeName, "witself.fact.subject.set"),
 		"witself.fact.subject.alias", mcpToolName(runtimeName, "witself.fact.subject.alias"),
-	).Replace(witselfMCPInstructions)
+	).Replace(instructions)
 }
 
 func factTranscriptSourceRef(transcriptID, entryID string) string {

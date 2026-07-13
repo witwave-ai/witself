@@ -47,9 +47,11 @@ V0 should prove the end-to-end product boundary:
   agent's own memories.
 - The CLI can set, get, list, and delete an agent's own facts, and promote a
   fact to primary.
-- An agent can self-manage its memory and hydrate its context: a quick-add
-  `remember` that auto-routes to a fact or memory, an always-loaded
-  `self show` self-digest, `session start`/`session end` bootstrap and
+- An agent integration can route natural-language capture without replacing the
+  runtime's own memory: an explicitly requested atomic assertion goes to a
+  Witself fact, while narrative context stays on the runtime-native memory path.
+  Self-management also includes an always-loaded `self show` self-digest,
+  `session start`/`session end` bootstrap and
   flush-before-long-ops, `memory consolidate` garbage collection, a two-way
   `digest emit`/`ingest` file bridge with CLAUDE.md/AGENTS.md, and
   `bootstrap-instructions` to install the teaching stanza.
@@ -110,9 +112,12 @@ Core user-facing capabilities:
   memories, with soft-delete-by-default forget and a guarded hard delete.
 - Fact set/get/list/delete with `--primary` promotion that demotes the prior
   primary of the same logical kind.
-- `remember` quick-add that auto-routes a clear name/value assertion to a fact
-  upsert and anything else to a verbatim memory add, sharing the same
-  validation, limits, dedup, and echo as the precise verbs.
+- Provider-aware agent routing for natural-language `remember`, `save`, and
+  `store`: explicit atomic assertions use `fact set`; narrative context remains
+  eligible for runtime-native memory; clearly mixed requests split; and the
+  same content is never silently duplicated. A future explicit
+  `witself remember` command may route within Witself, but it is not the natural
+  provider router.
 - `self show` bounded session-start digest of primary facts, top-N salient
   memories, and a one-line kinds/tags/counts index, hard-capped with an
   `elided` signal instead of silent truncation, and never requiring the
@@ -315,8 +320,9 @@ V0 is credible when:
   in list/scan output across CLI, MCP, API, logs, errors, and audit records;
   an authorized read of a single record returns the value with no reveal
   ceremony.
-- `remember` auto-routes a name/value assertion to a fact upsert and free text
-  to a memory add; `self show` returns a bounded digest that sets `elided` when
+- Agent integrations route an explicitly requested atomic assertion to a fact
+  upsert and leave narrative capture on the runtime-native path; `self show`
+  returns a bounded digest that sets `elided` when
   capped and works without the embedding provider; `session start`/`end`
   round-trips identity and open goals; `memory consolidate` is dry-run by
   default and never silently overwrites human- or import-authored records;
