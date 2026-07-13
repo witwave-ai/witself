@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +93,95 @@ func TestConfiguredMCPBackendPinsLiveTokenIdentity(t *testing.T) {
 				t.Fatalf("connect error = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestCleanMCPStdioShutdownClassification(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		clean bool
+	}{
+		{name: "direct EOF", err: io.EOF, clean: true},
+		{name: "wrapped EOF", err: fmt.Errorf("outer: %w", io.EOF), clean: true},
+		{name: "SDK in-flight EOF", err: errors.New("server is closing: EOF"), clean: true},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, clean: false},
+		{name: "SDK unexpected EOF", err: errors.New("server is closing: unexpected EOF"), clean: false},
+		{name: "parse failure", err: errors.New("parse error: EOF"), clean: false},
+		{name: "cancelled", err: context.Canceled, clean: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCleanMCPStdioShutdown(tc.err); got != tc.clean {
+				t.Fatalf("isCleanMCPStdioShutdown(%q) = %t, want %t", tc.err, got, tc.clean)
+			}
+		})
+	}
+}
+
+type discardWriteCloser struct{ io.Writer }
+
+func (discardWriteCloser) Close() error { return nil }
+
+func TestMCPServerInFlightEOFIsCleanShutdown(t *testing.T) {
+	entered := make(chan struct{})
+	pingDone := make(chan error, 1)
+	release := make(chan struct{})
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "block"}, func(ctx context.Context, request *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpNoInput, error) {
+		close(entered)
+		pingDone <- request.Session.Ping(ctx, &mcp.PingParams{})
+		<-release
+		return nil, mcpNoInput{}, nil
+	})
+
+	inputReader, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = inputReader.Close()
+		_ = inputWriter.Close()
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Run(context.Background(), &mcp.IOTransport{
+			Reader: inputReader,
+			Writer: discardWriteCloser{Writer: io.Discard},
+		})
+	}()
+
+	if _, err := io.WriteString(inputWriter, strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"block","arguments":{}}}`,
+	}, "\n")+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking MCP tool was not called")
+	}
+	if err := inputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-pingDone:
+		if err == nil {
+			t.Fatal("server-to-client ping unexpectedly survived stdin EOF")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server-to-client ping did not observe stdin EOF")
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "server is closing: EOF" {
+			t.Fatalf("SDK in-flight EOF error = %v, want exact closing EOF", err)
+		}
+		if !isCleanMCPStdioShutdown(err) {
+			t.Fatalf("SDK in-flight EOF was not classified as clean: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("MCP server did not exit after stdin EOF")
 	}
 }
 

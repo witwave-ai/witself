@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -575,10 +577,21 @@ func mcpCmd(args []string) int {
 	}
 	server := newWitselfMCPServerForRuntime(configuredMCPBackend{cfg: cfg}, cfg.Runtime)
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		if isCleanMCPStdioShutdown(err) {
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func isCleanMCPStdioShutdown(err error) bool {
+	// go-sdk v1.6.1 formats the underlying EOF with %v when stdin closes
+	// while a request is finishing, so that specific path cannot be matched
+	// with errors.Is. Keep the textual fallback exact so malformed input and
+	// unexpected EOFs remain visible failures.
+	return errors.Is(err, io.EOF) || (err != nil && err.Error() == "server is closing: EOF")
 }
 
 func newWitselfMCPServer(backend witselfMCPBackend) *mcp.Server {
