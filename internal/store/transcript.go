@@ -154,6 +154,24 @@ func (s *Store) CreateTranscript(ctx context.Context, accountID, realmID, agentI
 		}
 		return Transcript{}, fmt.Errorf("create transcript: %w", err)
 	}
+	if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+		AccountID: accountID, RealmID: realmID, AgentID: agentID,
+		Dimension: UsageDimensionTranscriptCreated, Quantity: 1, Unit: UsageUnitTranscript,
+		SubjectType: "transcript", SubjectID: out.ID,
+		IdempotencyKey: "transcript_created:" + out.ID, OccurredAt: out.CreatedAt,
+	}); err != nil {
+		return Transcript{}, err
+	}
+	if logicalBytes := transcriptLogicalBytes(out); logicalBytes > 0 {
+		if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+			AccountID: accountID, RealmID: realmID, AgentID: agentID,
+			Dimension: UsageDimensionTranscriptStorage, Quantity: logicalBytes, Unit: UsageUnitByte,
+			SubjectType: "transcript", SubjectID: out.ID,
+			IdempotencyKey: "transcript_storage:" + out.ID, OccurredAt: out.CreatedAt,
+		}); err != nil {
+			return Transcript{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Transcript{}, err
 	}
@@ -215,6 +233,8 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 	}
 
 	out := make([]TranscriptEntry, 0, len(inputs))
+	insertedIDs := make([]string, 0, len(inputs))
+	var insertedBytes int64
 	startSequence := sequence
 	var latestInsertedAt time.Time
 	for _, in := range inputs {
@@ -294,6 +314,8 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			return nil, fmt.Errorf("append transcript entry: %w", err)
 		}
 		out = append(out, entry)
+		insertedIDs = append(insertedIDs, entry.ID)
+		insertedBytes += transcriptEntryLogicalBytes(entry)
 		latestInsertedAt = entry.CreatedAt
 		sequence++
 	}
@@ -303,6 +325,25 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 		SET next_sequence = $2, updated_at = $3
 		WHERE id = $1`, transcriptID, sequence, latestInsertedAt); err != nil {
 			return nil, fmt.Errorf("advance transcript sequence: %w", err)
+		}
+		batchKey := usageBatchKey(insertedIDs)
+		if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+			AccountID: accountID, RealmID: realmID, AgentID: agentID,
+			Dimension: UsageDimensionTranscriptEntryWrite, Quantity: int64(len(insertedIDs)), Unit: UsageUnitEntry,
+			SubjectType: "transcript", SubjectID: transcriptID,
+			IdempotencyKey: "transcript_entry_write:" + batchKey, OccurredAt: latestInsertedAt,
+		}); err != nil {
+			return nil, err
+		}
+		if insertedBytes > 0 {
+			if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+				AccountID: accountID, RealmID: realmID, AgentID: agentID,
+				Dimension: UsageDimensionTranscriptStorage, Quantity: insertedBytes, Unit: UsageUnitByte,
+				SubjectType: "transcript", SubjectID: transcriptID,
+				IdempotencyKey: "transcript_entry_storage:" + batchKey, OccurredAt: latestInsertedAt,
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -417,7 +458,6 @@ func (s *Store) GetTranscript(ctx context.Context, p Principal, transcriptID str
 	if err != nil {
 		return Transcript{}, nil, fmt.Errorf("list transcript entries: %w", err)
 	}
-	defer rows.Close()
 	var entries []TranscriptEntry
 	for rows.Next() {
 		var entry TranscriptEntry
@@ -429,7 +469,15 @@ func (s *Store) GetTranscript(ctx context.Context, p Principal, transcriptID str
 		}
 		entries = append(entries, entry)
 	}
-	return tr, entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Transcript{}, nil, err
+	}
+	rows.Close()
+	if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
+		return Transcript{}, nil, err
+	}
+	return tr, entries, nil
 }
 
 // GetTranscriptPage returns a bounded page without loading the full transcript.
@@ -479,7 +527,6 @@ func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID
 	if err != nil {
 		return TranscriptPage{}, fmt.Errorf("page transcript entries: %w", err)
 	}
-	defer rows.Close()
 	entries := make([]TranscriptEntry, 0, opts.Limit+1)
 	for rows.Next() {
 		var entry TranscriptEntry
@@ -492,14 +539,19 @@ func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return TranscriptPage{}, err
 	}
+	rows.Close()
 	if opts.Tail {
 		if len(entries) > opts.Limit {
 			entries = entries[:opts.Limit]
 		}
 		for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
 			entries[left], entries[right] = entries[right], entries[left]
+		}
+		if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
+			return TranscriptPage{}, err
 		}
 		return TranscriptPage{Transcript: tr, Entries: entries}, nil
 	}
@@ -509,7 +561,35 @@ func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID
 		entries = entries[:opts.Limit]
 		next = entries[len(entries)-1].Sequence
 	}
+	if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
+		return TranscriptPage{}, err
+	}
 	return TranscriptPage{Transcript: tr, Entries: entries, NextAfterSequence: next}, nil
+}
+
+func (s *Store) recordTranscriptRead(ctx context.Context, p Principal, transcriptID string, entryCount int) error {
+	if p.Kind != PrincipalAgent || entryCount == 0 {
+		return nil
+	}
+	readID, err := id.New("urd")
+	if err != nil {
+		return err
+	}
+	return s.recordUsage(ctx, usageEventInput{
+		AccountID: p.AccountID, RealmID: p.RealmID, AgentID: p.ID,
+		Dimension: UsageDimensionTranscriptEntryRead, Quantity: int64(entryCount), Unit: UsageUnitEntry,
+		SubjectType: "transcript", SubjectID: transcriptID,
+		IdempotencyKey: "transcript_entry_read:" + readID, OccurredAt: time.Now().UTC(),
+	})
+}
+
+func transcriptLogicalBytes(tr Transcript) int64 {
+	return int64(len(tr.ExternalID) + len(tr.Title) + len(tr.Metadata))
+}
+
+func transcriptEntryLogicalBytes(entry TranscriptEntry) int64 {
+	return int64(len(entry.ExternalID) + len(entry.Role) + len(entry.Body) +
+		len(entry.Payload) + len(entry.Model) + len(entry.ReplyToEntryID) + len(entry.Artifacts))
 }
 
 func normalizeTranscriptPageOptions(opts TranscriptPageOptions) (TranscriptPageOptions, error) {

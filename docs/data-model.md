@@ -142,7 +142,7 @@ generate stable local ids.
 | `dek_` | per-secret/per-field data-encryption key | sealed | `secret_deks` |
 | `att_` | attachment metadata (deferred-but-stubbed) | sealed | `attachments` |
 | `aud_` | audit event | spine | `audit_events` |
-| `usg_` | usage counter row | spine | `usage_counters` |
+| `usg_` | immutable usage event | spine | `usage_events` |
 | `idem_` | idempotency record | spine | `idempotency_keys` |
 
 The raw agent bearer-token string uses the `witself_at_` text prefix (the
@@ -171,7 +171,7 @@ expand/contract migrations cheap) using the exact contract vocabularies:
 | `aead_algorithm` (sealed) | `XCHACHA20_POLY1305`, `AES_256_GCM` |
 | `totp_hash_algorithm` (sealed) | `SHA1`, `SHA256`, `SHA512` |
 | `template` (sealed) | `login`, `api-key`, `ssh-key`, `certificate`, `env`, `generic` |
-| `usage_dimension` | the canonical metered dimensions (see [`usage_counters`](#usage_counters)) |
+| `usage_dimension` | extensible metered dimension name (see [`usage_events`](#usage_events)) |
 | `overage_behavior` | `warn`, `throttle`, `block` |
 
 **Ownership is unified across both planes.** Witpass distinguished
@@ -732,6 +732,43 @@ Unique `(transcript_id, sequence)` provides deterministic order, and unique
 `(transcript_id, external_id)` makes retry-safe capture possible. Entry bodies
 and payloads never appear in logs, metrics, errors, or account-event metadata.
 Small structured artifacts fit in `payload`; file bytes do not go in Postgres.
+
+### `usage_events`
+
+Purpose: immutable, idempotent product-usage facts scoped to the agent whose
+token performed the work. This ledger is independent of billing; a later
+billing adapter may consume it without becoming its source of truth.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `usg_` prefix |
+| `account_id` | `text NOT NULL` FK -> `accounts(id)` | archive boundary |
+| `realm_id` | `text NOT NULL` FK -> `realms(id)` | token-derived scope |
+| `agent_id` | `text NOT NULL` FK -> `agents(id)` | token-derived subject |
+| `dimension` | `text NOT NULL` | extensible snake-case metric name |
+| `quantity` | `bigint NOT NULL` | positive increment |
+| `unit` | `text NOT NULL` | `transcript`, `entry`, `byte`, or a future dimension unit |
+| `subject_type` / `subject_id` | `text NOT NULL` | resource that caused the usage |
+| `idempotency_key` | `text NOT NULL` | unique within the account |
+| `metadata` | `jsonb NOT NULL DEFAULT '{}'` | bounded non-content object |
+| `occurred_at` / `created_at` | `timestamptz` | event time / ledger insert time |
+
+The transcript slice emits `transcript_created`, `transcript_entry_write`,
+`transcript_entry_read`, and `transcript_storage_byte`. Write events commit in
+the same transaction as transcript data; retrying the same external ids adds
+no usage. Read quantity is the number of entries successfully returned to an
+agent. Operator audit reads do not accrue per-agent usage. Usage metadata must
+never contain transcript bodies, prompts, responses, secrets, or tokens.
+
+### `usage_rollups`
+
+Purpose: transactionally maintained hourly and daily UTC projections for fast
+CLI/API display. The key is agent + dimension + unit + bucket + bucket start;
+each row stores summed `quantity`, source `event_count`, and `updated_at`.
+
+Both usage tables are included in the account archive. Import preserves their
+ids, timestamps, and totals and does not emit new usage, so moving an account
+between cells does not reset or double-count its history.
 
 ### `messages`
 
@@ -1303,6 +1340,11 @@ CREATE INDEX ix_audit_realm_action_ts  ON audit_events (realm_id, action, timest
 
 ### `usage_counters`
 
+Status: deferred limit-enforcement design. This is distinct from the
+implemented `usage_events` source ledger and `usage_rollups` display
+projection. If it lands, its identifier/key must not reuse the `usg_` event
+namespace.
+
 Purpose: per-realm, per-dimension metered usage and rate-limit state. Feeds
 `/v1/capabilities` limits and `/v1/billing/usage`. Caps (`max`/`used`) and rate
 windows are persisted per realm per dimension. See
@@ -1319,7 +1361,7 @@ dimensions are metered only when the sealed plane is enabled.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | `text` PK | `usg_` prefix |
+| `id` | `text` PK | prefix to be assigned when implemented |
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
 | `realm_id` | `text NOT NULL` FK -> `realms(id)` | billing target (rolls up to account) |
 | `dimension` | `text NOT NULL` | one of the canonical dimensions |

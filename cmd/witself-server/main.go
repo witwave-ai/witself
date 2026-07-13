@@ -210,6 +210,20 @@ func serve() int {
 				NextAfterSequence: page.NextAfterSequence,
 			}, nil
 		}
+		cfg.GetUsage = func(ctx context.Context, p server.DomainPrincipal, query server.UsageQuery) (server.UsageReport, error) {
+			report, err := st.GetAgentUsage(ctx, toStorePrincipal(p), store.UsageQuery{
+				Since: query.Since, Until: query.Until, Bucket: query.Bucket, Dimensions: query.Dimensions,
+			})
+			switch {
+			case errors.Is(err, store.ErrUsageInputInvalid):
+				return server.UsageReport{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
+			case errors.Is(err, store.ErrUsageForbidden):
+				return server.UsageReport{}, server.ErrForbidden
+			case err != nil:
+				return server.UsageReport{}, err
+			}
+			return toServerUsageReport(report), nil
+		}
 		cfg.SendMessage = func(ctx context.Context, p server.DomainPrincipal, in server.SendMessageRequest) (server.Message, error) {
 			if in.To.Kind != "agent" {
 				return server.Message{}, fmt.Errorf("%w: to.kind must be agent", server.ErrBadInput)
@@ -1188,5 +1202,28 @@ func toServerTranscriptEntry(entry store.TranscriptEntry) server.TranscriptEntry
 		ReplyToEntryID:    entry.ReplyToEntryID,
 		Artifacts:         entry.Artifacts,
 		CreatedAt:         entry.CreatedAt,
+	}
+}
+
+func toServerUsageReport(report store.UsageReport) server.UsageReport {
+	points := make([]server.UsagePoint, len(report.Points))
+	for i, point := range report.Points {
+		points[i] = server.UsagePoint{
+			Dimension: point.Dimension, Unit: point.Unit, BucketStart: point.BucketStart,
+			Quantity: point.Quantity, EventCount: point.EventCount,
+		}
+	}
+	totals := make([]server.UsageTotal, len(report.Totals))
+	for i, total := range report.Totals {
+		totals[i] = server.UsageTotal{
+			Dimension: total.Dimension, Unit: total.Unit,
+			Quantity: total.Quantity, EventCount: total.EventCount,
+		}
+	}
+	return server.UsageReport{
+		AccountID: report.AccountID, RealmID: report.RealmID, RealmName: report.RealmName,
+		AgentID: report.AgentID, AgentName: report.AgentName,
+		Since: report.Since, Until: report.Until, Bucket: report.Bucket,
+		Points: points, Totals: totals,
 	}
 }

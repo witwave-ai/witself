@@ -21,6 +21,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/groups`
 - `/v1/messages`
 - `/v1/transcripts`
+- `/v1/usage`
 - `/v1/conversations`
 - `/v1/federation`
 - `/v1/tokens`
@@ -231,6 +232,9 @@ GET  /v1/transcripts/{transcript_id}
 POST /v1/transcripts/{transcript_id}/entries
 POST /v1/transcripts/{transcript_id}/entries:batch
 
+# Token-derived product usage. V0 is deliberately agent-self only.
+GET  /v1/usage
+
 # Cross-realm conversation/task resource (post-v0 collaboration).
 GET  /v1/conversations
 GET  /v1/conversations/{conversation_id}
@@ -287,6 +291,13 @@ append are retry-safe when the caller supplies external ids. Reusing an entry
 external id with different content is a conflict; `reply_to_external_id` may
 refer to an earlier entry in the same transcript, including an earlier entry in
 the same batch.
+
+`GET /v1/usage` accepts only an active agent token; account operators cannot
+expand it into another agent's view. `since` and `until` are RFC3339, repeated
+`dimension` parameters filter dimensions, and `group_by` is `hour` or `day`
+(default `day`). The default window is 30 days. Hourly windows are capped at 90
+days and daily windows at five years. Results contain time-bucket points and
+whole-window totals, each with `quantity`, `unit`, and source `event_count`.
 
 `/metrics` is intentionally outside `/v1` because it is an operational
 Prometheus scrape endpoint, not a product API resource. It should be served on

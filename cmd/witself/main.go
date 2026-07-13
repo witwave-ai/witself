@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -57,6 +58,8 @@ func run(args []string) int {
 		return tokenCmd(args[1:])
 	case "self":
 		return selfCmd(args[1:])
+	case "usage":
+		return usageCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
 	case "message":
@@ -341,6 +344,15 @@ func parseCSVList(s string) []string {
 		out = []string{}
 	}
 	return out
+}
+
+type csvListFlag []string
+
+func (v *csvListFlag) String() string { return strings.Join(*v, ",") }
+
+func (v *csvListFlag) Set(raw string) error {
+	*v = append(*v, parseCSVList(raw)...)
+	return nil
 }
 
 func printPlacementPolicy(policy placement.Policy) {
@@ -2464,6 +2476,111 @@ func selfShow(args []string) int {
 	return 0
 }
 
+func usageCmd(args []string) int {
+	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	realm := fs.String("realm", "", `local realm name (default: WITSELF_REALM or "default")`)
+	agent := fs.String("agent", "", "local agent name (default: WITSELF_AGENT)")
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an agent token")
+	sinceRaw := fs.String("since", "30d", "report start (RFC3339 or duration such as 30d or 24h)")
+	untilRaw := fs.String("until", "", "report end (RFC3339; default: now)")
+	groupBy := fs.String("group-by", "day", "time bucket: hour or day")
+	var dimensions csvListFlag
+	fs.Var(&dimensions, "dimension", "usage dimension (repeatable or comma-separated)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself usage [--account NAME] [--realm NAME] (--agent NAME | --endpoint URL --token-file FILE)")
+		return 2
+	}
+	now := time.Now().UTC()
+	since, err := parseUsageStart(*sinceRaw, now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: --since %v\n", err)
+		return 2
+	}
+	var until time.Time
+	if strings.TrimSpace(*untilRaw) != "" {
+		until, err = time.Parse(time.RFC3339, strings.TrimSpace(*untilRaw))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: --until must be RFC3339: %v\n", err)
+			return 2
+		}
+	}
+	if *groupBy != "hour" && *groupBy != "day" {
+		fmt.Fprintln(os.Stderr, "witself: --group-by must be hour or day")
+		return 2
+	}
+
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	report, err := client.GetUsage(ctx, conn.Endpoint, conn.Token, client.UsageQuery{
+		Since: since, Until: until, Bucket: *groupBy, Dimensions: dimensions,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if conn.AccountID != "" && report.AccountID != conn.AccountID {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to account %s, not local account %s (%s)\n",
+			report.AccountID, conn.AccountName, conn.AccountID)
+		return 1
+	}
+	if conn.RealmName != "" && report.RealmName != "" && report.RealmName != conn.RealmName {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to realm %q, not %q\n", report.RealmName, conn.RealmName)
+		return 1
+	}
+	if conn.AgentName != "" && report.AgentName != "" && report.AgentName != conn.AgentName {
+		fmt.Fprintf(os.Stderr, "witself: agent token belongs to agent %q, not %q\n", report.AgentName, conn.AgentName)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(report)
+	}
+	if len(report.Points) == 0 {
+		fmt.Fprintln(os.Stderr, "no usage")
+		return 0
+	}
+	w, flush := tableWriter("start\tdimension\tquantity\tunit\tevents")
+	for _, point := range report.Points {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%d\n",
+			point.BucketStart.UTC().Format(time.RFC3339), point.Dimension,
+			point.Quantity, point.Unit, point.EventCount)
+	}
+	flush()
+	return 0
+}
+
+func parseUsageStart(raw string, now time.Time) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed.UTC(), nil
+	}
+	if strings.HasSuffix(raw, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+		if err != nil || days < 1 {
+			return time.Time{}, fmt.Errorf("must be RFC3339 or a positive duration such as 30d or 24h")
+		}
+		return now.Add(-time.Duration(days) * 24 * time.Hour), nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return time.Time{}, fmt.Errorf("must be RFC3339 or a positive duration such as 30d or 24h")
+	}
+	return now.Add(-duration), nil
+}
+
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail ...")
@@ -2729,6 +2846,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
+	usageLine(w, "  witself usage                Show token-bound agent usage over time")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")

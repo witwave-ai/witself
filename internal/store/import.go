@@ -96,6 +96,18 @@ var importColumns = map[string]map[string]bool{
 		"payload": true, "model": true, "reply_to_entry_id": true,
 		"artifacts": true, "created_at": true,
 	},
+	"usage_events": {
+		"id": true, "account_id": true, "realm_id": true, "agent_id": true,
+		"dimension": true, "quantity": true, "unit": true,
+		"subject_type": true, "subject_id": true, "idempotency_key": true,
+		"metadata": true, "occurred_at": true, "created_at": true,
+	},
+	"usage_rollups": {
+		"account_id": true, "realm_id": true, "agent_id": true,
+		"dimension": true, "unit": true, "bucket": true,
+		"bucket_start": true, "quantity": true, "event_count": true,
+		"updated_at": true,
+	},
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
 		"from_agent_id": true, "to_agent_id": true,
@@ -170,6 +182,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	case "operators", "realms", "tokens", "account_events",
 		"support_tickets", "support_ticket_messages",
 		"transcript_conversations", "transcript_entries",
+		"usage_events", "usage_rollups",
 		"agent_messages", "agent_message_deliveries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
@@ -327,6 +340,25 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("transcript_entries row missing id")
 		}
 		ic.entries[id] = transcriptID
+	case "usage_events":
+		if err := ic.validateUsageScope(obj, badf, "usage_events"); err != nil {
+			return err
+		}
+		dimension, _ := stringField(obj, "dimension")
+		if strings.HasPrefix(dimension, "transcript_") {
+			subjectType, _ := stringField(obj, "subject_type")
+			subjectID, _ := stringField(obj, "subject_id")
+			scope, ok := ic.transcripts[subjectID]
+			agentID, _ := stringField(obj, "agent_id")
+			realmID, _ := stringField(obj, "realm_id")
+			if subjectType != "transcript" || !ok || scope.ownerAgentID != agentID || scope.realmID != realmID {
+				return badf("usage_events row transcript subject %q does not belong to its agent scope", subjectID)
+			}
+		}
+	case "usage_rollups":
+		if err := ic.validateUsageScope(obj, badf, "usage_rollups"); err != nil {
+			return err
+		}
 	case "agent_messages":
 		realmID, err := requireStringField(obj, "realm_id")
 		if err != nil || !ic.realms[realmID] {
@@ -370,6 +402,18 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		ic.deliveries[messageID] = true
 	default:
 		return badf("table %q is not importable", table)
+	}
+	return nil
+}
+
+func (ic *importCtx) validateUsageScope(obj map[string]any, badf func(string, ...any) error, table string) error {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return badf("%s row references realm %q not present in this archive", table, realmID)
+	}
+	agentID, err := requireStringField(obj, "agent_id")
+	if err != nil || !ic.agents[agentID] || ic.agentRealms[agentID] != realmID {
+		return badf("%s row references agent %q outside realm %q", table, agentID, realmID)
 	}
 	return nil
 }
@@ -463,6 +507,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
 		}
 	}
+	if err := validateImportedUsageRollups(ctx, tx, m.AccountID); err != nil {
+		return export.Manifest{}, err
+	}
 
 	// The archive's own account row must have actually landed, and must not
 	// claim the deployment's default seat. These are all permanent
@@ -491,6 +538,47 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, err
 	}
 	return m, nil
+}
+
+// validateImportedUsageRollups prevents a stale or edited projection from
+// landing beside an otherwise valid event ledger. date_bin uses a fixed UTC
+// epoch, matching usageBucketStart without depending on the DB session zone.
+func validateImportedUsageRollups(ctx context.Context, tx pgx.Tx, accountID string) error {
+	var mismatch bool
+	err := tx.QueryRow(ctx, `
+		WITH expected AS (
+		  SELECT account_id, realm_id, agent_id, dimension, unit,
+		         'hour'::text AS bucket,
+		         date_bin('1 hour', occurred_at, '1970-01-01 00:00:00+00'::timestamptz) AS bucket_start,
+		         sum(quantity)::bigint AS quantity, count(*)::bigint AS event_count
+		  FROM usage_events WHERE account_id = $1
+		  GROUP BY account_id, realm_id, agent_id, dimension, unit, bucket_start
+		  UNION ALL
+		  SELECT account_id, realm_id, agent_id, dimension, unit,
+		         'day'::text AS bucket,
+		         date_bin('1 day', occurred_at, '1970-01-01 00:00:00+00'::timestamptz) AS bucket_start,
+		         sum(quantity)::bigint AS quantity, count(*)::bigint AS event_count
+		  FROM usage_events WHERE account_id = $1
+		  GROUP BY account_id, realm_id, agent_id, dimension, unit, bucket_start
+		), actual AS (
+		  SELECT account_id, realm_id, agent_id, dimension, unit, bucket,
+		         bucket_start, quantity, event_count
+		  FROM usage_rollups WHERE account_id = $1
+		)
+		SELECT EXISTS (
+		  SELECT 1 FROM expected e
+		  FULL OUTER JOIN actual a
+		    USING (account_id, realm_id, agent_id, dimension, unit, bucket, bucket_start)
+		  WHERE e.account_id IS NULL OR a.account_id IS NULL
+		     OR e.quantity <> a.quantity OR e.event_count <> a.event_count
+		)`, accountID).Scan(&mismatch)
+	if err != nil {
+		return fmt.Errorf("validate imported usage rollups: %w", err)
+	}
+	if mismatch {
+		return fmt.Errorf("%w: usage rollups do not match usage events", ErrArchiveContent)
+	}
+	return nil
 }
 
 // insertProjected inserts one row using ONLY the columns the archive

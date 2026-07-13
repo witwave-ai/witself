@@ -21,6 +21,12 @@ audit) and the sealed plane (secret and TOTP). The metered payload spans identit
 usage and credential usage; the sealed-plane dimensions count events only and
 never carry secret or seed values.
 
+The implemented transcript-usage slice is deliberately upstream of this
+billing design: immutable `usage_events` plus hourly/daily `usage_rollups` move
+with the account and power `GET /v1/usage`. No Stripe object is the usage source
+of truth. Realm/account billing aggregation and conversion into plan charges
+remain deferred.
+
 ## Billing Model
 
 V0 billing posture:

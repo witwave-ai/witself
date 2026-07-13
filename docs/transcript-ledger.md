@@ -219,6 +219,27 @@ enterprise needs to understand a complex action, an integration may record:
 This provides an inspectable execution record without treating private model
 reasoning or every internal token as durable customer data.
 
+## Usage Accounting
+
+Transcript usage is recorded in the product-owned `usage_events` ledger and
+transactionally projected into hourly and daily `usage_rollups`. It is not
+owned by Stripe or another billing provider.
+
+- `transcript_created`: one transcript, idempotent by transcript id.
+- `transcript_entry_write`: newly inserted entries only; external-id retries
+  add zero.
+- `transcript_entry_read`: entries successfully returned to the owning agent;
+  account-operator audit reads add zero.
+- `transcript_storage_byte`: logical captured content bytes. It sums external
+  ids, roles, visible bodies, JSON payload/artifact bytes, model labels, reply
+  ids, titles, and transcript metadata. Generated database ids and storage
+  engine overhead are excluded.
+
+Usage events and rollups move inside the account archive. Import restores them
+verbatim and does not meter the restore itself. `GET /v1/usage` and
+`witself usage` expose only the bearer-token agent's own rollups in this slice;
+realm/account aggregation and billing conversion remain deferred.
+
 ## Structured Objects And File Artifacts
 
 Postgres `jsonb` is the right first-slice home for small structured objects:

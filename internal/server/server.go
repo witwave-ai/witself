@@ -283,6 +283,7 @@ type Config struct {
 	ListTranscripts         func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
 	GetTranscript           func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
+	GetUsage                func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
@@ -608,6 +609,45 @@ type TranscriptPage struct {
 	Transcript        Transcript
 	Entries           []TranscriptEntry
 	NextAfterSequence int64
+}
+
+// UsageQuery selects the authenticated agent's hourly or daily usage rollups.
+type UsageQuery struct {
+	Since      time.Time
+	Until      time.Time
+	Bucket     string
+	Dimensions []string
+}
+
+// UsagePoint is one dimension total in a UTC time bucket.
+type UsagePoint struct {
+	Dimension   string    `json:"dimension"`
+	Unit        string    `json:"unit"`
+	BucketStart time.Time `json:"bucket_start"`
+	Quantity    int64     `json:"quantity"`
+	EventCount  int64     `json:"event_count"`
+}
+
+// UsageTotal is a dimension total across the report window.
+type UsageTotal struct {
+	Dimension  string `json:"dimension"`
+	Unit       string `json:"unit"`
+	Quantity   int64  `json:"quantity"`
+	EventCount int64  `json:"event_count"`
+}
+
+// UsageReport is the token-derived per-agent usage view.
+type UsageReport struct {
+	AccountID string       `json:"account_id"`
+	RealmID   string       `json:"realm_id"`
+	RealmName string       `json:"realm_name,omitempty"`
+	AgentID   string       `json:"agent_id"`
+	AgentName string       `json:"agent_name,omitempty"`
+	Since     time.Time    `json:"since"`
+	Until     time.Time    `json:"until"`
+	Bucket    string       `json:"bucket"`
+	Points    []UsagePoint `json:"points"`
+	Totals    []UsageTotal `json:"totals"`
 }
 
 // Message is one durable realm-local direct message and the recipient's
@@ -1001,6 +1041,9 @@ func apiMux(cfg Config) http.Handler {
 	}
 	if cfg.AuthenticatePrincipal != nil {
 		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal))
+		if cfg.GetUsage != nil {
+			mux.HandleFunc("GET /v1/usage", usageHandler(cfg.AuthenticatePrincipal, cfg.GetUsage))
+		}
 		if cfg.CreateTranscript != nil {
 			mux.HandleFunc("POST /v1/transcripts", createTranscriptHandler(cfg.AuthenticatePrincipal, cfg.CreateTranscript))
 		}
@@ -1318,6 +1361,57 @@ func selfHandler(auth PrincipalAuthFunc) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(digest)
+	})
+}
+
+func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, UsageQuery) (UsageReport, error)) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may read per-agent usage")
+			return
+		}
+		q := r.URL.Query()
+		query := UsageQuery{Bucket: strings.TrimSpace(q.Get("group_by"))}
+		if raw := strings.TrimSpace(q.Get("since")); raw != "" {
+			since, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "since must be RFC3339")
+				return
+			}
+			query.Since = since
+		}
+		if raw := strings.TrimSpace(q.Get("until")); raw != "" {
+			until, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "until must be RFC3339")
+				return
+			}
+			query.Until = until
+		}
+		for _, raw := range q["dimension"] {
+			for _, dimension := range strings.Split(raw, ",") {
+				if dimension = strings.TrimSpace(dimension); dimension != "" {
+					query.Dimensions = append(query.Dimensions, dimension)
+				}
+			}
+		}
+		report, err := get(r.Context(), p, query)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "usage access forbidden")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not read usage")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"usage":          report,
+		})
 	})
 }
 

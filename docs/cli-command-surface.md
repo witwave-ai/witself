@@ -209,6 +209,7 @@ witself
   support create|list|show|comment|close
   remember
   self show
+  usage
   session start|end
   memory add|adjust|read|recall|list|forget|restore|delete|consolidate
   digest emit
@@ -1311,6 +1312,38 @@ Flags:
 | `--salient-limit N` | Maximum salient memories to include. Default: `10`. |
 | `--max-bytes N` | Hard cap on digest size; sets `elided=true` when the cap is hit. |
 | `--json` | Emit `{ identity, primary_facts[], salient_memories[], index, elided }`. |
+
+## `witself usage`
+
+Show fast hourly or daily product-usage totals for the authenticated agent. V0
+is deliberately self-scoped: an agent token cannot select another agent, and
+an operator token cannot use this command for account-wide aggregation.
+
+```sh
+witself usage --account default --agent scott
+witself usage --account default --agent scott --since 24h --group-by hour
+witself usage --account default --agent scott \
+  --dimension transcript_entry_write --dimension transcript_entry_read --json
+```
+
+| Flag | Description |
+|---|---|
+| `--account NAME` | Local account binding. Default: `WITSELF_ACCOUNT` or `default`. |
+| `--realm NAME` | Local realm selector. Default: `WITSELF_REALM` or `default`. |
+| `--agent NAME` | Local agent selector. Default: `WITSELF_AGENT`; required for managed credential lookup. |
+| `--endpoint URL` | Explicit cell endpoint; use with `--token-file` for an unmanaged credential. |
+| `--token-file PATH` | Explicit agent token file; requires `--endpoint`. |
+| `--since TIMESTAMP_OR_DURATION` | Window start; RFC3339 or positive duration such as `30d`/`24h`. Default: `30d`. |
+| `--until TIMESTAMP` | RFC3339 window end. Default: now. |
+| `--dimension DIMENSION` | Filter a usage dimension. Repeatable; comma-separated values also work. |
+| `--group-by hour\|day` | UTC rollup size. Default: `day`. |
+| `--json` | Emit identity scope, window, points, and whole-window totals. |
+
+Initial transcript dimensions are `transcript_created`,
+`transcript_entry_write`, `transcript_entry_read`, and
+`transcript_storage_byte`. This is product usage, not a Stripe or billing view;
+future realm/account billing commands aggregate from the same portable event
+ledger subject to operator permissions.
 
 ## `witself session`
 

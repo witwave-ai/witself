@@ -31,7 +31,7 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = deleteAccountForMessageTest(ctx, st, provisioned.AccountID) }()
+	defer func() { _ = deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID) }()
 	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 		t.Fatalf("activate = %v / %v", activated, err)
 	}
@@ -76,7 +76,7 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 	if err := st.ExportAccount(ctx, provisioned.AccountID, "test-source", "test", &archive); err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteAccountForMessageTest(ctx, st, provisioned.AccountID); err != nil {
+	if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
@@ -98,7 +98,7 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 	}
 }
 
-func deleteAccountForMessageTest(ctx context.Context, st *Store, accountID string) error {
+func deleteAccountForIntegrationTest(ctx context.Context, st *Store, accountID string) error {
 	tx, err := st.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -107,6 +107,8 @@ func deleteAccountForMessageTest(ctx context.Context, st *Store, accountID strin
 	statements := []string{
 		`DELETE FROM agent_message_deliveries WHERE account_id = $1`,
 		`DELETE FROM agent_messages WHERE account_id = $1`,
+		`DELETE FROM usage_rollups WHERE account_id = $1`,
+		`DELETE FROM usage_events WHERE account_id = $1`,
 		`DELETE FROM transcript_entries WHERE account_id = $1`,
 		`DELETE FROM transcript_conversations WHERE account_id = $1`,
 		`DELETE FROM support_ticket_messages WHERE account_id = $1`,

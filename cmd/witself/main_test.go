@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
@@ -27,6 +28,65 @@ func TestDefaultBootstrapTokenPath(t *testing.T) {
 	want := filepath.Join(home, "tokens", "aws-sandbox-usw2-dev", "bootstrap.token")
 	if got != want {
 		t.Fatalf("path = %q, want %q", got, want)
+	}
+}
+
+func TestParseUsageStart(t *testing.T) {
+	now := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
+	got, err := parseUsageStart("30d", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(-30 * 24 * time.Hour); !got.Equal(want) {
+		t.Fatalf("30d = %s, want %s", got, want)
+	}
+	got, err = parseUsageStart("2026-07-01T00:00:00Z", now)
+	if err != nil || !got.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("RFC3339 = %s / %v", got, err)
+	}
+	if _, err := parseUsageStart("0d", now); err == nil {
+		t.Fatal("0d was accepted")
+	}
+}
+
+func TestCSVListFlagAcceptsRepeatedAndCommaSeparatedValues(t *testing.T) {
+	var values csvListFlag
+	if err := values.Set("transcript_created,transcript_entry_write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := values.Set("transcript_entry_read"); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 3 || values[2] != "transcript_entry_read" {
+		t.Fatalf("values = %#v", values)
+	}
+}
+
+func TestUsageCommandUsesAgentTokenAndFilters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/usage" || r.Header.Get("Authorization") != "Bearer witself_agt_usage" {
+			t.Fatalf("request = %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		if got := r.URL.Query()["dimension"]; len(got) != 2 || got[0] != "transcript_created" || got[1] != "transcript_entry_write" {
+			t.Fatalf("dimensions = %#v", got)
+		}
+		if r.URL.Query().Get("group_by") != "day" || r.URL.Query().Get("since") != "2026-07-01T00:00:00Z" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"usage":{"account_id":"acc_1","realm_id":"rlm_1","agent_id":"agt_1","since":"2026-07-01T00:00:00Z","until":"2026-07-12T00:00:00Z","bucket":"day","points":[],"totals":[]}}`))
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_usage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"usage", "--endpoint", srv.URL, "--token-file", tokenFile,
+		"--since", "2026-07-01T00:00:00Z", "--until", "2026-07-12T00:00:00Z",
+		"--dimension", "transcript_created", "--dimension", "transcript_entry_write",
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
 	}
 }
 

@@ -243,6 +243,52 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: false, want: "not an earlier entry",
 		},
 		{
+			name:  "transcript usage with matching archived scope is accepted",
+			table: "usage_events",
+			row: map[string]any{
+				"id": "usg_1", "account_id": acc, "realm_id": "rlm_ok", "agent_id": "agt_ok",
+				"dimension": "transcript_entry_write", "quantity": float64(2), "unit": "entry",
+				"subject_type": "transcript", "subject_id": "trn_1", "idempotency_key": "write:1",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_ok"] = true
+				ic.agentRealms["agt_ok"] = "rlm_ok"
+				ic.transcripts["trn_1"] = transcriptImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
+			},
+			wantOK: true,
+		},
+		{
+			name:  "transcript usage cannot graft a foreign transcript",
+			table: "usage_events",
+			row: map[string]any{
+				"id": "usg_1", "account_id": acc, "realm_id": "rlm_ok", "agent_id": "agt_ok",
+				"dimension": "transcript_entry_read", "quantity": float64(1), "unit": "entry",
+				"subject_type": "transcript", "subject_id": "trn_foreign", "idempotency_key": "read:1",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_ok"] = true
+				ic.agentRealms["agt_ok"] = "rlm_ok"
+			},
+			wantOK: false, want: "does not belong to its agent scope",
+		},
+		{
+			name:  "usage rollup cannot cross agent realms",
+			table: "usage_rollups",
+			row: map[string]any{
+				"account_id": acc, "realm_id": "rlm_ok", "agent_id": "agt_other",
+				"dimension": "transcript_created", "unit": "transcript", "bucket": "day",
+				"quantity": float64(1), "event_count": float64(1),
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_other"] = true
+				ic.agentRealms["agt_other"] = "rlm_other"
+			},
+			wantOK: false, want: "outside realm",
+		},
+		{
 			name:  "message with archive-local same-realm agents is accepted",
 			table: "agent_messages",
 			row: map[string]any{
@@ -383,6 +429,16 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 		"realm_id": "rlm_default", "recorded_by_agent_id": "agt_1",
 		"sequence": float64(2), "role": "assistant", "body": "hi",
 		"reply_to_entry_id": "ent_1",
+	})
+	feed("usage_events", map[string]any{
+		"id": "usg_1", "account_id": acc, "realm_id": "rlm_default", "agent_id": "agt_1",
+		"dimension": "transcript_entry_write", "quantity": float64(2), "unit": "entry",
+		"subject_type": "transcript", "subject_id": "trn_1", "idempotency_key": "write:1",
+	})
+	feed("usage_rollups", map[string]any{
+		"account_id": acc, "realm_id": "rlm_default", "agent_id": "agt_1",
+		"dimension": "transcript_entry_write", "unit": "entry", "bucket": "day",
+		"quantity": float64(2), "event_count": float64(1),
 	})
 	feed("agent_messages", map[string]any{
 		"id": "msg_1", "account_id": acc, "realm_id": "rlm_default",

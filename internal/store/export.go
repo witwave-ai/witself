@@ -125,6 +125,28 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'artifacts', artifacts, 'created_at', created_at)
 			FROM transcript_entries WHERE account_id = $1
 			ORDER BY transcript_id, sequence, id`, arg: accountID},
+		// Usage facts and their fast projections are account-owned data. Both
+		// are preserved so a moved account keeps exact history and can serve
+		// usage immediately without rebuilding rollups during import.
+		&querySource{s: s, table: "usage_events", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'dimension', dimension,
+			  'quantity', quantity, 'unit', unit,
+			  'subject_type', subject_type, 'subject_id', subject_id,
+			  'idempotency_key', idempotency_key, 'metadata', metadata,
+			  'occurred_at', occurred_at, 'created_at', created_at)
+			FROM usage_events WHERE account_id = $1
+			ORDER BY occurred_at, id`, arg: accountID},
+		&querySource{s: s, table: "usage_rollups", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'dimension', dimension, 'unit', unit,
+			  'bucket', bucket, 'bucket_start', bucket_start,
+			  'quantity', quantity, 'event_count', event_count,
+			  'updated_at', updated_at)
+			FROM usage_rollups WHERE account_id = $1
+			ORDER BY bucket, bucket_start, agent_id, dimension, unit`, arg: accountID},
 		// Messages depend on realms + agents; recipient delivery state depends
 		// on its message. Preserve bodies here because the account archive is
 		// the durable, encrypted migration unit for all account-owned data.
