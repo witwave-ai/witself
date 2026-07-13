@@ -1364,6 +1364,9 @@ func selfHandler(
 	countFacts func(context.Context, DomainPrincipal) (int, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		// Self digests can contain durable personal context and must never be
+		// retained by shared or private HTTP caches.
+		w.Header().Set("Cache-Control", "private, no-store")
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may show self")
 			return

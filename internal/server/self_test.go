@@ -35,6 +35,9 @@ func TestSelfDigestUsesAgentTokenIdentity(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("agent self = %d, want 200", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("self Cache-Control = %q", got)
+	}
 	var digest SelfDigest
 	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
 		t.Fatal(err)
