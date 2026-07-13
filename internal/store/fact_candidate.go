@@ -77,9 +77,33 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
 		return FactCandidate{}, err
 	}
+	proposal.IdempotencyKey, err = normalizeFactIdempotencyKey(proposal.IdempotencyKey)
+	if err != nil {
+		return FactCandidate{}, err
+	}
+	if err := lockFactIdempotencyKey(ctx, tx, p, "proposal", proposal.IdempotencyKey); err != nil {
+		return FactCandidate{}, err
+	}
 	proposal.Subject, err = resolveFactSubjectCanonicalKey(ctx, tx, p, proposal.Subject)
 	if err != nil {
 		return FactCandidate{}, err
+	}
+	fingerprint := ""
+	if proposal.IdempotencyKey != "" {
+		fingerprint, err = factProposalFingerprint(proposal)
+		if err != nil {
+			return FactCandidate{}, err
+		}
+		out, replayed, replayErr := replayProposeFact(ctx, tx, p, proposal.IdempotencyKey, fingerprint)
+		if replayErr != nil {
+			return FactCandidate{}, replayErr
+		}
+		if replayed {
+			if err := tx.Commit(ctx); err != nil {
+				return FactCandidate{}, err
+			}
+			return out, nil
+		}
 	}
 	in, err := normalizeSetFactInput(proposal.SetFactInput)
 	if err != nil {
@@ -124,8 +148,8 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 		  (id, account_id, realm_id, owner_agent_id, subject_key, predicate,
 		   value_type, value, recurrence, cardinality, sensitive, source_ref, confidence,
 		   observed_at, valid_from, valid_until, reason, status, conflict_fact_id,
-		   observed_assertion_id, proposed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),clock_timestamp())
+		   observed_assertion_id, idempotency_key, idempotency_fingerprint, proposed_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21,$22,clock_timestamp())
 		RETURNING id, subject_key, predicate, value_type, value, recurrence, cardinality,
 		          sensitive, source_ref, confidence, observed_at, valid_from,
 		          valid_until, reason, status,
@@ -135,7 +159,7 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 		candidateID, p.AccountID, p.RealmID, p.ID, in.Subject, in.Predicate,
 		in.ValueType, string(in.Value), in.Recurrence, in.Cardinality, in.Sensitive, in.SourceRef,
 		*in.Confidence, in.ObservedAt, in.ValidFrom, in.ValidUntil, proposal.Reason,
-		status, conflictID, observedAssertionID).Scan(
+		status, conflictID, observedAssertionID, proposal.IdempotencyKey, fingerprint).Scan(
 		&out.ID, &out.Subject, &out.Predicate, &out.ValueType, &out.Value, &out.Recurrence,
 		&out.Cardinality, &out.Sensitive, &out.SourceRef, &out.Confidence,
 		&out.ObservedAt, &out.ValidFrom, &out.ValidUntil, &out.Reason, &out.Status,
@@ -157,8 +181,12 @@ func (s *Store) GetFactCandidate(ctx context.Context, p Principal, candidateID s
 	if p.Kind != PrincipalAgent {
 		return FactCandidate{}, ErrFactForbidden
 	}
+	return getFactCandidateTx(ctx, s.pool, p, candidateID)
+}
+
+func getFactCandidateTx(ctx context.Context, q factQuerier, p Principal, candidateID string) (FactCandidate, error) {
 	var out FactCandidate
-	err := s.pool.QueryRow(ctx, `SELECT id, subject_key, predicate, value_type,
+	err := q.QueryRow(ctx, `SELECT id, subject_key, predicate, value_type,
 		value, recurrence, cardinality, sensitive, source_ref, confidence, observed_at,
 		valid_from, valid_until, reason, status,
 		COALESCE(conflict_fact_id,''), COALESCE(observed_assertion_id,''),
@@ -259,8 +287,19 @@ func normalizeFactCandidateListOptions(opts FactCandidateListOptions) (FactCandi
 
 // RejectFactCandidate closes one candidate without changing canonical facts.
 func (s *Store) RejectFactCandidate(ctx context.Context, p Principal, candidateID string) (FactCandidate, error) {
+	return s.RejectFactCandidateIdempotent(ctx, p, candidateID, "")
+}
+
+// RejectFactCandidateIdempotent closes one candidate and replays the result
+// when the same decision key is retried after a lost response.
+func (s *Store) RejectFactCandidateIdempotent(ctx context.Context, p Principal, candidateID, idempotencyKey string) (FactCandidate, error) {
 	if p.Kind != PrincipalAgent {
 		return FactCandidate{}, ErrFactForbidden
+	}
+	var err error
+	idempotencyKey, err = normalizeFactIdempotencyKey(idempotencyKey)
+	if err != nil {
+		return FactCandidate{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -273,23 +312,59 @@ func (s *Store) RejectFactCandidate(ctx context.Context, p Principal, candidateI
 	if err := verifyLiveAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
 		return FactCandidate{}, err
 	}
+	if err := lockFactIdempotencyKey(ctx, tx, p, "decision", idempotencyKey); err != nil {
+		return FactCandidate{}, err
+	}
 	var out FactCandidate
-	err = tx.QueryRow(ctx, `UPDATE fact_candidates SET status='rejected', decided_at=clock_timestamp()
+	var existingDecisionKey string
+	err = tx.QueryRow(ctx, `SELECT id, subject_key, predicate, value_type, value,
+		recurrence, cardinality, sensitive, source_ref, confidence, observed_at,
+		valid_from, valid_until, reason, status,
+		COALESCE(conflict_fact_id,''), COALESCE(observed_assertion_id,''),
+		COALESCE(resolved_fact_id,''), proposed_at, decided_at,
+		decision_idempotency_key
+		FROM fact_candidates
 		WHERE id=$1 AND account_id=$2 AND realm_id=$3 AND owner_agent_id=$4
-		  AND status IN ('pending','conflict')
+		FOR UPDATE`, candidateID, p.AccountID, p.RealmID, p.ID).Scan(
+		&out.ID, &out.Subject, &out.Predicate, &out.ValueType, &out.Value,
+		&out.Recurrence, &out.Cardinality, &out.Sensitive, &out.SourceRef,
+		&out.Confidence, &out.ObservedAt, &out.ValidFrom, &out.ValidUntil,
+		&out.Reason, &out.Status, &out.ConflictFactID, &out.ObservedAssertionID,
+		&out.ResolvedFactID, &out.ProposedAt, &out.DecidedAt, &existingDecisionKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FactCandidate{}, ErrFactNotFound
+	}
+	if err != nil {
+		return FactCandidate{}, err
+	}
+	if err := ensureFactDecisionKeyAvailable(ctx, tx, p, candidateID, idempotencyKey); err != nil {
+		return FactCandidate{}, err
+	}
+	if out.Status == "rejected" && idempotencyKey != "" && existingDecisionKey == idempotencyKey {
+		if err := tx.Commit(ctx); err != nil {
+			return FactCandidate{}, err
+		}
+		return out, nil
+	}
+	if out.Status != "pending" && out.Status != "conflict" {
+		if idempotencyKey != "" {
+			return FactCandidate{}, ErrFactIdempotencyConflict
+		}
+		return FactCandidate{}, ErrFactNotFound
+	}
+	err = tx.QueryRow(ctx, `UPDATE fact_candidates
+		SET status='rejected', decided_at=clock_timestamp(), decision_idempotency_key=$5
+		WHERE id=$1 AND account_id=$2 AND realm_id=$3 AND owner_agent_id=$4
 		RETURNING id, subject_key, predicate, value_type, value, recurrence, cardinality,
 		sensitive, source_ref, confidence, observed_at, valid_from, valid_until,
 		reason, status,
 		COALESCE(conflict_fact_id,''), COALESCE(observed_assertion_id,''),
 		COALESCE(resolved_fact_id,''), proposed_at, decided_at`,
-		candidateID, p.AccountID, p.RealmID, p.ID).Scan(&out.ID, &out.Subject,
+		candidateID, p.AccountID, p.RealmID, p.ID, idempotencyKey).Scan(&out.ID, &out.Subject,
 		&out.Predicate, &out.ValueType, &out.Value, &out.Recurrence, &out.Cardinality, &out.Sensitive,
 		&out.SourceRef, &out.Confidence, &out.ObservedAt, &out.ValidFrom,
 		&out.ValidUntil, &out.Reason, &out.Status, &out.ConflictFactID,
 		&out.ObservedAssertionID, &out.ResolvedFactID, &out.ProposedAt, &out.DecidedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return FactCandidate{}, ErrFactNotFound
-	}
 	if err != nil {
 		return FactCandidate{}, err
 	}
@@ -302,8 +377,19 @@ func (s *Store) RejectFactCandidate(ctx context.Context, p Principal, candidateI
 // ConfirmFactCandidate atomically promotes a candidate through the canonical
 // SetFact path and closes the candidate. The row lock prevents double decisions.
 func (s *Store) ConfirmFactCandidate(ctx context.Context, p Principal, candidateID string) (Fact, error) {
+	return s.ConfirmFactCandidateIdempotent(ctx, p, candidateID, "")
+}
+
+// ConfirmFactCandidateIdempotent promotes one candidate and replays the
+// resulting fact when the same decision key is retried.
+func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal, candidateID, idempotencyKey string) (Fact, error) {
 	if p.Kind != PrincipalAgent {
 		return Fact{}, ErrFactForbidden
+	}
+	var err error
+	idempotencyKey, err = normalizeFactIdempotencyKey(idempotencyKey)
+	if err != nil {
+		return Fact{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -316,24 +402,49 @@ func (s *Store) ConfirmFactCandidate(ctx context.Context, p Principal, candidate
 	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
 		return Fact{}, err
 	}
+	if err := lockFactIdempotencyKey(ctx, tx, p, "decision", idempotencyKey); err != nil {
+		return Fact{}, err
+	}
 	var c FactCandidate
+	var existingDecisionKey, decisionAssertionID string
 	err = tx.QueryRow(ctx, `SELECT id, subject_key, predicate, value_type, value,
 		recurrence, cardinality, sensitive, source_ref, confidence, observed_at, valid_from,
 		valid_until, reason, status,
 		COALESCE(conflict_fact_id,''), COALESCE(observed_assertion_id,''),
-		COALESCE(resolved_fact_id,''), proposed_at, decided_at
+		COALESCE(resolved_fact_id,''), proposed_at, decided_at,
+		decision_idempotency_key, COALESCE(decision_assertion_id,'')
 		FROM fact_candidates WHERE id=$1 AND account_id=$2 AND realm_id=$3
-		AND owner_agent_id=$4 AND status IN ('pending','conflict') FOR UPDATE`,
+		AND owner_agent_id=$4 FOR UPDATE`,
 		candidateID, p.AccountID, p.RealmID, p.ID).Scan(&c.ID, &c.Subject, &c.Predicate,
 		&c.ValueType, &c.Value, &c.Recurrence, &c.Cardinality, &c.Sensitive, &c.SourceRef, &c.Confidence,
 		&c.ObservedAt, &c.ValidFrom, &c.ValidUntil, &c.Reason, &c.Status,
 		&c.ConflictFactID, &c.ObservedAssertionID, &c.ResolvedFactID,
-		&c.ProposedAt, &c.DecidedAt)
+		&c.ProposedAt, &c.DecidedAt, &existingDecisionKey, &decisionAssertionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Fact{}, ErrFactNotFound
 	}
 	if err != nil {
 		return Fact{}, err
+	}
+	if err := ensureFactDecisionKeyAvailable(ctx, tx, p, candidateID, idempotencyKey); err != nil {
+		return Fact{}, err
+	}
+	if c.Status == "confirmed" && idempotencyKey != "" && existingDecisionKey == idempotencyKey {
+		out, replayErr := getFactAtAssertionTx(ctx, tx, p, c.ResolvedFactID, decisionAssertionID)
+		if replayErr != nil {
+			return Fact{}, replayErr
+		}
+		out.Cardinality = c.Cardinality
+		if err := tx.Commit(ctx); err != nil {
+			return Fact{}, err
+		}
+		return out, nil
+	}
+	if c.Status != "pending" && c.Status != "conflict" {
+		if idempotencyKey != "" {
+			return Fact{}, ErrFactIdempotencyConflict
+		}
+		return Fact{}, ErrFactNotFound
 	}
 	c.Subject, err = resolveFactSubjectCanonicalKey(ctx, tx, p, c.Subject)
 	if err != nil {
@@ -396,7 +507,11 @@ func (s *Store) ConfirmFactCandidate(ctx context.Context, p Principal, candidate
 	if _, err = tx.Exec(ctx, `UPDATE facts SET resolved_assertion_id=$1,updated_at=clock_timestamp() WHERE id=$2`, assertionID, factID); err != nil {
 		return Fact{}, err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE fact_candidates SET status='confirmed',resolved_fact_id=$1,decided_at=clock_timestamp() WHERE id=$2`, factID, candidateID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE fact_candidates
+		SET status='confirmed', resolved_fact_id=$1, decided_at=clock_timestamp(),
+		    decision_idempotency_key=$3,
+		    decision_assertion_id=CASE WHEN $3='' THEN NULL ELSE $4 END
+		WHERE id=$2`, factID, candidateID, idempotencyKey, assertionID); err != nil {
 		return Fact{}, err
 	}
 	out, err := getFactTx(ctx, tx, p, factID, "", "", true)

@@ -74,8 +74,14 @@ func TestSetFactAnnualRecurrenceClientContract(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/fact-candidates" {
+			if got := r.Header.Get("Idempotency-Key"); got != "proposal-birthday-1" {
+				t.Errorf("proposal Idempotency-Key = %q", got)
+			}
 			_, _ = w.Write([]byte(`{"candidate":{"id":"fcand_birthday","subject":"self","predicate":"identity/birth-date","value_type":"date","value":"1990-07-13","recurrence":"annual","status":"pending"}}`))
 			return
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != "set-birthday-1" {
+			t.Errorf("set Idempotency-Key = %q", got)
 		}
 		_, _ = w.Write([]byte(`{"fact":{"id":"fact_birthday","subject":"self","predicate":"identity/birth-date","value_type":"date","value":"1990-07-13","recurrence":"annual"}}`))
 	}))
@@ -83,7 +89,7 @@ func TestSetFactAnnualRecurrenceClientContract(t *testing.T) {
 
 	fact, err := SetFact(context.Background(), srv.URL, "agent-token", SetFactInput{
 		Predicate: "identity/birth-date", ValueType: "date",
-		Value: json.RawMessage(`"1990-07-13"`), Recurrence: "annual",
+		Value: json.RawMessage(`"1990-07-13"`), Recurrence: "annual", IdempotencyKey: "set-birthday-1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +99,7 @@ func TestSetFactAnnualRecurrenceClientContract(t *testing.T) {
 	}
 	candidate, err := ProposeFact(context.Background(), srv.URL, "agent-token", ProposeFactInput{SetFactInput: SetFactInput{
 		Predicate: "identity/birth-date", ValueType: "date",
-		Value: json.RawMessage(`"1990-07-13"`), Recurrence: "annual",
+		Value: json.RawMessage(`"1990-07-13"`), Recurrence: "annual", IdempotencyKey: "proposal-birthday-1",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +120,9 @@ func TestFactCandidateClientLifecycle(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/fact-candidates":
 			seen["propose"]++
+			if got := r.Header.Get("Idempotency-Key"); got != "proposal-editor-1" {
+				t.Errorf("proposal Idempotency-Key = %q", got)
+			}
 			var in ProposeFactInput
 			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 				t.Errorf("decode proposal: %v", err)
@@ -142,9 +151,15 @@ func TestFactCandidateClientLifecycle(t *testing.T) {
 			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","candidate":{"id":"fcand_sensitive","subject":"self","predicate":"identity/wedding-date","value_type":"date","value":"2010-06-12","recurrence":"annual","sensitive":true,"status":"conflict","observed_assertion_id":"fas_date_1","proposed_at":"2026-07-12T18:30:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/fact-candidates/fcand_1:confirm":
 			seen["confirm"]++
+			if got := r.Header.Get("Idempotency-Key"); got != "confirm-editor-1" {
+				t.Errorf("confirm Idempotency-Key = %q", got)
+			}
 			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","fact":{"id":"fact_1","subject":"self","predicate":"preferences/editor","value_type":"string","value":"helix"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/fact-candidates/fcand_2:reject":
 			seen["reject"]++
+			if got := r.Header.Get("Idempotency-Key"); got != "reject-editor-1" {
+				t.Errorf("reject Idempotency-Key = %q", got)
+			}
 			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","candidate":{"id":"fcand_2","subject":"self","predicate":"preferences/editor","value_type":"string","value":"vim","status":"rejected","proposed_at":"2026-07-12T18:30:00Z","decided_at":"2026-07-12T18:35:00Z"}}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
@@ -159,6 +174,7 @@ func TestFactCandidateClientLifecycle(t *testing.T) {
 			Subject: "self", Predicate: "preferences/editor", ValueType: "string",
 			Value: json.RawMessage(`"helix"`), SourceRef: "transcript_1/entry_7",
 			ObservedAt: now.Add(-time.Hour), ValidFrom: &now, Confidence: &confidence,
+			IdempotencyKey: "proposal-editor-1",
 		},
 		Reason: "possible preference",
 	})
@@ -185,7 +201,7 @@ func TestFactCandidateClientLifecycle(t *testing.T) {
 		t.Fatalf("candidate detail = %#v", detail)
 	}
 
-	fact, err := ConfirmFactCandidate(context.Background(), srv.URL, "agent-token", "fcand_1")
+	fact, err := ConfirmFactCandidateWithIdempotency(context.Background(), srv.URL, "agent-token", "fcand_1", "confirm-editor-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +209,7 @@ func TestFactCandidateClientLifecycle(t *testing.T) {
 		t.Fatalf("confirmed fact = %#v", fact)
 	}
 
-	rejected, err := RejectFactCandidate(context.Background(), srv.URL, "agent-token", "fcand_2")
+	rejected, err := RejectFactCandidateWithIdempotency(context.Background(), srv.URL, "agent-token", "fcand_2", "reject-editor-1")
 	if err != nil {
 		t.Fatal(err)
 	}

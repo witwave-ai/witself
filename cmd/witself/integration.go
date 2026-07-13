@@ -139,8 +139,8 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: verify agent identity: %v\n", err)
 		return 1
 	}
-	if conn.AgentName != "" && conn.AgentName != self.Identity.AgentName {
-		fmt.Fprintf(os.Stderr, "witself: local agent %q authenticates as %q; refusing to install an ambiguous binding\n", conn.AgentName, self.Identity.AgentName)
+	if err := verifyInstallAgentIdentity(conn, self.Identity); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 	loc, err := transcriptcapture.EnsureLocation(*location)
@@ -165,8 +165,9 @@ func installCmd(args []string) int {
 	}
 	cfg := transcriptcapture.Config{
 		Runtime: runtime, RuntimeVersion: runtimeVersion, CaptureMode: captureMode, HookMode: hookMode,
-		Account: accountName, Realm: conn.RealmName, Agent: self.Identity.AgentName,
-		AgentID: self.Identity.AgentID, AgentName: self.Identity.AgentName,
+		Account: accountName, AccountID: self.Identity.AccountID,
+		Realm: conn.RealmName, RealmID: self.Identity.RealmID,
+		Agent: self.Identity.AgentName, AgentID: self.Identity.AgentID, AgentName: self.Identity.AgentName,
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
@@ -234,6 +235,29 @@ func installCmd(args []string) int {
 		fmt.Printf("next: restart %s; global user hooks require no project trust\n", runtime)
 	}
 	return 0
+}
+
+// verifyInstallAgentIdentity pins an integration to the principal selected by
+// the caller instead of merely trusting that the supplied token authenticates.
+// Managed account resolution gives us an exact account id; explicit endpoint
+// installs may not, but their requested realm and agent names still bind the
+// token. The authenticated ids are persisted after this check and become the
+// stronger runtime guard used by MCP.
+func verifyInstallAgentIdentity(conn agentConnection, identity client.SelfIdentity) error {
+	if identity.AccountID == "" || identity.RealmID == "" || identity.AgentID == "" ||
+		identity.RealmName == "" || identity.AgentName == "" {
+		return errors.New("server returned an incomplete agent identity; refusing to install")
+	}
+	if conn.AccountID != "" && conn.AccountID != identity.AccountID {
+		return fmt.Errorf("local account %s authenticates against account %s; refusing to install an ambiguous binding", conn.AccountID, identity.AccountID)
+	}
+	if conn.RealmName != "" && conn.RealmName != identity.RealmName {
+		return fmt.Errorf("requested realm %q authenticates as %q; refusing to install an ambiguous binding", conn.RealmName, identity.RealmName)
+	}
+	if conn.AgentName != "" && conn.AgentName != identity.AgentName {
+		return fmt.Errorf("requested agent %q authenticates as %q; refusing to install an ambiguous binding", conn.AgentName, identity.AgentName)
+	}
+	return nil
 }
 
 func inferInstallAgent(accountName, realmName string) (string, error) {

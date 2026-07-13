@@ -248,31 +248,60 @@ func TestFactCandidateArchiveRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	confirmed, err := st.ProposeFact(ctx, p, ProposeFactInput{
+	confirmedInput := ProposeFactInput{
 		SetFactInput: SetFactInput{Predicate: "identity/wedding-date", ValueType: "date", Value: json.RawMessage(`"2010-06-12"`), Recurrence: FactRecurrenceAnnual},
 		Reason:       "explicit anniversary",
+	}
+	confirmedInput.IdempotencyKey = "archive-confirmed-proposal-1"
+	confirmed, err := st.ProposeFact(ctx, p, confirmedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedFact, err := st.ConfirmFactCandidateIdempotent(ctx, p, confirmed.ID, "archive-confirmed-decision-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterConfirmedFact, err := st.SetFact(ctx, p, SetFactInput{
+		Predicate: confirmedInput.Predicate, ValueType: "date", Value: json.RawMessage(`"2011-06-12"`),
+		Recurrence: FactRecurrenceAnnual, SourceKind: FactSourceAgent,
+		IdempotencyKey: "archive-wedding-date-update-1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ConfirmFactCandidate(ctx, p, confirmed.ID); err != nil {
+	if _, err := st.pool.Exec(ctx, `UPDATE fact_candidates SET decision_assertion_id=$1 WHERE id=$2`,
+		laterConfirmedFact.ResolvedAssertionID, confirmed.ID); err != nil {
 		t.Fatal(err)
 	}
-	rejected, err := st.ProposeFact(ctx, p, ProposeFactInput{
+	if err := validateImportedFactDecisionAssertions(ctx, st.pool, p.AccountID); !errors.Is(err, ErrArchiveContent) {
+		t.Fatalf("repointed decision assertion error = %v, want ErrArchiveContent", err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE fact_candidates SET decision_assertion_id=$1 WHERE id=$2`,
+		confirmedFact.ResolvedAssertionID, confirmed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateImportedFactDecisionAssertions(ctx, st.pool, p.AccountID); err != nil {
+		t.Fatalf("valid decision assertion: %v", err)
+	}
+	rejectedInput := ProposeFactInput{
 		SetFactInput: SetFactInput{Predicate: "preferences/theme", Value: json.RawMessage(`"dark"`)},
 		Reason:       "weak inference",
-	})
+	}
+	rejectedInput.IdempotencyKey = "archive-rejected-proposal-1"
+	rejected, err := st.ProposeFact(ctx, p, rejectedInput)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.RejectFactCandidate(ctx, p, rejected.ID); err != nil {
+	if _, err := st.RejectFactCandidateIdempotent(ctx, p, rejected.ID, "archive-rejected-decision-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetFact(ctx, p, SetFactInput{
+	anniversaryInput := SetFactInput{
 		Predicate: "identity/another-anniversary", ValueType: "date",
 		Value: json.RawMessage(`"2015-09-20"`), Recurrence: FactRecurrenceAnnual,
-		SourceKind: FactSourceAgent,
-	}); err != nil {
+		SourceKind: FactSourceAgent, IdempotencyKey: "archive-anniversary-set-1",
+	}
+	anniversaryFact, err := st.SetFact(ctx, p, anniversaryInput)
+	if err != nil {
 		t.Fatal(err)
 	}
 	chainFirst, err := st.SetFact(ctx, p, SetFactInput{
@@ -374,5 +403,43 @@ func TestFactCandidateArchiveRoundTrip(t *testing.T) {
 	if len(chainHistory) != 2 || string(chainHistory[0].Value) != `"zsh"` ||
 		string(chainHistory[1].Value) != `"bash"` || chainHistory[0].SupersedesID != chainHistory[1].ID {
 		t.Fatalf("restored topological assertion history = %#v", chainHistory)
+	}
+
+	if err := st.ResumeAccountSystem(ctx, p.AccountID, "evacuation"); err != nil {
+		t.Fatal(err)
+	}
+	replayedAnniversary, err := st.SetFact(ctx, p, anniversaryInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedAnniversary.ID != anniversaryFact.ID || replayedAnniversary.ResolvedAssertionID != anniversaryFact.ResolvedAssertionID {
+		t.Fatalf("restored set idempotency changed result: %#v -> %#v", anniversaryFact, replayedAnniversary)
+	}
+	replayedConfirmedCandidate, err := st.ProposeFact(ctx, p, confirmedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedConfirmedCandidate.ID != confirmed.ID || replayedConfirmedCandidate.Status != "confirmed" {
+		t.Fatalf("restored confirmed proposal replay = %#v", replayedConfirmedCandidate)
+	}
+	replayedConfirmedFact, err := st.ConfirmFactCandidateIdempotent(ctx, p, confirmed.ID, "archive-confirmed-decision-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedConfirmedFact.ID != confirmedFact.ID || replayedConfirmedFact.ResolvedAssertionID != confirmedFact.ResolvedAssertionID {
+		t.Fatalf("restored confirm replay changed result: %#v -> %#v", confirmedFact, replayedConfirmedFact)
+	}
+	if string(replayedConfirmedFact.Value) != `"2010-06-12"` {
+		t.Fatalf("restored confirm replay returned later value: %#v", replayedConfirmedFact)
+	}
+	replayedRejectedCandidate, err := st.ProposeFact(ctx, p, rejectedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedRejectedCandidate.ID != rejected.ID || replayedRejectedCandidate.Status != "rejected" {
+		t.Fatalf("restored rejected proposal replay = %#v", replayedRejectedCandidate)
+	}
+	if _, err := st.RejectFactCandidateIdempotent(ctx, p, rejected.ID, "archive-rejected-decision-1"); err != nil {
+		t.Fatalf("restored reject replay: %v", err)
 	}
 }

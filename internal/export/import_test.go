@@ -142,7 +142,7 @@ func TestReadAppliesUpgraders(t *testing.T) {
 	archive := buildArchive(t, 13, "acc_up")
 
 	upgraders[13] = func(_ string, row map[string]any) (map[string]any, error) {
-		if i, ok := row["i"].(float64); ok && int(i) == 0 {
+		if i, ok := row["i"].(json.Number); ok && i.String() == "0" {
 			return nil, nil // drop row 0 — exercises the drop contract
 		}
 		row["lifted"] = true

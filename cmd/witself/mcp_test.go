@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +16,82 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
+
+func TestConfiguredMCPBackendPinsLiveTokenIdentity(t *testing.T) {
+	identity := client.SelfIdentity{
+		AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default",
+		AgentID: "agt_1", AgentName: "scott",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(client.SelfDigest{
+			SchemaVersion: "witself.v0", Identity: identity,
+			PrimaryFacts: []client.SelfFact{}, SalientMemories: []client.SelfMemory{},
+			Index: client.SelfIndex{Kinds: []string{}, Tags: []string{}, Counts: map[string]int{}},
+		})
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex,
+		Account: "default", AccountID: "acc_1",
+		Realm: "default", RealmID: "rlm_1",
+		Agent: "scott", AgentID: "agt_1", AgentName: "scott",
+		Endpoint: srv.URL, TokenFile: tokenPath,
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*transcriptcapture.Config)
+		wantErr string
+	}{
+		{name: "exact binding"},
+		{name: "legacy config without new ids", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.AccountID, cfg.RealmID = "", ""
+		}},
+		{name: "account drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.AccountID = "acc_other"
+		}, wantErr: "account id"},
+		{name: "realm id drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.RealmID = "rlm_other"
+		}, wantErr: "realm id"},
+		{name: "agent id drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.AgentID = "agt_other"
+		}, wantErr: "agent id"},
+		{name: "realm name drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.Realm = "other"
+		}, wantErr: "realm name"},
+		{name: "agent selector drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.Agent = "other"
+		}, wantErr: "agent name"},
+		{name: "authenticated agent name drift", mutate: func(cfg *transcriptcapture.Config) {
+			cfg.AgentName = "other"
+		}, wantErr: "authenticated agent name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			if tc.mutate != nil {
+				tc.mutate(&cfg)
+			}
+			_, err := (configuredMCPBackend{cfg: cfg}).connect(context.Background())
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("connect error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 type fakeMCPBackend struct {
 	lastTranscriptID  string
@@ -25,6 +105,8 @@ type fakeMCPBackend struct {
 	lastFactList      client.FactListOptions
 	lastCandidateID   string
 	lastReview        client.FactCandidateListOptions
+	lastConfirmKey    string
+	lastRejectKey     string
 	lastUpcomingFrom  time.Time
 	sensitiveUpcoming bool
 	lastSubjectSet    client.UpsertFactSubjectInput
@@ -134,10 +216,12 @@ func (b *fakeMCPBackend) ListFactCandidates(_ context.Context, opts client.FactC
 	b.lastReview = opts
 	return []client.FactCandidate{{ID: "fcand_1", Status: "pending"}}, nil
 }
-func (b *fakeMCPBackend) ConfirmFactCandidate(context.Context, string) (client.Fact, error) {
+func (b *fakeMCPBackend) ConfirmFactCandidate(_ context.Context, _ string, key string) (client.Fact, error) {
+	b.lastConfirmKey = key
 	return client.Fact{ID: "fact_1", Value: json.RawMessage(`"vim"`)}, nil
 }
-func (b *fakeMCPBackend) RejectFactCandidate(context.Context, string) (client.FactCandidate, error) {
+func (b *fakeMCPBackend) RejectFactCandidate(_ context.Context, _ string, key string) (client.FactCandidate, error) {
+	b.lastRejectKey = key
 	return client.FactCandidate{ID: "fcand_1", Status: "rejected"}, nil
 }
 
@@ -226,15 +310,15 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		args map[string]any
 	}{
 		{name: "witself.self.show", args: map[string]any{}},
-		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00"}},
+		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00", "idempotency_key": "fact-set-1"}},
 		{name: "witself.fact.get", args: map[string]any{"subject": "self", "predicate": "preferences/editor"}},
 		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10, "sort_usage": true, "unused_only": true}},
 		{name: "witself.fact.propose", args: map[string]any{"subject": "self", "predicate": "preferences/theme", "value": "dark", "reason": "explicit preference", "confidence": 0.0}},
-		{name: "witself.fact.propose_from_transcript", args: map[string]any{"transcript_id": "trn_1", "entry_sequence": 1, "subject": "self", "predicate": "preferences/editor", "value": "helix", "reason": "the user explicitly stated a durable editor preference", "valid_from": "2026-07-01T00:00:00Z"}},
+		{name: "witself.fact.propose_from_transcript", args: map[string]any{"transcript_id": "trn_1", "entry_sequence": 1, "subject": "self", "predicate": "preferences/editor", "value": "helix", "reason": "the user explicitly stated a durable editor preference", "valid_from": "2026-07-01T00:00:00Z", "idempotency_key": "proposal-transcript-1"}},
 		{name: "witself.fact.review", args: map[string]any{"status": "open", "limit": 25}},
 		{name: "witself.fact.candidate.get", args: map[string]any{"candidate_id": "fcand_1"}},
-		{name: "witself.fact.confirm", args: map[string]any{"candidate_id": "fcand_1"}},
-		{name: "witself.fact.reject", args: map[string]any{"candidate_id": "fcand_1"}},
+		{name: "witself.fact.confirm", args: map[string]any{"candidate_id": "fcand_1", "idempotency_key": "confirm-1"}},
+		{name: "witself.fact.reject", args: map[string]any{"candidate_id": "fcand_1", "idempotency_key": "reject-1"}},
 		{name: "witself.fact.upcoming", args: map[string]any{"days": 14, "timezone": "America/Denver", "include_sensitive": true}},
 		{name: "witself.fact.subject.set", args: map[string]any{"canonical_key": "person_spouse", "display_name": "Spouse"}},
 		{name: "witself.fact.subject.alias", args: map[string]any{"canonical_key": "person_spouse", "alias": "my wife"}},
@@ -275,6 +359,9 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if backend.lastReview.Status != "open" || backend.lastReview.Limit != 25 || backend.lastCandidateID != "fcand_1" {
 		t.Fatalf("candidate review/detail calls = %#v / %q", backend.lastReview, backend.lastCandidateID)
 	}
+	if backend.lastConfirmKey != "confirm-1" || backend.lastRejectKey != "reject-1" {
+		t.Fatalf("candidate idempotency keys = %q / %q", backend.lastConfirmKey, backend.lastRejectKey)
+	}
 	if backend.lastSubjectSet.CanonicalKey != "person_spouse" || backend.lastSubjectAlias.Alias != "my wife" {
 		t.Fatalf("subject calls = %#v / %#v", backend.lastSubjectSet, backend.lastSubjectAlias)
 	}
@@ -292,6 +379,9 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if got := backend.lastFactSet.ObservedAt.Format(time.RFC3339); got != "2026-07-12T18:00:00Z" {
 		t.Fatalf("fact set observed_at = %q", got)
+	}
+	if backend.lastFactSet.IdempotencyKey != "fact-set-1" || backend.lastFactProposal.IdempotencyKey != "proposal-transcript-1" {
+		t.Fatalf("fact idempotency keys = %q / %q", backend.lastFactSet.IdempotencyKey, backend.lastFactProposal.IdempotencyKey)
 	}
 	if got := backend.lastFactProposal.ObservedAt.Format(time.RFC3339); got != "2026-07-12T17:30:00Z" {
 		t.Fatalf("transcript proposal observed_at = %q", got)

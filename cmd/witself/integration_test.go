@@ -11,9 +11,50 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
+
+func TestVerifyInstallAgentIdentityPinsRequestedScope(t *testing.T) {
+	identity := client.SelfIdentity{
+		AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default",
+		AgentID: "agt_1", AgentName: "scott",
+	}
+	tests := []struct {
+		name    string
+		conn    agentConnection
+		mutate  func(*client.SelfIdentity)
+		wantErr string
+	}{
+		{name: "managed binding", conn: agentConnection{AccountID: "acc_1", RealmName: "default", AgentName: "scott"}},
+		{name: "explicit token without managed account id", conn: agentConnection{RealmName: "default", AgentName: "scott"}},
+		{name: "managed account mismatch", conn: agentConnection{AccountID: "acc_other", RealmName: "default", AgentName: "scott"}, wantErr: "local account"},
+		{name: "requested realm mismatch", conn: agentConnection{AccountID: "acc_1", RealmName: "other", AgentName: "scott"}, wantErr: "requested realm"},
+		{name: "requested agent mismatch", conn: agentConnection{AccountID: "acc_1", RealmName: "default", AgentName: "other"}, wantErr: "requested agent"},
+		{name: "incomplete server identity", conn: agentConnection{AccountID: "acc_1", RealmName: "default", AgentName: "scott"}, mutate: func(identity *client.SelfIdentity) {
+			identity.RealmID = ""
+		}, wantErr: "incomplete agent identity"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotIdentity := identity
+			if tc.mutate != nil {
+				tc.mutate(&gotIdentity)
+			}
+			err := verifyInstallAgentIdentity(tc.conn, gotIdentity)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("identity error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	home := t.TempDir()
@@ -55,7 +96,8 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentID != "agent_1" || cfg.AgentName != "scott" || cfg.Location.Name != "home" {
+	if cfg.AccountID != "acc_1" || cfg.RealmID != "realm_1" ||
+		cfg.AgentID != "agent_1" || cfg.AgentName != "scott" || cfg.Location.Name != "home" {
 		t.Fatalf("config = %#v", cfg)
 	}
 	hooks, err := os.ReadFile(filepath.Join(codexHome, "hooks.json"))

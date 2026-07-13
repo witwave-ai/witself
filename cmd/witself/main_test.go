@@ -226,6 +226,9 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/facts":
+			if got := r.Header.Get("Idempotency-Key"); got != "set-birthday-1" {
+				t.Errorf("Idempotency-Key = %q", got)
+			}
 			var body client.SetFactInput
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
@@ -249,7 +252,7 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "--type", "date", "--recurrence", "annual", "identity/birth-date", "1980-02-29"}); code != 0 {
+	if code := run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", tokenFile, "--type", "date", "--recurrence", "annual", "--idempotency-key", "set-birthday-1", "identity/birth-date", "1980-02-29"}); code != 0 {
 		t.Fatalf("fact set code = %d", code)
 	}
 	if code := run([]string{"fact", "list", "--endpoint", srv.URL, "--token-file", tokenFile, "--category", "preferences"}); code != 0 {
@@ -257,6 +260,45 @@ func TestFactSetAndListUseAgentToken(t *testing.T) {
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestFactProposalAndDecisionCLIForwardIdempotencyKeys(t *testing.T) {
+	seen := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/fact-candidates":
+			seen["propose"] = r.Header.Get("Idempotency-Key")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"candidate":{"id":"fcand_1","subject":"self","predicate":"preferences/editor","value":"zed","status":"pending"}}`))
+		case "/v1/fact-candidates/fcand_1:confirm":
+			seen["confirm"] = r.Header.Get("Idempotency-Key")
+			_, _ = w.Write([]byte(`{"fact":{"id":"fact_1","subject":"self","predicate":"preferences/editor","value":"zed"}}`))
+		case "/v1/fact-candidates/fcand_2:reject":
+			seen["reject"] = r.Header.Get("Idempotency-Key")
+			_, _ = w.Write([]byte(`{"candidate":{"id":"fcand_2","subject":"self","predicate":"preferences/theme","value":"dark","status":"rejected"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connection := []string{"--endpoint", srv.URL, "--token-file", tokenFile}
+	if code := run(append([]string{"fact", "propose"}, append(connection, "--idempotency-key", "proposal-1", "preferences/editor", "zed")...)); code != 0 {
+		t.Fatalf("fact propose code = %d", code)
+	}
+	if code := run(append([]string{"fact", "confirm"}, append(connection, "--idempotency-key", "confirm-1", "fcand_1")...)); code != 0 {
+		t.Fatalf("fact confirm code = %d", code)
+	}
+	if code := run(append([]string{"fact", "reject"}, append(connection, "--idempotency-key", "reject-1", "fcand_2")...)); code != 0 {
+		t.Fatalf("fact reject code = %d", code)
+	}
+	if seen["propose"] != "proposal-1" || seen["confirm"] != "confirm-1" || seen["reject"] != "reject-1" {
+		t.Fatalf("idempotency headers = %#v", seen)
 	}
 }
 

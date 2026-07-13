@@ -291,8 +291,8 @@ type Config struct {
 	ProposeFact             func(ctx context.Context, p DomainPrincipal, in ProposeFactRequest) (FactCandidate, error)
 	GetFactCandidate        func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
 	ListFactCandidates      func(ctx context.Context, p DomainPrincipal, opts FactCandidateListOptions) ([]FactCandidate, error)
-	ConfirmFactCandidate    func(ctx context.Context, p DomainPrincipal, candidateID string) (Fact, error)
-	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
+	ConfirmFactCandidate    func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (Fact, error)
+	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (FactCandidate, error)
 	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfFact, int, error)
 	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
 	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
@@ -763,6 +763,10 @@ type Realm struct {
 // ErrConflict signals a uniqueness conflict (-> 409). The wiring layer returns
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
+
+// ErrIdempotencyConflict signals reuse of one retry key for a different
+// logical mutation. Handlers return a stable 409 without echoing request data.
+var ErrIdempotencyConflict = errors.New("idempotency conflict")
 
 // ErrNotFound signals a missing resource (-> 404), e.g. a realm not in the account.
 var ErrNotFound = errors.New("not found")

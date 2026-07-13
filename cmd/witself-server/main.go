@@ -232,6 +232,7 @@ func serve() int {
 				SourceKind: store.FactSourceAgent, SourceRef: in.SourceRef, Confidence: in.Confidence,
 				ObservedAt: in.ObservedAt, ConfirmedAt: in.ConfirmedAt,
 				ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil,
+				IdempotencyKey: in.IdempotencyKey,
 			})
 			if err != nil {
 				return server.Fact{}, mapFactError(err)
@@ -277,7 +278,7 @@ func serve() int {
 			return out, nil
 		}
 		cfg.ProposeFact = func(ctx context.Context, p server.DomainPrincipal, in server.ProposeFactRequest) (server.FactCandidate, error) {
-			c, err := st.ProposeFact(ctx, toStorePrincipal(p), store.ProposeFactInput{SetFactInput: store.SetFactInput{Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType, Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive, SourceKind: store.FactSourceInference, SourceRef: in.SourceRef, Confidence: in.Confidence, ObservedAt: in.ObservedAt, ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil}, Reason: in.Reason})
+			c, err := st.ProposeFact(ctx, toStorePrincipal(p), store.ProposeFactInput{SetFactInput: store.SetFactInput{Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType, Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive, SourceKind: store.FactSourceInference, SourceRef: in.SourceRef, Confidence: in.Confidence, ObservedAt: in.ObservedAt, ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil, IdempotencyKey: in.IdempotencyKey}, Reason: in.Reason})
 			if err != nil {
 				return server.FactCandidate{}, mapFactError(err)
 			}
@@ -301,15 +302,15 @@ func serve() int {
 			}
 			return out, nil
 		}
-		cfg.ConfirmFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id string) (server.Fact, error) {
-			f, err := st.ConfirmFactCandidate(ctx, toStorePrincipal(p), id)
+		cfg.ConfirmFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id, idempotencyKey string) (server.Fact, error) {
+			f, err := st.ConfirmFactCandidateIdempotent(ctx, toStorePrincipal(p), id, idempotencyKey)
 			if err != nil {
 				return server.Fact{}, mapFactError(err)
 			}
 			return toServerFact(f), nil
 		}
-		cfg.RejectFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id string) (server.FactCandidate, error) {
-			c, err := st.RejectFactCandidate(ctx, toStorePrincipal(p), id)
+		cfg.RejectFactCandidate = func(ctx context.Context, p server.DomainPrincipal, id, idempotencyKey string) (server.FactCandidate, error) {
+			c, err := st.RejectFactCandidateIdempotent(ctx, toStorePrincipal(p), id, idempotencyKey)
 			if err != nil {
 				return server.FactCandidate{}, mapFactError(err)
 			}
@@ -1319,6 +1320,8 @@ func mapFactError(err error) error {
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrFactConflict):
 		return server.ErrConflict
+	case errors.Is(err, store.ErrFactIdempotencyConflict):
+		return server.ErrIdempotencyConflict
 	case errors.Is(err, store.ErrFactForbidden), errors.Is(err, store.ErrAccountNotActive), errors.Is(err, store.ErrAgentNotFound):
 		return server.ErrForbidden
 	default:

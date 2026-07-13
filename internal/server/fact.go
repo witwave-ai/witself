@@ -55,20 +55,21 @@ type FactAssertion struct {
 
 // SetFactRequest is the POST /v1/facts request body.
 type SetFactRequest struct {
-	Subject     string          `json:"subject,omitempty"`
-	Predicate   string          `json:"predicate"`
-	ValueType   string          `json:"value_type,omitempty"`
-	Value       json.RawMessage `json:"value"`
-	Recurrence  string          `json:"recurrence,omitempty"`
-	Cardinality string          `json:"cardinality,omitempty"`
-	Sensitive   bool            `json:"sensitive,omitempty"`
-	SourceKind  string          `json:"source_kind,omitempty"`
-	SourceRef   string          `json:"source_ref,omitempty"`
-	Confidence  *float64        `json:"confidence,omitempty"`
-	ObservedAt  time.Time       `json:"observed_at,omitempty"`
-	ConfirmedAt *time.Time      `json:"confirmed_at,omitempty"`
-	ValidFrom   *time.Time      `json:"valid_from,omitempty"`
-	ValidUntil  *time.Time      `json:"valid_until,omitempty"`
+	Subject        string          `json:"subject,omitempty"`
+	Predicate      string          `json:"predicate"`
+	ValueType      string          `json:"value_type,omitempty"`
+	Value          json.RawMessage `json:"value"`
+	Recurrence     string          `json:"recurrence,omitempty"`
+	Cardinality    string          `json:"cardinality,omitempty"`
+	Sensitive      bool            `json:"sensitive,omitempty"`
+	SourceKind     string          `json:"source_kind,omitempty"`
+	SourceRef      string          `json:"source_ref,omitempty"`
+	Confidence     *float64        `json:"confidence,omitempty"`
+	ObservedAt     time.Time       `json:"observed_at,omitempty"`
+	ConfirmedAt    *time.Time      `json:"confirmed_at,omitempty"`
+	ValidFrom      *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil     *time.Time      `json:"valid_until,omitempty"`
+	IdempotencyKey string          `json:"-"`
 }
 
 // FactListOptions selects a bounded fact inventory.
@@ -159,6 +160,7 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 			writeJSONError(w, http.StatusBadRequest, "source_kind is derived from the authenticated agent")
 			return
 		}
+		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		fact, err := set(r.Context(), p, req)
 		switch {
 		case errors.Is(err, ErrBadInput):
@@ -166,6 +168,9 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 			return
 		case errors.Is(err, ErrForbidden):
 			writeJSONError(w, http.StatusForbidden, "fact access forbidden")
+			return
+		case errors.Is(err, ErrIdempotencyConflict):
+			writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different fact mutation")
 			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not set fact")
@@ -261,6 +266,8 @@ func writeFactError(w http.ResponseWriter, err error) bool {
 		writeJSONError(w, http.StatusNotFound, "fact not found")
 	case errors.Is(err, ErrForbidden):
 		writeJSONError(w, http.StatusForbidden, "fact access forbidden")
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different fact mutation")
 	case errors.Is(err, ErrConflict):
 		writeJSONError(w, http.StatusConflict, "fact changed since candidate proposal")
 	default:
@@ -280,6 +287,7 @@ func proposeFactHandler(auth PrincipalAuthFunc, propose func(context.Context, Do
 			writeJSONError(w, 400, "invalid fact proposal")
 			return
 		}
+		in.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		out, err := propose(r.Context(), p, in)
 		if writeFactError(w, err) {
 			return
@@ -332,7 +340,7 @@ func listFactCandidatesHandler(auth PrincipalAuthFunc, list func(context.Context
 	})
 }
 
-func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Context, DomainPrincipal, string) (Fact, error), reject func(context.Context, DomainPrincipal, string) (FactCandidate, error)) http.HandlerFunc {
+func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Context, DomainPrincipal, string, string) (Fact, error), reject func(context.Context, DomainPrincipal, string, string) (FactCandidate, error)) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may decide fact candidates")
@@ -345,15 +353,16 @@ func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Con
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "private, no-store")
+		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		if action == "confirm" {
-			out, err := confirm(r.Context(), p, candidateID)
+			out, err := confirm(r.Context(), p, candidateID, idempotencyKey)
 			if writeFactError(w, err) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "fact": out})
 			return
 		}
-		out, err := reject(r.Context(), p, candidateID)
+		out, err := reject(r.Context(), p, candidateID, idempotencyKey)
 		if writeFactError(w, err) {
 			return
 		}

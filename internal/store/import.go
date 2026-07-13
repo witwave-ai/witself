@@ -127,7 +127,9 @@ var importColumns = map[string]map[string]bool{
 		"recurrence":  true,
 		"source_kind": true, "source_ref": true, "confidence": true,
 		"observed_at": true, "confirmed_at": true, "valid_from": true,
-		"valid_until": true, "supersedes_id": true, "created_at": true,
+		"valid_until": true, "supersedes_id": true,
+		"idempotency_key": true, "idempotency_fingerprint": true,
+		"created_at": true,
 	},
 	"fact_candidates": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -138,7 +140,10 @@ var importColumns = map[string]map[string]bool{
 		"observed_at": true, "valid_from": true, "valid_until": true,
 		"reason": true, "status": true, "conflict_fact_id": true,
 		"observed_assertion_id": true,
-		"resolved_fact_id":      true, "proposed_at": true, "decided_at": true,
+		"resolved_fact_id":      true, "decision_assertion_id": true,
+		"idempotency_key":         true,
+		"idempotency_fingerprint": true, "decision_idempotency_key": true,
+		"proposed_at": true, "decided_at": true,
 	},
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -421,6 +426,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			}
 			if conflictFactID, conflict := optionalStringField(obj, "conflict_fact_id"); conflict && factID != conflictFactID {
 				return badf("fact_candidates row observed_assertion_id %q does not belong to conflict fact %q", observedAssertionID, conflictFactID)
+			}
+		}
+		decisionAssertionID, decided := optionalStringField(obj, "decision_assertion_id")
+		if decided {
+			factID, ok := ic.assertions[decisionAssertionID]
+			resolvedFactID, resolved := optionalStringField(obj, "resolved_fact_id")
+			if !ok || !resolved || factID != resolvedFactID {
+				return badf("fact_candidates row decision_assertion_id %q does not belong to resolved fact %q", decisionAssertionID, resolvedFactID)
 			}
 		}
 	case "account_events":
@@ -982,6 +995,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			return export.Manifest{}, fmt.Errorf("%w: fact %q has no valid resolved assertion", ErrArchiveContent, factID)
 		}
 	}
+	if err := validateImportedFactDecisionAssertions(ctx, tx, m.AccountID); err != nil {
+		return export.Manifest{}, err
+	}
 	if err := validateImportedUsageRollups(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, err
 	}
@@ -1013,6 +1029,72 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, err
 	}
 	return m, nil
+}
+
+// validateImportedFactDecisionAssertions proves that every persisted confirm
+// retry points at the exact assertion promoted by that candidate. A foreign
+// key to the same fact is insufficient: a content-hostile but correctly
+// checksummed archive could otherwise repoint the retry to an older assertion
+// and make a restored confirm return the wrong historical result.
+func validateImportedFactDecisionAssertions(ctx context.Context, q factQuerier, accountID string) error {
+	var mismatch bool
+	err := q.QueryRow(ctx, `
+		WITH RECURSIVE fact_chain(fact_id, assertion_id) AS (
+		  SELECT id, resolved_assertion_id
+		  FROM facts
+		  WHERE account_id = $1
+		  UNION
+		  SELECT chain.fact_id, assertion.supersedes_id
+		  FROM fact_chain chain
+		  JOIN fact_assertions assertion ON assertion.id = chain.assertion_id
+		  WHERE assertion.supersedes_id IS NOT NULL
+		)
+		SELECT EXISTS (
+		  SELECT 1
+		  FROM fact_candidates candidate
+		  LEFT JOIN fact_assertions assertion ON assertion.id = candidate.decision_assertion_id
+		  LEFT JOIN facts fact ON fact.id = candidate.resolved_fact_id
+		  LEFT JOIN fact_subjects subject ON subject.id = fact.subject_id
+		  WHERE candidate.account_id = $1
+		    AND candidate.decision_assertion_id IS NOT NULL
+		    AND (
+		      candidate.status <> 'confirmed'
+		      OR assertion.id IS NULL
+		      OR fact.id IS NULL
+		      OR assertion.fact_id IS DISTINCT FROM fact.id
+		      OR assertion.account_id IS DISTINCT FROM candidate.account_id
+		      OR assertion.realm_id IS DISTINCT FROM candidate.realm_id
+		      OR assertion.asserted_by_agent_id IS DISTINCT FROM candidate.owner_agent_id
+		      OR fact.account_id IS DISTINCT FROM candidate.account_id
+		      OR fact.realm_id IS DISTINCT FROM candidate.realm_id
+		      OR fact.owner_agent_id IS DISTINCT FROM candidate.owner_agent_id
+		      OR subject.canonical_key IS DISTINCT FROM candidate.subject_key
+		      OR fact.predicate IS DISTINCT FROM candidate.predicate
+		      OR assertion.value_type IS DISTINCT FROM candidate.value_type
+		      OR assertion.value IS DISTINCT FROM candidate.value
+		      OR assertion.recurrence IS DISTINCT FROM candidate.recurrence
+		      OR assertion.source_kind IS DISTINCT FROM 'inference'
+		      OR assertion.source_ref IS DISTINCT FROM candidate.source_ref
+		      OR assertion.confidence IS DISTINCT FROM candidate.confidence
+		      OR assertion.observed_at IS DISTINCT FROM candidate.observed_at
+		      OR assertion.confirmed_at IS NULL
+		      OR assertion.valid_from IS DISTINCT FROM candidate.valid_from
+		      OR assertion.valid_until IS DISTINCT FROM candidate.valid_until
+		      OR assertion.supersedes_id IS DISTINCT FROM candidate.observed_assertion_id
+		      OR NOT EXISTS (
+		        SELECT 1 FROM fact_chain chain
+		        WHERE chain.fact_id = fact.id
+		          AND chain.assertion_id = assertion.id
+		      )
+		    )
+		)`, accountID).Scan(&mismatch)
+	if err != nil {
+		return fmt.Errorf("validate imported fact decision assertions: %w", err)
+	}
+	if mismatch {
+		return fmt.Errorf("%w: confirmed fact candidate does not match its decision assertion", ErrArchiveContent)
+	}
+	return nil
 }
 
 // validateImportedUsageRollups prevents a stale or edited projection from

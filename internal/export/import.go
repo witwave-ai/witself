@@ -245,8 +245,16 @@ func upgradeRow(table string, row []byte, from, to int) ([]byte, error) {
 		return row, nil
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(row, &obj); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(row))
+	decoder.UseNumber()
+	if err := decoder.Decode(&obj); err != nil {
 		return nil, fmt.Errorf("%w: %s row: %v", ErrCorrupt, table, err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, fmt.Errorf("%w: %s row: %v", ErrCorrupt, table, err)
+	}
+	if obj == nil {
+		return nil, fmt.Errorf("%w: %s row: expected JSON object", ErrCorrupt, table)
 	}
 	for v := from; v < to; v++ {
 		up := UpgraderFor(v)
@@ -263,6 +271,17 @@ func upgradeRow(table string, row []byte, from, to int) ([]byte, error) {
 		}
 	}
 	return json.Marshal(obj)
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func readEntry(tr *tar.Reader, hdr *tar.Header) ([]byte, error) {

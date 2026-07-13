@@ -289,6 +289,7 @@ Idempotency is required for operations that create durable or external effects:
 - Token creation or rotation.
 - Memory add, adjust, forget, restore, and delete.
 - Fact set, primary promotion, and delete.
+- Fact candidate proposal, confirmation, and rejection.
 - Policy create and delete.
 - Group create, member add/remove, and delete.
 - Message send and acknowledgement.
@@ -302,6 +303,14 @@ Idempotency is required for operations that create durable or external effects:
 Idempotency records must not store memory content, fact values, message
 bodies/payloads, embedding vectors, raw tokens, payment details, provider
 secrets, secret field values, TOTP seeds, generated codes, or key material.
+
+Fact mutation retry keys are scoped to the authenticated agent and mutation
+surface (fact set, candidate proposal, or candidate decision). The service
+stores the key and a one-way normalized request fingerprint beside the created
+assertion or candidate; it does not copy the fact value into a separate retry
+record. Reusing a key for a different request or candidate decision returns
+`409 Conflict`. Retrying the same fact set, proposal, confirmation, or rejection
+returns the existing resource without appending another assertion or candidate.
 
 `witself setup` should combine API idempotency with name-based ensure semantics:
 account, realm, and agent creation can safely select existing visible resources

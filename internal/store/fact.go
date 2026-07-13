@@ -48,6 +48,9 @@ var (
 	// changed before promotion. The caller must review the new truth before
 	// deciding whether to propose or confirm another candidate.
 	ErrFactConflict = errors.New("fact changed since candidate proposal")
+	// ErrFactIdempotencyConflict reports reuse of a retry key for a different
+	// logical fact mutation. Values are compared through a one-way fingerprint.
+	ErrFactIdempotencyConflict = errors.New("fact idempotency key conflict")
 
 	factSubjectPattern   = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,254}$`)
 	factPredicatePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]*(/[a-z0-9_.-]+){0,7}$`)
@@ -118,6 +121,9 @@ type SetFactInput struct {
 	ConfirmedAt *time.Time
 	ValidFrom   *time.Time
 	ValidUntil  *time.Time
+	// IdempotencyKey identifies one logical mutation across transport retries.
+	// It is stored beside the assertion, never in audit events or responses.
+	IdempotencyKey string
 }
 
 // FactRetrievalMode identifies the delivery path recorded in immutable fact
@@ -154,9 +160,33 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
 		return Fact{}, err
 	}
+	in.IdempotencyKey, err = normalizeFactIdempotencyKey(in.IdempotencyKey)
+	if err != nil {
+		return Fact{}, err
+	}
+	if err := lockFactIdempotencyKey(ctx, tx, p, "set", in.IdempotencyKey); err != nil {
+		return Fact{}, err
+	}
 	in.Subject, err = resolveFactSubjectCanonicalKey(ctx, tx, p, in.Subject)
 	if err != nil {
 		return Fact{}, err
+	}
+	fingerprint := ""
+	if in.IdempotencyKey != "" {
+		fingerprint, err = factSetFingerprint(in)
+		if err != nil {
+			return Fact{}, err
+		}
+		out, replayed, replayErr := replaySetFact(ctx, tx, p, in.IdempotencyKey, fingerprint, in)
+		if replayErr != nil {
+			return Fact{}, replayErr
+		}
+		if replayed {
+			if err := tx.Commit(ctx); err != nil {
+				return Fact{}, err
+			}
+			return out, nil
+		}
 	}
 	in, err = normalizeSetFactInput(in)
 	if err != nil {
@@ -200,11 +230,12 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 		INSERT INTO fact_assertions
 		  (id, fact_id, account_id, realm_id, asserted_by_agent_id, value_type,
 		   value, recurrence, source_kind, source_ref, confidence, observed_at, confirmed_at,
-		   valid_from, valid_until, supersedes_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, NULLIF($16, ''), clock_timestamp())`,
+		   valid_from, valid_until, supersedes_id, idempotency_key,
+		   idempotency_fingerprint, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, NULLIF($16, ''), $17, $18, clock_timestamp())`,
 		assertionID, factID, p.AccountID, p.RealmID, p.ID, in.ValueType,
 		string(in.Value), in.Recurrence, in.SourceKind, in.SourceRef, confidence, in.ObservedAt,
-		in.ConfirmedAt, in.ValidFrom, in.ValidUntil, resolvedID)
+		in.ConfirmedAt, in.ValidFrom, in.ValidUntil, resolvedID, in.IdempotencyKey, fingerprint)
 	if err != nil {
 		return Fact{}, fmt.Errorf("insert fact assertion: %w", err)
 	}
@@ -331,6 +362,28 @@ func getFactTx(ctx context.Context, q factQuerier, p Principal, factID, subject,
 	return out, nil
 }
 
+// getFactAtAssertionTx reconstructs the resource result pinned to one
+// historical assertion. Idempotent mutation replays must not drift to a later
+// assertion merely because the fact was subsequently updated.
+func getFactAtAssertionTx(ctx context.Context, q factQuerier, p Principal, factID, assertionID string) (Fact, error) {
+	query := `
+		SELECT f.id, f.account_id, f.realm_id, f.owner_agent_id, f.subject_id,
+		       s.canonical_key, f.predicate, f.cardinality, f.sensitive,
+		       a.id, a.value_type, a.value, a.recurrence, a.source_kind, a.source_ref,
+		       a.confidence, a.observed_at, a.confirmed_at, a.valid_from,
+		       a.valid_until, f.created_at, a.created_at
+		FROM facts f
+		JOIN fact_subjects s ON s.id = f.subject_id
+		JOIN fact_assertions a ON a.fact_id = f.id
+		WHERE f.account_id=$1 AND f.realm_id=$2 AND f.owner_agent_id=$3
+		  AND f.id=$4 AND a.id=$5`
+	out, err := scanFact(q.QueryRow(ctx, query, p.AccountID, p.RealmID, p.ID, factID, assertionID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Fact{}, ErrFactNotFound
+	}
+	return out, err
+}
+
 type factScanner interface{ Scan(...any) error }
 
 func scanFact(row factScanner) (Fact, error) {
@@ -373,6 +426,10 @@ func ensureFactSubject(ctx context.Context, tx pgx.Tx, p Principal, key string) 
 }
 
 func normalizeSetFactInput(in SetFactInput) (SetFactInput, error) {
+	return normalizeSetFactInputAt(in, time.Now().UTC())
+}
+
+func normalizeSetFactInputAt(in SetFactInput, defaultObservedAt time.Time) (SetFactInput, error) {
 	in.Subject = normalizeFactSubject(in.Subject)
 	in.Predicate = strings.TrimSpace(in.Predicate)
 	in.ValueType = strings.TrimSpace(in.ValueType)
@@ -387,7 +444,7 @@ func normalizeSetFactInput(in SetFactInput) (SetFactInput, error) {
 		in.SourceKind = FactSourceSelf
 	}
 	if in.ObservedAt.IsZero() {
-		in.ObservedAt = time.Now().UTC()
+		in.ObservedAt = defaultObservedAt.UTC()
 	} else {
 		in.ObservedAt = in.ObservedAt.UTC()
 	}

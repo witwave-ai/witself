@@ -129,6 +129,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'confidence', confidence, 'observed_at', observed_at,
 			  'confirmed_at', confirmed_at, 'valid_from', valid_from,
 			  'valid_until', valid_until, 'supersedes_id', supersedes_id,
+			  'idempotency_key', idempotency_key,
+			  'idempotency_fingerprint', idempotency_fingerprint,
 			  'created_at', created_at)
 			FROM assertion_order
 			ORDER BY fact_id, chain_depth, created_at, id`, arg: accountID},
@@ -146,6 +148,10 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'conflict_fact_id', conflict_fact_id,
 			  'observed_assertion_id', observed_assertion_id,
 			  'resolved_fact_id', resolved_fact_id,
+			  'decision_assertion_id', decision_assertion_id,
+			  'idempotency_key', idempotency_key,
+			  'idempotency_fingerprint', idempotency_fingerprint,
+			  'decision_idempotency_key', decision_idempotency_key,
 			  'proposed_at', proposed_at, 'decided_at', decided_at)
 			FROM fact_candidates WHERE account_id = $1
 			ORDER BY proposed_at, id`, arg: accountID},

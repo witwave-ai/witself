@@ -23,7 +23,26 @@ type Upgrader func(table string, row map[string]any) (map[string]any, error)
 
 // upgraders maps a schema version to the function lifting rows to the NEXT
 // version. Absent = no shape change at that migration = no-op.
-var upgraders = map[int]Upgrader{}
+var upgraders = map[int]Upgrader{
+	25: addFactIdempotencyDefaults,
+}
+
+// addFactIdempotencyDefaults lifts schema-25 archives into the constrained
+// schema-26 shape. Empty keys opt out and therefore cannot collide with the
+// partial unique indexes added by migration 0026.
+func addFactIdempotencyDefaults(table string, row map[string]any) (map[string]any, error) {
+	switch table {
+	case "fact_assertions":
+		row["idempotency_key"] = ""
+		row["idempotency_fingerprint"] = ""
+	case "fact_candidates":
+		row["idempotency_key"] = ""
+		row["idempotency_fingerprint"] = ""
+		row["decision_idempotency_key"] = ""
+		row["decision_assertion_id"] = nil
+	}
+	return row, nil
+}
 
 // UpgraderFor returns the upgrader lifting rows from schema version v to
 // v+1, or nil when that migration changed no data shape.

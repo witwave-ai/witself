@@ -55,20 +55,21 @@ type FactAssertion struct {
 
 // SetFactInput carries one explicit typed assertion to the fact service.
 type SetFactInput struct {
-	Subject     string          `json:"subject,omitempty"`
-	Predicate   string          `json:"predicate"`
-	ValueType   string          `json:"value_type,omitempty"`
-	Value       json.RawMessage `json:"value"`
-	Recurrence  string          `json:"recurrence,omitempty"`
-	Cardinality string          `json:"cardinality,omitempty"`
-	Sensitive   bool            `json:"sensitive,omitempty"`
-	SourceKind  string          `json:"source_kind,omitempty"`
-	SourceRef   string          `json:"source_ref,omitempty"`
-	Confidence  *float64        `json:"confidence,omitempty"`
-	ObservedAt  time.Time       `json:"observed_at,omitempty"`
-	ConfirmedAt *time.Time      `json:"confirmed_at,omitempty"`
-	ValidFrom   *time.Time      `json:"valid_from,omitempty"`
-	ValidUntil  *time.Time      `json:"valid_until,omitempty"`
+	Subject        string          `json:"subject,omitempty"`
+	Predicate      string          `json:"predicate"`
+	ValueType      string          `json:"value_type,omitempty"`
+	Value          json.RawMessage `json:"value"`
+	Recurrence     string          `json:"recurrence,omitempty"`
+	Cardinality    string          `json:"cardinality,omitempty"`
+	Sensitive      bool            `json:"sensitive,omitempty"`
+	SourceKind     string          `json:"source_kind,omitempty"`
+	SourceRef      string          `json:"source_ref,omitempty"`
+	Confidence     *float64        `json:"confidence,omitempty"`
+	ObservedAt     time.Time       `json:"observed_at,omitempty"`
+	ConfirmedAt    *time.Time      `json:"confirmed_at,omitempty"`
+	ValidFrom      *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil     *time.Time      `json:"valid_until,omitempty"`
+	IdempotencyKey string          `json:"-"`
 }
 
 // FactListOptions selects a bounded fact inventory.
@@ -141,7 +142,8 @@ func SetFact(ctx context.Context, endpoint, token string, in SetFactInput) (*Fac
 	var out struct {
 		Fact Fact `json:"fact"`
 	}
-	if err := doJSON(ctx, http.MethodPost, factsURL(endpoint), token, body, &out); err != nil {
+	headers := factIdempotencyHeaders(in.IdempotencyKey)
+	if err := doJSONWithHeaders(ctx, http.MethodPost, factsURL(endpoint), token, headers, body, &out); err != nil {
 		return nil, err
 	}
 	return &out.Fact, nil
@@ -215,7 +217,8 @@ func ProposeFact(ctx context.Context, endpoint, token string, in ProposeFactInpu
 	var out struct {
 		Candidate FactCandidate `json:"candidate"`
 	}
-	if err = doJSON(ctx, http.MethodPost, factCandidatesURL(endpoint), token, body, &out); err != nil {
+	headers := factIdempotencyHeaders(in.IdempotencyKey)
+	if err = doJSONWithHeaders(ctx, http.MethodPost, factCandidatesURL(endpoint), token, headers, body, &out); err != nil {
 		return nil, err
 	}
 	return &out.Candidate, nil
@@ -263,10 +266,15 @@ func ListFactCandidatesWithOptions(ctx context.Context, endpoint, token string, 
 
 // ConfirmFactCandidate promotes a candidate into canonical fact history.
 func ConfirmFactCandidate(ctx context.Context, endpoint, token, id string) (*Fact, error) {
+	return ConfirmFactCandidateWithIdempotency(ctx, endpoint, token, id, "")
+}
+
+// ConfirmFactCandidateWithIdempotency safely retries one logical decision.
+func ConfirmFactCandidateWithIdempotency(ctx context.Context, endpoint, token, id, idempotencyKey string) (*Fact, error) {
 	var out struct {
 		Fact Fact `json:"fact"`
 	}
-	if err := doJSON(ctx, http.MethodPost, factCandidatesURL(endpoint)+"/"+url.PathEscape(id)+":confirm", token, nil, &out); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodPost, factCandidatesURL(endpoint)+"/"+url.PathEscape(id)+":confirm", token, factIdempotencyHeaders(idempotencyKey), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out.Fact, nil
@@ -274,13 +282,26 @@ func ConfirmFactCandidate(ctx context.Context, endpoint, token, id string) (*Fac
 
 // RejectFactCandidate closes a candidate without changing canonical facts.
 func RejectFactCandidate(ctx context.Context, endpoint, token, id string) (*FactCandidate, error) {
+	return RejectFactCandidateWithIdempotency(ctx, endpoint, token, id, "")
+}
+
+// RejectFactCandidateWithIdempotency safely retries one logical decision.
+func RejectFactCandidateWithIdempotency(ctx context.Context, endpoint, token, id, idempotencyKey string) (*FactCandidate, error) {
 	var out struct {
 		Candidate FactCandidate `json:"candidate"`
 	}
-	if err := doJSON(ctx, http.MethodPost, factCandidatesURL(endpoint)+"/"+url.PathEscape(id)+":reject", token, nil, &out); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodPost, factCandidatesURL(endpoint)+"/"+url.PathEscape(id)+":reject", token, factIdempotencyHeaders(idempotencyKey), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out.Candidate, nil
+}
+
+func factIdempotencyHeaders(key string) map[string]string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	return map[string]string{"Idempotency-Key": key}
 }
 
 // UpcomingFacts lists resolved date/datetime facts in a future window.

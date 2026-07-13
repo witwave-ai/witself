@@ -2779,6 +2779,7 @@ func factSet(args []string) int {
 	observedAtRaw := fs.String("observed-at", "", "observation time in RFC3339")
 	validFromRaw := fs.String("valid-from", "", "validity start in RFC3339")
 	validUntilRaw := fs.String("valid-until", "", "validity end in RFC3339")
+	idempotencyKey := fs.String("idempotency-key", "", "retry key for exactly one logical fact write")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2828,6 +2829,7 @@ func factSet(args []string) int {
 		Recurrence:  *recurrence,
 		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
 		Confidence: confidence, ValidFrom: validFrom, ValidUntil: validUntil,
+		IdempotencyKey: *idempotencyKey,
 	}
 	if observedAt != nil {
 		factInput.ObservedAt = *observedAt
@@ -2982,6 +2984,7 @@ func factPropose(args []string) int {
 	observedAtRaw := fs.String("observed-at", "", "observation time in RFC3339")
 	validFromRaw := fs.String("valid-from", "", "validity start in RFC3339")
 	validUntilRaw := fs.String("valid-until", "", "validity end in RFC3339")
+	idempotencyKey := fs.String("idempotency-key", "", "retry key for exactly one logical proposal")
 	jsonOut := jsonFlag(fs)
 	if fs.Parse(args) != nil {
 		return 2
@@ -3031,6 +3034,7 @@ func factPropose(args []string) int {
 		Recurrence:  *recurrence,
 		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
 		Confidence: confidence, ValidFrom: validFrom, ValidUntil: validUntil,
+		IdempotencyKey: *idempotencyKey,
 	}
 	if observedAt != nil {
 		factInput.ObservedAt = *observedAt
@@ -3135,6 +3139,7 @@ func factCandidateDecision(action string, args []string) int {
 	fs := flag.NewFlagSet("fact "+action, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	idempotencyKey := fs.String("idempotency-key", "", "retry key for exactly one logical candidate decision")
 	jsonOut := jsonFlag(fs)
 	if fs.Parse(args) != nil {
 		return 2
@@ -3150,7 +3155,7 @@ func factCandidateDecision(action string, args []string) int {
 		return 1
 	}
 	if action == "confirm" {
-		out, err := client.ConfirmFactCandidate(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+		out, err := client.ConfirmFactCandidateWithIdempotency(ctx, conn.Endpoint, conn.Token, fs.Arg(0), *idempotencyKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
@@ -3161,7 +3166,7 @@ func factCandidateDecision(action string, args []string) int {
 		fmt.Printf("confirmed %s as %s\n", fs.Arg(0), out.ID)
 		return 0
 	}
-	out, err := client.RejectFactCandidate(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+	out, err := client.RejectFactCandidateWithIdempotency(ctx, conn.Endpoint, conn.Token, fs.Arg(0), *idempotencyKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1

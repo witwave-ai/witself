@@ -189,7 +189,7 @@ func TestFactCandidateRoutes(t *testing.T) {
 			}
 			return []FactCandidate{candidate}, nil
 		},
-		ConfirmFactCandidate: func(_ context.Context, p DomainPrincipal, id string) (Fact, error) {
+		ConfirmFactCandidate: func(_ context.Context, p DomainPrincipal, id, _ string) (Fact, error) {
 			if id == "fcand_stale" {
 				return Fact{}, ErrConflict
 			}
@@ -198,7 +198,7 @@ func TestFactCandidateRoutes(t *testing.T) {
 			}
 			return confirmed, nil
 		},
-		RejectFactCandidate: func(_ context.Context, p DomainPrincipal, id string) (FactCandidate, error) {
+		RejectFactCandidate: func(_ context.Context, p DomainPrincipal, id, _ string) (FactCandidate, error) {
 			if p.ID != "agent_1" || id != "fcand_2" {
 				t.Errorf("reject principal/id = %#v / %q", p, id)
 			}
@@ -319,11 +319,11 @@ func TestFactCandidateDetailAndDecisionRequireAgent(t *testing.T) {
 			called = true
 			return FactCandidate{}, nil
 		},
-		ConfirmFactCandidate: func(context.Context, DomainPrincipal, string) (Fact, error) {
+		ConfirmFactCandidate: func(context.Context, DomainPrincipal, string, string) (Fact, error) {
 			called = true
 			return Fact{}, nil
 		},
-		RejectFactCandidate: func(context.Context, DomainPrincipal, string) (FactCandidate, error) {
+		RejectFactCandidate: func(context.Context, DomainPrincipal, string, string) (FactCandidate, error) {
 			called = true
 			return FactCandidate{}, nil
 		},
@@ -391,7 +391,77 @@ func TestUpcomingFactsIncludeSensitiveQuery(t *testing.T) {
 	}
 }
 
+func TestFactMutationIdempotencyHeaders(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	seen := map[string]string{}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		SetFact: func(_ context.Context, _ DomainPrincipal, in SetFactRequest) (Fact, error) {
+			seen["set"] = in.IdempotencyKey
+			if in.IdempotencyKey == "conflict" {
+				return Fact{}, ErrIdempotencyConflict
+			}
+			return Fact{ID: "fact_1", Subject: "self", Predicate: in.Predicate, Value: in.Value}, nil
+		},
+		ProposeFact: func(_ context.Context, _ DomainPrincipal, in ProposeFactRequest) (FactCandidate, error) {
+			seen["propose"] = in.IdempotencyKey
+			return FactCandidate{ID: "fcand_1", Subject: "self", Predicate: in.Predicate, Value: in.Value, Status: "pending"}, nil
+		},
+		ConfirmFactCandidate: func(_ context.Context, _ DomainPrincipal, _ string, key string) (Fact, error) {
+			seen["confirm"] = key
+			return Fact{ID: "fact_1"}, nil
+		},
+		RejectFactCandidate: func(_ context.Context, _ DomainPrincipal, _ string, key string) (FactCandidate, error) {
+			seen["reject"] = key
+			return FactCandidate{ID: "fcand_2", Status: "rejected"}, nil
+		},
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name string
+		path string
+		body string
+		key  string
+		want int
+	}{
+		{name: "set", path: "/v1/facts", body: `{"predicate":"preferences/editor","value":"zed"}`, key: "set-1", want: http.StatusCreated},
+		{name: "propose", path: "/v1/fact-candidates", body: `{"predicate":"preferences/editor","value":"zed"}`, key: "proposal-1", want: http.StatusCreated},
+		{name: "confirm", path: "/v1/fact-candidates/fcand_1:confirm", key: "confirm-1", want: http.StatusOK},
+		{name: "reject", path: "/v1/fact-candidates/fcand_2:reject", key: "reject-1", want: http.StatusOK},
+	}
+	for _, tt := range tests {
+		resp := factRequestWithIdempotency(t, srv.URL, http.MethodPost, tt.path, tt.body, tt.key)
+		_ = resp.Body.Close()
+		if resp.StatusCode != tt.want {
+			t.Fatalf("%s status = %d", tt.name, resp.StatusCode)
+		}
+	}
+	if seen["set"] != "set-1" || seen["propose"] != "proposal-1" || seen["confirm"] != "confirm-1" || seen["reject"] != "reject-1" {
+		t.Fatalf("idempotency headers = %#v", seen)
+	}
+
+	resp := factRequestWithIdempotency(t, srv.URL, http.MethodPost, "/v1/facts", `{"predicate":"preferences/editor","value":"zed"}`, "conflict")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflict status = %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "idempotency key was reused for a different fact mutation" {
+		t.Fatalf("conflict body = %#v", body)
+	}
+}
+
 func factRequest(t *testing.T, base, method, path, body string) *http.Response {
+	return factRequestWithIdempotency(t, base, method, path, body, "")
+}
+
+func factRequestWithIdempotency(t *testing.T, base, method, path, body, key string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(method, base+path, strings.NewReader(body))
 	if err != nil {
@@ -400,6 +470,9 @@ func factRequest(t *testing.T, base, method, path, body string) *http.Response {
 	req.Header.Set("Authorization", "Bearer agent-token")
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

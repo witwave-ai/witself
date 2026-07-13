@@ -51,7 +51,9 @@ type Config struct {
 	CaptureMode    string    `json:"capture_mode"`
 	HookMode       string    `json:"hook_mode"`
 	Account        string    `json:"account"`
+	AccountID      string    `json:"account_id,omitempty"`
 	Realm          string    `json:"realm"`
+	RealmID        string    `json:"realm_id,omitempty"`
 	Agent          string    `json:"agent"`
 	AgentID        string    `json:"agent_id"`
 	AgentName      string    `json:"agent_name"`
