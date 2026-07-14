@@ -15,7 +15,7 @@ apps:
     namespace: witself
     chartVersion: 0.0.161
     imageTag: 0.0.161
-    factDeletionEnabled: false
+    factDeletionEnabled: true
     backendKind: managed
     awsAlbIngress:
       enabled: false
