@@ -16,6 +16,10 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
+    # Keep permanent deletion disabled through the schema-27 compatibility
+    # rollout and the schema-28 activation rollout. Enable it only after every
+    # writer has converged on schema-28-compatible code.
+    factDeletionEnabled: false
     awsAlbIngress:
       enabled: false
       className: alb

@@ -75,6 +75,7 @@ Expected server environment variables may include:
 | `WITSELF_DATABASE_URL` | Postgres connection string, supplied by the runtime or secret manager. The target database must have the pgvector extension available. |
 | `WITSELF_BOOTSTRAP_TOKEN_FILE` | File containing a first-operator bootstrap token. Default deployment path: `/.witself/tokens/bootstrap.token`; cell deployments mount a cell-scoped path under `/.witself/tokens/<cell>/`. |
 | `WITSELF_BOOTSTRAP_TOKEN_TTL` | Lifetime applied when the server adopts the bootstrap token. Current deployment default: `24h`. |
+| `WITSELF_FACT_DELETION_ENABLED` | Enable permanent fact deletion routes and explicit recreation of a deleted fact. Default: `false`. Invalid booleans fail startup, and enabling requires compiled store schema 28 or newer. Existing deployments must first converge all writers on the schema-27 compatibility release, then converge schema 28 with this flag still false, and only then set it true; skipping the compatibility release is unsafe. Helm maps `features.factDeletion.enabled` to this variable. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_EMBEDDINGS_PROVIDER` | Embedding provider name: `voyage` (default), `openai`, or `local-dev`. |

@@ -51,6 +51,10 @@ var (
 	// ErrFactIdempotencyConflict reports reuse of a retry key for a different
 	// logical fact mutation. Values are compared through a one-way fingerprint.
 	ErrFactIdempotencyConflict = errors.New("fact idempotency key conflict")
+	// ErrFactDeleted reports an address whose prior fact was permanently
+	// deleted. Callers must opt into explicit recreation; ordinary writes and
+	// delayed retries never resurrect deleted content.
+	ErrFactDeleted = errors.New("fact was permanently deleted")
 
 	factSubjectPattern   = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,254}$`)
 	factPredicatePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]*(/[a-z0-9_.-]+){0,7}$`)
@@ -124,6 +128,9 @@ type SetFactInput struct {
 	// IdempotencyKey identifies one logical mutation across transport retries.
 	// It is stored beside the assertion, never in audit events or responses.
 	IdempotencyKey string
+	// RecreateDeleted explicitly authorizes creating a new stable fact id at an
+	// address whose latest fact is a deleted, unrecreated tombstone.
+	RecreateDeleted bool
 }
 
 // FactRetrievalMode identifies the delivery path recorded in immutable fact
@@ -157,12 +164,15 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
 		return Fact{}, err
 	}
-	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
+	if err := lockFactSubjectNamespace(ctx, tx, p, in.RecreateDeleted); err != nil {
 		return Fact{}, err
 	}
 	in.IdempotencyKey, err = normalizeFactIdempotencyKey(in.IdempotencyKey)
 	if err != nil {
 		return Fact{}, err
+	}
+	if in.RecreateDeleted && in.IdempotencyKey == "" {
+		return Fact{}, fmt.Errorf("%w: recreation requires a fresh idempotency key", ErrFactInputInvalid)
 	}
 	if err := lockFactIdempotencyKey(ctx, tx, p, "set", in.IdempotencyKey); err != nil {
 		return Fact{}, err
@@ -197,25 +207,9 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err != nil {
 		return Fact{}, err
 	}
-	factID, err := id.New("fact")
+	factID, resolvedID, err := prepareFactForSet(ctx, tx, p, subjectID, in)
 	if err != nil {
 		return Fact{}, err
-	}
-	var resolvedID string
-	err = tx.QueryRow(ctx, `
-		INSERT INTO facts
-		  (id, account_id, realm_id, owner_agent_id, subject_id, predicate,
-		   cardinality, sensitive, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())
-		ON CONFLICT (owner_agent_id, subject_id, predicate)
-		DO UPDATE SET cardinality = EXCLUDED.cardinality,
-		              sensitive = facts.sensitive OR EXCLUDED.sensitive,
-		              updated_at = clock_timestamp()
-		RETURNING id, COALESCE(resolved_assertion_id, '')`,
-		factID, p.AccountID, p.RealmID, p.ID, subjectID, in.Predicate,
-		in.Cardinality, in.Sensitive).Scan(&factID, &resolvedID)
-	if err != nil {
-		return Fact{}, fmt.Errorf("upsert fact: %w", err)
 	}
 
 	assertionID, err := id.New("fas")
@@ -253,6 +247,95 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 		return Fact{}, err
 	}
 	return out, nil
+}
+
+// prepareFactForSet resolves an active address or performs an explicitly
+// authorized recreation. The partial active-address index is the database
+// backstop; the namespace lock makes the tombstone check and replacement mark
+// one serial operation.
+func prepareFactForSet(ctx context.Context, tx pgx.Tx, p Principal, subjectID string, in SetFactInput) (string, string, error) {
+	var tombstoneID string
+	var tombstoneSensitive bool
+	err := tx.QueryRow(ctx, `
+		SELECT id, sensitive FROM facts
+		WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		  AND subject_id=$4 AND predicate=$5 AND deleted_at IS NOT NULL
+		  AND replacement_fact_id IS NULL
+		ORDER BY deleted_at DESC, id DESC LIMIT 1
+		FOR UPDATE`, p.AccountID, p.RealmID, p.ID, subjectID, in.Predicate).
+		Scan(&tombstoneID, &tombstoneSensitive)
+	hasTombstone := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", err
+	}
+	if hasTombstone && !in.RecreateDeleted {
+		return "", "", ErrFactDeleted
+	}
+	if in.RecreateDeleted && !hasTombstone {
+		return "", "", fmt.Errorf("%w: no deleted fact exists at this address", ErrFactInputInvalid)
+	}
+
+	factID, err := id.New("fact")
+	if err != nil {
+		return "", "", err
+	}
+	var resolvedID string
+	if in.RecreateDeleted {
+		replacementSensitive := tombstoneSensitive || in.Sensitive
+		err = tx.QueryRow(ctx, `
+			INSERT INTO facts
+			  (id, account_id, realm_id, owner_agent_id, subject_id, predicate,
+			   cardinality, sensitive, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),clock_timestamp())
+			RETURNING id, COALESCE(resolved_assertion_id,'')`, factID, p.AccountID,
+			p.RealmID, p.ID, subjectID, in.Predicate, in.Cardinality, replacementSensitive).
+			Scan(&factID, &resolvedID)
+		if err != nil {
+			return "", "", fmt.Errorf("recreate fact: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE facts SET recreated_at=clock_timestamp(), replacement_fact_id=$1,
+			                 updated_at=clock_timestamp()
+			WHERE id=$2 AND deleted_at IS NOT NULL AND replacement_fact_id IS NULL`,
+			factID, tombstoneID)
+		if err != nil {
+			return "", "", fmt.Errorf("mark fact tombstone recreated: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return "", "", ErrFactConflict
+		}
+		return factID, resolvedID, nil
+	}
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO facts
+		  (id, account_id, realm_id, owner_agent_id, subject_id, predicate,
+		   cardinality, sensitive, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),clock_timestamp())
+		ON CONFLICT (owner_agent_id, subject_id, predicate) WHERE deleted_at IS NULL
+		DO UPDATE SET cardinality=EXCLUDED.cardinality,
+		              sensitive=facts.sensitive OR EXCLUDED.sensitive,
+		              updated_at=clock_timestamp()
+		RETURNING id, COALESCE(resolved_assertion_id,'')`, factID, p.AccountID,
+		p.RealmID, p.ID, subjectID, in.Predicate, in.Cardinality, in.Sensitive).
+		Scan(&factID, &resolvedID)
+	if err != nil {
+		return "", "", fmt.Errorf("upsert fact: %w", err)
+	}
+	return factID, resolvedID, nil
+}
+
+func factAddressHasUnrecreatedTombstone(ctx context.Context, q factQuerier, p Principal, subject, predicate string) (bool, error) {
+	var deleted bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM facts f
+		  JOIN fact_subjects s ON s.id=f.subject_id
+		  WHERE f.account_id=$1 AND f.realm_id=$2 AND f.owner_agent_id=$3
+		    AND s.canonical_key=$4 AND f.predicate=$5
+		    AND f.deleted_at IS NOT NULL AND f.replacement_fact_id IS NULL
+		)`, p.AccountID, p.RealmID, p.ID, subject, predicate).Scan(&deleted)
+	return deleted, err
 }
 
 // GetFact resolves an exact subject/predicate pair and records delivery usage.
@@ -332,7 +415,7 @@ const factSelect = `
 	       a.valid_until, f.created_at, f.updated_at
 	FROM facts f
 	JOIN fact_subjects s ON s.id = f.subject_id
-	JOIN fact_assertions a ON a.id = f.resolved_assertion_id`
+	JOIN fact_assertions a ON a.id = f.resolved_assertion_id AND f.deleted_at IS NULL`
 
 type factQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -376,7 +459,7 @@ func getFactAtAssertionTx(ctx context.Context, q factQuerier, p Principal, factI
 		JOIN fact_subjects s ON s.id = f.subject_id
 		JOIN fact_assertions a ON a.fact_id = f.id
 		WHERE f.account_id=$1 AND f.realm_id=$2 AND f.owner_agent_id=$3
-		  AND f.id=$4 AND a.id=$5`
+		  AND f.id=$4 AND a.id=$5 AND f.deleted_at IS NULL`
 	out, err := scanFact(q.QueryRow(ctx, query, p.AccountID, p.RealmID, p.ID, factID, assertionID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Fact{}, ErrFactNotFound

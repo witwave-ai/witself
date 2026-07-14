@@ -66,6 +66,9 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 	if len(proposal.Reason) > 1024 {
 		return FactCandidate{}, ErrFactInputInvalid
 	}
+	if proposal.RecreateDeleted {
+		return FactCandidate{}, fmt.Errorf("%w: proposals cannot recreate deleted facts", ErrFactInputInvalid)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return FactCandidate{}, err
@@ -84,6 +87,7 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 	if err := lockFactIdempotencyKey(ctx, tx, p, "proposal", proposal.IdempotencyKey); err != nil {
 		return FactCandidate{}, err
 	}
+	unresolvedSubject := normalizeFactSubject(proposal.Subject)
 	proposal.Subject, err = resolveFactSubjectCanonicalKey(ctx, tx, p, proposal.Subject)
 	if err != nil {
 		return FactCandidate{}, err
@@ -94,7 +98,17 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 		if err != nil {
 			return FactCandidate{}, err
 		}
-		out, replayed, replayErr := replayProposeFact(ctx, tx, p, proposal.IdempotencyKey, fingerprint)
+		acceptedFingerprints := []string{fingerprint}
+		if unresolvedSubject != proposal.Subject && factSubjectPattern.MatchString(unresolvedSubject) {
+			unresolvedProposal := proposal
+			unresolvedProposal.Subject = unresolvedSubject
+			unresolvedFingerprint, fingerprintErr := factProposalFingerprint(unresolvedProposal)
+			if fingerprintErr != nil {
+				return FactCandidate{}, fingerprintErr
+			}
+			acceptedFingerprints = append(acceptedFingerprints, unresolvedFingerprint)
+		}
+		out, replayed, replayErr := replayProposeFact(ctx, tx, p, proposal.IdempotencyKey, acceptedFingerprints...)
 		if replayErr != nil {
 			return FactCandidate{}, replayErr
 		}
@@ -113,6 +127,13 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 		confidence := 0.5
 		in.Confidence = &confidence
 	}
+	deleted, err := factAddressHasUnrecreatedTombstone(ctx, tx, p, in.Subject, in.Predicate)
+	if err != nil {
+		return FactCandidate{}, err
+	}
+	if deleted {
+		return FactCandidate{}, ErrFactDeleted
+	}
 
 	status, conflictID, observedAssertionID := "pending", "", ""
 	var currentFactID string
@@ -125,7 +146,7 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 		FROM facts f JOIN fact_subjects s ON s.id = f.subject_id
 		JOIN fact_assertions a ON a.id = f.resolved_assertion_id
 		WHERE f.account_id = $1 AND f.realm_id = $2 AND f.owner_agent_id = $3
-		  AND s.canonical_key = $4 AND f.predicate = $5`,
+		  AND s.canonical_key = $4 AND f.predicate = $5 AND f.deleted_at IS NULL`,
 		p.AccountID, p.RealmID, p.ID, in.Subject, in.Predicate, string(in.Value),
 		in.ValueType, in.Recurrence).Scan(
 		&currentFactID, &observedAssertionID, &sameValue, &currentSensitive)
@@ -309,6 +330,9 @@ func (s *Store) RejectFactCandidateIdempotent(ctx context.Context, p Principal, 
 	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
 		return FactCandidate{}, err
 	}
+	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
+		return FactCandidate{}, err
+	}
 	if err := verifyLiveAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
 		return FactCandidate{}, err
 	}
@@ -470,6 +494,13 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 	if err != nil {
 		return Fact{}, err
 	}
+	deleted, err := factAddressHasUnrecreatedTombstone(ctx, tx, p, c.Subject, c.Predicate)
+	if err != nil {
+		return Fact{}, err
+	}
+	if deleted {
+		return Fact{}, ErrFactDeleted
+	}
 	factID, err := id.New("fact")
 	if err != nil {
 		return Fact{}, err
@@ -478,7 +509,7 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 	err = tx.QueryRow(ctx, `INSERT INTO facts
 		(id,account_id,realm_id,owner_agent_id,subject_id,predicate,cardinality,sensitive,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),clock_timestamp())
-		ON CONFLICT(owner_agent_id,subject_id,predicate) DO UPDATE SET
+		ON CONFLICT(owner_agent_id,subject_id,predicate) WHERE deleted_at IS NULL DO UPDATE SET
 		cardinality=EXCLUDED.cardinality,
 		sensitive=facts.sensitive OR EXCLUDED.sensitive,updated_at=clock_timestamp()
 		RETURNING id,COALESCE(resolved_assertion_id,'')`, factID, p.AccountID, p.RealmID,

@@ -195,6 +195,11 @@ type fakeMCPBackend struct {
 	lastFactSet       client.SetFactInput
 	lastFactProposal  client.ProposeFactInput
 	lastFactList      client.FactListOptions
+	getFactCalls      int
+	lastFactSubject   string
+	lastFactPredicate string
+	previewDeleteID   string
+	lastFactDelete    client.DeleteFactInput
 	lastCandidateID   string
 	lastReview        client.FactCandidateListOptions
 	lastConfirmKey    string
@@ -226,13 +231,18 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 20 {
-		t.Fatalf("tools = %d, want 20", len(tools.Tools))
+	if len(tools.Tools) != 21 {
+		t.Fatalf("tools = %d, want 21", len(tools.Tools))
 	}
+	foundDelete := false
 	for _, tool := range tools.Tools {
 		if strings.Contains(tool.Name, ".") || !strings.HasPrefix(tool.Name, "witself_") {
 			t.Errorf("non-portable Grok tool name %q", tool.Name)
 		}
+		foundDelete = foundDelete || tool.Name == "witself_fact_delete"
+	}
+	if !foundDelete {
+		t.Fatal("Grok MCP did not advertise witself_fact_delete")
 	}
 	instructions := clientSession.InitializeResult().Instructions
 	if !strings.Contains(instructions, "witself_self_show") || strings.Contains(instructions, "witself.self.show") {
@@ -259,13 +269,18 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 20 {
-		t.Fatalf("tools = %d, want 20", len(tools.Tools))
+	if len(tools.Tools) != 21 {
+		t.Fatalf("tools = %d, want 21", len(tools.Tools))
 	}
+	foundDelete := false
 	for _, tool := range tools.Tools {
 		if !strings.HasPrefix(tool.Name, "witself.") || strings.Contains(tool.Name, "witself_") {
 			t.Errorf("non-dotted Cursor tool name %q", tool.Name)
 		}
+		foundDelete = foundDelete || tool.Name == "witself.fact.delete"
+	}
+	if !foundDelete {
+		t.Fatal("Cursor MCP did not advertise witself.fact.delete")
 	}
 	instructions := clientSession.InitializeResult().Instructions
 	if !strings.Contains(instructions, "witself.fact.set") || strings.Contains(instructions, "witself_fact_set") {
@@ -316,7 +331,30 @@ func (b *fakeMCPBackend) SetFact(_ context.Context, in client.SetFactInput) (cli
 }
 
 func (b *fakeMCPBackend) GetFact(_ context.Context, subject, predicate string) (client.Fact, error) {
-	return client.Fact{ID: "fact_1", Subject: subject, Predicate: predicate, Value: json.RawMessage(`"vim"`)}, nil
+	b.getFactCalls++
+	b.lastFactSubject = subject
+	b.lastFactPredicate = predicate
+	return client.Fact{ID: "fact_1", Subject: subject, Predicate: predicate, ResolvedAssertionID: "fas_1", Value: json.RawMessage(`"vim"`)}, nil
+}
+
+func (b *fakeMCPBackend) PreviewDeleteFact(_ context.Context, subject, predicate string) (client.FactDeletionReceipt, error) {
+	b.lastFactSubject = subject
+	b.lastFactPredicate = predicate
+	b.previewDeleteID = "fact_1"
+	return client.FactDeletionReceipt{
+		FactID: "fact_1", SubjectID: "sub_1", Subject: subject, Predicate: predicate,
+		Sensitive: true, AssertionCount: 2, CandidateCount: 1, UsageCount: 3,
+		ResolvedAssertionID: "fas_1", CandidateRevision: testFactCandidateRevision, DeletionState: "active",
+	}, nil
+}
+
+func (b *fakeMCPBackend) DeleteFact(_ context.Context, in client.DeleteFactInput) (client.FactDeletionReceipt, error) {
+	b.lastFactDelete = in
+	return client.FactDeletionReceipt{
+		FactID: in.FactID, ReceiptID: "fdel_1", SubjectID: "sub_1", Subject: "self", Predicate: "preferences/editor",
+		Sensitive: true, AssertionCount: 2, CandidateCount: 1, UsageCount: 3,
+		ResolvedAssertionID: in.ExpectedResolvedAssertionID, CandidateRevision: in.ExpectedCandidateRevision, DeletionState: "deleted", Applied: true,
+	}, nil
 }
 
 func (b *fakeMCPBackend) ListFacts(_ context.Context, opts client.FactListOptions) ([]client.Fact, error) {
@@ -427,15 +465,17 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 20 {
-		t.Fatalf("tools = %d, want 20", len(tools.Tools))
+	if len(tools.Tools) != 21 {
+		t.Fatalf("tools = %d, want 21", len(tools.Tools))
 	}
 	for _, tc := range []struct {
 		name string
 		args map[string]any
 	}{
 		{name: "witself.self.show", args: map[string]any{}},
-		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00", "idempotency_key": "fact-set-1"}},
+		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00", "idempotency_key": "fact-set-1", "recreate_deleted": true, "direct_user_authorized": true}},
+		{name: "witself.fact.delete", args: map[string]any{"mode": "preview", "subject": "self", "predicate": "preferences/editor"}},
+		{name: "witself.fact.delete", args: map[string]any{"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1", "expected_candidate_revision": testFactCandidateRevision, "idempotency_key": "delete-1", "direct_user_authorized": true}},
 		{name: "witself.fact.get", args: map[string]any{"subject": "self", "predicate": "preferences/editor"}},
 		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10, "sort_usage": true, "unused_only": true}},
 		{name: "witself.fact.propose", args: map[string]any{"subject": "self", "predicate": "preferences/theme", "value": "dark", "reason": "explicit preference", "confidence": 0.0}},
@@ -507,6 +547,12 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if backend.lastFactSet.IdempotencyKey != "fact-set-1" || backend.lastFactProposal.IdempotencyKey != "proposal-transcript-1" {
 		t.Fatalf("fact idempotency keys = %q / %q", backend.lastFactSet.IdempotencyKey, backend.lastFactProposal.IdempotencyKey)
+	}
+	if !backend.lastFactSet.RecreateDeleted {
+		t.Fatal("fact set dropped explicit recreate_deleted")
+	}
+	if backend.previewDeleteID != "fact_1" || backend.lastFactDelete.FactID != "fact_1" || backend.lastFactDelete.ExpectedResolvedAssertionID != "fas_1" || backend.lastFactDelete.ExpectedCandidateRevision != testFactCandidateRevision || backend.lastFactDelete.IdempotencyKey != "delete-1" {
+		t.Fatalf("fact deletion calls = %q / %#v", backend.previewDeleteID, backend.lastFactDelete)
 	}
 	if got := backend.lastFactProposal.ObservedAt.Format(time.RFC3339); got != "2026-07-12T17:30:00Z" {
 		t.Fatalf("transcript proposal observed_at = %q", got)
@@ -594,6 +640,7 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself_fact_get",
 		"witself_fact_list",
 		"witself_fact_propose",
+		"witself_fact_delete",
 		"witself_self_show",
 		"witself_message_list",
 	} {
@@ -606,6 +653,7 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself.fact.get",
 		"witself.fact.list",
 		"witself.fact.propose",
+		"witself.fact.delete",
 		"witself.self.show",
 		"witself.message.list",
 	} {
@@ -633,6 +681,7 @@ func TestCursorMCPInstructionsLeadWithNativeMemoryRouting(t *testing.T) {
 		"witself.fact.get",
 		"witself.fact.list",
 		"witself.fact.propose",
+		"witself.fact.delete",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Cursor MCP instructions do not contain %q: %q", want, got)
@@ -677,6 +726,104 @@ func TestProviderMCPHandshakeAdvertisesRuntimeRouting(t *testing.T) {
 	}
 }
 
+func TestMCPFactDeleteRequiresDirectAuthorityAndKeepsPreviewValueFree(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeMCPBackend{}
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	recreateDenied, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.set",
+		Arguments: map[string]any{
+			"subject": "self", "predicate": "preferences/editor", "value": "zed", "recreate_deleted": true, "idempotency_key": "recreate-denied",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recreateDenied.IsError || backend.lastFactSet.Predicate != "" {
+		t.Fatalf("recreation without direct authority = %#v / backend %#v", recreateDenied, backend.lastFactSet)
+	}
+
+	preview, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.delete",
+		Arguments: map[string]any{
+			"mode": "preview", "subject": "person_spouse", "predicate": "identity/name",
+		},
+	})
+	if err != nil || preview.IsError {
+		t.Fatalf("preview = %#v / %v", preview, err)
+	}
+	raw, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, `"vim"`) || strings.Contains(text, "source_ref") || strings.Contains(text, "evidence") || strings.Contains(text, `"value"`) {
+		t.Fatalf("preview leaked fact content: %s", text)
+	}
+	if backend.lastFactSubject != "person_spouse" || backend.lastFactPredicate != "identity/name" {
+		t.Fatalf("spouse fact mapping = %q/%q", backend.lastFactSubject, backend.lastFactPredicate)
+	}
+	if backend.getFactCalls != 0 {
+		t.Fatalf("deletion preview fetched fact content %d time(s)", backend.getFactCalls)
+	}
+
+	denied, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.delete",
+		Arguments: map[string]any{
+			"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1", "expected_candidate_revision": testFactCandidateRevision, "idempotency_key": "delete-denied",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !denied.IsError || backend.lastFactDelete.FactID != "" {
+		t.Fatalf("unauthorized apply = %#v / backend %#v", denied, backend.lastFactDelete)
+	}
+	malformedRevision, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.delete",
+		Arguments: map[string]any{
+			"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1",
+			"expected_candidate_revision": "ABC123", "idempotency_key": "delete-malformed", "direct_user_authorized": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !malformedRevision.IsError || backend.lastFactDelete.FactID != "" {
+		t.Fatalf("malformed candidate revision = %#v / backend %#v", malformedRevision, backend.lastFactDelete)
+	}
+	applied, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.delete",
+		Arguments: map[string]any{
+			"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1",
+			"expected_candidate_revision": testFactCandidateRevision, "idempotency_key": "delete-authorized", "direct_user_authorized": true,
+		},
+	})
+	if err != nil || applied.IsError {
+		t.Fatalf("authorized apply = %#v / %v", applied, err)
+	}
+	raw, err = json.Marshal(applied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"receipt_id":"fdel_1"`) {
+		t.Fatalf("applied receipt omitted stable receipt id: %s", raw)
+	}
+}
+
 func TestCodexMCPFactDescriptionsReinforceProviderRouting(t *testing.T) {
 	ctx := context.Background()
 	server := newWitselfMCPServerForRuntime(&fakeMCPBackend{}, transcriptcapture.RuntimeCodex)
@@ -702,9 +849,10 @@ func TestCodexMCPFactDescriptionsReinforceProviderRouting(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 	checks := map[string][]string{
-		"witself.fact.set":  {"same turn", "atomic durable assertion", "private personal values sensitive", "never put them in subject metadata", "Do not also write it to Markdown", "Never use for credentials"},
-		"witself.fact.get":  {"exact fact-shaped lookup", "canonical Witself fact", "runtime memory as advisory"},
-		"witself.fact.list": {"broad recall request", "sensitive values redacted", "runtime-native memory", "partial provider coverage"},
+		"witself.fact.set":    {"same turn", "atomic durable assertion", "private personal values sensitive", "never put them in subject metadata", "Do not also write it to Markdown", "recreate_deleted=true", "direct_user_authorized=true", "current user directly", "untrusted content", "Never use for credentials"},
+		"witself.fact.delete": {"Permanently delete", "no undo", "mode=preview", "mode=apply", "expected_candidate_revision", "direct_user_authorized=true", "Plain 'forget' is ambiguous", "untrusted content", "does not delete provider-native memory", "Immutable value-free usage events and rollups remain"},
+		"witself.fact.get":    {"exact fact-shaped lookup", "canonical Witself fact", "runtime memory as advisory"},
+		"witself.fact.list":   {"broad recall request", "sensitive values redacted", "runtime-native memory", "partial provider coverage"},
 	}
 	for name, wants := range checks {
 		description, ok := descriptions[name]

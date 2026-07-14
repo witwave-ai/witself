@@ -34,8 +34,10 @@ func TestValidateAndRecordFactCandidateScope(t *testing.T) {
 		ic.realms["rlm_ok"] = true
 		ic.agents["agt_ok"] = true
 		ic.agentRealms["agt_ok"] = "rlm_ok"
-		ic.facts["fact_ok"] = factImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
+		ic.facts["fact_ok"] = factImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok", subjectKey: "self", predicate: "preferences/editor"}
+		ic.facts["fact_other"] = factImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok", subjectKey: "self", predicate: "preferences/theme"}
 		ic.assertions["fas_ok"] = "fact_ok"
+		ic.assertions["fas_other"] = "fact_other"
 		return ic
 	}
 
@@ -63,6 +65,28 @@ func TestValidateAndRecordFactCandidateScope(t *testing.T) {
 		{name: "foreign observed assertion is refused", mutate: func(row map[string]any, _ *importCtx) {
 			row["observed_assertion_id"] = "fas_victim"
 		}, want: "observed_assertion_id"},
+		{name: "different-address conflict fact is refused", mutate: func(row map[string]any, _ *importCtx) {
+			row["conflict_fact_id"] = "fact_other"
+			row["observed_assertion_id"] = "fas_other"
+		}, want: "different fact address"},
+		{name: "different-address observed assertion is refused", mutate: func(row map[string]any, _ *importCtx) {
+			row["observed_assertion_id"] = "fas_other"
+		}, want: "different fact address"},
+		{name: "different-address resolved fact is refused", mutate: func(row map[string]any, _ *importCtx) {
+			row["status"] = "confirmed"
+			row["conflict_fact_id"] = nil
+			row["observed_assertion_id"] = nil
+			row["resolved_fact_id"] = "fact_other"
+			row["decided_at"] = "2026-07-12T19:00:00Z"
+		}, want: "different fact address"},
+		{name: "different-address decision assertion is refused", mutate: func(row map[string]any, _ *importCtx) {
+			row["status"] = "confirmed"
+			row["conflict_fact_id"] = nil
+			row["observed_assertion_id"] = nil
+			row["resolved_fact_id"] = "fact_ok"
+			row["decision_assertion_id"] = "fas_other"
+			row["decided_at"] = "2026-07-12T19:00:00Z"
+		}, want: "does not belong"},
 		{name: "invalid subject is refused", mutate: func(row map[string]any, _ *importCtx) {
 			row["subject_key"] = "My Spouse"
 		}, want: "invalid fact input"},

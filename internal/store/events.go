@@ -90,6 +90,11 @@ const (
 	VerbMessageRead      = "message.read"
 	VerbMessageAcked     = "message.acked"
 
+	// Permanent fact deletion is content-free in the account ledger. The
+	// receipt carries stable ids, address metadata, counts, and sensitivity but
+	// never an assertion/candidate value, source, reason, or retry key.
+	VerbFactDeleted = "fact.deleted"
+
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
 	// owner's audit ledger surfaces "you filed a ticket / support
@@ -315,6 +320,16 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
 			"recipient_agent_id", "kind", "thread_id", "subject_present",
+		},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbFactDeleted: {
+		requiredKeys: []string{
+			"fact_id", "subject_id", "subject", "predicate", "receipt_id",
+		},
+		allowedKeys: []string{
+			"fact_id", "subject_id", "subject", "predicate", "receipt_id",
+			"assertion_count", "candidate_count", "usage_count", "sensitive",
 		},
 		allowedActors: []string{ActorAgent},
 	},

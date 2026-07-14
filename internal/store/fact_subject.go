@@ -160,6 +160,18 @@ func (s *Store) AddFactSubjectAlias(ctx context.Context, p Principal, canonicalK
 			return target, nil
 		}
 	}
+	// A proposal may predate this alias (for example, propose "spouse" before
+	// attaching that conversational name to person_spouse). Canonicalize those
+	// candidate addresses in the same namespace-locked transaction so later
+	// review and permanent deletion cannot strand their content under the old
+	// alias string.
+	if _, err := tx.Exec(ctx, `
+		UPDATE fact_candidates SET subject_key=$1
+		WHERE account_id=$2 AND realm_id=$3 AND owner_agent_id=$4
+		  AND subject_key=$5`, target.CanonicalKey, p.AccountID, p.RealmID, p.ID,
+		alias); err != nil {
+		return FactSubject{}, fmt.Errorf("canonicalize fact candidate alias: %w", err)
+	}
 	target.Aliases = append(target.Aliases, alias)
 	sort.Strings(target.Aliases)
 	aliases, err := json.Marshal(target.Aliases)

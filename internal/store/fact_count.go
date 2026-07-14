@@ -29,6 +29,7 @@ func (s *Store) CountFacts(ctx context.Context, p Principal, opts FactListOption
 		"f.account_id = $1",
 		"f.realm_id = $2",
 		"f.owner_agent_id = $3",
+		"f.deleted_at IS NULL",
 		"f.resolved_assertion_id IS NOT NULL",
 	}
 	if opts.Subject != "" {

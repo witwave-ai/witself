@@ -102,8 +102,11 @@ Conventions that apply to every table unless stated otherwise:
   `updated_at` JSON fields.
 - **Optimistic concurrency.** Mutable resources carry `row_version bigint NOT NULL
   DEFAULT 1`, incremented on every update (see [Optimistic Concurrency](#optimistic-concurrency-and-history)).
-- **Soft delete.** Tombstoned via `deleted_at timestamptz NULL`; rows with non-null
-  `deleted_at` are excluded from ordinary reads (see [Soft Delete And Tombstones](#soft-delete-and-tombstones)).
+- **Deletion.** Most resources are soft-deleted through `deleted_at timestamptz
+  NULL`; rows with non-null `deleted_at` are excluded from ordinary reads (see
+  [Soft Delete And Tombstones](#soft-delete-and-tombstones)). Facts are the
+  exception: permanent fact deletion purges content and evidence while retaining
+  only a value-free integrity tombstone and immutable usage history.
 - **Open plane = ordinary columns; sealed plane = envelopes only.** Open-plane
   memory `content` and fact `value` are ordinary queryable columns (data at
   rest). Sealed-plane sensitive field values and TOTP seeds live ONLY in envelope
@@ -1437,16 +1440,19 @@ semantics (`revoked_at`), not `If-Match`/`row_version`. `memory_versions` /
 
 ## Soft Delete And Tombstones
 
-Resource tables use `deleted_at timestamptz NULL` for soft delete; ordinary reads
+Most resource tables use `deleted_at timestamptz NULL` for soft delete; ordinary reads
 filter `deleted_at IS NULL`, and the partial unique indexes above are scoped to
 live rows so a deleted name can be reused. `memories` additionally carries a
 `state` (`active`/`forgotten`/`deleted`) for the reversible `forget` lifecycle;
 `secrets` additionally has `archived_at` for archive/restore (distinct from
-delete). `memory_versions`/`fact_versions`, `messages`, and `audit_events` are
-append-only with no `deleted_at` (audit is removed only by the 365-day retention
-sweep). Token tombstones may retain metadata for audit, but raw token values are
-never retained. Permanent delete of an agent invalidates and may tombstone its
-tokens.
+delete). `memory_versions`, `messages`, and `audit_events` are append-only with
+no `deleted_at` (audit is removed only by the 365-day retention sweep).
+Permanent fact deletion is deliberately different: it removes the fact's
+assertions, history/evidence, and candidates, then keeps only a value-free
+tombstone plus immutable usage events and rollups. A later explicit recreation
+receives a new fact id and does not inherit the deleted fact's usage rank. Token
+tombstones may retain metadata for audit, but raw token values are never
+retained. Permanent delete of an agent invalidates and may tombstone its tokens.
 
 ## Account Deletion, PII, And Erasure
 

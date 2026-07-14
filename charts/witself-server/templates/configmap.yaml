@@ -12,3 +12,4 @@ data:
   WITSELF_HEALTH_ADDR: ":{{ .Values.health.port }}"
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
   WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
+  WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}

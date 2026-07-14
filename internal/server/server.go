@@ -285,6 +285,7 @@ type Config struct {
 	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
 	GetUsage                func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
 	SetFact                 func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
+	DeleteFact              func(ctx context.Context, p DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error)
 	GetFact                 func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
 	ListFacts               func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
 	GetFactHistory          func(ctx context.Context, p DomainPrincipal, factID string) ([]FactAssertion, error)
@@ -768,6 +769,11 @@ var ErrConflict = errors.New("conflict")
 // logical mutation. Handlers return a stable 409 without echoing request data.
 var ErrIdempotencyConflict = errors.New("idempotency conflict")
 
+// ErrFactDeleted signals a request against a fact tombstone (-> 410). Keeping
+// this distinct from not-found lets clients explain that recreation must be
+// explicitly authorized without exposing the former fact value.
+var ErrFactDeleted = errors.New("fact deleted")
+
 // ErrNotFound signals a missing resource (-> 404), e.g. a realm not in the account.
 var ErrNotFound = errors.New("not found")
 
@@ -1062,6 +1068,10 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal, cfg.GetSelfFacts, cfg.CountSelfFacts))
 		if cfg.SetFact != nil {
 			mux.HandleFunc("POST /v1/facts", setFactHandler(cfg.AuthenticatePrincipal, cfg.SetFact))
+		}
+		if cfg.DeleteFact != nil {
+			mux.HandleFunc("DELETE /v1/facts", deleteFactHandler(cfg.AuthenticatePrincipal, cfg.DeleteFact))
+			mux.HandleFunc("DELETE /v1/facts/{fact}", deleteFactHandler(cfg.AuthenticatePrincipal, cfg.DeleteFact))
 		}
 		if cfg.GetFact != nil && cfg.ListFacts != nil {
 			mux.HandleFunc("GET /v1/facts", factsReadHandler(cfg.AuthenticatePrincipal, cfg.GetFact, cfg.ListFacts))

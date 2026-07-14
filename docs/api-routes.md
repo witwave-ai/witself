@@ -342,6 +342,18 @@ The colon-action routes carry Witself's integrity-sensitive verbs. They are
   window.
 - `POST /v1/facts/{fact_id}:primary` is the atomic primary promotion. It demotes
   any prior primary of the same logical kind for the same owner.
+- `DELETE /v1/facts?dry_run=true&subject={subject}&predicate={predicate}`
+  resolves an exact canonical address and returns a value-free permanent-
+  deletion preview without recording retrieval usage. A fact-id preview is
+  also available at `DELETE /v1/facts/{fact_id}?dry_run=true`. Apply uses the
+  fact-id route without `dry_run`, requires
+  `Idempotency-Key`, `expected_resolved_assertion_id`, and the preview's
+  `expected_candidate_revision`, and returns HTTP 409 when either the resolved
+  assertion or address-matching candidate set changed after preview. It permanently removes
+  assertions and address-matching candidates, retains a value-free fact
+  tombstone plus immutable usage events, and returns HTTP 410 for a deleted
+  target that is not an idempotent replay. Ordinary fact reads exclude the
+  tombstone. A new fact at that address requires explicit recreation.
 - `POST /v1/policies:test` evaluates whether a given subject, permission,
   target, and scope would be allowed under current policy, returning the
   deciding policy id or a deny reason. It is the canonical dry-run for access

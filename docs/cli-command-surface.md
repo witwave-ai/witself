@@ -1747,6 +1747,7 @@ Flags:
 | `--not-sensitive` | Clear the `sensitive` marker. |
 | `--format HINT` | Type hint such as `string`, `email`, `url`, `date`, or `number`. |
 | `--source TEXT` | Provenance. |
+| `--recreate-deleted` | Explicitly create a new fact id at an address whose prior fact was permanently deleted. Never inferred. |
 | `--owner-agent NAME_OR_ID` | Set a fact for a specific agent. `contribute`/`curate` policy or operator. |
 | `--owner-group NAME_OR_ID` | Set a group-owned fact. |
 | `--dry-run` | Show the planned upsert and any primary demotion without writing. |
@@ -1797,19 +1798,46 @@ Flags:
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
-### `witself fact delete NAME`
+### `witself fact delete PREDICATE`
 
-Delete a fact (guarded, audited).
+Permanently delete the token-bound agent's fact at
+`(--subject, PREDICATE)`. Deletion removes the current value, every assertion
+in its history, evidence references, and all candidates at the same canonical
+address. It preserves the subject/aliases, immutable usage events, billing
+rollups, and a value-free tombstone/receipt. It never rolls resolution back to
+an older assertion and cannot be undone.
+
+```sh
+ws fact delete --subject person_spouse --dry-run identity/name
+ws fact delete --subject person_spouse --yes identity/name
+ws fact delete --yes --fact-id fact_01... --expected-assertion-id fas_01... \
+  --expected-candidate-revision 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --idempotency-key fact_delete_01...
+```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin, or a `curate`/`forget`-policy caller holding `memory:manage-others` + `fact:delete`: delete a fact owned by a specific agent. |
-| `--owner-group NAME_OR_ID` | Delete a group-owned fact. |
-| `--dry-run` | Show deletion impact, including loss of a `primary` anchor, without deleting the fact. |
-| `--yes` | Skip confirmation. |
-| `--reason TEXT` | Audit reason. Required for cross-agent or group-owned deletes. |
+| `--subject KEY_OR_ALIAS` | Stable subject or alias. Defaults to `self`. |
+| `--dry-run` | Show a value-free impact preview without deleting anything. |
+| `--yes` | Confirm permanent, non-restorable deletion. Required for apply. |
+| `--fact-id ID` | Exact-mode fact id returned by preview. Cannot be combined with a subject or positional predicate. |
+| `--expected-assertion-id ID` | Exact-mode resolved assertion guard returned by preview. |
+| `--expected-candidate-revision REVISION` | Exact-mode 64-character lowercase hexadecimal candidate-set guard returned by preview. |
+| `--idempotency-key KEY` | Stable retry key for this logical deletion. Generated when omitted. |
+
+Apply is concurrency-safe: the CLI previews first and supplies the previewed
+resolved assertion id and candidate-set revision. A fact or matching candidate
+changed between preview and apply returns a conflict and remains intact. If the
+address-mode apply returns an error or an inconsistent success receipt, the CLI
+prints a copy-pasteable exact-mode replay command containing the fact id, both
+guards, and the same generated or supplied idempotency key; the command never
+contains the fact value, source, evidence, subject, or predicate. Reusing old
+direct-write/proposal retry keys cannot resurrect deleted content. `fact set
+--recreate-deleted` is the explicit path to create a new fact id at that
+address; it requires a fresh mutation key and does not inherit the old usage
+rank.
 
 ## `witself password generate`
 
@@ -3271,8 +3299,9 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current server exposes the 20-tool self, deterministic fact read/write and
-candidate-review, transcript read, and direct-agent message surface documented
+The current server exposes the 21-tool self, deterministic fact read/write,
+permanent fact deletion, candidate-review, transcript read, and direct-agent
+message surface documented
 in [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
 target contract as additional domain capabilities are wired in.
 

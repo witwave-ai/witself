@@ -78,6 +78,17 @@ would shadow its managed file. After installing, restart the runtime and start a
 new task so the file guidance and MCP initialization are refreshed. See
 [Agent Memory Routing](docs/agent-memory-routing.md).
 
+Facts also support guarded permanent deletion. Preview with
+`witself fact delete --subject SUBJECT --dry-run PREDICATE`, then apply with
+`--yes`. Apply binds both the previewed assertion and candidate-set revision;
+on an ambiguous response the CLI prints an exact value-free replay command
+that preserves the generated retry key. Deletion removes values, assertion/evidence history, and matching
+candidates; it retains only a non-restorable value-free tombstone plus immutable
+usage history so retries, audit, billing, and exports remain consistent. The
+MCP tool `witself.fact.delete` uses the same preview/apply contract across
+Codex, Claude Code, Grok Build, and Cursor. Plain “forget” remains ambiguous
+with each runtime's native memory and is clarified before any destructive call.
+
 Administrator-managed hooks are the Codex and Claude Code default. Run the
 command as your normal user; Witself requests administrator access only for the
 system hook policy, while identity, tokens, and MCP registration stay in the

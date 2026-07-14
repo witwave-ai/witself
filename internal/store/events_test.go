@@ -57,6 +57,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 
 		VerbMessageSent, VerbMessageDelivered,
 		VerbMessageRead, VerbMessageAcked,
+		VerbFactDeleted,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,

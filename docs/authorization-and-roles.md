@@ -82,7 +82,7 @@ role namespace (below) so no one mistakes a role for a single scope.
 | `fact:create` | Create an own fact. |
 | `fact:read` | Read own facts (including `sensitive` facts; redaction is a display flag, not a reveal ceremony). |
 | `fact:update` | Update an own fact value/namespace. |
-| `fact:delete` | Soft-delete an own fact. |
+| `fact:delete` | Permanently delete an own fact's content; retain only a non-restorable value-free tombstone and immutable usage/audit metadata. |
 | `fact:primary` | Set/clear the `primary` flag on an own fact. |
 | `group:member` | Act as a group member for group-owned memories/facts. |
 | `group:read` | Read group membership/metadata. |

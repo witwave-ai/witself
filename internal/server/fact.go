@@ -55,21 +55,57 @@ type FactAssertion struct {
 
 // SetFactRequest is the POST /v1/facts request body.
 type SetFactRequest struct {
-	Subject        string          `json:"subject,omitempty"`
-	Predicate      string          `json:"predicate"`
-	ValueType      string          `json:"value_type,omitempty"`
-	Value          json.RawMessage `json:"value"`
-	Recurrence     string          `json:"recurrence,omitempty"`
-	Cardinality    string          `json:"cardinality,omitempty"`
-	Sensitive      bool            `json:"sensitive,omitempty"`
-	SourceKind     string          `json:"source_kind,omitempty"`
-	SourceRef      string          `json:"source_ref,omitempty"`
-	Confidence     *float64        `json:"confidence,omitempty"`
-	ObservedAt     time.Time       `json:"observed_at,omitempty"`
-	ConfirmedAt    *time.Time      `json:"confirmed_at,omitempty"`
-	ValidFrom      *time.Time      `json:"valid_from,omitempty"`
-	ValidUntil     *time.Time      `json:"valid_until,omitempty"`
-	IdempotencyKey string          `json:"-"`
+	Subject         string          `json:"subject,omitempty"`
+	Predicate       string          `json:"predicate"`
+	ValueType       string          `json:"value_type,omitempty"`
+	Value           json.RawMessage `json:"value"`
+	Recurrence      string          `json:"recurrence,omitempty"`
+	Cardinality     string          `json:"cardinality,omitempty"`
+	Sensitive       bool            `json:"sensitive,omitempty"`
+	SourceKind      string          `json:"source_kind,omitempty"`
+	SourceRef       string          `json:"source_ref,omitempty"`
+	Confidence      *float64        `json:"confidence,omitempty"`
+	ObservedAt      time.Time       `json:"observed_at,omitempty"`
+	ConfirmedAt     *time.Time      `json:"confirmed_at,omitempty"`
+	ValidFrom       *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil      *time.Time      `json:"valid_until,omitempty"`
+	RecreateDeleted bool            `json:"recreate_deleted,omitempty"`
+	IdempotencyKey  string          `json:"-"`
+}
+
+// DeleteFactRequest is the value-free input to the fact deletion hook. DELETE
+// requests carry the retry key in Idempotency-Key and optimistic concurrency
+// guards in expected_resolved_assertion_id and expected_candidate_revision;
+// they never carry the fact value.
+type DeleteFactRequest struct {
+	FactID                      string
+	Subject                     string
+	Predicate                   string
+	ExpectedResolvedAssertionID string
+	ExpectedCandidateRevision   string
+	IdempotencyKey              string
+	Apply                       bool
+}
+
+// FactDeletionReceipt is a sensitive-safe preview or deletion receipt. It is
+// intentionally metadata-only: values, sources, and assertion evidence must
+// never cross the deletion response boundary.
+type FactDeletionReceipt struct {
+	FactID              string     `json:"fact_id"`
+	ReceiptID           string     `json:"receipt_id,omitempty"`
+	SubjectID           string     `json:"subject_id"`
+	Subject             string     `json:"subject"`
+	Predicate           string     `json:"predicate"`
+	Sensitive           bool       `json:"sensitive"`
+	AssertionCount      int64      `json:"assertion_count"`
+	CandidateCount      int64      `json:"candidate_count"`
+	CandidateRevision   string     `json:"candidate_revision"`
+	UsageCount          int64      `json:"usage_count"`
+	ResolvedAssertionID string     `json:"resolved_assertion_id"`
+	DeletionState       string     `json:"deletion_state"`
+	DeletedAt           *time.Time `json:"deleted_at,omitempty"`
+	Applied             bool       `json:"applied"`
+	Replayed            bool       `json:"replayed,omitempty"`
 }
 
 // FactListOptions selects a bounded fact inventory.
@@ -172,6 +208,9 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 		case errors.Is(err, ErrIdempotencyConflict):
 			writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different fact mutation")
 			return
+		case errors.Is(err, ErrFactDeleted):
+			writeJSONError(w, http.StatusConflict, "fact was deleted; set recreate_deleted=true to create a new fact")
+			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not set fact")
 			return
@@ -256,6 +295,95 @@ func factHistoryHandler(auth PrincipalAuthFunc, history func(context.Context, Do
 	})
 }
 
+func deleteFactHandler(auth PrincipalAuthFunc, deleteFact func(context.Context, DomainPrincipal, DeleteFactRequest) (FactDeletionReceipt, error)) http.HandlerFunc {
+	protected := requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may delete facts")
+			return
+		}
+
+		factID := strings.TrimSpace(r.PathValue("fact"))
+		dryRun := false
+		if raw := r.URL.Query().Get("dry_run"); raw != "" {
+			var err error
+			dryRun, err = strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "dry_run must be true or false")
+				return
+			}
+		}
+
+		req := DeleteFactRequest{
+			FactID:                      factID,
+			Subject:                     strings.TrimSpace(r.URL.Query().Get("subject")),
+			Predicate:                   strings.TrimSpace(r.URL.Query().Get("predicate")),
+			ExpectedResolvedAssertionID: strings.TrimSpace(r.URL.Query().Get("expected_resolved_assertion_id")),
+			ExpectedCandidateRevision:   strings.TrimSpace(r.URL.Query().Get("expected_candidate_revision")),
+			IdempotencyKey:              strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+			Apply:                       !dryRun,
+		}
+		if factID == "" {
+			if req.Apply || req.Subject == "" || req.Predicate == "" || req.IdempotencyKey != "" || req.ExpectedResolvedAssertionID != "" || req.ExpectedCandidateRevision != "" {
+				writeJSONError(w, http.StatusBadRequest, "address preview requires dry_run=true, subject, and predicate only")
+				return
+			}
+		} else if req.Subject != "" || req.Predicate != "" {
+			writeJSONError(w, http.StatusBadRequest, "fact-id deletion does not accept subject or predicate")
+			return
+		}
+		if !req.Apply && (req.IdempotencyKey != "" || req.ExpectedResolvedAssertionID != "" || req.ExpectedCandidateRevision != "") {
+			writeJSONError(w, http.StatusBadRequest, "deletion preview accepts no idempotency or concurrency guard")
+			return
+		}
+		if req.Apply && req.IdempotencyKey == "" {
+			writeJSONError(w, http.StatusBadRequest, "Idempotency-Key is required when deleting a fact")
+			return
+		}
+		if req.Apply && req.ExpectedResolvedAssertionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "expected_resolved_assertion_id is required when deleting a fact")
+			return
+		}
+		if req.Apply && req.ExpectedCandidateRevision == "" {
+			writeJSONError(w, http.StatusBadRequest, "expected_candidate_revision is required when deleting a fact")
+			return
+		}
+
+		receipt, err := deleteFact(r.Context(), p, req)
+		if writeDeleteFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "deletion": receipt})
+	})
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		protected(w, r)
+	}
+}
+
+func writeDeleteFactError(w http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrBadInput):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrForbidden):
+		writeJSONError(w, http.StatusForbidden, "fact access forbidden")
+	case errors.Is(err, ErrNotFound):
+		writeJSONError(w, http.StatusNotFound, "fact not found")
+	case errors.Is(err, ErrFactDeleted):
+		writeJSONError(w, http.StatusGone, "fact already deleted")
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different fact deletion")
+	case errors.Is(err, ErrConflict):
+		writeJSONError(w, http.StatusConflict, "fact changed since deletion preview")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "could not delete fact")
+	}
+	return true
+}
+
 func writeFactError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
@@ -289,6 +417,10 @@ func proposeFactHandler(auth PrincipalAuthFunc, propose func(context.Context, Do
 		}
 		in.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		out, err := propose(r.Context(), p, in)
+		if errors.Is(err, ErrFactDeleted) {
+			writeJSONError(w, http.StatusConflict, "fact was deleted; use fact set with recreate_deleted=true to create a new fact")
+			return
+		}
 		if writeFactError(w, err) {
 			return
 		}
@@ -356,6 +488,10 @@ func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Con
 		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		if action == "confirm" {
 			out, err := confirm(r.Context(), p, candidateID, idempotencyKey)
+			if errors.Is(err, ErrFactDeleted) {
+				writeJSONError(w, http.StatusConflict, "fact was deleted; use fact set with recreate_deleted=true to create a new fact")
+				return
+			}
 			if writeFactError(w, err) {
 				return
 			}

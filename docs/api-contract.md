@@ -363,6 +363,20 @@ removal, and group deletion. The canonical dry run for a pure access decision is
 `POST /v1/policies:test`, which evaluates whether a subject/permission/target
 would be allowed without touching any record.
 
+The implemented address-based fact-delete dry run is `DELETE
+/v1/facts?dry_run=true&subject={subject}&predicate={predicate}`. It resolves the
+fact without fetching its value or recording retrieval usage; an id-based
+preview is also available at `DELETE /v1/facts/{fact_id}?dry_run=true`. The
+metadata-only response supplies the resolved assertion id and value-free
+candidate-set revision used as apply-time concurrency tokens. Apply requires
+both tokens plus `Idempotency-Key`; a changed assertion or candidate set
+returns 409. Successful
+apply permanently removes values, assertion/evidence history, and
+address-matching candidates while retaining a non-restorable value-free fact
+tombstone and immutable usage events. Responses use `Cache-Control: private,
+no-store` and never include values, evidence, candidate reasons, raw retry keys,
+or value-derived request fingerprints.
+
 ## Pagination And Filtering
 
 List endpoints should use cursor pagination:

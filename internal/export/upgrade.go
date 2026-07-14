@@ -25,6 +25,7 @@ type Upgrader func(table string, row map[string]any) (map[string]any, error)
 // version. Absent = no shape change at that migration = no-op.
 var upgraders = map[int]Upgrader{
 	25: addFactIdempotencyDefaults,
+	26: addFactDeletionDefaults,
 }
 
 // addFactIdempotencyDefaults lifts schema-25 archives into the constrained
@@ -41,6 +42,30 @@ func addFactIdempotencyDefaults(table string, row map[string]any) (map[string]an
 		row["decision_idempotency_key"] = ""
 		row["decision_assertion_id"] = nil
 	}
+	return row, nil
+}
+
+// addFactDeletionDefaults lifts active schema-26 facts into schema 27. Older
+// archives cannot contain deletion tombstones, so every imported fact receives
+// the value-free active defaults and continues to require its resolved
+// assertion. The new retry-tombstone table is absent, which is equivalent to
+// an empty table for a pre-deletion archive.
+func addFactDeletionDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table != "facts" {
+		return row, nil
+	}
+	row["deleted_at"] = nil
+	row["deleted_by_agent_id"] = nil
+	row["delete_receipt_id"] = ""
+	row["delete_idempotency_key_hash"] = ""
+	row["deleted_prior_assertion_id"] = ""
+	row["deleted_assertion_count"] = 0
+	row["deleted_candidate_count"] = 0
+	row["deleted_usage_count"] = 0
+	row["deleted_mutation_key_count"] = 0
+	row["deleted_candidate_revision"] = ""
+	row["recreated_at"] = nil
+	row["replacement_fact_id"] = nil
 	return row, nil
 }
 

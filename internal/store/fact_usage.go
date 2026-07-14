@@ -22,7 +22,7 @@ const factUsageSelect = `
 	       COALESCE(u.usage_count, 0)::bigint AS usage_count, u.last_used_at
 	FROM facts f
 	JOIN fact_subjects s ON s.id = f.subject_id
-	JOIN fact_assertions a ON a.id = f.resolved_assertion_id
+	JOIN fact_assertions a ON a.id = f.resolved_assertion_id AND f.deleted_at IS NULL
 	LEFT JOIN (
 		SELECT subject_id AS fact_id, SUM(quantity) AS usage_count,
 		       MAX(occurred_at) AS last_used_at

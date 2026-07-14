@@ -107,8 +107,29 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'owner_agent_id', owner_agent_id, 'subject_id', subject_id,
 			  'predicate', predicate, 'cardinality', cardinality,
 			  'sensitive', sensitive, 'resolved_assertion_id', resolved_assertion_id,
+			  'deleted_at', deleted_at,
+			  'deleted_by_agent_id', deleted_by_agent_id,
+			  'delete_receipt_id', delete_receipt_id,
+			  'delete_idempotency_key_hash', delete_idempotency_key_hash,
+			  'deleted_prior_assertion_id', deleted_prior_assertion_id,
+			  'deleted_assertion_count', deleted_assertion_count,
+			  'deleted_candidate_count', deleted_candidate_count,
+			  'deleted_usage_count', deleted_usage_count,
+			  'deleted_mutation_key_count', deleted_mutation_key_count,
+			  'deleted_candidate_revision', deleted_candidate_revision,
+			  'recreated_at', recreated_at,
+			  'replacement_fact_id', replacement_fact_id,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM facts WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		&querySource{s: s, table: "fact_mutation_tombstones", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'fact_id', fact_id,
+			  'surface', surface,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'deleted_at', deleted_at)
+			FROM fact_mutation_tombstones WHERE account_id = $1
+			ORDER BY fact_id, surface, id`, arg: accountID},
 		&querySource{s: s, table: "fact_assertions", q: `
 			WITH RECURSIVE assertion_order AS (
 			  SELECT a.*, 0 AS chain_depth

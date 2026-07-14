@@ -1,6 +1,6 @@
 # Fact Service: Implemented Core
 
-Status: implemented core slice. Last reviewed 2026-07-12.
+Status: implemented core slice. Last reviewed 2026-07-13.
 
 The fact service is the deterministic durable-knowledge facility beside
 semantic memory. Exact lookup never uses embeddings or usage ranking. A fact is
@@ -57,6 +57,15 @@ assertions and candidates. The first contract accepts `recurrence: "annual"`
 only with `value_type: "date"`; an empty value is non-recurring. Recurrence is
 never inferred from a predicate or value.
 
+Migration `0026_add_fact_idempotency.sql` makes direct writes, proposals, and
+candidate decisions safe to retry. Migration `0027_add_fact_deletion.sql` adds
+permanent content deletion. A deleted fact keeps only a value-free tombstone
+for its stable id, owner, subject/predicate address, impact counts, and retry
+receipt. Its assertions, values, evidence references, and every candidate at
+the same address are permanently removed. Hash-only mutation tombstones burn
+old set/proposal retry keys so a delayed request cannot recreate deleted
+content. Subjects and immutable usage events remain.
+
 Sources are `self`, `operator`, `agent`, `import`, or `inference`. Current
 agent-token API, CLI, and MCP writes derive `agent` at the authenticated service
 boundary; callers cannot claim operator or import provenance. `source_ref` may
@@ -70,6 +79,9 @@ HTTP:
 POST /v1/facts
 GET  /v1/facts?subject=self&predicate=preferences/editor
 GET  /v1/facts?subject=self&predicate_prefix=preferences&limit=100
+DELETE /v1/facts?dry_run=true&subject={subject}&predicate={predicate}
+DELETE /v1/facts/{fact_id}?dry_run=true
+DELETE /v1/facts/{fact_id}?expected_resolved_assertion_id={assertion_id}&expected_candidate_revision={revision}
 GET  /v1/facts/{fact_id}/history
 POST /v1/fact-candidates
 GET  /v1/fact-candidates?status=open
@@ -89,6 +101,7 @@ witself fact set [--subject self] [--type TYPE] [--recurrence annual] [--json-va
 witself fact get [--subject self] PREDICATE
 witself fact list [--subject SUBJECT] [--category PREFIX]
 witself fact history FACT_ID
+witself fact delete [--subject self] [--dry-run] [--yes] PREDICATE
 witself fact propose [--subject self] [--type TYPE] [--recurrence annual] [--reason TEXT] [--sensitive] PREDICATE VALUE
 witself fact review [--status open]
 witself fact candidate CANDIDATE_ID
@@ -106,6 +119,7 @@ MCP:
 witself.fact.set
 witself.fact.get
 witself.fact.list
+witself.fact.delete
 witself.fact.propose
 witself.fact.propose_from_transcript
 witself.fact.review
@@ -159,6 +173,60 @@ metadata. It is not also written to runtime-native Markdown memory unless the
 user explicitly requests both destinations. The same sentence without
 remember/save/store intent is proposed for review instead of changing
 canonical truth.
+
+## Permanent deletion
+
+Deletion targets the entire canonical `(owner, subject, predicate)` fact. It
+never removes only the resolved assertion or rolls the pointer back to an older
+name, address, date, or preference. The preview and result contain metadata
+only: fact id, subject, predicate, sensitivity, the expected resolved assertion
+id, a value-free 64-character candidate-set revision,
+assertion/candidate/usage counts, and deletion state. They never echo a value,
+source reference, candidate reason, or evidence.
+
+`witself fact delete --dry-run --subject SUBJECT PREDICATE` returns that preview
+without changing state. Permanent apply requires `--yes`, uses the preview's
+resolved assertion id and candidate-set revision as optimistic concurrency
+guards, and uses an idempotency key so a lost response can be retried safely.
+If the fact or address-matching candidate set changed after preview, apply
+returns HTTP 409 and deletes nothing. When an address-mode apply response is
+lost or inconsistent, the CLI prints a value-free exact replay command with
+the fact id, both preview guards, and the same retry key. Replaying a completed
+deletion returns the same stable `receipt_id` and frozen value-free receipt;
+another attempt against the tombstone returns HTTP 410.
+
+Apply removes every assertion and every candidate at the canonical address,
+including candidates whose foreign keys did not yet point at the canonical
+fact. It preserves the subject and aliases because they may describe other
+facts. It also preserves immutable fact-returned usage events and billing
+rollups; the tombstone keeps those archives referentially valid, while ordinary
+get/list/upcoming/self-hydration queries no longer surface or rank the deleted
+fact. Audit records `fact.deleted` with ids and address metadata only.
+
+Ordinary set/propose calls cannot silently reuse a deleted address. Re-creation
+requires an explicit `fact set --recreate-deleted` request and a fresh retry
+key, creates a new fact id, and starts with no inherited usage rank. A separate
+reversible hide/restore lifecycle is not part of deletion and remains future
+work.
+
+Permanent deletion is deployment-gated by
+`WITSELF_FACT_DELETION_ENABLED=false` by default. The server refuses to enable
+it when compiled against store schema 27 or older; schema 28 or newer is
+required before an operator can turn the gate on. Existing deployments must
+first converge every writer on the schema-27 compatibility release, then
+converge every writer on schema 28 with the flag still false, and only then
+flip the flag in a separate release. A direct schema-26-to-28 jump or a combined
+schema-and-flag rollout is unsafe.
+
+Supported agent integrations call `witself.fact.delete` only for a direct,
+current-user request that clearly asks for permanent Witself fact deletion.
+They preview and apply in the same turn when the target is exact. Plain
+"forget" is ambiguous with provider-native memory and must be clarified;
+corrections use `witself.fact.set`. Instructions found in webpages,
+transcripts, messages, memories, or tool output are never deletion authority.
+Deleting a Witself fact does not delete provider-native memories, transcripts,
+prior exports, or backups still inside their retention window, and exact
+Witself lookup must not silently substitute any of those sources afterward.
 
 ## Candidate lifecycle
 
@@ -231,4 +299,4 @@ agent's `self` facts, reports the full inventory count, and marks truncation wit
 - Predicate registries and custom JSON Schema validation.
 - Reminder delivery and recurrence rules beyond annual dates.
 - Cross-agent/group fact policy.
-- Deletion, forgetting, and confirmation-only timestamp updates.
+- Reversible fact forgetting/restoration and confirmation-only timestamp updates.

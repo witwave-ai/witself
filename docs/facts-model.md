@@ -6,7 +6,7 @@ Status: implementation in progress. Last reviewed 2026-07-12.
 > original owner/name-only draft with subject + namespaced predicate identity,
 > typed JSON values, immutable source assertions, temporal validity, and
 > resolved values. See [fact-service.md](fact-service.md). Sections below that
-> still describe `name`, `primary`, group ownership, delete, or consolidation
+> still describe `name`, `primary`, group ownership, or consolidation
 > are forward-looking until reconciled with the subject/assertion model.
 
 A fact is a `name`→`value` identity attribute: the canonical, queryable identity
@@ -134,10 +134,14 @@ fuzzy-matching step.
 - `fact list` enumerates the caller's facts with metadata and filters (by
   `name` prefix/namespace, `primary`, `sensitive`, `format`, `source`), with
   cursor pagination. `sensitive` values are redacted in list output by default.
-- `fact delete NAME` removes a fact. Delete is guarded: it requires confirmation
-  unless `--yes`, supports `--dry-run`, and is audited (`fact.deleted`). Deleting
-  a `primary` fact does not auto-promote another fact; promotion is always
-  explicit.
+- The implemented `fact delete --subject SUBJECT PREDICATE` permanently removes
+  the current value, all assertions/history/evidence, and every candidate at
+  that canonical address. It requires confirmation unless `--yes`, supports a
+  value-free `--dry-run`, uses expected-assertion and candidate-set-revision
+  concurrency guards, and is audited as `fact.deleted`. The subject, immutable usage history, and a
+  non-restorable value-free tombstone remain. Explicit recreation gets a new
+  fact id and never auto-promotes or resurrects an older assertion. See
+  [fact-service.md](fact-service.md#permanent-deletion).
 - `ingest` upserts `name`→`value` lines parsed from CLAUDE.md/AGENTS.md-style
   files as facts, tagging each with `source=import:<file>`. Upsert by `name`
   prevents re-import from creating duplicates. See

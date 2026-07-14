@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +23,11 @@ import (
 	"github.com/witwave-ai/witself/internal/version"
 )
 
-const defaultBootstrapTokenFile = "/.witself/tokens/bootstrap.token"
+const (
+	defaultBootstrapTokenFile        = "/.witself/tokens/bootstrap.token"
+	factDeletionEnv                  = "WITSELF_FACT_DELETION_ENABLED"
+	factDeletionMinimumSchemaVersion = 28
+)
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -50,6 +55,16 @@ func run(args []string) int {
 }
 
 func serve() int {
+	factDeletionEnabled, err := factDeletionEnabledFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
+	if err := validateFactDeletionFeature(factDeletionEnabled, store.SchemaVersion()); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -225,20 +240,7 @@ func serve() int {
 			}
 			return toServerUsageReport(report), nil
 		}
-		cfg.SetFact = func(ctx context.Context, p server.DomainPrincipal, in server.SetFactRequest) (server.Fact, error) {
-			fact, err := st.SetFact(ctx, toStorePrincipal(p), store.SetFactInput{
-				Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType,
-				Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive,
-				SourceKind: store.FactSourceAgent, SourceRef: in.SourceRef, Confidence: in.Confidence,
-				ObservedAt: in.ObservedAt, ConfirmedAt: in.ConfirmedAt,
-				ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil,
-				IdempotencyKey: in.IdempotencyKey,
-			})
-			if err != nil {
-				return server.Fact{}, mapFactError(err)
-			}
-			return toServerFact(fact), nil
-		}
+		configureFactMutations(&cfg, st, factDeletionEnabled)
 		cfg.GetFact = func(ctx context.Context, p server.DomainPrincipal, subject, predicate string) (server.Fact, error) {
 			fact, err := st.GetFact(ctx, toStorePrincipal(p), subject, predicate)
 			if err != nil {
@@ -278,7 +280,7 @@ func serve() int {
 			return out, nil
 		}
 		cfg.ProposeFact = func(ctx context.Context, p server.DomainPrincipal, in server.ProposeFactRequest) (server.FactCandidate, error) {
-			c, err := st.ProposeFact(ctx, toStorePrincipal(p), store.ProposeFactInput{SetFactInput: store.SetFactInput{Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType, Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive, SourceKind: store.FactSourceInference, SourceRef: in.SourceRef, Confidence: in.Confidence, ObservedAt: in.ObservedAt, ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil, IdempotencyKey: in.IdempotencyKey}, Reason: in.Reason})
+			c, err := st.ProposeFact(ctx, toStorePrincipal(p), store.ProposeFactInput{SetFactInput: store.SetFactInput{Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType, Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive, SourceKind: store.FactSourceInference, SourceRef: in.SourceRef, Confidence: in.Confidence, ObservedAt: in.ObservedAt, ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil, RecreateDeleted: in.RecreateDeleted, IdempotencyKey: in.IdempotencyKey}, Reason: in.Reason})
 			if err != nil {
 				return server.FactCandidate{}, mapFactError(err)
 			}
@@ -1087,6 +1089,72 @@ func serve() int {
 	return 0
 }
 
+func factDeletionEnabledFromEnv() (bool, error) {
+	raw, ok := os.LookupEnv(factDeletionEnv)
+	if !ok {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", factDeletionEnv, err)
+	}
+	return enabled, nil
+}
+
+func validateFactDeletionFeature(enabled bool, schemaVersion int) error {
+	if enabled && schemaVersion < factDeletionMinimumSchemaVersion {
+		return fmt.Errorf(
+			"%s=true requires store schema version %d or newer (compiled version is %d)",
+			factDeletionEnv,
+			factDeletionMinimumSchemaVersion,
+			schemaVersion,
+		)
+	}
+	return nil
+}
+
+func configureFactMutations(cfg *server.Config, st *store.Store, deletionEnabled bool) {
+	cfg.SetFact = func(ctx context.Context, p server.DomainPrincipal, in server.SetFactRequest) (server.Fact, error) {
+		if in.RecreateDeleted && !deletionEnabled {
+			return server.Fact{}, fmt.Errorf(
+				"%w: recreate_deleted requires %s=true",
+				server.ErrBadInput,
+				factDeletionEnv,
+			)
+		}
+		fact, err := st.SetFact(ctx, toStorePrincipal(p), store.SetFactInput{
+			Subject: in.Subject, Predicate: in.Predicate, ValueType: in.ValueType,
+			Value: in.Value, Recurrence: in.Recurrence, Cardinality: in.Cardinality, Sensitive: in.Sensitive,
+			SourceKind: store.FactSourceAgent, SourceRef: in.SourceRef, Confidence: in.Confidence,
+			ObservedAt: in.ObservedAt, ConfirmedAt: in.ConfirmedAt,
+			ValidFrom: in.ValidFrom, ValidUntil: in.ValidUntil,
+			RecreateDeleted: in.RecreateDeleted, IdempotencyKey: in.IdempotencyKey,
+		})
+		if err != nil {
+			return server.Fact{}, mapFactError(err)
+		}
+		return toServerFact(fact), nil
+	}
+	if !deletionEnabled {
+		return
+	}
+	cfg.DeleteFact = func(ctx context.Context, p server.DomainPrincipal, in server.DeleteFactRequest) (server.FactDeletionReceipt, error) {
+		result, err := st.DeleteFact(ctx, toStorePrincipal(p), store.DeleteFactInput{
+			FactID:                      in.FactID,
+			Subject:                     in.Subject,
+			Predicate:                   in.Predicate,
+			ExpectedResolvedAssertionID: in.ExpectedResolvedAssertionID,
+			ExpectedCandidateRevision:   in.ExpectedCandidateRevision,
+			IdempotencyKey:              in.IdempotencyKey,
+			Apply:                       in.Apply,
+		})
+		if err != nil {
+			return server.FactDeletionReceipt{}, mapFactError(err)
+		}
+		return toServerFactDeletion(result), nil
+	}
+}
+
 func serverOperator(op store.Operator) server.Operator {
 	out := server.Operator{
 		ID:          op.ID,
@@ -1322,6 +1390,8 @@ func mapFactError(err error) error {
 		return server.ErrConflict
 	case errors.Is(err, store.ErrFactIdempotencyConflict):
 		return server.ErrIdempotencyConflict
+	case errors.Is(err, store.ErrFactDeleted):
+		return server.ErrFactDeleted
 	case errors.Is(err, store.ErrFactForbidden), errors.Is(err, store.ErrAccountNotActive), errors.Is(err, store.ErrAgentNotFound):
 		return server.ErrForbidden
 	default:
@@ -1385,6 +1455,30 @@ func toServerFact(f store.Fact) server.Fact {
 		ObservedAt: f.ObservedAt, ConfirmedAt: f.ConfirmedAt, ValidFrom: f.ValidFrom,
 		ValidUntil: f.ValidUntil, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
 		UsageCount: f.UsageCount, LastUsedAt: f.LastUsedAt,
+	}
+}
+
+func toServerFactDeletion(result store.DeleteFactResult) server.FactDeletionReceipt {
+	state := "active"
+	if result.Applied {
+		state = "deleted"
+	}
+	return server.FactDeletionReceipt{
+		FactID:              result.FactID,
+		ReceiptID:           result.ReceiptID,
+		SubjectID:           result.SubjectID,
+		Subject:             result.Subject,
+		Predicate:           result.Predicate,
+		Sensitive:           result.Sensitive,
+		AssertionCount:      result.AssertionCount,
+		CandidateCount:      result.CandidateCount,
+		CandidateRevision:   result.CandidateRevision,
+		UsageCount:          result.UsageCount,
+		ResolvedAssertionID: result.PriorResolvedAssertionID,
+		DeletionState:       state,
+		DeletedAt:           result.DeletedAt,
+		Applied:             result.Applied,
+		Replayed:            result.Replayed,
 	}
 }
 

@@ -110,8 +110,11 @@ Core user-facing capabilities:
 - Token create/list/show/rotate/revoke with raw token returned only once.
 - Memory add/adjust/read/recall/list/forget/restore/delete for the caller's own
   memories, with soft-delete-by-default forget and a guarded hard delete.
-- Fact set/get/list/delete with `--primary` promotion that demotes the prior
-  primary of the same logical kind.
+- Fact set/get/list plus guarded permanent deletion by canonical
+  subject/predicate. Deletion previews a value-free receipt, requires explicit
+  confirmation, purges assertions/history/evidence and candidates, and retains
+  only a value-free integrity tombstone and immutable usage history. Explicit
+  recreation receives a new fact id and zero inherited usage rank.
 - Provider-aware agent routing for natural-language `remember`, `save`, and
   `store`: explicit atomic assertions use `fact set`; narrative context remains
   eligible for runtime-native memory; clearly mixed requests split; and the

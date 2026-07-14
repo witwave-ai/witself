@@ -42,6 +42,17 @@ Set `bootstrap.existingSecret.name` to mount a first-operator bootstrap token at
 `bootstrap.tokenFile` (default `/.witself/tokens/bootstrap.token`) and expose
 the configured TTL as `WITSELF_BOOTSTRAP_TOKEN_TTL`.
 
+Permanent fact deletion is disabled by default. `features.factDeletion.enabled`
+renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
+27 or older refuses to start when it is enabled, so turn it on only with schema
+28 or newer.
+
+For an existing multi-replica database, the rollout sequence is mandatory:
+first deploy schema-27-compatible writers with the flag off and wait for full
+convergence; next deploy schema 28 with the flag still off and wait again; only
+then enable the flag. Do not skip the schema-27 compatibility release, because
+schema 28 removes the conflict target used by older writers.
+
 ## Self-hosted vs cloud
 
 The defaults are the **self-hosted** profile: single replica, `backend.kind:
@@ -64,6 +75,7 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
-`database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,
+`features.factDeletion.enabled`, `database.existingSecret.*`,
+`bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`.

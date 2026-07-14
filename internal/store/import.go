@@ -119,7 +119,19 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "account_id": true, "realm_id": true,
 		"owner_agent_id": true, "subject_id": true, "predicate": true,
 		"cardinality": true, "sensitive": true, "resolved_assertion_id": true,
+		"deleted_at": true, "deleted_by_agent_id": true,
+		"delete_receipt_id": true, "delete_idempotency_key_hash": true,
+		"deleted_prior_assertion_id": true,
+		"deleted_assertion_count":    true, "deleted_candidate_count": true,
+		"deleted_usage_count": true, "deleted_mutation_key_count": true,
+		"deleted_candidate_revision": true,
+		"recreated_at":               true, "replacement_fact_id": true,
 		"created_at": true, "updated_at": true,
+	},
+	"fact_mutation_tombstones": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "fact_id": true, "surface": true,
+		"idempotency_key_hash": true, "deleted_at": true,
 	},
 	"fact_assertions": {
 		"id": true, "fact_id": true, "account_id": true, "realm_id": true,
@@ -170,9 +182,16 @@ type messageImportScope struct {
 }
 
 type factImportScope struct {
-	realmID             string
-	ownerAgentID        string
-	resolvedAssertionID string
+	realmID                 string
+	ownerAgentID            string
+	resolvedAssertionID     string
+	subjectID               string
+	subjectKey              string
+	predicate               string
+	sensitive               bool
+	deleted                 bool
+	replacementFactID       string
+	deletedMutationKeyCount int64
 }
 
 // importCtx accumulates per-import state: how many accounts rows we have seen
@@ -181,39 +200,41 @@ type factImportScope struct {
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID        string
-	accounts         int
-	operators        map[string]bool
-	realms           map[string]bool
-	agents           map[string]bool
-	agentRealms      map[string]string
-	tickets          map[string]bool
-	transcripts      map[string]transcriptImportScope
-	entries          map[string]string
-	factSubjects     map[string]factImportScope
-	factSubjectNames map[string]map[string]string
-	facts            map[string]factImportScope
-	assertions       map[string]string
-	messages         map[string]messageImportScope
-	deliveries       map[string]bool
+	accountID                   string
+	accounts                    int
+	operators                   map[string]bool
+	realms                      map[string]bool
+	agents                      map[string]bool
+	agentRealms                 map[string]string
+	tickets                     map[string]bool
+	transcripts                 map[string]transcriptImportScope
+	entries                     map[string]string
+	factSubjects                map[string]factImportScope
+	factSubjectNames            map[string]map[string]string
+	facts                       map[string]factImportScope
+	assertions                  map[string]string
+	factMutationTombstoneCounts map[string]int64
+	messages                    map[string]messageImportScope
+	deliveries                  map[string]bool
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID:        accountID,
-		operators:        map[string]bool{},
-		realms:           map[string]bool{},
-		agents:           map[string]bool{},
-		agentRealms:      map[string]string{},
-		tickets:          map[string]bool{},
-		transcripts:      map[string]transcriptImportScope{},
-		entries:          map[string]string{},
-		factSubjects:     map[string]factImportScope{},
-		factSubjectNames: map[string]map[string]string{},
-		facts:            map[string]factImportScope{},
-		assertions:       map[string]string{},
-		messages:         map[string]messageImportScope{},
-		deliveries:       map[string]bool{},
+		accountID:                   accountID,
+		operators:                   map[string]bool{},
+		realms:                      map[string]bool{},
+		agents:                      map[string]bool{},
+		agentRealms:                 map[string]string{},
+		tickets:                     map[string]bool{},
+		transcripts:                 map[string]transcriptImportScope{},
+		entries:                     map[string]string{},
+		factSubjects:                map[string]factImportScope{},
+		factSubjectNames:            map[string]map[string]string{},
+		facts:                       map[string]factImportScope{},
+		assertions:                  map[string]string{},
+		factMutationTombstoneCounts: map[string]int64{},
+		messages:                    map[string]messageImportScope{},
+		deliveries:                  map[string]bool{},
 	}
 }
 
@@ -234,7 +255,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"support_tickets", "support_ticket_messages",
 		"transcript_conversations", "transcript_entries",
 		"usage_events", "usage_rollups",
-		"fact_subjects", "facts", "fact_assertions", "fact_candidates",
+		"fact_subjects", "facts", "fact_mutation_tombstones", "fact_assertions", "fact_candidates",
 		"agent_messages", "agent_message_deliveries":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
@@ -355,7 +376,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			}
 			namespace[name] = id
 		}
-		ic.factSubjects[id] = factImportScope{realmID: realmID, ownerAgentID: agentID}
+		ic.factSubjects[id] = factImportScope{realmID: realmID, ownerAgentID: agentID, subjectKey: canonicalKey}
 	case "facts":
 		subjectID, err := requireStringField(obj, "subject_id")
 		scope, ok := ic.factSubjects[subjectID]
@@ -371,14 +392,41 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("facts row missing id")
 		}
-		resolvedID, _ := optionalStringField(obj, "resolved_assertion_id")
+		resolvedID, deleted, replacementID, err := validateImportedFactContent(obj, scope.ownerAgentID)
+		if err != nil {
+			return badf("facts row %v", err)
+		}
 		scope.resolvedAssertionID = resolvedID
+		scope.subjectID = subjectID
+		scope.predicate, _ = requireStringField(obj, "predicate")
+		scope.sensitive, _ = obj["sensitive"].(bool)
+		scope.deleted = deleted
+		scope.replacementFactID = replacementID
+		scope.deletedMutationKeyCount, _ = importedNonnegativeInteger(obj["deleted_mutation_key_count"])
 		ic.facts[id] = scope
+	case "fact_mutation_tombstones":
+		factID, err := requireStringField(obj, "fact_id")
+		scope, ok := ic.facts[factID]
+		if err != nil || !ok || !scope.deleted {
+			return badf("fact_mutation_tombstones row references non-deleted fact %q", factID)
+		}
+		realmID, _ := requireStringField(obj, "realm_id")
+		agentID, _ := requireStringField(obj, "owner_agent_id")
+		if realmID != scope.realmID || agentID != scope.ownerAgentID {
+			return badf("fact_mutation_tombstones row scope does not match fact %q", factID)
+		}
+		if err := validateImportedFactMutationTombstone(obj); err != nil {
+			return badf("fact_mutation_tombstones row %v", err)
+		}
+		ic.factMutationTombstoneCounts[factID]++
 	case "fact_assertions":
 		factID, err := requireStringField(obj, "fact_id")
 		scope, ok := ic.facts[factID]
 		if err != nil || !ok {
 			return badf("fact_assertions row references fact %q not present in this archive", factID)
+		}
+		if scope.deleted {
+			return badf("fact_assertions row references deleted fact %q", factID)
 		}
 		realmID, _ := requireStringField(obj, "realm_id")
 		if realmID != scope.realmID {
@@ -407,6 +455,19 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err := validateImportedFactCandidateContent(obj); err != nil {
 			return badf("fact_candidates row %v", err)
 		}
+		subjectKey, _ := requireStringField(obj, "subject_key")
+		predicate, _ := requireStringField(obj, "predicate")
+		addressSubjectKey := subjectKey
+		if subjectID := ic.factSubjectNames[agentID][subjectKey]; subjectID != "" {
+			addressSubjectKey = ic.factSubjects[subjectID].subjectKey
+		}
+		for _, factScope := range ic.facts {
+			if factScope.deleted && factScope.replacementFactID == "" &&
+				factScope.realmID == realmID && factScope.ownerAgentID == agentID &&
+				factScope.subjectKey == addressSubjectKey && factScope.predicate == predicate {
+				return badf("fact_candidates row occupies an unrecreated deleted fact address")
+			}
+		}
 		for _, field := range []string{"conflict_fact_id", "resolved_fact_id"} {
 			factID, present := optionalStringField(obj, field)
 			if !present {
@@ -416,6 +477,9 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			if !ok || scope.realmID != realmID || scope.ownerAgentID != agentID {
 				return badf("fact_candidates row %s %q is outside its agent scope", field, factID)
 			}
+			if scope.subjectKey != addressSubjectKey || scope.predicate != predicate {
+				return badf("fact_candidates row %s %q is at a different fact address", field, factID)
+			}
 		}
 		observedAssertionID, observed := optionalStringField(obj, "observed_assertion_id")
 		if observed {
@@ -423,6 +487,9 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			scope, scoped := ic.facts[factID]
 			if !ok || !scoped || scope.realmID != realmID || scope.ownerAgentID != agentID {
 				return badf("fact_candidates row observed_assertion_id %q is outside its agent scope", observedAssertionID)
+			}
+			if scope.subjectKey != addressSubjectKey || scope.predicate != predicate {
+				return badf("fact_candidates row observed_assertion_id %q is at a different fact address", observedAssertionID)
 			}
 			if conflictFactID, conflict := optionalStringField(obj, "conflict_fact_id"); conflict && factID != conflictFactID {
 				return badf("fact_candidates row observed_assertion_id %q does not belong to conflict fact %q", observedAssertionID, conflictFactID)
@@ -434,6 +501,10 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			resolvedFactID, resolved := optionalStringField(obj, "resolved_fact_id")
 			if !ok || !resolved || factID != resolvedFactID {
 				return badf("fact_candidates row decision_assertion_id %q does not belong to resolved fact %q", decisionAssertionID, resolvedFactID)
+			}
+			scope := ic.facts[factID]
+			if scope.subjectKey != addressSubjectKey || scope.predicate != predicate {
+				return badf("fact_candidates row decision_assertion_id %q is at a different fact address", decisionAssertionID)
 			}
 		}
 	case "account_events":
@@ -651,6 +722,124 @@ func validateImportedFactSubjectContent(obj map[string]any) (string, error) {
 		seen[alias] = true
 	}
 	return canonicalKey, nil
+}
+
+func validateImportedFactContent(obj map[string]any, ownerAgentID string) (resolvedID string, deleted bool, replacementID string, err error) {
+	predicate, ok := obj["predicate"].(string)
+	if !ok || !validFactPredicate(predicate) {
+		return "", false, "", fmt.Errorf("predicate is invalid")
+	}
+	if _, ok := obj["sensitive"].(bool); !ok {
+		return "", false, "", fmt.Errorf("sensitive must be a boolean")
+	}
+	cardinality, ok := obj["cardinality"].(string)
+	if !ok || (cardinality != FactCardinalityOne && cardinality != FactCardinalityMany && cardinality != FactCardinalityOneAtTime) {
+		return "", false, "", fmt.Errorf("cardinality is invalid")
+	}
+	resolvedID, _ = optionalStringField(obj, "resolved_assertion_id")
+	deletedAt, hasDeletedAt, err := importedOptionalTimestamp(obj, "deleted_at")
+	if err != nil {
+		return "", false, "", err
+	}
+	_ = deletedAt
+	deleted = hasDeletedAt
+	deletedBy, hasDeletedBy := optionalStringField(obj, "deleted_by_agent_id")
+	receipt, _ := obj["delete_receipt_id"].(string)
+	deleteKeyHash, _ := obj["delete_idempotency_key_hash"].(string)
+	priorAssertionID, _ := obj["deleted_prior_assertion_id"].(string)
+	assertionCount, assertionCountOK := importedNonnegativeInteger(obj["deleted_assertion_count"])
+	candidateCount, candidateCountOK := importedNonnegativeInteger(obj["deleted_candidate_count"])
+	usageCount, usageCountOK := importedNonnegativeInteger(obj["deleted_usage_count"])
+	mutationKeyCount, mutationKeyCountOK := importedNonnegativeInteger(obj["deleted_mutation_key_count"])
+	candidateRevision, _ := obj["deleted_candidate_revision"].(string)
+	_, hasRecreatedAt, err := importedOptionalTimestamp(obj, "recreated_at")
+	if err != nil {
+		return "", false, "", err
+	}
+	replacementID, hasReplacement := optionalStringField(obj, "replacement_fact_id")
+
+	if !deleted {
+		if resolvedID == "" {
+			return "", false, "", fmt.Errorf("active fact requires resolved_assertion_id")
+		}
+		if hasDeletedBy || receipt != "" || deleteKeyHash != "" || priorAssertionID != "" ||
+			!assertionCountOK || assertionCount != 0 || !candidateCountOK || candidateCount != 0 ||
+			!usageCountOK || usageCount != 0 ||
+			!mutationKeyCountOK || mutationKeyCount != 0 ||
+			candidateRevision != "" ||
+			hasRecreatedAt || hasReplacement {
+			return "", false, "", fmt.Errorf("active fact carries deletion metadata")
+		}
+		return resolvedID, false, "", nil
+	}
+	if resolvedID != "" || !hasDeletedBy || deletedBy != ownerAgentID ||
+		!strings.HasPrefix(receipt, "fdel_") || !validFactSHA256(deleteKeyHash) ||
+		!strings.HasPrefix(priorAssertionID, "fas_") || !assertionCountOK || assertionCount < 1 ||
+		!candidateCountOK || !usageCountOK || !mutationKeyCountOK || !validFactSHA256(candidateRevision) {
+		return "", false, "", fmt.Errorf("deleted fact receipt is invalid")
+	}
+	if hasRecreatedAt != hasReplacement {
+		return "", false, "", fmt.Errorf("deleted fact replacement metadata is incomplete")
+	}
+	if hasReplacement && (!strings.HasPrefix(replacementID, "fact_") || replacementID == obj["id"]) {
+		return "", false, "", fmt.Errorf("replacement_fact_id is invalid")
+	}
+	return "", true, replacementID, nil
+}
+
+func validateImportedFactMutationTombstone(obj map[string]any) error {
+	id, ok := obj["id"].(string)
+	if !ok || !strings.HasPrefix(id, "fmt_") {
+		return fmt.Errorf("id is invalid")
+	}
+	surface, ok := obj["surface"].(string)
+	if !ok || (surface != "set" && surface != "proposal") {
+		return fmt.Errorf("surface is invalid")
+	}
+	hash, ok := obj["idempotency_key_hash"].(string)
+	if !ok || !validFactSHA256(hash) {
+		return fmt.Errorf("idempotency_key_hash is invalid")
+	}
+	if _, present, err := importedOptionalTimestamp(obj, "deleted_at"); err != nil || !present {
+		return fmt.Errorf("deleted_at must be an RFC3339 timestamp")
+	}
+	return nil
+}
+
+func importedOptionalTimestamp(obj map[string]any, key string) (*time.Time, bool, error) {
+	raw, present := obj[key]
+	if !present || raw == nil {
+		return nil, false, nil
+	}
+	value, ok := raw.(string)
+	if !ok || value == "" {
+		return nil, false, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s must be an RFC3339 timestamp", key)
+	}
+	return &parsed, true, nil
+}
+
+func importedNonnegativeInteger(raw any) (int64, bool) {
+	value, ok := raw.(float64)
+	if !ok || value < 0 || value != math.Trunc(value) || value > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(value), true
+}
+
+func validFactSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateImportedFactAssertionContent(obj map[string]any) error {
@@ -991,9 +1180,31 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		}
 	}
 	for factID, scope := range ic.facts {
+		if scope.deleted {
+			if scope.resolvedAssertionID != "" {
+				return export.Manifest{}, fmt.Errorf("%w: deleted fact %q has a resolved assertion", ErrArchiveContent, factID)
+			}
+			if scope.replacementFactID != "" {
+				replacement, ok := ic.facts[scope.replacementFactID]
+				if !ok || replacement.subjectID != scope.subjectID || replacement.predicate != scope.predicate ||
+					replacement.realmID != scope.realmID || replacement.ownerAgentID != scope.ownerAgentID {
+					return export.Manifest{}, fmt.Errorf("%w: deleted fact %q has invalid replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
+				}
+				if scope.sensitive && !replacement.sensitive {
+					return export.Manifest{}, fmt.Errorf("%w: sensitive deleted fact %q has non-sensitive replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
+				}
+			}
+			continue
+		}
 		if scope.resolvedAssertionID == "" || ic.assertions[scope.resolvedAssertionID] != factID {
 			return export.Manifest{}, fmt.Errorf("%w: fact %q has no valid resolved assertion", ErrArchiveContent, factID)
 		}
+	}
+	if err := validateImportedFactReplacementTopology(ic.facts); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: fact replacement topology: %v", ErrArchiveContent, err)
+	}
+	if err := validateImportedFactMutationTombstoneCompleteness(ic.facts, ic.factMutationTombstoneCounts); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: fact mutation tombstones: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedFactDecisionAssertions(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, err
@@ -1029,6 +1240,92 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, err
 	}
 	return m, nil
+}
+
+func validateImportedFactMutationTombstoneCompleteness(facts map[string]factImportScope, counts map[string]int64) error {
+	for factID, scope := range facts {
+		got := counts[factID]
+		want := scope.deletedMutationKeyCount
+		if got != want {
+			return fmt.Errorf("fact %q carries %d retry tombstones, receipt commits to %d", factID, got, want)
+		}
+	}
+	return nil
+}
+
+// validateImportedFactReplacementTopology proves that each fact address is one
+// linear history. A checksummed but hostile archive must not be able to create
+// duplicate unrecreated tombstones (which wedge explicit recreation), a cycle
+// (which removes the required tail), or disconnected histories (which let an
+// ordinary set bypass a deletion guard).
+func validateImportedFactReplacementTopology(facts map[string]factImportScope) error {
+	type address struct {
+		realmID, ownerAgentID, subjectID, predicate string
+	}
+	groups := map[address]map[string]factImportScope{}
+	for factID, scope := range facts {
+		key := address{scope.realmID, scope.ownerAgentID, scope.subjectID, scope.predicate}
+		if groups[key] == nil {
+			groups[key] = map[string]factImportScope{}
+		}
+		groups[key][factID] = scope
+	}
+	for _, nodes := range groups {
+		activeID := ""
+		incoming := map[string]int{}
+		for factID, scope := range nodes {
+			if !scope.deleted {
+				if activeID != "" {
+					return fmt.Errorf("address has multiple active facts %q and %q", activeID, factID)
+				}
+				activeID = factID
+			}
+			if scope.replacementFactID != "" {
+				replacement, ok := nodes[scope.replacementFactID]
+				if !ok {
+					return fmt.Errorf("fact %q replacement %q is outside its address", factID, scope.replacementFactID)
+				}
+				if scope.sensitive && !replacement.sensitive {
+					return fmt.Errorf("sensitive fact %q has non-sensitive replacement %q", factID, scope.replacementFactID)
+				}
+				incoming[scope.replacementFactID]++
+				if incoming[scope.replacementFactID] > 1 {
+					return fmt.Errorf("fact %q has multiple replacement predecessors", scope.replacementFactID)
+				}
+			}
+		}
+
+		tailID := activeID
+		if tailID == "" {
+			for factID, scope := range nodes {
+				if scope.replacementFactID == "" {
+					if tailID != "" {
+						return fmt.Errorf("address has multiple unrecreated tombstones %q and %q", tailID, factID)
+					}
+					tailID = factID
+				}
+			}
+			if tailID == "" {
+				return fmt.Errorf("deleted address has no unrecreated tail")
+			}
+		}
+
+		for start := range nodes {
+			seen := map[string]bool{}
+			current := start
+			for nodes[current].replacementFactID != "" {
+				if seen[current] {
+					return fmt.Errorf("replacement cycle contains fact %q", current)
+				}
+				seen[current] = true
+				current = nodes[current].replacementFactID
+			}
+			if current != tailID {
+				return fmt.Errorf("fact %q replacement chain ends at %q, want %q", start, current, tailID)
+			}
+		}
+	}
+	return nil
 }
 
 // validateImportedFactDecisionAssertions proves that every persisted confirm

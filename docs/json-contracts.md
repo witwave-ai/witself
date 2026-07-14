@@ -1731,11 +1731,44 @@ Rules:
   delete is a further-guarded step.
 - `forget` reports a tombstone (`changed: true`, `resource.kind: "memory"`);
   `restore` reverses it within the retention window. Facts have no
-  forget/restore tombstone; a fact mutation is a delete-only hard delete.
+  forget/restore lifecycle; `fact delete` permanently erases content and keeps
+  only a non-restorable, value-free tombstone for usage/archive, retry, and
+  audit integrity.
 - Mutations should include the affected resource and `audit_event_id` when audit
   is available.
 - Token create and rotate responses may include the raw token once, but only for
   commands explicitly designed to return the token.
+
+The implemented fact-deletion preview/result is deliberately narrower than a
+general mutation resource:
+
+```json
+{
+  "fact_id": "fact_01...",
+  "subject_id": "sub_01...",
+  "subject": "person_spouse",
+  "predicate": "identity/name",
+  "sensitive": true,
+  "assertion_count": 2,
+  "candidate_count": 1,
+  "candidate_revision": "64 lowercase hexadecimal characters",
+  "usage_count": 7,
+  "resolved_assertion_id": "fas_01...",
+  "deletion_state": "active",
+  "deleted_at": null,
+  "applied": false,
+  "replayed": false
+}
+```
+
+`receipt_id` is omitted during preview and becomes a stable `fdel_...`
+identifier after apply; an idempotent replay returns the same receipt id and
+the original frozen counts. Apply echoes the preview's `candidate_revision`;
+clients send it as `expected_candidate_revision` together with
+`resolved_assertion_id` as `expected_resolved_assertion_id`.
+
+It never contains a fact value, value type, source/evidence reference,
+candidate reason, raw idempotency key, or value-derived request fingerprint.
 
 ## Audit Event
 

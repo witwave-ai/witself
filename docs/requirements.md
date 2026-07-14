@@ -532,8 +532,11 @@ service the agent forgets to call is worthless):
    coverage. Codex prepends its full provider contract; Claude uses a compact
    suffix to stay within its 2 KiB limit; Grok uses that suffix with
    underscore-safe tool names; Cursor uses the suffix with standard dotted tool
-   names and project-scoped Memories semantics. The remaining standing protocol
-   covers implemented self, fact, transcript, and message tools.
+   names and project-scoped Memories semantics. Direct permanent Witself fact
+   deletion uses a value-free preview/apply contract, while plain "forget" is
+   clarified against the provider-native memory lifecycle and untrusted content
+   is never deletion authority. The remaining standing protocol covers
+   implemented self, fact, transcript, and message tools.
 2. **Tool descriptions as instruction** — every implemented fact/self tool's
    prose embeds an explicit when-to-call trigger list, including the distinction
    between a requested canonical write and a merely observed fact candidate.
@@ -608,9 +611,14 @@ Lookup and lifecycle:
 
 - Lookup is **deterministic by name**: `fact get email` returns the one true value
   for the caller's identity.
-- `fact set NAME VALUE` creates or updates a fact (upsert by name within the
-  owner). `fact list` enumerates with filters. `fact delete NAME` removes a fact
-  (guarded, audited).
+- The implemented typed service addresses facts by owner + stable subject +
+  namespaced predicate. `fact set PREDICATE VALUE` appends a resolved assertion;
+  `fact list` enumerates with filters. `fact delete --subject SUBJECT PREDICATE`
+  permanently removes the value, all assertions/evidence, and all candidates at
+  that address (guarded by the previewed resolved assertion and candidate-set
+  revision, previewable, concurrency-safe, idempotent, and audited).
+  A non-restorable value-free tombstone and immutable usage history remain;
+  explicit recreation receives a new fact id and no inherited usage rank.
 - Fact names are unique within the owning agent (or owning group). Different
   agents may reuse the same fact name because ownership disambiguates them.
 
@@ -664,9 +672,11 @@ Permission verbs, escalating in danger:
 - `contribute` — add new memories or facts to another agent's or group's store.
 - `curate` — adjust/merge/re-tag existing memories or facts owned by another agent
   or group, including editing salience, links, and primary flags.
-- `forget` — soft-delete or prune another agent's or group's memories and facts
-  (reversible window). Hard delete across agents is a further-guarded step and is
-  never the default.
+- `forget` — soft-delete or prune another agent's or group's memories within a
+  reversible window. Fact-scoped cross-agent `forget` remains a reserved policy
+  capability until a separate reversible fact lifecycle exists; it does not
+  authorize the implemented owner-only permanent fact deletion. Hard delete
+  across agents is a further-guarded step and is never the default.
 
 Default deny:
 

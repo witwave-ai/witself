@@ -55,21 +55,53 @@ type FactAssertion struct {
 
 // SetFactInput carries one explicit typed assertion to the fact service.
 type SetFactInput struct {
-	Subject        string          `json:"subject,omitempty"`
-	Predicate      string          `json:"predicate"`
-	ValueType      string          `json:"value_type,omitempty"`
-	Value          json.RawMessage `json:"value"`
-	Recurrence     string          `json:"recurrence,omitempty"`
-	Cardinality    string          `json:"cardinality,omitempty"`
-	Sensitive      bool            `json:"sensitive,omitempty"`
-	SourceKind     string          `json:"source_kind,omitempty"`
-	SourceRef      string          `json:"source_ref,omitempty"`
-	Confidence     *float64        `json:"confidence,omitempty"`
-	ObservedAt     time.Time       `json:"observed_at,omitempty"`
-	ConfirmedAt    *time.Time      `json:"confirmed_at,omitempty"`
-	ValidFrom      *time.Time      `json:"valid_from,omitempty"`
-	ValidUntil     *time.Time      `json:"valid_until,omitempty"`
-	IdempotencyKey string          `json:"-"`
+	Subject         string          `json:"subject,omitempty"`
+	Predicate       string          `json:"predicate"`
+	ValueType       string          `json:"value_type,omitempty"`
+	Value           json.RawMessage `json:"value"`
+	Recurrence      string          `json:"recurrence,omitempty"`
+	Cardinality     string          `json:"cardinality,omitempty"`
+	Sensitive       bool            `json:"sensitive,omitempty"`
+	SourceKind      string          `json:"source_kind,omitempty"`
+	SourceRef       string          `json:"source_ref,omitempty"`
+	Confidence      *float64        `json:"confidence,omitempty"`
+	ObservedAt      time.Time       `json:"observed_at,omitempty"`
+	ConfirmedAt     *time.Time      `json:"confirmed_at,omitempty"`
+	ValidFrom       *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil      *time.Time      `json:"valid_until,omitempty"`
+	RecreateDeleted bool            `json:"recreate_deleted,omitempty"`
+	IdempotencyKey  string          `json:"-"`
+}
+
+// DeleteFactInput carries the concurrency and retry guards required to apply a
+// deletion. Call PreviewDeleteFact first and pass its resolved assertion ID
+// and candidate-set revision.
+type DeleteFactInput struct {
+	FactID                      string
+	ExpectedResolvedAssertionID string
+	ExpectedCandidateRevision   string
+	IdempotencyKey              string
+}
+
+// FactDeletionReceipt is a value-free deletion preview or result. It is safe
+// to display for sensitive facts because it contains no value, source, or
+// assertion evidence.
+type FactDeletionReceipt struct {
+	FactID              string     `json:"fact_id"`
+	ReceiptID           string     `json:"receipt_id,omitempty"`
+	SubjectID           string     `json:"subject_id"`
+	Subject             string     `json:"subject"`
+	Predicate           string     `json:"predicate"`
+	Sensitive           bool       `json:"sensitive"`
+	AssertionCount      int64      `json:"assertion_count"`
+	CandidateCount      int64      `json:"candidate_count"`
+	CandidateRevision   string     `json:"candidate_revision"`
+	UsageCount          int64      `json:"usage_count"`
+	ResolvedAssertionID string     `json:"resolved_assertion_id"`
+	DeletionState       string     `json:"deletion_state"`
+	DeletedAt           *time.Time `json:"deleted_at,omitempty"`
+	Applied             bool       `json:"applied"`
+	Replayed            bool       `json:"replayed,omitempty"`
 }
 
 // FactListOptions selects a bounded fact inventory.
@@ -147,6 +179,58 @@ func SetFact(ctx context.Context, endpoint, token string, in SetFactInput) (*Fac
 		return nil, err
 	}
 	return &out.Fact, nil
+}
+
+// PreviewDeleteFact returns the value-free impact of deleting one fact without
+// mutating it. The returned resolved assertion ID is the apply-time guard.
+func PreviewDeleteFact(ctx context.Context, endpoint, token, factID string) (*FactDeletionReceipt, error) {
+	q := url.Values{"dry_run": {"true"}}
+	requestURL := factsURL(endpoint) + "/" + url.PathEscape(factID) + "?" + q.Encode()
+	var out struct {
+		Deletion FactDeletionReceipt `json:"deletion"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodDelete, requestURL, token, factDeletionHeaders(""), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Deletion, nil
+}
+
+// PreviewDeleteFactByAddress resolves an exact subject/predicate directly at
+// the deletion boundary. Unlike GetFact, it returns no fact value and records
+// no retrieval usage, so a deletion dry-run is genuinely non-mutating.
+func PreviewDeleteFactByAddress(ctx context.Context, endpoint, token, subject, predicate string) (*FactDeletionReceipt, error) {
+	q := url.Values{
+		"dry_run":   {"true"},
+		"subject":   {subject},
+		"predicate": {predicate},
+	}
+	requestURL := factsURL(endpoint) + "?" + q.Encode()
+	var out struct {
+		Deletion FactDeletionReceipt `json:"deletion"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodDelete, requestURL, token, factDeletionHeaders(""), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Deletion, nil
+}
+
+// DeleteFact permanently removes a fact's content while retaining only a
+// value-free tombstone. Callers must supply the resolved assertion ID and
+// candidate-set revision returned by PreviewDeleteFact plus a stable retry key
+// for this logical deletion.
+func DeleteFact(ctx context.Context, endpoint, token string, in DeleteFactInput) (*FactDeletionReceipt, error) {
+	q := url.Values{
+		"expected_resolved_assertion_id": {in.ExpectedResolvedAssertionID},
+		"expected_candidate_revision":    {in.ExpectedCandidateRevision},
+	}
+	requestURL := factsURL(endpoint) + "/" + url.PathEscape(in.FactID) + "?" + q.Encode()
+	var out struct {
+		Deletion FactDeletionReceipt `json:"deletion"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodDelete, requestURL, token, factDeletionHeaders(in.IdempotencyKey), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Deletion, nil
 }
 
 // GetFact retrieves one fact by exact subject and predicate. Successful
@@ -302,6 +386,14 @@ func factIdempotencyHeaders(key string) map[string]string {
 		return nil
 	}
 	return map[string]string{"Idempotency-Key": key}
+}
+
+func factDeletionHeaders(idempotencyKey string) map[string]string {
+	headers := map[string]string{"Cache-Control": "no-store"}
+	if key := strings.TrimSpace(idempotencyKey); key != "" {
+		headers["Idempotency-Key"] = key
+	}
+	return headers
 }
 
 // UpcomingFacts lists resolved date/datetime facts in a future window.

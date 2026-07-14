@@ -34,6 +34,10 @@ For DNS, keep the stable names here:
   DNS-01 issuer/certificate resources for HTTPS when enabled; Pulumi turns it
   on at runtime after enabling the AKS-managed ALB Controller add-on and
   injecting the delegated association subnet and DNS identity values.
+- `apps.witselfServer.factDeletionEnabled` is the explicit rollout gate for
+  permanent fact deletion. Keep it `false` through the mandatory schema-27
+  compatibility rollout and until all writers have converged on schema 28;
+  only then flip it to `true` and verify that rollout before relying on DELETE.
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.

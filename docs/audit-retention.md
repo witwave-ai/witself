@@ -166,7 +166,9 @@ the actual selected operation.
 
 - `fact.created` (a new fact created by name)
 - `fact.updated` (an existing fact updated by name)
-- `fact.deleted`
+- `fact.deleted` (permanent content deletion; the event and receipt retain only
+  ids, canonical address metadata, counts, and timestamps, never the fact value,
+  evidence, source text, or raw idempotency key)
 - `fact.primary_changed` — records the promotion and the matching demotion of the
   prior primary of the same logical kind, with both fact ids.
 

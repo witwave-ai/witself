@@ -32,6 +32,41 @@ func TestSchema25FactIdempotencyUpgrade(t *testing.T) {
 	}
 }
 
+func TestSchema26FactDeletionUpgrade(t *testing.T) {
+	upgrade := UpgraderFor(26)
+	if upgrade == nil {
+		t.Fatal("schema 26 upgrader is not registered")
+	}
+	fact, err := upgrade("facts", map[string]any{
+		"id": "fact_1", "resolved_assertion_id": "fas_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"delete_receipt_id", "delete_idempotency_key_hash",
+		"deleted_prior_assertion_id", "deleted_candidate_revision",
+	} {
+		if fact[key] != "" {
+			t.Fatalf("%s = %#v, want empty", key, fact[key])
+		}
+	}
+	for _, key := range []string{"deleted_assertion_count", "deleted_candidate_count", "deleted_usage_count", "deleted_mutation_key_count"} {
+		if fact[key] != 0 {
+			t.Fatalf("%s = %#v, want zero", key, fact[key])
+		}
+	}
+	for _, key := range []string{"deleted_at", "deleted_by_agent_id", "recreated_at", "replacement_fact_id"} {
+		if fact[key] != nil {
+			t.Fatalf("%s = %#v, want nil", key, fact[key])
+		}
+	}
+	other, err := upgrade("fact_assertions", map[string]any{"id": "fas_1"})
+	if err != nil || len(other) != 1 {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

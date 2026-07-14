@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const testFactCandidateRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestFactRoutes(t *testing.T) {
 	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
@@ -454,6 +456,330 @@ func TestFactMutationIdempotencyHeaders(t *testing.T) {
 	}
 	if body["error"] != "idempotency key was reused for a different fact mutation" {
 		t.Fatalf("conflict body = %#v", body)
+	}
+}
+
+func TestDeleteFactPreviewAndApplyContract(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	deletedAt := time.Date(2026, 7, 13, 20, 30, 0, 0, time.UTC)
+	var calls []DeleteFactRequest
+	mutations := 0
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		DeleteFact: func(_ context.Context, _ DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error) {
+			calls = append(calls, in)
+			receipt := FactDeletionReceipt{
+				FactID: "fact_sensitive", SubjectID: "fsub_1", Subject: "spouse",
+				Predicate: "identity/name", Sensitive: true, AssertionCount: 2,
+				CandidateCount: 1, CandidateRevision: testFactCandidateRevision, UsageCount: 7, ResolvedAssertionID: "fas_current",
+				DeletionState: "active",
+			}
+			if in.Apply {
+				mutations++
+				receipt.ReceiptID = "fdel_1"
+				receipt.Applied = true
+				receipt.DeletionState = "deleted"
+				receipt.DeletedAt = &deletedAt
+			}
+			return receipt, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := factRequest(t, srv.URL, http.MethodDelete, "/v1/facts/fact_sensitive?dry_run=true", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("preview status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("preview Cache-Control = %q", got)
+	}
+	var preview map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&preview); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(calls) != 1 || calls[0].Apply || calls[0].FactID != "fact_sensitive" || calls[0].IdempotencyKey != "" || calls[0].ExpectedResolvedAssertionID != "" || calls[0].ExpectedCandidateRevision != "" {
+		t.Fatalf("preview callback = %#v", calls)
+	}
+	if mutations != 0 {
+		t.Fatalf("preview mutations = %d, want zero", mutations)
+	}
+	deletion, ok := preview["deletion"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview envelope = %#v", preview)
+	}
+	for _, forbidden := range []string{"value", "source", "source_ref", "evidence", "delete_key", "idempotency_key", "request_fingerprint"} {
+		if _, exists := deletion[forbidden]; exists {
+			t.Fatalf("preview leaked forbidden field %q: %#v", forbidden, deletion)
+		}
+	}
+	if deletion["sensitive"] != true || deletion["resolved_assertion_id"] != "fas_current" || deletion["candidate_revision"] != testFactCandidateRevision || deletion["deletion_state"] != "active" || deletion["applied"] != false {
+		t.Fatalf("preview receipt = %#v", deletion)
+	}
+
+	resp = factRequestWithIdempotency(t, srv.URL, http.MethodDelete, "/v1/facts/fact_sensitive?expected_resolved_assertion_id=fas_current&expected_candidate_revision="+testFactCandidateRevision, "", "delete-fact-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("apply status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("apply Cache-Control = %q", got)
+	}
+	var apply struct {
+		Deletion FactDeletionReceipt `json:"deletion"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apply); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(calls) != 2 || !calls[1].Apply || calls[1].IdempotencyKey != "delete-fact-1" || calls[1].ExpectedResolvedAssertionID != "fas_current" || calls[1].ExpectedCandidateRevision != testFactCandidateRevision {
+		t.Fatalf("apply callback = %#v", calls)
+	}
+	if mutations != 1 || !apply.Deletion.Applied || apply.Deletion.ReceiptID != "fdel_1" || apply.Deletion.DeletionState != "deleted" || apply.Deletion.DeletedAt == nil || !apply.Deletion.DeletedAt.Equal(deletedAt) {
+		t.Fatalf("apply receipt/mutations = %#v / %d", apply.Deletion, mutations)
+	}
+}
+
+func TestDeleteFactAddressPreviewContract(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	mutations := 0
+	var got DeleteFactRequest
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		DeleteFact: func(_ context.Context, _ DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error) {
+			got = in
+			if in.Apply {
+				mutations++
+			}
+			return FactDeletionReceipt{
+				FactID: "fact_spouse", SubjectID: "sub_spouse", Subject: "person_spouse",
+				Predicate: "identity/name", Sensitive: true, AssertionCount: 1,
+				CandidateRevision: testFactCandidateRevision, UsageCount: 3, ResolvedAssertionID: "fas_current", DeletionState: "active",
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := factRequest(t, srv.URL, http.MethodDelete, "/v1/facts?dry_run=true&subject=person_spouse&predicate=identity%2Fname", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got.FactID != "" || got.Subject != "person_spouse" || got.Predicate != "identity/name" || got.Apply || got.IdempotencyKey != "" || got.ExpectedResolvedAssertionID != "" || got.ExpectedCandidateRevision != "" {
+		t.Fatalf("callback = %#v", got)
+	}
+	if mutations != 0 {
+		t.Fatalf("preview mutations = %d", mutations)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	deletion := body["deletion"].(map[string]any)
+	for _, forbidden := range []string{"value", "source_ref", "evidence", "idempotency_key"} {
+		if _, exists := deletion[forbidden]; exists {
+			t.Fatalf("preview leaked %q: %#v", forbidden, deletion)
+		}
+	}
+}
+
+func TestDeleteFactGuardsAndErrors(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		kind := PrincipalKindAgent
+		if token == "operator-token" {
+			kind = PrincipalKindOperator
+		}
+		return DomainPrincipal{Kind: kind, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token" || token == "operator-token", nil
+	}
+	calls := 0
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		DeleteFact: func(_ context.Context, _ DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error) {
+			calls++
+			switch in.FactID {
+			case "bad":
+				return FactDeletionReceipt{}, ErrBadInput
+			case "forbidden":
+				return FactDeletionReceipt{}, ErrForbidden
+			case "missing":
+				return FactDeletionReceipt{}, ErrNotFound
+			case "stale":
+				return FactDeletionReceipt{}, ErrConflict
+			case "deleted":
+				return FactDeletionReceipt{}, ErrFactDeleted
+			case "idem":
+				return FactDeletionReceipt{}, ErrIdempotencyConflict
+			default:
+				return FactDeletionReceipt{FactID: in.FactID}, nil
+			}
+		},
+	}))
+	defer srv.Close()
+
+	for _, path := range []string{
+		"/v1/facts/fact_1?dry_run=maybe",
+		"/v1/facts/fact_1?expected_resolved_assertion_id=fas_1",
+		"/v1/facts/fact_1?dry_run=true&expected_resolved_assertion_id=fas_1",
+		"/v1/facts/fact_1?dry_run=true&expected_candidate_revision=" + testFactCandidateRevision,
+		"/v1/facts",
+		"/v1/facts?dry_run=true&subject=self",
+		"/v1/facts?dry_run=true&predicate=identity%2Fname",
+		"/v1/facts/fact_1?dry_run=true&subject=self&predicate=identity%2Fname",
+	} {
+		resp := factRequest(t, srv.URL, http.MethodDelete, path, "")
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("DELETE %s status = %d, want 400", path, resp.StatusCode)
+		}
+	}
+	resp := factRequestWithIdempotency(t, srv.URL, http.MethodDelete, "/v1/facts/fact_1?dry_run=true", "", "preview-key")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("preview idempotency status = %d, want 400", resp.StatusCode)
+	}
+	resp = factRequestWithIdempotency(t, srv.URL, http.MethodDelete, "/v1/facts/fact_1", "", "delete-1")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("missing expected assertion status = %d, want 400", resp.StatusCode)
+	}
+	resp = factRequestWithIdempotency(t, srv.URL, http.MethodDelete, "/v1/facts/fact_1?expected_resolved_assertion_id=fas_1", "", "delete-1")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("missing expected candidate revision status = %d, want 400", resp.StatusCode)
+	}
+	if calls != 0 {
+		t.Fatalf("guarded callback calls = %d, want zero", calls)
+	}
+	resp, err := http.DefaultClient.Do(mustFactDeleteRequest(t, srv.URL+"/v1/facts/fact_1?dry_run=true", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("Cache-Control") != "private, no-store" || calls != 0 {
+		t.Fatalf("unauthenticated status/cache/calls = %d/%q/%d", resp.StatusCode, resp.Header.Get("Cache-Control"), calls)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/v1/facts/fact_1?dry_run=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer operator-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || calls != 0 {
+		t.Fatalf("operator status/calls = %d/%d", resp.StatusCode, calls)
+	}
+
+	tests := []struct {
+		factID    string
+		want      int
+		wantError string
+	}{
+		{factID: "bad", want: http.StatusBadRequest, wantError: "bad input"},
+		{factID: "forbidden", want: http.StatusForbidden, wantError: "fact access forbidden"},
+		{factID: "missing", want: http.StatusNotFound, wantError: "fact not found"},
+		{factID: "stale", want: http.StatusConflict, wantError: "fact changed since deletion preview"},
+		{factID: "deleted", want: http.StatusGone, wantError: "fact already deleted"},
+		{factID: "idem", want: http.StatusConflict, wantError: "idempotency key was reused for a different fact deletion"},
+	}
+	for _, tt := range tests {
+		resp := factRequestWithIdempotency(t, srv.URL, http.MethodDelete, "/v1/facts/"+tt.factID+"?expected_resolved_assertion_id=fas_1&expected_candidate_revision="+testFactCandidateRevision, "", "delete-1")
+		if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+			t.Errorf("%s Cache-Control = %q", tt.factID, got)
+		}
+		if resp.StatusCode != tt.want {
+			t.Errorf("%s status = %d, want %d", tt.factID, resp.StatusCode, tt.want)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if body["error"] != tt.wantError {
+			t.Errorf("%s error = %#v, want %q", tt.factID, body["error"], tt.wantError)
+		}
+	}
+}
+
+func mustFactDeleteRequest(t *testing.T, requestURL, token string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req
+}
+
+func TestSetFactRecreateDeletedContract(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	seen := false
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		SetFact: func(_ context.Context, _ DomainPrincipal, in SetFactRequest) (Fact, error) {
+			seen = in.RecreateDeleted
+			return Fact{ID: "fact_new", Predicate: in.Predicate, Value: in.Value}, nil
+		},
+	}))
+	defer srv.Close()
+	resp := factRequest(t, srv.URL, http.MethodPost, "/v1/facts", `{"predicate":"preferences/editor","value":"zed","recreate_deleted":true}`)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated || !seen {
+		t.Fatalf("set recreate status/seen = %d/%v", resp.StatusCode, seen)
+	}
+}
+
+func TestFactWritesRequireExplicitRecreationAfterDeletion(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		SetFact: func(context.Context, DomainPrincipal, SetFactRequest) (Fact, error) {
+			return Fact{}, ErrFactDeleted
+		},
+		ProposeFact: func(context.Context, DomainPrincipal, ProposeFactRequest) (FactCandidate, error) {
+			return FactCandidate{}, ErrFactDeleted
+		},
+		ConfirmFactCandidate: func(context.Context, DomainPrincipal, string, string) (Fact, error) {
+			return Fact{}, ErrFactDeleted
+		},
+		RejectFactCandidate: func(context.Context, DomainPrincipal, string, string) (FactCandidate, error) {
+			return FactCandidate{}, nil
+		},
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/v1/facts", want: "fact was deleted; set recreate_deleted=true to create a new fact"},
+		{path: "/v1/fact-candidates", want: "fact was deleted; use fact set with recreate_deleted=true to create a new fact"},
+		{path: "/v1/fact-candidates/fcand_stale:confirm", want: "fact was deleted; use fact set with recreate_deleted=true to create a new fact"},
+	} {
+		resp := factRequest(t, srv.URL, http.MethodPost, tc.path, `{"predicate":"preferences/editor","value":"zed"}`)
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("POST %s status = %d, want 409", tc.path, resp.StatusCode)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if body["error"] != tc.want {
+			t.Errorf("POST %s body = %#v", tc.path, body)
+		}
 	}
 }
 

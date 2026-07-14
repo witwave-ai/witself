@@ -142,10 +142,12 @@ does not imply another.
    Curate appends to versioned edit history; prior versions are retained.
    Requires the `memory:manage-others` scope; an own-data scope such as
    `memory:update` or `fact:update` never authorizes cross-agent curate.
-4. `forget` — soft-delete (tombstone) the target's memories or facts within the
-   reversible retention window. Requires the `memory:manage-others` scope. Hard
-   delete across agents is a further-guarded step and is never the default (see
-   [Guardrails](#guardrails-for-curate-and-forget)).
+4. `forget` — soft-delete (tombstone) the target's memories within the
+   reversible retention window. Fact-scoped cross-agent `forget` is reserved
+   until a distinct reversible fact lifecycle exists and does not authorize the
+   implemented owner-only permanent fact deletion. Requires the
+   `memory:manage-others` scope. Hard delete across agents is a further-guarded
+   step and is never the default (see [Guardrails](#guardrails-for-curate-and-forget)).
 
 Self-access is not expressed as a Policy. An agent's access to its own identity
 data is governed by its own token scopes (`memory:*`, `fact:*`), not by

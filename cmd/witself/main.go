@@ -19,13 +19,17 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/token"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
-var cellNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+var (
+	cellNamePattern              = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	factCandidateRevisionPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -2585,7 +2589,7 @@ func parseUsageStart(raw string, now time.Time) (time.Time, error) {
 
 func factCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history|propose|review|candidate|confirm|reject|upcoming|subject ...")
+		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history|delete|propose|review|candidate|confirm|reject|upcoming|subject ...")
 		return 2
 	}
 	switch args[0] {
@@ -2597,6 +2601,8 @@ func factCmd(args []string) int {
 		return factList(args[1:])
 	case "history":
 		return factHistory(args[1:])
+	case "delete":
+		return factDelete(args[1:])
 	case "propose":
 		return factPropose(args[1:])
 	case "review":
@@ -2780,6 +2786,7 @@ func factSet(args []string) int {
 	validFromRaw := fs.String("valid-from", "", "validity start in RFC3339")
 	validUntilRaw := fs.String("valid-until", "", "validity end in RFC3339")
 	idempotencyKey := fs.String("idempotency-key", "", "retry key for exactly one logical fact write")
+	recreateDeleted := fs.Bool("recreate-deleted", false, "explicitly create a new fact after permanent deletion")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2818,6 +2825,14 @@ func factSet(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: --valid-until %v\n", err)
 		return 2
 	}
+	factRetryKey := *idempotencyKey
+	if *recreateDeleted && strings.TrimSpace(factRetryKey) == "" {
+		factRetryKey, err = id.New("fact_recreate")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: generate fact recreation retry key: %v\n", err)
+			return 1
+		}
+	}
 	ctx := context.Background()
 	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
 	if err != nil {
@@ -2829,7 +2844,7 @@ func factSet(args []string) int {
 		Recurrence:  *recurrence,
 		Cardinality: *cardinality, Sensitive: *sensitive, SourceRef: *sourceRef,
 		Confidence: confidence, ValidFrom: validFrom, ValidUntil: validUntil,
-		IdempotencyKey: *idempotencyKey,
+		RecreateDeleted: *recreateDeleted, IdempotencyKey: factRetryKey,
 	}
 	if observedAt != nil {
 		factInput.ObservedAt = *observedAt
@@ -2965,6 +2980,234 @@ func factHistory(args []string) int {
 			tabSafe(string(assertion.Value)), assertion.ValueType, assertion.Recurrence, assertion.SourceKind, assertion.SupersedesID)
 	}
 	flush()
+	return 0
+}
+
+func factDelete(args []string) int {
+	fs := flag.NewFlagSet("fact delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	subject := fs.String("subject", "self", "stable subject key")
+	dryRun := fs.Bool("dry-run", false, "preview value-free permanent deletion impact without changing data")
+	yes := fs.Bool("yes", false, "confirm permanent deletion with no undo")
+	factID := fs.String("fact-id", "", "exact fact id for guarded apply or replay")
+	expectedAssertionID := fs.String("expected-assertion-id", "", "exact resolved assertion id captured from preview")
+	expectedCandidateRevision := fs.String("expected-candidate-revision", "", "exact candidate-set revision captured from preview")
+	idempotencyKey := fs.String("idempotency-key", "", "retry key for exactly one logical permanent deletion")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	exactMode, subjectWasSet, retryKeyWasSet := false, false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "fact-id", "expected-assertion-id", "expected-candidate-revision":
+			exactMode = true
+		case "subject":
+			subjectWasSet = true
+		case "idempotency-key":
+			retryKeyWasSet = true
+		}
+	})
+	if fs.NArg() == 0 && retryKeyWasSet {
+		exactMode = true
+	}
+	if exactMode {
+		if *dryRun {
+			fmt.Fprintln(os.Stderr, "witself: --dry-run cannot be combined with exact guarded fact deletion")
+			return 2
+		}
+		if fs.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "witself: exact guarded fact deletion does not accept a positional PREDICATE")
+			return 2
+		}
+		if subjectWasSet {
+			fmt.Fprintln(os.Stderr, "witself: --subject cannot be combined with exact guarded fact deletion")
+			return 2
+		}
+		if !*yes {
+			fmt.Fprintln(os.Stderr, "witself: fact deletion is permanent and cannot be undone; exact guarded apply or replay requires --yes")
+			return 2
+		}
+		exactFactID := strings.TrimSpace(*factID)
+		exactAssertionID := strings.TrimSpace(*expectedAssertionID)
+		exactCandidateRevision := strings.TrimSpace(*expectedCandidateRevision)
+		exactRetryKey := strings.TrimSpace(*idempotencyKey)
+		if exactFactID == "" || exactAssertionID == "" || exactCandidateRevision == "" || exactRetryKey == "" {
+			fmt.Fprintln(os.Stderr, "witself: exact guarded apply or replay requires --fact-id, --expected-assertion-id, --expected-candidate-revision, and --idempotency-key")
+			return 2
+		}
+		if !factCandidateRevisionPattern.MatchString(exactCandidateRevision) {
+			fmt.Fprintln(os.Stderr, "witself: --expected-candidate-revision must be exactly 64 lowercase hexadecimal characters")
+			return 2
+		}
+		ctx := context.Background()
+		conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		receipt, err := client.DeleteFact(ctx, conn.Endpoint, conn.Token, client.DeleteFactInput{
+			FactID:                      exactFactID,
+			ExpectedResolvedAssertionID: exactAssertionID,
+			ExpectedCandidateRevision:   exactCandidateRevision,
+			IdempotencyKey:              exactRetryKey,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: apply or replay permanent fact deletion: %v\n", err)
+			return 1
+		}
+		if err := validateAppliedFactDeletionReceipt(*receipt, exactFactID, exactAssertionID, exactCandidateRevision); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: apply or replay permanent fact deletion: %v\n", err)
+			return 1
+		}
+		return printFactDeletionReceipt(*receipt, false, *jsonOut)
+	}
+	if fs.NArg() != 1 {
+		factDeleteUsage()
+		return 2
+	}
+	factSubject := strings.TrimSpace(*subject)
+	predicate := strings.TrimSpace(fs.Arg(0))
+	if factSubject == "" || predicate == "" {
+		fmt.Fprintln(os.Stderr, "witself: --subject and PREDICATE must not be empty")
+		return 2
+	}
+	if !*dryRun && !*yes {
+		fmt.Fprintln(os.Stderr, "witself: fact deletion is permanent and cannot be undone; re-run with --yes, or use --dry-run for a value-free preview")
+		return 2
+	}
+
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	preview, err := client.PreviewDeleteFactByAddress(ctx, conn.Endpoint, conn.Token, factSubject, predicate)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: preview permanent fact deletion: %v\n", err)
+		return 1
+	}
+	if err := validateFactDeletionPreview(*preview, factSubject, predicate); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: preview permanent fact deletion: %v\n", err)
+		return 1
+	}
+	if *dryRun {
+		return printFactDeletionReceipt(*preview, true, *jsonOut)
+	}
+
+	retryKey := strings.TrimSpace(*idempotencyKey)
+	if retryKey == "" {
+		retryKey, err = id.New("fact_delete")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: generate deletion retry key: %v\n", err)
+			return 1
+		}
+	}
+	receipt, err := client.DeleteFact(ctx, conn.Endpoint, conn.Token, client.DeleteFactInput{
+		FactID:                      preview.FactID,
+		ExpectedResolvedAssertionID: preview.ResolvedAssertionID,
+		ExpectedCandidateRevision:   preview.CandidateRevision,
+		IdempotencyKey:              retryKey,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: permanently delete fact: %v\n", err)
+		printFactDeletionReplayCommand(*account, *realm, *agent, *endpoint, *tokenFile, preview, retryKey)
+		return 1
+	}
+	if err := validateAppliedFactDeletionReceipt(*receipt, preview.FactID, preview.ResolvedAssertionID, preview.CandidateRevision); err != nil ||
+		receipt.Subject != preview.Subject || receipt.Predicate != preview.Predicate {
+		fmt.Fprintln(os.Stderr, "witself: permanent fact deletion returned an inconsistent receipt")
+		printFactDeletionReplayCommand(*account, *realm, *agent, *endpoint, *tokenFile, preview, retryKey)
+		return 1
+	}
+	return printFactDeletionReceipt(*receipt, false, *jsonOut)
+}
+
+func validateAppliedFactDeletionReceipt(receipt client.FactDeletionReceipt, factID, expectedAssertionID, expectedCandidateRevision string) error {
+	if !receipt.Applied || receipt.ReceiptID == "" || receipt.DeletionState != "deleted" ||
+		receipt.FactID != factID || receipt.ResolvedAssertionID != expectedAssertionID || receipt.CandidateRevision != expectedCandidateRevision {
+		return fmt.Errorf("permanent fact deletion returned an inconsistent receipt")
+	}
+	return nil
+}
+
+func factDeleteUsage() {
+	fmt.Fprintln(os.Stderr, "usage: witself fact delete [--subject self] [--dry-run] [--yes] [--idempotency-key KEY] PREDICATE")
+	fmt.Fprintln(os.Stderr, "       witself fact delete --yes --fact-id FACT_ID --expected-assertion-id ASSERTION_ID --expected-candidate-revision REVISION --idempotency-key KEY")
+}
+
+func factDeletionReplayCommand(account, realm, agent, endpoint, tokenFile, factID, assertionID, candidateRevision, retryKey string) string {
+	args := []string{"witself", "fact", "delete"}
+	for _, option := range []struct {
+		name  string
+		value string
+	}{
+		{name: "--account", value: account},
+		{name: "--realm", value: realm},
+		{name: "--agent", value: agent},
+		{name: "--endpoint", value: endpoint},
+		{name: "--token-file", value: tokenFile},
+	} {
+		if strings.TrimSpace(option.value) != "" {
+			args = append(args, option.name, quoteFactDeletionReplayArg(option.value))
+		}
+	}
+	args = append(args,
+		"--yes",
+		"--fact-id", quoteFactDeletionReplayArg(factID),
+		"--expected-assertion-id", quoteFactDeletionReplayArg(assertionID),
+		"--expected-candidate-revision", quoteFactDeletionReplayArg(candidateRevision),
+		"--idempotency-key", quoteFactDeletionReplayArg(retryKey),
+	)
+	return strings.Join(args, " ")
+}
+
+func printFactDeletionReplayCommand(account, realm, agent, endpoint, tokenFile string, preview *client.FactDeletionReceipt, retryKey string) {
+	fmt.Fprintf(os.Stderr, "witself: exact value-free replay command:\n  %s\n", factDeletionReplayCommand(
+		account, realm, agent, endpoint, tokenFile,
+		preview.FactID, preview.ResolvedAssertionID, preview.CandidateRevision, retryKey,
+	))
+}
+
+func quoteFactDeletionReplayArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func validateFactDeletionPreview(preview client.FactDeletionReceipt, _ string, predicate string) error {
+	if preview.Applied {
+		return fmt.Errorf("server marked a dry-run preview as applied")
+	}
+	if preview.ReceiptID != "" {
+		return fmt.Errorf("server returned an apply receipt id during dry-run preview")
+	}
+	if preview.DeletionState != "active" {
+		return fmt.Errorf("server returned deletion state %q for an active-fact preview", preview.DeletionState)
+	}
+	if preview.FactID == "" || preview.ResolvedAssertionID == "" || !factCandidateRevisionPattern.MatchString(preview.CandidateRevision) {
+		return fmt.Errorf("server omitted deletion concurrency fields")
+	}
+	if preview.Subject == "" || preview.Predicate != predicate {
+		return fmt.Errorf("server returned a different fact address")
+	}
+	return nil
+}
+
+func printFactDeletionReceipt(receipt client.FactDeletionReceipt, dryRun, jsonOut bool) int {
+	if jsonOut {
+		return printJSON(map[string]any{"deletion": receipt})
+	}
+	action := "would permanently delete"
+	if !dryRun {
+		fmt.Printf("permanently deleted\treceipt=%s\tfact=%s\tassertion=%s\tcandidate-revision=%s\tsubject=%s\tpredicate=%s\tsensitive=%t\tassertions=%d\tcandidates=%d\tuses=%d\treplayed=%t\n",
+			receipt.ReceiptID, receipt.FactID, receipt.ResolvedAssertionID, receipt.CandidateRevision, receipt.Subject, receipt.Predicate, receipt.Sensitive,
+			receipt.AssertionCount, receipt.CandidateCount, receipt.UsageCount, receipt.Replayed)
+		return 0
+	}
+	fmt.Printf("%s\tfact=%s\tassertion=%s\tcandidate-revision=%s\tsubject=%s\tpredicate=%s\tsensitive=%t\tassertions=%d\tcandidates=%d\tuses=%d\n",
+		action, receipt.FactID, receipt.ResolvedAssertionID, receipt.CandidateRevision, receipt.Subject, receipt.Predicate, receipt.Sensitive,
+		receipt.AssertionCount, receipt.CandidateCount, receipt.UsageCount)
 	return 0
 }
 
@@ -3489,7 +3732,8 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
-	usageLine(w, "  witself fact set|get|list|history  Store and review durable facts")
+	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
+	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")

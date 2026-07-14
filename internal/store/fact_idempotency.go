@@ -65,20 +65,21 @@ func factSetFingerprintWithDefaultConfidence(in SetFactInput, defaultConfidence 
 		observedAt = &value
 	}
 	payload := struct {
-		Subject     string          `json:"subject"`
-		Predicate   string          `json:"predicate"`
-		ValueType   string          `json:"value_type"`
-		Value       json.RawMessage `json:"value"`
-		Recurrence  string          `json:"recurrence"`
-		Cardinality string          `json:"cardinality"`
-		Sensitive   bool            `json:"sensitive"`
-		SourceKind  string          `json:"source_kind"`
-		SourceRef   string          `json:"source_ref"`
-		Confidence  float64         `json:"confidence"`
-		ObservedAt  *time.Time      `json:"observed_at,omitempty"`
-		ConfirmedAt *time.Time      `json:"confirmed_at,omitempty"`
-		ValidFrom   *time.Time      `json:"valid_from,omitempty"`
-		ValidUntil  *time.Time      `json:"valid_until,omitempty"`
+		Subject         string          `json:"subject"`
+		Predicate       string          `json:"predicate"`
+		ValueType       string          `json:"value_type"`
+		Value           json.RawMessage `json:"value"`
+		Recurrence      string          `json:"recurrence"`
+		Cardinality     string          `json:"cardinality"`
+		Sensitive       bool            `json:"sensitive"`
+		SourceKind      string          `json:"source_kind"`
+		SourceRef       string          `json:"source_ref"`
+		Confidence      float64         `json:"confidence"`
+		ObservedAt      *time.Time      `json:"observed_at,omitempty"`
+		ConfirmedAt     *time.Time      `json:"confirmed_at,omitempty"`
+		ValidFrom       *time.Time      `json:"valid_from,omitempty"`
+		ValidUntil      *time.Time      `json:"valid_until,omitempty"`
+		RecreateDeleted bool            `json:"recreate_deleted,omitempty"`
 	}{
 		Subject: normalized.Subject, Predicate: normalized.Predicate,
 		ValueType: normalized.ValueType, Value: normalized.Value,
@@ -87,6 +88,7 @@ func factSetFingerprintWithDefaultConfidence(in SetFactInput, defaultConfidence 
 		SourceRef: normalized.SourceRef, Confidence: confidence,
 		ObservedAt: observedAt, ConfirmedAt: normalized.ConfirmedAt,
 		ValidFrom: normalized.ValidFrom, ValidUntil: normalized.ValidUntil,
+		RecreateDeleted: normalized.RecreateDeleted,
 	}
 	return factMutationFingerprint(payload)
 }
@@ -112,8 +114,15 @@ func factMutationFingerprint(payload any) (string, error) {
 }
 
 func replaySetFact(ctx context.Context, tx pgx.Tx, p Principal, key, fingerprint string, in SetFactInput) (Fact, bool, error) {
+	blocked, err := factMutationRetryBlocked(ctx, tx, p, "set", key)
+	if err != nil {
+		return Fact{}, false, err
+	}
+	if blocked {
+		return Fact{}, false, ErrFactDeleted
+	}
 	var assertionID, factID, existingFingerprint string
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT id, fact_id, idempotency_fingerprint
 		FROM fact_assertions
 		WHERE account_id=$1 AND realm_id=$2 AND asserted_by_agent_id=$3
@@ -138,9 +147,16 @@ func replaySetFact(ctx context.Context, tx pgx.Tx, p Principal, key, fingerprint
 	return out, true, err
 }
 
-func replayProposeFact(ctx context.Context, tx pgx.Tx, p Principal, key, fingerprint string) (FactCandidate, bool, error) {
+func replayProposeFact(ctx context.Context, tx pgx.Tx, p Principal, key string, fingerprints ...string) (FactCandidate, bool, error) {
+	blocked, err := factMutationRetryBlocked(ctx, tx, p, "proposal", key)
+	if err != nil {
+		return FactCandidate{}, false, err
+	}
+	if blocked {
+		return FactCandidate{}, false, ErrFactDeleted
+	}
 	var candidateID, existingFingerprint string
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT id, idempotency_fingerprint
 		FROM fact_candidates
 		WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
@@ -152,11 +168,38 @@ func replayProposeFact(ctx context.Context, tx pgx.Tx, p Principal, key, fingerp
 	if err != nil {
 		return FactCandidate{}, false, err
 	}
-	if existingFingerprint != fingerprint {
+	matched := false
+	for _, fingerprint := range fingerprints {
+		if existingFingerprint == fingerprint {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return FactCandidate{}, false, ErrFactIdempotencyConflict
 	}
 	out, err := getFactCandidateTx(ctx, tx, p, candidateID)
 	return out, true, err
+}
+
+func factIdempotencyKeyHash(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+func factMutationRetryBlocked(ctx context.Context, tx pgx.Tx, p Principal, surface, key string) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	var blocked bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM fact_mutation_tombstones
+		  WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		    AND surface=$4 AND idempotency_key_hash=$5
+		)`, p.AccountID, p.RealmID, p.ID, surface,
+		factIdempotencyKeyHash(key)).Scan(&blocked)
+	return blocked, err
 }
 
 func ensureFactDecisionKeyAvailable(ctx context.Context, tx pgx.Tx, p Principal, candidateID, key string) error {
