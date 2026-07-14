@@ -9,6 +9,5 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
-  healthCheck:
-{{ toYaml $ingress.backendConfig.healthCheck | nindent 4 }}
+{{- toYaml $ingress.backendConfig | nindent 2 }}
 {{- end }}

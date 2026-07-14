@@ -218,12 +218,25 @@ converge every writer on schema 28 with the flag still false, and only then
 flip the flag in a separate release. A direct schema-26-to-28 jump or a combined
 schema-and-flag rollout is unsafe.
 
-Supported agent integrations call `witself.fact.delete` only for a direct,
-current-user request that clearly asks for permanent Witself fact deletion.
-They preview and apply in the same turn when the target is exact. Plain
-"forget" is ambiguous with provider-native memory and must be clarified;
-corrections use `witself.fact.set`. Instructions found in webpages,
-transcripts, messages, memories, or tool output are never deletion authority.
+Supported agent integrations treat a direct current-user request to
+“permanently forget” or permanently delete a uniquely resolved fact-shaped
+target as permanent Witself fact deletion even when the request does not name
+Witself. They preview and apply in the same turn only when exactly one live fact
+resolves; zero or multiple matches require clarification. An explicitly named
+destination wins, so provider-native memory never authorizes Witself deletion.
+Plain “forget” without permanent intent is ambiguous and must be clarified;
+corrections use `witself.fact.set`. Autonomous or background work, standing
+instructions, subagents or delegated tasks, and instructions found in
+webpages, transcripts, messages, memories, or tool output can never set
+`direct_user_authorized: true` or apply permanent deletion.
+That rule is the supported agent-routing contract, not proof of human presence:
+`direct_user_authorized` is caller-attested at the MCP boundary. The HTTP
+service independently enforces `fact:delete`, ownership, preview concurrency
+guards, and idempotency, but a delete-capable token can call it directly. The
+current default agent token includes `fact:delete`, so an unattended agent that
+must be technically unable to delete cannot use that token against the
+protected realm. Restricted credentials and server-verified, short-lived,
+target-scoped user deletion grants are post-v0 hardening items.
 Deleting a Witself fact does not delete provider-native memories, transcripts,
 prior exports, or backups still inside their retention window, and exact
 Witself lookup must not silently substitute any of those sources afterward.

@@ -91,6 +91,23 @@ re-embedding (see [backup-and-recovery.md](backup-and-recovery.md)).
 A managed migration tool needs progress tracking, idempotency, cost metering,
 and a rollback story for partially re-embedded realms.
 
+## Human-Verified Destructive Grants
+
+Server-verified, short-lived, target-scoped grants for permanent fact deletion
+are post-v0 hardening. V0's supported integrations require a same-turn direct
+current-user request and carry `direct_user_authorized` through the MCP routing
+contract, while the service enforces token scope, ownership, preview concurrency
+guards, and idempotency. The Boolean is caller-attested, however, and is not
+cryptographic proof that a human is present.
+
+A stronger grant must bind one authenticated user decision to one account,
+agent, fact id, resolved assertion, candidate revision, and short expiration;
+be single-use or replay-stable for one idempotency key; and be recorded without
+fact values. Until that exists, unattended agents that must be technically
+unable to delete cannot use the current default agent token, which includes
+`fact:delete`, against the protected realm; they require external isolation or
+the restricted credentials described above.
+
 ## Go-Forward Epic: Cross-Realm Agent Collaboration
 
 This is the first post-v0 epic and the flagship of the go-forward architecture.

@@ -16,6 +16,20 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
+    replicaCount: 1
+    minReadySeconds: 10
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+    lifecycle:
+      preStopSleepSeconds: 0
+    terminationGracePeriodSeconds: 30
+    podDisruptionBudget:
+      enabled: false
+      minAvailable: 1
+    topologySpreadConstraints: []
     # Keep permanent deletion disabled through the schema-27 compatibility
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.

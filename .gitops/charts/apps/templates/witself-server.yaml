@@ -5,6 +5,13 @@
 {{- $bootstrapMountPath := default (printf "/.witself/tokens/%s/bootstrap.token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $_ := set $serverValues "replicaCount" .Values.apps.witselfServer.replicaCount -}}
+{{- $_ := set $serverValues "minReadySeconds" .Values.apps.witselfServer.minReadySeconds -}}
+{{- $_ := set $serverValues "strategy" .Values.apps.witselfServer.strategy -}}
+{{- $_ := set $serverValues "lifecycle" .Values.apps.witselfServer.lifecycle -}}
+{{- $_ := set $serverValues "terminationGracePeriodSeconds" .Values.apps.witselfServer.terminationGracePeriodSeconds -}}
+{{- $_ := set $serverValues "podDisruptionBudget" .Values.apps.witselfServer.podDisruptionBudget -}}
+{{- $_ := set $serverValues "topologySpreadConstraints" .Values.apps.witselfServer.topologySpreadConstraints -}}
 {{- if and .Values.apps.witselfServer.awsAlbIngress.enabled (eq .Values.cell.cloud "aws") -}}
 {{- $_ := set $serverValues "ingress" .Values.apps.witselfServer.awsAlbIngress -}}
 {{- end -}}

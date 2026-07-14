@@ -9,6 +9,17 @@
 
 replicaCount: 1
 
+# Keep a ready replica serving while a replacement becomes stable. The
+# maxUnavailable: 0 default matters even for a single-replica self-hosted
+# install: upgrades surge a replacement instead of intentionally dropping the
+# only serving pod first.
+minReadySeconds: 10
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
 image:
   repository: ghcr.io/witwave-ai/images/witself-server
   # Empty tag defaults to the chart appVersion.
@@ -174,6 +185,12 @@ networkPolicy:
   #       kubernetes.io/metadata.name: ingress-nginx
   # Sources allowed to scrape the metrics port. Empty = allow from any.
   metricsFrom: []
+
+# Optional native Kubernetes preStop sleep. Leave disabled for the portable
+# self-hosted default. Managed ingress overlays can set this long enough for
+# endpoint removal and load-balancer connection draining before SIGTERM.
+lifecycle:
+  preStopSleepSeconds: 0
 
 terminationGracePeriodSeconds: 30
 nodeSelector: {}

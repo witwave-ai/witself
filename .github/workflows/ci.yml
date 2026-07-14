@@ -98,10 +98,14 @@ jobs:
         run: |
           helm lint charts/witself-server
           helm lint charts/witself-server --values charts/witself-server/ci/cloud-values.yaml
+          helm lint charts/witself-server --values charts/witself-server/ci/gcp-rollout-values.yaml
+
+      - name: rollout rendering checks
+        run: bash scripts/test-helm-rollout.sh
 
       - name: helm template + kubeconform
         run: |
-          for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml"; do
+          for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml" "ci/gcp-rollout-values.yaml"; do
             args=(); label=default
             if [ -n "$v" ]; then args=(--values "charts/witself-server/$v"); label="$v"; fi
             echo "::group::$label"

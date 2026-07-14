@@ -68,6 +68,13 @@ ingress + TLS, and topology spread.
 - `automountServiceAccountToken: false` — the server needs no Kubernetes API.
 - Health and metrics are on their own ports and never exposed through the API
   Service or public ingress.
+- Rolling upgrades default to `maxUnavailable: 0`, `maxSurge: 1`, and
+  `minReadySeconds: 10`, so a replacement must remain ready before Kubernetes
+  retires the previous pod.
+- `lifecycle.preStopSleepSeconds` optionally renders the native Kubernetes
+  `preStop.sleep` handler (Kubernetes 1.30+). Set it with a sufficiently larger
+  `terminationGracePeriodSeconds` when a managed load balancer needs time to
+  remove and drain a terminating endpoint.
 - No secrets in `values.yaml` or rendered manifests; secret-bearing subsystems
   arrive via `existingSecret` references when they land.
 
@@ -78,4 +85,5 @@ for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `database.existingSecret.*`,
 `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
-`networkPolicy.*`.
+`networkPolicy.*`, `strategy.*`, `minReadySeconds`,
+`lifecycle.preStopSleepSeconds`, and `terminationGracePeriodSeconds`.

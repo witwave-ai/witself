@@ -5,6 +5,44 @@
   "required": ["image", "backend", "features", "server", "health", "metrics", "service"],
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 0 },
+    "minReadySeconds": { "type": "integer", "minimum": 0 },
+    "strategy": {
+      "type": "object",
+      "required": ["type", "rollingUpdate"],
+      "not": {
+        "properties": {
+          "rollingUpdate": {
+            "properties": {
+              "maxUnavailable": { "enum": [0, "0%"] },
+              "maxSurge": { "enum": [0, "0%"] }
+            },
+            "required": ["maxUnavailable", "maxSurge"]
+          }
+        },
+        "required": ["rollingUpdate"]
+      },
+      "properties": {
+        "type": { "type": "string", "enum": ["RollingUpdate"] },
+        "rollingUpdate": {
+          "type": "object",
+          "required": ["maxUnavailable", "maxSurge"],
+          "properties": {
+            "maxUnavailable": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string", "pattern": "^(100|[0-9]{1,2})%$" }
+              ]
+            },
+            "maxSurge": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string", "pattern": "^(100|[0-9]{1,2})%$" }
+              ]
+            }
+          }
+        }
+      }
+    },
     "image": {
       "type": "object",
       "required": ["repository"],
@@ -145,7 +183,46 @@
     },
     "podDisruptionBudget": {
       "type": "object",
-      "properties": { "enabled": { "type": "boolean" } }
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "pattern": "^(100|[0-9]{1,2})%$" }
+          ]
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["preStopSleepSeconds"],
+      "properties": {
+        "preStopSleepSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["maxSkew", "topologyKey", "whenUnsatisfiable"],
+        "properties": {
+          "maxSkew": { "type": "integer", "minimum": 1 },
+          "topologyKey": { "type": "string", "minLength": 1 },
+          "whenUnsatisfiable": {
+            "type": "string",
+            "enum": ["DoNotSchedule", "ScheduleAnyway"]
+          },
+          "labelSelector": { "type": "object" },
+          "minDomains": { "type": "integer", "minimum": 1 },
+          "nodeAffinityPolicy": { "type": "string", "enum": ["Honor", "Ignore"] },
+          "nodeTaintsPolicy": { "type": "string", "enum": ["Honor", "Ignore"] },
+          "matchLabelKeys": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
     }
   }
 }

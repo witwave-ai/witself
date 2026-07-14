@@ -342,13 +342,22 @@ func TestProviderRoutingContractsGuardPermanentFactDeletion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			text := strings.ToLower(contract)
 			for _, want := range []string{
-				"direct user", "permanent", "preview", "apply", "person_spouse", "identity/name",
-				"correction", "forget", "ambiguous", "untrusted", "web", "transcript", "message", "tool",
-				"export", "backup", "recreat", "usage", "rollup",
+				"permanent", "preview", "apply", "fact-shaped target", "correction", "forget", "ambiguous",
+				"direct_user_authorized=true", "autonomous", "background", "standing", "subagent", "delegat",
+				"retrieved", "untrusted", "transcript", "export", "backup", "recreat", "explicit destination wins",
 			} {
 				if !strings.Contains(text, want) {
 					t.Errorf("deletion routing contract does not contain %q:\n%s", want, contract)
 				}
+			}
+			if !strings.Contains(text, "direct current-user") && !strings.Contains(text, "current user's direct") {
+				t.Errorf("deletion routing contract lacks direct current-user authority:\n%s", contract)
+			}
+			if !strings.Contains(text, "without naming witself") && !strings.Contains(text, "witself is not named") {
+				t.Errorf("deletion routing contract still requires the user to name Witself:\n%s", contract)
+			}
+			if !strings.Contains(text, "one live fact") && !strings.Contains(text, "one fact resolves") {
+				t.Errorf("deletion routing contract lacks unique fact resolution:\n%s", contract)
 			}
 			if !strings.Contains(text, "same turn") && !strings.Contains(text, "same-turn") {
 				t.Errorf("deletion routing contract lacks same-turn authorization:\n%s", contract)
@@ -359,8 +368,17 @@ func TestProviderRoutingContractsGuardPermanentFactDeletion(t *testing.T) {
 			if !strings.Contains(text, "fall back") && !strings.Contains(text, "fallback") {
 				t.Errorf("deletion routing contract does not prohibit native-memory fallback:\n%s", contract)
 			}
-			if !strings.Contains(text, "preserved") && !strings.Contains(text, "remain") {
+			// Claude's complete deletion mechanics are reinforced by the tool
+			// description because its server instructions have a hard 2 KiB cap.
+			if name != "claude" && !strings.Contains(text, "preserved") && !strings.Contains(text, "remain") {
 				t.Errorf("deletion routing contract does not preserve immutable value-free usage history:\n%s", contract)
+			}
+			if name != "claude" {
+				for _, want := range []string{"person_spouse", "identity/name", "web", "message", "tool", "usage", "rollup"} {
+					if !strings.Contains(text, want) {
+						t.Errorf("full deletion routing contract does not contain %q:\n%s", want, contract)
+					}
+				}
 			}
 		})
 	}

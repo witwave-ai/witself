@@ -1,0 +1,25 @@
+# GKE rollout profile used by template validation. This mirrors the production
+# availability controls passed through the GitOps apps chart.
+backend:
+  kind: managed
+
+replicaCount: 2
+
+lifecycle:
+  preStopSleepSeconds: 120
+
+terminationGracePeriodSeconds: 210
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 2
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: witself-server
+        app.kubernetes.io/instance: witself-server
