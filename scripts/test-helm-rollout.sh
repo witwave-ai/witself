@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 server_chart="$repo_root/charts/witself-server"
 apps_chart="$repo_root/.gitops/charts/apps"
+apps_profile="$apps_chart/ci/gcp-rollout-values.yaml"
 gcp_profile="$server_chart/ci/gcp-rollout-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
 
@@ -16,7 +17,8 @@ helm template witself-server "$server_chart" --namespace witself >"$default_rend
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" >"$gcp_render"
 helm template witself-apps "$apps_chart" \
-  --values "$gcp_cell" >"$apps_render"
+  --values "$gcp_cell" \
+  --values "$apps_profile" >"$apps_render"
 
 require_line() {
   local expected="$1"
