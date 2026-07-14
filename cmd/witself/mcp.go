@@ -958,6 +958,8 @@ func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
 		instructions = claudeMemoryRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeGrokBuild:
 		instructions = grokMemoryRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+	case transcriptcapture.RuntimeCursor:
+		instructions = cursorMemoryRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	}
 	if runtimeName != transcriptcapture.RuntimeGrokBuild {
 		return instructions

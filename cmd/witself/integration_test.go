@@ -285,6 +285,7 @@ func TestCommaSeparatedInstallConfiguresEveryRuntime(t *testing.T) {
 		filepath.Join(managedRoot, "codex", "requirements.toml"),
 		filepath.Join(home, ".grok", "hooks", "witself.json"),
 		filepath.Join(home, ".cursor", "hooks.json"),
+		filepath.Join(home, ".cursor", "rules", cursorMemoryRoutingRuleFile),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected hook configuration %s: %v", path, err)
@@ -499,6 +500,7 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 		hookPath      func(string) string
 		routingPath   func(string) string
 		routingText   string
+		removeRouting bool
 	}{
 		{
 			name: "grok", installName: "grok", runtime: transcriptcapture.RuntimeGrokBuild,
@@ -510,7 +512,10 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 		{
 			name: "cursor", installName: "cursor", runtime: transcriptcapture.RuntimeCursor,
 			cliEnv: "CURSOR_CLI_PATH", configRootEnv: "CURSOR_CONFIG_DIR",
-			hookPath: func(root string) string { return filepath.Join(root, "hooks.json") },
+			hookPath:      func(root string) string { return filepath.Join(root, "hooks.json") },
+			routingPath:   func(root string) string { return filepath.Join(root, "rules", cursorMemoryRoutingRuleFile) },
+			routingText:   cursorMemoryRoutingInstructions,
+			removeRouting: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -613,12 +618,18 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 				t.Fatalf("token was removed: %v", err)
 			}
 			if tc.routingPath != nil {
-				routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(routing) != 0 {
-					t.Fatalf("shared instruction file retained managed bytes: %q", routing)
+				if tc.removeRouting {
+					if _, err := os.Stat(tc.routingPath(runtimeRoot)); !os.IsNotExist(err) {
+						t.Fatalf("dedicated memory-routing rule still exists: %v", err)
+					}
+				} else {
+					routing, err := os.ReadFile(tc.routingPath(runtimeRoot))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(routing) != 0 {
+						t.Fatalf("shared instruction file retained managed bytes: %q", routing)
+					}
 				}
 			}
 			if tc.runtime == transcriptcapture.RuntimeCursor {

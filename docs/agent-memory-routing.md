@@ -1,9 +1,7 @@
 # Agent Memory Routing
 
-Status: implemented for Codex, Claude Code, and Grok Build. Cursor receives the
-Witself MCP server and transcript hooks but does not yet receive a managed
-fact-versus-native-memory routing file. Provider aggregation remains an agent
-behavior contract, not a new Witself API.
+Status: implemented for Codex, Claude Code, Grok Build, and Cursor. Provider
+aggregation remains an agent behavior contract, not a new Witself API.
 
 ## Authority and delivery
 
@@ -16,7 +14,7 @@ policy into an independent server-side classifier.
 | Codex | `$CODEX_HOME/AGENTS.md`, normally `~/.codex/AGENTS.md` | The full Codex-specific policy is prepended to the implemented Witself protocol. |
 | Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A concise Claude-specific policy plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
 | Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
-| Cursor | None | The implemented base Witself protocol only. |
+| Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 
 Codex's installed block and MCP policy use the same Codex-specific contract.
 Grok's installed block preserves the same Grok behavior with underscore-safe
@@ -26,12 +24,25 @@ tool names. This avoids conflicting provider names when another compatible
 runtime, including Grok Build when launched from a directory that causes it to
 scan Claude rules, also loads that global rule.
 
+Cursor receives a dedicated managed ancestor MDC rule with `alwaysApply: true` YAML
+frontmatter. Cursor discovers `.cursor/rules` while walking the current
+workspace and its ancestors, so the normal `~/.cursor/rules` location applies
+to workspaces beneath the user's home directory without modifying each project.
+`CURSOR_CONFIG_DIR` relocates the MCP, hook, and routing files Witself manages;
+automatic rule loading from a custom directory additionally requires the
+selected Cursor installation to discover that directory. Witself does not copy
+the rule into project repositories to work around a custom path outside the
+runtime's rule-discovery boundary.
+
 Every managed file contains routing policy only. Personal facts and memory
 content never belong in it. Installation is idempotent and replaces only the
 marker-delimited Witself block. Uninstall removes only that block. Shared Codex
 and Grok `AGENTS.md` files retain unrelated content and remain present if the
-managed block was their only content; Claude's dedicated rule is removed when
-empty. Codex installation also refuses to write when a non-empty global
+managed block was their only content; the dedicated Claude and Cursor rules are
+removed when empty. Cursor installation refuses to merge into an unmarked
+pre-existing file at Witself's dedicated rule path, because prepending another
+MDC document could silently change the existing rule's frontmatter. Codex
+installation also refuses to write when a non-empty global
 `AGENTS.override.md` would shadow its `AGENTS.md`.
 
 Installation and removal use atomic file replacement and restore the previous
@@ -84,6 +95,14 @@ as a fallback when native memory is unavailable.
   confirmation. If memory is unavailable, report that the narrative was not
   stored; do not fall back to a Witself fact or transcript and do not change the
   user's settings.
+- **Cursor:** Cursor Memories are advisory context scoped to the current project
+  or repository. Route narrative capture only through Cursor's supported native
+  memory facility when it is surfaced, enabled, and available, and claim success
+  only after the facility confirms the write. Passive memory generation may
+  require user approval, and privacy settings can make Memories unavailable.
+  Never substitute or manually edit `.cursor/rules`, User Rules, `AGENTS.md`,
+  project or plan Markdown, a Witself fact, or a transcript. Report a failed or
+  unavailable write without changing Cursor's settings.
 
 ## Retrieval contract
 
@@ -109,6 +128,10 @@ Native retrieval inherits each runtime's boundary:
   memory, including relevant topic files exposed through that facility.
 - Grok Build native recall is available only when its experimental memory
   feature is enabled and accessible.
+- Cursor broad recall can consult available Memories for the current project or
+  repository, but Cursor exposes no supported exhaustive native-memory search
+  contract. Report its project scope and partial coverage rather than claiming
+  every Cursor Memory was searched.
 
 If a requested provider is unavailable or cannot be queried, the answer names
 that provider and marks the result partial instead of claiming comprehensive
@@ -135,18 +158,18 @@ permission to reveal private data.
 A future federating interface should use `provider`, not `source`, because
 Witself records already use `source_kind` and `source_ref` for provenance. A
 request may eventually accept selectors such as
-`provider=auto|witself|native|codex|claude|grok|all`, with an envelope that
+`provider=auto|witself|native|codex|claude|grok|cursor|all`, with an envelope that
 reports requested providers, provider statuses, results, conflicts, and a
 top-level `partial` flag.
 
 That wire contract should be added only when each selected runtime exposes a
 supported retrieval boundary or a deliberate local federation adapter exists.
-Witself must not scrape generated Codex, Claude, or Grok files as if they were
-stable cross-provider APIs.
+Witself must not scrape generated Codex, Claude, Grok, or Cursor files as if
+they were stable cross-provider APIs.
 
 ## Runtime expectations
 
-All three managed runtimes load file guidance and MCP server instructions at
+All four managed runtimes load file guidance and MCP server instructions at
 runtime initialization. Start a new task after installing or upgrading so both
 instruction surfaces are refreshed.
 
@@ -162,3 +185,6 @@ Official runtime documentation:
   [MCP servers](https://docs.x.ai/build/features/mcp-servers),
   [memory commands](https://docs.x.ai/build/modes-and-commands), and
   [memory settings](https://docs.x.ai/build/settings/reference)
+- Cursor: [rules](https://docs.cursor.com/context/rules),
+  [Memories](https://docs.cursor.com/en/context/memories), and
+  [CLI rules and MCP](https://docs.cursor.com/en/cli/using)

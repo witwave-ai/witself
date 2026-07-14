@@ -214,6 +214,82 @@ func TestManagedInstructionsRejectMalformedAndMultipleMarkersWithoutWriting(t *t
 	}
 }
 
+func TestManagedInstructionsExclusiveFileRejectsUnmanagedOrExtraContent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		original func(managedInstructionsSpec) []byte
+		want     string
+	}{
+		{
+			name: "unmarked",
+			original: func(managedInstructionsSpec) []byte {
+				return []byte("personal rule\n")
+			},
+			want: "existing dedicated file is not managed by Witself",
+		},
+		{
+			name: "prefix",
+			original: func(spec managedInstructionsSpec) []byte {
+				return append([]byte("personal prefix\n"), spec.block...)
+			},
+			want: "dedicated file contains content outside the Witself managed block",
+		},
+		{
+			name: "suffix",
+			original: func(spec managedInstructionsSpec) []byte {
+				return append(append(append([]byte{}, spec.block...), '\n'), []byte("personal suffix\n")...)
+			},
+			want: "dedicated file contains content outside the Witself managed block",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dedicated.md")
+			spec := testManagedInstructionsSpec(path)
+			spec.exclusive = true
+			spec.removeEmpty = true
+			original := tc.original(spec)
+			if err := os.WriteFile(path, original, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installManagedInstructions(spec); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("install error = %v, want %q", err, tc.want)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, original) {
+				t.Fatalf("rejected exclusive install modified file: %q", got)
+			}
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o640 {
+				t.Fatalf("rejected exclusive install changed mode: info=%v err=%v", info, err)
+			}
+		})
+	}
+}
+
+func TestManagedInstructionsExclusiveRemovalRejectsMixedContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dedicated.md")
+	spec := testManagedInstructionsSpec(path)
+	spec.exclusive = true
+	spec.removeEmpty = true
+	original := append(append(append([]byte{}, spec.block...), '\n'), []byte("personal suffix\n")...)
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removeManagedInstructions(spec); err == nil ||
+		!strings.Contains(err.Error(), "dedicated file contains content outside the Witself managed block") {
+		t.Fatalf("remove error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("rejected exclusive removal modified file: %q", got)
+	}
+}
+
 func TestManagedInstructionsUsesConfiguredFilenameInTemporaryWriteErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "RUNTIME-RULES.md")
 	spec := testManagedInstructionsSpec(path)

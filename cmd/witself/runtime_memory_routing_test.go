@@ -15,10 +15,12 @@ func TestRuntimeMemoryRoutingSpecsSelectProviderFiles(t *testing.T) {
 	codexHome := filepath.Join(home, "codex")
 	claudeHome := filepath.Join(home, "claude")
 	grokHome := filepath.Join(home, "grok")
+	cursorHome := filepath.Join(home, "cursor")
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
 	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
 
 	for _, tc := range []struct {
 		runtimeName string
@@ -29,7 +31,7 @@ func TestRuntimeMemoryRoutingSpecsSelectProviderFiles(t *testing.T) {
 		{transcriptcapture.RuntimeCodex, "Codex", filepath.Join(codexHome, "AGENTS.md"), true},
 		{transcriptcapture.RuntimeClaudeCode, "Claude Code", filepath.Join(claudeHome, "rules", claudeMemoryRoutingRuleFile), true},
 		{transcriptcapture.RuntimeGrokBuild, "Grok Build", filepath.Join(grokHome, "AGENTS.md"), true},
-		{transcriptcapture.RuntimeCursor, "", "", false},
+		{transcriptcapture.RuntimeCursor, "Cursor", filepath.Join(cursorHome, "rules", cursorMemoryRoutingRuleFile), true},
 	} {
 		t.Run(tc.runtimeName, func(t *testing.T) {
 			spec, displayName, managed, err := runtimeMemoryRoutingSpec(tc.runtimeName)
@@ -70,6 +72,11 @@ func TestRuntimeMemoryRoutingLifecycleUsesProviderContract(t *testing.T) {
 			name: "grok", runtimeName: transcriptcapture.RuntimeGrokBuild, envName: "GROK_HOME",
 			path:         func(root string) string { return filepath.Join(root, "AGENTS.md") },
 			instructions: grokPortableMemoryRoutingInstructions, original: []byte("# Existing Grok rules\n"),
+		},
+		{
+			name: "cursor", runtimeName: transcriptcapture.RuntimeCursor, envName: "CURSOR_CONFIG_DIR",
+			path:         func(root string) string { return filepath.Join(root, "rules", cursorMemoryRoutingRuleFile) },
+			instructions: cursorMemoryRoutingInstructions, removed: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

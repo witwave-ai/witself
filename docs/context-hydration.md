@@ -225,8 +225,8 @@ this verbatim:
 
 This is a target stanza for the deferred unified Witself memory surface. For the
 implemented coexistence behavior, `witself install codex`, `witself install
-claude`, and `witself install grok` own separate managed routing guidance whose
-lifecycle and provider contracts are documented in
+claude`, `witself install grok`, and `witself install cursor` own separate
+managed routing guidance whose lifecycle and provider contracts are documented in
 [Agent Memory Routing](agent-memory-routing.md).
 
 ```markdown

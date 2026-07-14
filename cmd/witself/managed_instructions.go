@@ -25,6 +25,12 @@ type managedInstructionsSpec struct {
 	// removeEmpty is for dedicated Witself-owned files. Shared instruction
 	// files such as AGENTS.md retain an empty file after removing the block.
 	removeEmpty bool
+
+	// exclusive is for a dedicated file whose complete contents are owned by
+	// this managed block. Installation refuses an existing unmarked file or
+	// content outside the block instead of silently making user instructions
+	// part of a global runtime rule.
+	exclusive bool
 }
 
 type managedInstructionsSnapshot struct {
@@ -53,6 +59,11 @@ func installManagedInstructions(spec managedInstructionsSpec) (managedInstructio
 	snapshot, err := readManagedInstructionsSnapshot(spec)
 	if err != nil {
 		return managedInstructionsSnapshot{}, err
+	}
+	if spec.exclusive && snapshot.existed {
+		if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, true); err != nil {
+			return managedInstructionsSnapshot{}, err
+		}
 	}
 	updated, changed, err := upsertManagedInstructionsBlock(snapshot.data, spec)
 	if err != nil {
@@ -99,6 +110,11 @@ func removeManagedInstructions(spec managedInstructionsSpec) (managedInstruction
 	if !snapshot.existed {
 		return snapshot, nil
 	}
+	if spec.exclusive {
+		if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, false); err != nil {
+			return managedInstructionsSnapshot{}, err
+		}
+	}
 	updated, changed, err := removeManagedInstructionsBlock(snapshot.data, spec)
 	if err != nil {
 		return managedInstructionsSnapshot{}, err
@@ -142,6 +158,30 @@ func removeManagedInstructions(spec managedInstructionsSpec) (managedInstruction
 	snapshot.expectedInfo = expectedInfo
 	snapshot.expectedSet = true
 	return snapshot, nil
+}
+
+func validateExclusiveManagedInstructionsContent(raw []byte, spec managedInstructionsSpec, requireManaged bool) error {
+	start, end, found, err := managedInstructionsBlockRange(raw, spec)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if requireManaged {
+			return fmt.Errorf(
+				"refuse to install %s because the existing dedicated file is not managed by Witself",
+				spec.fileName,
+			)
+		}
+		return nil
+	}
+	trailing := raw[end:]
+	if start != 0 || (len(trailing) != 0 && !bytes.Equal(trailing, []byte("\n"))) {
+		return fmt.Errorf(
+			"refuse to modify %s because the dedicated file contains content outside the Witself managed block",
+			spec.fileName,
+		)
+	}
+	return nil
 }
 
 func (snapshot managedInstructionsSnapshot) restore() error {

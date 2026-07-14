@@ -83,7 +83,8 @@ func runtimeMemoryRoutingSpec(runtimeName string) (managedInstructionsSpec, stri
 		spec, err := grokManagedInstructionsSpec()
 		return spec, "Grok Build", true, err
 	case transcriptcapture.RuntimeCursor:
-		return managedInstructionsSpec{}, "", false, nil
+		spec, err := cursorManagedInstructionsSpec()
+		return spec, "Cursor", true, err
 	default:
 		return managedInstructionsSpec{}, "", false, fmt.Errorf("unsupported runtime %q", runtimeName)
 	}

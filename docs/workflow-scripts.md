@@ -888,10 +888,23 @@ never embeds the token in the MCP registration. The installed server command is
 equivalent to `witself mcp serve --runtime` with `codex`, `claude-code`,
 `grok-build`, or `cursor`.
 
+Each runtime also receives managed fact-versus-native-memory routing guidance.
+Cursor's rule is
+`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
+`~/.cursor/rules/witself-memory-routing.mdc`), with `alwaysApply: true`
+frontmatter. The default managed rule is discovered from the workspace's ancestor
+chain; a custom `CURSOR_CONFIG_DIR` is effective for routing only when the
+selected Cursor installation also discovers its `rules` directory. Cursor MCP
+keeps the standard dotted tool names, while Cursor Memories remain
+project-scoped and broad recall reports partial native-memory coverage.
+
 Expected behavior:
 
 - MCP stdio is the v0 transport.
 - MCP uses the token-bound identity and the same authorization as the CLI.
+- Reinstall replaces only Witself's marker-delimited routing policy without
+  duplicating it; uninstall removes that policy and preserves unrelated runtime
+  configuration.
 - The implemented slice exposes `witself.self.show`,
   `witself.transcript.list`, `witself.transcript.get`, and
   `witself.transcript.tail`; all are reads.

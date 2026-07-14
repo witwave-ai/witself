@@ -240,6 +240,39 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	}
 }
 
+func TestCursorMCPUsesDottedToolNames(t *testing.T) {
+	ctx := context.Background()
+	server := newWitselfMCPServerForRuntime(&fakeMCPBackend{}, transcriptcapture.RuntimeCursor)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.Tools) != 20 {
+		t.Fatalf("tools = %d, want 20", len(tools.Tools))
+	}
+	for _, tool := range tools.Tools {
+		if !strings.HasPrefix(tool.Name, "witself.") || strings.Contains(tool.Name, "witself_") {
+			t.Errorf("non-dotted Cursor tool name %q", tool.Name)
+		}
+	}
+	instructions := clientSession.InitializeResult().Instructions
+	if !strings.Contains(instructions, "witself.fact.set") || strings.Contains(instructions, "witself_fact_set") {
+		t.Fatalf("instructions = %q", instructions)
+	}
+}
+
 func (b *fakeMCPBackend) SendMessage(_ context.Context, in client.SendMessageInput) (client.Message, error) {
 	b.lastMessageSend = in
 	return client.Message{
@@ -582,11 +615,40 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 	}
 }
 
+func TestCursorMCPInstructionsLeadWithNativeMemoryRouting(t *testing.T) {
+	got := mcpInstructions(
+		transcriptcapture.RuntimeCursor,
+		"witself.self.show",
+		"witself.message.list",
+	)
+	if !strings.HasPrefix(got, cursorMemoryRoutingInstructions+"\n\n") {
+		t.Fatal("Cursor MCP instructions do not lead with the installed provider routing contract")
+	}
+	for _, want := range []string{
+		"Cursor Memories",
+		"current-project or repository-scoped advisory context",
+		"say the narrative was not stored",
+		"no supported exhaustive native-memory search contract",
+		"witself.fact.set",
+		"witself.fact.get",
+		"witself.fact.list",
+		"witself.fact.propose",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Cursor MCP instructions do not contain %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "witself_fact_set") {
+		t.Fatal("Cursor MCP instructions contain a Grok-portable tool name")
+	}
+}
+
 func TestProviderMCPHandshakeAdvertisesRuntimeRouting(t *testing.T) {
 	ctx := context.Background()
 	for _, runtimeName := range []string{
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeCursor,
 	} {
 		t.Run(runtimeName, func(t *testing.T) {
 			server := newWitselfMCPServerForRuntime(&fakeMCPBackend{}, runtimeName)

@@ -134,7 +134,14 @@ capture-mode event set without duplicating handlers.
 Grok Build receives `~/.grok/hooks/witself.json` and a native MCP entry in
 `~/.grok/config.toml`. Cursor merges handlers into `~/.cursor/hooks.json`,
 preserves unrelated entries in `~/.cursor/mcp.json`, and asks the Cursor CLI to
-enable the `witself` MCP registration.
+enable the `witself` MCP registration. Cursor also receives an always-applied
+MDC routing rule at
+`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
+`~/.cursor/rules/witself-memory-routing.mdc`). The default path is discovered as
+an ancestor rule for workspaces beneath the user's home. A custom
+`CURSOR_CONFIG_DIR` relocates the files Witself manages, but the selected Cursor
+installation must also discover that custom `rules` directory; Witself does not
+write a routing rule into each project.
 
 The installer does not set Codex `allow_managed_hooks_only` or Claude Code
 `allowManagedHooksOnly`, so unrelated user, project, and plugin hooks remain
@@ -142,12 +149,15 @@ available. If Claude Code is already governed by a higher-precedence server or
 MDM managed-settings source, deploy the same hook object through that active
 source instead; Claude Code does not merge separate managed tiers.
 
-`witself uninstall codex|claude|grok|cursor` removes the MCP registration, integration
-binding, and the recorded user or managed hooks. Agent tokens and pending local
-transcript events are deliberately preserved. `--managed-hooks` forces removal
-of the administrator-managed policy for a supported runtime. If the local
-integration record is missing, uninstall makes no changes; reinstall that
-runtime integration to reconstruct a rollback-safe binding, then uninstall it.
+`witself uninstall codex|claude|grok|cursor` removes the MCP registration,
+integration binding, managed memory-routing block or dedicated rule, and the
+recorded user or managed hooks. Agent tokens and pending local transcript events
+are deliberately preserved. Cursor uninstall removes its dedicated MDC rule
+when empty and preserves unrelated Cursor MCP and hook configuration.
+`--managed-hooks` forces removal of the administrator-managed policy for a
+supported runtime. If the local integration record is missing, uninstall makes
+no changes; reinstall that runtime integration to reconstruct a rollback-safe
+binding, then uninstall it.
 
 ## Capture And Delivery
 

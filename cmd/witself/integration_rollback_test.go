@@ -124,6 +124,63 @@ func saveRollbackBinding(t *testing.T, fixture rollbackIntegrationFixture, agent
 	return stored
 }
 
+func saveCursorRollbackBinding(t *testing.T, fixture rollbackIntegrationFixture, agent string) transcriptcapture.Config {
+	t.Helper()
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCursor, RuntimeVersion: "3.11.13",
+		CaptureMode: transcriptcapture.ModeRaw, HookMode: transcriptcapture.HookModeUser,
+		Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "realm_1",
+		Agent: agent, AgentID: "agent_previous", AgentName: agent,
+		Endpoint: fixture.serverURL, TokenFile: fixture.tokenPath, Location: location,
+	}
+	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+func setupCursorRollbackCLI(t *testing.T, fixture rollbackIntegrationFixture, cursorHome string) string {
+	t.Helper()
+	enabledPath := filepath.Join(fixture.home, "cursor-mcp-enabled")
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	t.Setenv("CURSOR_CLI_PATH", fixture.runtimeCLI)
+	t.Setenv("FAKE_CURSOR_MCP_PATH", filepath.Join(cursorHome, "mcp.json"))
+	t.Setenv("FAKE_CURSOR_ENABLED", enabledPath)
+	t.Setenv("FAKE_CURSOR_FAIL_ENABLE_AGENT", "")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MCP_LOG"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'Cursor 3.11.13'
+  exit 0
+fi
+if [ "$1 $2 $3 $4" = "agent mcp enable witself" ]; then
+  if [ -n "${FAKE_CURSOR_FAIL_ENABLE_AGENT:-}" ] && grep -Fq "$FAKE_CURSOR_FAIL_ENABLE_AGENT" "$FAKE_CURSOR_MCP_PATH"; then
+    printf '%s\n' 'forced Cursor MCP enable failure' >&2
+    exit 9
+  fi
+  : > "$FAKE_CURSOR_ENABLED"
+  exit 0
+fi
+if [ "$1 $2 $3 $4" = "agent mcp disable witself" ]; then
+  rm -f "$FAKE_CURSOR_ENABLED"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fixture.runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return enabledPath
+}
+
 func rollbackTestExecutable(t *testing.T) string {
 	t.Helper()
 	executable, err := currentExecutablePath()
@@ -325,6 +382,285 @@ exit 0
 	}
 }
 
+func TestCursorFailedReinstallRestoresPriorBindingHooksMCPAndRule(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "new-agent")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	enabledPath := setupCursorRollbackCLI(t, fixture, cursorHome)
+	previous := saveCursorRollbackBinding(t, fixture, "prior-agent")
+	executable := rollbackTestExecutable(t)
+
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cursorHome, "mcp.json"),
+		[]byte(`{"mcpServers":{"existing":{"command":"existing-mcp"}},"other":true}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerMCP(
+		transcriptcapture.RuntimeCursor,
+		fixture.runtimeCLI,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath, err := transcriptcapture.InstallHooks(
+		transcriptcapture.RuntimeCursor,
+		previous.CaptureMode,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routingPath, err := cursorMemoryRoutingPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(routingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	priorRouting := []byte(
+		cursorMemoryRoutingBeginMarker + "\n" +
+			"description: Prior Witself Cursor routing policy\n" +
+			"alwaysApply: true\n" +
+			"---\n" +
+			"## Prior managed routing contract\n" +
+			cursorMemoryRoutingEndMarker + "\n",
+	)
+	if err := os.WriteFile(routingPath, priorRouting, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	mcpPath, err := cursorMCPPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		path string
+		raw  []byte
+		mode os.FileMode
+	}{}
+	for name, path := range map[string]string{
+		"routing": routingPath,
+		"hooks":   hooksPath,
+		"MCP":     mcpPath,
+		"config":  configPath,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read initial %s: %v", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat initial %s: %v", name, err)
+		}
+		want[name] = struct {
+			path string
+			raw  []byte
+			mode os.FileMode
+		}{path: path, raw: raw, mode: info.Mode().Perm()}
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_CURSOR_FAIL_ENABLE_AGENT", "new-agent")
+
+	if code := installCmd([]string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "new-agent",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	for name, state := range want {
+		got, err := os.ReadFile(state.path)
+		if err != nil {
+			t.Fatalf("read restored %s: %v", name, err)
+		}
+		if !bytes.Equal(got, state.raw) {
+			t.Fatalf("restored %s = %q, want %q", name, got, state.raw)
+		}
+		info, err := os.Stat(state.path)
+		if err != nil {
+			t.Fatalf("stat restored %s: %v", name, err)
+		}
+		if info.Mode().Perm() != state.mode {
+			t.Fatalf("restored %s mode = %04o, want %04o", name, info.Mode().Perm(), state.mode)
+		}
+	}
+	gotMCP, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gotMCP), "new-agent") || !strings.Contains(string(gotMCP), "prior-agent") ||
+		!strings.Contains(string(gotMCP), "existing-mcp") {
+		t.Fatalf("failed Cursor reinstall retained the wrong MCP state: %s", gotMCP)
+	}
+	restoredConfig, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig.Agent != previous.Agent || restoredConfig.AgentID != previous.AgentID ||
+		restoredConfig.Location.Name != previous.Location.Name {
+		t.Fatalf("restored Cursor config = %#v, want prior binding %#v", restoredConfig, previous)
+	}
+	if _, err := os.Stat(enabledPath); err != nil {
+		t.Fatalf("prior Cursor MCP binding was not re-enabled: %v", err)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "agent mcp enable witself") != 2 {
+		t.Fatalf("unexpected Cursor reinstall rollback sequence: %s", log)
+	}
+}
+
+func TestCursorUnownedRoutingRuleBlocksInstallBeforeMCPOrHooks(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "new-agent")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	enabledPath := setupCursorRollbackCLI(t, fixture, cursorHome)
+	previous := saveCursorRollbackBinding(t, fixture, "prior-agent")
+	executable := rollbackTestExecutable(t)
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cursorHome, "mcp.json"),
+		[]byte(`{"mcpServers":{"existing":{"command":"existing-mcp"}},"other":true}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerMCP(
+		transcriptcapture.RuntimeCursor,
+		fixture.runtimeCLI,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath, err := transcriptcapture.InstallHooks(
+		transcriptcapture.RuntimeCursor,
+		previous.CaptureMode,
+		executable,
+		previous.Account,
+		previous.Realm,
+		previous.Agent,
+		previous.Location.Name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routingPath, err := cursorMemoryRoutingPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(routingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unownedRouting := []byte("---\ndescription: Personal Cursor rule\nalwaysApply: true\n---\n# Keep this rule\n")
+	if err := os.WriteFile(routingPath, unownedRouting, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	mcpPath, err := cursorMCPPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		path string
+		raw  []byte
+		mode os.FileMode
+	}{}
+	for name, path := range map[string]string{
+		"routing": routingPath,
+		"hooks":   hooksPath,
+		"MCP":     mcpPath,
+		"config":  configPath,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read initial %s: %v", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat initial %s: %v", name, err)
+		}
+		want[name] = struct {
+			path string
+			raw  []byte
+			mode os.FileMode
+		}{path: path, raw: raw, mode: info.Mode().Perm()}
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "new-agent",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	for name, state := range want {
+		got, err := os.ReadFile(state.path)
+		if err != nil {
+			t.Fatalf("read preserved %s: %v", name, err)
+		}
+		if !bytes.Equal(got, state.raw) {
+			t.Fatalf("preserved %s = %q, want %q", name, got, state.raw)
+		}
+		info, err := os.Stat(state.path)
+		if err != nil {
+			t.Fatalf("stat preserved %s: %v", name, err)
+		}
+		if info.Mode().Perm() != state.mode {
+			t.Fatalf("preserved %s mode = %04o, want %04o", name, info.Mode().Perm(), state.mode)
+		}
+	}
+	restoredConfig, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig.Agent != previous.Agent || restoredConfig.AgentID != previous.AgentID {
+		t.Fatalf("restored Cursor config = %#v, want prior binding %#v", restoredConfig, previous)
+	}
+	if _, err := os.Stat(enabledPath); err != nil {
+		t.Fatalf("pre-existing Cursor MCP binding was disabled: %v", err)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "agent mcp enable witself") ||
+		strings.Contains(string(log), "agent mcp disable witself") {
+		t.Fatalf("Cursor MCP changed before routing preflight completed: %s", log)
+	}
+}
+
 func TestHookInstallFailureRollsBackMCPConfigAndRouting(t *testing.T) {
 	fixture := setupRollbackIntegrationFixture(t, "scott")
 	if err := os.MkdirAll(fixture.codexHome, 0o700); err != nil {
@@ -382,6 +718,266 @@ func TestHookInstallFailureRollsBackMCPConfigAndRouting(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "mcp add witself") || strings.Count(string(log), "mcp remove witself") < 2 {
 		t.Fatalf("expected successful MCP add followed by rollback removal: %s", log)
+	}
+}
+
+func TestCursorHookInstallFailureRollsBackMCPConfigAndRouting(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "scott")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	t.Setenv("CURSOR_CLI_PATH", fixture.runtimeCLI)
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath := filepath.Join(cursorHome, "hooks.json")
+	originalHooks := []byte("{not valid json\n")
+	if err := os.WriteFile(hooksPath, originalHooks, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "scott",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+
+	for name, path := range map[string]string{
+		"MCP configuration": filepath.Join(cursorHome, "mcp.json"),
+		"routing rule":      filepath.Join(cursorHome, "rules", cursorMemoryRoutingRuleFile),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("failed Cursor install retained %s: %v", name, err)
+		}
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("failed Cursor install retained integration config: %v", err)
+	}
+	gotHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotHooks, originalHooks) {
+		t.Fatalf("failed Cursor hook install changed original hooks: %q", gotHooks)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "agent mcp enable witself") ||
+		!strings.Contains(string(log), "agent mcp disable witself") {
+		t.Fatalf("expected Cursor MCP enable followed by rollback disable: %s", log)
+	}
+}
+
+func TestCursorMalformedRoutingPreflightPreservesIntegration(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	witselfHome := filepath.Join(home, ".witself")
+	runtimeCLI := filepath.Join(home, "cursor")
+	cliLog := filepath.Join(home, "cursor-args.log")
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", witselfHome)
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	t.Setenv("CURSOR_CLI_PATH", runtimeCLI)
+	t.Setenv("FAKE_CURSOR_LOG", cliLog)
+	setInstallExecutableForTest(t)
+	if err := os.WriteFile(runtimeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURSOR_LOG\"\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCursor, RuntimeVersion: "3.11.13",
+		CaptureMode: transcriptcapture.ModeRaw, HookMode: transcriptcapture.HookModeUser,
+		Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "realm_1",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott", Location: location,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable := rollbackTestExecutable(t)
+	hooksPath, err := transcriptcapture.InstallHooks(
+		transcriptcapture.RuntimeCursor,
+		transcriptcapture.ModeRaw,
+		executable,
+		"default",
+		"default",
+		"scott",
+		"home",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registerCursorMCP([]string{
+		executable, "mcp", "serve", "--runtime", transcriptcapture.RuntimeCursor,
+		"--account", "default", "--realm", "default", "--agent", "scott", "--location", "home",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mcpPath, err := cursorMCPPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	routingPath, err := cursorMemoryRoutingPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(routingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	malformedRouting := []byte(cursorMemoryRoutingBeginMarker + "\ndescription: incomplete\n")
+	if err := os.WriteFile(routingPath, malformedRouting, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]byte{}
+	for name, path := range map[string]string{
+		"routing": routingPath,
+		"hooks":   hooksPath,
+		"MCP":     mcpPath,
+		"config":  configPath,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read initial %s: %v", name, err)
+		}
+		want[name] = raw
+	}
+
+	if code := uninstallCmd([]string{"cursor"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+	for name, path := range map[string]string{
+		"routing": routingPath,
+		"hooks":   hooksPath,
+		"MCP":     mcpPath,
+		"config":  configPath,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read preserved %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want[name]) {
+			t.Fatalf("%s changed after malformed-routing preflight: got %q want %q", name, got, want[name])
+		}
+	}
+	if _, err := os.Stat(cliLog); !os.IsNotExist(err) {
+		t.Fatalf("Cursor CLI ran before routing preflight completed: %v", err)
+	}
+}
+
+func TestCursorFailedUninstallRestoresRuleHooksMCPAndBinding(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary-user directory permissions to force integration-config removal failure")
+	}
+	fixture := setupRollbackIntegrationFixture(t, "scott")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	enabledPath := setupCursorRollbackCLI(t, fixture, cursorHome)
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cursorHome, "mcp.json"),
+		[]byte(`{"mcpServers":{"existing":{"command":"existing-mcp"}},"other":true}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "scott",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 0 {
+		t.Fatalf("initial install code = %d", code)
+	}
+	hooksPath := filepath.Join(cursorHome, "hooks.json")
+	routingPath, err := cursorMemoryRoutingPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpPath, err := cursorMCPPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		path string
+		raw  []byte
+		mode os.FileMode
+	}{}
+	for name, path := range map[string]string{
+		"routing": routingPath,
+		"hooks":   hooksPath,
+		"MCP":     mcpPath,
+		"config":  configPath,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read initial %s: %v", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat initial %s: %v", name, err)
+		}
+		want[name] = struct {
+			path string
+			raw  []byte
+			mode os.FileMode
+		}{path: path, raw: raw, mode: info.Mode().Perm()}
+	}
+	if err := os.WriteFile(fixture.mcpLogPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Dir(configPath)
+	if err := os.Chmod(configDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
+
+	if code := uninstallCmd([]string{"cursor"}); code != 1 {
+		t.Fatalf("uninstall code = %d, want 1", code)
+	}
+
+	for name, state := range want {
+		got, err := os.ReadFile(state.path)
+		if err != nil {
+			t.Fatalf("read restored %s: %v", name, err)
+		}
+		if !bytes.Equal(got, state.raw) {
+			t.Fatalf("restored %s = %q, want %q", name, got, state.raw)
+		}
+		info, err := os.Stat(state.path)
+		if err != nil {
+			t.Fatalf("stat restored %s: %v", name, err)
+		}
+		if info.Mode().Perm() != state.mode {
+			t.Fatalf("restored %s mode = %04o, want %04o", name, info.Mode().Perm(), state.mode)
+		}
+	}
+	if _, err := os.Stat(enabledPath); err != nil {
+		t.Fatalf("Cursor MCP binding was not re-enabled after rollback: %v", err)
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "agent mcp disable witself") ||
+		!strings.Contains(string(log), "agent mcp enable witself") {
+		t.Fatalf("Cursor uninstall rollback did not disable and restore MCP: %s", log)
 	}
 }
 

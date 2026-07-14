@@ -32,16 +32,15 @@ witself version
 
 Once an agent token exists under the normal `~/.witself` account layout, one
 command installs the Witself stdio MCP server and durable transcript hooks.
-Codex, Claude Code, and Grok Build also receive managed
+Codex, Claude Code, Grok Build, and Cursor also receive managed
 fact-versus-native-memory routing guidance:
 
 - Codex: `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`)
 - Claude Code: `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md` (normally
   `~/.claude/rules/witself-memory-routing.md`)
 - Grok Build: `$GROK_HOME/AGENTS.md` (normally `~/.grok/AGENTS.md`)
-
-Cursor receives the MCP server and transcript hooks but no managed routing
-file.
+- Cursor: `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
+  `~/.cursor/rules/witself-memory-routing.mdc`)
 
 ```sh
 witself install codex
@@ -68,11 +67,15 @@ integration identity and the retryable transcript outbox live under
 
 Managed guidance contains policy only, never personal facts. Reinstall updates
 the marker-delimited policy without duplicating it. Codex and Grok preserve
-unrelated content in their shared `AGENTS.md` files; Claude uses a dedicated
-rule file that uninstall removes when empty. Codex installation refuses to
-proceed when a non-empty global `AGENTS.override.md` would shadow its managed
-file. After installing, restart the runtime and start a new task so the file
-guidance and MCP initialization are refreshed. See
+unrelated content in their shared `AGENTS.md` files; Claude and Cursor use
+dedicated rule files that uninstall removes when empty. Cursor's MDC rule has
+`alwaysApply: true` frontmatter and is discovered as an ancestor rule for
+workspaces below the normal user home. `CURSOR_CONFIG_DIR` relocates the files
+Witself manages, but the selected Cursor runtime must also discover that custom
+`rules` directory; Witself does not copy the rule into each project. Codex
+installation refuses to proceed when a non-empty global `AGENTS.override.md`
+would shadow its managed file. After installing, restart the runtime and start a
+new task so the file guidance and MCP initialization are refreshed. See
 [Agent Memory Routing](docs/agent-memory-routing.md).
 
 Administrator-managed hooks are the Codex and Claude Code default. Run the

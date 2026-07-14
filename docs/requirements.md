@@ -525,14 +525,15 @@ Teaching layer (three reinforcing surfaces that all say the same thing, because 
 service the agent forgets to call is worthless):
 
 1. **MCP server `instructions` field** — returned on connect by `witself mcp
-   serve`. Codex, Claude Code, and Grok Build each receive the provider policy
-   from [Agent Memory Routing](agent-memory-routing.md): explicitly requested
-   atomic assertions use `fact.set`, narrative capture stays on the supported
-   native-memory path, and broad recall reports partial provider coverage.
-   Codex retains the implemented base protocol; Claude uses a compact suffix to
-   stay within its 2 KiB limit; Grok uses that suffix with underscore-safe tool
-   names. The remaining standing protocol covers implemented self, fact,
-   transcript, and message tools.
+   serve`. Codex, Claude Code, Grok Build, and Cursor each receive the provider
+   policy from [Agent Memory Routing](agent-memory-routing.md): explicitly
+   requested atomic assertions use `fact.set`, narrative capture stays on the
+   supported native-memory path, and broad recall reports partial provider
+   coverage. Codex prepends its full provider contract; Claude uses a compact
+   suffix to stay within its 2 KiB limit; Grok uses that suffix with
+   underscore-safe tool names; Cursor uses the suffix with standard dotted tool
+   names and project-scoped Memories semantics. The remaining standing protocol
+   covers implemented self, fact, transcript, and message tools.
 2. **Tool descriptions as instruction** — every implemented fact/self tool's
    prose embeds an explicit when-to-call trigger list, including the distinction
    between a requested canonical write and a merely observed fact candidate.

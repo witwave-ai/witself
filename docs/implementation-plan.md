@@ -288,11 +288,14 @@ Deliverables:
   durable assertion calls `witself.fact.set` in the same turn; a merely stated
   fact follows the candidate/review path; narrative context stays eligible for
   runtime-native memory; mixed requests split; and explicit destinations win.
-  Codex, Claude Code, and Grok Build receive this contract through managed file
-  guidance and provider-specific MCP runtime instructions. Claude's installed
-  rule is runtime-neutral for compatibility loading while its MCP policy carries
-  Claude auto-memory semantics; Grok's installed and MCP guidance uses
-  underscore-safe tool names. `witself remember`, `witself.remember`, and `POST
+  Codex, Claude Code, Grok Build, and Cursor receive this contract through
+  managed file guidance and provider-specific MCP runtime instructions.
+  Claude's installed rule is runtime-neutral for compatibility loading while
+  its MCP policy carries Claude auto-memory semantics; Grok's installed and MCP
+  guidance uses underscore-safe tool names. Cursor's always-applied ancestor MDC
+  rule and MCP guidance retain dotted tool names, treat Cursor Memories as
+  project-scoped advisory context, and report broad native recall as partial.
+  `witself remember`, `witself.remember`, and `POST
   /v1/remember` remain deferred; if implemented, invoking them explicitly
   selects Witself and never masquerades as the runtime's native-memory path.
 - `witself self show` / `witself.self.show` / `GET /v1/self`: the bounded,
@@ -347,12 +350,12 @@ Deliverables:
 
 Exit criteria:
 
-- For Codex, Claude Code, and Grok Build, a natural explicit fact-capture request
-  reaches `fact.set` in the same turn, a narrative request is not converted into
-  a Witself fact or transcript fallback, and merely stated facts remain
-  candidates rather than canonical truth. Each runtime's managed file and MCP
-  surfaces preserve one behavioral contract, including provider-specific native
-  memory availability and confirmation semantics.
+- For Codex, Claude Code, Grok Build, and Cursor, a natural explicit fact-capture
+  request reaches `fact.set` in the same turn, a narrative request is not
+  converted into a Witself fact or transcript fallback, and merely stated facts
+  remain candidates rather than canonical truth. Each runtime's managed file
+  and MCP surfaces preserve one behavioral contract, including provider-specific
+  native memory availability and confirmation semantics.
 - `witself self show` returns a digest under its byte cap without the embedding
   provider, sets `elided=true` when capped, and points to `memory.recall`.
 - A session can be started and ended across process restarts so resuming is one

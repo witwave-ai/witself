@@ -39,6 +39,11 @@ func preflightRuntimeMemoryRoutingRemoval(runtimeName string) error {
 	if !snapshot.existed {
 		return nil
 	}
+	if spec.exclusive {
+		if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, false); err != nil {
+			return fmt.Errorf("remove %s memory routing instructions: %w", displayName, err)
+		}
+	}
 	if _, _, err := removeManagedInstructionsBlock(snapshot.data, spec); err != nil {
 		return fmt.Errorf("remove %s memory routing instructions: %w", displayName, err)
 	}

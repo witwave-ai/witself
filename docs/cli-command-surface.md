@@ -2595,6 +2595,17 @@ when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
 
+Install also writes the managed fact-versus-native-memory routing policy for
+the selected runtime. Cursor uses
+`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
+`~/.cursor/rules/witself-memory-routing.mdc`) with `alwaysApply: true`
+frontmatter and dotted Witself MCP tool names. The default rule is discovered
+for workspaces beneath the user's home through Cursor's ancestor rule search;
+a custom `CURSOR_CONFIG_DIR` works for routing only when that Cursor
+installation also discovers its `rules` directory. Cursor Memories remain
+project-scoped advisory context, so broad native-memory recall reports partial
+coverage rather than claiming an exhaustive search.
+
 Administrator-managed hooks are the default for Codex and Claude Code while
 identity and MCP registration remain user-scoped. The command prompts for
 administrator access only for that system policy write. Codex uses
