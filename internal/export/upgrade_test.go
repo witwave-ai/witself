@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -64,6 +65,36 @@ func TestSchema26FactDeletionUpgrade(t *testing.T) {
 	other, err := upgrade("fact_assertions", map[string]any{"id": "fas_1"})
 	if err != nil || len(other) != 1 {
 		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
+func TestSchema27FactDeletionActivationPreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(27)
+	if upgrade == nil {
+		t.Fatal("schema 27 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":                         "fact_1",
+		"deleted_at":                 "2026-07-14T00:00:00Z",
+		"deleted_candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"deleted_assertion_count":    json.Number("9007199254740993"),
+	}
+	want := map[string]any{
+		"id":                         "fact_1",
+		"deleted_at":                 "2026-07-14T00:00:00Z",
+		"deleted_candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"deleted_assertion_count":    json.Number("9007199254740993"),
+	}
+	got, err := upgrade("facts", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 27 identity upgrade changed row: got %#v, want %#v", got, want)
+	}
+	other, err := upgrade("agents", map[string]any{"id": "agent_1"})
+	if err != nil || !reflect.DeepEqual(other, map[string]any{"id": "agent_1"}) {
+		t.Fatalf("schema 27 identity upgrade changed unrelated row: %#v / %v", other, err)
 	}
 }
 

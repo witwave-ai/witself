@@ -26,6 +26,17 @@ type Upgrader func(table string, row map[string]any) (map[string]any, error)
 var upgraders = map[int]Upgrader{
 	25: addFactIdempotencyDefaults,
 	26: addFactDeletionDefaults,
+	27: preserveSchema27Rows,
+}
+
+// preserveSchema27Rows is an explicit archive-discipline acknowledgement for
+// migration 0028. That migration removes a redundant full-address UNIQUE
+// constraint after the schema-27 writer-compatibility rollout; it changes what
+// relational states Postgres accepts but does not add, remove, or transform an
+// archive field. Registering the identity step keeps that non-additive schema
+// decision visible to the enforced upgrader chain.
+func preserveSchema27Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // addFactIdempotencyDefaults lifts schema-25 archives into the constrained
