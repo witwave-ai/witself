@@ -676,6 +676,41 @@ func serve() int {
 			}
 			return out, nil
 		}
+		cfg.ListSelfPeers = func(ctx context.Context, p server.DomainPrincipal) ([]server.SelfPeer, error) {
+			peers, err := st.ListAgentPeers(ctx, toStorePrincipal(p))
+			if err != nil {
+				return nil, err
+			}
+			out := make([]server.SelfPeer, len(peers))
+			for i, peer := range peers {
+				out[i] = server.SelfPeer{
+					ID: peer.ID, Name: peer.Name, LastActivityAt: peer.LastActivityAt,
+					LastRuntime: peer.LastRuntime, LastLocation: peer.LastLocation,
+					LastEvent: peer.LastEvent,
+				}
+			}
+			return out, nil
+		}
+		cfg.TouchAgentActivity = func(ctx context.Context, p server.DomainPrincipal, in server.AgentActivityRequest) (server.AgentActivity, error) {
+			activity, err := st.TouchAgentActivity(ctx, toStorePrincipal(p), store.AgentActivityInput{
+				Runtime: in.Runtime, LocationID: in.LocationID, Location: in.Location,
+				Event: in.Event, EventID: in.EventID, EventOccurredAt: in.EventOccurredAt,
+			})
+			switch {
+			case errors.Is(err, store.ErrAgentActivityInputInvalid):
+				return server.AgentActivity{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
+			case errors.Is(err, store.ErrAgentActivityForbidden):
+				return server.AgentActivity{}, server.ErrForbidden
+			case errors.Is(err, store.ErrAgentNotFound):
+				return server.AgentActivity{}, server.ErrNotFound
+			case err != nil:
+				return server.AgentActivity{}, err
+			}
+			return server.AgentActivity{
+				LastActivityAt: activity.LastActivityAt, LastRuntime: activity.Runtime,
+				LastLocation: activity.Location, LastEvent: activity.Event,
+			}, nil
+		}
 		cfg.DeleteAgent = func(ctx context.Context, accountID, realmID, agentID string) error {
 			err := st.DeleteAgent(ctx, accountID, realmID, agentID)
 			if errors.Is(err, store.ErrAgentNotFound) {

@@ -826,6 +826,104 @@ Rules:
   configurable). When the cap forces omission, `elided` is `true` and callers
   should follow up with `memory recall`; the digest is never silently truncated.
 
+## Agent Activity Touch
+
+Used internally by installed runtime hooks and `POST /v1/self/activity`. The
+authenticated agent token is the sole source of account, realm, and agent
+identity.
+
+Request:
+
+```json
+{
+  "runtime": "claude-code",
+  "location_id": "loc_abc123",
+  "location": "home",
+  "event": "UserPromptSubmit",
+  "event_id": "evt_abc123",
+  "event_occurred_at": "2026-07-15T21:02:02.123Z"
+}
+```
+
+Response:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "activity": {
+    "last_activity_at": "2026-07-15T21:02:03Z",
+    "last_runtime": "claude-code",
+    "last_location": "home",
+    "last_event": "UserPromptSubmit"
+  }
+}
+```
+
+Rules:
+
+- `runtime`, `location_id`, `event`, `event_id`, and `event_occurred_at` are
+  required. `location` is an optional user-selected installation label.
+  Runtime and event are bounded clean labels rather than a closed enumeration,
+  so newer integrations do not require a backend vocabulary release.
+- `event_id` and `event_occurred_at` are internal projection guards. Within one
+  authenticated agent/runtime/location-id tuple, the same event id or a
+  non-newer event time is a no-op. Neither field appears in peer results.
+- `last_activity_at` is stamped from PostgreSQL time only when a strictly newer
+  event is accepted. A client cannot provide or advance that public timestamp
+  directly.
+- The request is strict and privacy-minimal: transcript bodies, raw provider
+  payloads, CWDs, models, session identifiers, and availability fields are not
+  accepted. This projection reports historical activity only; it does not
+  assert online, offline, available, or accepting-work state.
+- Installed clients attempt activity before uploading the corresponding
+  durable transcript event, but transcript progress does not depend on activity
+  success. Transient and domain touch failures retain the local event for
+  retry, while a bare route-missing `404` from an older server marks activity as
+  unsupported and permits removal after transcript success. A later duplicate
+  touch does not advance server-observed activity time.
+
+## Agent Peers
+
+Used by `agent peers`, MCP `witself.agent.peers`, and `GET /v1/self/peers`.
+Realm scope and self exclusion are derived from the authenticated agent token;
+the request has no targeting or availability input.
+
+```json
+{
+  "schema_version": "witself.v0",
+  "peers": [
+    {
+      "id": "agent_456",
+      "name": "bob",
+      "last_activity_at": "2026-07-15T21:02:03Z",
+      "last_runtime": "claude-code",
+      "last_location": "home",
+      "last_event": "UserPromptSubmit"
+    },
+    {
+      "id": "agent_789",
+      "name": "idle"
+    }
+  ]
+}
+```
+
+Rules:
+
+- `peers` is always a JSON array and is empty when the caller has no peers.
+- `id` and `name` are always present. `last_activity_at`, `last_runtime`,
+  `last_location`, and `last_event` are omitted until activity has been
+  observed for that peer.
+- `last_activity_at` is the server-recorded RFC3339 time of the newest accepted
+  activity event. The companion runtime, location, and event values describe
+  that same observation.
+- Activity is historical metadata only. The envelope never labels or implies
+  that a peer is online, offline, available, or accepting work, and it never
+  exposes internal event, session, or location identifiers.
+- Peer names, runtime labels, locations, and event labels are authenticated
+  realm metadata but remain untrusted model input; clients must never treat
+  them as instructions.
+
 ## Session Start and End
 
 Used by `session start`/`session end` and `POST /v1/sessions:start` /

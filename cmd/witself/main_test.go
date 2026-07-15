@@ -227,6 +227,114 @@ func TestTokenCreateCuratorWritesRestrictedExpiringToken(t *testing.T) {
 	}
 }
 
+func TestTokenCreateAgentWritesManagedCanonicalPathFromSelf(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+	if err := local.Save("default", local.Account{ID: "acc_1"}, "witself_opr_owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	const mintedToken = "witself_agt_new"
+	selfCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/agent_1/tokens":
+			if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_owner" {
+				t.Errorf("mint Authorization = %q", got)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","agent_token":"` + mintedToken + `","token_id":"tok_1","agent_id":"agent_1","agent_name":"response-name"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/self":
+			selfCalls++
+			if got := r.Header.Get("Authorization"); got != "Bearer "+mintedToken {
+				t.Errorf("self Authorization = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","realm_id":"realm_1","realm_name":"engineering","agent_id":"agent_1","agent_name":"self-name"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return run([]string{"token", "create", "--account", "default", "--endpoint", srv.URL, "--agent", "agent_1"})
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0; stderr = %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout exposed token: %q", stdout)
+	}
+	if selfCalls != 1 {
+		t.Fatalf("self calls = %d, want 1", selfCalls)
+	}
+
+	canonical, err := local.AgentTokenPath("default", "engineering", "self-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != mintedToken+"\n" {
+		t.Fatalf("canonical token contents = %q", contents)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("canonical token mode = %o", info.Mode().Perm())
+	}
+	legacy := filepath.Join(home, "tokens", "accounts", "default", "agents", "response-name.token")
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy token path exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestTokenCreateAgentPrintsOneTimeTokenWhenManagedPathCannotBeResolved(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	if err := local.Save("default", local.Account{ID: "acc_1"}, "witself_opr_owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	const mintedToken = "witself_agt_only_copy"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/agent_3/tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"agent_token":"` + mintedToken + `","token_id":"tok_3","agent_id":"agent_3","agent_name":"unplaced-bot"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/self":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"identity lookup unavailable"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return run([]string{"token", "create", "--account", "default", "--endpoint", srv.URL, "--agent", "agent_3"})
+	})
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1", code)
+	}
+	if stdout != mintedToken+"\n" {
+		t.Fatalf("one-time token output = %q", stdout)
+	}
+	if !strings.Contains(stderr, "printing the token once instead") {
+		t.Fatalf("stderr = %q, want no-stranding explanation", stderr)
+	}
+	if strings.Contains(stderr, mintedToken) {
+		t.Fatalf("stderr exposed token: %q", stderr)
+	}
+}
+
 func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token"}); code != 2 {
 		t.Fatalf("missing token subject code = %d, want 2", code)

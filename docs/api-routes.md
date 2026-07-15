@@ -753,13 +753,17 @@ as documented here.
 
 ## Self-Management And Hydration Routes
 
-These routes back the agent self-managed memory and hydration surface; see
-[context-hydration.md](context-hydration.md). Every mutating route returns the
-deterministic `echo` string and any `warnings[]` (e.g. `memory_duplicate`)
-described in [api-contract.md](api-contract.md).
+These routes back the agent self-managed memory, hydration, and observational
+activity surfaces; see [context-hydration.md](context-hydration.md). User-
+authored memory mutations return the deterministic `echo` string and any
+`warnings[]` (e.g. `memory_duplicate`) described in
+[api-contract.md](api-contract.md); the internal activity touch returns the
+projection contract documented below.
 
 ```text
 GET  /v1/self                # ?format=claude-md|agents-md|markdown for digest emit
+GET  /v1/self/peers
+POST /v1/self/activity       # authenticated runtime-hook activity projection
 POST /v1/remember
 POST /v1/sessions:start
 POST /v1/sessions:end
@@ -776,6 +780,24 @@ POST /v1/memories:consolidate # superseded target; not implemented
   renders the digest as a CLAUDE.md/AGENTS.md/Markdown fragment with witself
   provenance comments — this is the HTTP surface for `witself digest emit`; no
   separate emit resource exists.
+- `GET /v1/self/peers` lists every other non-deleted agent in the authenticated
+  agent's realm, with each peer's optional last-observed activity fields. Realm
+  scope and self exclusion come only from the agent token; there are no realm,
+  agent, availability, or status query parameters. A missing activity timestamp
+  means no activity has been recorded, not that the peer is offline.
+- `POST /v1/self/activity` is the agent-token-only hook ingestion route behind
+  those timestamps. It accepts only bounded runtime, installation, canonical
+  event, event-id, and client event-time metadata; it never accepts transcript
+  content, CWDs, models, session identifiers, availability, or a public
+  activity timestamp. The client time and event id order and deduplicate the
+  per-agent/runtime/installation projection, while PostgreSQL stamps
+  `last_activity_at` when a strictly newer event is accepted. Replaying the
+  same or an older event returns the current projection without advancing that
+  server-observed time. Transcript upload proceeds independently when an
+  activity touch fails. Every transient or domain activity error leaves the
+  local event queued so the touch can retry; only an older server's bare
+  route-missing `404` is treated as permanently unsupported, allowing the event
+  to be removed after its transcript upload succeeds.
 - `POST /v1/remember` is deferred. If implemented, invoking it is an explicit
   choice of Witself: a clear name→value assertion may upsert a fact and other
   text may add Witself memory with dedup/supersede. It never bypasses validation

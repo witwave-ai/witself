@@ -6,6 +6,7 @@ import (
 	neturl "net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SelfIdentity is the token-derived account, realm, and agent identity.
@@ -68,6 +69,26 @@ type SelfOptions struct {
 	MaximumByteSize int
 }
 
+// PeerAgent is one other principal in the authenticated agent's realm.
+// Activity fields are observations only; they do not imply that the peer is
+// online, available, or accepting work.
+type PeerAgent struct {
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	LastRuntime    string     `json:"last_runtime,omitempty"`
+	LastLocation   string     `json:"last_location,omitempty"`
+	LastEvent      string     `json:"last_event,omitempty"`
+}
+
+// SelfPeers is the realm-safe peer inventory returned to an authenticated
+// agent. The server derives both the realm and the excluded self agent from the
+// token; callers cannot provide either as targeting input.
+type SelfPeers struct {
+	SchemaVersion string      `json:"schema_version"`
+	Peers         []PeerAgent `json:"peers"`
+}
+
 // GetSelf fetches the token-bound agent's self digest.
 func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (SelfDigest, error) {
 	params := neturl.Values{}
@@ -83,6 +104,20 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	var out SelfDigest
 	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
 		return SelfDigest{}, err
+	}
+	return out, nil
+}
+
+// GetSelfPeers lists every other agent in the token-derived realm together
+// with its most recently observed activity, when any has been recorded.
+func GetSelfPeers(ctx context.Context, endpoint, token string) (SelfPeers, error) {
+	url := strings.TrimRight(endpoint, "/") + "/v1/self/peers"
+	var out SelfPeers
+	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return SelfPeers{}, err
+	}
+	if out.Peers == nil {
+		out.Peers = []PeerAgent{}
 	}
 	return out, nil
 }

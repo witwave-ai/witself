@@ -273,6 +273,45 @@ func TestRawHookCoverageByRuntime(t *testing.T) {
 	}
 }
 
+func TestActivityObservationCanonicalizesEveryCurrentRuntimeWithoutContent(t *testing.T) {
+	for _, test := range []struct {
+		runtime, raw, wantEvent string
+	}{
+		{RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"private codex prompt","cwd":"/private/codex"}`, "UserPromptSubmit"},
+		{RuntimeClaudeCode, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"private claude prompt","cwd":"/private/claude"}`, "UserPromptSubmit"},
+		{RuntimeGrokBuild, `{"sessionId":"session-1","hookEventName":"user_prompt_submit","promptId":"prompt-1","prompt":"private grok prompt","cwd":"/private/grok"}`, "UserPromptSubmit"},
+		{RuntimeCursor, `{"conversation_id":"session-1","generation_id":"generation-1","hook_event_name":"afterAgentResponse","text":"private cursor response","cwd":"/private/cursor"}`, "AgentResponse"},
+	} {
+		t.Run(test.runtime, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+			location, err := EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(Config{
+				Runtime: test.runtime, CaptureMode: ModeRaw,
+				Account: "default", Realm: "default", Agent: "scott",
+				AgentID: "agent_1", AgentName: "scott", Location: location,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			event := enqueueTestHook(t, test.runtime, test.raw)
+			observation := event.ActivityObservation()
+			if observation.Runtime != test.runtime || observation.LocationID != location.ID ||
+				observation.Location != "home" || observation.Event != test.wantEvent ||
+				observation.EventID != event.ID || !observation.EventOccurredAt.Equal(event.OccurredAt) {
+				t.Fatalf("activity observation = %#v", observation)
+			}
+			formatted := fmt.Sprintf("%#v", observation)
+			for _, forbidden := range []string{"private ", "/private/", "session-1", "prompt-1"} {
+				if strings.Contains(formatted, forbidden) {
+					t.Fatalf("activity observation leaked %q: %s", forbidden, formatted)
+				}
+			}
+		})
+	}
+}
+
 func TestGrokHooksUseDedicatedGlobalFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

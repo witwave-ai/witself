@@ -737,8 +737,12 @@ func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	t.Setenv("WITSELF_HOME", home)
 	var mu sync.Mutex
 	var appended []map[string]any
+	routeMisses := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			routeMisses++
+			http.NotFound(w, r) // pre-activity server during a rolling upgrade
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
 			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
@@ -800,11 +804,105 @@ func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	if len(appended) != 3 {
 		t.Fatalf("appended = %#v", appended)
 	}
+	if routeMisses != 3 {
+		t.Fatalf("activity compatibility probes = %d, want 3", routeMisses)
+	}
 	if appended[1]["body"] != "the full original prompt" || appended[2]["body"] != "the full final response" {
 		t.Fatalf("visible turn = %#v", appended)
 	}
 	if appended[2]["reply_to_external_id"] != appended[1]["external_id"] {
 		t.Fatalf("reply link = %#v", appended[2])
+	}
+}
+
+func TestCaptureFlushActivityFailureDoesNotBlockTranscriptAndRetriesSameEvent(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	var order []string
+	var touches []map[string]any
+	createAttempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			order = append(order, "activity")
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode activity: %v", err)
+				http.Error(w, "bad activity", http.StatusBadRequest)
+				return
+			}
+			if len(body) != 6 || body["runtime"] != "cursor" || body["location"] != "home" ||
+				body["event"] != "UserPromptSubmit" || body["location_id"] == "" ||
+				body["event_id"] == "" || body["event_occurred_at"] == "" {
+				t.Errorf("activity body = %#v", body)
+			}
+			for _, forbidden := range []string{"cwd", "body", "model", "raw", "availability", "session_id"} {
+				if _, exists := body[forbidden]; exists {
+					t.Errorf("activity body exposed %s: %#v", forbidden, body)
+				}
+			}
+			touches = append(touches, body)
+			if len(touches) == 1 {
+				http.Error(w, "temporary activity failure", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-07-15T20:00:00Z","last_runtime":"cursor","last_location":"home","last_event":"UserPromptSubmit"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			order = append(order, "transcript")
+			createAttempts++
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			order = append(order, "batch")
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCursor, CaptureMode: transcriptcapture.ModeMessages,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: location,
+		Endpoint: srv.URL, TokenFile: tokenPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCursor, []byte(
+		`{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","prompt":"private prompt","cwd":"/private/worktree"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCursor}); code != 1 {
+		t.Fatalf("activity-failed flush code = %d, want retryable failure", code)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCursor)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending after failed activity = %d / %v", len(pending), err)
+	}
+	if createAttempts != 1 {
+		t.Fatalf("transcript attempts after activity failure = %d, want 1", createAttempts)
+	}
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCursor}); code != 0 {
+		t.Fatalf("successful retry flush code = %d", code)
+	}
+	pending, err = transcriptcapture.Pending(transcriptcapture.RuntimeCursor)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after retry = %d / %v", len(pending), err)
+	}
+	if got := strings.Join(order, ","); got != "activity,transcript,batch,activity,transcript,batch" {
+		t.Fatalf("request order = %s", got)
+	}
+	if len(touches) != 2 || touches[0]["event_id"] != touches[1]["event_id"] ||
+		touches[0]["event_occurred_at"] != touches[1]["event_occurred_at"] {
+		t.Fatalf("retry touches = %#v", touches)
 	}
 }
 

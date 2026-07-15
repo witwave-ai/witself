@@ -63,6 +63,27 @@ type Event struct {
 	Raw                  json.RawMessage `json:"raw,omitempty"`
 }
 
+// ActivityObservation is the deliberately narrow hook projection sent to the
+// activity endpoint. Transcript content, paths, models, raw provider payloads,
+// and session identifiers never cross this boundary.
+type ActivityObservation struct {
+	Runtime         string
+	LocationID      string
+	Location        string
+	Event           string
+	EventID         string
+	EventOccurredAt time.Time
+}
+
+// ActivityObservation returns only privacy-safe activity metadata. HookEvent
+// has already been normalized from each provider's native event vocabulary.
+func (e Event) ActivityObservation() ActivityObservation {
+	return ActivityObservation{
+		Runtime: e.Runtime, LocationID: e.Location.ID, Location: e.Location.Name,
+		Event: e.HookEvent, EventID: e.ID, EventOccurredAt: e.OccurredAt,
+	}
+}
+
 // Entry is one server append generated from an event. Large visible bodies are
 // chunked without truncation; all chunks retain the same event id in payload.
 type Entry struct {

@@ -98,6 +98,12 @@ source of truth.
 - `agents` — `agent_…` id, realm, name, state (`active`/`disabled`/`archived`),
   timestamps. The durable named principal; identity is derived from the token,
   never from input.
+- `agent_activity` — migration-0039 latest-only observation projections, one
+  row per agent/runtime/installation. Client event ids and event times provide
+  retry and ordering guards; PostgreSQL alone stamps the public
+  `last_activity_at`. Same-realm peer reads aggregate the newest row per agent
+  and never infer online, offline, available, or accepting-work state. These
+  canonical rows are account archive data; the local runtime-hook outbox is not.
 - `tokens` — `tok_…` id, principal, token hash, immutable access profile,
   optional display name/expiry, and state. `full` is the compatibility default;
   expiring `curator-preview` and `curator-apply` are valid only for agent

@@ -25,6 +25,7 @@ var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "operators", introducedSchema: 2},
 	{name: "realms", introducedSchema: 4},
 	{name: "agents", introducedSchema: 5},
+	{name: "agent_activity", introducedSchema: 39},
 	{name: "fact_subjects", introducedSchema: 22},
 	{name: "facts", introducedSchema: 22},
 	{name: "fact_mutation_tombstones", introducedSchema: 27},

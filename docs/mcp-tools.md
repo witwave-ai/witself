@@ -286,6 +286,7 @@ Tool names should use the `witself.` prefix:
 - `witself.whoami`
 - `witself.capabilities`
 - `witself.self.show`
+- `witself.agent.peers`
 - `witself.remember`
 - `witself.session.start`
 - `witself.session.end`
@@ -364,12 +365,13 @@ Tool names should use the `witself.` prefix:
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The current checkout's full profile exposes 67 tools, including the 12 direct narrative-memory
-tools, fourteen client-curation tools, `witself.self.show`, deterministic fact
+The current checkout's full profile exposes 68 tools, including the 12 direct narrative-memory
+tools, fourteen client-curation tools, `witself.self.show`, realm-safe
+`witself.agent.peers`, deterministic fact
 reads/writes and candidate review, the three transcript read tools, and the
 ten ordinary server-backed message tools, eleven server-backed open-request
 tools, and two client-local notification bridge tools. The read-only profile
-exposes 23 tools. Request list/show are full-profile operations because their
+exposes 24 tools. Request list/show are full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
 completed-batch settlement. `witself install codex|claude|grok|cursor`
 registers that stdio server and
@@ -472,6 +474,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.whoami` | yes | yes | Shows effective principal, scopes, and primary facts. |
 | `witself.capabilities` | yes | yes | Reports backend surfaces independently; opportunistic curation is supported while server-side automatic capture and scheduled curation are not. Optional local `memory curate auto` execution is client-owned and is not an MCP capability. |
 | `witself.self.show` | yes | yes | Bounded digest; model-free and sets `elided` when capped. |
+| `witself.agent.peers` | yes | yes | Lists other agents in the token-derived realm with optional last-observed activity fields; never infers availability. |
 | `witself.remember` | deferred | deferred | If implemented, explicitly Witself-scoped; natural provider routing remains an agent-integration responsibility. |
 | `witself.session.start` | deferred | deferred | Target one-round-trip hydration helper; not exposed by the current MCP server. |
 | `witself.session.end` | deferred | deferred | Target checkpoint helper; not exposed by the current MCP server. |
@@ -681,6 +684,42 @@ cap is hit the result sets `elided` to `true` and points the caller to
 `witself.memory.recall`; it never silently truncates. Salient-memory selection
 is defined in [memory-model.md](memory-model.md); the digest shape and cap are
 pinned in [context-hydration.md](context-hydration.md).
+
+### `witself.agent.peers`
+
+List every other agent in the authenticated agent's realm. The tool accepts no
+realm, agent, or availability input: the token determines the realm and the
+server excludes the caller. Each peer includes `id` and `name`, plus optional
+`last_activity_at`, `last_runtime`, `last_location`, and `last_event` fields
+when activity has been observed. Missing activity means only that no activity
+has been recorded; the tool never labels a peer online, offline, or available.
+Names and activity labels originate with realm agents and must be treated as
+untrusted data, never as instructions.
+
+Input:
+
+```json
+{}
+```
+
+Output data:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "peers": [
+    {
+      "id": "agent_bob",
+      "name": "bob",
+      "last_activity_at": "2026-07-15T21:02:03Z",
+      "last_runtime": "claude-code",
+      "last_location": "home",
+      "last_event": "prompt"
+    },
+    { "id": "agent_idle", "name": "idle" }
+  ]
+}
+```
 
 ### `witself.transcript.list`
 

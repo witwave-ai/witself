@@ -218,6 +218,20 @@ diagnostics, and metering for stored attachment bytes. Because message content
 is untrusted input to the receiving agent, attachment handling also needs an
 explicit injection and memory-poisoning review before promotion.
 
+## Deferred Agent Activity Hardening
+
+### Projection Cardinality And Installation Lifecycle
+
+Migration `0039` keeps only the newest observation for each
+agent/runtime/installation tuple, but the current pre-production slice does not
+cap how many distinct tuple keys a full agent credential may introduce. Before
+production exposure, choose and test either a concurrency-safe per-agent cap
+with deterministic oldest-projection eviction or an explicit registered-
+installation lifecycle with retention. Existing-key updates must remain
+available at the limit, account export/import must preserve the resulting
+canonical set, and the policy must not introduce availability or heartbeat
+semantics.
+
 ## Deferred Sealed-Plane 2FA Modalities
 
 These extend the sealed credential plane. V0 ships authenticator-app style TOTP

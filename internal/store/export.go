@@ -120,6 +120,18 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_activity", q: `
+			SELECT jsonb_build_object(
+			  'agent_id', aa.agent_id, 'runtime', aa.runtime,
+			  'location_id', aa.location_id, 'location', aa.location,
+			  'last_event', aa.last_event, 'last_event_id', aa.last_event_id,
+			  'last_event_occurred_at', aa.last_event_occurred_at,
+			  'last_activity_at', aa.last_activity_at)
+			FROM agent_activity aa
+			JOIN agents a ON a.id = aa.agent_id
+			JOIN realms r ON r.id = a.realm_id
+			WHERE r.account_id = $1
+			ORDER BY aa.agent_id, aa.runtime, aa.location_id`, arg: accountID},
 		&querySource{tx: tx, table: "fact_subjects", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,

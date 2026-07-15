@@ -1941,12 +1941,12 @@ Defaults:
   value-returning `witself.reference.resolve`) while leaving redacted/metadata
   tools available. `--no-value-tools` and `--read-only` are independent switches.
 
-The current full MCP profile exposes 67 tools. MCP exposes direct agent-useful
+The current full MCP profile exposes 68 tools. MCP exposes direct agent-useful
 memory capture/adjust/read/history/recall/list/
 supersede/lifecycle/evidence/delete tools, fourteen curation tools
 (`preflight`, `requests`, `request.get`, `request`, `start`, `run.get`, `renew`,
 `get`, `plan`, `apply`, `cancel`, `abandon`, `rollback`, and `status`), plus the
-implemented fact tools, ten server-backed direct-message tools, eleven
+implemented fact tools, the realm-safe peer-activity tool, ten server-backed direct-message tools, eleven
 server-backed realm-request tools, and the two client-local notification bridge
 tools. Read-only retains request list/show and notification list but not request
 mutations or notification consume; curator profiles expose neither. The broader target also includes

@@ -503,7 +503,7 @@ func realmList(args []string) int {
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself agent create|list|delete [--account NAME] --realm REALM")
+		fmt.Fprintln(os.Stderr, "usage: witself agent create|list|peers|delete [--account NAME] [--realm REALM]")
 		return 2
 	}
 	switch args[0] {
@@ -511,6 +511,8 @@ func agentCmd(args []string) int {
 		return agentCreate(args[1:])
 	case "list":
 		return agentList(args[1:])
+	case "peers":
+		return agentPeers(args[1:])
 	case "delete":
 		return agentDelete(args[1:])
 	default:
@@ -825,12 +827,14 @@ func tokenCreate(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
-	// Resolve the local account name early: named operator tokens default to
-	// its managed home (accounts/<name>/operators/<token-name>.token).
+	// Resolve the local account early so automatically managed operator and
+	// agent credentials can use its canonical local name and verify its id.
 	managedAccount := ""
+	managedAccountID := ""
 	if *tokenFile == "" {
-		if n, _, _, err := local.Resolve(*account); err == nil {
+		if n, acct, _, err := local.Resolve(*account); err == nil {
 			managedAccount = n
+			managedAccountID = acct.ID
 		}
 	}
 	ep, op, err := connect(ctx, *account, *endpoint, *tokenFile)
@@ -903,16 +907,16 @@ func tokenCreate(args []string) int {
 	}
 	dest := *out
 	if dest == "" && managedAccount != "" && !curator {
-		// Managed home: agents/<agent-name>.token, falling back to the agent
-		// id when the name isn't filename-safe (or the cell predates the
-		// field) — both charsets are collision-free.
-		fileBase := agentName
-		if !cellNamePattern.MatchString(fileBase) {
-			fileBase = *agent
-		}
-		tp, perr := local.TokenPath(managedAccount)
-		if perr == nil {
-			dest = filepath.Join(filepath.Dir(tp), "agents", fileBase+".token")
+		var pathErr error
+		dest, pathErr = managedAgentTokenDestination(
+			ctx, ep, agentTok, managedAccount, managedAccountID, *agent,
+		)
+		if pathErr != nil {
+			// The server returns this credential only once. A failed identity
+			// lookup must not consume the only copy without giving it back.
+			fmt.Fprintf(os.Stderr, "witself: determining managed path for the new agent token: %v — printing the token once instead:\n", pathErr)
+			fmt.Println(agentTok)
+			return 1
 		}
 	}
 	if dest != "" && dest != "-" {
@@ -935,6 +939,47 @@ func tokenCreate(args []string) int {
 	}
 	fmt.Println(agentTok)
 	return 0
+}
+
+// managedAgentTokenDestination resolves the canonical realm-scoped home for a
+// freshly minted full agent token. The token-derived self identity is the
+// authoritative source: it cannot accidentally select a same-named agent in a
+// different realm.
+func managedAgentTokenDestination(
+	ctx context.Context,
+	endpoint, agentToken, accountName, accountID, requestedAgentID string,
+) (string, error) {
+	digest, err := client.GetSelf(ctx, endpoint, agentToken, client.SelfOptions{})
+	if err != nil {
+		return "", fmt.Errorf("authenticate new token: %w", err)
+	}
+	identity := digest.Identity
+	if strings.TrimSpace(identity.AccountID) == "" {
+		return "", errors.New("new token identity did not include an account id")
+	}
+	if accountID != "" && identity.AccountID != accountID {
+		return "", fmt.Errorf("new token belongs to account %s, not local account %s (%s)", identity.AccountID, accountName, accountID)
+	}
+	if strings.TrimSpace(identity.AgentID) == "" {
+		return "", errors.New("new token identity did not include an agent id")
+	}
+	if identity.AgentID != requestedAgentID {
+		return "", fmt.Errorf("new token belongs to agent %s, not requested agent %s", identity.AgentID, requestedAgentID)
+	}
+	if strings.TrimSpace(identity.RealmID) == "" {
+		return "", errors.New("new token identity did not include a realm id")
+	}
+	if strings.TrimSpace(identity.RealmName) == "" {
+		return "", errors.New("new token identity did not include a realm name")
+	}
+	if strings.TrimSpace(identity.AgentName) == "" {
+		return "", errors.New("new token identity did not include an agent name")
+	}
+	path, err := local.AgentTokenPath(accountName, identity.RealmName, identity.AgentName)
+	if err != nil {
+		return "", fmt.Errorf("new token identity has unusable local selectors: %w", err)
+	}
+	return path, nil
 }
 
 func tokenRevoke(args []string) int {
@@ -3757,7 +3802,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself account close        Permanently close an account (owner only)")
 	usageLine(w, "  witself account forget       Remove a local account binding (server untouched)")
 	usageLine(w, "  witself realm create|list|delete")
-	usageLine(w, "  witself agent create|list|delete")
+	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
