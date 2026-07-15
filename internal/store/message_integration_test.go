@@ -1128,6 +1128,141 @@ func receiveMessageRaceError(ctx context.Context, t *testing.T, result <-chan er
 	}
 }
 
+func TestMessageAudienceFanoutPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	provisioned, err := st.ProvisionAccount(ctx, "message-audience-test@witwave.ai", "message audience test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID) }()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %v / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := make([]Agent, 4)
+	for i, name := range []string{"sender", "alice", "bob", "carol"} {
+		agents[i], err = st.CreateAgent(ctx, provisioned.AccountID, realm.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	principal := func(agent Agent) Principal {
+		return Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID,
+			RealmID: realm.ID, AgentName: agent.Name, AccountStatus: "active"}
+	}
+	sender := principal(agents[0])
+	alice := principal(agents[1])
+	bob := principal(agents[2])
+	carol := principal(agents[3])
+
+	explicit, err := st.SendMessage(ctx, sender, SendMessageInput{
+		AudienceKind: MessageRecipientAgents,
+		ToAgents:     []string{agents[2].ID, agents[1].Name, agents[1].ID},
+		Kind:         "request", Body: "fan out", IdempotencyKey: "audience-explicit-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.To.Kind != MessageRecipientAgents || explicit.To.Count != 2 || explicit.To.ID != "" {
+		t.Fatalf("explicit audience projection = %#v", explicit.To)
+	}
+	var deliveryCount int
+	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_message_deliveries WHERE message_id=$1`, explicit.ID).Scan(&deliveryCount); err != nil || deliveryCount != 2 {
+		t.Fatalf("explicit delivery count = %d / %v, want 2", deliveryCount, err)
+	}
+	for _, recipient := range []Principal{alice, bob} {
+		page, err := st.ListMessages(ctx, recipient, MessageFilter{ThreadID: explicit.ThreadID, Limit: 10})
+		if err != nil || len(page.Messages) != 1 || page.Messages[0].ID != explicit.ID ||
+			page.Messages[0].To.Kind != MessageRecipientAgents || page.Messages[0].To.Count != 2 {
+			t.Fatalf("recipient %s inbox = %#v / %v", recipient.AgentName, page, err)
+		}
+	}
+	carolPage, err := st.ListMessages(ctx, carol, MessageFilter{ThreadID: explicit.ThreadID, Limit: 10})
+	if err != nil || len(carolPage.Messages) != 0 {
+		t.Fatalf("non-recipient inbox = %#v / %v", carolPage, err)
+	}
+	outbox, err := st.ListMessages(ctx, sender, MessageFilter{Direction: MessageDirectionOutbox, ThreadID: explicit.ThreadID, Limit: 10})
+	if err != nil || len(outbox.Messages) != 1 || outbox.Messages[0].ID != explicit.ID || outbox.Messages[0].To.Count != 2 {
+		t.Fatalf("fanout outbox = %#v / %v", outbox, err)
+	}
+
+	reply, err := st.ReplyMessage(ctx, bob, explicit.ID, ReplyMessageInput{Body: "offer", IdempotencyKey: "audience-reply-1"})
+	if err != nil || reply.To.ID != agents[0].ID || reply.ReplyToMessageID != explicit.ID {
+		t.Fatalf("fanout reply = %#v / %v", reply, err)
+	}
+	claim, err := st.ClaimMessage(ctx, alice, explicit.ID, ClaimMessageInput{IdempotencyKey: "audience-claim-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := st.CompleteMessage(ctx, alice, explicit.ID, CompleteMessageInput{
+		ClaimID: claim.Processing.ClaimID, ProcessingGeneration: claim.Processing.Generation,
+		IdempotencyKey: "audience-complete-1", Body: "done",
+	})
+	if err != nil || completed.ResultMessage.To.ID != agents[0].ID || completed.ResultMessage.ReplyToMessageID != explicit.ID {
+		t.Fatalf("fanout completion = %#v / %v", completed, err)
+	}
+	outbox, err = st.ListMessages(ctx, sender, MessageFilter{Direction: MessageDirectionOutbox, ThreadID: explicit.ThreadID, Limit: 10})
+	if err != nil || len(outbox.Messages) != 1 || outbox.Messages[0].ID != explicit.ID {
+		t.Fatalf("post-completion fanout outbox = %#v / %v", outbox, err)
+	}
+	if _, err := st.ReadMessage(ctx, carol, explicit.ID); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("non-recipient read error = %v, want ErrMessageNotFound", err)
+	}
+
+	realmMessage, err := st.SendMessage(ctx, sender, SendMessageInput{
+		AudienceKind: MessageRecipientRealm, Kind: "note", Body: "realm notice",
+		IdempotencyKey: "audience-realm-1",
+	})
+	if err != nil || realmMessage.To.Kind != MessageRecipientRealm || realmMessage.To.Count != 3 {
+		t.Fatalf("realm send = %#v / %v", realmMessage, err)
+	}
+	late, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "late")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := st.SendMessage(ctx, sender, SendMessageInput{
+		AudienceKind: MessageRecipientRealm, Kind: "note", Body: "realm notice",
+		IdempotencyKey: "audience-realm-1",
+	})
+	if err != nil || replay.ID != realmMessage.ID || replay.To.Count != 3 {
+		t.Fatalf("realm retry = %#v / %v", replay, err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_message_deliveries WHERE message_id=$1`, realmMessage.ID).Scan(&deliveryCount); err != nil || deliveryCount != 3 {
+		t.Fatalf("realm retry delivery count = %d / %v, want 3", deliveryCount, err)
+	}
+	latePage, err := st.ListMessages(ctx, principal(late), MessageFilter{ThreadID: realmMessage.ThreadID, Limit: 10})
+	if err != nil || len(latePage.Messages) != 0 {
+		t.Fatalf("late realm member inbox = %#v / %v", latePage, err)
+	}
+
+	if _, err := st.SendMessage(ctx, sender, SendMessageInput{
+		AudienceKind: MessageRecipientAgents, ToAgents: []string{agents[1].ID, "missing"},
+		Body: "must roll back", IdempotencyKey: "audience-invalid-1",
+	}); !errors.Is(err, ErrMessageRecipientMissing) {
+		t.Fatalf("invalid audience error = %v, want ErrMessageRecipientMissing", err)
+	}
+	var invalidCount int
+	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_messages WHERE account_id=$1 AND idempotency_key='audience-invalid-1'`, provisioned.AccountID).Scan(&invalidCount); err != nil || invalidCount != 0 {
+		t.Fatalf("invalid audience inserted %d messages / %v", invalidCount, err)
+	}
+}
+
 func deleteAccountForIntegrationTest(ctx context.Context, st *Store, accountID string) error {
 	tx, err := st.pool.Begin(ctx)
 	if err != nil {

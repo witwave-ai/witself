@@ -34,6 +34,19 @@ var upgraders = map[int]Upgrader{
 	33: addMessageProcessingDefaults,
 	34: addMessageCausalDepthDefault,
 	35: addMessageFailureCountDefault,
+	36: addMessageAudienceDefaults,
+}
+
+// addMessageAudienceDefaults lifts the one-recipient message shape written
+// before migration 0037 into the explicit direct-audience representation.
+// A schema-36 archive can only contain the to_agent_id-backed delivery that
+// was authoritative at the time, so no audience snapshot is synthesized.
+func addMessageAudienceDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_messages" {
+		row["audience_kind"] = "agent"
+		row["audience_fingerprint"] = ""
+	}
+	return row, nil
 }
 
 // addMessageFailureCountDefault supplies the backend-owned deterministic

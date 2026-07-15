@@ -795,11 +795,11 @@ A message has:
   from input.** Sender forgery is structurally impossible through the API.
 - `to`: a recipient agent, bounded explicit agent list, token-derived realm, or
   group.
-- In the implemented direct slice, a lowercase `agent_` recipient selector is
+- In the implemented messaging slice, a lowercase `agent_` recipient selector is
   exact ID-only and never falls back to a name. Inbox list/listen sender filters
   use the same rule; ordinary selectors match exact ID or name with ID
   precedence.
-- `subject`/`kind`: a short classification. Omitted direct-send kind normalizes
+- `subject`/`kind`: a short classification. Omitted ordinary-send kind normalizes
   to actionable `request` across CLI, MCP, and backend writes. Explicit `note`
   is FYI-only to the runner and uses the notification/ack path without
   inference.
@@ -831,21 +831,25 @@ Trust boundary and threats:
 - Rate limits apply to send and delivery. `message:send` and `message:read`
   scopes gate the surface. Send, deliver, and read events are audited.
 - Read, acknowledgement, direct-delivery processing claim, and work completion
-  are distinct. Future open-request claims are a separate multi-assignee model.
+  are distinct. Open-request claims use the separate migration-0038
+  multi-assignee request model rather than overloading delivery processing.
   Autonomous processing persists a reply/result and completes the current
-  fenced claim before acknowledging handled work.
+  fenced delivery or request claim before acknowledging handled work.
 
 Autonomous delegation:
 
-- Coordination modes are `notify`, `each`, `claim`, and `collaborate`.
+- `notify`, `each`, `claim`, and `collaborate` are conceptual client coordination
+  behaviors, not a persisted backend `coordination.mode`. `claim` maps to the
+  separate open-request operation; the other behaviors use ordinary sends.
 - Questions, replies, offers, and results remain ordinary messages in the
   opening request's thread.
 - Open realm requests may select one or several agents. Offers are advisory;
   authoritative capacity is enforced by token-derived claims with expiry,
   renewal, and fencing generations.
-- The initiating client AI selects the best offers. The backend may store and
-  filter declared capabilities and availability but performs no semantic
-  routing or model ranking.
+- The immutable token-derived coordinator client AI selects the best offers.
+  The backend stores bounded, untrusted offer content but neither defines nor
+  filters responsibility, capability, availability, directive, or profile
+  fields and performs no semantic routing or model ranking.
 - A client-owned runner performs listen/claim/read/invoke/complete/ack with
   bounded retries, concurrency, turns, and elapsed time. Direct completion
   atomically persists the derived result reply and processing result link under
@@ -861,7 +865,7 @@ Autonomous delegation:
   escalates the fifth deterministic attempt. Payload history, payload turn
   fields, and host-local counters are advisory only and cannot reset either
   bound.
-- The implemented direct runner retains the Witself credential only in its
+- The implemented runner retains the Witself credential only in its
   trusted parent. Text-only provider children receive no token, token path,
   processing fence, API handle, or MCP/tools. Native Claude Code and Grok Build
   are capability-probed; native Codex and Cursor fail closed. Enable captures
@@ -893,20 +897,31 @@ Autonomous delegation:
 - A message carries no authority and can never forward direct-user
   authorization for permanent deletion, secret reveal, or another protected
   operation.
+- Request opening, offer, and result messages are protocol notifications, not
+  ordinary claimable work. Full-profile clients scan candidate assigned,
+  candidate collecting-offers, and coordinator awaiting-selection request
+  lanes at task start because selection creates reservations without another
+  ordinary message; ordinary processing claims reject protocol-linked rows.
 
 Surfaces:
 
 - CLI: the `message` group with implemented `send`/`reply`/`list`/`listen`/
-  `read`/`ack`/`claim`/`renew`/`release`/`complete`, plus the client-local
-  `message runner enable|disable|status|notifications|run|serve|start`
-  lifecycle. Future multi-assignee request-claim operations remain target work.
+  `read`/`ack`/`claim`/`renew`/`release`/`complete`; the implemented
+  `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`
+  lifecycle; and the client-local
+  `message runner enable|disable|status|notifications|run|serve|start` lifecycle.
 - MCP: `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
-  plus local bridge tools `witself.message.notification.list/consume`. List,
-  listen, and notification list are metadata-only; read, notification consume,
-  ack, claim, and completion are separate state transitions.
+  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`
+  and local bridge tools `witself.message.notification.list/consume`. Message
+  list/listen and notification list are read-only; request list/show are
+  full-profile because lazy lifecycle reconciliation may persist state;
+  read, notification consume, ack, claim, and completion are separate state
+  transitions.
 - API: `/v1/messages`, `POST /v1/messages:listen`, and recipient-only colon
   actions `:reply`, `:read`, `:ack`, `:claim`, `:renew`, `:release`, and
-  `:complete` on a message id.
+  `:complete` on a message id; plus create/list/detail under
+  `/v1/message-requests` and request actions `:offer`, `:decline`, `:select`,
+  `:cancel`, `:claim`, `:renew`, `:release`, and `:complete`.
 - A stable JSON Message shape shared by all frontends.
 - Messages sent and delivered are metered billing dimensions.
 
@@ -940,15 +955,16 @@ Export posture:
   mutation receipts, and curation attribution. Import validates graph scope and
   hashes, interrupts active leases, clears active lanes, and advances fences so
   an in-flight source-cell client cannot apply after the move.
-- Account export carries direct messages, migration-0035 reply causality/depth,
-  delivery/read/ack state, migration-0034 processing state, and migration-0036
-  deterministic `failure_count`. Import validates or derives causal depth from
-  the reply graph and preserves completed processing, its validated result link,
-  and the failure count. Every active message claim is interrupted by changing
-  it to `available`, incrementing its generation without incrementing failure
-  count, and clearing its claim id, retry-key hash, and lease before the
-  destination account resumes. Archives older than schema 36 upgrade the count
-  to zero.
+- Account export carries migration-0037 direct/explicit-list/realm messages and
+  their immutable delivery snapshots; migration-0035 reply causality/depth;
+  delivery/read/ack state; migration-0034 processing state; migration-0036
+  deterministic `failure_count`; and the full migration-0038 open-request
+  candidate, selection, claim, and result graph. Import validates or derives
+  causal depth and fanout fingerprints, preserves completed processing and
+  validated result links, and interrupts every active direct claim. Active
+  open-request reservations/claims are cancelled and fenced forward so work
+  from the source cell cannot complete after import. Archives older than schema
+  36 upgrade direct failure counts to zero.
 - For operators, export can include realm-level context: policies, security-group
   membership, and group-owned memories and facts.
 - Export is round-trippable: `witself import` restores an exported self into the
@@ -1826,7 +1842,8 @@ Open plane:
 - `policy` (`create`/`list`/`show`/`delete`/`test`).
 - `group` (`create`/`list`/`show`/`add-member`/`remove-member`/`delete`).
 - `message` (`send`/`reply`/`list`/`listen`/`read`/`ack`/`claim`/`renew`/
-  `release`/`complete`, plus client-local
+  `release`/`complete`; `request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`;
+  plus client-local
   `runner enable|disable|status|notifications|run|serve|start`).
 
 Sealed plane:
@@ -1856,7 +1873,8 @@ The MCP tool catalog spans both planes:
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
 - `witself.group.list/show`.
 - `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
-  plus local `witself.message.notification.list/consume` bridge tools.
+  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`
+  and local `witself.message.notification.list/consume` bridge tools.
 - `witself.secret.create/list/show/reveal/update` (sealed plane).
 - `witself.totp.enroll/code/show` (sealed plane).
 - `witself.password.generate` (sealed plane).
@@ -1923,14 +1941,15 @@ Defaults:
   value-returning `witself.reference.resolve`) while leaving redacted/metadata
   tools available. `--no-value-tools` and `--read-only` are independent switches.
 
-The current full MCP profile exposes 56 tools. MCP exposes direct agent-useful
+The current full MCP profile exposes 67 tools. MCP exposes direct agent-useful
 memory capture/adjust/read/history/recall/list/
 supersede/lifecycle/evidence/delete tools, fourteen curation tools
 (`preflight`, `requests`, `request.get`, `request`, `start`, `run.get`, `renew`,
 `get`, `plan`, `apply`, `cancel`, `abandon`, `rollback`, and `status`), plus the
-implemented fact tools, ten server-backed direct-message tools, and the two
-client-local notification bridge tools. Read-only retains notification list but
-not consume; curator profiles expose neither. The broader target also includes
+implemented fact tools, ten server-backed direct-message tools, eleven
+server-backed realm-request tools, and the two client-local notification bridge
+tools. Read-only retains request list/show and notification list but not request
+mutations or notification consume; curator profiles expose neither. The broader target also includes
 remaining policy, group, reference, secret, TOTP, and password operations as
 their product slices land. High-risk admin actions such as
 realm deletion, broad agent lifecycle operations, policy mutation, secret grant,
@@ -2034,6 +2053,16 @@ reconciliation, and customer exports. Initial event names include:
 - `message.processing.renewed`
 - `message.processing.released`
 - `message.processing.completed`
+- `message.request.opened`
+- `message.request.offered`
+- `message.request.declined`
+- `message.request.selected`
+- `message.request.claimed`
+- `message.request.renewed`
+- `message.request.released`
+- `message.request.completed`
+- `message.request.cancelled`
+- `message.request.expired` (system actor)
 - `identity.exported`
 - `identity.imported`
 - `secret.created`
@@ -2200,7 +2229,8 @@ API contract requirements:
   `server_side_decrypt` (see [Encryption (Two-Tier)](#encryption-two-tier)).
 - Use resource-oriented `/v1` REST-ish routes with plural resources, including
   the open-plane `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and
-  `/v1/messages`, the curation resources `/v1/memory-curation-requests` and
+  `/v1/messages`, the coordination resource `/v1/message-requests`, the
+  curation resources `/v1/memory-curation-requests` and
   `/v1/memory-curation-runs`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
 - Expose all 13 curation routes: request create/list/get/start; run get/inputs/
   renew/plan/apply/cancel/abandon/rollback; and value-free status. Mutations
@@ -2217,6 +2247,10 @@ API contract requirements:
   `/v1/messages/{message_id}:claim`, `/v1/messages/{message_id}:renew`,
   `/v1/messages/{message_id}:release`, `/v1/messages/{message_id}:complete`, and
   `/v1/tokens/{token_id}:rotate`.
+- Expose message-request create/list/detail at `/v1/message-requests` and
+  `/v1/message-requests/{request_id}`, plus `POST` actions `:offer`, `:decline`,
+  `:select`, `:cancel`, `:claim`, `:renew`, `:release`, and `:complete` on a
+  request id.
 - Use the sealed-plane action subroutes
   `/v1/secrets/{secret_id}:reveal` (returns one sensitive field; carries the
   `client_side_decrypt` ciphertext-and-envelope shape or the `server_side_decrypt`

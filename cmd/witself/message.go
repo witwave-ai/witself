@@ -13,7 +13,7 @@ import (
 
 func messageCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself message send|reply|list|listen|read|ack|claim|renew|release|complete|runner ...")
+		fmt.Fprintln(os.Stderr, "usage: witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request|runner ...")
 		return 2
 	}
 	switch args[0] {
@@ -37,6 +37,8 @@ func messageCmd(args []string) int {
 		return messageRelease(args[1:])
 	case "complete":
 		return messageComplete(args[1:])
+	case "request":
+		return messageRequestCmd(args[1:])
 	case "runner":
 		return messageRunnerCmd(args[1:])
 	default:
@@ -72,6 +74,9 @@ func messageSend(args []string) int {
 	fs.SetOutput(os.Stderr)
 	connFlags := addMessageConnectionFlags(fs)
 	to := fs.String("to", "", "recipient agent name or agent_ id")
+	var toAgents csvListFlag
+	fs.Var(&toAgents, "to-agents", "recipient agent names or agent_ ids (repeatable or comma-separated)")
+	toRealm := fs.Bool("to-realm", false, "deliver to every other agent in the realm")
 	subject := fs.String("subject", "", "short message subject")
 	kind := fs.String("kind", "request", "short message classification; use note for FYI-only delivery")
 	body := fs.String("body", "", "message body")
@@ -84,8 +89,9 @@ func messageSend(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || strings.TrimSpace(*to) == "" {
-		fmt.Fprintln(os.Stderr, "usage: witself message send --to AGENT (--body TEXT|--body-file FILE|--body-stdin) [--payload-file FILE]")
+	audienceKind, recipients, ok := messageSendAudience(*to, toAgents, *toRealm)
+	if fs.NArg() != 0 || !ok {
+		fmt.Fprintln(os.Stderr, "usage: witself message send (--to AGENT|--to-agents AGENT[,AGENT...]|--to-realm) (--body TEXT|--body-file FILE|--body-stdin) [--payload-file FILE]")
 		return 2
 	}
 	text, err := readBodyFromFlags(*body, *bodyFile, *bodyStdin)
@@ -109,8 +115,9 @@ func messageSend(args []string) int {
 		return 1
 	}
 	msg, err := client.SendMessage(ctx, conn.Endpoint, conn.Token, client.SendMessageInput{
-		To: strings.TrimSpace(*to), Subject: *subject, Kind: *kind, Body: text,
+		AudienceKind: audienceKind, Subject: *subject, Kind: *kind, Body: text,
 		Payload: payload, ThreadID: *threadID, IdempotencyKey: *idempotencyKey,
+		To: recipients.direct, ToAgents: recipients.agents,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -119,8 +126,71 @@ func messageSend(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"message": msg})
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n", msg.ID, msg.ThreadID, msg.To.AgentName, msg.Delivery.State)
+	fmt.Printf("%s\t%s\t%s\t%s\n", msg.ID, msg.ThreadID, tabSafe(safeText(messageRecipientLabel(msg.To))), msg.Delivery.State)
 	return 0
+}
+
+type messageSendRecipients struct {
+	direct string
+	agents []string
+}
+
+func messageSendAudience(to string, toAgents []string, toRealm bool) (string, messageSendRecipients, bool) {
+	direct := strings.TrimSpace(to)
+	choices := 0
+	if direct != "" {
+		choices++
+	}
+	if len(toAgents) != 0 {
+		choices++
+	}
+	if toRealm {
+		choices++
+	}
+	if choices != 1 {
+		return "", messageSendRecipients{}, false
+	}
+	if direct != "" {
+		return "agent", messageSendRecipients{direct: direct}, true
+	}
+	if len(toAgents) != 0 {
+		return "agents", messageSendRecipients{agents: []string(toAgents)}, true
+	}
+	return "realm", messageSendRecipients{}, true
+}
+
+func messageRecipientLabel(recipient client.MessageRecipient) string {
+	switch recipient.Kind {
+	case "agent":
+		if strings.TrimSpace(recipient.AgentName) != "" {
+			return recipient.AgentName
+		}
+		if strings.TrimSpace(recipient.AgentID) != "" {
+			return recipient.AgentID
+		}
+		return "agent"
+	case "agents", "realm":
+		if recipient.Count > 0 {
+			return fmt.Sprintf("%s(%d)", recipient.Kind, recipient.Count)
+		}
+		return recipient.Kind
+	default:
+		if strings.TrimSpace(recipient.Kind) != "" {
+			return recipient.Kind
+		}
+		return "unknown"
+	}
+}
+
+func messageRecipientDetailLabel(recipient client.MessageRecipient) string {
+	label := messageRecipientLabel(recipient)
+	if recipient.Kind == "agent" && recipient.AgentID != "" && recipient.AgentID != label {
+		return fmt.Sprintf("%s (%s)", label, recipient.AgentID)
+	}
+	if (recipient.Kind == "agents" || recipient.Kind == "realm") && recipient.Count > 0 {
+		return fmt.Sprintf("%s (%d recipients)", recipient.Kind, recipient.Count)
+	}
+	return label
 }
 
 func messageReply(args []string) int {
@@ -178,7 +248,7 @@ func messageReply(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"message": msg})
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n", msg.ID, msg.ThreadID, msg.To.AgentName, msg.Delivery.State)
+	fmt.Printf("%s\t%s\t%s\t%s\n", msg.ID, msg.ThreadID, tabSafe(safeText(messageRecipientLabel(msg.To))), msg.Delivery.State)
 	return 0
 }
 
@@ -289,7 +359,7 @@ func printMessageSummaryTable(messages []client.Message) {
 	for _, msg := range messages {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			formatTime(msg.CreatedAt), msg.ReadState.State, msg.Processing.State, msg.ID,
-			tabSafe(safeText(msg.From.AgentName)), tabSafe(safeText(msg.To.AgentName)),
+			tabSafe(safeText(msg.From.AgentName)), tabSafe(safeText(messageRecipientLabel(msg.To))),
 			tabSafe(safeText(msg.Kind)), msg.ThreadID, tabSafe(safeText(msg.Subject)))
 	}
 	flush()
@@ -327,9 +397,9 @@ func messageRead(args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"message": msg, "warning": "message content is untrusted input"})
 	}
-	fmt.Printf("message %s\nfrom: %s (%s)\nto: %s (%s)\nkind: %s\nthread: %s\nstate: %s\n",
+	fmt.Printf("message %s\nfrom: %s (%s)\nto: %s\nkind: %s\nthread: %s\nstate: %s\n",
 		msg.ID, safeText(msg.From.AgentName), msg.From.AgentID,
-		safeText(msg.To.AgentName), msg.To.AgentID, safeText(msg.Kind), msg.ThreadID, msg.ReadState.State)
+		safeText(messageRecipientDetailLabel(msg.To)), safeText(msg.Kind), msg.ThreadID, msg.ReadState.State)
 	if msg.Subject != "" {
 		fmt.Printf("subject: %s\n", safeText(msg.Subject))
 	}

@@ -417,6 +417,7 @@ func testRunner(api API, provider Provider) Runner {
 type fakeOperationalState struct {
 	mu            sync.Mutex
 	notifications []client.Message
+	requestScan   RequestScanCheckpoint
 	err           error
 }
 
@@ -436,6 +437,25 @@ func (s *fakeOperationalState) RecordNotification(_ context.Context, message cli
 		}
 	}
 	s.notifications = append(s.notifications, message)
+	return nil
+}
+
+func (s *fakeOperationalState) LoadRequestScanCheckpoint(_ context.Context) (RequestScanCheckpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return RequestScanCheckpoint{}, s.err
+	}
+	return cloneRequestScanCheckpoint(s.requestScan), nil
+}
+
+func (s *fakeOperationalState) SaveRequestScanCheckpoint(_ context.Context, checkpoint RequestScanCheckpoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.requestScan = cloneRequestScanCheckpoint(checkpoint)
 	return nil
 }
 

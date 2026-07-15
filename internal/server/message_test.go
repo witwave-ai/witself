@@ -105,7 +105,9 @@ func TestMessageHTTPContract(t *testing.T) {
 		t.Fatalf("send = %d / %+v", sends, sent)
 	}
 
-	for _, actorField := range []string{"from", "sender", "actor", "realm", "realm_id", "causal_depth"} {
+	for _, actorField := range []string{
+		"from", "sender", "actor", "account", "account_id", "realm", "realm_id", "causal_depth",
+	} {
 		body := `{"to":{"kind":"agent","id":"peer"},"body":"hello","` + actorField + `":"spoof"}`
 		req, _ = http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer token")
@@ -483,6 +485,62 @@ func TestMessageProcessingHTTPContract(t *testing.T) {
 	_ = capResp.Body.Close()
 	if feature := caps.Features["message_processing"]; !feature.Supported || feature.Reason != "" {
 		t.Fatalf("message_processing capability = %+v", feature)
+	}
+}
+
+func TestMessageProcessingRejectsDurationOverflowBeforeCallingBackend(t *testing.T) {
+	principal := DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_worker", AccountID: "acc_1",
+		RealmID: "realm_1", AccountStatus: "active",
+	}
+	var claimCalls, renewCalls int
+	cfg := Config{
+		AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+			return principal, true, nil
+		},
+		ClaimMessage: func(context.Context, DomainPrincipal, string, ClaimMessageRequest) (MessageProcessing, error) {
+			claimCalls++
+			return MessageProcessing{}, nil
+		},
+		RenewMessageClaim: func(context.Context, DomainPrincipal, string, RenewMessageClaimRequest) (MessageProcessing, error) {
+			renewCalls++
+			return MessageProcessing{}, nil
+		},
+	}
+	srv := httptest.NewServer(apiMux(cfg))
+	defer srv.Close()
+
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{"claim positive overflow", "/v1/messages/msg_work:claim", `{"lease_seconds":36028797018964268}`},
+		{"claim negative overflow", "/v1/messages/msg_work:claim", `{"lease_seconds":-36028797018963668}`},
+		{"renew positive overflow", "/v1/messages/msg_work:renew", `{"claim_id":"mcl_1","generation":1,"lease_seconds":36028797018964268}`},
+		{"renew negative overflow", "/v1/messages/msg_work:renew", `{"claim_id":"mcl_1","generation":1,"lease_seconds":-36028797018963668}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+test.path, strings.NewReader(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer token")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+			if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+				t.Fatalf("cache control = %q", got)
+			}
+		})
+	}
+	if claimCalls != 0 || renewCalls != 0 {
+		t.Fatalf("overflow values reached backend: claim=%d renew=%d", claimCalls, renewCalls)
 	}
 }
 

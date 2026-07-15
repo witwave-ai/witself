@@ -501,25 +501,27 @@ Exit criteria:
 
 Goal: deliver full durable inter-agent messaging in v0 (not a stub).
 
-Status: direct processing and runner slice complete in the current checkout.
-Direct same-realm agent delivery now includes the
+Status: direct processing, fanout, open-request, and runner slices are complete
+in the current checkout. Same-realm agent delivery now includes the
 durable message/delivery schema, token-derived sender, idempotent send,
 recipient-only parent-validated reply, metadata-only inbox/outbox listing,
 oldest-unacknowledged long-poll listen, separate read/ack transitions on every
 surface, migration-0034 claim/renew/release and atomic result completion,
 server-derived migration-0035 causal depth, migration-0036 deterministic
-per-message failure counting, content-free audit, archive/restore with
-active-claim interruption, and API/CLI/MCP adapters. A client-owned text-only
+per-message failure counting, migration-0037 explicit-list/realm snapshots,
+migration-0038 client-ranked open requests and fenced multi-assignee claims,
+content-free audit, archive/restore with active-claim interruption, and
+API/CLI/MCP adapters. A client-owned text-only
 runner adds identity pinning, lease renewal/recovery, bounded advisory
 continuation, backend-owned cross-machine turn/failure enforcement, native
 Claude Code/Grok Build adapters, fail-closed Codex/Cursor probes, and
 launchd/systemd supervision. Provider authentication is captured through a provider-specific
 allowlist into a separate mode-0600 client file, never runner config, service
 definitions, backend state, or account export.
-Group fan-out, policy scopes, explicit-list/realm fan-out, open multi-assignee
-request claims, rate/meter enforcement, and dry-run remain before the full
-milestone exit criteria are met. This status does not claim deployment or
-release. The accepted working product design is tracked in
+Group fan-out, policy scopes, responsibility/directive-aware eligibility,
+rate/meter enforcement, and dry-run remain before the full milestone exit
+criteria are met. This status does not claim deployment or release. The
+accepted working product design is tracked in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 Deliverables:
@@ -539,17 +541,20 @@ Deliverables:
   snapshot with per-member delivery and ack state. The sender is excluded from
   a realm audience by default.
 - `witself message send/reply/list/listen/read/ack/claim/renew/release/complete`
-  for the direct same-realm slice, plus client-local
+  plus `message request open/list/show/offer/decline/select/cancel/claim/renew/release/complete`,
+  and client-local
   `message runner enable|disable|status|notifications|run|serve|start`.
 - `/v1/messages`, `/v1/messages:listen`, and the
   `/v1/messages/{message_id}:reply`, `:read`, `:ack`, `:claim`, `:renew`,
   `:release`, and `:complete` actions, all using `POST` where state or a bounded
-  wait is involved.
+  wait is involved; plus `/v1/message-requests`, request detail, and the nine
+  mutating request actions.
 - `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
-  plus client-local `witself.message.notification.list/consume`; read-only keeps
-  message list/listen and notification list but omits consume, while curator
-  profiles expose neither bridge tool. The four backend lifecycle states remain
-  separate.
+  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`
+  and client-local `witself.message.notification.list/consume`; read-only keeps
+  ordinary list/listen, request list/show, and notification list but omits
+  mutations/consume, while curator profiles expose no message tools. The
+  backend lifecycle states remain separate.
 - Full/read-only MCP startup instructions call non-blocking
   `message.listen(wait_seconds=0)` and notification list. Consume canonically
   reads/verifies before exact local clear and retains the pointer on failure.
@@ -577,9 +582,11 @@ Deliverables:
   content behind ordinary message read. The backend and MCP do not launch
   inference. Status exposes content-free last-cycle health without raw errors,
   message content, provider output, or credentials.
-- Request coordination modes `notify`, `each`, `claim`, and `collaborate`, with
-  realm-visible offers represented as messages and authoritative bounded claims
-  protected by expiry, renewal, and fencing generations.
+- Client-side coordination choices include ordinary notify/fanout and the
+  implemented client-ranked open-request flow. The conceptual
+  `notify`/`each`/`claim`/`collaborate` taxonomy is not a persisted request
+  field. Realm-visible offers are ordinary messages; authoritative bounded
+  claims are protected by expiry, renewal, and fencing generations.
 - Per-request recipient, assignee, turn/message, time, rate, and retry bounds;
   model/token/dollar budgets remain client-runner settings.
 
@@ -602,9 +609,11 @@ Implementation slices:
    generic command-adapter core is available for separately integrated wrappers;
    arbitrary wrapper CLI configuration and tool-capable execution are not part
    of this slice.
-4. Bounded explicit-list and realm fan-out with archive/audit coverage.
+4. Bounded explicit-list and realm fan-out with archive/audit coverage
+   (**complete in the current checkout**).
 5. Realm open requests, offers, atomic `max_assignees` claims, leases/fences,
-   renewal, expiry, release, completion, and reassignment.
+   renewal, expiry, release, completion, and reassignment
+   (**complete in the current checkout**).
 6. Multi-runner race, restart, disabled-agent, cancellation, rate, export/import,
    and three-cloud conformance hardening.
 
@@ -617,7 +626,9 @@ Exit criteria:
   result while either runtime is initially offline; a message send by itself
   never claims that a model was invoked.
 - A realm request with `max_assignees=2` may receive many offers but can never
-  have more than two current fenced claims; stale claim completion fails.
+  have more than two current fenced claims; selecting fewer is valid, the
+  request closes when the completed selected batch has no other live claim or
+  reservation, and stale claim completion fails.
 - Sender forgery is structurally impossible: `from` is always the token-bound
   agent.
 - A message-driven write still fails without a matching policy.

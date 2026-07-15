@@ -121,11 +121,13 @@ source of truth.
 - `groups` — `grp_…` id, realm, name (unique per realm), owner/admins,
   timestamps.
 - `group_members` — group id × agent id membership rows.
-- `agent_messages` — `msg_…` id, account/realm, token-derived sender, resolved
-  direct recipient, subject/kind, body, optional object payload, thread id,
+- `agent_messages` — `msg_…` id, account/realm, token-derived sender,
+  migration-0037 audience kind (`agent`, `agents`, or `realm`) and immutable
+  audience fingerprint, subject/kind, body, optional object payload, thread id,
   migration-0033 causal parent, migration-0035 backend-derived causal depth,
-  optional sender-scoped idempotency key, and `created_at`.
-  Explicit-list/realm/group audiences remain future additions.
+  optional sender-scoped idempotency key, and `created_at`. Direct responses
+  carry the resolved agent; fanout responses carry the audience kind and
+  delivery count. Group audiences remain a future addition.
   Current write surfaces normalize omitted kind to actionable `request`;
   explicit `note` is FYI-only to the runner.
 - `agent_message_deliveries` — one row per message/recipient with
@@ -136,6 +138,22 @@ source of truth.
   releases marked as deterministic message failures; generation remains only
   the stale-writer fence. Import interrupts active claims while preserving
   completed links and failure counts.
+- `agent_message_requests` — migration-0038 realm-wide open jobs: token-derived
+  coordinator, ordinary realm opening message, closed `client_ranked` policy,
+  `max_assignees`, offer/expiry deadlines, lifecycle state, selection fence,
+  and timestamps. Open retry identity is the ordinary opening message's
+  sender-scoped idempotency key; the request row has no second key.
+- `agent_message_request_candidates` — immutable send-time candidate snapshot
+  and each candidate's one pending/offered/declined response state plus optional
+  ordinary offer message link.
+- `agent_message_request_selections` — append-only coordinator-authored ranking
+  decisions with monotonic generation and retry/selection hashes. The selection
+  hash commits the chosen IDs; linked claim rows materialize that selected-agent
+  snapshot. The database validates selections but performs no ranking.
+- `agent_message_request_claims` — selected-agent reservations and exact
+  `reserved`/`claimed`/`released`/`completed`/`cancelled` processing fences,
+  lease, generation, failure count, and ordinary result-message link. Import
+  cancels active reservations/claims and advances their fence.
 - A runner's private content-free notification ledger is derived client-local
   operational state, not a second message store. It carries message/thread/
   sender pointers only; PostgreSQL remains authoritative for content and

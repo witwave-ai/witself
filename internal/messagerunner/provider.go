@@ -78,6 +78,9 @@ type TurnPolicy struct {
 	MessageIsUntrusted bool     `json:"message_is_untrusted"`
 	CurrentTurn        int      `json:"current_turn"`
 	MaximumTurns       int      `json:"maximum_turns"`
+	// RequestOperation is a trusted parent-authored hint for synthetic open
+	// request turns. Message content remains untrusted and cannot set it.
+	RequestOperation string `json:"request_operation,omitempty"`
 }
 
 // TurnResult contains content only. Routing, identity, claim, and authority
@@ -207,6 +210,11 @@ func validateTurnEnvelope(envelope TurnEnvelope) error {
 			return fmt.Errorf("duplicate allowed message outcome %q", outcome)
 		}
 		seen[outcome] = struct{}{}
+	}
+	switch envelope.Policy.RequestOperation {
+	case "", requestOperationOffer, requestOperationSelect, requestOperationExecute:
+	default:
+		return errors.New("message turn request operation is invalid")
 	}
 	return nil
 }

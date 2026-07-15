@@ -182,12 +182,18 @@ curation recipe. See the
 
 ## Agent Messaging
 
-Agents in the same account realm can exchange durable direct messages using
-their existing agent tokens:
+Agents in the same account realm can exchange durable direct, explicit-list,
+and realm-wide messages using their existing agent tokens:
 
 ```sh
 witself message send --account default --agent scott \
   --to coordinator --body "Please pick up the indexing task."
+
+witself message send --account default --agent scott \
+  --to-agents bob,alice --kind note --body "The migration is complete."
+
+witself message send --account default --agent scott \
+  --to-realm --kind note --body "The maintenance window starts now."
 
 witself message list --account default --agent coordinator --unread
 witself message listen --account default --agent coordinator --timeout 20
@@ -197,26 +203,48 @@ witself message reply msg_... --account default --agent coordinator \
 witself message ack msg_... --account default --agent coordinator
 ```
 
+For work that should be offered to the realm instead of assigned immediately,
+open a client-ranked request. Eligible agents offer or decline, and the
+coordinator client selects one or more offers when all candidates have
+responded or the bounded offer window ends:
+
+```sh
+witself message request open --account default --agent scott \
+  --body "Investigate the failing GCP rollout." \
+  --offer-window 30s --max-assignees 1 --idempotency-key rollout-investigation
+
+witself message request list --account default --agent bob --role candidate
+witself message request offer mrq_... --account default --agent bob \
+  --body "I can inspect the GKE and database state." --idempotency-key bob-offer
+witself message request select mrq_... --account default --agent scott \
+  --selected-agent agent_... --idempotency-key select-bob
+```
+
 The sender and realm always come from the authenticated agent token. An
 ordinary send defaults to actionable `kind=request`; use explicit `--kind note`
 for an FYI that the background runner records and acknowledges without provider
-inference. Inbox lists and `listen` contain metadata only; `listen` returns the
-oldest unacknowledged inbound work without changing state, `read` is the content
-boundary, and message content must be treated as untrusted input. Replies are
+inference. Fanout uses one immutable send-time recipient snapshot with separate
+delivery/read/ack state per recipient; the authenticated sender is excluded
+from `--to-realm`. Inbox lists and `listen` contain metadata only; `listen`
+returns the oldest unacknowledged inbound work without changing state, `read`
+is the content boundary, and message content must be treated as untrusted input. Replies are
 recipient-only: the server validates that the caller received the parent and
 derives the reply recipient, thread, and parent link. Read and acknowledgement
 remain separate in the CLI, API, and MCP; acknowledgement returns metadata only,
 never the message body or payload. The installed MCP server exposes
 matching `witself.message.send`, `reply`, `list`, `listen`, `read`, `ack`,
 `claim`, `renew`, `release`, and `complete` tools plus
-`witself.message.notification.list` and `.consume`. At the start of a
+`witself.message.request.open`, `list`, `show`, `offer`, `decline`, `select`,
+`cancel`, `claim`, `renew`, `release`, and `complete`, and the local
+`witself.message.notification.list` and `.consume` bridge. At the start of a
 non-trivial task, its instructions call for non-blocking
 `message.listen(wait_seconds=0)` and notification list: the first discovers
 canonical unacknowledged work, while the second discovers local pointers the
 background runner already acknowledged. Consume reads and verifies the
 canonical message before clearing exactly that pointer; any failure leaves it
-intact. Read-only MCP retains list but removes consume, and curator profiles
-expose neither bridge tool. Grok receives underscore names, including
+intact. Read-only MCP retains ordinary list/listen, request list/show, and
+notification list; it removes every message mutation and notification consume.
+Curator profiles expose no message tools. Grok receives underscore names, including
 `witself_message_notification_list` and
 `witself_message_notification_consume`. The processing operations use a
 recipient-only migration-0034 lease/fence; `complete` atomically creates and
@@ -250,7 +278,10 @@ configuration, service definitions, or account export. Native Claude Code and
 Grok Build are capability-probed text-only providers. Native Codex and Cursor
 fail closed until their CLIs expose equivalent isolation; the runner core also
 defines a strict generic command-adapter protocol for separately integrated
-wrappers. Direct continuation history is bounded, with 12 turns by default and
+wrappers. The runner handles direct work and scans open-request roles before
+the mailbox: candidate clients offer or decline, the immutable coordinator
+client ranks durable offers, and selected clients claim and execute exact
+request fences. Direct continuation history is bounded, with 12 turns by default and
 a hard configurable maximum of 64. The runner enforces that limit from
 backend-owned `causal_depth`, not the advisory payload history. Its default
 repeated-failure policy escalates the fifth deterministic attempt from the
@@ -269,10 +300,11 @@ canonical PostgreSQL messages are included. `message runner status` also
 reports content-free last-cycle health: timestamps, status/error class, and
 consecutive failure count, never an error string or message content.
 
-See [Witself Inter-Agent Messaging](docs/inter-agent-messaging.md) for the
-implemented direct boundary. Explicit-list and realm audiences plus open
-multi-assignee work claims remain future work specified in
-[Autonomous Realm Messaging](docs/autonomous-realm-messaging.md).
+See [Witself Inter-Agent Messaging](docs/inter-agent-messaging.md) and
+[Autonomous Realm Messaging](docs/autonomous-realm-messaging.md) for the
+implemented same-realm direct, fanout, and client-ranked open-request boundary.
+Group audiences, cross-realm routing, and responsibility-aware eligibility
+remain separate follow-on work.
 
 ## Infrastructure Example
 

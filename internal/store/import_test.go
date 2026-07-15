@@ -319,7 +319,9 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
 				"from_agent_id": "agt_from", "to_agent_id": "agt_to",
+				"audience_kind": "agent", "audience_fingerprint": "",
 				"kind": "note", "body": "hello", "thread_id": "thr_1", "causal_depth": 1,
+				"created_at": "2026-07-15T10:00:00Z",
 			},
 			setup: func(ic *importCtx) {
 				ic.realms["rlm_ok"] = true
@@ -336,6 +338,8 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
 				"from_agent_id": "agt_from", "to_agent_id": "agt_other",
+				"audience_kind": "agent", "audience_fingerprint": "",
+				"created_at": "2026-07-15T10:00:00Z",
 			},
 			setup: func(ic *importCtx) {
 				ic.realms["rlm_ok"] = true
@@ -355,6 +359,8 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			},
 			setup: func(ic *importCtx) {
 				ic.messages["msg_1"] = messageImportScope{realmID: "rlm_ok", fromAgentID: "agt_from", toAgentID: "agt_to"}
+				ic.agents["agt_wrong"] = true
+				ic.agentRealms["agt_wrong"] = "rlm_ok"
 			},
 			wantOK: false, want: "does not match message recipient",
 		},
@@ -371,6 +377,8 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			},
 			setup: func(ic *importCtx) {
 				ic.messages["msg_1"] = messageImportScope{realmID: "rlm_ok", fromAgentID: "agt_from", toAgentID: "agt_to"}
+				ic.agents["agt_to"] = true
+				ic.agentRealms["agt_to"] = "rlm_ok"
 			},
 			wantOK: true,
 		},
@@ -769,7 +777,9 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	feed("agent_messages", map[string]any{
 		"id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
 		"from_agent_id": "agt_1", "to_agent_id": "agt_2",
+		"audience_kind": "agent", "audience_fingerprint": "",
 		"kind": "handoff", "body": "your turn", "thread_id": "thr_1", "causal_depth": 1,
+		"created_at": "2026-07-15T10:00:00Z",
 	})
 	feed("agent_message_deliveries", map[string]any{
 		"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
@@ -794,7 +804,7 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	}
 	if _, ok := ic.messages["msg_1"]; !ok {
 		t.Error("message id not recorded across a legal stream")
-	} else if _, ok := ic.deliveries["msg_1"]; !ok {
+	} else if _, ok := ic.deliveries["msg_1\x00agt_2"]; !ok {
 		t.Error("message and delivery ids not recorded across a legal stream")
 	}
 }

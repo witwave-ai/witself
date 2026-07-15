@@ -2951,21 +2951,25 @@ messaging model is tracked in
 extension is tracked in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
-Implementation note: the direct slice supports agents in the same realm with
-`send`, recipient-only `reply`, metadata-only `list` and `listen`, separate
-`read` and `ack`, delivery-processing `claim`/`renew`/`release`, atomic
-result-producing `complete`, and the client-owned `message runner` lifecycle.
-Group/cross-realm recipients, explicit-list/realm fan-out, dry-run, time-window
-filters, operator mailbox overrides, and multi-assignee open-request claims are
-planned follow-on slices. This describes the current checkout, not a deployed
-or released version.
+Implementation note: the current checkout supports same-realm direct,
+explicit-list, and realm fanout with one immutable send-time delivery snapshot;
+recipient-only `reply`; metadata-only `list` and `listen`; separate `read` and
+`ack`; delivery-processing `claim`/`renew`/`release`; atomic result-producing
+`complete`; client-ranked realm open requests; and the client-owned `message
+runner` lifecycle. Group/cross-realm recipients, dry-run, time-window filters,
+operator mailbox overrides, and responsibility/directive-aware eligibility
+remain follow-on slices. This describes the current checkout, not a deployed or
+released version.
 
 ### `witself message send`
 
-Send a message to one agent in the token-derived realm. `from` is the
-token-bound agent. Caller-supplied `thread_id` is correlation metadata; it is
-not proof that this send is a reply and does not grant thread membership. Use
-`message reply` for validated reply causality.
+Send to exactly one of: one agent, a bounded explicit agent list, or every other
+live agent in the token-derived realm. `from` is the token-bound agent. Fanout
+creates one immutable send-time recipient snapshot and one independent delivery
+row per recipient; a realm audience excludes the sender. Caller-supplied
+`thread_id` is correlation metadata; it is not proof that this send is a reply
+and does not grant thread membership. Use `message reply` for validated reply
+causality.
 
 Realm-qualified agents, groups, and dry-run are target extensions tracked in
 [agent-collaboration.md](agent-collaboration.md); the current command rejects
@@ -2981,6 +2985,12 @@ ws message send --to coordinator \
   --kind note \
   --body "Acknowledged; proceeding." \
   --payload-file ./status.json
+
+ws message send --to-agents archivist,reviewer \
+  --kind note --body "The release candidate is ready."
+
+ws message send --to-realm \
+  --kind note --body "The maintenance window starts now."
 ```
 
 Flags:
@@ -2988,6 +2998,8 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--to NAME_OR_ID` | Recipient agent in the authenticated realm. A lowercase `agent_` prefix selects the exact ID namespace and never falls back to a name. |
+| `--to-agents NAME_OR_ID[,NAME_OR_ID...]` | Bounded explicit recipients; repeatable or comma-separated. Mutually exclusive with `--to` and `--to-realm`. |
+| `--to-realm` | Every other live agent in the authenticated realm, resolved atomically at send time. Mutually exclusive with `--to` and `--to-agents`. |
 | `--subject TEXT` | Short subject. |
 | `--kind KIND` | Short classification; defaults to actionable `request`. Use explicit `note` for FYI-only delivery without runner inference. |
 | `--body TEXT` | Message body from a flag. |
@@ -3219,9 +3231,74 @@ Flags:
 | `--payload-file PATH` | Attach an optional structured result object. |
 | `--idempotency-key KEY` | Required retry key for this one atomic completion. |
 
+### `witself message request`
+
+Coordinate a realm-wide open job without backend inference. `open` snapshots
+every other live agent in the authenticated realm as a bounded candidate set
+and sends one ordinary `open_request` notification delivery to each candidate.
+Candidates may offer or decline. Under the only current policy,
+`client_ranked`, the coordinator client reads the offers and submits the chosen
+agent IDs; PostgreSQL validates capacity and creates exact fenced reservations
+but never ranks or selects an agent.
+
+```sh
+ws message request open \
+  --subject "Investigate rollout" \
+  --body "Find the cause of the failed GCP rollout." \
+  --offer-window 30s \
+  --expires-in 1h \
+  --max-assignees 1 \
+  --idempotency-key rollout-investigation
+
+ws message request list --role candidate --state open
+ws message request offer mrq_01H... \
+  --body "I can inspect GKE and PostgreSQL." \
+  --idempotency-key offer-mrq-01H
+
+# The coordinator ranks the returned offers locally.
+ws message request show mrq_01H... --json
+ws message request select mrq_01H... \
+  --selected-agent agent_01H... \
+  --reservation 2m \
+  --idempotency-key select-mrq-01H
+
+ws message request claim mrq_01H... \
+  --lease 2m --idempotency-key claim-mrq-01H
+# Use the returned mrc_ claim id and generation.
+ws message request complete mrq_01H... \
+  --claim mrc_01H... --generation 1 \
+  --body "The rollout failed because ..." \
+  --idempotency-key complete-mrq-01H-1
+```
+
+Subcommands:
+
+| Command | Behavior |
+|---|---|
+| `open` | Create the realm snapshot and opening notification. Requires a body and idempotency key; accepts `--subject`, `--payload-file`, closed `--selection-policy client_ranked`, `--max-assignees 1-8`, `--offer-window 1s-15m`, and `--expires-in` after that window and at most seven days. |
+| `list` | List authorized requests with optional `--state`, `--phase`, `--role candidate|coordinator`, `--limit 1-100`, and cursor. |
+| `show ID` | Read the request, opening message, visible candidates/offers, selections, and claims. Message content remains untrusted input. |
+| `offer ID` | Submit one ordinary offer message with body, optional subject/payload, and required idempotency key. |
+| `decline ID` | Record that the candidate will not offer; an idempotency key is optional. |
+| `select ID` | Coordinator-only client-ranked choice after the offer deadline or once no candidate remains pending. `--selected-agent` is repeatable or comma-separated; `--reservation 30s-15m` and an idempotency key fence the mutation. `max_assignees` is a ceiling, so selecting fewer is valid. |
+| `cancel ID` | Coordinator-only cancellation. Existing reservations/claims become unusable. |
+| `claim ID` | Convert this selected agent's reservation into a processing lease using `--lease 30s-15m` and a required idempotency key. |
+| `renew ID` | Extend the exact `--claim mrc_...` and positive `--generation` fence. |
+| `release ID` | Release the exact fence. `--deterministic-failure` is reserved for bounded runner failure accounting. |
+| `complete ID` | Atomically validate the exact fence, create an ordinary result message back to the coordinator, and complete the claim. The request closes when that selected batch has no other live reservation or claim, even if `max_assignees` was larger. Requires a non-empty body and idempotency key. |
+
+Persisted request states are `open`, `completed`, `cancelled`, and `expired`;
+the effective open phase is derived as `collecting_offers`,
+`awaiting_selection`, or `assigned`. Selection creates no model work on the
+backend. If the coordinator client goes offline, the request remains durably
+awaiting its decision until it expires or is cancelled; deleting the coordinator
+agent system-cancels its open requests and live claims. Deleting a candidate
+declines a pending response and cancels that agent's live claims while retaining
+historical offers. There is no first-offer or first-eligible fallback.
+
 ### `witself message runner`
 
-Run direct autonomous message handling as the immutable account/realm/agent in
+Run autonomous direct-message and open-request handling as the immutable account/realm/agent in
 an installed runtime binding. The trusted parent retains the Witself token,
 long-polls metadata, claims and renews work, reads untrusted content, invokes a
 bounded text-only provider child, completes one derived reply, and then acks.
@@ -3825,10 +3902,10 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current full server exposes 56 tools across self, deterministic facts and
+The current full server exposes 67 tools across self, deterministic facts and
 fact review/deletion, transcripts, direct-agent messages, the implemented
-direct narrative-memory lifecycle/recall/delete surface, and fourteen
-client-curation tools documented in
+realm request lifecycle, direct narrative-memory lifecycle/recall/delete
+surface, and fourteen client-curation tools documented in
 [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
 target contract as additional domain capabilities are wired in.
 
@@ -3858,8 +3935,10 @@ omits implemented mutating memory tools, including `capture`, `adjust`,
 `supersede`, lifecycle changes, evidence resolution, and permanent-delete
 apply; fact/candidate/subject mutations plus message `send`, `reply`, `read`,
 `ack`, `claim`, `renew`, `release`, `complete`, and
-`message.notification.consume` are also omitted. Message `list`, non-mutating
-`listen`, and content-free `message.notification.list` remain available.
+`message.notification.consume` are also omitted. The nine mutating
+`message.request.*` operations are omitted, while request `list` and `show`
+remain alongside message `list`, non-mutating `listen`, and content-free
+`message.notification.list`.
 Curator profiles expose neither notification bridge tool. Memory `read`,
 `list`, `history`, and `recall` remain alongside the other non-mutating lookup
 tools.

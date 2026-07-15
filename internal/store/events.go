@@ -95,6 +95,22 @@ const (
 	VerbMessageProcessingReleased  = "message.processing.released"
 	VerbMessageProcessingCompleted = "message.processing.completed"
 
+	// Realm-wide request coordination. These events intentionally carry only
+	// stable ids and decimal counters. Offer/result content, raw idempotency
+	// keys, claim capabilities, and lease timestamps remain in their canonical
+	// message/request rows and never enter the account audit ledger.
+	VerbMessageRequestOpened          = "message.request.opened"
+	VerbMessageRequestOffered         = "message.request.offered"
+	VerbMessageRequestDeclined        = "message.request.declined"
+	VerbMessageRequestSelected        = "message.request.selected"
+	VerbMessageRequestClaimed         = "message.request.claimed"
+	VerbMessageRequestRenewed         = "message.request.renewed"
+	VerbMessageRequestReleased        = "message.request.released"
+	VerbMessageRequestCompleted       = "message.request.completed"
+	VerbMessageRequestCancelled       = "message.request.cancelled"
+	VerbMessageRequestExpired         = "message.request.expired"
+	VerbMessageRequestCancelledSystem = "message.request.cancelled.system"
+
 	// Permanent fact deletion is content-free in the account ledger. The
 	// receipt carries stable ids, address metadata, counts, and sensitivity but
 	// never an assertion/candidate value, source, reason, or retry key.
@@ -371,6 +387,47 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbMessageProcessingRenewed:   messageProcessingEventSpec(false),
 	VerbMessageProcessingReleased:  messageProcessingEventSpec(false),
 	VerbMessageProcessingCompleted: messageProcessingEventSpec(true),
+	VerbMessageRequestOpened: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+	),
+	VerbMessageRequestOffered: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+	),
+	VerbMessageRequestDeclined: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+	),
+	// Selection emits one event per selected agent. The shared selection id
+	// and generation correlate a multi-assignee decision without putting an
+	// unbounded agent-id array into one audit record.
+	VerbMessageRequestSelected: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		"selection_id", "generation", "max_assignees",
+	),
+	VerbMessageRequestClaimed: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		"selection_id", "generation", "failure_count",
+	),
+	VerbMessageRequestRenewed: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		"selection_id", "generation", "failure_count",
+	),
+	VerbMessageRequestReleased: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		"selection_id", "generation", "failure_count",
+	),
+	VerbMessageRequestCompleted: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		"selection_id", "generation", "failure_count", "result_message_id",
+	),
+	VerbMessageRequestCancelled: messageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+	),
+	VerbMessageRequestExpired: systemMessageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+	),
+	VerbMessageRequestCancelledSystem: systemMessageRequestEventSpec(
+		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees", "reason_code",
+	),
 	VerbFactDeleted: {
 		requiredKeys: []string{
 			"fact_id", "subject_id", "subject", "predicate", "receipt_id",
@@ -482,6 +539,22 @@ func messageProcessingEventSpec(completed bool) verbSpec {
 		required = append(required, "result_message_id")
 	}
 	return verbSpec{requiredKeys: required, allowedKeys: allowed, allowedActors: []string{ActorAgent}}
+}
+
+func messageRequestEventSpec(keys ...string) verbSpec {
+	return verbSpec{
+		requiredKeys:  keys,
+		allowedKeys:   keys,
+		allowedActors: []string{ActorAgent},
+	}
+}
+
+func systemMessageRequestEventSpec(keys ...string) verbSpec {
+	return verbSpec{
+		requiredKeys:  keys,
+		allowedKeys:   keys,
+		allowedActors: []string{ActorSystem},
+	}
 }
 
 // EventInput is one row to write. The store fills in the id and

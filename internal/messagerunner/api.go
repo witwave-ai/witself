@@ -22,6 +22,21 @@ type API interface {
 	AckMessage(context.Context, string) (client.Message, error)
 }
 
+// MessageRequestAPI is an optional autonomous open-request surface. Runner
+// implementations discover it with a type assertion so existing mailbox-only
+// API adapters remain source compatible.
+type MessageRequestAPI interface {
+	ListMessageRequests(context.Context, client.MessageRequestListOptions) (client.MessageRequestPage, error)
+	GetMessageRequest(context.Context, string) (client.MessageRequestDetail, error)
+	OfferMessageRequest(context.Context, string, client.OfferMessageRequestInput) (client.OfferMessageRequestResult, error)
+	DeclineMessageRequest(context.Context, string, string) (client.MessageRequest, error)
+	SelectMessageRequest(context.Context, string, client.SelectMessageRequestInput) (client.SelectMessageRequestResult, error)
+	ClaimMessageRequest(context.Context, string, client.ClaimMessageRequestInput) (client.MessageRequestClaim, error)
+	RenewMessageRequest(context.Context, string, client.RenewMessageRequestInput) (client.MessageRequestClaim, error)
+	ReleaseMessageRequest(context.Context, string, client.ReleaseMessageRequestInput) (client.MessageRequestClaim, error)
+	CompleteMessageRequest(context.Context, string, client.CompleteMessageRequestInput) (client.CompleteMessageRequestResult, error)
+}
+
 // HTTPAPI adapts the ordinary Witself client to the runner's token-retaining
 // parent boundary.
 type HTTPAPI struct {
@@ -67,4 +82,52 @@ func (a HTTPAPI) CompleteMessage(ctx context.Context, messageID string, in clien
 // AckMessage acknowledges a successfully handled or non-actionable delivery.
 func (a HTTPAPI) AckMessage(ctx context.Context, messageID string) (client.Message, error) {
 	return client.AckMessage(ctx, a.Endpoint, a.Token, messageID)
+}
+
+// ListMessageRequests returns one metadata-only page of request work visible
+// to the pinned agent.
+func (a HTTPAPI) ListMessageRequests(ctx context.Context, opts client.MessageRequestListOptions) (client.MessageRequestPage, error) {
+	return client.ListMessageRequests(ctx, a.Endpoint, a.Token, opts)
+}
+
+// GetMessageRequest returns the request detail authorized for the pinned
+// agent.
+func (a HTTPAPI) GetMessageRequest(ctx context.Context, requestID string) (client.MessageRequestDetail, error) {
+	return client.GetMessageRequest(ctx, a.Endpoint, a.Token, requestID)
+}
+
+// OfferMessageRequest records one inference-authored candidate offer.
+func (a HTTPAPI) OfferMessageRequest(ctx context.Context, requestID string, in client.OfferMessageRequestInput) (client.OfferMessageRequestResult, error) {
+	return client.OfferMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
+}
+
+// DeclineMessageRequest records a candidate's terminal non-participation.
+func (a HTTPAPI) DeclineMessageRequest(ctx context.Context, requestID, idempotencyKey string) (client.MessageRequest, error) {
+	return client.DeclineMessageRequest(ctx, a.Endpoint, a.Token, requestID, idempotencyKey)
+}
+
+// SelectMessageRequest persists the coordinator provider's bounded choice.
+func (a HTTPAPI) SelectMessageRequest(ctx context.Context, requestID string, in client.SelectMessageRequestInput) (client.SelectMessageRequestResult, error) {
+	return client.SelectMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
+}
+
+// ClaimMessageRequest acquires one selected request reservation.
+func (a HTTPAPI) ClaimMessageRequest(ctx context.Context, requestID string, in client.ClaimMessageRequestInput) (client.MessageRequestClaim, error) {
+	return client.ClaimMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
+}
+
+// RenewMessageRequest extends one exact selected-request claim.
+func (a HTTPAPI) RenewMessageRequest(ctx context.Context, requestID string, in client.RenewMessageRequestInput) (client.MessageRequestClaim, error) {
+	return client.RenewMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
+}
+
+// ReleaseMessageRequest gives up one exact selected-request claim.
+func (a HTTPAPI) ReleaseMessageRequest(ctx context.Context, requestID string, in client.ReleaseMessageRequestInput) (client.MessageRequestClaim, error) {
+	return client.ReleaseMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
+}
+
+// CompleteMessageRequest publishes a result and closes one selected request
+// claim atomically.
+func (a HTTPAPI) CompleteMessageRequest(ctx context.Context, requestID string, in client.CompleteMessageRequestInput) (client.CompleteMessageRequestResult, error) {
+	return client.CompleteMessageRequest(ctx, a.Endpoint, a.Token, requestID, in)
 }

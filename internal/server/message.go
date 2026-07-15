@@ -17,6 +17,7 @@ const (
 	messageListenPollInterval           = time.Second
 	maxConcurrentMessageListens         = 128
 	maxConcurrentMessageListensPerAgent = 2
+	maxMessageProcessingLeaseSeconds    = 15 * 60
 )
 
 // messageListenLimiter bounds the number of long-lived handlers and database
@@ -63,8 +64,10 @@ func sendMessageHandler(auth PrincipalAuthFunc, send func(context.Context, Domai
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		if len(req.From) != 0 || len(req.Sender) != 0 || len(req.Actor) != 0 || len(req.Realm) != 0 || len(req.RealmID) != 0 || len(req.CausalDepth) != 0 {
-			writeJSONError(w, http.StatusBadRequest, "sender and realm are derived from the agent token")
+		if len(req.From) != 0 || len(req.Sender) != 0 || len(req.Actor) != 0 ||
+			len(req.Account) != 0 || len(req.AccountID) != 0 || len(req.Realm) != 0 ||
+			len(req.RealmID) != 0 || len(req.CausalDepth) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "sender, account, and realm are derived from the agent token")
 			return
 		}
 		if len(req.To.Realm) != 0 || len(req.To.RealmID) != 0 || len(req.To.AccountID) != 0 {
@@ -373,6 +376,10 @@ func handleMessageProcessingAction(
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
+		if !messageProcessingSecondsWithinConversionBounds(req.LeaseSeconds) {
+			writeJSONError(w, http.StatusBadRequest, "lease_seconds must be between 0 and 900")
+			return
+		}
 		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		processing, err = claim(r.Context(), p, messageID, req)
 	case "renew":
@@ -383,6 +390,10 @@ func handleMessageProcessingAction(
 		var req RenewMessageClaimRequest
 		if decodeErr := decodeLimitedJSON(w, r, &req, 16*1024); decodeErr != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if !messageProcessingSecondsWithinConversionBounds(req.LeaseSeconds) {
+			writeJSONError(w, http.StatusBadRequest, "lease_seconds must be between 0 and 900")
 			return
 		}
 		processing, err = renew(r.Context(), p, messageID, req)
@@ -436,6 +447,13 @@ func handleMessageProcessingAction(
 		"schema_version": "witself.v0",
 		"processing":     processing,
 	})
+}
+
+// messageProcessingSecondsWithinConversionBounds validates the raw JSON
+// integer before cmd/witself-server multiplies it by time.Second. Extremely
+// large positive or negative integers can otherwise wrap into a valid lease.
+func messageProcessingSecondsWithinConversionBounds(seconds int) bool {
+	return seconds >= 0 && seconds <= maxMessageProcessingLeaseSeconds
 }
 
 func writeMessageProcessingError(w http.ResponseWriter, err error) bool {

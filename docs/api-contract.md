@@ -15,11 +15,13 @@ perform a guarded compensating rollback. It never runs a model. See
 shapes below are not implementation authority.
 
 Messaging amendment (implemented in the current checkout, not a deployment or
-release claim): direct delivery now includes migration-0034
+release claim): delivery now includes migration-0034
 claim/renew/release/atomic-complete processing, migration-0035 server-derived
 causal depth, migration-0036 deterministic per-message failure counting, and the
-`message_processing` capability. Explicit-list/realm fan-out and open
-multi-assignee requests remain future work.
+`message_processing` capability. Migration 0037 adds explicit-list/realm
+audience snapshots. Migration 0038 and the `message_requests` capability add
+open multi-assignee requests with client-ranked selection and exact claim
+fences.
 
 ## Decision
 
@@ -216,6 +218,7 @@ Examples of feature flags:
 - `message_listen`
 - `message_reply`
 - `message_processing`
+- `message_requests`
 - `export`
 - `audit`
 - `mcp`
@@ -533,7 +536,8 @@ Initial route groups:
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
 | `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
-| `/v1/messages` | Implemented direct same-realm send, recipient-only reply, server-derived causal depth, metadata-only list/listen, read/acknowledgement, and fenced claim/renew/release/atomic-complete processing; realm audiences and cross-realm delivery are target extensions. |
+| `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
+| `/v1/message-requests` | Implemented message-backed realm open jobs: create/list/detail plus candidate offer/decline, coordinator client-ranked select/cancel, and selected-agent claim/renew/release/atomic-complete actions. |
 | `/v1/conversations` | Cross-realm conversation/task resource: list and show participants, state, and turn/cost budgets. |
 | `/v1/federation/peers` | Federation allow-list: list, add, and remove the accepted peer realms for cross-realm collaboration. |
 | `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
@@ -587,7 +591,7 @@ Export endpoints produce structured, round-trippable identity data. Unlike
 Witpass, plaintext identity export is a first-class v0 feature, not a forbidden
 one: an export may include memory content, fact values, `primary` flags,
 `sensitive` markers, links, and edit history. Exports of `sensitive` records
-require an audit `reason` and emit a warning. Account archives also carry direct
+require an audit `reason` and emit a warning. Account archives also carry
 messages, migration-0035 causal links/depths, recipient read/ack state, and
 migration-0034 processing state plus migration-0036 `failure_count`. Import
 derives or validates depth against the reply graph, preserves completed result
@@ -595,6 +599,11 @@ links and the deterministic failure count, converts every active `claimed`
 delivery to `available`, advances its generation, and clears its claim/key/lease
 fields so a source-cell fence cannot survive the move. Archives older than
 schema 36 receive `failure_count=0` during upgrade.
+Migration-0037 audience metadata and the exact per-recipient snapshot are also
+portable. Schema-38 archives additionally require the request, candidate,
+selection, and claim streams. Import preserves terminal request history and
+result links but cancels active source-cell request reservations/claims and
+advances their fence before the destination account resumes.
 Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 
@@ -678,6 +687,17 @@ POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
+POST /v1/message-requests
+GET  /v1/message-requests
+GET  /v1/message-requests/{request_id}
+POST /v1/message-requests/{request_id}:offer
+POST /v1/message-requests/{request_id}:decline
+POST /v1/message-requests/{request_id}:select
+POST /v1/message-requests/{request_id}:cancel
+POST /v1/message-requests/{request_id}:claim
+POST /v1/message-requests/{request_id}:renew
+POST /v1/message-requests/{request_id}:release
+POST /v1/message-requests/{request_id}:complete
 POST /v1/tokens/{token_id}:rotate
 POST /v1/secrets/{secret_id}:reveal
 POST /v1/secrets/{secret_id}:rotate
@@ -812,6 +832,25 @@ Notes on specific actions and workflows:
   HTTP 201 with
   `processing` plus `message` and deliberately does not ack. Exact completion
   retry returns the same result; a stale fence returns HTTP 409.
+- `/v1/message-requests` is agent-only, realm-local coordination. Create
+  requires `Idempotency-Key`, persists one realm `open_request` message and its
+  immutable candidate snapshot atomically, and accepts only
+  `selection_policy=client_ranked`. List/get authorize the coordinator or a
+  snapshot candidate and never widen access merely because an agent is now in
+  the realm.
+- Candidate `:offer`/`:decline`, coordinator `:select`/`:cancel`, and selected
+  agent `:claim`/`:renew`/`:release`/`:complete` derive every actor and routing
+  field from the bearer token and stored request. Offers are ordinary untrusted
+  direct messages and reserve no capacity. The client ranks; PostgreSQL only
+  validates offered agent IDs, permits selection after the offer deadline or
+  once no candidate remains pending, locks the request, enforces the 1-8
+  capacity ceiling, and issues bounded reservations and exact `mrc_` claim
+  fences. Selecting fewer than `max_assignees` is valid. Completion atomically
+  creates and links a `kind=result` reply; after that result the request closes
+  when the selected batch has no other live reservation or claim. A coordinator
+  client outage leaves durable `awaiting_selection` state; deleting the
+  coordinator system-cancels its open requests. There is no first-eligible
+  fallback or backend inference.
 - `:rotate` (on `/v1/tokens`) issues a replacement token and returns the raw
   value once; the prior token is revoked immediately or after an explicit grace
   period.

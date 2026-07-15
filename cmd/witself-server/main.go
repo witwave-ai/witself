@@ -391,11 +391,10 @@ func serve() int {
 			return out, nil
 		}
 		cfg.SendMessage = func(ctx context.Context, p server.DomainPrincipal, in server.SendMessageRequest) (server.Message, error) {
-			if in.To.Kind != "agent" {
-				return server.Message{}, fmt.Errorf("%w: to.kind must be agent", server.ErrBadInput)
-			}
 			msg, err := st.SendMessage(ctx, toStorePrincipal(p), store.SendMessageInput{
+				AudienceKind:   in.To.Kind,
 				ToAgent:        in.To.ID,
+				ToAgents:       in.To.IDs,
 				Subject:        in.Subject,
 				Kind:           in.Kind,
 				Body:           in.Body,
@@ -407,6 +406,126 @@ func serve() int {
 				return server.Message{}, mapMessageError(err)
 			}
 			return toServerAgentMessage(msg), nil
+		}
+		cfg.CreateMessageRequest = func(ctx context.Context, p server.DomainPrincipal, in server.CreateMessageRequestRequest) (server.CreateMessageRequestResult, error) {
+			result, err := st.OpenMessageRequest(ctx, toStorePrincipal(p), store.OpenMessageRequestInput{
+				Subject: in.Subject, Body: in.Body, Payload: in.Payload,
+				SelectionPolicy: in.SelectionPolicy, MaxAssignees: in.MaxAssignees,
+				OfferWindow:    time.Duration(in.OfferWindowSeconds) * time.Second,
+				ExpiresIn:      time.Duration(in.ExpiresInSeconds) * time.Second,
+				IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.CreateMessageRequestResult{}, mapMessageRequestError(err)
+			}
+			return server.CreateMessageRequestResult{
+				Request: toServerMessageRequest(result.Request), OpeningMessage: toServerAgentMessage(result.OpeningMessage),
+			}, nil
+		}
+		cfg.ListMessageRequests = func(ctx context.Context, p server.DomainPrincipal, opts server.MessageRequestListOptions) (server.MessageRequestPage, error) {
+			page, err := st.ListMessageRequests(ctx, toStorePrincipal(p), store.MessageRequestFilter{
+				State: opts.State, Phase: opts.Phase, Role: opts.Role, Limit: opts.Limit, Cursor: opts.Cursor,
+			})
+			if err != nil {
+				return server.MessageRequestPage{}, mapMessageRequestError(err)
+			}
+			requests := make([]server.MessageRequest, len(page.Requests))
+			for i, request := range page.Requests {
+				requests[i] = toServerMessageRequest(request)
+			}
+			return server.MessageRequestPage{Requests: requests, NextCursor: page.NextCursor}, nil
+		}
+		cfg.GetMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string) (server.MessageRequestDetail, error) {
+			detail, err := st.GetMessageRequest(ctx, toStorePrincipal(p), requestID)
+			if err != nil {
+				return server.MessageRequestDetail{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequestDetail(detail), nil
+		}
+		cfg.OfferMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.OfferMessageRequestRequest) (server.OfferMessageRequestResult, error) {
+			result, err := st.OfferMessageRequest(ctx, toStorePrincipal(p), requestID, store.OfferMessageRequestInput{
+				Subject: in.Subject, Body: in.Body, Payload: in.Payload, IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.OfferMessageRequestResult{}, mapMessageRequestError(err)
+			}
+			return server.OfferMessageRequestResult{
+				Request: toServerMessageRequest(result.Request), Offer: toServerMessageRequestOffer(result.Offer),
+			}, nil
+		}
+		cfg.DeclineMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.DeclineMessageRequestRequest) (server.MessageRequest, error) {
+			request, err := st.DeclineMessageRequest(ctx, toStorePrincipal(p), requestID, store.DeclineMessageRequestInput{
+				IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.MessageRequest{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequest(request), nil
+		}
+		cfg.SelectMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.SelectMessageRequestRequest) (server.SelectMessageRequestResult, error) {
+			result, err := st.SelectMessageRequest(ctx, toStorePrincipal(p), requestID, store.SelectMessageRequestInput{
+				SelectedAgentIDs: in.SelectedAgentIDs,
+				Reservation:      time.Duration(in.ReservationSeconds) * time.Second,
+				IdempotencyKey:   in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.SelectMessageRequestResult{}, mapMessageRequestError(err)
+			}
+			claims := make([]server.MessageRequestClaim, len(result.Claims))
+			for i, claim := range result.Claims {
+				claims[i] = toServerMessageRequestClaim(claim)
+			}
+			return server.SelectMessageRequestResult{
+				Request: toServerMessageRequest(result.Request), Selection: toServerMessageRequestSelection(result.Selection), Claims: claims,
+			}, nil
+		}
+		cfg.CancelMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string) (server.MessageRequest, error) {
+			request, err := st.CancelMessageRequest(ctx, toStorePrincipal(p), requestID)
+			if err != nil {
+				return server.MessageRequest{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequest(request), nil
+		}
+		cfg.ClaimMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.ClaimMessageRequestRequest) (server.MessageRequestClaim, error) {
+			claim, err := st.ClaimMessageRequest(ctx, toStorePrincipal(p), requestID, store.ClaimMessageRequestInput{
+				LeaseDuration: time.Duration(in.LeaseSeconds) * time.Second, IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.MessageRequestClaim{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequestClaim(claim), nil
+		}
+		cfg.RenewMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.RenewMessageRequestRequest) (server.MessageRequestClaim, error) {
+			claim, err := st.RenewMessageRequest(ctx, toStorePrincipal(p), requestID, store.RenewMessageRequestInput{
+				ClaimID: in.ClaimID, Generation: in.Generation,
+				LeaseDuration: time.Duration(in.LeaseSeconds) * time.Second,
+			})
+			if err != nil {
+				return server.MessageRequestClaim{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequestClaim(claim), nil
+		}
+		cfg.ReleaseMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.ReleaseMessageRequestRequest) (server.MessageRequestClaim, error) {
+			claim, err := st.ReleaseMessageRequest(ctx, toStorePrincipal(p), requestID, store.ReleaseMessageRequestInput{
+				ClaimID: in.ClaimID, Generation: in.Generation, DeterministicFailure: in.DeterministicFailure,
+			})
+			if err != nil {
+				return server.MessageRequestClaim{}, mapMessageRequestError(err)
+			}
+			return toServerMessageRequestClaim(claim), nil
+		}
+		cfg.CompleteMessageRequest = func(ctx context.Context, p server.DomainPrincipal, requestID string, in server.CompleteMessageRequestRequest) (server.CompleteMessageRequestResult, error) {
+			result, err := st.CompleteMessageRequest(ctx, toStorePrincipal(p), requestID, store.CompleteMessageRequestInput{
+				ClaimID: in.ClaimID, Generation: in.Generation, Subject: in.Subject,
+				Body: in.Body, Payload: in.Payload, IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.CompleteMessageRequestResult{}, mapMessageRequestError(err)
+			}
+			return server.CompleteMessageRequestResult{
+				Request: toServerMessageRequest(result.Request), Claim: toServerMessageRequestClaim(result.Claim),
+				Message: toServerAgentMessage(result.Message),
+			}, nil
 		}
 		cfg.ListMessages = func(ctx context.Context, p server.DomainPrincipal, opts server.MessageListOptions) (server.MessagePage, error) {
 			page, err := st.ListMessages(ctx, toStorePrincipal(p), store.MessageFilter{
@@ -1446,6 +1565,33 @@ func mapMessageError(err error) error {
 	}
 }
 
+func mapMessageRequestError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrMessageRequestInputInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageRequestInputInvalid, err)
+	case errors.Is(err, store.ErrMessageRequestCursorInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageRequestCursorInvalid, err)
+	case errors.Is(err, store.ErrMessageInputInvalid), errors.Is(err, store.ErrMessageCursorInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageInputInvalid, err)
+	case errors.Is(err, store.ErrMessageRequestNotFound), errors.Is(err, store.ErrMessageRecipientMissing), errors.Is(err, store.ErrMessageNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrMessageRequestBusy), errors.Is(err, store.ErrMessageBusy):
+		return server.ErrBusy
+	case errors.Is(err, store.ErrMessageRequestClaimLost), errors.Is(err, store.ErrMessageClaimLost),
+		errors.Is(err, store.ErrMessageRequestConflict), errors.Is(err, store.ErrMessageConflict):
+		return server.ErrConflict
+	case errors.Is(err, store.ErrMessageRequestForbidden), errors.Is(err, store.ErrMessageForbidden),
+		errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotActive):
+		return server.ErrForbidden
+	case errors.Is(err, store.ErrAccountNotFound):
+		return server.ErrNotFound
+	default:
+		return err
+	}
+}
+
 func mapFactError(err error) error {
 	switch {
 	case err == nil:
@@ -1504,7 +1650,7 @@ func toServerAgentMessage(msg store.Message) server.Message {
 			Kind: "agent", AgentID: msg.From.ID, AgentName: msg.From.Name,
 		},
 		To: server.MessageRecipient{
-			Kind: msg.To.Kind, AgentID: msg.To.ID, AgentName: msg.To.Name,
+			Kind: msg.To.Kind, AgentID: msg.To.ID, AgentName: msg.To.Name, Count: msg.To.Count,
 		},
 		Subject: msg.Subject, Kind: msg.Kind, Body: msg.Body, Payload: msg.Payload,
 		ThreadID: msg.ThreadID, ReplyToMessageID: msg.ReplyToMessageID, CausalDepth: msg.CausalDepth,
@@ -1516,6 +1662,88 @@ func toServerAgentMessage(msg store.Message) server.Message {
 			State: msg.ReadState.State, ReadAt: msg.ReadState.ReadAt, AckedAt: msg.ReadState.AckedAt,
 		},
 		Processing: toServerMessageProcessing(msg.Processing),
+	}
+}
+
+func toServerMessageRequest(request store.MessageRequest) server.MessageRequest {
+	return server.MessageRequest{
+		ID: request.ID, AccountID: request.AccountID, RealmID: request.RealmID,
+		OpeningMessageID: request.OpeningMessageID,
+		Coordinator: server.MessageAgent{
+			Kind: "agent", AgentID: request.Coordinator.ID, AgentName: request.Coordinator.Name,
+		},
+		SelectionPolicy: request.SelectionPolicy, State: request.State, Phase: request.Phase,
+		MaxAssignees: request.MaxAssignees, CandidateCount: request.CandidateCount,
+		OfferCount: request.OfferCount, DeclineCount: request.DeclineCount,
+		SelectedAgentIDs: request.SelectedAgentIDs, SelectionGeneration: request.SelectionGeneration,
+		OfferDeadline: request.OfferDeadline, ExpiresAt: request.ExpiresAt,
+		CreatedAt: request.CreatedAt, UpdatedAt: request.UpdatedAt,
+		CompletedAt: request.CompletedAt, CancelledAt: request.CancelledAt, ExpiredAt: request.ExpiredAt,
+	}
+}
+
+func toServerMessageRequestCandidate(candidate store.MessageRequestCandidate) server.MessageRequestCandidate {
+	return server.MessageRequestCandidate{
+		Agent: server.MessageAgent{
+			Kind: "agent", AgentID: candidate.Agent.ID, AgentName: candidate.Agent.Name,
+		},
+		ResponseState: candidate.ResponseState, OfferMessageID: candidate.OfferMessageID,
+		RespondedAt: candidate.RespondedAt, CreatedAt: candidate.CreatedAt,
+	}
+}
+
+func toServerMessageRequestOffer(offer store.MessageRequestOffer) server.MessageRequestOffer {
+	return server.MessageRequestOffer{
+		Agent: server.MessageAgent{
+			Kind: "agent", AgentID: offer.Agent.ID, AgentName: offer.Agent.Name,
+		},
+		Message: toServerAgentMessage(offer.Message), OfferedAt: offer.OfferedAt,
+	}
+}
+
+func toServerMessageRequestSelection(selection store.MessageRequestSelection) server.MessageRequestSelection {
+	return server.MessageRequestSelection{
+		ID: selection.ID, Generation: selection.Generation,
+		Coordinator: server.MessageAgent{
+			Kind: "agent", AgentID: selection.Coordinator.ID, AgentName: selection.Coordinator.Name,
+		},
+		SelectedAgentIDs: selection.SelectedAgentIDs, CreatedAt: selection.CreatedAt,
+	}
+}
+
+func toServerMessageRequestClaim(claim store.MessageRequestClaim) server.MessageRequestClaim {
+	return server.MessageRequestClaim{
+		ClaimID: claim.ClaimID, RequestID: claim.RequestID, SelectionID: claim.SelectionID,
+		Agent: server.MessageAgent{
+			Kind: "agent", AgentID: claim.Agent.ID, AgentName: claim.Agent.Name,
+		},
+		State: claim.State, Generation: claim.Generation, FailureCount: claim.FailureCount,
+		LeaseExpiresAt: claim.LeaseExpiresAt, ResultMessageID: claim.ResultMessageID,
+		SelectedAt: claim.SelectedAt, ClaimedAt: claim.ClaimedAt, ReleasedAt: claim.ReleasedAt,
+		CompletedAt: claim.CompletedAt, CancelledAt: claim.CancelledAt, UpdatedAt: claim.UpdatedAt,
+	}
+}
+
+func toServerMessageRequestDetail(detail store.MessageRequestDetail) server.MessageRequestDetail {
+	candidates := make([]server.MessageRequestCandidate, len(detail.Candidates))
+	for i, candidate := range detail.Candidates {
+		candidates[i] = toServerMessageRequestCandidate(candidate)
+	}
+	offers := make([]server.MessageRequestOffer, len(detail.Offers))
+	for i, offer := range detail.Offers {
+		offers[i] = toServerMessageRequestOffer(offer)
+	}
+	selections := make([]server.MessageRequestSelection, len(detail.Selections))
+	for i, selection := range detail.Selections {
+		selections[i] = toServerMessageRequestSelection(selection)
+	}
+	claims := make([]server.MessageRequestClaim, len(detail.Claims))
+	for i, claim := range detail.Claims {
+		claims[i] = toServerMessageRequestClaim(claim)
+	}
+	return server.MessageRequestDetail{
+		Request: toServerMessageRequest(detail.Request), OpeningMessage: toServerAgentMessage(detail.OpeningMessage),
+		Candidates: candidates, Offers: offers, Selections: selections, Claims: claims,
 	}
 }
 

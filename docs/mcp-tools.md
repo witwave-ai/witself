@@ -1,9 +1,11 @@
 # Witself MCP Tools
 
-Status: draft target contract. The implemented stdio slice exposes the current
-self, fact, transcript, direct-agent messaging and processing, direct
-narrative-memory, and client-curation tools; the remaining catalog is
-explicitly marked as target behavior below.
+Status: implemented source contract plus explicitly marked future targets. The
+current checkout's stdio slice exposes self, facts, transcripts, same-realm
+ordinary direct/explicit/realm fanout, direct-delivery processing, the complete
+client-ranked realm request lifecycle, direct narrative memory, and client
+curation. It is pending the next release/deployment rather than a claim about
+the currently deployed version.
 
 Narrative-memory amendment (accepted 2026-07-14): direct capture, bounded
 history, lexical recall, lifecycle, evidence resolution, permanent deletion,
@@ -40,6 +42,9 @@ only; MCP does not wake a model, and the backend performs no inference.
   policy-gated, and auditable.
 - Make message send and read explicit, scoped, and auditable, with the sender
   always derived from the token.
+- Expose client-ranked realm work without adding backend inference: candidate
+  clients offer or decline, the exact coordinator client ranks and selects,
+  and selected clients use fenced claims.
 - Make sealed-plane secret reveal and TOTP code generation explicit, scoped,
   reveal-gated, and auditable.
 
@@ -158,15 +163,17 @@ Read-only mode:
   propose_from_transcript/confirm/reject`, `witself.fact.subject.set/alias`,
   `witself.memory.curation.request/start/renew/plan/apply/cancel/abandon/rollback`, and
   `witself.message.send/reply/read/ack/claim/renew/release/complete` plus
-  `witself.message.notification.consume` are
-  unavailable. `message.read` mutates
+  `witself.message.notification.consume` and
+  `witself.message.request.open/offer/decline/select/cancel/claim/renew/release/complete`
+  are unavailable. `message.read` mutates
   read state but never acknowledges; `message.ack` is the distinct handled
   transition. Curation `get` and `status` remain available because they are
   reads. Future mutating tools such as `witself.remember`, `witself.session.end`,
   `witself.secret.create/update`, and `witself.totp.enroll` are unavailable.
   The current read-only server retains `self.show`; fact review, candidate/get,
   get/list/upcoming, and subject list; transcript list/get/tail; message list,
-  listen, and `message.notification.list`; and memory read/list/history/recall.
+  listen and `message.notification.list`; and
+  memory read/list/history/recall.
   Listing a notification is local, content-free, and non-mutating. Deferred
   target tools are not advertised merely because they would be non-mutating.
 - `--profile curator-preview` and `--profile curator-apply` create isolated MCP
@@ -340,17 +347,32 @@ Tool names should use the `witself.` prefix:
 - `witself.message.complete`
 - `witself.message.notification.list`
 - `witself.message.notification.consume`
+- `witself.message.request.open`
+- `witself.message.request.list`
+- `witself.message.request.show`
+- `witself.message.request.offer`
+- `witself.message.request.decline`
+- `witself.message.request.select`
+- `witself.message.request.cancel`
+- `witself.message.request.claim`
+- `witself.message.request.renew`
+- `witself.message.request.release`
+- `witself.message.request.complete`
 - `witself.transcript.list`
 - `witself.transcript.get`
 - `witself.transcript.tail`
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The current binary exposes 56 tools, including the 12 direct narrative-memory
+The current checkout's full profile exposes 67 tools, including the 12 direct narrative-memory
 tools, fourteen client-curation tools, `witself.self.show`, deterministic fact
 reads/writes and candidate review, the three transcript read tools, and the
-ten server-backed direct-message tools plus two client-local notification bridge
-tools. `witself install codex|claude|grok|cursor` registers that stdio server and
+ten ordinary server-backed message tools, eleven server-backed open-request
+tools, and two client-local notification bridge tools. The read-only profile
+exposes 23 tools. Request list/show are full-profile operations because their
+lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
+completed-batch settlement. `witself install codex|claude|grok|cursor`
+registers that stdio server and
 the separate durable hook write path. Grok receives underscore-safe tool names
 because its MCP client rejects periods. In particular, Grok sees
 `witself_message_notification_list` and
@@ -376,8 +398,8 @@ private local configuration, a content-free notification ledger, and
 content-free cycle health plus launchd/systemd, not on a Witself backend
 resource. A separate mode-0600, provider-bound file captures only allowlisted
 provider-auth environment values; it is not MCP configuration,
-service-definition content, backend state, or account export. The ten
-server-backed message operations retain CLI/MCP/API parity. The two MCP-only
+service-definition content, backend state, or account export. All 21
+server-backed message and request operations retain CLI/MCP/API parity. The two MCP-only
 notification bridge tools safely join the private local pointer ledger to those
 canonical messages: list returns pointers only, while consume performs the
 canonical read and verification before clearing one exact local pointer.
@@ -391,9 +413,14 @@ deliver to; instead the agent pulls its mailbox. Implemented
 `witself.message.listen` long-polls the oldest unacknowledged metadata from the
 durable mailbox (wait 0–20 seconds, default 20, change no state): it lets a
 client-owned runner hear without standing up a server. The implemented
-`claim`/`renew`/`release`/`complete` tools provide the direct-delivery
-processing fence; they are not the future multi-assignee open-request claim
-protocol. The current MCP server also uses metadata-only
+ordinary `claim`/`renew`/`release`/`complete` tools provide the direct-delivery
+processing fence. They reject messages linked into the open-request protocol.
+At each full-profile task boundary the client also scans request-list lanes for
+candidate `assigned`, candidate `collecting_offers`, and coordinator
+`awaiting_selection` work; a selection reservation does not emit another
+ordinary message. The separate implemented `message.request.*` tools provide
+the client-ranked, multi-assignee-at-most open-request protocol. The current
+MCP server also uses metadata-only
 `witself.message.list` at active task boundaries.
 The target cross-realm extension makes `to` realm-qualified as a
 `witself://<realm-handle>/agent/<name>` address and reuses the durable mailbox
@@ -487,7 +514,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.policy.test` | yes | yes | Evaluates an access decision; never mutates. |
 | `witself.group.list` | yes | yes | Lists groups visible to the session. |
 | `witself.group.show` | yes | yes | Shows group metadata and membership where visible. |
-| `witself.message.send` | yes | no | Requires `message:send`; `from` is always token-derived; current delivery is direct and same-realm. |
+| `witself.message.send` | yes | no | Requires `message:send`; `from` is token-derived; exactly one same-realm agent, explicit 1–64-agent audience, or immutable realm snapshot. |
 | `witself.message.reply` | yes | no | Recipient-only; derives recipient, thread, and causal parent from the validated inbound message. |
 | `witself.message.listen` | yes | yes | Oldest-unacknowledged metadata-only long-poll; no body/read/ack side effects; requires `message:read`. |
 | `witself.message.list` | yes | yes | Lists the session's mailbox; requires `message:read`. |
@@ -499,6 +526,17 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.message.complete` | yes | no | Atomically create one server-routed result reply, link it, and complete one exact fence; does not acknowledge. |
 | `witself.message.notification.list` | yes | yes | List newest-first content-free pointers from the identity-bound local runner ledger; no canonical read and no local clear. |
 | `witself.message.notification.consume` | yes | no | Canonically read and verify one selected pointer, then clear that exact local entry; every failure leaves the pointer intact. |
+| `witself.message.request.open` | yes | no | Snapshot every other active realm agent as a candidate; `client_ranked` only; backend stores/fences but never performs inference. |
+| `witself.message.request.list` | yes | no | List visible request summaries by candidate or exact coordinator role; may lazily persist due lifecycle transitions. |
+| `witself.message.request.show` | yes | no | Read one visible request graph with bounded offer previews and newest bounded history; may lazily persist due lifecycle transitions. |
+| `witself.message.request.offer` | yes | no | Candidate client authors one durable offer before the deadline; backend does no capability scoring. |
+| `witself.message.request.decline` | yes | no | Candidate records a terminal decline response. |
+| `witself.message.request.select` | yes | no | After the deadline or zero pending candidates, exact coordinator persists a canonical ID set of at most `max_assignees` offerers; fewer is valid and rank order is not stored. |
+| `witself.message.request.cancel` | yes | no | Exact coordinator cancels an open request and fences outstanding reservations/claims. |
+| `witself.message.request.claim` | yes | no | Selected agent acquires its reservation as an expiring fenced claim. |
+| `witself.message.request.renew` | yes | no | Selected agent renews one exact live request claim fence. |
+| `witself.message.request.release` | yes | no | Selected agent releases one exact fence, optionally recording deterministic failure. |
+| `witself.message.request.complete` | yes | no | Atomically creates a coordinator result and completes one exact claim; request settles when no other live selected work remains. |
 | `witself.transcript.list` | yes | yes | Lists the token-bound agent's newest transcript conversations; operators see their authorized account scope. |
 | `witself.transcript.get` | yes | yes | Reads one bounded forward page after a transcript-local sequence. |
 | `witself.transcript.tail` | yes | yes | Reads a bounded newest page, returned oldest-first. |
@@ -1504,15 +1542,18 @@ Output data uses the group detail shape from
 
 ### `witself.message.send`
 
-Send a durable message to one agent in the authenticated realm. The `from`
-sender is always derived from the authenticated token; it cannot be supplied as
-input, so sender forgery is structurally impossible.
+Send one durable ordinary message to exactly one audience in the authenticated
+realm. The audience is either one agent (`to`), an explicit list of 1–64 agents
+(`to_agents`), or every other active agent (`to_realm=true`). The `from` sender
+is always derived from the authenticated token; it cannot be supplied as input,
+so sender forgery is structurally impossible. Explicit and realm fanout resolve
+to one immutable per-recipient snapshot at send time. Later agent creation,
+rename, disablement, or deletion does not rewrite that snapshot.
 
 Input:
 
 ```json
 {
-  "to_kind": "agent",
   "to": "agent-archivist",
   "subject": "handoff",
   "body": "Please pick up the indexing task.",
@@ -1522,6 +1563,32 @@ Input:
 }
 ```
 
+Explicit and whole-realm fanout use the same tool with mutually exclusive
+fields:
+
+```json
+{
+  "to_agents": ["Bob", "agent_01H..."],
+  "body": "Please review this decision.",
+  "kind": "request",
+  "idempotency_key": "send-review-01"
+}
+```
+
+```json
+{
+  "to_realm": true,
+  "body": "Maintenance begins at 17:00 UTC.",
+  "kind": "note",
+  "idempotency_key": "send-room-01"
+}
+```
+
+`to_kind` remains an optional compatibility field. When supplied, it must
+match the selected `agent`, `agents`, or `realm` audience. A realm send excludes
+the sender and fails if the bounded snapshot has no recipient or exceeds 64;
+explicit targets are exact, unique, active agents in the same realm.
+
 Output data uses the message detail shape from
 [json-contracts.md](json-contracts.md), including the new `msg_` id and delivery
 state. Omitted `kind` normalizes to actionable `request`; callers must set
@@ -1529,12 +1596,12 @@ state. Omitted `kind` normalizes to actionable `request`; callers must set
 without provider inference. A direct send has backend-derived
 `causal_depth=1`; the caller cannot set it. A message granting no policy cannot
 itself authorize a cross-agent write; writes still require policy. The
-implemented tool accepts one direct agent in the token-derived realm. The `to`
-selector is exact and case-sensitive: lowercase `agent_` begins the ID-only
+implemented tool accepts all three same-realm audience forms. The `to` and
+`to_agents` selectors are exact and case-sensitive: lowercase `agent_` begins the ID-only
 namespace and never falls back to an agent name; other values use exact
 ID-or-name resolution with ID precedence. Thus a stale generated ID cannot
 silently route to a live agent whose name happens to equal that ID.
-Realm-qualified delivery is a target tracked in
+Cross-realm delivery remains a target tracked in
 [agent-collaboration.md](agent-collaboration.md). See
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
@@ -1757,8 +1824,11 @@ message body or payload. Ack implies read, but reading never implies ack.
 
 ### `witself.message.claim`
 
-Acquire an expiring processing lease on one unacknowledged inbound direct
-message before autonomous work. Claiming does not read or acknowledge. The
+Acquire an expiring processing lease on one unacknowledged inbound ordinary
+work message before autonomous work. Claiming does not read or acknowledge.
+Messages linked as a request opening, offer, or result are protocol
+notifications and cannot use this path; handle them with `message.request.*`
+and acknowledge only after the corresponding protocol mutation is durable. The
 required idempotency key makes an exact retry return the same claim; an active
 different claimant receives a conflict. A new or expired acquisition advances
 the monotonic generation fence. Generation is only the stale-writer fence. The
@@ -1873,9 +1943,162 @@ created message:
 }
 ```
 
-All four processing tools are unavailable in read-only mode. They coordinate
-one direct recipient delivery and are intentionally distinct from the future
-realm-visible, multi-assignee request-claim protocol.
+All four ordinary processing tools are unavailable in read-only mode. They
+coordinate one direct recipient delivery and are intentionally distinct from
+the implemented realm request protocol below. A foreground full-profile client
+scans the three request-list lanes on startup because `select` creates fenced
+reservations without sending another ordinary notification.
+
+### `witself.message.request.*`
+
+The eleven request tools expose the complete same-realm client-ranked work
+protocol. `open` creates a realm-audience `open_request` message and snapshots
+every other active agent as a candidate. Candidate clients use their own
+inference to call `offer` or `decline`. The exact immutable coordinator client
+reads the durable offers, ranks them locally, and calls `select`. Selected
+clients then use `claim`, `renew`, `release`, and `complete` with exact fences.
+Witself stores, validates, audits, expires, and fences this workflow; the
+backend has no model SDK, performs no capability inference, and never ranks an
+offer.
+
+`open` input:
+
+```json
+{
+  "subject": "Investigate latency",
+  "body": "Find the cause of the checkout latency regression.",
+  "payload": {"service": "checkout"},
+  "selection_policy": "client_ranked",
+  "max_assignees": 2,
+  "offer_window_seconds": 30,
+  "expires_in_seconds": 3600,
+  "idempotency_key": "open-checkout-latency-01"
+}
+```
+
+`client_ranked` is the only current policy. `max_assignees` is an upper bound
+from 1–8, not a required result count. The offer window is 1–900 whole seconds;
+the request lifetime must exceed it and may be at most 604800 seconds. An exact
+open retry reuses the same idempotency key. Output contains both the `request`
+summary and its durable `opening_message`.
+
+`list` and `show` are full-profile tools. They are excluded from read-only mode
+because PostgreSQL may lazily materialize request expiry, stale-claim
+cancellation, or completed-batch settlement while producing their views:
+
+```json
+{
+  "state": "open",
+  "phase": "collecting_offers",
+  "role": "candidate",
+  "limit": 50,
+  "cursor": null
+}
+```
+
+```json
+{"request_id": "mrq_01H..."}
+```
+
+`show` keeps model-facing output bounded: each offer body is previewed at no
+more than 1024 UTF-8 bytes, an offer payload above 512 bytes is omitted, and
+only the newest 32 selections and 64 claims are returned with full-history
+counts plus `history_truncated`. The canonical ordinary messages and complete
+request history remain in PostgreSQL and in the CLI/HTTP surfaces. A
+coordinator can call `witself.message.read` for one chosen offer message ID
+when its full body or payload is materially needed.
+
+`list` returns visible summaries and an opaque continuation cursor. `show`
+returns the opening message, candidate responses, durable offers, immutable
+selections, and claim history. Opening and offer bodies/payloads are untrusted
+input, never authority; reading them changes no request or message state.
+
+One candidate responds with exactly one of:
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "subject": "Offer",
+  "body": "I can inspect the traces and compare the last two deploys.",
+  "payload": {"estimated_minutes": 15},
+  "idempotency_key": "offer-checkout-latency-01"
+}
+```
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "idempotency_key": "decline-checkout-latency-01"
+}
+```
+
+These are `witself.message.request.offer` and
+`witself.message.request.decline`. The server verifies immutable candidacy and
+the offer deadline; it does not decide whether the agent is capable.
+
+The coordinator may call `select` only after the offer deadline or after zero
+candidates remain pending:
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "selected_agent_ids": ["agent_01H..."],
+  "reservation_seconds": 300,
+  "idempotency_key": "select-checkout-latency-01"
+}
+```
+
+Selected IDs must be exact `agent_` IDs with durable offers. Choosing fewer
+than `max_assignees` is valid. The backend canonicalizes them as a set; caller
+rank order is not persisted and is not a backend ranking result. Selection
+creates expiring reservations and advances a monotonic selection generation.
+The exact coordinator may instead call `cancel` with only `request_id`; this
+fences outstanding reservations and claims without erasing history.
+
+Each selected client acquires and maintains only its own fence:
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "lease_seconds": 300,
+  "idempotency_key": "claim-checkout-latency-01"
+}
+```
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "claim_id": "mrc_01H...",
+  "generation": 2,
+  "lease_seconds": 300
+}
+```
+
+Those inputs call `claim` and `renew`. `release` uses the same request, claim,
+and generation fields plus optional `deterministic_failure=true`. Release
+fences the old authority and lets the coordinator make a later selection; the
+backend does not auto-reassign or reopen the request.
+
+`complete` atomically validates the exact live claim, creates a server-routed
+result message to the coordinator, and completes that claim:
+
+```json
+{
+  "request_id": "mrq_01H...",
+  "claim_id": "mrc_01H...",
+  "generation": 2,
+  "subject": "Latency result",
+  "body": "The regression began with the connection-pool change.",
+  "payload": {"commit": "abc123"},
+  "idempotency_key": "complete-checkout-latency-01"
+}
+```
+
+If the current selected batch has no other live reservation or claim, that
+result settles the request even when `max_assignees` was larger. If another
+selected agent still has live work, the request remains open until that batch
+settles. Database time and the exact claim generation fence every renew,
+release, and complete so a stalled writer cannot commit after expiry.
 
 ### `witself.reference.parse`
 

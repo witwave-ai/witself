@@ -35,6 +35,12 @@ depth deterministically derived during upgrade/import.
 Migration `0036` adds the durable direct-message `failure_count`. Schema-36
 archives preserve and validate it; earlier archives upgrade to zero because
 they contain no trustworthy per-message deterministic failure history.
+Migration `0037` adds explicit-list and realm audience metadata; the ordinary
+delivery rows remain the authoritative immutable send-time snapshot. Migration
+`0038` adds the complete open-request graph: requests, candidate snapshots,
+selections, and claims, linked to the ordinary opening, offer, and result
+messages. Terminal request history survives import. Active source-cell
+reservations and claims are imported as interrupted history with stale fences.
 The client-local runner notification ledger and content-free cycle health are
 not account data and are not exported. Notification pointers contain no message
 content; the referenced PostgreSQL messages remain in the archive and can be
@@ -119,8 +125,9 @@ Production backups should include:
 - Postgres backup. This is the system of record and carries memories, facts,
   primary flags, memory edit history, policies, group membership, group-owned
   records, curation queue/run/receipt state, messages and per-recipient
-  delivery/read/ack plus fenced processing state, tokens (hashes and metadata
-  only), audit records, and usage/limit state.
+  delivery/read/ack plus fenced processing state, audience snapshots, open
+  message requests and their candidate/selection/claim graph, tokens (hashes
+  and metadata only), audit records, and usage/limit state.
 - Migration-0032 client-vector profiles/rows; vector rows are optional derived
   data to use, but their table streams and existing rows are part of a complete
   schema-32 archive (see [Client-Supplied Vectors](#client-supplied-vectors)).
@@ -405,6 +412,13 @@ Import rules:
   preserved for available, claimed-normalized, and completed deliveries.
   Processing generation remains solely a stale-writer fence; interrupting an
   active import claim advances that fence without incrementing `failure_count`.
+- Fan-out messages restore one immutable header plus their exact delivery
+  snapshot; current realm membership is never re-resolved during import. Open
+  request candidates therefore remain the original send-time set. Completed,
+  released, and cancelled request claims retain their history and result links.
+  A source-cell `reserved` or `claimed` request slot imports as cancelled
+  history with its generation advanced, so no old worker can renew or complete
+  it in the destination.
 
 The implemented whole-account exporter requires the account to be suspended or
 closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
@@ -505,7 +519,8 @@ Self-hosted operators own:
 
 - Database backup and restore, including memories, facts, primary flags, memory
   edit history, curation queue/run/receipt state, policies, group membership,
-  group-owned records, messages, and audit.
+  group-owned records, messages, message audience snapshots, open request
+  coordination state, and audit.
 - Migration-0032 client-vector profile/row backup and restore.
 - Object/blob backup and restore when used.
 - Migration version tracking and upgrade ordering. See [storage.md](storage.md).
