@@ -9,6 +9,12 @@ for the durable mailbox, message shape, delivery/ordering, and the
 token-derived-sender trust boundary; this doc adds only what cross-realm
 collaboration requires on top of it.
 
+Client-owned autonomous execution, direct clarification loops, same-realm
+audiences, and request claims are defined first in
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md). This document
+adds cross-realm consent, discovery, transport, and trust; it does not redefine
+the local runner boundary.
+
 Sequencing: collaboration is the **first post-v0 epic**, built **after** the
 realm-local core (memory + realm-local messaging). You cannot extend a substrate
 that is not built yet; the realm-local mailbox is the substrate this design
@@ -126,16 +132,19 @@ Rules:
 
 ## Rendezvous: the blind relay (Witself Cloud)
 
-Witself Cloud is a **blind relay**. It routes envelopes between realms by realm
-handle and carries **end-to-end-signed** envelopes it **cannot read, forge, or
-alter**.
+Witself Cloud is intended to be a **blind relay**. It routes envelopes between
+realms by realm handle. End-to-end signatures prevent undetected forgery or
+alteration, but signatures alone provide no confidentiality; body/payload must
+also be end-to-end encrypted before this design may claim that the relay cannot
+read them.
 
 - The relay routes by realm handle (looked up in the shared global directory)
   to the recipient realm's home cell.
-- Envelopes are **end-to-end signed** by the sending realm/agent; the relay sees
-  routing metadata (handles, ids, size, timing) but **cannot read** `body` or
-  `payload` and **cannot** produce a valid signature for content it did not
-  originate. A relay compromise cannot impersonate a realm or rewrite a message.
+- Envelopes are **end-to-end signed** by the sending realm/agent; the relay
+  cannot produce a valid signature for content it did not originate. A relay
+  compromise cannot silently impersonate a realm or rewrite a message.
+  Confidential body/payload handling requires a separately specified
+  end-to-end encryption contract and remains unresolved in this draft.
 - **Self-hosts federate** by registering an FQDN + signing key in the shared
   global directory. A self-hosted realm is reachable by handle the same way a
   managed realm is.
@@ -225,7 +234,8 @@ Rules:
   reconstructed from the durable mailbox in the home cell; an agent can resume a
   conversation after a restart by reading its mailbox.
 - **Any live stream is only a latency accelerator**, never authoritative. A
-  dropped stream loses no state; the next `listen`/`list` drains the mailbox.
+  dropped stream loses no state; the next `listen`/`list` sees the same pending
+  metadata until explicit read/ack transitions occur.
 - State transitions emit audit events (`conversation.started`,
   `conversation.state_changed`, `conversation.completed`,
   `conversation.failed`, `conversation.canceled`); the canonical names land in
@@ -319,8 +329,8 @@ These are **decided** invariants for the collaboration substrate.
   mirror it (one core, multiple adapters).
 - **`listen` / `recv` verb.** A long-poll-style verb is added to **both** CLI and
   MCP, next to `send` / `list` / `read`: it **blocks up to N seconds** and
-  returns inbound messages (draining the mailbox), then returns. This is how an
-  agent "hears" without running a server.
+  returns inbound metadata without changing read/ack state, then returns. This
+  is how a client-owned runner "hears" without running a server.
 - **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**.
   The only HTTP server in the system is the backend (`witself-server` / the
   relay). An agent never needs to bind a port or accept inbound connections to
@@ -332,15 +342,16 @@ These are **decided** invariants for the collaboration substrate.
   state lives in the mailbox in the home cell.
 - **Offline recipients are the default.** A `send` **never requires the recipient
   to be online**: it persists into the recipient's durable mailbox (store-and-
-  forward) and **drains on the recipient's next `listen`**. This is the
+  forward) and is visible on the recipient's next `listen`. This is the
   realm-local mailbox model extended across the relay.
 - **Polling-first transport for v0.** v0 collaboration is polling-first (`listen`
   long-poll); push/streaming is an optimization layered on top, not a
   requirement.
-- **Agent-directive `listen` instruction.** Agents are told to listen in their
-  **agent directive** — the context-hydration teaching stanza gains an
-  instruction equivalent to: *"to hear, call the `witself listen` tool each
-  loop."* See [context-hydration.md](context-hydration.md).
+- **Agent-directive and runner split.** Managed instructions tell an already
+  active agent how to check its mailbox; a client-owned runner, not a teaching
+  string, owns repeated long polls and provider wake. See
+  [context-hydration.md](context-hydration.md) and
+  [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 ## Surfaces
 

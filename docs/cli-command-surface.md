@@ -231,7 +231,8 @@ witself
   install RUNTIME[,RUNTIME...]
   uninstall RUNTIME[,RUNTIME...]
   transcript create|append|list|show|tail|flush
-  message send|list|read|ack|listen
+  message send|reply|list|listen|read|ack|claim|renew|release|complete
+  message runner enable|disable|status|notifications|run|serve|start
   federation peers|card
   reference parse|resolve
   agent create|list|show|rename|copy|disable|enable|delete
@@ -2946,62 +2947,105 @@ is always derived from the authenticated token, never from input, so sender
 forgery is structurally impossible. Message content is untrusted input to the
 receiving agent; a message cannot itself authorize a cross-agent write. The
 messaging model is tracked in
-[inter-agent-messaging.md](inter-agent-messaging.md).
+[inter-agent-messaging.md](inter-agent-messaging.md); the client-owned autonomy
+extension is tracked in
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
-Implementation note: the current first slice supports direct agents in the same
-realm with `send`, `list`, `read`, and `ack`. Group/cross-realm recipients,
-`listen`, dry-run, time-window filters, and operator mailbox overrides are
-planned follow-on slices.
+Implementation note: the direct slice supports agents in the same realm with
+`send`, recipient-only `reply`, metadata-only `list` and `listen`, separate
+`read` and `ack`, delivery-processing `claim`/`renew`/`release`, atomic
+result-producing `complete`, and the client-owned `message runner` lifecycle.
+Group/cross-realm recipients, explicit-list/realm fan-out, dry-run, time-window
+filters, operator mailbox overrides, and multi-assignee open-request claims are
+planned follow-on slices. This describes the current checkout, not a deployed
+or released version.
 
 ### `witself message send`
 
-Send a message to an agent or group. `from` is the token-bound agent.
+Send a message to one agent in the token-derived realm. `from` is the
+token-bound agent. Caller-supplied `thread_id` is correlation metadata; it is
+not proof that this send is a reply and does not grant thread membership. Use
+`message reply` for validated reply causality.
 
-`--to` also accepts a realm-qualified `witself://<realm-handle>/agent/<name>`
-(and `witself://<realm-handle>/group/<name>`) to address a named agent or
-channel in a remote realm; an unqualified name is local, unchanged. The session
-can still only send **as** the token-bound agent. Cross-realm sends carry no
-authority on their own: delivery requires the receiving realm to allow-list the
-sending realm, and `--dry-run` validates the recipient, federation allow-list,
-budgets, and quotas without persisting or delivering anything. Cross-realm
-addressing is tracked in
-[agent-collaboration.md](agent-collaboration.md).
+Realm-qualified agents, groups, and dry-run are target extensions tracked in
+[agent-collaboration.md](agent-collaboration.md); the current command rejects
+cross-realm routing.
 
 ```sh
 ws message send --to archivist \
   --subject "handoff" \
   --body "Postmortem stored as mem_01H...; please review."
 
-ws message send --to-group shared-context \
-  --kind notice \
-  --body-file ./broadcast.txt
-
 ws message send --to coordinator \
   --thread thr_01H... \
+  --kind note \
   --body "Acknowledged; proceeding." \
   --payload-file ./status.json
-
-ws message send --to witself://acme-research/agent/coordinator \
-  --subject "cross-realm handoff" \
-  --body "Requesting review; conversation continues here."
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--to NAME_OR_ID` | Recipient agent. Accepts a realm-qualified `witself://<realm-handle>/agent/<name>` for a remote-realm agent. Mutually exclusive with `--to-group`. |
-| `--to-group NAME_OR_ID` | Recipient security group; fanned out to current members. Accepts a realm-qualified `witself://<realm-handle>/group/<name>` for a remote-realm channel. Mutually exclusive with `--to`. |
+| `--to NAME_OR_ID` | Recipient agent in the authenticated realm. A lowercase `agent_` prefix selects the exact ID namespace and never falls back to a name. |
 | `--subject TEXT` | Short subject. |
-| `--kind KIND` | Short classification, such as `notice`, `handoff`, or `request`. |
+| `--kind KIND` | Short classification; defaults to actionable `request`. Use explicit `note` for FYI-only delivery without runner inference. |
 | `--body TEXT` | Message body from a flag. |
 | `--body-file PATH` | Read the message body from a file. |
 | `--body-stdin` | Read the message body from stdin. |
 | `--payload-file PATH` | Attach an optional structured payload from a JSON file. |
 | `--thread ID` | Continue an existing conversation/thread for ordered delivery. |
 | `--idempotency-key KEY` | Retry key for one logical send; reuse returns the original message. |
-| `--dry-run` | Validate recipients, authorization, and rate limits without sending. |
-| `--reason TEXT` | Audit reason when required by operator/cross-context policy. |
+
+The default is deliberately actionable across CLI, MCP, and API/store
+normalization. An omitted kind becomes `request`. A runner treats explicit
+`note` (and other non-actionable labels) as a content-free notification pointer,
+then acknowledges it without invoking the provider.
+
+Recipient resolution is exact and case-sensitive. A selector beginning with
+lowercase `agent_` is ID-only: if that live same-realm ID does not exist, the
+send fails even if a live agent has that exact text as its name. Other selectors
+use ordinary exact ID-or-name resolution, with an ID taking precedence over a
+same-text name. This prevents a stale generated ID from silently routing to a
+different, same-named agent.
+
+The same namespace rule applies to inbox sender filters. On `message list` and
+`message listen`, a lowercase `agent_` `--from` value matches only that exact
+sender ID and never a same-text name; ordinary values use exact ID-or-name
+matching with ID precedence.
+
+An exact keyed send retry returns its original durable message even if that
+message's recipient was subsequently deleted. A new key still performs live
+recipient resolution and cannot create a delivery to the tombstone.
+
+### `witself message reply ID`
+
+Reply to one inbound parent message. The caller must be the parent recipient.
+The server derives the recipient from the parent sender and derives both the
+thread and `reply_to_message_id`; it derives `causal_depth` as parent plus one.
+The command intentionally has no `--to`, `--thread`, or depth flag. Raw
+`thread_id` remains correlation only.
+
+```sh
+ws message reply msg_01H... \
+  --body "Which environment should I use?" \
+  --idempotency-key reply-01
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--subject TEXT` | Short reply subject. |
+| `--kind KIND` | Reply classification; defaults to `reply`. |
+| `--body TEXT` | Reply body from a flag. |
+| `--body-file PATH` | Read the reply body from a file; `-` means stdin. |
+| `--body-stdin` | Read the reply body from stdin. |
+| `--payload-file PATH` | Attach an optional structured payload from a JSON file. |
+| `--idempotency-key KEY` | Retry key for one logical reply; reuse returns the original message. |
+
+An exact keyed reply retry likewise survives later deletion of its derived
+recipient; a new reply key still requires that recipient to be live.
 
 ### `witself message list`
 
@@ -3023,13 +3067,9 @@ Flags:
 |---|---|
 | `--unread` | Show only unread messages. |
 | `--sent` | Show messages sent by the caller instead of received. |
-| `--from NAME_OR_ID` | Filter by sender agent. |
-| `--to-group NAME_OR_ID` | Filter to messages delivered via a group. |
+| `--from NAME_OR_ID` | Filter by exact sender agent ID or name; lowercase `agent_` is ID-only. |
 | `--thread ID` | Filter by conversation/thread. |
 | `--kind KIND` | Filter by message kind. |
-| `--since TIMESTAMP_OR_DURATION` | Filter by created window start. |
-| `--until TIMESTAMP` | Filter window end. |
-| `--owner-agent NAME_OR_ID` | Operator/admin only: list a specific agent's mailbox. |
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
@@ -3038,53 +3078,262 @@ Flags:
 Read one message, including body and any structured payload. Reading marks the
 per-recipient read state. Treat the body and payload as untrusted input.
 
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin only: read a message from a specific agent's mailbox. |
-| `--no-mark-read` | Do not update read state when reading. |
-| `--show-payload` | Include the structured payload. Default: true. |
-| `--reason TEXT` | Audit reason for operator reads. |
+The command has no no-mark-read mode: use metadata-only `list` or `listen` when
+content should remain unread. `--json` returns the same message detail shape as
+the API and MCP, including backend-derived `causal_depth`. Direct sends begin at
+one; validated replies advance exactly one from their durable parent.
 
 ### `witself message ack ID`
 
 Acknowledge a message, recording explicit per-recipient ack state. Ack is
 distinct from read: it confirms the recipient processed the message.
 
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin only: ack on behalf of a specific agent when permitted. |
-| `--reason TEXT` | Audit reason for operator acks. |
+`--json` returns acknowledged message metadata only; it never returns the body
+or payload.
 
 ### `witself message listen`
 
-Long-poll receive: block up to `--timeout` seconds and return inbound messages
-for the token-bound agent, draining the mailbox. This is the live face of the
-durable mailbox and the receive half of cross-realm collaboration: a dropped
-poll loses no state, since the next `listen` (or `message list`) drains the same
-mailbox. Agents are told to call `listen` each loop in their teaching stanza so
-they hear inbound messages and reply with `send`; the directive lives in
-[context-hydration.md](context-hydration.md), and the collaboration model is
-tracked in [agent-collaboration.md](agent-collaboration.md).
+Stateless long-poll receive: block up to `--timeout` seconds and return the
+oldest unacknowledged inbound **message metadata** for the token-bound agent.
+This is a waitable mailbox query, not a consuming drain: a timeout or dropped
+poll loses no state, and listing or listening never marks read or acknowledged.
+A crash after read but before ack leaves the message eligible for a later
+listen. A client runner calls `listen`, then explicitly reads untrusted content
+and acknowledges only after handling it.
+The active-session teaching boundary lives in
+[context-hydration.md](context-hydration.md), and the autonomous runner model is
+tracked in
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 ```sh
 ws message listen
-ws message listen --timeout 30 --json
-ws message listen --conversation thr_01H... --timeout 60
+ws message listen --timeout 20 --json
+ws message listen --conversation thr_01H... --timeout 10
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--timeout SECONDS` | Maximum time to block waiting for inbound messages before returning. |
-| `--conversation ID` | Listen only for messages in a specific conversation/thread. |
-| `--owner-agent NAME_OR_ID` | Operator/admin only: listen on a specific agent's mailbox. |
-| `--no-mark-read` | Do not update read state for returned messages. |
-| `--limit N` | Maximum number of messages to return per poll. |
+| `--timeout SECONDS` | Maximum wait from 0 through 20 seconds; defaults to 20. |
+| `--from NAME_OR_ID` | Filter by exact sender agent ID or name; lowercase `agent_` is ID-only. |
+| `--thread ID` | Filter by conversation/thread. |
+| `--conversation ID` | Alias for `--thread`; specifying both requires equal values. |
+| `--kind KIND` | Filter by message kind. |
+| `--limit N` | Maximum messages to return, from 1 through 100; defaults to 50. |
+
+Listen has no cursor: each poll queries current unacknowledged state oldest
+first. JSON output contains `messages` and `timed_out`. The server bounds
+concurrent listen admission per process; saturation is retryable and surfaces
+HTTP 429 with `Retry-After`.
+
+### `witself message claim ID`
+
+Acquire a bounded processing lease before autonomous work on one inbound,
+unacknowledged direct message. Claiming does not read or acknowledge the
+message. An exact idempotent retry returns the same claim; an active different
+claim conflicts. A new or expired claim increments the monotonic generation
+fence. Generation is only the stale-writer fence. The separate backend-owned
+`failure_count` tracks exact-fence releases that the direct runner marks as
+deterministic message failures.
+
+```sh
+ws message claim msg_01H... \
+  --lease 2m \
+  --idempotency-key runner-claim-msg-01H
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--lease DURATION` | Processing lease from 30 seconds through 15 minutes in whole seconds; defaults to 5 minutes. |
+| `--idempotency-key KEY` | Required retry key for this one logical claim. |
+
+Human output includes message id, claim id, generation, state, and lease expiry.
+JSON output returns the value-free `processing` object, including
+`failure_count`.
+
+### `witself message renew ID`
+
+Renew one exact, still-live claim using the claim id and generation returned by
+`claim` (or the prior renewal). Renewal is a database-time heartbeat and does
+not read, complete, or acknowledge the message.
+
+```sh
+ws message renew msg_01H... \
+  --claim mcl_01H... \
+  --generation 1 \
+  --lease 2m
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--claim ID` | Required active `mcl_` processing claim id. |
+| `--generation N` | Required positive processing fence generation. |
+| `--lease DURATION` | Replacement lease from 30 seconds through 15 minutes in whole seconds; defaults to 5 minutes. |
+
+### `witself message release ID`
+
+Release one exact claim so another runner may retry. Release makes processing
+available and invalidates the old fence immediately; it does not ack. This
+manual CLI action does not mark a deterministic failure and therefore does not
+increment `failure_count`; the client-owned runner uses the internal HTTP field
+only after a message-specific deterministic failure.
+
+```sh
+ws message release msg_01H... --claim mcl_01H... --generation 1
+```
+
+### `witself message complete ID`
+
+Atomically validate one exact unexpired fence, create a server-routed reply to
+the original sender, link that result to the delivery, and mark processing
+completed. Recipient, thread, causal parent, sender, account, and realm are
+derived by the server, and result `causal_depth` is parent plus one. Completion
+never acknowledges the parent; call `message ack` only after observing the
+durable completion.
+
+```sh
+ws message complete msg_01H... \
+  --claim mcl_01H... \
+  --generation 1 \
+  --kind result \
+  --body-file ./result.txt \
+  --idempotency-key runner-complete-msg-01H-1
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--claim ID` | Required active `mcl_` processing claim id. |
+| `--generation N` | Required positive processing fence generation. |
+| `--subject TEXT` | Optional result subject. |
+| `--kind KIND` | Result classification; defaults to `result`. |
+| `--body TEXT` | Result body from a flag. |
+| `--body-file PATH` | Read the result body from a file; `-` means stdin. |
+| `--body-stdin` | Read the result body from stdin. |
+| `--payload-file PATH` | Attach an optional structured result object. |
+| `--idempotency-key KEY` | Required retry key for this one atomic completion. |
+
+### `witself message runner`
+
+Run direct autonomous message handling as the immutable account/realm/agent in
+an installed runtime binding. The trusted parent retains the Witself token,
+long-polls metadata, claims and renews work, reads untrusted content, invokes a
+bounded text-only provider child, completes one derived reply, and then acks.
+Provider children receive no Witself token, token path, API handle, or
+processing fence.
+
+The current provider-invoking kinds are `request`, `question`, and `reply`.
+Other kinds are recorded in the private content-free notification ledger before
+acknowledgement and never invoke the provider. `notifications` exposes the
+message id for an authorized ordinary read. Automatically injecting an
+asynchronous terminal result into a human-facing sender task remains a client
+integration responsibility rather than a backend push.
+
+```sh
+# Configure the Claude Code binding and install/start its per-user service.
+ws message runner enable --runtime claude-code --max-turns 12
+
+# Inspect or explicitly restart the installed service.
+ws message runner status --runtime claude-code --json
+ws message runner notifications --runtime claude-code --json
+# After `message read msg_result` handles one pointer:
+ws message runner notifications --runtime claude-code --clear msg_result
+ws message runner start --runtime claude-code
+ws message runner disable --runtime claude-code
+
+# Alternative foreground/manual configuration for testing.
+ws message runner enable --runtime claude-code --no-service
+ws message runner run --runtime claude-code --once --json
+ws message runner run --runtime claude-code
+ws message runner disable --runtime claude-code
+```
+
+Subcommands:
+
+| Command | Behavior |
+|---|---|
+| `enable --runtime RUNTIME` | Verify the installed binding and token identity, probe the provider, write private value-free configuration, and install/start launchd (macOS) or a systemd user service (Linux). `--no-service` configures without the OS service. |
+| `disable --runtime RUNTIME` | Uninstall only Witself's owned service definition and mark the runner disabled; pending messages remain durable. |
+| `status --runtime RUNTIME` | Report configuration, installed/enabled/active service state, pending notification count, and content-free last-cycle health without message content, raw errors, or credentials. |
+| `notifications --runtime RUNTIME` | List newest-first local notification pointers without message content. Repeatable/comma-separated `--clear MESSAGE_ID` removes exact pointers; `--clear-all` removes every pointer. Neither deletes durable messages. |
+| `run --runtime RUNTIME` | Run in the foreground; `--once` handles at most one oldest unacknowledged message and may be combined with `--json`. |
+| `serve --runtime RUNTIME` | Long-running service-manager entrypoint; rejects `--once` and `--json`. |
+| `start --runtime RUNTIME` | Start/restart an already installed service without changing configuration. |
+
+`enable` accepts `--provider`, `--provider-path`, `--model`, `--max-turns 1-64`,
+`--replace-binding`, `--no-service`, and `--json`. Provider defaults to the
+runtime. The automated turn limit defaults to 12 and supports at most 64. The
+runner carries bounded continuation history between direct replies, but that
+payload is advisory only. It enforces the cross-machine turn limit from
+backend-derived message `causal_depth` and emits a durable escalation when the
+configured limit is exceeded. Repeated message-specific deterministic failures
+are enforced separately from backend-owned `failure_count`: the current default
+releases and counts the first four and publishes a durable escalation on the
+fifth. Provider-wide, configuration, cancellation, and claim-lease maintenance
+failures do not consume that message budget; processing generation remains only
+the stale-writer fence.
+
+At enable time, Witself captures only recognized provider-auth environment
+values into a separate mode-0600 `provider-credentials.json` bound to the
+selected provider. Claude Code accepts `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and
+`CLAUDE_CODE_OAUTH_TOKEN`; Grok Build accepts `XAI_API_KEY`. The value-free
+runner config, launchd/systemd definition, status output, logs, and account
+export never contain those values. The service loads the provider-scoped file
+and passes only its allowlisted authentication values into the already
+sanitized provider child; the Witself token/path/fence and all other
+`WITSELF_*` values remain unavailable apart from the reserved value-free runner
+session marker.
+
+`status --json` includes a content-free `health` object with `last_cycle_at`,
+`last_success_at`, `last_status`, `last_error_class`, and
+`consecutive_failures`. Error classes are bounded to configuration, identity,
+provider, cancelled, or generic cycle failures. Neither the persisted record
+nor status output includes raw error text, message ids/content, provider output,
+or credentials. Human status prints the last status, local consecutive-failure
+count, and error class alongside service and notification state. This local
+health streak is distinct from a message's backend `failure_count`.
+
+The notification ledger is a mode-0600 local file, is metadata-only, and is
+bounded to 1,024 entries. A terminal or otherwise non-provider delivery is
+recorded before it is acknowledged. At capacity, recording fails closed: the
+runner neither silently evicts a pointer nor acknowledges the unrecorded
+delivery. Use `message read MESSAGE_ID` for content, then `message runner
+notifications --runtime RUNTIME --clear MESSAGE_ID` to remove an inspected
+local pointer. Use `--clear-all` only after every listed pointer has been
+handled.
+
+For an active agent, full-profile MCP provides a combined verified path:
+`message.notification.list` exposes local pointers and
+`message.notification.consume` reads and verifies the canonical message before
+clearing only the exact pointer. Any consume failure leaves it intact.
+Read-only retains list but omits consume; curator profiles expose neither. Grok
+uses `witself_message_notification_list` and
+`witself_message_notification_consume`. The runner's acknowledgement is global
+for that agent delivery, but the pointer lives only under this runtime's
+`WITSELF_HOME`; another machine/runtime cannot see it or recover the delivery as
+unread. This is an intentional MVP locality limit, not cross-host wake delivery.
+Local pointers are excluded from account export; canonical messages are
+included.
+
+Native text-only provider support is capability-probed. Claude Code and Grok
+Build are supported when their installed help surface advertises every required
+no-tools/isolation flag. Native Codex and Cursor deliberately fail closed; use
+a supported provider override for that installed identity or integrate the
+runner core's strict generic command-adapter contract separately. The generic
+adapter is an extensibility API, not yet an arbitrary-command flag on
+`message runner enable`. Tool-capable execution is not part of this runner.
+Grok receives its private plain-text `turn.txt` inside the mode-0700 per-call
+workspace because the strict sandbox reads only beneath `--cwd`; the file is
+mode 0600 and the entire scratch root is removed when the invocation returns.
+Do not start a foreground `run` while the installed background service is
+active; the per-runtime singleton lock deliberately rejects the second process.
 
 ## `witself federation`
 
@@ -3576,10 +3825,10 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current full server exposes 47 tools across self, deterministic facts and fact
-review/deletion, transcripts, direct-agent messages, the implemented direct
-narrative-memory lifecycle/recall/delete surface, and fourteen client-curation tools
-documented in
+The current full server exposes 56 tools across self, deterministic facts and
+fact review/deletion, transcripts, direct-agent messages, the implemented
+direct narrative-memory lifecycle/recall/delete surface, and fourteen
+client-curation tools documented in
 [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
 target contract as additional domain capabilities are wired in.
 
@@ -3595,18 +3844,25 @@ value-returning sealed-plane tools while leaving open-plane and metadata tools
 available; `--read-only` separately disables mutating tools.
 
 On connect, the server returns its `instructions` field carrying the canonical
-standing protocol that teaches the agent to call Witself: load `self.show` and
-`recall` at the start of non-trivial work, `remember` after learning something
-durable, `adjust`/`forget` instead of contradicting, and flush state with
-`session.end` before long operations. This is the MCP half of the teaching layer;
+standing protocol. At the start of non-trivial work it teaches the active agent
+to call `self.show`, non-blocking `message.listen(wait_seconds=0)`, and
+`message.notification.list`, then use focused memory recall when prior context
+matters. Listen discovers canonical unacknowledged mailbox work; notification
+list discovers content-free pointers already acknowledged by the background
+runner. Neither startup check exposes content, clears a pointer, or wakes an
+idle model. This is the MCP half of the teaching layer;
 the pinned text and the file-ecosystem counterpart
 ([`witself bootstrap-instructions`](#witself-bootstrap-instructions)) are tracked
 in [context-hydration.md](context-hydration.md). In `--read-only` mode the server
 omits implemented mutating memory tools, including `capture`, `adjust`,
 `supersede`, lifecycle changes, evidence resolution, and permanent-delete
-apply; fact/candidate/subject mutations plus message `send` and the
-acknowledging message `read` are also omitted. Memory `read`, `list`, `history`,
-and `recall` remain alongside the other non-mutating lookup tools.
+apply; fact/candidate/subject mutations plus message `send`, `reply`, `read`,
+`ack`, `claim`, `renew`, `release`, `complete`, and
+`message.notification.consume` are also omitted. Message `list`, non-mutating
+`listen`, and content-free `message.notification.list` remain available.
+Curator profiles expose neither notification bridge tool. Memory `read`,
+`list`, `history`, and `recall` remain alongside the other non-mutating lookup
+tools.
 
 Flags:
 

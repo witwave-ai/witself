@@ -187,19 +187,92 @@ their existing agent tokens:
 
 ```sh
 witself message send --account default --agent scott \
-  --to coordinator --kind handoff --body "Picking this up from here."
+  --to coordinator --body "Please pick up the indexing task."
 
 witself message list --account default --agent coordinator --unread
+witself message listen --account default --agent coordinator --timeout 20
 witself message read msg_... --account default --agent coordinator
+witself message reply msg_... --account default --agent coordinator \
+  --body "I have one question before I start."
 witself message ack msg_... --account default --agent coordinator
 ```
 
-The sender and realm always come from the authenticated agent token. Inbox
-lists contain metadata only; `read` is the content boundary, and message content
-must be treated as untrusted input. The installed MCP server exposes matching
-`witself.message.send`, `witself.message.list`, and `witself.message.read` tools.
+The sender and realm always come from the authenticated agent token. An
+ordinary send defaults to actionable `kind=request`; use explicit `--kind note`
+for an FYI that the background runner records and acknowledges without provider
+inference. Inbox lists and `listen` contain metadata only; `listen` returns the
+oldest unacknowledged inbound work without changing state, `read` is the content
+boundary, and message content must be treated as untrusted input. Replies are
+recipient-only: the server validates that the caller received the parent and
+derives the reply recipient, thread, and parent link. Read and acknowledgement
+remain separate in the CLI, API, and MCP; acknowledgement returns metadata only,
+never the message body or payload. The installed MCP server exposes
+matching `witself.message.send`, `reply`, `list`, `listen`, `read`, `ack`,
+`claim`, `renew`, `release`, and `complete` tools plus
+`witself.message.notification.list` and `.consume`. At the start of a
+non-trivial task, its instructions call for non-blocking
+`message.listen(wait_seconds=0)` and notification list: the first discovers
+canonical unacknowledged work, while the second discovers local pointers the
+background runner already acknowledged. Consume reads and verifies the
+canonical message before clearing exactly that pointer; any failure leaves it
+intact. Read-only MCP retains list but removes consume, and curator profiles
+expose neither bridge tool. Grok receives underscore names, including
+`witself_message_notification_list` and
+`witself_message_notification_consume`. The processing operations use a
+recipient-only migration-0034 lease/fence; `complete` atomically creates and
+links one server-routed result reply, while acknowledgement remains separate.
+Migration 0035 adds server-derived `causal_depth`: direct sends start at one and
+each validated reply advances exactly one from its durable parent. Migration
+0036 adds a durable `failure_count` for deterministic, message-specific runner
+failures; processing generation remains only the stale-writer fence.
+
+The current source also includes a client-owned autonomous text-only runner:
+
+```sh
+witself message runner enable --runtime claude-code --max-turns 12 --no-service
+witself message runner run --runtime claude-code --once --json
+witself message runner disable --runtime claude-code
+
+# Persistent service path.
+witself message runner enable --runtime claude-code --max-turns 12
+witself message runner status --runtime claude-code
+witself message runner notifications --runtime claude-code
+witself message runner disable --runtime claude-code
+```
+
+`enable` installs a per-user launchd service on macOS or systemd user service
+on Linux unless `--no-service` is supplied. The trusted parent retains the
+Witself token; provider children receive no token, token path, MCP/tool access,
+or processing fence. At enable time, recognized provider-auth environment
+values are captured into a separate mode-0600, provider-bound local file so the
+OS service can authenticate after the shell exits. They never enter runner
+configuration, service definitions, or account export. Native Claude Code and
+Grok Build are capability-probed text-only providers. Native Codex and Cursor
+fail closed until their CLIs expose equivalent isolation; the runner core also
+defines a strict generic command-adapter protocol for separately integrated
+wrappers. Direct continuation history is bounded, with 12 turns by default and
+a hard configurable maximum of 64. The runner enforces that limit from
+backend-owned `causal_depth`, not the advisory payload history. Its default
+repeated-failure policy escalates the fifth deterministic attempt from the
+backend-owned `failure_count`; provider-wide, configuration, cancellation, and
+lease-maintenance failures release without consuming that per-message budget.
+Processing generation is only the fencing token. Terminal and other
+non-provider messages are indexed in a private,
+content-free notification ledger before acknowledgement; inspect the metadata
+with `message runner notifications`, or use MCP notification consume for a
+canonical read/verify followed by exact local clear. The runner's
+acknowledgement is global for that agent delivery, but its pointer exists only
+in that runtime's local `WITSELF_HOME`; another machine/runtime cannot recover
+it as unread work. This is an intentional MVP locality limit, not cross-host
+wake delivery. Local pointers are excluded from account export while their
+canonical PostgreSQL messages are included. `message runner status` also
+reports content-free last-cycle health: timestamps, status/error class, and
+consecutive failure count, never an error string or message content.
+
 See [Witself Inter-Agent Messaging](docs/inter-agent-messaging.md) for the
-implemented boundary and planned group/cross-realm extensions.
+implemented direct boundary. Explicit-list and realm audiences plus open
+multi-assignee work claims remain future work specified in
+[Autonomous Realm Messaging](docs/autonomous-realm-messaging.md).
 
 ## Infrastructure Example
 
@@ -563,6 +636,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 - [Access Policy](docs/access-policy.md)
 - [Security Groups](docs/security-groups.md)
 - [Inter-Agent Messaging](docs/inter-agent-messaging.md)
+- [Autonomous Realm Messaging](docs/autonomous-realm-messaging.md)
 - [Agent Collaboration](docs/agent-collaboration.md)
 - [Operator Authentication](docs/operator-auth.md)
 - [Token Lifecycle](docs/token-lifecycle.md)

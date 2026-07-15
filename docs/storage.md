@@ -121,11 +121,35 @@ source of truth.
 - `groups` — `grp_…` id, realm, name (unique per realm), owner/admins,
   timestamps.
 - `group_members` — group id × agent id membership rows.
-- `messages` — `msg_…` id, realm, `from` agent (always token-derived), `to`
-  (agent or group), subject/kind, body, optional payload, optional
-  thread/conversation id, `created_at`.
-- `message_deliveries` — per-recipient delivery rows with ordering, read, and
-  ack state for the mailbox/queue model.
+- `agent_messages` — `msg_…` id, account/realm, token-derived sender, resolved
+  direct recipient, subject/kind, body, optional object payload, thread id,
+  migration-0033 causal parent, migration-0035 backend-derived causal depth,
+  optional sender-scoped idempotency key, and `created_at`.
+  Explicit-list/realm/group audiences remain future additions.
+  Current write surfaces normalize omitted kind to actionable `request`;
+  explicit `note` is FYI-only to the runner.
+- `agent_message_deliveries` — one row per message/recipient with
+  delivery/read/ack state plus migration-0034 independent
+  `available`/`claimed`/`completed` processing state, monotonic generation,
+  claim/complete retry hashes, database-time lease, and unique result-message
+  link. Migration 0036 adds the separate durable `failure_count` for exact-fence
+  releases marked as deterministic message failures; generation remains only
+  the stale-writer fence. Import interrupts active claims while preserving
+  completed links and failure counts.
+- A runner's private content-free notification ledger is derived client-local
+  operational state, not a second message store. It carries message/thread/
+  sender pointers only; PostgreSQL remains authoritative for content and
+  delivery state. The ledger is excluded from account export even though its
+  canonical messages are included. Because the runner globally acknowledges a
+  delivery after recording its local pointer, another host/runtime for the same
+  agent cannot see that pointer or rediscover the delivery as unread; this is an
+  intentional MVP locality limitation.
+- Runner cycle health in the same private state is also derived and
+  content-free: timestamps, bounded status/error class, and consecutive failure
+  count only.
+- A runner's provider-auth capture is a separate mode-0600 client-local file
+  bound to one configured native provider. It is not PostgreSQL, runner config,
+  service-definition content, or account-export data.
 - `transcript_conversations` — `trn_…` id, account/realm, owning recorder agent,
   optional external conversation id/title/metadata, and sequence allocator.
 - `transcript_entries` — `ent_…` id, transcript, monotonically ordered role,
@@ -212,8 +236,8 @@ salience, and recency ranking remain available when no vectors exist.
   profile. It never replaces memory content as the source of truth.
 - The backend validates authorization, finite values, dimensions, profile,
   version, and content hash, then performs deterministic bounded similarity
-  math over canonical JSONB arrays. It never calls a model, chooses a provider, or generates,
-  repairs, or re-embeds a vector.
+  math over canonical JSONB arrays. It never calls a model, chooses a provider,
+  or generates, repairs, or re-embeds a vector.
 - Missing, stale, or incompatible vectors use the universal lexical path and
   report profile coverage. They are not a server dependency failure.
 - Client software may regenerate vectors after a profile change and resubmit

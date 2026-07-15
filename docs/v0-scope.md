@@ -77,14 +77,17 @@ V0 should prove the end-to-end product boundary:
 - The CLI can create, append, list, and show visible interaction transcripts;
   agents write their own ledger and account operators have read-only audit
   visibility.
-- The CLI can send, list, read, and acknowledge durable inter-agent messages,
-  with sender identity derived from the token.
+- The CLI can send, reply, list, listen, read, acknowledge, and coordinate
+  fenced processing for durable inter-agent messages, with sender identity
+  derived from the token. Its client-owned runner keeps a bounded content-free
+  local notification handoff.
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
 - `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
-  the self-management and fourteen curation tools, and teach the always-loaded
-  recall-before-act / write-after-learn protocol through its server
-  `instructions` field.
+  the self-management, fourteen curation, direct-message, and local notification
+  bridge tools. Its server `instructions` teach the always-loaded
+  recall-before-act/write-after-learn protocol plus non-blocking message listen
+  and notification-list startup checks.
 - `witself-server serve --dev` can exercise the same core through HTTP.
 - `witself-server` exposes Prometheus metrics, structured logs, and Kubernetes
   health probes.
@@ -159,8 +162,9 @@ Core user-facing capabilities:
 - Policy create/list/show/delete/test under default deny.
 - Group create/list/show/add-member/remove-member/delete, including
   group-scoped shared memories and facts.
-- Message send/list/read/ack over a durable mailbox with per-recipient ordering
-  and acknowledgement.
+- Message send/reply/list/listen/read/ack and fenced processing over a durable
+  mailbox with per-recipient ordering and acknowledgement, plus local MCP
+  notification list/consume bridging for background-runner handoff.
 - Identity reference parsing and resolution.
 - `witself export` and `witself import` for round-trippable structured
   identity data, including the portable curation graph and value-free receipts.
@@ -412,6 +416,7 @@ When the sealed credential-plane slice ships, it is additionally credible when:
 - [storage.md](storage.md)
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
+- [autonomous-realm-messaging.md](autonomous-realm-messaging.md)
 - [agent-collaboration.md](agent-collaboration.md)
 - [observability-and-operations.md](observability-and-operations.md)
 - [mcp-tools.md](mcp-tools.md)

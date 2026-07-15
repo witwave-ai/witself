@@ -18,7 +18,7 @@ import (
 
 var migrationTestSchemaSequence atomic.Uint64
 
-func TestMigration32Postgres(t *testing.T) {
+func TestMigration36Postgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
@@ -29,10 +29,22 @@ func TestMigration32Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 		assertMigrationTestTableConstraint(t, st, "tokens", "tokens_access_profile_kind_check", true)
 		assertMigrationTestColumn(t, st, "tokens", "access_profile", true)
+		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
+		assertMigrationTestTableConstraint(t, st, "agent_messages", "agent_messages_reply_parent_fk", true)
+		assertMigrationTestTableConstraint(t, st, "agent_messages", "agent_messages_reply_not_self", true)
+		assertMigrationTestColumn(t, st, "agent_messages", "causal_depth", true)
+		assertMigrationTestTableConstraint(t, st, "agent_messages", "agent_messages_causal_depth_range", true)
+		assertMigrationTestIndex(t, st, "agent_messages", "agent_messages_by_recipient_activity", true)
+		assertMigrationTestColumn(t, st, "agent_message_deliveries", "processing_state", true)
+		assertMigrationTestColumn(t, st, "agent_message_deliveries", "failure_count", true)
+		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_failure_count_range", true)
+		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_processing_shape", true)
+		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_result_message_fk", true)
+		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_result_message_unique", true)
 	})
 
 	t.Run("schema 30 credentials upgrade to full profiles", func(t *testing.T) {
@@ -64,7 +76,7 @@ func TestMigration32Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestTableConstraint(t, st, "tokens", "tokens_access_profile_kind_check", true)
 		var total, full int
 		if err := st.pool.QueryRow(ctx, `
@@ -91,6 +103,160 @@ func TestMigration32Postgres(t *testing.T) {
 				UPDATE tokens SET access_profile=$1
 				WHERE account_id=$2 AND kind='agent'`, profile, provisioned.AccountID); err != nil {
 				t.Fatalf("agent profile %q: %v", profile, err)
+			}
+		}
+	})
+
+	t.Run("schema 32 messages upgrade with null reply parent", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 32)
+		insertMigrationTestMemoryPrincipals(t, st)
+		ctx := context.Background()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertMigrationTestMessage(t, tx, "msg_schema_32", "agent_memory_sender", "agent_memory_recipient")
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 36)
+		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
+		var parent *string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT reply_to_message_id FROM agent_messages WHERE id='msg_schema_32'`).Scan(&parent); err != nil {
+			t.Fatal(err)
+		}
+		if parent != nil {
+			t.Fatalf("schema-32 message reply parent = %q, want NULL", *parent)
+		}
+	})
+
+	t.Run("schema 33 deliveries upgrade to available processing", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 33)
+		insertMigrationTestMemoryPrincipals(t, st)
+		ctx := context.Background()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertMigrationTestMessage(t, tx, "msg_schema_33", "agent_memory_sender", "agent_memory_recipient")
+		mustMigrationTestExec(t, tx, `
+			INSERT INTO agent_message_deliveries
+			  (message_id,account_id,realm_id,recipient_agent_id,state,delivered_at)
+			VALUES
+			  ('msg_schema_33','acc_memory_trigger','realm_memory_trigger',
+			   'agent_memory_recipient','delivered',clock_timestamp())`)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 36)
+		var state, claimHash, completeHash string
+		var generation int64
+		var claimID, lease, completedAt, resultID any
+		if err := st.pool.QueryRow(ctx, `
+			SELECT processing_state,processing_generation,claim_id,claim_key_hash,
+			       lease_expires_at,completed_at,complete_key_hash,result_message_id
+			FROM agent_message_deliveries WHERE message_id='msg_schema_33'`).
+			Scan(&state, &generation, &claimID, &claimHash, &lease, &completedAt, &completeHash, &resultID); err != nil {
+			t.Fatal(err)
+		}
+		if state != MessageProcessingAvailable || generation != 0 || claimID != nil ||
+			claimHash != "" || lease != nil || completedAt != nil || completeHash != "" || resultID != nil {
+			t.Fatalf("schema-33 processing defaults = %q/%d/%v/%q/%v/%v/%q/%v",
+				state, generation, claimID, claimHash, lease, completedAt, completeHash, resultID)
+		}
+	})
+
+	t.Run("schema 34 reply graph upgrades to trusted causal depth", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 34)
+		insertMigrationTestMemoryPrincipals(t, st)
+		ctx := context.Background()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertMigrationTestMessage(t, tx, "msg_depth_root", "agent_memory_sender", "agent_memory_recipient")
+		mustMigrationTestExec(t, tx, `
+			INSERT INTO agent_messages
+			  (id,account_id,realm_id,from_agent_id,to_agent_id,body,thread_id,reply_to_message_id)
+			VALUES
+			  ('msg_depth_reply_1','acc_memory_trigger','realm_memory_trigger',
+			   'agent_memory_recipient','agent_memory_sender','reply one','thr_memory_trigger','msg_depth_root'),
+			  ('msg_depth_reply_2','acc_memory_trigger','realm_memory_trigger',
+			   'agent_memory_sender','agent_memory_recipient','reply two','thr_memory_trigger','msg_depth_reply_1'),
+			  ('msg_depth_forged_thread_root','acc_memory_trigger','realm_memory_trigger',
+			   'agent_memory_sender','agent_memory_recipient','new root','thr_memory_trigger',NULL)`)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 36)
+		for messageID, want := range map[string]int64{
+			"msg_depth_root": 1, "msg_depth_reply_1": 2,
+			"msg_depth_reply_2": 3, "msg_depth_forged_thread_root": 1,
+		} {
+			var got int64
+			if err := st.pool.QueryRow(ctx, `SELECT causal_depth FROM agent_messages WHERE id=$1`, messageID).Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("%s causal depth = %d, want %d", messageID, got, want)
+			}
+		}
+	})
+
+	t.Run("schema 35 deliveries upgrade with zero deterministic failures", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 35)
+		insertMigrationTestMemoryPrincipals(t, st)
+		ctx := context.Background()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertMigrationTestMessage(t, tx, "msg_schema_35", "agent_memory_sender", "agent_memory_recipient")
+		mustMigrationTestExec(t, tx, `
+			INSERT INTO agent_message_deliveries
+			  (message_id,account_id,realm_id,recipient_agent_id,state,delivered_at)
+			VALUES
+			  ('msg_schema_35','acc_memory_trigger','realm_memory_trigger',
+			   'agent_memory_recipient','delivered',clock_timestamp())`)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 36)
+		var failureCount int64
+		if err := st.pool.QueryRow(ctx, `
+			SELECT failure_count FROM agent_message_deliveries
+			WHERE message_id='msg_schema_35'`).Scan(&failureCount); err != nil {
+			t.Fatal(err)
+		}
+		if failureCount != 0 {
+			t.Fatalf("schema-35 failure count = %d, want 0", failureCount)
+		}
+		for _, invalid := range []int64{-1, maxMessageFailureCount + 1} {
+			if _, err := st.pool.Exec(ctx, `
+				UPDATE agent_message_deliveries SET failure_count=$1
+				WHERE message_id='msg_schema_35'`, invalid); err == nil {
+				t.Fatalf("failure_count range constraint accepted %d", invalid)
 			}
 		}
 	})
@@ -225,7 +391,7 @@ func TestMigration32Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestVersion(t, dsn, 36)
 	})
 
 	t.Run("populated schema 26 cannot skip compatibility release", func(t *testing.T) {
@@ -262,7 +428,7 @@ func TestMigration32Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 	})
 
@@ -316,11 +482,35 @@ func TestMigration32Postgres(t *testing.T) {
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", true)
 	})
 
-	t.Run("clean down removes narrative schema and can re-upgrade", func(t *testing.T) {
+	t.Run("clean down removes reply and narrative schemas and can re-upgrade", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 35)
+		assertMigrationTestColumn(t, st, "agent_message_deliveries", "failure_count", false)
+		assertMigrationTestColumn(t, st, "agent_messages", "causal_depth", true)
+		assertMigrationTestColumn(t, st, "agent_message_deliveries", "processing_state", true)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 34)
+		assertMigrationTestColumn(t, st, "agent_messages", "causal_depth", false)
+		assertMigrationTestIndex(t, st, "agent_messages", "agent_messages_by_recipient_activity", false)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 33)
+		assertMigrationTestColumn(t, st, "agent_message_deliveries", "processing_state", false)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", false)
+		assertMigrationTestTableConstraint(t, st, "agent_messages", "agent_messages_reply_parent_fk", false)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -341,10 +531,11 @@ func TestMigration32Postgres(t *testing.T) {
 		assertMigrationTestVersion(t, dsn, 28)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 		if err := st.Migrate(); err != nil {
-			t.Fatalf("re-upgrade schema 28 to 32: %v", err)
+			t.Fatalf("re-upgrade schema 28 to 36: %v", err)
 		}
-		assertMigrationTestVersion(t, dsn, 32)
+		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
+		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
 	})
 
 	t.Run("down refuses duplicate recreated address without data loss", func(t *testing.T) {
@@ -352,6 +543,22 @@ func TestMigration32Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 35)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 34)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 33)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 32)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -656,6 +863,21 @@ func assertMigrationTestColumn(t *testing.T, st *Store, table, column string, wa
 	}
 	if got != want {
 		t.Fatalf("column %s.%s exists = %t, want %t", table, column, got, want)
+	}
+}
+
+func assertMigrationTestIndex(t *testing.T, st *Store, table, index string, want bool) {
+	t.Helper()
+	var got bool
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+		  SELECT 1 FROM pg_index
+		  WHERE indrelid=to_regclass($1) AND indexrelid=to_regclass($2)
+		)`, table, index).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("index %s.%s exists = %t, want %t", table, index, got, want)
 	}
 }
 

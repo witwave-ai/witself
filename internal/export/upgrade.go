@@ -30,6 +30,56 @@ var upgraders = map[int]Upgrader{
 	28: preserveSchema28Rows,
 	29: addMemoryCurationDefaults,
 	30: addTokenAccessProfileDefault,
+	32: preserveSchema32Rows,
+	33: addMessageProcessingDefaults,
+	34: addMessageCausalDepthDefault,
+	35: addMessageFailureCountDefault,
+}
+
+// addMessageFailureCountDefault supplies the backend-owned deterministic
+// failure counter introduced by migration 0036. Earlier archives have no
+// durable poison-attempt history, so zero is the only faithful default.
+func addMessageFailureCountDefault(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_message_deliveries" {
+		row["failure_count"] = 0
+	}
+	return row, nil
+}
+
+// addMessageCausalDepthDefault supplies the destination column for archives
+// written before migration 0035. The account importer recalculates reply
+// depths from the validated parent graph after all rows have landed.
+func addMessageCausalDepthDefault(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_messages" {
+		row["causal_depth"] = 1
+	}
+	return row, nil
+}
+
+// addMessageProcessingDefaults lifts schema-33 delivery rows into the
+// unclaimed processing state introduced by migration 0034. Older archives
+// cannot contain a live claim or linked completion result.
+func addMessageProcessingDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table != "agent_message_deliveries" {
+		return row, nil
+	}
+	row["processing_state"] = "available"
+	row["processing_generation"] = 0
+	row["claim_id"] = nil
+	row["claim_key_hash"] = ""
+	row["lease_expires_at"] = nil
+	row["completed_at"] = nil
+	row["complete_key_hash"] = ""
+	row["result_message_id"] = nil
+	return row, nil
+}
+
+// preserveSchema32Rows acknowledges the nullable reply-causality column and
+// scoped parent foreign key added by migration 0033. Schema-32 archives cannot
+// contain replies, so their existing message rows remain valid with a NULL
+// reply_to_message_id on import.
+func preserveSchema32Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // addTokenAccessProfileDefault preserves the pre-schema-31 authority of every

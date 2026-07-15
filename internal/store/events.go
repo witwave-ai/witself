@@ -85,10 +85,15 @@ const (
 	// Realm-local agent messaging. Message bodies and payloads deliberately
 	// never enter the account audit ledger; the message id and routing metadata
 	// are enough to establish lifecycle without duplicating private content.
-	VerbMessageSent      = "message.sent"
-	VerbMessageDelivered = "message.delivered"
-	VerbMessageRead      = "message.read"
-	VerbMessageAcked     = "message.acked"
+	VerbMessageSent                = "message.sent"
+	VerbMessageDelivered           = "message.delivered"
+	VerbMessageDeliveryFailed      = "message.delivery.failed"
+	VerbMessageRead                = "message.read"
+	VerbMessageAcked               = "message.acked"
+	VerbMessageProcessingClaimed   = "message.processing.claimed"
+	VerbMessageProcessingRenewed   = "message.processing.renewed"
+	VerbMessageProcessingReleased  = "message.processing.released"
+	VerbMessageProcessingCompleted = "message.processing.completed"
 
 	// Permanent fact deletion is content-free in the account ledger. The
 	// receipt carries stable ids, address metadata, counts, and sensitivity but
@@ -305,47 +310,67 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbMessageSent: {
 		requiredKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
-			"recipient_agent_id", "kind", "thread_id",
+			"recipient_agent_id", "kind", "thread_id", "causal_depth",
 		},
 		allowedKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
 			"recipient_agent_id", "kind", "thread_id", "subject_present",
+			"reply_to_message_id", "causal_depth",
 		},
 		allowedActors: []string{ActorAgent},
 	},
 	VerbMessageDelivered: {
 		requiredKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
-			"recipient_agent_id", "kind", "thread_id",
+			"recipient_agent_id", "kind", "thread_id", "causal_depth",
 		},
 		allowedKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
 			"recipient_agent_id", "kind", "thread_id", "subject_present",
+			"reply_to_message_id", "causal_depth",
+		},
+		allowedActors: []string{ActorSystem},
+	},
+	VerbMessageDeliveryFailed: {
+		requiredKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "causal_depth",
+		},
+		allowedKeys: []string{
+			"message_id", "from_agent_id", "recipient_kind",
+			"recipient_agent_id", "kind", "thread_id", "subject_present",
+			"reply_to_message_id", "causal_depth",
 		},
 		allowedActors: []string{ActorSystem},
 	},
 	VerbMessageRead: {
 		requiredKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
-			"recipient_agent_id", "kind", "thread_id",
+			"recipient_agent_id", "kind", "thread_id", "causal_depth",
 		},
 		allowedKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
 			"recipient_agent_id", "kind", "thread_id", "subject_present",
+			"reply_to_message_id", "causal_depth",
 		},
 		allowedActors: []string{ActorAgent},
 	},
 	VerbMessageAcked: {
 		requiredKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
-			"recipient_agent_id", "kind", "thread_id",
+			"recipient_agent_id", "kind", "thread_id", "causal_depth",
 		},
 		allowedKeys: []string{
 			"message_id", "from_agent_id", "recipient_kind",
 			"recipient_agent_id", "kind", "thread_id", "subject_present",
+			"reply_to_message_id", "causal_depth",
 		},
 		allowedActors: []string{ActorAgent},
 	},
+	VerbMessageProcessingClaimed:   messageProcessingEventSpec(false),
+	VerbMessageProcessingRenewed:   messageProcessingEventSpec(false),
+	VerbMessageProcessingReleased:  messageProcessingEventSpec(false),
+	VerbMessageProcessingCompleted: messageProcessingEventSpec(true),
 	VerbFactDeleted: {
 		requiredKeys: []string{
 			"fact_id", "subject_id", "subject", "predicate", "receipt_id",
@@ -441,6 +466,22 @@ func memoryCurationEventSpec() verbSpec {
 		},
 		allowedActors: []string{ActorAgent},
 	}
+}
+
+func messageProcessingEventSpec(completed bool) verbSpec {
+	required := []string{
+		"message_id", "from_agent_id", "recipient_kind",
+		"recipient_agent_id", "kind", "thread_id", "causal_depth", "processing_generation",
+	}
+	allowed := []string{
+		"message_id", "from_agent_id", "recipient_kind",
+		"recipient_agent_id", "kind", "thread_id", "subject_present",
+		"reply_to_message_id", "causal_depth", "processing_generation", "failure_count", "result_message_id",
+	}
+	if completed {
+		required = append(required, "result_message_id")
+	}
+	return verbSpec{requiredKeys: required, allowedKeys: allowed, allowedActors: []string{ActorAgent}}
 }
 
 // EventInput is one row to write. The store fills in the id and

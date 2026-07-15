@@ -3766,7 +3766,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
 	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
-	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
+	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|runner  Exchange and process durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")
 	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")

@@ -165,6 +165,99 @@ func TestSchema30TokenProfileUpgradeDefaultsToFull(t *testing.T) {
 	}
 }
 
+func TestSchema32MessageReplyUpgradePreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(32)
+	if upgrade == nil {
+		t.Fatal("schema 32 reply-causality upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":            "msg_1",
+		"account_id":    "acc_1",
+		"realm_id":      "rlm_1",
+		"from_agent_id": "agt_1",
+		"to_agent_id":   "agt_2",
+		"thread_id":     "thr_1",
+	}
+	want := map[string]any{
+		"id":            "msg_1",
+		"account_id":    "acc_1",
+		"realm_id":      "rlm_1",
+		"from_agent_id": "agt_1",
+		"to_agent_id":   "agt_2",
+		"thread_id":     "thr_1",
+	}
+	got, err := upgrade("agent_messages", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 32 identity upgrade changed message: got %#v, want %#v", got, want)
+	}
+}
+
+func TestSchema33MessageProcessingUpgradeDefaultsAvailable(t *testing.T) {
+	upgrade := UpgraderFor(33)
+	if upgrade == nil {
+		t.Fatal("schema 33 message-processing upgrader is not registered")
+	}
+	row, err := upgrade("agent_message_deliveries", map[string]any{
+		"message_id": "msg_1", "recipient_agent_id": "agt_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row["processing_state"] != "available" || row["processing_generation"] != 0 ||
+		row["claim_id"] != nil || row["claim_key_hash"] != "" ||
+		row["lease_expires_at"] != nil || row["completed_at"] != nil ||
+		row["complete_key_hash"] != "" || row["result_message_id"] != nil {
+		t.Fatalf("schema 33 delivery defaults = %#v", row)
+	}
+	other, err := upgrade("agent_messages", map[string]any{"id": "msg_1"})
+	if err != nil || len(other) != 1 || other["id"] != "msg_1" {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
+func TestSchema34MessageCausalDepthUpgradeDefaultsForGraphNormalization(t *testing.T) {
+	upgrade := UpgraderFor(34)
+	if upgrade == nil {
+		t.Fatal("schema 34 message-causal-depth upgrader is not registered")
+	}
+	row, err := upgrade("agent_messages", map[string]any{
+		"id": "msg_reply", "reply_to_message_id": "msg_parent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row["causal_depth"] != 1 {
+		t.Fatalf("legacy causal depth placeholder = %#v, want 1", row["causal_depth"])
+	}
+	other, err := upgrade("agent_message_deliveries", map[string]any{"message_id": "msg_reply"})
+	if err != nil || len(other) != 1 {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
+func TestSchema35MessageFailureCountUpgradeDefaultsToZero(t *testing.T) {
+	upgrade := UpgraderFor(35)
+	if upgrade == nil {
+		t.Fatal("schema 35 message-failure-count upgrader is not registered")
+	}
+	row, err := upgrade("agent_message_deliveries", map[string]any{
+		"message_id": "msg_1", "processing_generation": 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row["failure_count"] != 0 || row["processing_generation"] != 9 {
+		t.Fatalf("schema 35 delivery defaults = %#v", row)
+	}
+	other, err := upgrade("agent_messages", map[string]any{"id": "msg_1"})
+	if err != nil || len(other) != 1 || other["id"] != "msg_1" {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

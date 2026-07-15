@@ -250,6 +250,19 @@ deciding policy id.
 - `message.delivered` (per recipient on group fan-out)
 - `message.read`
 - `message.acked`
+- `message.processing.claimed`
+- `message.processing.renewed`
+- `message.processing.released`
+- `message.processing.completed` (may carry the result message id, never
+  body/payload)
+
+Message lifecycle metadata may include value-free `message_id`, agent ids,
+kind, thread id, validated reply parent, backend-derived `causal_depth`, and—on
+processing events—`processing_generation` and `failure_count`. Generation is a
+fence; failure count is the migration-0036 durable deterministic-message-failure
+counter. Neither is the client-local runner health field
+`consecutive_failures`. Audit never includes subject text, body, payload, claim
+id, lease, or idempotency material.
 
 ### Identity Export and Import
 

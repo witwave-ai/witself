@@ -15,6 +15,11 @@ not run inference. Older server-classification/consolidation routes are
 superseded. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Messaging amendment (implemented in the current checkout): direct message
+actions include `:claim`, `:renew`, `:release`, and atomic `:complete` in
+addition to reply/read/ack. Realm fan-out and open-request routes remain future
+work; this is not a deployment or release statement.
+
 ## Decision
 
 The public HTTP API should be REST-ish and resource-oriented under `/v1`.
@@ -68,7 +73,14 @@ POST /v1/secrets/{secret_id}:rotate
 POST /v1/secrets/{secret_id}:grant
 POST /v1/totp/{secret_id}:code
 POST /v1/policies:test
+POST /v1/messages:listen
+POST /v1/messages/{message_id}:reply
+POST /v1/messages/{message_id}:read
 POST /v1/messages/{message_id}:ack
+POST /v1/messages/{message_id}:claim
+POST /v1/messages/{message_id}:renew
+POST /v1/messages/{message_id}:release
+POST /v1/messages/{message_id}:complete
 POST /v1/tokens/{token_id}:rotate
 ```
 
@@ -277,10 +289,14 @@ DELETE /v1/groups/{group_id}/members/{principal}
 
 GET  /v1/messages
 POST /v1/messages
-GET  /v1/messages/{message_id}
+POST /v1/messages:listen        # metadata-only, oldest-unacked long poll
+POST /v1/messages/{message_id}:reply
 POST /v1/messages/{message_id}:read
 POST /v1/messages/{message_id}:ack
-POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
+POST /v1/messages/{message_id}:claim
+POST /v1/messages/{message_id}:renew
+POST /v1/messages/{message_id}:release
+POST /v1/messages/{message_id}:complete
 
 # Append-only visible conversation ledger. Agent tokens write their own;
 # account operators may read every transcript in their account.
@@ -495,11 +511,56 @@ audit events; read-only recall does neither:
   target, and scope would be allowed under current policy, returning the
   deciding policy id or a deny reason. It is the canonical dry-run for access
   decisions and does not mutate state.
-- `POST /v1/messages/{message_id}:read` returns content and records the
-  recipient read transition; `POST /v1/messages/{message_id}:ack` records
-  per-recipient acknowledgement.
+- `POST /v1/messages:listen` performs a stateless metadata-only long poll for
+  the caller's oldest unacknowledged inbound messages. The body accepts
+  `wait_seconds` (0–20, default 20), `from_agent`, `thread_id`, `kind`, and
+  `limit`; the response contains `messages` and `timed_out`. It has no cursor
+  and changes no read/ack state. Each server process bounds concurrent listen
+  admission; saturation returns HTTP 429 with `Retry-After` so callers can retry
+  without losing durable mailbox state. On list and listen, a lowercase
+  `agent_` `from_agent` selector matches only that exact sender ID and never a
+  same-text name; ordinary selectors use exact ID-or-name matching with ID
+  precedence.
+- `POST /v1/messages` normalizes an omitted `kind` to actionable `request`.
+  Clients use explicit `kind=note` for FYI-only delivery that a runner records
+  and acknowledges without provider inference. Direct recipient resolution is
+  exact and case-sensitive. A selector beginning with lowercase `agent_` is an
+  ID-only reference and never falls back to an agent name; other selectors use
+  exact ID-or-name resolution with ID precedence.
+- `POST /v1/messages/{message_id}:reply` is recipient-only. It verifies that the
+  caller received the parent, then derives the recipient from the parent sender
+  and derives the thread, `reply_to_message_id`, and `causal_depth` (parent plus
+  one). Caller-supplied routing, identity, or depth fields are rejected.
+- `POST /v1/messages/{message_id}:read` returns content and records only the
+  recipient read transition; `POST /v1/messages/{message_id}:ack` separately
+  records per-recipient acknowledgement and returns metadata only, never the
+  message body or payload.
+- `POST /v1/messages/{message_id}:claim` acquires or idempotently replays a
+  30–900 second direct-delivery processing lease for the token-bound recipient.
+  Taking an available or expired delivery advances a monotonic generation;
+  claiming does not read or acknowledge. Generation is solely the stale-writer
+  fence; it is not a failure-attempt counter.
+- `POST /v1/messages/{message_id}:renew` and `:release` require the exact live
+  `claim_id` and generation. Renewal replaces the database-time expiry; release
+  makes processing available and invalidates the old fence without acking.
+  Release accepts optional `deterministic_failure` (default false); only true on
+  an exact-fence release atomically increments migration-0036 `failure_count`.
+  The direct runner does not mark provider-wide, configuration, cancellation,
+  or lease-maintenance failures deterministic and escalates the fifth
+  deterministic attempt under its current default policy.
+- `POST /v1/messages/{message_id}:complete` validates the exact unexpired fence
+  and required `Idempotency-Key`, then in one transaction creates a
+  server-routed result reply at parent `causal_depth + 1`, links it to the
+  delivery, and marks processing completed. It returns HTTP 201 with
+  `processing` and `message`; it does not ack. Active conflicts and stale fences
+  return HTTP 409.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
+- `witself.message.notification.list/consume` have no HTTP product routes. They
+  are MCP bridges over one runtime's private local pointer ledger; consume uses
+  the canonical `:read` route and clears its exact pointer only after
+  verification. Canonical messages remain PostgreSQL/account-export data, while
+  the local ledger does not.
 - `POST /v1/tokens/{token_id}:rotate` issues a replacement token. The raw token
   value is returned once.
 - `POST /v1/tokens/{token_id}:revoke` immediately invalidates a live operator
@@ -561,11 +622,13 @@ Some CLI commands map onto these routes without a dedicated path:
 
 These routes back the post-v0 cross-realm collaboration substrate; see
 [agent-collaboration.md](agent-collaboration.md). They reuse the existing
-`/v1/messages` resource and add a long-poll receive verb, a conversation/task
-resource, the realm federation allow-list, and the signed realm card.
+`/v1/messages` resource and its implemented realm-local long-poll receive verb, then
+add a conversation/task resource, the realm federation allow-list, and the
+signed realm card. `:listen` belongs to the same-realm mailbox first; cross-realm
+delivery reuses it later.
 
 ```text
-POST /v1/messages:listen        # long-poll receive; drains the durable mailbox
+POST /v1/messages:listen        # implemented realm-local metadata-only receive
 
 GET  /v1/conversations
 GET  /v1/conversations/{conversation_id}
@@ -577,17 +640,17 @@ DELETE /v1/federation/peers/{peer}
 GET  /.well-known/witself-card.json
 ```
 
-- `POST /v1/messages:listen` is the long-poll receive verb: it blocks up to a
-  caller-supplied timeout (bounded server-side) and returns the inbound messages
-  drained from the caller's durable mailbox, the source of truth for
-  conversation state. It is the live face of the mailbox, not a separate
-  transport — a dropped connection loses no state, and the next `:listen` (or a
-  plain `GET /v1/messages`) drains whatever has arrived. The timeout and
-  optional `conversation_id` filter travel in the request body. This is the HTTP
-  surface for the CLI/MCP `listen`/`recv` verb (`witself message listen`,
-  `witself.message.listen`); it honors `--read-only`. Local and cross-realm
-  inbound arrive on the same route — a cross-realm message carries no authority
-  and still resolves against a standing receive policy in this realm.
+- `POST /v1/messages:listen` is the implemented realm-local long-poll receive
+  verb: it blocks for 20 seconds by default, bounded to 0–20, and returns the
+  oldest unacknowledged inbound **metadata** from the caller's durable mailbox.
+  It is a stateless waitable query, not a drain: a dropped connection loses no
+  state, and neither listen nor list marks read or ack. Sender, thread, kind,
+  and limit filters travel in the request body. CLI and MCP expose the same
+  operation, including in MCP read-only mode. Per-process bounded admission
+  rejects excess concurrent listens with HTTP 429 and `Retry-After`; retrying
+  cannot lose a durable delivery. Local and later cross-realm
+  inbound use the same mailbox, but cross-realm content still carries no
+  authority and resolves against standing receive policy.
 - `GET /v1/conversations` and `GET /v1/conversations/{conversation_id}` expose
   the cross-realm conversation/task resource and its A2A-style state machine
   (`submitted`, `working`, `input_required`, `auth_required`, `completed`,

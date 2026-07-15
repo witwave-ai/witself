@@ -410,13 +410,15 @@ func serve() int {
 		}
 		cfg.ListMessages = func(ctx context.Context, p server.DomainPrincipal, opts server.MessageListOptions) (server.MessagePage, error) {
 			page, err := st.ListMessages(ctx, toStorePrincipal(p), store.MessageFilter{
-				Direction: opts.Direction,
-				Unread:    opts.Unread,
-				From:      opts.From,
-				ThreadID:  opts.ThreadID,
-				Kind:      opts.Kind,
-				Limit:     opts.Limit,
-				Cursor:    opts.Cursor,
+				Direction:   opts.Direction,
+				Unread:      opts.Unread,
+				Unacked:     opts.Unacked,
+				OldestFirst: opts.OldestFirst,
+				From:        opts.From,
+				ThreadID:    opts.ThreadID,
+				Kind:        opts.Kind,
+				Limit:       opts.Limit,
+				Cursor:      opts.Cursor,
 			})
 			if err != nil {
 				return server.MessagePage{}, mapMessageError(err)
@@ -426,6 +428,60 @@ func serve() int {
 				out[i] = toServerAgentMessage(msg)
 			}
 			return server.MessagePage{Messages: out, NextCursor: page.NextCursor}, nil
+		}
+		cfg.ReplyMessage = func(ctx context.Context, p server.DomainPrincipal, parentMessageID string, in server.ReplyMessageRequest) (server.Message, error) {
+			msg, err := st.ReplyMessage(ctx, toStorePrincipal(p), parentMessageID, store.ReplyMessageInput{
+				Subject: in.Subject, Kind: in.Kind, Body: in.Body,
+				Payload: in.Payload, IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
+		}
+		cfg.ClaimMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string, in server.ClaimMessageRequest) (server.MessageProcessing, error) {
+			msg, err := st.ClaimMessage(ctx, toStorePrincipal(p), messageID, store.ClaimMessageInput{
+				LeaseDuration:  time.Duration(in.LeaseSeconds) * time.Second,
+				IdempotencyKey: in.IdempotencyKey,
+			})
+			if err != nil {
+				return server.MessageProcessing{}, mapMessageError(err)
+			}
+			return toServerMessageProcessing(msg.Processing), nil
+		}
+		cfg.RenewMessageClaim = func(ctx context.Context, p server.DomainPrincipal, messageID string, in server.RenewMessageClaimRequest) (server.MessageProcessing, error) {
+			msg, err := st.RenewMessageClaim(ctx, toStorePrincipal(p), messageID, store.RenewMessageClaimInput{
+				ClaimID: in.ClaimID, ProcessingGeneration: in.Generation,
+				LeaseDuration: time.Duration(in.LeaseSeconds) * time.Second,
+			})
+			if err != nil {
+				return server.MessageProcessing{}, mapMessageError(err)
+			}
+			return toServerMessageProcessing(msg.Processing), nil
+		}
+		cfg.ReleaseMessageClaim = func(ctx context.Context, p server.DomainPrincipal, messageID string, in server.MessageClaimRequest) (server.MessageProcessing, error) {
+			msg, err := st.ReleaseMessageClaim(ctx, toStorePrincipal(p), messageID, store.ReleaseMessageClaimInput{
+				ClaimID: in.ClaimID, ProcessingGeneration: in.Generation,
+				DeterministicFailure: in.DeterministicFailure,
+			})
+			if err != nil {
+				return server.MessageProcessing{}, mapMessageError(err)
+			}
+			return toServerMessageProcessing(msg.Processing), nil
+		}
+		cfg.CompleteMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string, in server.CompleteMessageRequest) (server.CompleteMessageResult, error) {
+			result, err := st.CompleteMessage(ctx, toStorePrincipal(p), messageID, store.CompleteMessageInput{
+				ClaimID: in.ClaimID, ProcessingGeneration: in.Generation,
+				IdempotencyKey: in.IdempotencyKey, Subject: in.Subject, Kind: in.Kind,
+				Body: in.Body, Payload: in.Payload,
+			})
+			if err != nil {
+				return server.CompleteMessageResult{}, mapMessageError(err)
+			}
+			return server.CompleteMessageResult{
+				Processing: toServerMessageProcessing(result.Processing),
+				Message:    toServerAgentMessage(result.ResultMessage),
+			}, nil
 		}
 		cfg.ReadMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
 			msg, err := st.ReadMessage(ctx, toStorePrincipal(p), messageID)
@@ -1377,7 +1433,9 @@ func mapMessageError(err error) error {
 		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageInputInvalid, err)
 	case errors.Is(err, store.ErrMessageRecipientMissing), errors.Is(err, store.ErrMessageNotFound):
 		return server.ErrNotFound
-	case errors.Is(err, store.ErrMessageConflict):
+	case errors.Is(err, store.ErrMessageBusy):
+		return server.ErrBusy
+	case errors.Is(err, store.ErrMessageClaimLost), errors.Is(err, store.ErrMessageConflict):
 		return server.ErrConflict
 	case errors.Is(err, store.ErrMessageForbidden), errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotActive):
 		return server.ErrForbidden
@@ -1449,13 +1507,24 @@ func toServerAgentMessage(msg store.Message) server.Message {
 			Kind: msg.To.Kind, AgentID: msg.To.ID, AgentName: msg.To.Name,
 		},
 		Subject: msg.Subject, Kind: msg.Kind, Body: msg.Body, Payload: msg.Payload,
-		ThreadID: msg.ThreadID, CreatedAt: msg.CreatedAt,
+		ThreadID: msg.ThreadID, ReplyToMessageID: msg.ReplyToMessageID, CausalDepth: msg.CausalDepth,
+		CreatedAt: msg.CreatedAt,
 		Delivery: server.MessageDelivery{
 			State: msg.Delivery.State, DeliveredAt: msg.Delivery.DeliveredAt,
 		},
 		ReadState: server.MessageReadState{
 			State: msg.ReadState.State, ReadAt: msg.ReadState.ReadAt, AckedAt: msg.ReadState.AckedAt,
 		},
+		Processing: toServerMessageProcessing(msg.Processing),
+	}
+}
+
+func toServerMessageProcessing(processing store.MessageProcessing) server.MessageProcessing {
+	return server.MessageProcessing{
+		State: processing.State, ClaimID: processing.ClaimID, Generation: processing.Generation,
+		FailureCount:   processing.FailureCount,
+		LeaseExpiresAt: processing.LeaseExpiresAt, CompletedAt: processing.CompletedAt,
+		ResultMessageID: processing.ResultMessageID,
 	}
 }
 

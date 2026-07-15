@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -317,7 +319,7 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
 				"from_agent_id": "agt_from", "to_agent_id": "agt_to",
-				"kind": "note", "body": "hello", "thread_id": "thr_1",
+				"kind": "note", "body": "hello", "thread_id": "thr_1", "causal_depth": 1,
 			},
 			setup: func(ic *importCtx) {
 				ic.realms["rlm_ok"] = true
@@ -362,6 +364,10 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_ok",
 				"recipient_agent_id": "agt_to", "state": "delivered",
+				"processing_state": "available", "processing_generation": 0,
+				"failure_count": 0,
+				"claim_id":      nil, "claim_key_hash": "", "lease_expires_at": nil,
+				"completed_at": nil, "complete_key_hash": "", "result_message_id": nil,
 			},
 			setup: func(ic *importCtx) {
 				ic.messages["msg_1"] = messageImportScope{realmID: "rlm_ok", fromAgentID: "agt_from", toAgentID: "agt_to"}
@@ -398,6 +404,263 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 				t.Errorf("error = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateImportedMessageReplies(t *testing.T) {
+	message := func(from, to, thread, parent string, explicitDepth ...int64) messageImportScope {
+		depth := int64(1)
+		if parent != "" {
+			depth = 2
+		}
+		if len(explicitDepth) > 0 {
+			depth = explicitDepth[0]
+		}
+		return messageImportScope{
+			realmID: "rlm_1", fromAgentID: from, toAgentID: to,
+			threadID: thread, replyToMessageID: parent, causalDepth: depth,
+		}
+	}
+	tests := []struct {
+		name     string
+		messages map[string]messageImportScope
+		want     string
+	}{
+		{
+			name: "root and alternating reply chain",
+			messages: map[string]messageImportScope{
+				"msg_reply_2": message("agt_a", "agt_b", "thr_1", "msg_reply_1", 3),
+				"msg_root":    message("agt_a", "agt_b", "thr_1", ""),
+				"msg_reply_1": message("agt_b", "agt_a", "thr_1", "msg_root"),
+			},
+		},
+		{
+			name: "missing parent",
+			messages: map[string]messageImportScope{
+				"msg_reply": message("agt_b", "agt_a", "thr_1", "msg_missing"),
+			},
+			want: "references missing parent",
+		},
+		{
+			name: "self reply",
+			messages: map[string]messageImportScope{
+				"msg_reply": message("agt_b", "agt_a", "thr_1", "msg_reply"),
+			},
+			want: "replies to itself",
+		},
+		{
+			name: "thread mismatch",
+			messages: map[string]messageImportScope{
+				"msg_root":  message("agt_a", "agt_b", "thr_1", ""),
+				"msg_reply": message("agt_b", "agt_a", "thr_2", "msg_root"),
+			},
+			want: "does not preserve parent participants, realm, and thread",
+		},
+		{
+			name: "participant mismatch",
+			messages: map[string]messageImportScope{
+				"msg_root":  message("agt_a", "agt_b", "thr_1", ""),
+				"msg_reply": message("agt_c", "agt_a", "thr_1", "msg_root"),
+			},
+			want: "does not preserve parent participants, realm, and thread",
+		},
+		{
+			name: "realm mismatch",
+			messages: map[string]messageImportScope{
+				"msg_root": message("agt_a", "agt_b", "thr_1", ""),
+				"msg_reply": {
+					realmID: "rlm_2", fromAgentID: "agt_b", toAgentID: "agt_a",
+					threadID: "thr_1", replyToMessageID: "msg_root",
+				},
+			},
+			want: "does not preserve parent participants, realm, and thread",
+		},
+		{
+			name: "forged causal depth",
+			messages: map[string]messageImportScope{
+				"msg_root":  message("agt_a", "agt_b", "thr_1", ""),
+				"msg_reply": message("agt_b", "agt_a", "thr_1", "msg_root", 99),
+			},
+			want: "does not match derived depth",
+		},
+		{
+			name: "two-message cycle",
+			messages: map[string]messageImportScope{
+				"msg_a": message("agt_a", "agt_b", "thr_1", "msg_b"),
+				"msg_b": message("agt_b", "agt_a", "thr_1", "msg_a"),
+			},
+			want: "reply graph contains a cycle",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateImportedMessageReplies(tc.messages)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeLegacyImportedMessageCausalDepthsUsesWholeGraph(t *testing.T) {
+	messages := map[string]messageImportScope{
+		"msg_reply_2": {
+			realmID: "rlm_1", fromAgentID: "agt_a", toAgentID: "agt_b",
+			threadID: "thr_1", replyToMessageID: "msg_reply_1", causalDepth: 1,
+		},
+		"msg_root": {
+			realmID: "rlm_1", fromAgentID: "agt_a", toAgentID: "agt_b",
+			threadID: "thr_1", causalDepth: 1,
+		},
+		"msg_reply_1": {
+			realmID: "rlm_1", fromAgentID: "agt_b", toAgentID: "agt_a",
+			threadID: "thr_1", replyToMessageID: "msg_root", causalDepth: 1,
+		},
+	}
+	fake := &recordingExec{}
+	if err := normalizeLegacyImportedMessageCausalDepths(
+		context.Background(), fake, messages, "acc_1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 3 {
+		t.Fatalf("causal depth updates = %d, want 3", fake.calls)
+	}
+	if messages["msg_root"].causalDepth != 1 || messages["msg_reply_1"].causalDepth != 2 ||
+		messages["msg_reply_2"].causalDepth != 3 {
+		t.Fatalf("normalized legacy graph = %#v", messages)
+	}
+	if err := validateImportedMessageReplies(messages); err != nil {
+		t.Fatalf("normalized legacy graph is not valid: %v", err)
+	}
+}
+
+func TestImportedMessageProcessingShapeAndClaimNormalization(t *testing.T) {
+	base := func(state string) map[string]any {
+		return map[string]any{
+			"processing_state": state, "processing_generation": 0,
+			"failure_count": 0,
+			"claim_id":      nil, "claim_key_hash": "", "lease_expires_at": nil,
+			"completed_at": nil, "complete_key_hash": "", "result_message_id": nil,
+		}
+	}
+	available := base(MessageProcessingAvailable)
+	if got, err := validateImportedMessageProcessingShape(available); err != nil ||
+		got.processingState != MessageProcessingAvailable || got.processingGeneration != 0 {
+		t.Fatalf("available shape = %#v / %v", got, err)
+	}
+
+	claimed := base(MessageProcessingClaimed)
+	claimed["processing_generation"] = 7
+	claimed["failure_count"] = 2
+	claimed["claim_id"] = "mcl_aaaaaaaaaaaaaaaa"
+	claimed["claim_key_hash"] = strings.Repeat("a", 64)
+	claimed["lease_expires_at"] = "2026-07-15T01:00:00Z"
+	if err := newImportCtx("acc_1").normalizeImportedMessageClaim("agent_message_deliveries", claimed); err != nil {
+		t.Fatal(err)
+	}
+	if claimed["processing_state"] != MessageProcessingAvailable || claimed["processing_generation"] != int64(8) ||
+		claimed["failure_count"] != 2 ||
+		claimed["claim_id"] != nil || claimed["claim_key_hash"] != "" || claimed["lease_expires_at"] != nil {
+		t.Fatalf("normalized active claim = %#v", claimed)
+	}
+
+	completed := base(MessageProcessingCompleted)
+	completed["processing_generation"] = 3
+	completed["claim_id"] = "mcl_bbbbbbbbbbbbbbbb"
+	completed["claim_key_hash"] = strings.Repeat("b", 64)
+	completed["completed_at"] = "2026-07-15T01:00:00Z"
+	completed["complete_key_hash"] = strings.Repeat("c", 64)
+	completed["result_message_id"] = "msg_cccccccccccccccc"
+	before := maps.Clone(completed)
+	if err := newImportCtx("acc_1").normalizeImportedMessageClaim("agent_message_deliveries", completed); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(completed, before) {
+		t.Fatalf("completed processing changed on import: %#v", completed)
+	}
+
+	invalid := []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{name: "missing field", edit: func(row map[string]any) { delete(row, "claim_id") }},
+		{name: "available claim", edit: func(row map[string]any) { row["claim_id"] = "mcl_aaaaaaaaaaaaaaaa" }},
+		{name: "claimed without lease", edit: func(row map[string]any) {
+			row["processing_state"] = MessageProcessingClaimed
+			row["processing_generation"] = 1
+			row["claim_id"] = "mcl_aaaaaaaaaaaaaaaa"
+			row["claim_key_hash"] = strings.Repeat("a", 64)
+		}},
+		{name: "invalid state", edit: func(row map[string]any) { row["processing_state"] = "running" }},
+		{name: "negative failure count", edit: func(row map[string]any) { row["failure_count"] = -1 }},
+		{name: "exhausted failure count", edit: func(row map[string]any) { row["failure_count"] = "4611686018427387904" }},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			row := base(MessageProcessingAvailable)
+			tc.edit(row)
+			if _, err := validateImportedMessageProcessingShape(row); err == nil {
+				t.Fatalf("invalid processing shape accepted: %#v", row)
+			}
+		})
+	}
+
+	exhausted := base(MessageProcessingClaimed)
+	exhausted["processing_generation"] = maxMessageProcessingGeneration
+	exhausted["claim_id"] = "mcl_aaaaaaaaaaaaaaaa"
+	exhausted["claim_key_hash"] = strings.Repeat("a", 64)
+	exhausted["lease_expires_at"] = "2026-07-15T01:00:00Z"
+	if err := newImportCtx("acc_1").normalizeImportedMessageClaim("agent_message_deliveries", exhausted); !errors.Is(err, ErrArchiveContent) {
+		t.Fatalf("exhausted active claim error = %v", err)
+	}
+}
+
+func TestValidateImportedMessageProcessingLinks(t *testing.T) {
+	const (
+		sourceID = "msg_aaaaaaaaaaaaaaaa"
+		resultID = "msg_bbbbbbbbbbbbbbbb"
+	)
+	messages := map[string]messageImportScope{
+		sourceID: {
+			realmID: "rlm_1", fromAgentID: "agt_sender", toAgentID: "agt_worker", threadID: "thr_1",
+		},
+		resultID: {
+			realmID: "rlm_1", fromAgentID: "agt_worker", toAgentID: "agt_sender",
+			threadID: "thr_1", replyToMessageID: sourceID,
+		},
+	}
+	deliveries := map[string]messageDeliveryImportScope{
+		sourceID: {
+			processingState: MessageProcessingCompleted, processingGeneration: 1,
+			claimID: "mcl_aaaaaaaaaaaaaaaa", resultMessageID: resultID,
+		},
+		resultID: {processingState: MessageProcessingAvailable},
+	}
+	if err := validateImportedMessageProcessingLinks(messages, deliveries); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := maps.Clone(deliveries)
+	missing[sourceID] = messageDeliveryImportScope{
+		processingState: MessageProcessingCompleted, resultMessageID: "msg_cccccccccccccccc",
+	}
+	if err := validateImportedMessageProcessingLinks(messages, missing); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing result error = %v", err)
+	}
+
+	wrongMessages := maps.Clone(messages)
+	wrong := wrongMessages[resultID]
+	wrong.threadID = "thr_other"
+	wrongMessages[resultID] = wrong
+	if err := validateImportedMessageProcessingLinks(wrongMessages, deliveries); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("wrong result relationship error = %v", err)
 	}
 }
 
@@ -506,11 +769,15 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	feed("agent_messages", map[string]any{
 		"id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
 		"from_agent_id": "agt_1", "to_agent_id": "agt_2",
-		"kind": "handoff", "body": "your turn", "thread_id": "thr_1",
+		"kind": "handoff", "body": "your turn", "thread_id": "thr_1", "causal_depth": 1,
 	})
 	feed("agent_message_deliveries", map[string]any{
 		"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
 		"recipient_agent_id": "agt_2", "state": "delivered",
+		"processing_state": "available", "processing_generation": 0,
+		"failure_count": 0,
+		"claim_id":      nil, "claim_key_hash": "", "lease_expires_at": nil,
+		"completed_at": nil, "complete_key_hash": "", "result_message_id": nil,
 	})
 
 	if ic.accounts != 1 {
@@ -525,7 +792,9 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	if _, ok := ic.transcripts["trn_1"]; !ok || ic.entries["ent_2"] != "trn_1" {
 		t.Error("transcript ids not recorded across a legal stream")
 	}
-	if _, ok := ic.messages["msg_1"]; !ok || !ic.deliveries["msg_1"] {
+	if _, ok := ic.messages["msg_1"]; !ok {
+		t.Error("message id not recorded across a legal stream")
+	} else if _, ok := ic.deliveries["msg_1"]; !ok {
 		t.Error("message and delivery ids not recorded across a legal stream")
 	}
 }

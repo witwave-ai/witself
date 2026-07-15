@@ -25,6 +25,28 @@ attribution participate in the same implemented account archive. Migration
 also participate in export/import. Cross-cell moves require source freeze or
 placement-epoch fencing as specified in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+Migration `0034` direct-message processing state also participates. Completed
+processing and its result-message link are preserved; import interrupts every
+active message claim by advancing its generation and clearing its
+claim/key/lease fields before the destination account resumes.
+Migration `0035` backend-derived message causal depth also participates.
+Schema-35 import validates depth against the reply graph; older archives have
+depth deterministically derived during upgrade/import.
+Migration `0036` adds the durable direct-message `failure_count`. Schema-36
+archives preserve and validate it; earlier archives upgrade to zero because
+they contain no trustworthy per-message deterministic failure history.
+The client-local runner notification ledger and content-free cycle health are
+not account data and are not exported. Notification pointers contain no message
+content; the referenced PostgreSQL messages remain in the archive and can be
+rediscovered through mailbox reads. The source runner already acknowledged
+those deliveries globally, however, so a destination or second host does not
+rediscover the local pointers through unread mailbox state. MCP notification
+consume canonically reads/verifies and clears one exact pointer on its source
+runtime; this intentional MVP handoff is local, not cross-host wake delivery.
+The separate runner `provider-credentials.json` is host authentication state,
+not account data, and is also excluded. A destination host must enable its
+runner under the intended provider-auth environment rather than importing that
+file through the account archive.
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -97,8 +119,8 @@ Production backups should include:
 - Postgres backup. This is the system of record and carries memories, facts,
   primary flags, memory edit history, policies, group membership, group-owned
   records, curation queue/run/receipt state, messages and per-recipient
-  delivery/read/ack state, tokens (hashes and metadata only), audit records, and
-  usage/limit state.
+  delivery/read/ack plus fenced processing state, tokens (hashes and metadata
+  only), audit records, and usage/limit state.
 - Migration-0032 client-vector profiles/rows; vector rows are optional derived
   data to use, but their table streams and existing rows are part of a complete
   schema-32 archive (see [Client-Supplied Vectors](#client-supplied-vectors)).
@@ -370,6 +392,19 @@ Import rules:
   run, interrupts an open/planned run and claimed request, removes the live
   lease, and reserves the next fencing generation. A destination client must
   claim fresh due work; an old source-cell fence cannot apply.
+- Active direct-message processing also never resumes across an archive
+  boundary. Import validates the delivery's processing shape and result-message
+  scope. It preserves `completed` rows and their unique result links, but
+  normalizes `claimed` rows to `available`, increments the generation, and
+  clears `claim_id`, claim-key hash, and lease expiry. The source runner's fence
+  is therefore stale on the destination.
+- Direct-message `causal_depth` is portable safety state, not a client hint.
+  Schema-35 imports must match every reply's depth to parent plus one; legacy
+  archive rows receive deterministic depths derived from their validated reply
+  graph. Migration-0036 `failure_count` is also portable safety state and is
+  preserved for available, claimed-normalized, and completed deliveries.
+  Processing generation remains solely a stale-writer fence; interrupting an
+  active import claim advances that fence without incrementing `failure_count`.
 
 The implemented whole-account exporter requires the account to be suspended or
 closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
@@ -564,7 +599,9 @@ A managed or self-hosted restore should proceed in this order:
    primary per logical kind per owner, group membership and admins, policy
    bindings (default-deny surface), memory edit-history continuity, curation
    request/run/action/receipt ownership and attribution, inactive imported
-   leases with reserved fences, and message delivery/read/ack state.
+   leases with reserved fences, message delivery/read/ack state, completed
+   processing/result links, preserved deterministic failure counts, and
+   interrupted active message claims with advanced generations.
 9. Confirm lexical recall works. Confirm restored hybrid recall and reported
    coverage when compatible vector rows exist; zero coverage remains a supported
    lexical fallback, not an unsupported memory service.

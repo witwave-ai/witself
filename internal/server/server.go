@@ -350,9 +350,18 @@ type Config struct {
 	// store derives sender/account/realm from that principal and never from the
 	// request body. List is metadata-only; Read is the content boundary.
 	SendMessage  func(ctx context.Context, p DomainPrincipal, in SendMessageRequest) (Message, error)
+	ReplyMessage func(ctx context.Context, p DomainPrincipal, parentMessageID string, in ReplyMessageRequest) (Message, error)
 	ListMessages func(ctx context.Context, p DomainPrincipal, opts MessageListOptions) (MessagePage, error)
 	ReadMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 	AckMessage   func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
+
+	// Message processing is a recipient-only fenced lease. The claim id and
+	// generation returned by ClaimMessage must be presented by every later
+	// transition; implementations atomically fence stale workers.
+	ClaimMessage        func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimMessageRequest) (MessageProcessing, error)
+	RenewMessageClaim   func(ctx context.Context, p DomainPrincipal, messageID string, in RenewMessageClaimRequest) (MessageProcessing, error)
+	ReleaseMessageClaim func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error)
+	CompleteMessage     func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -728,19 +737,22 @@ type UsageReport struct {
 // Message is one durable realm-local direct message and the recipient's
 // delivery/read state. Body and Payload are omitted from list responses.
 type Message struct {
-	ID        string           `json:"id"`
-	AccountID string           `json:"account_id"`
-	RealmID   string           `json:"realm_id"`
-	From      MessageAgent     `json:"from"`
-	To        MessageRecipient `json:"to"`
-	Subject   string           `json:"subject,omitempty"`
-	Kind      string           `json:"kind"`
-	Body      string           `json:"body,omitempty"`
-	Payload   json.RawMessage  `json:"payload,omitempty"`
-	ThreadID  string           `json:"thread_id"`
-	CreatedAt time.Time        `json:"created_at"`
-	Delivery  MessageDelivery  `json:"delivery"`
-	ReadState MessageReadState `json:"read_state"`
+	ID               string            `json:"id"`
+	AccountID        string            `json:"account_id"`
+	RealmID          string            `json:"realm_id"`
+	From             MessageAgent      `json:"from"`
+	To               MessageRecipient  `json:"to"`
+	Subject          string            `json:"subject,omitempty"`
+	Kind             string            `json:"kind"`
+	Body             string            `json:"body,omitempty"`
+	Payload          json.RawMessage   `json:"payload,omitempty"`
+	ThreadID         string            `json:"thread_id"`
+	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
+	CausalDepth      int64             `json:"causal_depth"`
+	CreatedAt        time.Time         `json:"created_at"`
+	Delivery         MessageDelivery   `json:"delivery"`
+	ReadState        MessageReadState  `json:"read_state"`
+	Processing       MessageProcessing `json:"processing"`
 }
 
 // MessageAgent identifies the token-derived sender in the wire shape.
@@ -795,23 +807,127 @@ type SendMessageRequest struct {
 	Actor          json.RawMessage         `json:"actor,omitempty"`
 	Realm          json.RawMessage         `json:"realm,omitempty"`
 	RealmID        json.RawMessage         `json:"realm_id,omitempty"`
+	CausalDepth    json.RawMessage         `json:"causal_depth,omitempty"`
+}
+
+// ReplyMessageRequest carries only content. Routing and causality fields are
+// represented solely so permissive JSON decoding cannot silently accept them;
+// the handler rejects every non-empty caller-supplied identity/routing field.
+type ReplyMessageRequest struct {
+	Subject          string          `json:"subject,omitempty"`
+	Kind             string          `json:"kind,omitempty"`
+	Body             string          `json:"body"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	IdempotencyKey   string          `json:"-"`
+	To               json.RawMessage `json:"to,omitempty"`
+	ThreadID         json.RawMessage `json:"thread_id,omitempty"`
+	ReplyToMessageID json.RawMessage `json:"reply_to_message_id,omitempty"`
+	From             json.RawMessage `json:"from,omitempty"`
+	Sender           json.RawMessage `json:"sender,omitempty"`
+	Actor            json.RawMessage `json:"actor,omitempty"`
+	Account          json.RawMessage `json:"account,omitempty"`
+	AccountID        json.RawMessage `json:"account_id,omitempty"`
+	Realm            json.RawMessage `json:"realm,omitempty"`
+	RealmID          json.RawMessage `json:"realm_id,omitempty"`
+	CausalDepth      json.RawMessage `json:"causal_depth,omitempty"`
+}
+
+// MessageListenRequest is a bounded, inbound-only, metadata-only waitable list.
+// A pointer distinguishes omitted wait_seconds (server default) from an
+// explicit zero-second non-blocking check.
+type MessageListenRequest struct {
+	WaitSeconds *int   `json:"wait_seconds,omitempty"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	FromAgent   string `json:"from_agent,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 }
 
 // MessageListOptions selects one bounded inbox or outbox page.
 type MessageListOptions struct {
-	Direction string
-	Unread    bool
-	From      string
-	ThreadID  string
-	Kind      string
-	Limit     int
-	Cursor    string
+	Direction   string
+	Unread      bool
+	Unacked     bool
+	OldestFirst bool
+	From        string
+	ThreadID    string
+	Kind        string
+	Limit       int
+	Cursor      string
 }
 
 // MessagePage is the API-neutral mailbox page returned by the store adapter.
 type MessagePage struct {
 	Messages   []Message
 	NextCursor string
+}
+
+// MessageListenResult reports a waitable metadata-only mailbox page.
+type MessageListenResult struct {
+	Messages []Message `json:"messages"`
+	TimedOut bool      `json:"timed_out"`
+}
+
+// MessageProcessing is the fenced processing state for one inbound message.
+// A claim id is an opaque capability and generation is its monotonic fence.
+type MessageProcessing struct {
+	State           string     `json:"state"`
+	ClaimID         string     `json:"claim_id,omitempty"`
+	Generation      int64      `json:"generation"`
+	FailureCount    int64      `json:"failure_count"`
+	LeaseExpiresAt  *time.Time `json:"lease_expires_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	ResultMessageID string     `json:"result_message_id,omitempty"`
+}
+
+// ClaimMessageRequest starts or idempotently resumes one processing claim.
+type ClaimMessageRequest struct {
+	LeaseSeconds   int    `json:"lease_seconds"`
+	IdempotencyKey string `json:"-"`
+}
+
+// MessageClaimRequest identifies one exact processing lease generation.
+type MessageClaimRequest struct {
+	ClaimID              string `json:"claim_id"`
+	Generation           int64  `json:"generation"`
+	DeterministicFailure bool   `json:"deterministic_failure"`
+}
+
+// RenewMessageClaimRequest extends one exact processing lease generation.
+type RenewMessageClaimRequest struct {
+	ClaimID      string `json:"claim_id"`
+	Generation   int64  `json:"generation"`
+	LeaseSeconds int    `json:"lease_seconds"`
+}
+
+// CompleteMessageRequest atomically completes one exact processing claim and
+// creates its recipient-only result reply. Routing and identity fields are
+// represented so the handler can reject attempts to spoof derived values.
+type CompleteMessageRequest struct {
+	ClaimID          string          `json:"claim_id"`
+	Generation       int64           `json:"generation"`
+	Subject          string          `json:"subject,omitempty"`
+	Kind             string          `json:"kind,omitempty"`
+	Body             string          `json:"body"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	IdempotencyKey   string          `json:"-"`
+	To               json.RawMessage `json:"to,omitempty"`
+	ThreadID         json.RawMessage `json:"thread_id,omitempty"`
+	ReplyToMessageID json.RawMessage `json:"reply_to_message_id,omitempty"`
+	From             json.RawMessage `json:"from,omitempty"`
+	Sender           json.RawMessage `json:"sender,omitempty"`
+	Actor            json.RawMessage `json:"actor,omitempty"`
+	Account          json.RawMessage `json:"account,omitempty"`
+	AccountID        json.RawMessage `json:"account_id,omitempty"`
+	Realm            json.RawMessage `json:"realm,omitempty"`
+	RealmID          json.RawMessage `json:"realm_id,omitempty"`
+	CausalDepth      json.RawMessage `json:"causal_depth,omitempty"`
+}
+
+// CompleteMessageResult is the atomic processing transition and durable reply.
+type CompleteMessageResult struct {
+	Processing MessageProcessing `json:"processing"`
+	Message    Message           `json:"message"`
 }
 
 // Realm is the API view of a realm.
@@ -823,6 +939,9 @@ type Realm struct {
 // ErrConflict signals a uniqueness conflict (-> 409). The wiring layer returns
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
+
+// ErrBusy signals an active lease held by another processing worker (-> 409).
+var ErrBusy = errors.New("busy")
 
 // ErrIdempotencyConflict signals reuse of one retry key for a different
 // logical mutation. Handlers return a stable 409 without echoing request data.
@@ -1035,6 +1154,11 @@ func apiMux(cfg Config) http.Handler {
 		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
 	messagingSupported := selfDigestSupported && cfg.SendMessage != nil &&
 		cfg.ListMessages != nil && cfg.ReadMessage != nil && cfg.AckMessage != nil
+	messageListenSupported := selfDigestSupported && cfg.ListMessages != nil
+	messageReplySupported := selfDigestSupported && cfg.ReplyMessage != nil
+	messageProcessingSupported := selfDigestSupported &&
+		cfg.ClaimMessage != nil && cfg.RenewMessageClaim != nil &&
+		cfg.ReleaseMessageClaim != nil && cfg.CompleteMessage != nil
 	memoriesSupported := selfDigestSupported && cfg.CaptureMemory != nil &&
 		cfg.GetMemory != nil && cfg.ListMemories != nil && cfg.RecallMemories != nil &&
 		cfg.GetMemoryHistory != nil && cfg.AdjustMemory != nil &&
@@ -1057,7 +1181,8 @@ func apiMux(cfg Config) http.Handler {
 		cfg.GetMemoryCurationStatus != nil
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
 		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
-		messagingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
+		messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported,
+		memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
 		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
@@ -1309,9 +1434,14 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.ListMessages != nil {
 			mux.HandleFunc("GET /v1/messages", listMessagesHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
+			mux.HandleFunc("POST /v1/messages:listen", messageListenHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
 		}
-		if cfg.ReadMessage != nil && cfg.AckMessage != nil {
-			mux.HandleFunc("POST /v1/messages/{action}", messageActionHandler(cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage))
+		if cfg.ReadMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil ||
+			cfg.ClaimMessage != nil || cfg.RenewMessageClaim != nil ||
+			cfg.ReleaseMessageClaim != nil || cfg.CompleteMessage != nil {
+			mux.HandleFunc("POST /v1/messages/{action}", messageActionHandler(
+				cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage, cfg.ReplyMessage,
+				cfg.ClaimMessage, cfg.RenewMessageClaim, cfg.ReleaseMessageClaim, cfg.CompleteMessage))
 		}
 	}
 	// Provision-token-authorized cell-wide admin ticket list (feeds
@@ -1328,7 +1458,7 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return mux
+	return messagingNoStoreMux(mux)
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
@@ -1419,7 +1549,7 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -1452,6 +1582,9 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				"policies":                notImpl,
 				"groups":                  notImpl,
 				"messaging":               {Supported: messagingSupported},
+				"message_listen":          featureState(messageListenSupported),
+				"message_reply":           featureState(messageReplySupported),
+				"message_processing":      featureState(messageProcessingSupported),
 				"transcripts":             {Supported: transcriptsSupported},
 				"audit":                   notImpl,
 			},

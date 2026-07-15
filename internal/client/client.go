@@ -145,6 +145,10 @@ func doJSON(ctx context.Context, method, url, token string, body []byte, out any
 // doJSONWithHeaders is the same as doJSON but lets callers set extra request
 // headers (e.g. X-Witself-Email for the CP's optional email hint).
 func doJSONWithHeaders(ctx context.Context, method, url, token string, headers map[string]string, body []byte, out any) error {
+	return doJSONWithHeadersTimeout(ctx, method, url, token, headers, body, out, 15*time.Second)
+}
+
+func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, headers map[string]string, body []byte, out any, timeout time.Duration) error {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -162,7 +166,7 @@ func doJSONWithHeaders(ctx context.Context, method, url, token string, headers m
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}

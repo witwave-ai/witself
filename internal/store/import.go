@@ -183,12 +183,18 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "account_id": true, "realm_id": true,
 		"from_agent_id": true, "to_agent_id": true,
 		"subject": true, "kind": true, "body": true, "payload": true,
-		"thread_id": true, "idempotency_key": true, "created_at": true,
+		"thread_id": true, "reply_to_message_id": true, "causal_depth": true,
+		"idempotency_key": true, "created_at": true,
 	},
 	"agent_message_deliveries": {
 		"message_id": true, "account_id": true, "realm_id": true,
 		"recipient_agent_id": true, "state": true, "delivered_at": true,
 		"read_at": true, "acked_at": true, "created_at": true,
+		"processing_state": true, "processing_generation": true,
+		"failure_count": true,
+		"claim_id":      true, "claim_key_hash": true,
+		"lease_expires_at": true, "completed_at": true,
+		"complete_key_hash": true, "result_message_id": true,
 	},
 	"memory_change_clocks": {
 		"account_id": true, "realm_id": true, "owner_kind": true,
@@ -361,9 +367,20 @@ type transcriptImportScope struct {
 }
 
 type messageImportScope struct {
-	realmID     string
-	fromAgentID string
-	toAgentID   string
+	realmID          string
+	fromAgentID      string
+	toAgentID        string
+	threadID         string
+	replyToMessageID string
+	causalDepth      int64
+}
+
+type messageDeliveryImportScope struct {
+	processingState      string
+	processingGeneration int64
+	failureCount         int64
+	claimID              string
+	resultMessageID      string
 }
 
 type factImportScope struct {
@@ -550,7 +567,7 @@ type importCtx struct {
 	assertions                   map[string]string
 	factMutationTombstoneCounts  map[string]int64
 	messages                     map[string]messageImportScope
-	deliveries                   map[string]bool
+	deliveries                   map[string]messageDeliveryImportScope
 	memoryClocks                 map[memoryOwnerImportKey]int64
 	memories                     map[string]memoryImportScope
 	memoryVersions               map[memoryVersionImportKey]memoryVersionImportScope
@@ -587,7 +604,7 @@ func newImportCtx(accountID string) *importCtx {
 		assertions:                   map[string]string{},
 		factMutationTombstoneCounts:  map[string]int64{},
 		messages:                     map[string]messageImportScope{},
-		deliveries:                   map[string]bool{},
+		deliveries:                   map[string]messageDeliveryImportScope{},
 		memoryClocks:                 map[memoryOwnerImportKey]int64{},
 		memories:                     map[string]memoryImportScope{},
 		memoryVersions:               map[memoryVersionImportKey]memoryVersionImportScope{},
@@ -699,6 +716,35 @@ func (ic *importCtx) normalizeImportedCurationLease(table string, obj map[string
 		obj["terminal_at"] = importedAt.Format(time.RFC3339Nano)
 		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
 	}
+	return nil
+}
+
+// normalizeImportedMessageClaim prevents a runner lease from crossing cells.
+// The archive must first prove the complete strict source shape; an active
+// claim then becomes available and consumes one generation so every old fence
+// is permanently stale on the destination. Completed links are preserved.
+func (ic *importCtx) normalizeImportedMessageClaim(table string, obj map[string]any) error {
+	if table != "agent_message_deliveries" {
+		return nil
+	}
+	scope, err := validateImportedMessageProcessingShape(obj)
+	if err != nil {
+		return fmt.Errorf("%w: agent_message_deliveries row %v", ErrArchiveContent, err)
+	}
+	if scope.processingState != MessageProcessingClaimed {
+		return nil
+	}
+	if scope.processingGeneration >= maxMessageProcessingGeneration {
+		return fmt.Errorf("%w: agent_message_deliveries active claim has no import fence reserve", ErrArchiveContent)
+	}
+	obj["processing_state"] = MessageProcessingAvailable
+	obj["processing_generation"] = scope.processingGeneration + 1
+	obj["claim_id"] = nil
+	obj["claim_key_hash"] = ""
+	obj["lease_expires_at"] = nil
+	obj["completed_at"] = nil
+	obj["complete_key_hash"] = ""
+	obj["result_message_id"] = nil
 	return nil
 }
 
@@ -1138,8 +1184,18 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("agent_messages row missing id")
 		}
+		threadID, err := requireStringField(obj, "thread_id")
+		if err != nil {
+			return badf("agent_messages row missing thread_id")
+		}
+		replyTo, _ := stringField(obj, "reply_to_message_id")
+		causalDepth, ok := importedPositiveInteger(obj["causal_depth"])
+		if !ok || causalDepth > maxMessageCausalDepth {
+			return badf("agent_messages row causal_depth is invalid")
+		}
 		ic.messages[id] = messageImportScope{
 			realmID: realmID, fromAgentID: fromAgentID, toAgentID: toAgentID,
+			threadID: threadID, replyToMessageID: replyTo, causalDepth: causalDepth,
 		}
 	case "agent_message_deliveries":
 		messageID, err := requireStringField(obj, "message_id")
@@ -1158,7 +1214,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil || recipientID != scope.toAgentID {
 			return badf("agent_message_deliveries recipient %q does not match message recipient %q", recipientID, scope.toAgentID)
 		}
-		ic.deliveries[messageID] = true
+		processing, err := validateImportedMessageProcessingShape(obj)
+		if err != nil {
+			return badf("agent_message_deliveries row %v", err)
+		}
+		if _, duplicate := ic.deliveries[messageID]; duplicate {
+			return badf("agent_message_deliveries duplicates message %q", messageID)
+		}
+		ic.deliveries[messageID] = processing
 	case "memory_change_clocks":
 		owner, err := ic.importedMemoryOwner(obj)
 		if err != nil {
@@ -3081,6 +3144,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := ic.normalizeImportedCurationLease(table, obj, importedAt); err != nil {
 				return err
 			}
+			if err := ic.normalizeImportedMessageClaim(table, obj); err != nil {
+				return err
+			}
 			if err := ic.validateAndRecord(table, obj); err != nil {
 				return err
 			}
@@ -3094,8 +3160,19 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	if err != nil {
 		return export.Manifest{}, err
 	}
+	if m.SchemaVersion < 35 {
+		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {
+			return export.Manifest{}, fmt.Errorf("%w: normalize legacy message causal depth: %v", ErrArchiveContent, err)
+		}
+	}
+	if err := validateImportedMessageReplies(ic.messages); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: message reply graph: %v", ErrArchiveContent, err)
+	}
+	if err := validateImportedMessageProcessingLinks(ic.messages, ic.deliveries); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: message processing graph: %v", ErrArchiveContent, err)
+	}
 	for messageID := range ic.messages {
-		if !ic.deliveries[messageID] {
+		if _, ok := ic.deliveries[messageID]; !ok {
 			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
 		}
 	}
@@ -3199,6 +3276,219 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, err
 	}
 	return m, nil
+}
+
+func deriveImportedMessageCausalDepths(messages map[string]messageImportScope) (map[string]int64, error) {
+	for messageID, message := range messages {
+		if message.replyToMessageID == "" {
+			continue
+		}
+		if message.replyToMessageID == messageID {
+			return nil, fmt.Errorf("message %q replies to itself", messageID)
+		}
+		parent, ok := messages[message.replyToMessageID]
+		if !ok {
+			return nil, fmt.Errorf("message %q references missing parent %q", messageID, message.replyToMessageID)
+		}
+		if parent.realmID != message.realmID || parent.threadID != message.threadID ||
+			parent.fromAgentID != message.toAgentID || parent.toAgentID != message.fromAgentID {
+			return nil, fmt.Errorf("message %q does not preserve parent participants, realm, and thread", messageID)
+		}
+	}
+
+	// Each message has at most one parent. A three-state walk both calculates
+	// the backend-owned depth and rejects a checksum-valid archive that uses
+	// deferred FKs to manufacture a causal cycle.
+	state := make(map[string]uint8, len(messages))
+	depths := make(map[string]int64, len(messages))
+	var visit func(string) (int64, error)
+	visit = func(messageID string) (int64, error) {
+		switch state[messageID] {
+		case 1:
+			return 0, fmt.Errorf("reply graph contains a cycle at %q", messageID)
+		case 2:
+			return depths[messageID], nil
+		}
+		state[messageID] = 1
+		depth := int64(1)
+		if parentID := messages[messageID].replyToMessageID; parentID != "" {
+			parentDepth, err := visit(parentID)
+			if err != nil {
+				return 0, err
+			}
+			if parentDepth >= maxMessageCausalDepth {
+				return 0, fmt.Errorf("message %q exceeds maximum causal depth", messageID)
+			}
+			depth = parentDepth + 1
+		}
+		state[messageID] = 2
+		depths[messageID] = depth
+		return depth, nil
+	}
+	for messageID := range messages {
+		if _, err := visit(messageID); err != nil {
+			return nil, err
+		}
+	}
+	return depths, nil
+}
+
+func validateImportedMessageReplies(messages map[string]messageImportScope) error {
+	depths, err := deriveImportedMessageCausalDepths(messages)
+	if err != nil {
+		return err
+	}
+	for messageID, expected := range depths {
+		if messages[messageID].causalDepth != expected {
+			return fmt.Errorf("message %q causal_depth %d does not match derived depth %d",
+				messageID, messages[messageID].causalDepth, expected)
+		}
+	}
+	return nil
+}
+
+func normalizeLegacyImportedMessageCausalDepths(
+	ctx context.Context,
+	tx pgxExec,
+	messages map[string]messageImportScope,
+	accountID string,
+) error {
+	depths, err := deriveImportedMessageCausalDepths(messages)
+	if err != nil {
+		return err
+	}
+	messageIDs := make([]string, 0, len(depths))
+	for messageID := range depths {
+		messageIDs = append(messageIDs, messageID)
+	}
+	sort.Strings(messageIDs)
+	for _, messageID := range messageIDs {
+		depth := depths[messageID]
+		if _, err := tx.Exec(ctx, `
+			UPDATE agent_messages SET causal_depth=$1
+			WHERE id=$2 AND account_id=$3`, depth, messageID, accountID); err != nil {
+			return fmt.Errorf("update message %q causal depth: %w", messageID, err)
+		}
+		scope := messages[messageID]
+		scope.causalDepth = depth
+		messages[messageID] = scope
+	}
+	return nil
+}
+
+func validateImportedMessageProcessingShape(obj map[string]any) (messageDeliveryImportScope, error) {
+	for _, field := range []string{
+		"processing_state", "processing_generation", "failure_count", "claim_id", "claim_key_hash",
+		"lease_expires_at", "completed_at", "complete_key_hash", "result_message_id",
+	} {
+		if _, present := obj[field]; !present {
+			return messageDeliveryImportScope{}, fmt.Errorf("missing %s", field)
+		}
+	}
+	state, ok := obj["processing_state"].(string)
+	if !ok {
+		return messageDeliveryImportScope{}, fmt.Errorf("processing_state is invalid")
+	}
+	generation, ok := importedGeneration(obj["processing_generation"], true)
+	if !ok {
+		return messageDeliveryImportScope{}, fmt.Errorf("processing_generation is invalid")
+	}
+	failureCount, ok := importedGeneration(obj["failure_count"], true)
+	if !ok {
+		return messageDeliveryImportScope{}, fmt.Errorf("failure_count is invalid")
+	}
+	claimID, hasClaim, err := importedNullableNonemptyString(obj, "claim_id")
+	if err != nil {
+		return messageDeliveryImportScope{}, err
+	}
+	claimKeyHash, ok := obj["claim_key_hash"].(string)
+	if !ok {
+		return messageDeliveryImportScope{}, fmt.Errorf("claim_key_hash is invalid")
+	}
+	_, hasLease, err := importedOptionalTimestamp(obj, "lease_expires_at")
+	if err != nil {
+		return messageDeliveryImportScope{}, err
+	}
+	_, hasCompletedAt, err := importedOptionalTimestamp(obj, "completed_at")
+	if err != nil {
+		return messageDeliveryImportScope{}, err
+	}
+	completeKeyHash, ok := obj["complete_key_hash"].(string)
+	if !ok {
+		return messageDeliveryImportScope{}, fmt.Errorf("complete_key_hash is invalid")
+	}
+	resultMessageID, hasResult, err := importedNullableNonemptyString(obj, "result_message_id")
+	if err != nil {
+		return messageDeliveryImportScope{}, err
+	}
+
+	scope := messageDeliveryImportScope{
+		processingState: state, processingGeneration: generation,
+		failureCount: failureCount,
+		claimID:      claimID, resultMessageID: resultMessageID,
+	}
+	switch state {
+	case MessageProcessingAvailable:
+		if hasClaim || claimKeyHash != "" || hasLease || hasCompletedAt ||
+			completeKeyHash != "" || hasResult {
+			return messageDeliveryImportScope{}, fmt.Errorf("available processing shape is invalid")
+		}
+	case MessageProcessingClaimed:
+		if generation < 1 || !hasClaim || !validImportedGeneratedID(claimID, "mcl") ||
+			!isSHA256Hex(claimKeyHash) || !hasLease || hasCompletedAt ||
+			completeKeyHash != "" || hasResult {
+			return messageDeliveryImportScope{}, fmt.Errorf("claimed processing shape is invalid")
+		}
+	case MessageProcessingCompleted:
+		if generation < 1 || !hasClaim || !validImportedGeneratedID(claimID, "mcl") ||
+			!isSHA256Hex(claimKeyHash) || hasLease || !hasCompletedAt ||
+			!isSHA256Hex(completeKeyHash) || !hasResult ||
+			!validImportedGeneratedID(resultMessageID, "msg") {
+			return messageDeliveryImportScope{}, fmt.Errorf("completed processing shape is invalid")
+		}
+	default:
+		return messageDeliveryImportScope{}, fmt.Errorf("processing_state is invalid")
+	}
+	return scope, nil
+}
+
+func importedNullableNonemptyString(obj map[string]any, field string) (string, bool, error) {
+	raw, present := obj[field]
+	if !present {
+		return "", false, fmt.Errorf("missing %s", field)
+	}
+	if raw == nil {
+		return "", false, nil
+	}
+	value, ok := raw.(string)
+	if !ok || value == "" {
+		return "", false, fmt.Errorf("%s is invalid", field)
+	}
+	return value, true, nil
+}
+
+func validateImportedMessageProcessingLinks(messages map[string]messageImportScope, deliveries map[string]messageDeliveryImportScope) error {
+	seenResults := make(map[string]string)
+	for messageID, delivery := range deliveries {
+		if delivery.processingState != MessageProcessingCompleted {
+			continue
+		}
+		result, ok := messages[delivery.resultMessageID]
+		if !ok {
+			return fmt.Errorf("message %q references missing processing result %q", messageID, delivery.resultMessageID)
+		}
+		source := messages[messageID]
+		if result.replyToMessageID != messageID || result.realmID != source.realmID ||
+			result.threadID != source.threadID || result.fromAgentID != source.toAgentID ||
+			result.toAgentID != source.fromAgentID {
+			return fmt.Errorf("message %q has an invalid processing result %q", messageID, delivery.resultMessageID)
+		}
+		if prior, duplicate := seenResults[delivery.resultMessageID]; duplicate {
+			return fmt.Errorf("processing result %q is linked by messages %q and %q", delivery.resultMessageID, prior, messageID)
+		}
+		seenResults[delivery.resultMessageID] = messageID
+	}
+	return nil
 }
 
 func validateImportedMemorySupersessionMembership(

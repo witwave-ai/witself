@@ -14,6 +14,13 @@ perform a guarded compensating rollback. It never runs a model. See
 `remember`, autonomous consolidation, server-embedding, or backend-synthesis
 shapes below are not implementation authority.
 
+Messaging amendment (implemented in the current checkout, not a deployment or
+release claim): direct delivery now includes migration-0034
+claim/renew/release/atomic-complete processing, migration-0035 server-derived
+causal depth, migration-0036 deterministic per-message failure counting, and the
+`message_processing` capability. Explicit-list/realm fan-out and open
+multi-assignee requests remain future work.
+
 ## Decision
 
 The backend API is a public product contract. The `witself` CLI, MCP adapter,
@@ -206,6 +213,9 @@ Examples of feature flags:
 - `policies`
 - `groups`
 - `messaging`
+- `message_listen`
+- `message_reply`
+- `message_processing`
 - `export`
 - `audit`
 - `mcp`
@@ -372,6 +382,9 @@ Message send is idempotent by `Idempotency-Key`: a retried send with the same
 key returns the original `msg_…` rather than fanning out a duplicate to the
 recipient mailbox. Messaging delivery semantics are tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
+Omitted direct-send `kind` normalizes to actionable `request` in the backend;
+clients must send explicit `note` for FYI-only runner notification/ack without
+provider inference.
 
 ## Dry Runs
 
@@ -520,7 +533,7 @@ Initial route groups:
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
 | `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
-| `/v1/messages` | Inter-agent and cross-realm message send, list, read, long-poll receive (`:listen`), and acknowledgement. |
+| `/v1/messages` | Implemented direct same-realm send, recipient-only reply, server-derived causal depth, metadata-only list/listen, read/acknowledgement, and fenced claim/renew/release/atomic-complete processing; realm audiences and cross-realm delivery are target extensions. |
 | `/v1/conversations` | Cross-realm conversation/task resource: list and show participants, state, and turn/cost budgets. |
 | `/v1/federation/peers` | Federation allow-list: list, add, and remove the accepted peer realms for cross-realm collaboration. |
 | `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
@@ -574,7 +587,15 @@ Export endpoints produce structured, round-trippable identity data. Unlike
 Witpass, plaintext identity export is a first-class v0 feature, not a forbidden
 one: an export may include memory content, fact values, `primary` flags,
 `sensitive` markers, links, and edit history. Exports of `sensitive` records
-require an audit `reason` and emit a warning. Export/import is tracked in
+require an audit `reason` and emit a warning. Account archives also carry direct
+messages, migration-0035 causal links/depths, recipient read/ack state, and
+migration-0034 processing state plus migration-0036 `failure_count`. Import
+derives or validates depth against the reply graph, preserves completed result
+links and the deterministic failure count, converts every active `claimed`
+delivery to `available`, advances its generation, and clears its claim/key/lease
+fields so a source-cell fence cannot survive the move. Archives older than
+schema 36 receive `failure_count=0` during upgrade.
+Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 
 ## Action And Colon Routes
@@ -650,7 +671,13 @@ POST /v1/sessions:start
 POST /v1/sessions:end
 POST /v1/policies:test
 POST /v1/messages:listen
+POST /v1/messages/{message_id}:reply
+POST /v1/messages/{message_id}:read
 POST /v1/messages/{message_id}:ack
+POST /v1/messages/{message_id}:claim
+POST /v1/messages/{message_id}:renew
+POST /v1/messages/{message_id}:release
+POST /v1/messages/{message_id}:complete
 POST /v1/tokens/{token_id}:rotate
 POST /v1/secrets/{secret_id}:reveal
 POST /v1/secrets/{secret_id}:rotate
@@ -738,18 +765,53 @@ Notes on specific actions and workflows:
 - `:test` evaluates a subject/permission/target/scope against current policy and
   returns the deciding policy id or a deny reason. It never mutates state and is
   the canonical access-decision dry run.
-- `:listen` is the long-poll receive verb: it blocks up to a caller-specified
-  number of seconds and returns inbound messages from the durable mailbox as they
-  arrive, returning empty when the window elapses. It is the live face of the
-  mailbox and the route the CLI/MCP `listen`/`recv` verb maps to; agents run no
-  HTTP server and instead poll this route each loop. It is a `POST` because the
-  receiving agent is derived from the token and message bodies travel in the
-  response, never a URL. Inbound cross-realm messages surface here with their
-  resolved `from` realm; the cross-realm envelope is defined in
-  [json-contracts.md](json-contracts.md). Delivery semantics are tracked in
-  [inter-agent-messaging.md](inter-agent-messaging.md).
-- `:ack` records per-recipient read/acknowledgement state for a delivered
-  message; the acknowledging agent is derived from the token.
+- `POST /v1/messages:listen` is the implemented stateless long-poll receive
+  verb. It returns the oldest unacknowledged inbound message **metadata**, or an
+  empty `messages` array with `timed_out=true` when the window elapses. The
+  request accepts `wait_seconds` from 0 through 20 (default 20) and optional
+  `from_agent`, `thread_id`, `kind`, and `limit` filters; it has no cursor. The
+  response never exposes bodies, marks read, or acknowledges and uses
+  `Cache-Control: private, no-store`. Each server process bounds concurrent
+  listen admission and returns HTTP 429 with `Retry-After` when saturated;
+  retrying loses no durable mailbox state. Agents run no inbound HTTP server; an
+  already-running client runner polls this route and then uses the explicit
+  read/ack lifecycle. It is a `POST` because the bounded wait/filter request is
+  authenticated input rather than a public cacheable URL. Delivery semantics
+  are tracked in
+  [inter-agent-messaging.md](inter-agent-messaging.md); client wake and inference
+  boundaries are tracked in
+  [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
+- `POST /v1/messages/{message_id}:reply` accepts only reply content and a
+  header idempotency key. The caller must be the parent recipient; the server
+  derives the recipient from the parent sender and derives the thread and
+  `reply_to_message_id`; it derives `causal_depth` as parent plus one. Supplying
+  routing, identity, or depth fields is rejected.
+- `:read` returns content and records only the recipient read transition.
+  `:ack` separately records per-recipient acknowledgement; the acting agent is
+  derived from the token for both operations. The ack response is metadata-only
+  and never returns the message body or payload.
+- `:claim` acquires or exactly replays a bounded 30–900 second processing lease
+  on the token-bound recipient's unacknowledged delivery. The required
+  `Idempotency-Key` is hashed at rest and never returned. A different live
+  claimant receives HTTP 409; an available or expired acquisition increments
+  the monotonic generation fence. Generation is solely a stale-writer fence;
+  claim, expiry, and takeover do not consume a message's failure budget.
+- `:renew` and `:release` require the exact `claim_id` and positive `generation`.
+  Renewal replaces the database-time expiry; release makes processing
+  available and invalidates the old fence without acknowledging. Release also
+  accepts optional `deterministic_failure` (default false). Only an exact-fence
+  release with that field true atomically increments the migration-0036
+  `failure_count`; provider-wide, configuration, cancellation, and
+  lease-maintenance releases leave it unchanged. The current direct runner uses
+  that durable count and, by default, publishes an escalation on the fifth
+  deterministic attempt.
+- `:complete` requires the exact unexpired fence and an `Idempotency-Key`. In
+  one transaction it derives recipient, thread, causal parent, causal depth,
+  sender, account, and realm from the claimed message and token; inserts one
+  result reply; links that reply; and marks processing completed. It returns
+  HTTP 201 with
+  `processing` plus `message` and deliberately does not ack. Exact completion
+  retry returns the same result; a stale fence returns HTTP 409.
 - `:rotate` (on `/v1/tokens`) issues a replacement token and returns the raw
   value once; the prior token is revoked immediately or after an explicit grace
   period.

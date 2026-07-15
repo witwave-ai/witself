@@ -264,6 +264,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'from_agent_id', from_agent_id, 'to_agent_id', to_agent_id,
 			  'subject', subject, 'kind', kind, 'body', body,
 			  'payload', payload, 'thread_id', thread_id,
+			  'reply_to_message_id', reply_to_message_id,
+			  'causal_depth', causal_depth,
 			  'idempotency_key', idempotency_key, 'created_at', created_at)
 			FROM agent_messages WHERE account_id = $1
 			ORDER BY created_at, id`, arg: accountID},
@@ -273,6 +275,14 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'realm_id', realm_id, 'recipient_agent_id', recipient_agent_id,
 			  'state', state, 'delivered_at', delivered_at,
 			  'read_at', read_at, 'acked_at', acked_at,
+			  'processing_state', processing_state,
+			  'processing_generation', processing_generation,
+			  'failure_count', failure_count,
+			  'claim_id', claim_id, 'claim_key_hash', claim_key_hash,
+			  'lease_expires_at', lease_expires_at,
+			  'completed_at', completed_at,
+			  'complete_key_hash', complete_key_hash,
+			  'result_message_id', result_message_id,
 			  'created_at', created_at)
 			FROM agent_message_deliveries WHERE account_id = $1
 			ORDER BY created_at, message_id, recipient_agent_id`, arg: accountID},

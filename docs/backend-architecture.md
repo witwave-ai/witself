@@ -76,6 +76,9 @@ Witself should have these public entrypoints:
 
 - `ws`: human and agent CLI.
 - `witself mcp serve`: local-first MCP adapter over the same core behavior.
+- `witself message runner serve`: client-owned, runtime-bound autonomous
+  mailbox process, normally supervised by per-user launchd or systemd;
+  `status` and `notifications` expose its content-free local handoff state.
 - `witself-server`: separate backend API server for managed and self-hosted
   deployments.
 
@@ -93,17 +96,21 @@ recall availability, and optional vector-profile coverage without guessing.
 
 Two invariants are load-bearing and additive to the one-core/multi-adapter spine.
 
-MCP-everywhere with full parity. Everything reachable through the CLI is also
-reachable through MCP, and vice versa, because both adapters translate into the
-same core commands. The CLI is the primary, canonical surface; MCP is not a
-reduced subset of it. New verbs land on both surfaces together (for example the
-cross-realm `listen`/`recv` verb in the [Collaboration Subsystem](#collaboration-subsystem)
-lands as a CLI `message` action and an MCP `witself.message.listen` tool in the
-same pass).
+MCP-everywhere with full parity. Every agent-facing, server-backed operation
+reachable through the CLI is also reachable through MCP, and vice versa,
+because both adapters translate into the same core commands. The CLI is the
+primary, canonical surface; MCP is not a reduced subset of the backend domain.
+Host-local operations such as installing a launchd/systemd message runner are
+intentional CLI-only lifecycle controls, not backend resources. New
+server-backed verbs land on both surfaces together (for example `message
+complete` and `witself.message.complete` landed in the same pass). The MCP
+notification list/consume pair is the narrow local-data exception: it exposes no
+service-management operation and only bridges an identity-bound local pointer
+to the canonical server-backed read boundary.
 
 Agents run no HTTP servers for normal I/O. Agents are outbound clients only:
 they reach a backend by calling out to it (local adapter, managed cell, or
-self-hosted cell) and they drain inbound work by polling/long-polling, never by
+self-hosted cell) and they discover inbound work by polling/long-polling, never by
 hosting an inbound listener. The only HTTP server in the system is the backend —
 `witself-server`, including the collaboration relay it exposes. A wake-webhook is
 optional and applies only to already-hosted cloud autonomous agents; it is never
@@ -130,7 +137,8 @@ in shared services that own:
   [Vector Boundary](#vector-boundary)).
 - The cross-agent policy engine and security-group evaluation (see the
   [Authorization Boundary](#authorization-boundary)).
-- Inter-agent messaging: send, deliver, list, read, and ack (see the
+- Inter-agent messaging: send, reply, listen, deliver, list, read, ack,
+  processing claim/renew/release, and atomic result completion (see the
   [Messaging Boundary](#messaging-boundary)).
 - Identity export and import.
 - Redaction rules for `sensitive` memories and facts.
@@ -159,7 +167,9 @@ Required storage responsibilities:
   hint, source, timestamps, and edit history.
 - Security groups and group membership.
 - Policy objects.
-- Messages, mailbox/queue state, and per-recipient delivery/read/ack state.
+- Messages, migration-0035 backend-derived causal depth, mailbox/queue state,
+  and per-recipient delivery/read/ack plus migration-0034 fenced processing and
+  migration-0036 deterministic failure state.
 - Audit events.
 - Usage counters and rate-limit state.
 - Idempotency records.
@@ -297,6 +307,27 @@ behind `internal/messaging`. The messaging model is tracked in
 - Durable mailbox/queue per recipient. Messages (`msg_…`) survive process and
   pod churn because mailbox and per-recipient delivery/read/ack state are
   persisted through the storage boundary.
+- Direct autonomous processing uses the same unique recipient delivery row.
+  Migration `0034` adds `available`/`claimed`/`completed` state, a monotonic
+  generation, opaque claim id and retry-key hash, database-time lease,
+  completion-key hash/time, and a unique result-message link. It does not
+  overload read or acknowledgement and does not pre-create the future
+  multi-assignee request-claim model.
+- Migration `0035` adds backend-derived causal depth to each direct message.
+  Direct sends start at one and replies/results advance exactly one from their
+  locked durable parent; callers cannot set or reset the value.
+- Migration `0036` adds the independent, durable `failure_count` to each direct
+  delivery. Only release of the exact fence with `deterministic_failure=true`
+  increments it; provider-wide, configuration, cancellation, and
+  lease-maintenance release paths do not.
+- Claim, renew, and release require the token-bound recipient and exact live
+  fence. Completion validates that unexpired fence, creates a parent-derived
+  result reply, links it, and marks processing complete in one transaction;
+  acknowledgement remains a later recovery boundary.
+- Processing generation is only the stale-writer fence. Exact live-claim replay
+  keeps it; a takeover after release or expiry advances it without consuming
+  the deterministic failure budget. The current runner uses `failure_count` and
+  escalates the fifth deterministic attempt by default.
 - Delivery is at-least-once with per-recipient (and per-conversation) ordering
   and explicit read/acknowledgement state. A message addressed to a group is
   fanned out to current group members with per-member delivery and ack state.
@@ -304,14 +335,56 @@ behind `internal/messaging`. The messaging model is tracked in
   sender forgery is structurally impossible through the API. `message:send` and
   `message:read` scopes gate the surface, and send/deliver/read events are
   audited.
+- Ordinary direct sends normalize omitted kind to actionable `request` on every
+  frontend/core path. Explicit `note` is FYI-only to the runner and follows its
+  notification/ack path without provider inference.
 - Message bodies and payloads are **untrusted input** to the receiving agent. A
   message can carry data toward a memory or fact write, but it cannot itself
   authorize a cross-agent write — writes still require a matching policy through
   the [Authorization Boundary](#authorization-boundary).
 - Rate limits apply to send and delivery. Messages sent and delivered are metered
   dimensions; see [billing-and-limits.md](billing-and-limits.md).
-- Surfaces: CLI `message` group, MCP `witself.message.send/list/read`, and
-  `/v1/messages` plus colon actions such as `/v1/messages/{message_id}:ack`.
+- The autonomous runner is a client boundary, not a backend inference feature.
+  Its trusted parent retains the token and API access; text-only provider
+  children receive no token, token path, processing fence, or MCP/tool access.
+  Recognized provider-auth environment values are captured at enable into a
+  separate mode-0600 provider-bound local file and supplied only to that native
+  provider child. They never enter value-free runner config, service
+  definitions, backend state, logs/status, or account export.
+  Native Claude Code and Grok Build adapters are capability-probed; Codex and
+  Cursor native adapters fail closed. A strict generic command adapter exists
+  for separately integrated wrappers. Tool-capable execution remains a
+  different, sandboxed contract. Direct replies carry bounded advisory
+  continuation history. The runner enforces its automated turn bound from
+  backend-derived causal depth, not payload metadata; the default is 12 turns
+  and the hard configurable maximum is 64.
+- Surfaces: CLI `message send|reply|list|listen|read|ack|claim|renew|release|complete`
+  plus local
+  `message runner enable|disable|status|notifications|run|serve|start`; MCP
+  mirrors the ten server-backed message operations and adds local
+  `message.notification.list|consume` bridge tools; HTTP uses `/v1/messages`,
+  `/v1/messages:listen`, and recipient action routes through `:complete`.
+- The runner records terminal and other non-provider deliveries in a private,
+  content-free, bounded notification ledger before ack. Status exposes the
+  count, while CLI and MCP list operations expose pointers; content remains
+  behind the ordinary server-backed message read boundary. MCP consume performs
+  that canonical read and exact verification before clearing one pointer, and
+  leaves the pointer intact on every failure. A full ledger fails closed.
+  The subsequent backend acknowledgement is global for that agent delivery,
+  but the pointer exists only in that runtime's local `WITSELF_HOME`; another
+  host/runtime bound to the same agent cannot rediscover it through unread
+  mailbox state. This is an intentional MVP locality limitation, not cross-host
+  wake delivery.
+- Status also exposes private content-free cycle health: last cycle/success
+  timestamps, bounded status/error class, and consecutive failures. It stores
+  no raw error, message identifier/content, provider output, or credential.
+- Account export preserves causal depth, completed processing, result links, and
+  deterministic `failure_count`. Import validates or derives causal depth,
+  preserves the failure count, and interrupts an active claim by advancing its
+  generation and clearing its claim/key/lease fields before the destination
+  account resumes. Archives older than schema 36 upgrade to `failure_count=0`.
+  Canonical PostgreSQL messages are exported; the derived host-local
+  notification ledger is not.
 
 ## Audit Boundary
 
@@ -487,7 +560,8 @@ Identity and platform resource routes include:
 - `/v1/facts` and action `/v1/facts/{fact_id}:primary`.
 - `/v1/policies` and action `/v1/policies:test`.
 - `/v1/groups` (membership management).
-- `/v1/messages` and action `/v1/messages/{message_id}:ack`.
+- `/v1/messages`, `/v1/messages:listen`, and message actions `:reply`, `:read`,
+  `:ack`, `:claim`, `:renew`, `:release`, and `:complete`.
 - `/v1/tokens` and action `/v1/tokens/{token_id}:rotate`.
 
 Mutating routes support `Idempotency-Key` and `dry_run` where practical, and list

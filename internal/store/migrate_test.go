@@ -55,33 +55,33 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:  "fresh database may install schema 32",
-			state: migrationPreflightState{TargetVersion: 32},
+			name:  "fresh database may install schema 36",
+			state: migrationPreflightState{TargetVersion: 36},
 		},
 		{
-			name: "Goose initialized but no application migration may install schema 32",
+			name: "Goose initialized but no application migration may install schema 36",
 			state: migrationPreflightState{
-				TargetVersion: 32, VersionTableExists: true,
+				TargetVersion: 36, VersionTableExists: true,
 			},
 		},
 		{
 			name: "interrupted empty install before compatibility schema may resume",
 			state: migrationPreflightState{
-				CurrentVersion: 12, TargetVersion: 32,
+				CurrentVersion: 12, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true,
 			},
 		},
 		{
 			name: "interrupted empty install at schema 26 may resume",
 			state: migrationPreflightState{
-				CurrentVersion: 26, TargetVersion: 32,
+				CurrentVersion: 26, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true,
 			},
 		},
 		{
 			name: "populated schema 1 cannot skip compatibility release",
 			state: migrationPreflightState{
-				CurrentVersion: 1, TargetVersion: 32,
+				CurrentVersion: 1, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationCompatibilityRequired,
@@ -89,7 +89,7 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		{
 			name: "populated schema 26 cannot skip compatibility release",
 			state: migrationPreflightState{
-				CurrentVersion: 26, TargetVersion: 32,
+				CurrentVersion: 26, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationCompatibilityRequired,
@@ -102,9 +102,9 @@ func TestValidateMigrationPreflight(t *testing.T) {
 			},
 		},
 		{
-			name: "populated schema 27 may activate through schema 32",
+			name: "populated schema 27 may activate through schema 36",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 32,
+				CurrentVersion: 27, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 		},
@@ -116,9 +116,58 @@ func TestValidateMigrationPreflight(t *testing.T) {
 			},
 		},
 		{
+			name: "populated schema 32 may activate schema 33",
+			state: migrationPreflightState{
+				CurrentVersion: 32, TargetVersion: 33,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "schema 33 is an idempotent no-op",
+			state: migrationPreflightState{
+				CurrentVersion: 33, TargetVersion: 33,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "populated schema 33 may activate through schema 36",
+			state: migrationPreflightState{
+				CurrentVersion: 33, TargetVersion: 36,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "populated schema 34 may activate through schema 36",
+			state: migrationPreflightState{
+				CurrentVersion: 34, TargetVersion: 36,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "schema 35 is an idempotent no-op",
+			state: migrationPreflightState{
+				CurrentVersion: 35, TargetVersion: 35,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "populated schema 35 may activate schema 36",
+			state: migrationPreflightState{
+				CurrentVersion: 35, TargetVersion: 36,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
+			name: "schema 36 is an idempotent no-op",
+			state: migrationPreflightState{
+				CurrentVersion: 36, TargetVersion: 36,
+				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
+			},
+		},
+		{
 			name: "database ahead of binary is refused",
 			state: migrationPreflightState{
-				CurrentVersion: 33, TargetVersion: 32,
+				CurrentVersion: 37, TargetVersion: 36,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationSchemaAhead,
@@ -126,21 +175,21 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		{
 			name: "versioned database without Goose table is corrupt",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 32, AccountsTableExists: true,
+				CurrentVersion: 27, TargetVersion: 36, AccountsTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},
 		{
 			name: "versioned database without accounts table is corrupt",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 32, VersionTableExists: true,
+				CurrentVersion: 27, TargetVersion: 36, VersionTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},
 		{
 			name: "unversioned application schema is corrupt even when empty",
 			state: migrationPreflightState{
-				TargetVersion: 32, AccountsTableExists: true,
+				TargetVersion: 36, AccountsTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},

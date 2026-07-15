@@ -170,6 +170,13 @@ partial integration guarantee. The matrix is pinned in code and shared
 conformance tests, so adding a runtime requires declaring its real output
 contract rather than copying another provider's hook fields.
 
+This automatic hydration path currently reads identity, facts, and narrative
+memory only. It does not inspect the mailbox. The target same-realm messaging
+extension adds bounded unread **metadata** to supported `SessionStart` and
+`UserPromptSubmit` hook output; bodies remain behind explicit read and no hook
+marks read, acknowledges, or starts inference. See
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md).
+
 ## The Sealed-Plane Carve-Out
 
 Hydration, teaching, and the file bridge are **open-plane only.** Witself's
@@ -207,14 +214,17 @@ recall-before-act, write-after-learn, fix-don't-contradict, consolidate-when-noi
 assume-interruption, and listen-before-reply. Redundancy is the point — the agent
 should be taught whether it connects over MCP or only ever reads project files.
 
-Collaboration rides this same teaching layer. The `message.listen`/`message.send`
-habit — how an agent hears from and replies to other agents, including agents in other realms —
-is taught through exactly these three surfaces, not a separate channel. Cross-realm
-comms are the same teaching layer carrying the same instinct out across realm
-boundaries; the underlying substrate is pinned in
-[agent-collaboration.md](agent-collaboration.md). The sealed-plane carve-out still
-applies: no secret value or TOTP seed rides a collaboration message by default, the
-same way it never enters the self-digest or the file bridge (see
+Collaboration rides this same teaching layer. The current implementation teaches
+an active agent to call unread `message.list`; target autonomous runners use
+metadata-only `message.listen` before `message.read` and explicit `message.ack`.
+Teaching is guidance for an active model, not a wake mechanism. The same three
+surfaces carry the protocol rather than creating a separate Chat channel.
+Same-realm autonomy is pinned in
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md); future
+cross-realm extension is pinned in
+[agent-collaboration.md](agent-collaboration.md). The sealed-plane carve-out
+still applies: no secret value or TOTP seed rides a collaboration message by
+default, the same way it never enters the self-digest or the file bridge (see
 [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)).
 
 ### 1. MCP Server `instructions` (the canonical standing protocol)
@@ -278,7 +288,10 @@ You have a persistent self/identity store reached through the `ws` MCP
 tools (or the `witself` CLI). Use it:
 
 - **Recall before acting.** At the start of a non-trivial task, call
-  `witself.self.show` to load your primary facts and salient memories, then
+  `witself.self.show`, non-blocking `witself.message.listen` with
+  `wait_seconds=0`, and `witself.message.notification.list`. The mailbox check
+  finds canonical unacknowledged metadata; notification list finds local
+  pointers already acknowledged by this runtime's background runner. Then call
   `witself.memory.recall <topic>` for anything you may have learned before.
   Resuming work? `witself.session.start` hydrates identity, open goals, and last
   progress in one call.
@@ -295,12 +308,22 @@ tools (or the `witself` CLI). Use it:
   enabled local `memory curate auto` worker can launch after terminal transcript
   flushes; optional per-user launchd/systemd scheduling is managed through
   `memory curate auto service`.
-- **Hear before you reply.** To hear from other agents, call
-  `witself.message.list` with `unread_only=true`; reply with
-  `witself.message.send`. This
+- **Hear before you reply.** To hear from other agents, inspect both
+  non-blocking `witself.message.listen` and
+  `witself.message.notification.list`. Consume a selected runner handoff only
+  with `witself.message.notification.consume`, which reads and verifies the
+  canonical message before clearing the exact local pointer and retains it on
+  failure. Reply with `witself.message.send`. This
   is how you collaborate — in your own realm and, when allowed, with agents in
   other realms (cross-realm sends are realm-qualified, e.g.
   `witself.message.send --to witself://<realm-handle>/agent/<name>`).
+
+The notification ledger is local to one runtime's `WITSELF_HOME`. Its runner
+has already acknowledged those canonical deliveries globally, so another host
+or runtime bound to the same agent cannot see the pointers or recover them as
+unread. This is an intentional MVP locality limitation, not cross-host wake
+delivery. Read-only MCP can list pointers but cannot consume them; curator
+profiles expose neither notification bridge tool.
 
 Memory work is not a substitute for doing the task.
 ```

@@ -501,26 +501,61 @@ Exit criteria:
 
 Goal: deliver full durable inter-agent messaging in v0 (not a stub).
 
-Status: first slice complete. Direct same-realm agent delivery now includes the
+Status: direct processing and runner slice complete in the current checkout.
+Direct same-realm agent delivery now includes the
 durable message/delivery schema, token-derived sender, idempotent send,
-metadata-only inbox/outbox listing, read/ack transitions, content-free audit,
-archive/restore, and API/CLI/MCP adapters. Group fan-out, policy scopes,
-rate/meter enforcement, dry-run, and long-poll listen remain before the full
-milestone exit criteria are met.
+recipient-only parent-validated reply, metadata-only inbox/outbox listing,
+oldest-unacknowledged long-poll listen, separate read/ack transitions on every
+surface, migration-0034 claim/renew/release and atomic result completion,
+server-derived migration-0035 causal depth, migration-0036 deterministic
+per-message failure counting, content-free audit, archive/restore with
+active-claim interruption, and API/CLI/MCP adapters. A client-owned text-only
+runner adds identity pinning, lease renewal/recovery, bounded advisory
+continuation, backend-owned cross-machine turn/failure enforcement, native
+Claude Code/Grok Build adapters, fail-closed Codex/Cursor probes, and
+launchd/systemd supervision. Provider authentication is captured through a provider-specific
+allowlist into a separate mode-0600 client file, never runner config, service
+definitions, backend state, or account export.
+Group fan-out, policy scopes, explicit-list/realm fan-out, open multi-assignee
+request claims, rate/meter enforcement, and dry-run remain before the full
+milestone exit criteria are met. This status does not claim deployment or
+release. The accepted working product design is tracked in
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 Deliverables:
 
 - Message object shape (`msg_…`): `from` (always derived from the token, never
-  input), `to` (agent or group), subject/kind, body, optional structured
-  payload, optional thread/conversation id, created/delivery/read-ack state.
+  input), `to` (agent, bounded explicit agent list, token-derived realm, or
+  group), subject/kind, body, optional structured payload, optional
+  thread/correlation id, validated reply parent, backend-derived causal depth,
+  and created/delivery/read-ack state.
+- Ordinary direct send defaults to actionable `kind=request` consistently in
+  CLI, MCP, and backend normalization; explicit `note` is FYI-only and does not
+  invoke the runner provider.
 - Durable per-recipient mailbox/queue surviving process and pod churn.
 - At-least-once delivery, per-recipient (and per-conversation) ordering, and
   explicit read/acknowledgement state.
-- Group fan-out: a message to a group is delivered to current members with
-  per-member delivery and ack state.
-- `witself message send/list/read/ack`.
-- `/v1/messages`, `/v1/messages/{message_id}:ack`, with `POST` for actions.
-- `witself.message.send/list/read`.
+- Explicit-list, realm, and group fan-out: membership is an atomic send-time
+  snapshot with per-member delivery and ack state. The sender is excluded from
+  a realm audience by default.
+- `witself message send/reply/list/listen/read/ack/claim/renew/release/complete`
+  for the direct same-realm slice, plus client-local
+  `message runner enable|disable|status|notifications|run|serve|start`.
+- `/v1/messages`, `/v1/messages:listen`, and the
+  `/v1/messages/{message_id}:reply`, `:read`, `:ack`, `:claim`, `:renew`,
+  `:release`, and `:complete` actions, all using `POST` where state or a bounded
+  wait is involved.
+- `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
+  plus client-local `witself.message.notification.list/consume`; read-only keeps
+  message list/listen and notification list but omits consume, while curator
+  profiles expose neither bridge tool. The four backend lifecycle states remain
+  separate.
+- Full/read-only MCP startup instructions call non-blocking
+  `message.listen(wait_seconds=0)` and notification list. Consume canonically
+  reads/verifies before exact local clear and retains the pointer on failure.
+  The runner acknowledgement is global, but the `WITSELF_HOME` pointer is
+  runtime-local and not account-exported; canonical messages are exported. This
+  intentional MVP locality does not provide cross-host wake delivery.
 - `message:send` and `message:read` scope enforcement; rate limits on send and
   delivery.
 - Trust boundary handling: message bodies/payloads are treated as untrusted
@@ -528,16 +563,70 @@ Deliverables:
   require an M4 policy).
 - `message.sent`, `message.delivered`, and `message.read` audit events;
   send/deliver/read metrics; messages-sent/delivered metered dimensions.
+- Client-owned autonomous runner: long-poll, deduplicate, claim, read, invoke
+  a configured capability-probed text-only local provider, atomically persist
+  and link the reply/result, complete/release, and ack. Provider children are
+  token-free. Payload continuation is advisory; server-derived causal depth
+  enforces the turn limit (12 by default, capped at 64), and migration-0036
+  `failure_count` enforces the cross-machine deterministic failure bound.
+  Processing generation is fence-only. Provider-wide, configuration,
+  cancellation, and lease-maintenance failures do not increment the count; the
+  current default escalates the fifth deterministic attempt.
+  Terminal/non-provider deliveries enter a private content-free notification
+  ledger before ack; it exposes pointers, fails closed at capacity, and leaves
+  content behind ordinary message read. The backend and MCP do not launch
+  inference. Status exposes content-free last-cycle health without raw errors,
+  message content, provider output, or credentials.
+- Request coordination modes `notify`, `each`, `claim`, and `collaborate`, with
+  realm-visible offers represented as messages and authoritative bounded claims
+  protected by expiry, renewal, and fencing generations.
+- Per-request recipient, assignee, turn/message, time, rate, and retry bounds;
+  model/token/dollar budgets remain client-runner settings.
+
+Implementation slices:
+
+1. Receive correctness (**complete**): non-consuming oldest-unacknowledged
+   metadata-only listen, separate MCP read/ack, recipient-only parent-validated
+   reply, archive coverage, and honest capability/documentation status.
+2. Direct-delivery processing fence (**complete**): claim/renew/release plus one
+   transaction that validates the fence, persists the derived result reply,
+   links it, and completes processing; acknowledgement remains a recoverable
+   later step. Processing generation is solely the stale-writer fence; the
+   migration-0036 `failure_count` is the separate durable failure bound.
+3. Text-only direct runner (**complete in the current checkout**): private
+   client state, identity pinning, OS service, fake-provider recovery tests,
+   migration-0035 causal-depth turn enforcement, migration-0036 deterministic
+   failure enforcement, bounded advisory continuation, provider-scoped private
+   authentication capture, native Claude Code/Grok Build adapters, content-free
+   cycle health, and explicit fail-closed Codex/Cursor capability results. The
+   generic command-adapter core is available for separately integrated wrappers;
+   arbitrary wrapper CLI configuration and tool-capable execution are not part
+   of this slice.
+4. Bounded explicit-list and realm fan-out with archive/audit coverage.
+5. Realm open requests, offers, atomic `max_assignees` claims, leases/fences,
+   renewal, expiry, release, completion, and reassignment.
+6. Multi-runner race, restart, disabled-agent, cancellation, rate, export/import,
+   and three-cloud conformance hardening.
 
 Exit criteria:
 
-- An agent can send to another agent and to a group, and recipients can list,
-  read, and ack with correct per-recipient ordering and state.
+- An agent can send to another agent, a bounded explicit set, the current realm,
+  and a group, and recipients can listen, list, read, and ack with correct
+  per-recipient ordering and state.
+- A direct request can complete an autonomous clarification loop and durable
+  result while either runtime is initially offline; a message send by itself
+  never claims that a model was invoked.
+- A realm request with `max_assignees=2` may receive many offers but can never
+  have more than two current fenced claims; stale claim completion fails.
 - Sender forgery is structurally impossible: `from` is always the token-bound
   agent.
 - A message-driven write still fails without a matching policy.
+- The server passes messaging/request tests with no model credential, provider
+  SDK, semantic ranking, or inference network call.
 - The model matches [inter-agent-messaging.md](inter-agent-messaging.md) and the
-  threat framing in [threat-model.md](threat-model.md).
+  autonomous extension in
+  [autonomous-realm-messaging.md](autonomous-realm-messaging.md), plus the threat
+  framing in [threat-model.md](threat-model.md).
 
 ## Milestone 6.1: Sealed-Plane Secret Model
 

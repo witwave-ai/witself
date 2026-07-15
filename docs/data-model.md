@@ -861,12 +861,16 @@ Both usage tables are included in the account archive. Import preserves their
 ids, timestamps, and totals and does not emit new usage, so moving an account
 between cells does not reset or double-count its history.
 
-### `messages`
+### `agent_messages` (logical `messages`)
 
 Purpose: durable inter-agent messages with a per-recipient mailbox. `from` is
 always token-derived (sender forgery is structurally impossible). `body`/`payload`
 are untrusted on receipt and never authorize a write. Semantics in
 [inter-agent-messaging.md](inter-agent-messaging.md).
+
+This section separates the implemented direct physical table from target
+fan-out/cross-realm additions. Migrations `0020`, `0033`, `0034`, `0035`, and
+`0036` are the source of truth for the current checkout.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -874,15 +878,24 @@ are untrusted on receipt and never authorize a write. Semantics in
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
 | `realm_id` | `text NOT NULL` FK -> `realms(id)` | realm-local only in v0 |
 | `from_agent_id` | `text NOT NULL` FK -> `agents(id)` | **always token-derived**, never from input |
-| `to_kind` | `text NOT NULL` | `agent` \| `group` |
-| `to_agent_id` | `text NULL` FK -> `agents(id)` | set iff `to_kind = 'agent'` |
-| `to_group_id` | `text NULL` FK -> `security_groups(id)` | set iff `to_kind = 'group'` (fan-out, snapshot-at-send) |
-| `subject` | `text NULL` | short classification (<= 256 chars) |
-| `kind` | `text NOT NULL DEFAULT 'note'` | open label (`note`/`request`/`reply`/`event`/`handoff`/…) |
+| `to_agent_id` | `text NOT NULL` FK -> `agents(id)` | current direct recipient, resolved in the token-derived realm |
+| `subject` | `text NOT NULL DEFAULT ''` | short classification (<= 256 bytes) |
+| `kind` | `text NOT NULL DEFAULT 'note'` | physical legacy default; current CLI/MCP/API/store writes normalize omission to actionable `request`; explicit `note` is runner FYI-only; open label |
 | `body` | `text NOT NULL` | free-form text (<= 64 KiB); ordinary column; untrusted on receipt |
 | `payload` | `jsonb NULL` | optional small structured object (<= 16 KiB serialized); untrusted |
-| `thread_id` | `text NULL` | `thr_` prefix; orders a conversation per recipient/thread; promoted to `conversation_id` for cross-realm (see [`conversations`](#conversations-cross-realm-post-v0)) |
+| `thread_id` | `text NOT NULL` | `thr_` prefix; orders a conversation per recipient/thread |
+| `reply_to_message_id` | `text NULL` scoped deferred FK -> `agent_messages` | migration-0033 validated causal parent; recipient/thread are server-derived on reply |
+| `causal_depth` | `bigint NOT NULL DEFAULT 1` | migration-0035 backend-derived reply depth; direct send = 1, validated reply = parent + 1; callers cannot set |
+| `idempotency_key` | `text NULL` | unique per account/sender when present; <= 512 bytes |
 | `created_at` | `timestamptz NOT NULL` | server-assigned send time |
+
+`causal_depth` is constrained to 1–2,147,483,647. The server writes one for a
+direct send and locks/validates the durable parent before writing parent plus
+one for a reply or atomic completion result.
+
+Target explicit-list, realm, and group fan-out may add an audience discriminator
+and snapshot rows without changing the immutable direct message body. Those
+fields are not present in the current physical table.
 
 **Cross-realm envelope columns (post-v0; additive, NULL for realm-local
 messages).** When `to`/`from` carry an optional `realm`, the message rides the
@@ -914,40 +927,65 @@ envelope is verified, and hop/TTL/budget governors applied, **before** a row is
 written and a delivery is created; the relay is blind (it cannot read `body` /
 `payload` or forge `signature`).
 
-### `message_deliveries`
+### `agent_message_deliveries` (logical `message_deliveries`)
 
 Purpose: per-recipient delivery + read/ack state for the mailbox/queue. A group
-send produces N delivery rows at send time; each member's state is independent.
+send will produce N delivery rows at send time; each member's state is
+independent. The current direct slice creates exactly one row.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | `text` PK | delivery-row id |
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
 | `realm_id` | `text NOT NULL` FK -> `realms(id)` | |
-| `message_id` | `text NOT NULL` FK -> `messages(id)` ON DELETE CASCADE | |
+| `message_id` | `text NOT NULL` FK -> `agent_messages(id)` ON DELETE CASCADE | composite PK with recipient |
 | `recipient_agent_id` | `text NOT NULL` FK -> `agents(id)` | the mailbox owner |
-| `delivery_state` | `text NOT NULL DEFAULT 'pending'` | `pending` \| `delivered` |
+| `state` | `text NOT NULL DEFAULT 'delivered'` | `queued` \| `delivered` \| `failed` |
 | `delivered_at` | `timestamptz NULL` | |
-| `read_state` | `text NOT NULL DEFAULT 'unread'` | `unread` \| `read` \| `acked` |
 | `read_at` / `acked_at` | `timestamptz NULL` | explicit per-recipient transitions |
-| `row_version` | `bigint NOT NULL DEFAULT 1` | |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
+| `processing_state` | `text NOT NULL DEFAULT 'available'` | migration-0034 `available` \| `claimed` \| `completed`; independent of read/ack |
+| `processing_generation` | `bigint NOT NULL DEFAULT 0` | monotonic stale-writer fence only; a new acquisition advances it |
+| `failure_count` | `bigint NOT NULL DEFAULT 0` | migration-0036 durable count of exact-fence releases explicitly marked as deterministic message failures; independent of generation |
+| `claim_id` | `text NULL` | opaque `mcl_` id only while claimed/completed |
+| `claim_key_hash` | `text NOT NULL DEFAULT ''` | SHA-256 retry shield; never returned |
+| `lease_expires_at` | `timestamptz NULL` | database-time expiry while claimed |
+| `completed_at` | `timestamptz NULL` | terminal processing time |
+| `complete_key_hash` | `text NOT NULL DEFAULT ''` | SHA-256 exact-completion retry shield |
+| `result_message_id` | `text NULL` scoped deferred unique FK -> `agent_messages` | exactly one atomically created result when completed |
+| `created_at` | `timestamptz NOT NULL` | |
 
-Constraints: FKs all above. One delivery per (message, recipient), live rows:
+Constraints: FKs all above. The composite primary key is one delivery per
+(message, recipient). A closed shape check prevents partial claim/completion
+rows. The result FK includes account and realm, is deferred for atomic
+completion/import, and is unique:
 
 ```sql
-CREATE UNIQUE INDEX ux_message_deliveries_msg_recipient
-  ON message_deliveries (message_id, recipient_agent_id)
-  WHERE deleted_at IS NULL;
+CREATE INDEX agent_message_deliveries_unacked_recipient
+  ON agent_message_deliveries
+     (account_id, realm_id, recipient_agent_id, message_id)
+  WHERE acked_at IS NULL;
 
-CREATE INDEX ix_message_deliveries_mailbox
-  ON message_deliveries (recipient_agent_id, created_at)
-  WHERE deleted_at IS NULL;
+CREATE INDEX agent_message_deliveries_claimable_recipient
+  ON agent_message_deliveries
+     (account_id, realm_id, recipient_agent_id, processing_state,
+      lease_expires_at, message_id)
+  WHERE acked_at IS NULL;
 ```
 
 `message list` reads metadata only (no state change); `read` transitions
 `unread → read`; `ack` transitions to `acked`. Bodies/payloads never appear in
-audit, logs, or metrics.
+audit, logs, or metrics. Claim/renew/release require the token-bound recipient
+and exact fence. Complete inserts the server-derived result reply, links it, and
+marks processing completed in one PostgreSQL transaction; ack remains separate.
+Generation is solely the stale-writer fence. An exact-fence release increments
+`failure_count` only when its request carries `deterministic_failure=true`;
+provider-wide, configuration, cancellation, and lease-maintenance releases
+leave it unchanged. The current runner escalates the fifth deterministic attempt
+by default. Logical account import preserves completed links and `failure_count`,
+but changes a claimed row to available, increments its generation, and clears
+claim/key/lease fields so an old source-cell fence cannot survive. Schema-35
+import validates message causal depth against the reply graph; older archives
+have depth derived during upgrade/import. Schema-36 import validates the
+portable failure count; older archives receive zero during upgrade.
 
 ### `conversations` (cross-realm, post-v0)
 
@@ -1378,7 +1416,9 @@ MUST NOT be conflated. Stable actions span both planes:
   `crossagent.contributed`, `crossagent.curated`, `crossagent.forgotten`,
   `policy.created`, `policy.deleted`, `policy.access_denied`, `group.created`,
   `group.member_added`, `group.member_removed`, `message.sent`,
-  `message.delivered`, `message.read`, `message.acked`. The `fact set` /
+  `message.delivered`, `message.read`, `message.acked`,
+  `message.processing.claimed`, `message.processing.renewed`,
+  `message.processing.released`, `message.processing.completed`. The `fact set` /
   `remember` upsert emits `fact.created` for a new fact or `fact.updated` for an
   existing one.
 - Sealed plane: `secret.created`, `secret.updated`, `secret.renamed`,

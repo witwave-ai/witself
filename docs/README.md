@@ -62,7 +62,16 @@ plane.
 - [security-groups.md](security-groups.md): named agent groups as policy
   subjects and targets, membership, and group-owned shared identity data.
 - [inter-agent-messaging.md](inter-agent-messaging.md): the durable mailbox
-  model, token-derived sender identity, delivery/ack state, and message threats.
+  model, token-derived sender identity, recipient-only replies,
+  oldest-unacknowledged listen, separate read/ack state, migration-0034 fenced
+  direct processing, migration-0035 server-derived causal depth, migration-0036
+  deterministic failure counting, atomic result completion, local MCP
+  notification bridging, and message threats.
+- [autonomous-realm-messaging.md](autonomous-realm-messaging.md): the working
+  same-realm design and implemented direct text-only client runner with a
+  content-free terminal-notification handoff and its explicit host-locality
+  limit, plus the future realm-audience, open-work, and multi-assignee claim
+  model.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
   capture, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.

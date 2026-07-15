@@ -282,6 +282,44 @@ explicit provider and policy. Installed runtime guidance tells an active
 compatible client how to claim due work, but the backend never implies that
 such a client is currently running.
 
+### Why an ordinary session does not automatically create a memory
+
+Several automatic mechanisms exist, but none of them alone authors a narrative
+memory:
+
+1. Session-start hydration and task recall are **reads** of existing facts and
+   memories. They never call the memory-capture write path.
+2. Runtime hooks append visible transcript evidence and mark curation work due.
+   A transcript answers what happened; it is intentionally not promoted to a
+   narrative memory without semantic selection and synthesis.
+3. MCP exposes the capture and curation operations, but it cannot call its own
+   tools or wake a model. Hooks also remain bounded and never wait for an LLM.
+4. The local automatic curator is client-owned and opt-in. Until it is
+   configured and enabled for a runtime, queued curation work remains queued.
+5. Preview is the unattended default. A preview plan does not write a memory;
+   standing mutation requires an explicitly configured apply policy and the
+   corresponding restricted credential.
+6. Managed runtime instructions ask the active agent to capture an explicit
+   narrative remember request and useful bounded checkpoints. That is
+   client/model behavior, not a deterministic hook guarantee.
+
+The expected no-worker chain is therefore:
+
+```text
+ordinary session
+  -> transcript persisted
+  -> curation request queued
+  -> no enabled client curator claims/applies it
+  -> no synthesized narrative memory is written
+```
+
+This is intentional, not transcript loss. Automatically turning conversation
+into memory requires client inference, and the architecture refuses to hide
+provider credentials, model cost, or semantic decisions in the backend. A
+deployment that wants unattended synthesis explicitly enables a compatible
+client runner; a user who says "remember what happened here" gets the immediate
+same-turn `memory.capture` path instead.
+
 ### Explicit narrative remember
 
 When the user says “remember what happened here,” “remember the decisions we
@@ -331,11 +369,12 @@ Runtime integrations may create client-written capsules at safe boundaries:
 - an evidence or token threshold;
 - a scheduled idle window.
 
-Thresholds and budgets are client settings. The installed default is to capture
-recognized durable decisions, milestones, corrections, and lessons in the
-current agent, and to queue deeper work at available lifecycle boundaries. The
-server stores the result and its capture reason but never decides what the
-capsule should say.
+Thresholds and budgets are client settings. Managed instructions ask the current
+agent to capture recognized durable decisions, milestones, corrections, and
+lessons, while hooks queue deeper work at available lifecycle boundaries. Only
+an actual client `memory.capture` call or an applied client-curation plan creates
+the memory; the server stores the result and its capture reason but never decides
+what the capsule should say.
 
 ## Curation: Low-Touch But Client-Run
 
