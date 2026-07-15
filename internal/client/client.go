@@ -21,6 +21,16 @@ import (
 // discrimination via errors.Is — status-based, not message-based.
 var ErrUnauthorized = errors.New("unauthorized")
 
+// ErrNotFound wraps 404 responses while preserving the server's existing
+// human-readable error text. Callers use it for capability-compatible
+// fallbacks, such as a new client talking to a pre-activity server.
+var ErrNotFound = errors.New("not found")
+
+type notFoundError struct{ cause error }
+
+func (e notFoundError) Error() string { return e.cause.Error() }
+func (e notFoundError) Unwrap() error { return ErrNotFound }
+
 // BootstrapResult is the outcome of a bootstrap login.
 type BootstrapResult struct {
 	OperatorToken string
@@ -177,7 +187,7 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	case resp.StatusCode == http.StatusConflict:
 		return responseError(resp, "conflict")
 	case resp.StatusCode == http.StatusNotFound:
-		return responseError(resp, "not found")
+		return notFoundError{cause: responseError(resp, "not found")}
 	case resp.StatusCode >= 300:
 		return responseError(resp, "request failed: "+resp.Status)
 	}

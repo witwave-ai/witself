@@ -41,6 +41,13 @@ delivery rows remain the authoritative immutable send-time snapshot. Migration
 selections, and claims, linked to the ordinary opening, offer, and result
 messages. Terminal request history survives import. Active source-cell
 reservations and claims are imported as interrupted history with stale fences.
+Migration `0039` adds the canonical latest-only `agent_activity` projection. Every
+agent/runtime/installation row, including its internal retry/order guards and
+PostgreSQL-stamped `last_activity_at`, participates in account export/import so
+peer activity survives a cross-cell move. The client-local runtime-hook outbox
+that delivers those observations is host retry state, not server or account
+archive data. Restored observations remain historical metadata only and do not
+assert availability or presence.
 The client-local runner notification ledger and content-free cycle health are
 not account data and are not exported. Notification pointers contain no message
 content; the referenced PostgreSQL messages remain in the archive and can be

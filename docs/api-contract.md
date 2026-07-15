@@ -519,6 +519,8 @@ Initial route groups:
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
 | `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
+| `/v1/self/peers` | Agent-token-scoped list of every other live agent in the same realm with optional last-observed activity; no caller-controlled realm or agent selector and no availability inference. |
+| `/v1/self/activity` | Agent-token-scoped runtime-hook ingestion for the latest-only activity projection; identity and public observation time are server-derived. |
 | `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
 | `/v1/sessions` | Multi-session bootstrap: hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
 | `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
@@ -603,7 +605,11 @@ Migration-0037 audience metadata and the exact per-recipient snapshot are also
 portable. Schema-38 archives additionally require the request, candidate,
 selection, and claim streams. Import preserves terminal request history and
 result links but cancels active source-cell request reservations/claims and
-advances their fence before the destination account resumes.
+advances their fence before the destination account resumes. Schema-39 archives
+also require the latest-only `agent_activity` projection so last-observed peer
+metadata survives a cross-cell move. Its local runtime-hook outbox is host retry
+state and is not part of the account archive; restored activity remains
+observational and never establishes availability.
 Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 

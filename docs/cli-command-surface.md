@@ -235,7 +235,7 @@ witself
   message runner enable|disable|status|notifications|run|serve|start
   federation peers|card
   reference parse|resolve
-  agent create|list|show|rename|copy|disable|enable|delete
+  agent create|list|peers|show|rename|copy|disable|enable|delete
   token create|list|revoke|rotate
   audit list|show
   export
@@ -3617,6 +3617,25 @@ Flags:
 | `--disabled` | Include disabled agents. |
 | `--limit N` | Maximum number of rows. |
 
+### `witself agent peers`
+
+List every other agent in the caller's token-derived realm together with each
+peer's last observed activity. This is an agent-profile command, not an
+operator inventory command: the authenticated agent is excluded by the server,
+and callers cannot target another realm. Activity is observational and does not
+claim that a peer is online, available, or accepting work.
+
+```sh
+witself agent peers --agent scott
+witself agent peers --account default --realm default --agent scott --json
+```
+
+`--account` and `--realm` use the normal local defaults (`WITSELF_ACCOUNT` /
+`WITSELF_REALM`, then `default`) when omitted. `--agent` uses `WITSELF_AGENT`
+when present. The text view shows a compact age such as `2m ago`, `5h ago`, or
+`never`; JSON returns the exact optional `last_activity_at`, `last_runtime`,
+`last_location`, and `last_event` fields.
+
 ### `witself agent show NAME_OR_ID`
 
 Show one agent principal, including its `primary` facts as identity anchors.
@@ -3902,7 +3921,8 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current full server exposes 67 tools across self, deterministic facts and
+The current full server exposes 68 tools across self and realm-safe peer
+activity, deterministic facts and
 fact review/deletion, transcripts, direct-agent messages, the implemented
 realm request lifecycle, direct narrative-memory lifecycle/recall/delete
 surface, and fourteen client-curation tools documented in
@@ -4046,6 +4066,7 @@ is tracked in [v0-scope.md](v0-scope.md).
 - `witself realm create`
 - `witself realm status`
 - `witself agent create`
+- `witself agent peers`
 - `witself token create`
 - `witself memory capture`
 - `witself memory recall`

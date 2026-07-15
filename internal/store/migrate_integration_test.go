@@ -65,7 +65,7 @@ func TestMigration37MessageAudiencePostgres(t *testing.T) {
 	}
 }
 
-func TestMigration38Postgres(t *testing.T) {
+func TestMigration39Postgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
@@ -76,7 +76,8 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
+		assertMigrationTestTable(t, st, "agent_activity", true)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_kind", true)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_fingerprint", true)
 		assertMigrationTestTableConstraint(t, st, "agent_messages", "agent_messages_audience_shape", true)
@@ -103,11 +104,17 @@ func TestMigration38Postgres(t *testing.T) {
 		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_result_message_unique", true)
 	})
 
-	t.Run("message request and audience migrations roll back in order", func(t *testing.T) {
+	t.Run("activity, message request, and audience migrations roll back in order", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestTable(t, st, "agent_activity", false)
+		assertMigrationTestTable(t, st, "agent_message_requests", true)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -119,6 +126,11 @@ func TestMigration38Postgres(t *testing.T) {
 		}
 		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_kind", false)
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 39)
+		assertMigrationTestTable(t, st, "agent_activity", true)
 	})
 
 	t.Run("schema 30 credentials upgrade to full profiles", func(t *testing.T) {
@@ -150,7 +162,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		assertMigrationTestTableConstraint(t, st, "tokens", "tokens_access_profile_kind_check", true)
 		var total, full int
 		if err := st.pool.QueryRow(ctx, `
@@ -198,7 +210,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
 		var parent *string
 		if err := st.pool.QueryRow(ctx, `
@@ -233,7 +245,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		var state, claimHash, completeHash string
 		var generation int64
 		var claimID, lease, completedAt, resultID any
@@ -278,7 +290,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		for messageID, want := range map[string]int64{
 			"msg_depth_root": 1, "msg_depth_reply_1": 2,
 			"msg_depth_reply_2": 3, "msg_depth_forged_thread_root": 1,
@@ -316,7 +328,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		var failureCount int64
 		if err := st.pool.QueryRow(ctx, `
 			SELECT failure_count FROM agent_message_deliveries
@@ -465,7 +477,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 	})
 
 	t.Run("populated schema 26 cannot skip compatibility release", func(t *testing.T) {
@@ -502,7 +514,7 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 	})
 
@@ -564,6 +576,11 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
+		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestTable(t, st, "agent_activity", false)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
 		assertMigrationTestVersion(t, dsn, 37)
 		assertMigrationTestTable(t, st, "agent_message_requests", false)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_kind", true)
@@ -616,9 +633,10 @@ func TestMigration38Postgres(t *testing.T) {
 		assertMigrationTestVersion(t, dsn, 28)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 		if err := st.Migrate(); err != nil {
-			t.Fatalf("re-upgrade schema 28 to 38: %v", err)
+			t.Fatalf("re-upgrade schema 28 to 39: %v", err)
 		}
-		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestVersion(t, dsn, 39)
+		assertMigrationTestTable(t, st, "agent_activity", true)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
 	})
@@ -628,6 +646,11 @@ func TestMigration38Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 38)
+		assertMigrationTestTable(t, st, "agent_activity", false)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}

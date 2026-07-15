@@ -305,6 +305,8 @@ type Config struct {
 	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
 	GetSelfMemories         func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfMemory, int, error)
 	CountSelfMemories       func(ctx context.Context, p DomainPrincipal) (int, error)
+	ListSelfPeers           func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
+	TouchAgentActivity      func(ctx context.Context, p DomainPrincipal, in AgentActivityRequest) (AgentActivity, error)
 	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
 	UpsertFactSubject       func(ctx context.Context, p DomainPrincipal, canonicalKey string, in UpsertFactSubjectRequest) (FactSubject, error)
 	AddFactSubjectAlias     func(ctx context.Context, p DomainPrincipal, canonicalKey, alias string) (FactSubject, error)
@@ -1542,6 +1544,12 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
 		))
+		if cfg.ListSelfPeers != nil {
+			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
+		}
+		if cfg.TouchAgentActivity != nil {
+			mux.HandleFunc("POST /v1/self/activity", touchAgentActivityHandler(cfg.AuthenticatePrincipal, cfg.TouchAgentActivity))
+		}
 		if memoryCurationSupported {
 			mux.HandleFunc("GET /v1/memory-curation-preflight", getMemoryCurationPreflightHandler(cfg.AuthenticatePrincipal))
 		}

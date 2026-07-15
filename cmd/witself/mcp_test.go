@@ -483,8 +483,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundDelete, foundNotificationList, foundNotificationConsume := false, false, false
 	for _, tool := range tools.Tools {
@@ -528,8 +528,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -602,6 +602,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 	}
 	readDotted := []string{
 		"witself.self.show",
+		"witself.agent.peers",
 		"witself.fact.review",
 		"witself.fact.candidate.get",
 		"witself.fact.get",
@@ -1382,6 +1383,17 @@ func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
 	}, nil
 }
 
+func (b *fakeMCPBackend) Peers(context.Context) (client.SelfPeers, error) {
+	lastActive := time.Date(2026, 7, 15, 21, 2, 3, 0, time.UTC)
+	return client.SelfPeers{
+		SchemaVersion: "witself.v0",
+		Peers: []client.PeerAgent{
+			{ID: "agent_bob", Name: "bob", LastActivityAt: &lastActive, LastRuntime: "claude-code", LastLocation: "home", LastEvent: "prompt"},
+			{ID: "agent_idle", Name: "idle"},
+		},
+	}, nil
+}
+
 func (b *fakeMCPBackend) ListTranscripts(context.Context) ([]client.Transcript, error) {
 	return []client.Transcript{{
 		ID: "trn_1", OwnerAgentID: "agent_1", CreatedAt: time.Now(),
@@ -1429,8 +1441,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundComplete := false
 	for _, tool := range tools.Tools {
@@ -1493,11 +1505,13 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		t.Fatalf("invalid notification consume reached backend: %q", backend.consumedMessageID)
 	}
 	var ackResult *mcp.CallToolResult
+	var peersResult *mcp.CallToolResult
 	for _, tc := range []struct {
 		name string
 		args map[string]any
 	}{
 		{name: "witself.self.show", args: map[string]any{}},
+		{name: "witself.agent.peers", args: map[string]any{}},
 		{name: "witself.fact.set", args: map[string]any{"subject": "self", "predicate": "identity/birth-date", "value": "1980-02-29", "value_type": "date", "recurrence": "annual", "observed_at": "2026-07-12T12:00:00-06:00", "idempotency_key": "fact-set-1", "recreate_deleted": true, "direct_user_authorized": true}},
 		{name: "witself.fact.delete", args: map[string]any{"mode": "preview", "subject": "self", "predicate": "preferences/editor"}},
 		{name: "witself.fact.delete", args: map[string]any{"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1", "expected_candidate_revision": testFactCandidateRevision, "idempotency_key": "delete-1", "direct_user_authorized": true}},
@@ -1539,6 +1553,26 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		if tc.name == "witself.message.ack" {
 			ackResult = result
 		}
+		if tc.name == "witself.agent.peers" {
+			peersResult = result
+		}
+	}
+	if peersResult == nil {
+		t.Fatal("agent peers did not return a result")
+	}
+	peersJSON, err := json.Marshal(peersResult.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peers client.SelfPeers
+	if err := json.Unmarshal(peersJSON, &peers); err != nil {
+		t.Fatalf("decode agent peers structured content: %v (%s)", err, peersJSON)
+	}
+	if len(peers.Peers) != 2 || peers.Peers[0].Name != "bob" || peers.Peers[0].LastRuntime != "claude-code" || peers.Peers[1].LastActivityAt != nil {
+		t.Fatalf("agent peers = %#v", peers)
+	}
+	if strings.Contains(string(peersJSON), "availability") || strings.Contains(string(peersJSON), "online") {
+		t.Fatalf("agent peers inferred availability: %s", peersJSON)
 	}
 	if ackResult == nil {
 		t.Fatal("message ack did not return a result")

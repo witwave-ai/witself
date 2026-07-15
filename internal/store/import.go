@@ -80,6 +80,11 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
 	},
+	"agent_activity": {
+		"agent_id": true, "runtime": true, "location_id": true, "location": true,
+		"last_event": true, "last_event_id": true,
+		"last_event_occurred_at": true, "last_activity_at": true,
+	},
 	"tokens": {
 		"id": true, "account_id": true, "operator_id": true, "agent_id": true,
 		"kind": true, "token_hash": true, "display_name": true,
@@ -619,6 +624,12 @@ type memoryRelationCurationImportScope struct {
 	revertedByActionID string
 }
 
+type agentActivityImportKey struct {
+	agentID    string
+	runtime    string
+	locationID string
+}
+
 // importCtx accumulates per-import state: how many accounts rows we have seen
 // (must be exactly one), and the set of ids inserted for each table. The FK
 // targets an incoming row references (agents.realm_id, tokens.operator_id,
@@ -633,6 +644,7 @@ type importCtx struct {
 	agents                       map[string]bool
 	liveAgents                   map[string]bool
 	agentRealms                  map[string]string
+	agentActivity                map[agentActivityImportKey]bool
 	tickets                      map[string]bool
 	transcripts                  map[string]transcriptImportScope
 	entries                      map[string]string
@@ -675,6 +687,7 @@ func newImportCtx(accountID string) *importCtx {
 		agents:                       map[string]bool{},
 		liveAgents:                   map[string]bool{},
 		agentRealms:                  map[string]string{},
+		agentActivity:                map[agentActivityImportKey]bool{},
 		tickets:                      map[string]bool{},
 		transcripts:                  map[string]transcriptImportScope{},
 		entries:                      map[string]string{},
@@ -997,6 +1010,53 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
 		}
+	case "agent_activity":
+		agentID, err := requireStringField(obj, "agent_id")
+		if err != nil || !ic.agents[agentID] {
+			return badf("agent_activity row references agent %q not present in this archive", agentID)
+		}
+		labels := make(map[string]string, 5)
+		for _, field := range []string{"runtime", "location_id", "last_event", "last_event_id"} {
+			value, err := requireStringField(obj, field)
+			if err != nil {
+				return badf("agent_activity row missing %s", field)
+			}
+			cleaned, err := cleanAgentActivityLabel(field, value, maxAgentActivityLabelBytes, true)
+			if err != nil || cleaned != value {
+				return badf("agent_activity row %s is not a canonical clean label", field)
+			}
+			labels[field] = value
+		}
+		location, ok := obj["location"].(string)
+		if !ok {
+			return badf("agent_activity row location must be a string")
+		}
+		cleanedLocation, err := cleanAgentActivityLabel("location", location, maxAgentActivityLocationBytes, false)
+		if err != nil || cleanedLocation != location {
+			return badf("agent_activity row location is not a canonical clean label")
+		}
+		occurredAt, err := requireImportedTimestamp(obj, "last_event_occurred_at")
+		if err != nil {
+			return badf("agent_activity row last_event_occurred_at is invalid")
+		}
+		if err := ic.requireTimestampAtOrBeforeExport("last_event_occurred_at", *occurredAt); err != nil {
+			return badf("agent_activity row %v", err)
+		}
+		activityAt, err := requireImportedTimestamp(obj, "last_activity_at")
+		if err != nil {
+			return badf("agent_activity row last_activity_at is invalid")
+		}
+		if err := ic.requireTimestampAtOrBeforeExport("last_activity_at", *activityAt); err != nil {
+			return badf("agent_activity row %v", err)
+		}
+		if activityAt.Before(*occurredAt) {
+			return badf("agent_activity row last_activity_at precedes last_event_occurred_at")
+		}
+		key := agentActivityImportKey{agentID: agentID, runtime: labels["runtime"], locationID: labels["location_id"]}
+		if ic.agentActivity[key] {
+			return badf("agent_activity row duplicates an agent/runtime/location projection")
+		}
+		ic.agentActivity[key] = true
 	case "tokens":
 		kind, kindErr := requireStringField(obj, "kind")
 		accessProfile, profileErr := requireStringField(obj, "access_profile")

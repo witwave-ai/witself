@@ -423,6 +423,35 @@ Constraints: `ux_agents_realm_name` (above); FKs `account_id`, `realm_id`. Index
 `(realm_id)`. Disabling or tombstoning an agent invalidates its tokens (enforced
 in the auth path by joining live `agents` and checking `disabled_at`).
 
+### `agent_activity` (migration `0039`)
+
+Purpose: the canonical latest-only projection of runtime-hook activity for a named
+agent. A row is the newest accepted observation for one
+agent/runtime/installation tuple. It is historical metadata, not a heartbeat,
+lease, or assertion that an agent is online, available, or accepting work.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `agent_id` | `text NOT NULL` FK -> `agents(id)` | always derived from the authenticated agent token; cascade-deleted with the agent |
+| `runtime` | `text NOT NULL` | bounded clean runtime label; deliberately not a closed provider enumeration |
+| `location_id` | `text NOT NULL` | stable client installation id used only to partition the projection; never exposed in peer results |
+| `location` | `text NOT NULL DEFAULT ''` | optional bounded human installation label exposed with an observation |
+| `last_event` | `text NOT NULL` | bounded provider-neutral hook event label exposed with an observation |
+| `last_event_id` | `text NOT NULL` | internal retry guard; never exposed in peer results |
+| `last_event_occurred_at` | `timestamptz NOT NULL` | client event time, clamped to PostgreSQL time and used only for projection ordering |
+| `last_activity_at` | `timestamptz NOT NULL DEFAULT now()` | PostgreSQL-stamped public observation time; callers cannot provide it |
+
+The primary key is `(agent_id, runtime, location_id)`. An upsert advances a row
+only for a different event id with a strictly newer event time; a replay or
+stale delivery returns the existing projection without moving
+`last_activity_at`. The accepted wall-clock stamp is monotonic even when
+concurrent touches wait on the same projection. Same-realm peer listing joins
+through the authenticated agent's realm, excludes the caller and deleted
+agents, and selects the newest projection across each peer's
+runtime/installations. The canonical rows are included in schema-39 account
+export/import. The client-local hook outbox is host retry state and is not part
+of this table or the account archive.
+
 ### `agent_tokens`
 
 Purpose: bearer token records. **Only hashes are stored, never raw token

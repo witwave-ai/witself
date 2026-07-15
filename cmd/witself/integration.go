@@ -674,8 +674,24 @@ func transcriptFlush(args []string) int {
 	}
 	flushed := 0
 	for len(pending) > 0 {
+		activityRetryPending := false
 		for _, pendingEvent := range pending {
 			event := pendingEvent.Event
+			observation := event.ActivityObservation()
+			_, activityErr := client.TouchAgentActivity(ctx, conn.Endpoint, conn.Token, client.AgentActivityInput{
+				Runtime: observation.Runtime, LocationID: observation.LocationID, Location: observation.Location,
+				Event: observation.Event, EventID: observation.EventID, EventOccurredAt: observation.EventOccurredAt,
+			})
+			if activityErr != nil {
+				// A new CLI may briefly talk to an older server during a rolling
+				// upgrade. Only the bare route-missing 404 is a compatibility
+				// fallback. Every other touch failure keeps the event pending, but
+				// it must not prevent the established transcript ledger from making
+				// progress; transcript creation and appends are idempotent on retry.
+				if errors.Is(activityErr, client.ErrNotFound) && activityErr.Error() == "not found" {
+					activityErr = nil
+				}
+			}
 			tr, err := client.CreateTranscript(ctx, conn.Endpoint, conn.Token, client.CreateTranscriptInput{
 				ExternalID: event.TranscriptExternalID(),
 				Title:      event.TranscriptTitle(),
@@ -709,11 +725,19 @@ func transcriptFlush(args []string) int {
 					fmt.Fprintf(os.Stderr, "witself: record automatic curator wake: %v\n", err)
 				}
 			}
+			if activityErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: record agent activity: %v\n", activityErr)
+				activityRetryPending = true
+				continue
+			}
 			if err := transcriptcapture.RemovePending(pendingEvent.Path); err != nil {
 				fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
 				return 1
 			}
 			flushed++
+		}
+		if activityRetryPending {
+			return 1
 		}
 		pending, err = transcriptcapture.Pending(runtimeName)
 		if err != nil {
