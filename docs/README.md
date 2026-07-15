@@ -1,7 +1,8 @@
 # Witself Docs
 
-Status: draft. These docs define Witself before implementation. Last reviewed
-2026-06-26.
+Status: evolving architecture and implementation reference. Narrative-memory
+sections were reconciled on 2026-07-14; older documents retain explicit
+supersession notices where implementation has moved ahead of the original draft.
 
 Witself is the agent durable-state platform and the trust fabric agents
 collaborate over: one open plane (memories + facts, plaintext at rest,
@@ -20,15 +21,25 @@ plane.
   decisions.
 - [v0-scope.md](v0-scope.md): first release target, required capabilities,
   capability-gated surfaces, non-goals, and exit criteria.
-- [memory-model.md](memory-model.md): the memory payload, lifecycle, edit
-  history, semantic recall, and the embedding-provider abstraction.
+- [memory-model.md](memory-model.md): the earlier memory payload, lifecycle,
+  edit history, and recall draft; superseded inference sections are marked.
+- [narrative-memory-and-curation.md](narrative-memory-and-curation.md): the
+  accepted portable narrative-memory architecture, implemented same-turn
+  capture and client-side curation protocol, deterministic backend, retrieval,
+  PostgreSQL graph, runtime adapters, export/import, and remaining delivery
+  plan. It controls wherever an older draft still describes server inference
+  or native-only narrative memory.
+- [client-memory-curator-recipe.md](client-memory-curator-recipe.md): the
+  provider-neutral, client-inference workflow for claiming due work, paging a
+  frozen snapshot, planning, previewing, applying, retrying, rolling back, and
+  optionally launching from a value-free terminal-flush wake.
 - [facts-model.md](facts-model.md): planned fact capabilities and the transition
   from the original name/value identity-card draft.
 - [fact-service.md](fact-service.md): the implemented subject/predicate core,
   typed assertions, provenance/history, CLI/API/MCP surfaces, and deferred work.
 - [agent-memory-routing.md](agent-memory-routing.md): the implemented Codex,
-  Claude Code, Grok Build, and Cursor fact-versus-native-memory routing policies
-  and provider-aware retrieval contract.
+  Claude Code, Grok Build, and Cursor portable fact-and-narrative-memory routing
+  policies and explicitly selected provider-native coexistence contract.
 - [secret-model.md](secret-model.md): the sealed-plane secret data model and
   lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
   templates, references, password generation, runtime injection, and the
@@ -81,12 +92,12 @@ plane.
   sensitive action route conventions.
 - [data-model.md](data-model.md): the full relational data model across both
   planes — realm/account/operator/agent/token tables, open-plane tables
-  (memories with the pgvector embedding column, facts, policies, groups,
-  messages, audit, usage), and sealed-plane tables (secrets, secret_fields,
+  (versioned memories, evidence and lineage, facts, policies, groups, messages,
+  audit, usage), and sealed-plane tables (secrets, secret_fields,
   secret_grants, totp_enrollments, realm_keys, secret_deks, attachments).
-- [storage.md](storage.md): Postgres-with-pgvector storage, object/blob usage,
-  the embedding-provider boundary, KMS plus realm_keys and secret_deks for the
-  sealed plane, and Goose migrations.
+- [storage.md](storage.md): authoritative PostgreSQL storage, deterministic
+  full-text retrieval, optional client-supplied vectors, object/blob usage, KMS
+  plus realm_keys and secret_deks for the sealed plane, and Goose migrations.
 - [encryption-model.md](encryption-model.md): the sealed-plane confidentiality
   model — envelope encryption, per-realm KEK, hybrid client-side/server-side
   decrypt, and the reveal posture (scoped to the sealed plane only).
@@ -94,6 +105,9 @@ plane.
   DEK key hierarchy, KMS providers, rotation, and the crypto-shred posture.
 - [cloud-targets.md](cloud-targets.md): AWS-first managed cloud and
   self-hosted Terraform target decision.
+- [memory-cloud-conformance.md](memory-cloud-conformance.md): the executable
+  AWS/GCP/Azure managed-PostgreSQL and directed account-move certification
+  matrix, protected-runner contract, and evidence requirements.
 - [deployment-cells.md](deployment-cells.md): the multi-cloud deployment
   topology — a fleet of independent cells, each authoritative for its own
   tenants, under a thin global control plane that does placement and routing
@@ -110,7 +124,7 @@ plane.
   round-trippable import.
 - [post-v0-roadmap.md](post-v0-roadmap.md): deliberately deferred features,
   including MCP network transport, web dashboard, utility token, cross-realm
-  federation, policy `deny` effects, and automated re-embedding.
+  federation, policy `deny` effects, and advanced vector-profile migration.
 - [helm-chart.md](helm-chart.md): first self-hosted Kubernetes deployment
   artifact and chart requirements.
 - [terraform-infrastructure.md](terraform-infrastructure.md): AWS, GCP, and
@@ -152,3 +166,6 @@ plane.
 - [decisions/0001-consolidate-witpass-into-witself.md](decisions/0001-consolidate-witpass-into-witself.md):
   consolidating the Witpass secrets product into Witself as the sealed plane —
   the two-plane model, naming/ownership unification, and the five reconciliations.
+- [ADR 0002](decisions/0002-client-side-narrative-memory.md):
+  making Witself the portable narrative-memory system of record while keeping
+  all semantic inference and optional embedding generation in clients.

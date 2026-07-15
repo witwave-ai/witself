@@ -3,7 +3,50 @@ package store
 import (
 	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
+
+func TestMigrationTestDSNWithSearchPathPreservesProviderOptions(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		dsn     string
+		options string
+	}{
+		{
+			name: "URL",
+			dsn: "postgres://user:password@db.example:5432/witself" +
+				"?sslmode=require&application_name=witself-test&options=-cstatement_timeout%3D5000",
+			options: "-cstatement_timeout=5000",
+		},
+		{
+			name: "keyword",
+			dsn: "host=db.example port=5432 dbname=witself user=user password=password " +
+				"sslmode=require application_name=witself-test options='-c statement_timeout=5000'",
+			options: "-c statement_timeout=5000",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := migrationTestDSNWithSearchPath(testCase.dsn, "witself_migration_123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			config, err := pgx.ParseConfig(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := config.RuntimeParams["search_path"]; got != "witself_migration_123" {
+				t.Fatalf("search_path = %q", got)
+			}
+			if got := config.RuntimeParams["options"]; got != testCase.options {
+				t.Fatalf("options = %q, want %q", got, testCase.options)
+			}
+			if got := config.RuntimeParams["application_name"]; got != "witself-test" {
+				t.Fatalf("application_name = %q", got)
+			}
+		})
+	}
+}
 
 func TestValidateMigrationPreflight(t *testing.T) {
 	tests := []struct {
@@ -12,33 +55,33 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:  "fresh database may install schema 28",
-			state: migrationPreflightState{TargetVersion: 28},
+			name:  "fresh database may install schema 32",
+			state: migrationPreflightState{TargetVersion: 32},
 		},
 		{
-			name: "Goose initialized but no application migration may install schema 28",
+			name: "Goose initialized but no application migration may install schema 32",
 			state: migrationPreflightState{
-				TargetVersion: 28, VersionTableExists: true,
+				TargetVersion: 32, VersionTableExists: true,
 			},
 		},
 		{
 			name: "interrupted empty install before compatibility schema may resume",
 			state: migrationPreflightState{
-				CurrentVersion: 12, TargetVersion: 28,
+				CurrentVersion: 12, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true,
 			},
 		},
 		{
 			name: "interrupted empty install at schema 26 may resume",
 			state: migrationPreflightState{
-				CurrentVersion: 26, TargetVersion: 28,
+				CurrentVersion: 26, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true,
 			},
 		},
 		{
 			name: "populated schema 1 cannot skip compatibility release",
 			state: migrationPreflightState{
-				CurrentVersion: 1, TargetVersion: 28,
+				CurrentVersion: 1, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationCompatibilityRequired,
@@ -46,7 +89,7 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		{
 			name: "populated schema 26 cannot skip compatibility release",
 			state: migrationPreflightState{
-				CurrentVersion: 26, TargetVersion: 28,
+				CurrentVersion: 26, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationCompatibilityRequired,
@@ -59,23 +102,23 @@ func TestValidateMigrationPreflight(t *testing.T) {
 			},
 		},
 		{
-			name: "populated schema 27 may activate schema 28",
+			name: "populated schema 27 may activate through schema 32",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 28,
+				CurrentVersion: 27, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 		},
 		{
-			name: "schema 28 is an idempotent no-op",
+			name: "schema 32 is an idempotent no-op",
 			state: migrationPreflightState{
-				CurrentVersion: 28, TargetVersion: 28,
+				CurrentVersion: 32, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 		},
 		{
 			name: "database ahead of binary is refused",
 			state: migrationPreflightState{
-				CurrentVersion: 29, TargetVersion: 28,
+				CurrentVersion: 33, TargetVersion: 32,
 				VersionTableExists: true, AccountsTableExists: true, AccountsPopulated: true,
 			},
 			wantErr: ErrMigrationSchemaAhead,
@@ -83,21 +126,21 @@ func TestValidateMigrationPreflight(t *testing.T) {
 		{
 			name: "versioned database without Goose table is corrupt",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 28, AccountsTableExists: true,
+				CurrentVersion: 27, TargetVersion: 32, AccountsTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},
 		{
 			name: "versioned database without accounts table is corrupt",
 			state: migrationPreflightState{
-				CurrentVersion: 27, TargetVersion: 28, VersionTableExists: true,
+				CurrentVersion: 27, TargetVersion: 32, VersionTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},
 		{
 			name: "unversioned application schema is corrupt even when empty",
 			state: migrationPreflightState{
-				TargetVersion: 28, AccountsTableExists: true,
+				TargetVersion: 32, AccountsTableExists: true,
 			},
 			wantErr: ErrMigrationStateInvalid,
 		},

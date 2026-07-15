@@ -3,6 +3,11 @@
 Status: draft. This document records features that are intentionally deferred
 from v0. They are product candidates, not first-release blockers.
 
+Narrative-memory amendment (accepted 2026-07-14): client-side curation and
+client-supplied vector profiles replace backend re-embedding/provider work.
+The roadmap below follows the canonical contract in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 V0 should stay focused on the core agent self/identity store:
@@ -14,9 +19,10 @@ V0 should stay focused on the core agent self/identity store:
 - Agent tokens bound to one realm and one named agent.
 - Memory CRUD with the add/adjust/read/recall/list/forget/restore/delete
   lifecycle, versioned edit history, and soft-delete tombstones.
-- Semantic-by-default recall over an embedding-provider abstraction (`voyage`
-  default, `openai`, `local-dev`) with hybrid keyword/tag/kind/time ranking and
-  deterministic degradation when the provider is unavailable.
+- Deterministic PostgreSQL lexical recall over keyword/tag/kind/time, recency,
+  and salience signals. The backend makes no model call and has no model secret;
+  optional client-supplied vector profiles, portable JSONB rows, and bounded
+  hybrid ranking are implemented without changing that baseline.
 - Facts CRUD with deterministic name lookup, `primary` promotion, and the
   `sensitive` PII display flag.
 - The cross-agent access policy engine with default deny, the
@@ -50,30 +56,36 @@ included in any plaintext export, and they remain reveal-gated.
 ### Richer Recall Ranking
 
 Reranker models, learned recall weights, and feedback-driven ranking are
-post-v0. V0 ships a fixed, documented hybrid blend of vector similarity,
-lexical match, tag/kind match, recency, and `salience`
+post-v0. V0 ships a fixed, documented blend of lexical match, tag/kind match,
+recency, and `salience`
 (see [memory-model.md](memory-model.md)).
 
-A second-stage reranker (cross-encoder or hosted rerank API) changes the
-provider boundary, adds a new metered dimension and capability flag, and needs a
-deterministic answer for when the reranker is unavailable. It should follow the
-same degrade-and-report contract that semantic recall already uses.
+A client may perform second-stage reranking after receiving deterministic score
+components. If a runtime uses a cross-encoder or hosted rerank API, that model,
+credential, privacy boundary, and cost belong to the client; Witself stores no
+model secret and the PostgreSQL lexical order remains the fallback.
 
 ### Multi-Vector And Chunked Embeddings
 
-Per-memory multi-vector embeddings, content chunking, and per-chunk recall are
-post-v0. V0 embeds one vector per memory from its `content`.
+Per-memory multi-vector profiles, content chunking, and per-chunk recall are
+post-v0. V0 implements at most one exact vector per profile and memory version
+in portable JSONB, while requiring no vector coverage and working fully with
+lexical recall.
 
-Multi-vector storage changes the pgvector schema, the vector-storage metering
-dimension, the re-embedding maintenance path, and recall result attribution
-(which chunk matched). It requires migration and backup notes before promotion
-because restored vectors must round-trip.
+Multi-vector storage changes the migration-0032 portable vector schema,
+vector-storage metering, recall result attribution (which chunk matched), and
+any future optional ANN projection. Authorized
+clients must supply both memory and query vectors under an immutable profile;
+the backend only validates, stores, and performs deterministic similarity math.
+It requires migration and backup notes before promotion because compatible
+vectors and their profiles must round-trip.
 
-### Summarization And Consolidation
+### Additional Summarization And Consolidation Policies
 
-Automatic memory summarization, consolidation, and decay (merging related
-memories, distilling episodic into semantic, pruning stale low-salience
-memories) are post-v0.
+Client-side curation, including plan actions for merge/split/supersede/relate,
+post-flush wakes, and persistent per-user scheduling, is implemented. Learned or
+server-owned summarization, autonomous decay, and policy families beyond the
+current bounded client-authored plan remain post-v0.
 
 Consolidation is an integrity-sensitive write path: it edits or forgets memories
 the agent did not explicitly touch. It needs a written threat-model update for
@@ -81,15 +93,18 @@ silent memory mutation, audit attribution distinct from agent and operator
 actions, `--dry-run` previews, reversible tombstones, and an opt-in capability
 flag. It must not run as an automatic side effect in v0.
 
-### Automated Re-Embedding And Model Migration
+### Client Vector-Profile Migration
 
-Automated re-embedding and embedding-model migration tooling are post-v0. V0
-treats re-embedding on a provider/model change as an explicit, audited
-maintenance operation, and restores recall from backed-up vectors rather than
-re-embedding (see [backup-and-recovery.md](backup-and-recovery.md)).
+Advanced vector-profile migration tooling is post-v0. Immutable profiles,
+client-supplied JSONB rows, hybrid recall, and archive round-tripping are
+implemented now, with no backend re-embedding operation. To change a model or
+vector contract today, a client registers a new immutable profile and supplies
+regenerated vectors; lexical recall remains available throughout (see
+[backup-and-recovery.md](backup-and-recovery.md)).
 
-A managed migration tool needs progress tracking, idempotency, cost metering,
-and a rollback story for partially re-embedded realms.
+A client-driven migration needs progress tracking, idempotency, profile-aware
+coverage, cost attribution to the client, and a rollback story for partially
+populated profiles. Witself must never acquire a model credential to finish it.
 
 ## Human-Verified Destructive Grants
 
@@ -305,12 +320,13 @@ committed go-forward direction under the same promotion bar as every other
 candidate here.
 
 Witself runs as a fleet of independent cells. A cell is one complete, isolated
-Witself stack — `witself-server`, Postgres/pgvector, KMS, and blob storage — in a
-single cloud account and region. Cells are isolated from one another, so a cell
-outage affects only the tenants that live on it. Multi-cloud is native: AWS, GCP,
-and Azure across multiple accounts, where an independent second AWS account is
-simply another cell. The per-cloud Terraform modules already planned are reused
-per cell (see [terraform-infrastructure.md](terraform-infrastructure.md),
+Witself stack — `witself-server`, ordinary PostgreSQL, KMS, and blob storage —
+in a single cloud account
+and region. Cells are isolated from one another, so a cell outage affects only
+the tenants that live on it. Multi-cloud is native: AWS, GCP, and Azure across
+multiple accounts, where an independent second AWS account is simply another
+cell. The per-cloud Terraform modules already planned are reused per cell (see
+[terraform-infrastructure.md](terraform-infrastructure.md),
 [cloud-targets.md](cloud-targets.md), and
 [backend-architecture.md](backend-architecture.md)).
 
@@ -336,8 +352,10 @@ cells and collaboration share one registry
 - Tenant migration: move a realm or account between cells by export from cell A,
   import into cell B, repoint the control-plane mapping, and cut over. The open
   plane (memories and facts) moves through the existing first-class
-  export/import, with embeddings recomputed at the destination or moved when the
-  model matches. The sealed plane is KMS-rooted per cell, so migration re-wraps
+  export/import. Compatible client-supplied vectors and their immutable profiles
+  may move with the archive; otherwise the destination immediately uses lexical
+  recall until an authorized client supplies a new profile. The sealed plane is
+  KMS-rooted per cell, so migration re-wraps
   keys under the destination KMS via an audited decrypt-at-source /
   re-encrypt-at-destination ceremony. Migration is bounded but not free (see
   [backup-and-recovery.md](backup-and-recovery.md) and [storage.md](storage.md)).
@@ -365,31 +383,35 @@ These forks are intentionally left open; see
 
 ## Deferred Provider And Cloud Targets
 
-### Additional Embedding Providers
+### Additional Vector Projections
 
-Additional embedding providers and on-cluster local embedding services are
-post-v0. V0 ships the `voyage` (default), `openai`, and `local-dev` providers
-behind the capability-gated embedding boundary
-(see [storage.md](storage.md) and [memory-model.md](memory-model.md)).
+Immutable client vector profiles (up to the bounded agent cap), exact JSONB
+rows, and deterministic hybrid ranking are implemented. Post-v0 candidates are
+multi-vector/chunk profiles and optional profile-compatible pgvector/ANN
+projections. V0 ships no backend embedding provider or local embedding service;
+it needs no model credential and performs no model egress (see
+[storage.md](storage.md) and [memory-model.md](memory-model.md)).
 
-New providers must report model identity and vector dimensionality through the
-capabilities contract, preserve the degrade-to-keyword behavior, and document
-the re-embedding impact of switching providers. On-cluster embedding services
-additionally need deployment, scaling, and observability guidance for
-self-hosted operators.
+Each immutable profile records the client-declared provider/model/recipe,
+dimension, distance metric, and normalization contract. Authorized clients
+supply finite memory and query vectors; the backend validates those contracts,
+reports profile coverage, and preserves deterministic lexical fallback. Any
+local or remote generation service is selected, secured, operated, and paid for
+by the client rather than deployed as part of `witself-server`.
 
 ### GCP And Azure General Availability
 
 GCP and Azure general availability is post-v0. V0 implements AWS first for
 managed Witself Cloud, the first self-hosted Terraform module and stack, the
-first production Postgres/pgvector (RDS) integration, and the first
-production-shaped Helm values (see [cloud-targets.md](cloud-targets.md)).
+first production PostgreSQL (RDS) integration, and the
+first production-shaped Helm values (see [cloud-targets.md](cloud-targets.md)).
 
 GCP and Azure keep visible repo structure and provider-neutral interfaces so
 AWS-only assumptions do not leak, but their full Terraform modules, managed
-Postgres/pgvector integrations, object/blob storage, workload identity, and
-production Helm examples follow AWS. Promotion to GA requires the same
-backup/restore, migration, upgrade, and observability guidance demanded of AWS.
+PostgreSQL integrations, object/blob storage, workload
+identity, and production Helm examples follow AWS. Promotion to GA requires the
+same backup/restore, migration, upgrade, and observability guidance demanded of
+AWS.
 
 ## Deferred Policy And Encryption Surfaces
 
@@ -582,12 +604,12 @@ A post-v0 feature should move into an active release plan only when it has:
   with the default-deny cross-agent policy engine.
 - CLI, API, MCP, and JSON contract changes where applicable.
 - Audit events that avoid memory content, fact values, message bodies/payloads,
-  embedding vectors, secret values, TOTP seeds, raw tokens, and high-risk payment
-  data.
+  client-supplied vectors, secret values, TOTP seeds, raw tokens, and high-risk
+  payment data.
 - Capability flags and deterministic `unsupported_operation` behavior.
 - Managed and self-hosted support boundaries.
-- Migration, backup, and recovery impact notes, including embedding-vector
-  round-trip where recall is affected.
+- Migration, backup, and recovery impact notes, including optional
+  vector-profile round-trip where recall is affected.
 - Tests, CI gates, and release notes.
 - A rollout plan that can be disabled or limited by backend policy.
 

@@ -31,3 +31,7 @@ dist-charts/
 /witself-tui
 /witself-server
 /ws
+
+# Nested Pulumi module build outputs.
+/infra/pulumi/witself-infra
+/infra/pulumi/cmd/witself-infra/witself-infra

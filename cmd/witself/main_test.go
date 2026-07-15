@@ -166,6 +166,67 @@ func TestTokenCreateOperatorWritesOutFile(t *testing.T) {
 	}
 }
 
+func TestTokenCreateCuratorWritesRestrictedExpiringToken(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/agents/agent_1/curator-tokens" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var body struct {
+			AccessProfile string `json:"access_profile"`
+			DisplayName   string `json:"display_name"`
+			TTL           string `json:"ttl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.AccessProfile != "curator-preview" || body.DisplayName != "nightly curator" || body.TTL != "30m" {
+			t.Errorf("request body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "agent_token": "witself_agt_curator",
+			"token_id": "tok_curator", "agent_id": "agent_1", "agent_name": "memory-agent",
+			"access_profile": "curator-preview", "display_name": "nightly curator", "expires_at": expiresAt,
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "parent.token")
+	out := filepath.Join(dir, "curator.token")
+	if err := os.WriteFile(parent, []byte("witself_opr_parent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{
+		"token", "create", "--endpoint", srv.URL, "--token-file", parent,
+		"--agent", "agent_1", "--profile", "curator-preview",
+		"--name", "nightly curator", "--ttl", "30m", "--out", out,
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+	contents, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "witself_agt_curator\n" {
+		t.Fatalf("token file = %q", contents)
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %o", info.Mode().Perm())
+	}
+}
+
 func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token"}); code != 2 {
 		t.Fatalf("missing token subject code = %d, want 2", code)
@@ -178,6 +239,15 @@ func TestTokenCreateRequiresOneSubject(t *testing.T) {
 	}
 	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--name", "deploy bot"}); code != 2 {
 		t.Fatalf("agent name code = %d, want 2", code)
+	}
+	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--profile", "curator-preview", "--name", "curator"}); code != 2 {
+		t.Fatalf("curator without ttl code = %d, want 2", code)
+	}
+	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--agent", "agent_1", "--profile", "admin", "--name", "curator", "--ttl", "30m"}); code != 2 {
+		t.Fatalf("unknown profile code = %d, want 2", code)
+	}
+	if code := run([]string{"token", "create", "--endpoint", "http://example.test", "--token-file", "token", "--operator", "--profile", "curator-apply"}); code != 2 {
+		t.Fatalf("operator curator profile code = %d, want 2", code)
 	}
 }
 

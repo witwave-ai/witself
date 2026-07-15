@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +38,22 @@ var ErrArchiveAccountMismatch = errors.New("archive is for a different account")
 // not retry it.
 var ErrArchiveContent = errors.New("archive content is not importable")
 
+// A small allowance prevents harmless cell clock skew from invalidating a
+// portable archive, while still rejecting a manifest that claims to come from
+// a materially future state. Rows remain bounded by the manifest's exact
+// exported_at value, not this allowance.
+const maxArchiveManifestFutureSkew = 5 * time.Minute
+
+func validateArchiveExportedAt(exportedAt, importedAt time.Time) error {
+	if exportedAt.IsZero() {
+		return fmt.Errorf("%w: manifest exported_at is required", ErrArchiveContent)
+	}
+	if exportedAt.After(importedAt.Add(maxArchiveManifestFutureSkew)) {
+		return fmt.Errorf("%w: manifest exported_at is materially in the future", ErrArchiveContent)
+	}
+	return nil
+}
+
 // importColumns is the strict per-table allowlist of column names an archive
 // may carry. It doubles as the SQL-identifier boundary — the row's JSON keys
 // are looked up here and only allowlisted names are interpolated into the
@@ -64,7 +83,7 @@ var importColumns = map[string]map[string]bool{
 	"tokens": {
 		"id": true, "account_id": true, "operator_id": true, "agent_id": true,
 		"kind": true, "token_hash": true, "display_name": true,
-		"created_at": true, "expires_at": true, "consumed_at": true,
+		"access_profile": true, "created_at": true, "expires_at": true, "consumed_at": true,
 	},
 	"account_events": {
 		"id": true, "account_id": true, "occurred_at": true,
@@ -155,7 +174,10 @@ var importColumns = map[string]map[string]bool{
 		"resolved_fact_id":      true, "decision_assertion_id": true,
 		"idempotency_key":         true,
 		"idempotency_fingerprint": true, "decision_idempotency_key": true,
-		"proposed_at": true, "decided_at": true,
+		"curation_run_id": true, "curation_action_id": true,
+		"withdrawal_reason": true, "withdrawal_idempotency_key": true,
+		"withdrawal_request_hash": true,
+		"proposed_at":             true, "decided_at": true,
 	},
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -168,11 +190,174 @@ var importColumns = map[string]map[string]bool{
 		"recipient_agent_id": true, "state": true, "delivered_at": true,
 		"read_at": true, "acked_at": true, "created_at": true,
 	},
+	"memory_change_clocks": {
+		"account_id": true, "realm_id": true, "owner_kind": true,
+		"owner_id": true, "last_change_seq": true,
+		"created_at": true, "updated_at": true,
+	},
+	"memories": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "origin": true,
+		"capture_reason": true, "authored_by_agent_id": true,
+		"current_version": true, "permanently_deleted_at": true,
+		"permanently_deleted_by_id": true, "permanent_delete_reason": true,
+		"delete_receipt_id": true, "delete_idempotency_key_hash": true,
+		"deleted_prior_version": true, "deleted_scrub_set_revision": true,
+		"deleted_version_count": true, "deleted_evidence_count": true,
+		"deleted_relation_count": true, "deleted_retry_shield_count": true,
+		"deleted_retry_shield_digest":     true,
+		"deleted_curation_run_count":      true,
+		"deleted_curation_action_count":   true,
+		"deleted_curation_input_count":    true,
+		"deleted_curation_mutation_count": true,
+		"created_at":                      true, "updated_at": true,
+	},
+	"memory_versions": {
+		"memory_id": true, "version": true, "account_id": true,
+		"realm_id": true, "owner_kind": true, "owner_id": true,
+		"previous_version": true, "change_seq": true, "content": true,
+		"content_encoding": true, "kind": true, "tags": true,
+		"links": true, "salience": true, "sensitive": true,
+		"occurred_from": true, "occurred_until": true, "state": true,
+		"prior_state": true, "lifecycle_reason": true, "content_hash": true,
+		"actor_kind": true, "actor_id": true, "operation": true,
+		"idempotency_key": true, "request_hash": true,
+		"client_runtime": true, "client_model": true,
+		"client_recipe": true, "client_recipe_version": true,
+		"supersession_set_id": true, "supersession_set_revision": true,
+		"supersession_replacement_count":  true,
+		"supersession_replacement_digest": true,
+		"curation_run_id":                 true, "curation_action_id": true,
+		"created_at": true,
+	},
+	"memory_vector_profiles": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "provider": true,
+		"model": true, "recipe": true, "recipe_version": true,
+		"dimensions": true, "distance_metric": true,
+		"normalization": true, "contract_hash": true,
+		"created_by_agent_id": true, "created_at": true,
+	},
+	"memory_vectors": {
+		"profile_id": true, "memory_id": true, "memory_version": true,
+		"account_id": true, "realm_id": true, "owner_kind": true,
+		"owner_id": true, "content_hash": true, "vector": true,
+		"vector_hash": true, "created_by_agent_id": true,
+		"created_at": true,
+	},
+	"memory_evidence": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "memory_id": true,
+		"target_version": true, "evidence_change_seq": true,
+		"evidence_type": true, "role": true, "resolution_state": true,
+		"external_locator": true, "pending_evidence_id": true,
+		"resolved_kind": true, "source_transcript_id": true,
+		"source_sequence_from": true, "source_sequence_until": true,
+		"source_memory_id": true, "source_memory_version": true,
+		"source_message_id": true, "source_import_locator": true,
+		"artifact_excerpt": true, "artifact_sensitive": true,
+		"terminal_reason_code": true, "source_digest": true,
+		"actor_id": true, "idempotency_key": true, "request_hash": true,
+		"created_at": true,
+	},
+	"memory_relations": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true,
+		"from_memory_id": true, "from_version": true,
+		"to_memory_id": true, "to_version": true, "relation_type": true,
+		"supersession_set_id": true, "supersession_set_revision": true,
+		"curation_run_id": true, "curation_action_id": true,
+		"reverted_by_run_id": true, "reverted_by_action_id": true,
+		"reverted_at": true, "created_at": true,
+	},
+	"memory_deleted_references": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "deleted_memory_id": true,
+		"former_reference_kind": true, "related_resource_id": true,
+		"curation_run_id": true, "curation_request_id": true,
+		"reason_code": true, "created_at": true,
+	},
+	"memory_curation_lanes": {
+		"account_id": true, "realm_id": true, "owner_kind": true,
+		"owner_id": true, "request_generation": true,
+		"fencing_generation": true, "active_run_id": true,
+		"created_at": true, "updated_at": true,
+	},
+	"memory_curation_cursors": {
+		"account_id": true, "realm_id": true, "owner_kind": true,
+		"owner_id": true, "source_kind": true, "source_stream_id": true,
+		"position": true, "created_at": true, "updated_at": true,
+	},
+	"memory_curation_requests": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "scope": true,
+		"coalescing_key": true, "trigger_reason": true,
+		"request_generation": true, "priority": true, "due_at": true,
+		"state": true, "attempt_count": true, "max_attempts": true,
+		"claimed_run_id": true, "fulfilled_generation": true,
+		"replay_run_id": true, "read_only_replay": true,
+		"actor_kind": true, "actor_id": true,
+		"idempotency_key": true, "request_hash": true,
+		"claimed_at": true, "fulfilled_at": true, "cancelled_at": true,
+		"dead_lettered_at": true, "created_at": true, "updated_at": true,
+	},
+	"memory_curation_runs": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "request_id": true,
+		"request_generation": true, "fencing_generation": true,
+		"state": true, "actor_kind": true, "actor_id": true,
+		"idempotency_key": true, "request_hash": true,
+		"lease_expires_at": true, "client_runtime": true,
+		"client_model": true, "client_recipe": true,
+		"client_recipe_version": true, "memory_change_upper": true,
+		"evidence_change_upper": true, "input_count": true,
+		"memory_input_count": true, "evidence_input_count": true,
+		"transcript_input_count": true, "cursor_input_count": true,
+		"plan_schema": true, "plan_revision": true, "plan_hash": true,
+		"apply_receipt_id": true, "rollback_receipt_id": true,
+		"conflict_reason_code": true, "terminal_reason_code": true,
+		"budgets": true, "scrubbed_at": true, "scrubbed_reason_code": true,
+		"started_at": true, "planned_at": true, "applied_at": true,
+		"rolled_back_at": true, "terminal_at": true,
+		"created_at": true, "updated_at": true,
+	},
+	"memory_curation_run_inputs": {
+		"run_id": true, "ordinal": true, "account_id": true,
+		"realm_id": true, "owner_kind": true, "owner_id": true,
+		"input_kind": true, "order_key": true,
+		"memory_id": true, "memory_version": true, "evidence_id": true,
+		"transcript_id": true, "sequence_from": true, "sequence_until": true,
+		"cursor_source_kind": true, "cursor_stream_id": true,
+		"cursor_expected_prior": true, "cursor_upper": true,
+		"created_at": true,
+	},
+	"memory_curation_actions": {
+		"id": true, "run_id": true, "account_id": true,
+		"realm_id": true, "owner_kind": true, "owner_id": true,
+		"ordinal": true, "plan_revision": true, "primitive": true,
+		"state": true, "local_ref": true, "input_refs": true,
+		"expected_heads": true, "proposed_payload": true,
+		"validation_result": true, "applied_result": true,
+		"rollback_result": true, "action_hash": true,
+		"scrubbed_at": true, "scrubbed_reason_code": true,
+		"created_at": true, "validated_at": true,
+		"applied_at": true, "reverted_at": true,
+	},
+	"memory_curation_mutations": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_kind": true, "owner_id": true, "actor_kind": true,
+		"actor_id": true, "operation": true, "idempotency_key": true,
+		"request_hash": true, "request_id": true, "run_id": true,
+		"request_generation": true, "fencing_generation": true,
+		"plan_revision": true, "plan_hash": true, "lease_expires_at": true,
+		"result_state": true, "receipt_id": true, "created_at": true,
+	},
 }
 
 type transcriptImportScope struct {
 	realmID      string
 	ownerAgentID string
+	nextSequence int64
 }
 
 type messageImportScope struct {
@@ -194,48 +379,337 @@ type factImportScope struct {
 	deletedMutationKeyCount int64
 }
 
+type memoryOwnerImportKey struct {
+	realmID   string
+	ownerKind string
+	ownerID   string
+}
+
+type memoryImportScope struct {
+	owner                    memoryOwnerImportKey
+	currentVersion           int64
+	deleted                  bool
+	deletedRetryShieldCount  int64
+	deletedRetryShieldDigest string
+	versionCount             int64
+	maxVersion               int64
+	maxChangeSeq             int64
+}
+
+type memoryVersionImportKey struct {
+	memoryID string
+	version  int64
+}
+
+type memoryVersionImportScope struct {
+	owner                         memoryOwnerImportKey
+	previousVersion               int64
+	changeSeq                     int64
+	payloadDigest                 string
+	requestHash                   string
+	state                         string
+	priorState                    string
+	operation                     string
+	supersessionSet               memorySupersessionImportSet
+	supersessionReplacementCount  int64
+	supersessionReplacementDigest string
+	supersessionRequestHash       string
+	expectsSupersessionRelations  bool
+	supersessionMembers           []MemoryVersionReference
+	activeSupersessionMemberCount int64
+	curationRunID                 string
+	curationActionID              string
+	contentHash                   string
+	createdAt                     time.Time
+}
+
+type memoryVectorImportKey struct {
+	profileID string
+	memoryID  string
+	version   int64
+}
+
+type memoryVectorProfileImportScope struct {
+	owner   memoryOwnerImportKey
+	profile MemoryVectorProfile
+}
+
+type memoryEvidenceImportScope struct {
+	target    memoryVersionImportKey
+	state     string
+	changeSeq int64
+}
+
+type memorySupersessionImportSet struct {
+	id       string
+	revision int64
+}
+
+type memoryCurationLaneImportScope struct {
+	owner             memoryOwnerImportKey
+	requestGeneration int64
+	fencingGeneration int64
+	activeRunID       string
+	normalizedActive  bool
+	validated         bool
+}
+
+type memoryCurationCursorImportKey struct {
+	owner      memoryOwnerImportKey
+	sourceKind string
+	streamID   string
+}
+
+type memoryCurationRequestImportScope struct {
+	owner             memoryOwnerImportKey
+	requestGeneration int64
+	state             string
+	claimedRunID      string
+	replayRunID       string
+	normalizedClaimed bool
+	validated         bool
+}
+
+type memoryCurationRunImportScope struct {
+	owner                 memoryOwnerImportKey
+	requestID             string
+	requestGeneration     int64
+	fencingGeneration     int64
+	state                 string
+	planSchema            string
+	planRevision          int64
+	planHash              string
+	scrubbed              bool
+	inputCount            int64
+	memoryInputCount      int64
+	evidenceInputCount    int64
+	transcriptInputCount  int64
+	cursorInputCount      int64
+	observedInputs        int64
+	observedByKind        map[string]int64
+	normalizedInterrupted bool
+	observedActions       int64
+	validated             bool
+}
+
+type memoryCurationActionImportScope struct {
+	id             string
+	owner          memoryOwnerImportKey
+	runID          string
+	ordinal        int64
+	planRevision   int64
+	state          string
+	primitive      string
+	scrubbed       bool
+	action         MemoryCurationPlanAction
+	inputRefs      []MemoryCurationActionInputRef
+	expectedHeads  []MemoryCurationExpectedHead
+	actionHash     string
+	appliedResult  *MemoryCurationActionApplyResult
+	rollbackResult *MemoryCurationActionRollbackResult
+}
+
+type factCandidateCurationImportScope struct {
+	owner    memoryOwnerImportKey
+	runID    string
+	actionID string
+	status   string
+}
+
+type memoryRelationCurationImportScope struct {
+	id                 string
+	owner              memoryOwnerImportKey
+	relationType       string
+	from               MemoryVersionReference
+	to                 MemoryVersionReference
+	runID              string
+	actionID           string
+	revertedByRunID    string
+	revertedByActionID string
+}
+
 // importCtx accumulates per-import state: how many accounts rows we have seen
 // (must be exactly one), and the set of ids inserted for each table. The FK
 // targets an incoming row references (agents.realm_id, tokens.operator_id,
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID                   string
-	accounts                    int
-	operators                   map[string]bool
-	realms                      map[string]bool
-	agents                      map[string]bool
-	agentRealms                 map[string]string
-	tickets                     map[string]bool
-	transcripts                 map[string]transcriptImportScope
-	entries                     map[string]string
-	factSubjects                map[string]factImportScope
-	factSubjectNames            map[string]map[string]string
-	facts                       map[string]factImportScope
-	assertions                  map[string]string
-	factMutationTombstoneCounts map[string]int64
-	messages                    map[string]messageImportScope
-	deliveries                  map[string]bool
+	accountID                    string
+	exportedAt                   time.Time
+	accounts                     int
+	operators                    map[string]bool
+	realms                       map[string]bool
+	agents                       map[string]bool
+	agentRealms                  map[string]string
+	tickets                      map[string]bool
+	transcripts                  map[string]transcriptImportScope
+	entries                      map[string]string
+	factSubjects                 map[string]factImportScope
+	factSubjectNames             map[string]map[string]string
+	facts                        map[string]factImportScope
+	assertions                   map[string]string
+	factMutationTombstoneCounts  map[string]int64
+	messages                     map[string]messageImportScope
+	deliveries                   map[string]bool
+	memoryClocks                 map[memoryOwnerImportKey]int64
+	memories                     map[string]memoryImportScope
+	memoryVersions               map[memoryVersionImportKey]memoryVersionImportScope
+	memoryVectorProfiles         map[string]memoryVectorProfileImportScope
+	memoryVectors                map[memoryVectorImportKey]bool
+	memoryEvidence               map[string]memoryEvidenceImportScope
+	memoryEvidenceTerminal       map[string]bool
+	memoryActiveSupersessionSets map[memoryVersionImportKey]memorySupersessionImportSet
+	memoryDeletedRetryShields    map[string][]memoryDeleteRetryShield
+	memoryCurationLanes          map[memoryOwnerImportKey]memoryCurationLaneImportScope
+	memoryCurationCursors        map[memoryCurationCursorImportKey]int64
+	memoryCurationRequests       map[string]memoryCurationRequestImportScope
+	memoryCurationRuns           map[string]memoryCurationRunImportScope
+	memoryCurationActions        map[string]memoryCurationActionImportScope
+	memoryCurationMutations      map[string]bool
+	factCandidateCurations       map[string]factCandidateCurationImportScope
+	memoryRelationCurations      []memoryRelationCurationImportScope
+	memoryRelations              map[string]memoryRelationCurationImportScope
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID:                   accountID,
-		operators:                   map[string]bool{},
-		realms:                      map[string]bool{},
-		agents:                      map[string]bool{},
-		agentRealms:                 map[string]string{},
-		tickets:                     map[string]bool{},
-		transcripts:                 map[string]transcriptImportScope{},
-		entries:                     map[string]string{},
-		factSubjects:                map[string]factImportScope{},
-		factSubjectNames:            map[string]map[string]string{},
-		facts:                       map[string]factImportScope{},
-		assertions:                  map[string]string{},
-		factMutationTombstoneCounts: map[string]int64{},
-		messages:                    map[string]messageImportScope{},
-		deliveries:                  map[string]bool{},
+		accountID:                    accountID,
+		operators:                    map[string]bool{},
+		realms:                       map[string]bool{},
+		agents:                       map[string]bool{},
+		agentRealms:                  map[string]string{},
+		tickets:                      map[string]bool{},
+		transcripts:                  map[string]transcriptImportScope{},
+		entries:                      map[string]string{},
+		factSubjects:                 map[string]factImportScope{},
+		factSubjectNames:             map[string]map[string]string{},
+		facts:                        map[string]factImportScope{},
+		assertions:                   map[string]string{},
+		factMutationTombstoneCounts:  map[string]int64{},
+		messages:                     map[string]messageImportScope{},
+		deliveries:                   map[string]bool{},
+		memoryClocks:                 map[memoryOwnerImportKey]int64{},
+		memories:                     map[string]memoryImportScope{},
+		memoryVersions:               map[memoryVersionImportKey]memoryVersionImportScope{},
+		memoryVectorProfiles:         map[string]memoryVectorProfileImportScope{},
+		memoryVectors:                map[memoryVectorImportKey]bool{},
+		memoryEvidence:               map[string]memoryEvidenceImportScope{},
+		memoryEvidenceTerminal:       map[string]bool{},
+		memoryActiveSupersessionSets: map[memoryVersionImportKey]memorySupersessionImportSet{},
+		memoryDeletedRetryShields:    map[string][]memoryDeleteRetryShield{},
+		memoryCurationLanes:          map[memoryOwnerImportKey]memoryCurationLaneImportScope{},
+		memoryCurationCursors:        map[memoryCurationCursorImportKey]int64{},
+		memoryCurationRequests:       map[string]memoryCurationRequestImportScope{},
+		memoryCurationRuns:           map[string]memoryCurationRunImportScope{},
+		memoryCurationActions:        map[string]memoryCurationActionImportScope{},
+		memoryCurationMutations:      map[string]bool{},
+		factCandidateCurations:       map[string]factCandidateCurationImportScope{},
+		memoryRelationCurations:      []memoryRelationCurationImportScope{},
+		memoryRelations:              map[string]memoryRelationCurationImportScope{},
 	}
+}
+
+// normalizeImportedCurationLease prevents an archive from carrying live work
+// across cells. It runs before row validation and insertion, but records the
+// original linkage so the final cross-row validator can prove that only a
+// coherent active lane/request/run triple was interrupted. Generations never
+// move backwards: clearing an active lane consumes one fencing generation.
+func (ic *importCtx) normalizeImportedCurationLease(table string, obj map[string]any, importedAt time.Time) error {
+	badf := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrArchiveContent, fmt.Sprintf(format, args...))
+	}
+	switch table {
+	case "memory_curation_lanes":
+		activeRunID, active := optionalStringField(obj, "active_run_id")
+		if !active {
+			return nil
+		}
+		if !validImportedGeneratedID(activeRunID, "mrun") {
+			return badf("memory_curation_lanes row active_run_id is invalid")
+		}
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_lanes row %v", err)
+		}
+		requestGeneration, ok := importedGeneration(obj["request_generation"], true)
+		if !ok {
+			return badf("memory_curation_lanes row request_generation is invalid")
+		}
+		fencingGeneration, ok := importedGeneration(obj["fencing_generation"], true)
+		if !ok || fencingGeneration >= maxImportedCurationGeneration {
+			return badf("memory_curation_lanes active fence has no import reserve")
+		}
+		fencingGeneration++
+		ic.memoryCurationLanes[owner] = memoryCurationLaneImportScope{
+			owner: owner, requestGeneration: requestGeneration,
+			fencingGeneration: fencingGeneration, activeRunID: activeRunID,
+			normalizedActive: true,
+		}
+		obj["active_run_id"] = nil
+		obj["fencing_generation"] = fencingGeneration
+		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	case "memory_curation_requests":
+		state, _ := obj["state"].(string)
+		if state != "claimed" {
+			return nil
+		}
+		requestID, _ := obj["id"].(string)
+		claimedRunID, present := optionalStringField(obj, "claimed_run_id")
+		if !validImportedGeneratedID(requestID, "mcrq") || !present ||
+			!validImportedGeneratedID(claimedRunID, "mrun") {
+			return badf("memory_curation_requests claimed row identifiers are invalid")
+		}
+		if _, present, err := importedOptionalTimestamp(obj, "claimed_at"); err != nil || !present {
+			return badf("memory_curation_requests claimed row requires claimed_at")
+		}
+		for _, field := range []string{"fulfilled_at", "cancelled_at", "dead_lettered_at"} {
+			if _, present, err := importedOptionalTimestamp(obj, field); err != nil || present {
+				return badf("memory_curation_requests claimed row carries terminal timestamp")
+			}
+		}
+		ic.memoryCurationRequests[requestID] = memoryCurationRequestImportScope{
+			claimedRunID: claimedRunID, normalizedClaimed: true,
+		}
+		obj["state"] = "queued"
+		obj["claimed_run_id"] = nil
+		obj["claimed_at"] = nil
+		obj["due_at"] = importedAt.Format(time.RFC3339Nano)
+		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	case "memory_curation_runs":
+		state, _ := obj["state"].(string)
+		if state != "open" && state != "planned" {
+			return nil
+		}
+		runID, _ := obj["id"].(string)
+		if !validImportedGeneratedID(runID, "mrun") {
+			return badf("memory_curation_runs active row id is invalid")
+		}
+		if _, present, err := importedOptionalTimestamp(obj, "lease_expires_at"); err != nil || !present {
+			return badf("memory_curation_runs active row requires lease_expires_at")
+		}
+		if _, present, err := importedOptionalTimestamp(obj, "terminal_at"); err != nil || present {
+			return badf("memory_curation_runs active row carries terminal_at")
+		}
+		ic.memoryCurationRuns[runID] = memoryCurationRunImportScope{
+			state: state, normalizedInterrupted: true,
+		}
+		obj["state"] = "interrupted"
+		obj["lease_expires_at"] = nil
+		obj["terminal_reason_code"] = "cell_import"
+		obj["terminal_at"] = importedAt.Format(time.RFC3339Nano)
+		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	}
+	return nil
+}
+
+const maxImportedCurationGeneration int64 = 4611686018427387903
+
+func importedGeneration(raw any, allowZero bool) (int64, bool) {
+	value, ok := importedNonnegativeInteger(raw)
+	if !ok || value > maxImportedCurationGeneration || (!allowZero && value == 0) {
+		return 0, false
+	}
+	return value, true
 }
 
 // validateAndRecord is the row-content boundary: it enforces the account
@@ -256,7 +730,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"transcript_conversations", "transcript_entries",
 		"usage_events", "usage_rollups",
 		"fact_subjects", "facts", "fact_mutation_tombstones", "fact_assertions", "fact_candidates",
-		"agent_messages", "agent_message_deliveries":
+		"agent_messages", "agent_message_deliveries",
+		"memory_change_clocks", "memories", "memory_versions",
+		"memory_vector_profiles", "memory_vectors",
+		"memory_evidence", "memory_relations", "memory_deleted_references",
+		"memory_curation_lanes", "memory_curation_cursors",
+		"memory_curation_requests", "memory_curation_runs",
+		"memory_curation_run_inputs", "memory_curation_actions",
+		"memory_curation_mutations":
 		id, err := requireStringField(obj, "account_id")
 		if err != nil {
 			return badf("%s row missing account_id", table)
@@ -294,8 +775,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				return badf("accounts row plan_limits must be an object of integer limits")
 			}
 			for key, raw := range m {
-				f, ok := raw.(float64)
-				if !ok || f != math.Trunc(f) {
+				if _, ok := importedInteger(raw); !ok {
 					return badf("accounts row plan_limits[%q] must be an integer", key)
 				}
 			}
@@ -341,6 +821,11 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.agentRealms[id] = realmID
 		}
 	case "tokens":
+		kind, kindErr := requireStringField(obj, "kind")
+		accessProfile, profileErr := requireStringField(obj, "access_profile")
+		if kindErr != nil || profileErr != nil || !validTokenAccessProfile(kind, accessProfile) {
+			return badf("tokens row access_profile is invalid for kind %q", kind)
+		}
 		if opID, present := optionalStringField(obj, "operator_id"); present && !ic.operators[opID] {
 			return badf("tokens row references operator %q not present in this archive", opID)
 		}
@@ -507,6 +992,27 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				return badf("fact_candidates row decision_assertion_id %q is at a different fact address", decisionAssertionID)
 			}
 		}
+		candidateID, err := requireStringField(obj, "id")
+		if err != nil || !strings.HasPrefix(candidateID, "fcand_") {
+			return badf("fact_candidates row id is invalid")
+		}
+		curationRunID, hasRun := optionalStringField(obj, "curation_run_id")
+		curationActionID, hasAction := optionalStringField(obj, "curation_action_id")
+		if hasRun != hasAction || (hasRun &&
+			(!validImportedGeneratedID(curationRunID, "mrun") ||
+				!validImportedGeneratedID(curationActionID, "mact"))) {
+			return badf("fact_candidates row curation attribution is invalid")
+		}
+		status, _ := requireStringField(obj, "status")
+		if status == "withdrawn" && !hasRun {
+			return badf("fact_candidates withdrawn row requires curation attribution")
+		}
+		if hasRun {
+			ic.factCandidateCurations[candidateID] = factCandidateCurationImportScope{
+				owner: memoryOwnerImportKey{realmID: realmID, ownerKind: "agent", ownerID: agentID},
+				runID: curationRunID, actionID: curationActionID, status: status,
+			}
+		}
 	case "account_events":
 		// The account_id scoping check already ran in the first switch;
 		// no downstream table references account_events, so nothing to
@@ -545,7 +1051,17 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("transcript_conversations row missing id")
 		}
-		ic.transcripts[id] = transcriptImportScope{realmID: realmID, ownerAgentID: agentID}
+		nextSequence := int64(math.MaxInt64)
+		if raw, present := obj["next_sequence"]; present {
+			var ok bool
+			nextSequence, ok = importedPositiveInteger(raw)
+			if !ok {
+				return badf("transcript_conversations row next_sequence must be a positive integer")
+			}
+		}
+		ic.transcripts[id] = transcriptImportScope{
+			realmID: realmID, ownerAgentID: agentID, nextSequence: nextSequence,
+		}
 	case "transcript_entries":
 		transcriptID, err := requireStringField(obj, "transcript_id")
 		if err != nil {
@@ -643,8 +1159,1278 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_message_deliveries recipient %q does not match message recipient %q", recipientID, scope.toAgentID)
 		}
 		ic.deliveries[messageID] = true
+	case "memory_change_clocks":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_change_clocks row %v", err)
+		}
+		last, ok := importedNonnegativeInteger(obj["last_change_seq"])
+		if !ok || last > maxImportedMemoryChangeSeq {
+			return badf(
+				"memory_change_clocks row last_change_seq must be between 0 and %d",
+				maxImportedMemoryChangeSeq,
+			)
+		}
+		if _, exists := ic.memoryClocks[owner]; exists {
+			return badf("memory_change_clocks row duplicates owner %q", owner.ownerID)
+		}
+		ic.memoryClocks[owner] = last
+	case "memories":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memories row %v", err)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil || !validImportedGeneratedID(id, "mem") {
+			return badf("memories row id is invalid")
+		}
+		if _, exists := ic.memories[id]; exists {
+			return badf("memories row duplicates id %q", id)
+		}
+		authorID, err := requireStringField(obj, "authored_by_agent_id")
+		if err != nil || authorID != owner.ownerID {
+			return badf("memories row author %q does not match owner %q", authorID, owner.ownerID)
+		}
+		origin, err := requireStringField(obj, "origin")
+		if err != nil || !memoryCodePattern.MatchString(origin) {
+			return badf("memories row origin is invalid")
+		}
+		captureReason, err := requireStringField(obj, "capture_reason")
+		if err != nil || !memoryCodePattern.MatchString(captureReason) {
+			return badf("memories row capture_reason is invalid")
+		}
+		currentVersion, hasCurrent, ok := importedOptionalPositiveInteger(obj, "current_version")
+		if !ok {
+			return badf("memories row current_version must be null or a positive integer")
+		}
+		deletedAt, hasDeletedAt, deletedAtErr := importedOptionalTimestamp(obj, "permanently_deleted_at")
+		deletedBy, hasDeletedBy := optionalStringField(obj, "permanently_deleted_by_id")
+		deleteReason, hasDeleteReason := optionalStringField(obj, "permanent_delete_reason")
+		if deletedAtErr != nil {
+			return badf("memories row permanently_deleted_at is invalid")
+		}
+		deleteReceipt, receiptOK := obj["delete_receipt_id"].(string)
+		deleteKeyHash, keyHashOK := obj["delete_idempotency_key_hash"].(string)
+		deletedPriorVersion, priorOK := importedNonnegativeInteger(obj["deleted_prior_version"])
+		deletedScrubRevision, scrubOK := obj["deleted_scrub_set_revision"].(string)
+		deletedVersionCount, versionCountOK := importedNonnegativeInteger(obj["deleted_version_count"])
+		deletedEvidenceCount, evidenceCountOK := importedNonnegativeInteger(obj["deleted_evidence_count"])
+		deletedRelationCount, relationCountOK := importedNonnegativeInteger(obj["deleted_relation_count"])
+		deletedShieldCount, shieldCountOK := importedNonnegativeInteger(obj["deleted_retry_shield_count"])
+		deletedShieldDigest, shieldDigestOK := obj["deleted_retry_shield_digest"].(string)
+		deletedCurationRunCount, curationRunCountOK := importedOptionalNonnegativeInteger(obj, "deleted_curation_run_count")
+		deletedCurationActionCount, curationActionCountOK := importedOptionalNonnegativeInteger(obj, "deleted_curation_action_count")
+		deletedCurationInputCount, curationInputCountOK := importedOptionalNonnegativeInteger(obj, "deleted_curation_input_count")
+		deletedCurationMutationCount, curationMutationCountOK := importedOptionalNonnegativeInteger(obj, "deleted_curation_mutation_count")
+		if !receiptOK || !keyHashOK || !priorOK || !scrubOK || !versionCountOK ||
+			!evidenceCountOK || !relationCountOK || !shieldCountOK || !shieldDigestOK ||
+			!curationRunCountOK || !curationActionCountOK || !curationInputCountOK ||
+			!curationMutationCountOK {
+			return badf("memories row permanent-deletion receipt fields are invalid")
+		}
+		deleted := !hasCurrent
+		if deleted {
+			createdAt, hasCreatedAt, createdAtErr := importedOptionalTimestamp(obj, "created_at")
+			updatedAt, hasUpdatedAt, updatedAtErr := importedOptionalTimestamp(obj, "updated_at")
+			if !hasDeletedAt || !hasDeletedBy || !hasDeleteReason ||
+				origin != "deleted" || captureReason != "deleted" ||
+				deletedBy != owner.ownerID || deleteReason != "direct_user_request" ||
+				!validImportedGeneratedID(deleteReceipt, "mdel") || !validFactSHA256(deleteKeyHash) ||
+				deletedPriorVersion < 1 || !validFactSHA256(deletedScrubRevision) ||
+				deletedVersionCount != deletedPriorVersion || deletedEvidenceCount < 1 ||
+				deletedShieldCount < deletedVersionCount || !validFactSHA256(deletedShieldDigest) ||
+				createdAtErr != nil || updatedAtErr != nil || !hasCreatedAt || !hasUpdatedAt ||
+				createdAt.After(*deletedAt) || !updatedAt.Equal(*deletedAt) {
+				return badf("memories row deleted tombstone shape is invalid")
+			}
+		} else if hasDeletedAt || hasDeletedBy || hasDeleteReason ||
+			deleteReceipt != "" || deleteKeyHash != "" || deletedPriorVersion != 0 ||
+			deletedScrubRevision != "" || deletedVersionCount != 0 || deletedEvidenceCount != 0 ||
+			deletedRelationCount != 0 || deletedShieldCount != 0 || deletedShieldDigest != "" ||
+			deletedCurationRunCount != 0 || deletedCurationActionCount != 0 ||
+			deletedCurationInputCount != 0 || deletedCurationMutationCount != 0 {
+			return badf("memories row live head carries permanent-deletion metadata")
+		}
+		ic.memories[id] = memoryImportScope{
+			owner: owner, currentVersion: currentVersion, deleted: deleted,
+			deletedRetryShieldCount: deletedShieldCount, deletedRetryShieldDigest: deletedShieldDigest,
+		}
+	case "memory_versions":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_versions row %v", err)
+		}
+		memoryID, err := requireStringField(obj, "memory_id")
+		memory, exists := ic.memories[memoryID]
+		if err != nil || !exists {
+			return badf("memory_versions row references memory %q not present in this archive", memoryID)
+		}
+		if memory.owner != owner || memory.deleted {
+			return badf("memory_versions row scope does not match live memory %q", memoryID)
+		}
+		version, ok := importedPositiveInteger(obj["version"])
+		if !ok {
+			return badf("memory_versions row version must be a positive integer")
+		}
+		key := memoryVersionImportKey{memoryID: memoryID, version: version}
+		if _, exists := ic.memoryVersions[key]; exists {
+			return badf("memory_versions row duplicates memory %q version %d", memoryID, version)
+		}
+		previous, hasPrevious, validPrevious := importedOptionalPositiveInteger(obj, "previous_version")
+		if !validPrevious || (version == 1 && hasPrevious) ||
+			(version > 1 && (!hasPrevious || previous != version-1)) {
+			return badf("memory_versions row previous_version is invalid")
+		}
+		var previousScope memoryVersionImportScope
+		if hasPrevious {
+			var exists bool
+			previousScope, exists = ic.memoryVersions[memoryVersionImportKey{memoryID: memoryID, version: previous}]
+			if !exists {
+				return badf("memory_versions row previous version %d is not earlier in memory %q", previous, memoryID)
+			}
+		}
+		changeSeq, ok := importedPositiveInteger(obj["change_seq"])
+		if !ok {
+			return badf("memory_versions row change_seq must be a positive integer")
+		}
+		actorID, err := requireStringField(obj, "actor_id")
+		if err != nil || actorID != owner.ownerID {
+			return badf("memory_versions row actor %q does not match owner %q", actorID, owner.ownerID)
+		}
+		content, contentOK := obj["content"].(string)
+		if !contentOK || strings.TrimSpace(content) == "" || len(content) > maxMemoryContentBytes {
+			return badf("memory_versions row content must be a nonempty string")
+		}
+		contentEncoding, err := requireStringField(obj, "content_encoding")
+		if err != nil {
+			return badf("memory_versions row content_encoding is required")
+		}
+		contentHash, hashOK := obj["content_hash"].(string)
+		if !hashOK || !validFactSHA256(contentHash) || memoryContentHash(content) != contentHash {
+			return badf("memory_versions row content_hash does not match content")
+		}
+		if err := validateMemoryContentEncoding(content, contentEncoding); err != nil {
+			return badf("memory_versions row %v", err)
+		}
+		versionCreatedAt, hasVersionCreatedAt, versionCreatedAtErr := importedOptionalTimestamp(obj, "created_at")
+		if versionCreatedAtErr != nil ||
+			(hasVersionCreatedAt && hasPrevious && !previousScope.createdAt.IsZero() &&
+				versionCreatedAt.Before(previousScope.createdAt)) {
+			return badf("memory_versions row created_at is invalid or precedes its previous version")
+		}
+		if !hasVersionCreatedAt {
+			versionCreatedAt = new(time.Time)
+		}
+		kind, err := requireStringField(obj, "kind")
+		if err != nil || !memoryKindPattern.MatchString(kind) {
+			return badf("memory_versions row kind is invalid")
+		}
+		tags, err := importedNormalizedMemoryStrings(obj["tags"], 64, 128, "tag")
+		if err != nil {
+			return badf("memory_versions row %v", err)
+		}
+		links, err := importedNormalizedMemoryStrings(obj["links"], 256, 2048, "link")
+		if err != nil {
+			return badf("memory_versions row %v", err)
+		}
+		salience, salienceOK := importedFloat64(obj["salience"])
+		if !salienceOK || salience < 0 || salience > 1 {
+			return badf("memory_versions row salience must be between 0 and 1")
+		}
+		if salience == 0 {
+			salience = 0 // canonicalize negative zero before hashing.
+		}
+		sensitive, sensitiveOK := obj["sensitive"].(bool)
+		if !sensitiveOK {
+			return badf("memory_versions row sensitive must be a boolean")
+		}
+		occurredFrom, _, occurredFromErr := importedOptionalTimestamp(obj, "occurred_from")
+		occurredUntil, _, occurredUntilErr := importedOptionalTimestamp(obj, "occurred_until")
+		if occurredFromErr != nil || occurredUntilErr != nil ||
+			(occurredFrom != nil && occurredUntil != nil && occurredUntil.Before(*occurredFrom)) {
+			return badf("memory_versions row occurrence range is invalid")
+		}
+		if occurredFrom != nil {
+			value := occurredFrom.UTC()
+			occurredFrom = &value
+		}
+		if occurredUntil != nil {
+			value := occurredUntil.UTC()
+			occurredUntil = &value
+		}
+		payloadDigest, err := memoryRequestHash(struct {
+			Content         string     `json:"content"`
+			ContentEncoding string     `json:"content_encoding"`
+			Kind            string     `json:"kind"`
+			Tags            []string   `json:"tags"`
+			Links           []string   `json:"links"`
+			Salience        float64    `json:"salience"`
+			Sensitive       bool       `json:"sensitive"`
+			OccurredFrom    *time.Time `json:"occurred_from"`
+			OccurredUntil   *time.Time `json:"occurred_until"`
+		}{
+			Content: content, ContentEncoding: contentEncoding, Kind: kind,
+			Tags: tags, Links: links, Salience: salience, Sensitive: sensitive,
+			OccurredFrom: occurredFrom, OccurredUntil: occurredUntil,
+		})
+		if err != nil {
+			return badf("memory_versions row payload digest is invalid")
+		}
+		requestHash, requestHashOK := obj["request_hash"].(string)
+		if !requestHashOK || !validFactSHA256(requestHash) {
+			return badf("memory_versions row request_hash is invalid")
+		}
+		if keyValue, ok := obj["idempotency_key"].(string); !ok || keyValue == "" {
+			return badf("memory_versions row idempotency_key is invalid")
+		}
+		state, err := requireStringField(obj, "state")
+		if err != nil {
+			return badf("memory_versions row state is required")
+		}
+		operation, err := requireStringField(obj, "operation")
+		if err != nil {
+			return badf("memory_versions row operation is required")
+		}
+		priorState := ""
+		if rawPriorState, present := obj["prior_state"]; present && rawPriorState != nil {
+			var ok bool
+			priorState, ok = rawPriorState.(string)
+			if !ok || priorState == "" {
+				return badf("memory_versions row prior_state is invalid")
+			}
+		}
+		if err := validateImportedMemoryVersionTransition(
+			version, changeSeq, payloadDigest, state, priorState, operation, previousScope,
+		); err != nil {
+			return badf("memory_versions row %v", err)
+		}
+		curationRunID, hasCurationRun := optionalStringField(obj, "curation_run_id")
+		curationActionID, hasCurationAction := optionalStringField(obj, "curation_action_id")
+		if hasCurationRun != hasCurationAction || (hasCurationRun &&
+			(!validImportedGeneratedID(curationRunID, "mrun") ||
+				!validImportedGeneratedID(curationActionID, "mact"))) {
+			return badf("memory_versions row curation attribution is invalid")
+		}
+		if operation == "reverted" && !hasCurationRun {
+			return badf("memory_versions reverted row requires curation attribution")
+		}
+		setID, setIDOK := obj["supersession_set_id"].(string)
+		setRevision, revisionOK := importedNonnegativeInteger(obj["supersession_set_revision"])
+		replacementCount, countOK := importedNonnegativeInteger(obj["supersession_replacement_count"])
+		replacementDigest, digestOK := obj["supersession_replacement_digest"].(string)
+		if !setIDOK || !revisionOK || !countOK || !digestOK {
+			return badf("memory_versions row supersession receipt fields are invalid")
+		}
+		var supersessionSet memorySupersessionImportSet
+		supersessionRequestHash := ""
+		if operation == "superseded" {
+			if state != MemoryStateSuperseded || !validImportedGeneratedID(setID, "mset") || setRevision < 1 ||
+				replacementCount < 1 || replacementCount > maxMemorySupersessionReplacements ||
+				!validFactSHA256(replacementDigest) {
+				return badf("memory_versions row supersession receipt is invalid")
+			}
+			supersessionSet = memorySupersessionImportSet{id: setID, revision: setRevision}
+			supersessionRequestHash = requestHash
+		} else if setID != "" || setRevision != 0 || replacementCount != 0 || replacementDigest != "" {
+			return badf("memory_versions non-superseded row carries supersession receipt")
+		}
+		expectsSupersessionRelations := operation == "superseded" ||
+			(operation == "restored" && state == MemoryStateSuperseded)
+		if operation != "superseded" && previousScope.supersessionReplacementCount > 0 {
+			supersessionSet = previousScope.supersessionSet
+			replacementCount = previousScope.supersessionReplacementCount
+			replacementDigest = previousScope.supersessionReplacementDigest
+			supersessionRequestHash = previousScope.supersessionRequestHash
+		}
+		if expectsSupersessionRelations &&
+			(replacementCount < 1 || supersessionSet.id == "" || supersessionRequestHash == "") {
+			return badf("memory_versions row superseded lifecycle lineage is missing")
+		}
+		ic.memoryVersions[key] = memoryVersionImportScope{
+			owner: owner, previousVersion: previous, changeSeq: changeSeq,
+			payloadDigest: payloadDigest, requestHash: requestHash,
+			state: state, priorState: priorState, operation: operation,
+			supersessionSet:               supersessionSet,
+			supersessionReplacementCount:  replacementCount,
+			supersessionReplacementDigest: replacementDigest,
+			supersessionRequestHash:       supersessionRequestHash,
+			expectsSupersessionRelations:  expectsSupersessionRelations,
+			curationRunID:                 curationRunID,
+			curationActionID:              curationActionID,
+			contentHash:                   contentHash,
+			createdAt:                     *versionCreatedAt,
+		}
+		memory.versionCount++
+		if version > memory.maxVersion {
+			memory.maxVersion = version
+		}
+		if changeSeq > memory.maxChangeSeq {
+			memory.maxChangeSeq = changeSeq
+		}
+		ic.memories[memoryID] = memory
+	case "memory_vector_profiles":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_vector_profiles row %v", err)
+		}
+		profileID, err := requireStringField(obj, "id")
+		if err != nil || !validImportedGeneratedID(profileID, "mvp") {
+			return badf("memory_vector_profiles row id is invalid")
+		}
+		if _, exists := ic.memoryVectorProfiles[profileID]; exists {
+			return badf("memory_vector_profiles row duplicates id %q", profileID)
+		}
+		ownerProfileCount := 0
+		for _, existing := range ic.memoryVectorProfiles {
+			if existing.owner == owner {
+				ownerProfileCount++
+			}
+		}
+		if ownerProfileCount >= maxMemoryVectorProfiles {
+			return badf("memory_vector_profiles owner exceeds limit %d", maxMemoryVectorProfiles)
+		}
+		createdBy, err := requireStringField(obj, "created_by_agent_id")
+		if err != nil || createdBy != owner.ownerID {
+			return badf("memory_vector_profiles row creator does not match owner")
+		}
+		dimensions, ok := importedPositiveInteger(obj["dimensions"])
+		if !ok || dimensions > maxMemoryVectorDimensions {
+			return badf("memory_vector_profiles row dimensions are invalid")
+		}
+		provider, providerErr := requireStringField(obj, "provider")
+		model, modelErr := requireStringField(obj, "model")
+		recipe, recipeErr := requireStringField(obj, "recipe")
+		recipeVersion, recipeVersionErr := requireStringField(obj, "recipe_version")
+		metric, metricErr := requireStringField(obj, "distance_metric")
+		normalization, normalizationErr := requireStringField(obj, "normalization")
+		if providerErr != nil || modelErr != nil || recipeErr != nil || recipeVersionErr != nil || metricErr != nil || normalizationErr != nil {
+			return badf("memory_vector_profiles row contract fields are required")
+		}
+		normalized, contractHash, err := normalizeMemoryVectorProfileInput(CreateMemoryVectorProfileInput{
+			Provider: provider, Model: model, Recipe: recipe,
+			RecipeVersion: recipeVersion, Dimensions: int(dimensions),
+			DistanceMetric: metric, Normalization: normalization,
+		})
+		storedContractHash, _ := obj["contract_hash"].(string)
+		if err != nil || normalized.Provider != provider || normalized.Model != model ||
+			normalized.Recipe != recipe || normalized.RecipeVersion != recipeVersion ||
+			normalized.DistanceMetric != metric || normalized.Normalization != normalization ||
+			contractHash != storedContractHash {
+			return badf("memory_vector_profiles row contract is not canonical")
+		}
+		for _, existing := range ic.memoryVectorProfiles {
+			if existing.owner == owner && existing.profile.ContractHash == contractHash {
+				return badf("memory_vector_profiles row duplicates an owner contract")
+			}
+		}
+		createdAt, present, timestampErr := importedOptionalTimestamp(obj, "created_at")
+		if timestampErr != nil || !present || ic.exportedAt.IsZero() || createdAt.After(ic.exportedAt) {
+			return badf("memory_vector_profiles row created_at is invalid")
+		}
+		profile := MemoryVectorProfile{ID: profileID, Provider: provider, Model: model,
+			Recipe: recipe, RecipeVersion: recipeVersion, Dimensions: int(dimensions),
+			DistanceMetric: metric, Normalization: normalization,
+			ContractHash: contractHash, CreatedAt: *createdAt}
+		ic.memoryVectorProfiles[profileID] = memoryVectorProfileImportScope{owner: owner, profile: profile}
+	case "memory_vectors":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_vectors row %v", err)
+		}
+		profileID, profileErr := requireStringField(obj, "profile_id")
+		profileScope, profileOK := ic.memoryVectorProfiles[profileID]
+		memoryID, memoryErr := requireStringField(obj, "memory_id")
+		version, versionOK := importedPositiveInteger(obj["memory_version"])
+		versionScope, memoryVersionOK := ic.memoryVersions[memoryVersionImportKey{memoryID: memoryID, version: version}]
+		if profileErr != nil || !profileOK || profileScope.owner != owner || memoryErr != nil ||
+			!versionOK || !memoryVersionOK || versionScope.owner != owner {
+			return badf("memory_vectors row profile or memory version is outside its owner scope")
+		}
+		key := memoryVectorImportKey{profileID: profileID, memoryID: memoryID, version: version}
+		if ic.memoryVectors[key] {
+			return badf("memory_vectors row duplicates an exact vector key")
+		}
+		createdBy, err := requireStringField(obj, "created_by_agent_id")
+		if err != nil || createdBy != owner.ownerID {
+			return badf("memory_vectors row creator does not match owner")
+		}
+		contentHash, _ := obj["content_hash"].(string)
+		if contentHash != versionScope.contentHash {
+			return badf("memory_vectors row content_hash does not match the exact memory version")
+		}
+		rawVector, ok := obj["vector"].([]any)
+		if !ok {
+			return badf("memory_vectors row vector must be an array")
+		}
+		vector := make([]float64, len(rawVector))
+		for i, raw := range rawVector {
+			component, valid := importedFloat64(raw)
+			if !valid {
+				return badf("memory_vectors row component %d is invalid", i)
+			}
+			vector[i] = component
+		}
+		_, vectorHash, err := normalizeMemoryVector(vector, profileScope.profile)
+		storedVectorHash, _ := obj["vector_hash"].(string)
+		if err != nil || vectorHash != storedVectorHash {
+			return badf("memory_vectors row vector violates its profile or hash")
+		}
+		vectorCreatedAt, present, timestampErr := importedOptionalTimestamp(obj, "created_at")
+		if timestampErr != nil || !present || ic.exportedAt.IsZero() ||
+			vectorCreatedAt.After(ic.exportedAt) || versionScope.createdAt.IsZero() ||
+			vectorCreatedAt.Before(profileScope.profile.CreatedAt) ||
+			vectorCreatedAt.Before(versionScope.createdAt) {
+			return badf("memory_vectors row created_at is invalid")
+		}
+		ic.memoryVectors[key] = true
+	case "memory_evidence":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_evidence row %v", err)
+		}
+		memoryID, err := requireStringField(obj, "memory_id")
+		version, versionOK := importedPositiveInteger(obj["target_version"])
+		target := memoryVersionImportKey{memoryID: memoryID, version: version}
+		versionScope, targetOK := ic.memoryVersions[target]
+		if err != nil || !versionOK || !targetOK || versionScope.owner != owner {
+			return badf("memory_evidence row target %q version %d is outside its owner scope", memoryID, version)
+		}
+		id, err := requireStringField(obj, "id")
+		if err != nil || !strings.HasPrefix(id, "mev_") {
+			return badf("memory_evidence row id is invalid")
+		}
+		if _, exists := ic.memoryEvidence[id]; exists {
+			return badf("memory_evidence row duplicates id %q", id)
+		}
+		actorID, err := requireStringField(obj, "actor_id")
+		if err != nil || actorID != owner.ownerID {
+			return badf("memory_evidence row actor %q does not match owner %q", actorID, owner.ownerID)
+		}
+		changeSeq, ok := importedPositiveInteger(obj["evidence_change_seq"])
+		if !ok {
+			return badf("memory_evidence row evidence_change_seq must be a positive integer")
+		}
+		if err := ic.validateImportedMemoryEvidence(obj, target, owner, changeSeq); err != nil {
+			return badf("memory_evidence row %v", err)
+		}
+		state, _ := requireStringField(obj, "resolution_state")
+		ic.memoryEvidence[id] = memoryEvidenceImportScope{
+			target: target, state: state, changeSeq: changeSeq,
+		}
+		memory := ic.memories[memoryID]
+		if changeSeq > memory.maxChangeSeq {
+			memory.maxChangeSeq = changeSeq
+		}
+		ic.memories[memoryID] = memory
+	case "memory_relations":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_relations row %v", err)
+		}
+		relationID, err := requireStringField(obj, "id")
+		if err != nil || !validImportedGeneratedID(relationID, "mrel") {
+			return badf("memory_relations row id is invalid")
+		}
+		fromID, fromErr := requireStringField(obj, "from_memory_id")
+		fromVersion, fromVersionOK := importedPositiveInteger(obj["from_version"])
+		toID, toErr := requireStringField(obj, "to_memory_id")
+		toVersion, toVersionOK := importedPositiveInteger(obj["to_version"])
+		fromKey := memoryVersionImportKey{memoryID: fromID, version: fromVersion}
+		toKey := memoryVersionImportKey{memoryID: toID, version: toVersion}
+		from := ic.memoryVersions[fromKey]
+		to := ic.memoryVersions[toKey]
+		if fromErr != nil || toErr != nil || !fromVersionOK || !toVersionOK ||
+			from.owner != owner || to.owner != owner {
+			return badf("memory_relations row endpoints are outside its owner scope")
+		}
+		relationType, err := requireStringField(obj, "relation_type")
+		if err != nil {
+			return badf("memory_relations row relation_type is required")
+		}
+		curationRunID, hasCurationRun := optionalStringField(obj, "curation_run_id")
+		curationActionID, hasCurationAction := optionalStringField(obj, "curation_action_id")
+		if hasCurationRun != hasCurationAction || (hasCurationRun &&
+			(!validImportedGeneratedID(curationRunID, "mrun") ||
+				!validImportedGeneratedID(curationActionID, "mact"))) {
+			return badf("memory_relations row curation attribution is invalid")
+		}
+		revertedByRunID, hasRevertedRun := optionalStringField(obj, "reverted_by_run_id")
+		revertedByActionID, hasRevertedAction := optionalStringField(obj, "reverted_by_action_id")
+		if hasRevertedRun != hasRevertedAction || (hasRevertedRun &&
+			(!validImportedGeneratedID(revertedByRunID, "mrun") ||
+				!validImportedGeneratedID(revertedByActionID, "mact"))) {
+			return badf("memory_relations row revert attribution is invalid")
+		}
+		_, reverted, err := importedOptionalTimestamp(obj, "reverted_at")
+		if err != nil {
+			return badf("memory_relations row %v", err)
+		}
+		if hasRevertedRun && !reverted {
+			return badf("memory_relations row revert attribution requires reverted_at")
+		}
+		relationScope := memoryRelationCurationImportScope{
+			id: relationID, owner: owner, relationType: relationType,
+			from:  MemoryVersionReference{MemoryID: fromID, Version: fromVersion},
+			to:    MemoryVersionReference{MemoryID: toID, Version: toVersion},
+			runID: curationRunID, actionID: curationActionID,
+			revertedByRunID: revertedByRunID, revertedByActionID: revertedByActionID,
+		}
+		if _, duplicate := ic.memoryRelations[relationID]; duplicate {
+			return badf("memory_relations row duplicates id %q", relationID)
+		}
+		setID, hasSetID := optionalStringField(obj, "supersession_set_id")
+		setRevision, hasSetRevision, validSetRevision := importedOptionalPositiveInteger(obj, "supersession_set_revision")
+		switch relationType {
+		case "derived_from", "summarizes", "merged_from", "split_from", "conflicts_with":
+			if !hasCurationRun || hasSetID || hasSetRevision {
+				return badf("memory_relations generic lineage shape is invalid")
+			}
+		case "supersedes":
+			// Validated below against the immutable supersession receipt.
+		default:
+			return badf("memory_relations row relation_type %q is invalid", relationType)
+		}
+		if relationType != "supersedes" {
+			ic.memoryRelations[relationID] = relationScope
+			ic.memoryRelationCurations = append(ic.memoryRelationCurations, relationScope)
+			break
+		}
+		if !hasSetID || !validImportedGeneratedID(setID, "mset") ||
+			!hasSetRevision || !validSetRevision {
+			return badf("memory_relations supersedes row requires a valid supersession set id and revision")
+		}
+		set := memorySupersessionImportSet{id: setID, revision: setRevision}
+		if !to.expectsSupersessionRelations || to.supersessionReplacementCount < 1 ||
+			to.supersessionSet != set {
+			return badf("memory_relations supersedes row does not match the target version lineage")
+		}
+		if fromVersion != 1 || from.previousVersion != 0 ||
+			from.operation != "added" || from.state != MemoryStateActive {
+			return badf("memory_relations supersedes replacement must be its initial added active version")
+		}
+		if from.requestHash != to.supersessionRequestHash {
+			return badf("memory_relations supersedes replacement request_hash does not match its source operation")
+		}
+		ic.memoryRelations[relationID] = relationScope
+		if hasCurationRun || hasRevertedRun {
+			ic.memoryRelationCurations = append(ic.memoryRelationCurations, relationScope)
+		}
+		to.supersessionMembers = append(to.supersessionMembers,
+			MemoryVersionReference{MemoryID: fromID, Version: fromVersion})
+		if !reverted {
+			to.activeSupersessionMemberCount++
+		}
+		ic.memoryVersions[toKey] = to
+		if reverted {
+			break
+		}
+		if active, exists := ic.memoryActiveSupersessionSets[toKey]; exists && active != set {
+			return badf("memory version %q version %d belongs to multiple active supersession sets", toID, toVersion)
+		}
+		ic.memoryActiveSupersessionSets[toKey] = set
+	case "memory_deleted_references":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_deleted_references row %v", err)
+		}
+		referenceID, err := requireStringField(obj, "id")
+		if err != nil || !validImportedGeneratedID(referenceID, "mdr") {
+			return badf("memory_deleted_references row id is invalid")
+		}
+		memoryID, err := requireStringField(obj, "deleted_memory_id")
+		memory, exists := ic.memories[memoryID]
+		if err != nil || !exists || !memory.deleted || memory.owner != owner {
+			return badf("memory_deleted_references row references non-deleted memory %q", memoryID)
+		}
+		kind, err := requireStringField(obj, "former_reference_kind")
+		if err != nil || !validImportedMemoryRetryShieldKind(kind) {
+			return badf("memory_deleted_references row retry shield kind is invalid")
+		}
+		hash, present := optionalStringField(obj, "related_resource_id")
+		if !present || !validFactSHA256(hash) {
+			return badf("memory_deleted_references retry shield hash is invalid")
+		}
+		reason, err := requireStringField(obj, "reason_code")
+		if err != nil || reason != "permanent_delete" {
+			return badf("memory_deleted_references retry shield reason is invalid")
+		}
+		for _, field := range []string{"curation_run_id", "curation_request_id"} {
+			if value, supplied := obj[field]; supplied && value != nil {
+				return badf("memory_deleted_references retry shield %s must be null", field)
+			}
+		}
+		ic.memoryDeletedRetryShields[memoryID] = append(
+			ic.memoryDeletedRetryShields[memoryID],
+			memoryDeleteRetryShield{Kind: kind, Hash: hash},
+		)
+	case "memory_curation_lanes":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_lanes row %v", err)
+		}
+		requestGeneration, ok := importedGeneration(obj["request_generation"], true)
+		fencingGeneration, fenceOK := importedGeneration(obj["fencing_generation"], true)
+		if !ok || !fenceOK {
+			return badf("memory_curation_lanes row generations are invalid")
+		}
+		if active, present := optionalStringField(obj, "active_run_id"); present || active != "" {
+			return badf("memory_curation_lanes row retained an active lease during import")
+		}
+		existing, preRecorded := ic.memoryCurationLanes[owner]
+		if existing.validated || preRecorded && !existing.normalizedActive {
+			return badf("memory_curation_lanes row duplicates an owner lane")
+		}
+		if existing.normalizedActive &&
+			(existing.requestGeneration != requestGeneration || existing.fencingGeneration != fencingGeneration) {
+			return badf("memory_curation_lanes normalized generations changed unexpectedly")
+		}
+		existing.owner = owner
+		existing.requestGeneration = requestGeneration
+		existing.fencingGeneration = fencingGeneration
+		existing.validated = true
+		ic.memoryCurationLanes[owner] = existing
+	case "memory_curation_cursors":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_cursors row %v", err)
+		}
+		if _, ok := ic.memoryCurationLanes[owner]; !ok {
+			return badf("memory_curation_cursors row has no imported owner lane")
+		}
+		sourceKind, err := requireStringField(obj, "source_kind")
+		streamID, streamErr := requireStringField(obj, "source_stream_id")
+		position, positionOK := importedGeneration(obj["position"], true)
+		if err != nil || streamErr != nil || !positionOK || len(streamID) > 512 {
+			return badf("memory_curation_cursors row source or position is invalid")
+		}
+		switch sourceKind {
+		case "memory":
+			if !validImportedMemoryCurationFilteredStreamID(streamID) {
+				return badf("memory curation cursor stream is invalid")
+			}
+		case "evidence":
+			if !validImportedMemoryCurationFilteredStreamID(streamID) {
+				return badf("evidence curation cursor stream is invalid")
+			}
+		case "transcript":
+			transcript, exists := ic.transcripts[streamID]
+			if !exists || transcript.realmID != owner.realmID || transcript.ownerAgentID != owner.ownerID {
+				return badf("transcript curation cursor stream is outside its owner scope")
+			}
+		default:
+			return badf("memory_curation_cursors row source_kind is invalid")
+		}
+		key := memoryCurationCursorImportKey{owner: owner, sourceKind: sourceKind, streamID: streamID}
+		if _, duplicate := ic.memoryCurationCursors[key]; duplicate {
+			return badf("memory_curation_cursors row duplicates a source stream")
+		}
+		ic.memoryCurationCursors[key] = position
+	case "memory_curation_requests":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_requests row %v", err)
+		}
+		lane, exists := ic.memoryCurationLanes[owner]
+		if !exists {
+			return badf("memory_curation_requests row has no imported owner lane")
+		}
+		requestID, err := requireStringField(obj, "id")
+		generation, generationOK := importedGeneration(obj["request_generation"], false)
+		if err != nil || !validImportedGeneratedID(requestID, "mcrq") ||
+			!generationOK || generation > lane.requestGeneration {
+			return badf("memory_curation_requests row id or generation is invalid")
+		}
+		if err := validateImportedCurationActor(obj, owner); err != nil {
+			return badf("memory_curation_requests row %v", err)
+		}
+		if err := validateImportedCurationRequestContent(obj); err != nil {
+			return badf("memory_curation_requests row %v", err)
+		}
+		state, _ := requireStringField(obj, "state")
+		claimedRunID, _ := optionalStringField(obj, "claimed_run_id")
+		replayRunID, _ := optionalStringField(obj, "replay_run_id")
+		existing := ic.memoryCurationRequests[requestID]
+		if existing.validated {
+			return badf("memory_curation_requests row duplicates id %q", requestID)
+		}
+		existing.owner = owner
+		existing.requestGeneration = generation
+		existing.state = state
+		existing.replayRunID = replayRunID
+		if !existing.normalizedClaimed {
+			existing.claimedRunID = claimedRunID
+		}
+		existing.validated = true
+		ic.memoryCurationRequests[requestID] = existing
+	case "memory_curation_runs":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_runs row %v", err)
+		}
+		lane, exists := ic.memoryCurationLanes[owner]
+		if !exists {
+			return badf("memory_curation_runs row has no imported owner lane")
+		}
+		runID, err := requireStringField(obj, "id")
+		requestID, requestErr := requireStringField(obj, "request_id")
+		request, requestExists := ic.memoryCurationRequests[requestID]
+		generation, generationOK := importedGeneration(obj["request_generation"], false)
+		fence, fenceOK := importedGeneration(obj["fencing_generation"], false)
+		if err != nil || requestErr != nil || !validImportedGeneratedID(runID, "mrun") ||
+			!requestExists || request.owner != owner || !generationOK ||
+			generation > request.requestGeneration || !fenceOK || fence > lane.fencingGeneration {
+			return badf("memory_curation_runs row identity, request, or generation is invalid")
+		}
+		if err := validateImportedCurationActor(obj, owner); err != nil {
+			return badf("memory_curation_runs row %v", err)
+		}
+		counts := make([]int64, 5)
+		for index, field := range []string{"input_count", "memory_input_count", "evidence_input_count", "transcript_input_count", "cursor_input_count"} {
+			value, ok := importedNonnegativeInteger(obj[field])
+			if !ok || value > 10000 {
+				return badf("memory_curation_runs row %s is invalid", field)
+			}
+			counts[index] = value
+		}
+		if counts[0] != counts[1]+counts[2]+counts[3]+counts[4] {
+			return badf("memory_curation_runs row input counts do not sum")
+		}
+		planRevision, ok := importedNonnegativeInteger(obj["plan_revision"])
+		if !ok || planRevision > math.MaxInt32 {
+			return badf("memory_curation_runs row plan_revision is invalid")
+		}
+		planSchema, schemaOK := obj["plan_schema"].(string)
+		planHash, hashOK := obj["plan_hash"].(string)
+		_, scrubbed, scrubErr := importedOptionalTimestamp(obj, "scrubbed_at")
+		if !schemaOK || !hashOK || scrubErr != nil {
+			return badf("memory_curation_runs row plan or scrub metadata is invalid")
+		}
+		switch {
+		case planRevision == 0 && (planSchema != "" || planHash != ""):
+			return badf("memory_curation_runs unplanned row carries plan metadata")
+		case planRevision > 0 && planSchema != MemoryCurationPlanSchemaV1:
+			return badf("memory_curation_runs row plan schema is invalid")
+		case planRevision > 0 && !scrubbed && !isSHA256Hex(planHash):
+			return badf("memory_curation_runs row plan hash is invalid")
+		case scrubbed && planHash != "":
+			return badf("memory_curation_runs scrubbed row retains a plan hash")
+		}
+		state, _ := requireStringField(obj, "state")
+		existing := ic.memoryCurationRuns[runID]
+		if existing.validated {
+			return badf("memory_curation_runs row duplicates id %q", runID)
+		}
+		existing.owner = owner
+		existing.requestID = requestID
+		existing.requestGeneration = generation
+		existing.fencingGeneration = fence
+		if !existing.normalizedInterrupted {
+			existing.state = state
+		}
+		existing.planRevision = planRevision
+		existing.planSchema = planSchema
+		existing.planHash = planHash
+		existing.scrubbed = scrubbed
+		existing.inputCount = counts[0]
+		existing.memoryInputCount = counts[1]
+		existing.evidenceInputCount = counts[2]
+		existing.transcriptInputCount = counts[3]
+		existing.cursorInputCount = counts[4]
+		existing.observedByKind = map[string]int64{}
+		existing.validated = true
+		ic.memoryCurationRuns[runID] = existing
+	case "memory_curation_run_inputs":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_run_inputs row %v", err)
+		}
+		runID, err := requireStringField(obj, "run_id")
+		run, exists := ic.memoryCurationRuns[runID]
+		ordinal, ordinalOK := importedGeneration(obj["ordinal"], false)
+		kind, kindErr := requireStringField(obj, "input_kind")
+		if err != nil || !exists || run.owner != owner || !ordinalOK ||
+			ordinal != run.observedInputs+1 || kindErr != nil {
+			return badf("memory_curation_run_inputs row run, ordinal, or kind is invalid")
+		}
+		if err := ic.validateImportedCurationRunInput(obj, run, kind); err != nil {
+			return badf("memory_curation_run_inputs row %v", err)
+		}
+		run.observedInputs++
+		run.observedByKind[kind]++
+		ic.memoryCurationRuns[runID] = run
+	case "memory_curation_actions":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_actions row %v", err)
+		}
+		actionID, err := requireStringField(obj, "id")
+		runID, runErr := requireStringField(obj, "run_id")
+		run, exists := ic.memoryCurationRuns[runID]
+		planRevision, revisionOK := importedPositiveInteger(obj["plan_revision"])
+		ordinal, ordinalOK := importedGeneration(obj["ordinal"], false)
+		state, stateErr := requireStringField(obj, "state")
+		primitive, primitiveErr := requireStringField(obj, "primitive")
+		if err != nil || runErr != nil || !validImportedGeneratedID(actionID, "mact") ||
+			!exists || run.owner != owner || !revisionOK || planRevision != run.planRevision ||
+			!ordinalOK || ordinal != run.observedActions+1 ||
+			stateErr != nil || primitiveErr != nil || !validCurationPrimitive(primitive) {
+			return badf("memory_curation_actions row identity, run, or plan revision is invalid")
+		}
+		if _, duplicate := ic.memoryCurationActions[actionID]; duplicate {
+			return badf("memory_curation_actions row duplicates id %q", actionID)
+		}
+		action, err := decodeImportedMemoryCurationAction(
+			obj, owner, run, actionID, runID, ordinal, planRevision, state, primitive,
+		)
+		if err != nil {
+			return badf("memory_curation_actions row %v", err)
+		}
+		ic.memoryCurationActions[actionID] = action
+		run.observedActions++
+		ic.memoryCurationRuns[runID] = run
+	case "memory_curation_mutations":
+		owner, err := ic.importedMemoryOwner(obj)
+		if err != nil {
+			return badf("memory_curation_mutations row %v", err)
+		}
+		mutationID, err := requireStringField(obj, "id")
+		requestID, requestErr := requireStringField(obj, "request_id")
+		request, requestExists := ic.memoryCurationRequests[requestID]
+		operation, operationErr := requireStringField(obj, "operation")
+		if err != nil || !validImportedGeneratedID(mutationID, "mcmu") ||
+			requestErr != nil || !requestExists || request.owner != owner || operationErr != nil ||
+			!validCurationMutationOperation(operation) {
+			return badf("memory_curation_mutations row identity, request, or operation is invalid")
+		}
+		if err := validateImportedCurationActor(obj, owner); err != nil {
+			return badf("memory_curation_mutations row %v", err)
+		}
+		generation, generationOK := importedGeneration(obj["request_generation"], false)
+		fence, fenceOK := importedGeneration(obj["fencing_generation"], true)
+		if !generationOK || generation > request.requestGeneration || !fenceOK {
+			return badf("memory_curation_mutations row generations are invalid")
+		}
+		runID, hasRun := optionalStringField(obj, "run_id")
+		if operation == "request" {
+			if hasRun || fence != 0 {
+				return badf("memory_curation_mutations request receipt carries a run fence")
+			}
+		} else {
+			run, exists := ic.memoryCurationRuns[runID]
+			if !hasRun || !exists || run.requestID != requestID || run.owner != owner ||
+				fence > run.fencingGeneration {
+				return badf("memory_curation_mutations row run is outside its request scope")
+			}
+		}
+		if _, duplicate := ic.memoryCurationMutations[mutationID]; duplicate {
+			return badf("memory_curation_mutations row duplicates id %q", mutationID)
+		}
+		ic.memoryCurationMutations[mutationID] = true
 	default:
 		return badf("table %q is not importable", table)
+	}
+	return nil
+}
+
+func validImportedMemoryCurationFilteredStreamID(value string) bool {
+	const prefix = "filtered_v1_"
+	return strings.HasPrefix(value, prefix) && isSHA256Hex(strings.TrimPrefix(value, prefix))
+}
+
+func (ic *importCtx) importedMemoryOwner(obj map[string]any) (memoryOwnerImportKey, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return memoryOwnerImportKey{}, fmt.Errorf("references realm %q not present in this archive", realmID)
+	}
+	ownerKind, err := requireStringField(obj, "owner_kind")
+	if err != nil || ownerKind != "agent" {
+		return memoryOwnerImportKey{}, fmt.Errorf("owner_kind must be agent")
+	}
+	ownerID, err := requireStringField(obj, "owner_id")
+	if err != nil || !ic.agents[ownerID] || ic.agentRealms[ownerID] != realmID {
+		return memoryOwnerImportKey{}, fmt.Errorf("owner %q is outside realm %q", ownerID, realmID)
+	}
+	return memoryOwnerImportKey{
+		realmID: realmID, ownerKind: ownerKind, ownerID: ownerID,
+	}, nil
+}
+
+func validateImportedCurationActor(obj map[string]any, owner memoryOwnerImportKey) error {
+	actorKind, err := requireStringField(obj, "actor_kind")
+	actorID, actorErr := requireStringField(obj, "actor_id")
+	if err != nil || actorErr != nil || actorKind != "agent" || actorID != owner.ownerID {
+		return fmt.Errorf("actor must be the owner agent")
+	}
+	key, err := requireStringField(obj, "idempotency_key")
+	hash, hashErr := requireStringField(obj, "request_hash")
+	if err != nil || len(key) > 512 || hashErr != nil || !validFactSHA256(hash) {
+		return fmt.Errorf("idempotency receipt is invalid")
+	}
+	return nil
+}
+
+func validateImportedCurationRequestContent(obj map[string]any) error {
+	scope, ok := obj["scope"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("scope must be an object")
+	}
+	encoded, err := json.Marshal(scope)
+	if err != nil || len(encoded) > 32768 {
+		return fmt.Errorf("scope exceeds the size limit")
+	}
+	var decoded MemoryCurationScope
+	if err := decodeImportedCurationJSON(scope, &decoded); err != nil {
+		return fmt.Errorf("scope is not a strict curation scope")
+	}
+	normalized, err := normalizeMemoryCurationScope(decoded)
+	if err != nil || !sameCanonicalMemoryCurationJSON(decoded, normalized) {
+		return fmt.Errorf("scope is not canonical")
+	}
+	coalescingKey, err := requireStringField(obj, "coalescing_key")
+	triggerReason, triggerErr := requireStringField(obj, "trigger_reason")
+	if err != nil || len(coalescingKey) > 256 || triggerErr != nil ||
+		!memoryKindPattern.MatchString(triggerReason) {
+		return fmt.Errorf("coalescing key or trigger reason is invalid")
+	}
+	state, err := requireStringField(obj, "state")
+	if err != nil {
+		return fmt.Errorf("state is required")
+	}
+	switch state {
+	case "queued", "retry_wait", "fulfilled", "cancelled", "dead_letter":
+	default:
+		// A claimed request must have been normalized to queued before this
+		// boundary; retaining it would carry an old-cell lease.
+		return fmt.Errorf("state %q is invalid after lease normalization", state)
+	}
+	attempts, attemptsOK := importedNonnegativeInteger(obj["attempt_count"])
+	maxAttempts, maxOK := importedPositiveInteger(obj["max_attempts"])
+	if !attemptsOK || !maxOK || maxAttempts > 100 || attempts > maxAttempts {
+		return fmt.Errorf("attempt counts are invalid")
+	}
+	if _, ok := obj["read_only_replay"].(bool); !ok {
+		return fmt.Errorf("read_only_replay must be a boolean")
+	}
+	if coalescingKey == automaticMemoryCurationCoalescingKey {
+		defaultScope, scopeErr := normalizeMemoryCurationScope(MemoryCurationScope{})
+		priority, priorityOK := importedNonnegativeInteger(obj["priority"])
+		idempotencyKey, keyOK := obj["idempotency_key"].(string)
+		readOnlyReplay, replayOK := obj["read_only_replay"].(bool)
+		_, hasReplayRun := optionalStringField(obj, "replay_run_id")
+		if scopeErr != nil || !sameCanonicalMemoryCurationJSON(decoded, defaultScope) ||
+			!priorityOK || priority != 0 || !keyOK ||
+			!strings.HasPrefix(idempotencyKey, "automatic:") || !replayOK ||
+			readOnlyReplay || hasReplayRun {
+			return fmt.Errorf("reserved automatic request shape is invalid")
+		}
+	}
+	for _, field := range []string{"due_at", "created_at", "updated_at"} {
+		if _, present, err := importedOptionalTimestamp(obj, field); err != nil || !present {
+			return fmt.Errorf("%s must be an RFC3339 timestamp", field)
+		}
+	}
+	return nil
+}
+
+func (ic *importCtx) validateImportedCurationRunInput(
+	obj map[string]any,
+	run memoryCurationRunImportScope,
+	kind string,
+) error {
+	orderKey, err := requireStringField(obj, "order_key")
+	if err != nil || len(orderKey) > 512 {
+		return fmt.Errorf("order_key is invalid")
+	}
+	switch kind {
+	case "memory":
+		memoryID, err := requireStringField(obj, "memory_id")
+		version, ok := importedPositiveInteger(obj["memory_version"])
+		scope, exists := ic.memoryVersions[memoryVersionImportKey{memoryID: memoryID, version: version}]
+		if err != nil || !ok || !exists || scope.owner != run.owner {
+			return fmt.Errorf("memory input is outside its owner scope")
+		}
+	case "evidence":
+		evidenceID, err := requireStringField(obj, "evidence_id")
+		evidence, exists := ic.memoryEvidence[evidenceID]
+		version := ic.memoryVersions[evidence.target]
+		if err != nil || !exists || version.owner != run.owner {
+			return fmt.Errorf("evidence input is outside its owner scope")
+		}
+	case "transcript":
+		transcriptID, err := requireStringField(obj, "transcript_id")
+		transcript, exists := ic.transcripts[transcriptID]
+		from, fromOK := importedGeneration(obj["sequence_from"], false)
+		until, untilOK := importedGeneration(obj["sequence_until"], false)
+		if err != nil || !exists || transcript.realmID != run.owner.realmID ||
+			transcript.ownerAgentID != run.owner.ownerID || !fromOK || !untilOK ||
+			until < from || until >= transcript.nextSequence {
+			return fmt.Errorf("transcript input range is outside its owner stream")
+		}
+	case "cursor":
+		sourceKind, err := requireStringField(obj, "cursor_source_kind")
+		streamID, streamErr := requireStringField(obj, "cursor_stream_id")
+		expected, expectedOK := importedGeneration(obj["cursor_expected_prior"], true)
+		upper, upperOK := importedGeneration(obj["cursor_upper"], true)
+		position, exists := ic.memoryCurationCursors[memoryCurationCursorImportKey{
+			owner: run.owner, sourceKind: sourceKind, streamID: streamID,
+		}]
+		if err != nil || streamErr != nil || !expectedOK || !upperOK ||
+			upper < expected || !exists || position < expected {
+			return fmt.Errorf("cursor input interval is invalid")
+		}
+	default:
+		return fmt.Errorf("input_kind %q is invalid", kind)
+	}
+	return nil
+}
+
+func validCurationPrimitive(value string) bool {
+	switch value {
+	case "create", "replace", "supersede", "relate", "propose_fact":
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeImportedMemoryCurationAction(
+	obj map[string]any,
+	owner memoryOwnerImportKey,
+	run memoryCurationRunImportScope,
+	actionID, runID string,
+	ordinal, planRevision int64,
+	state, primitive string,
+) (memoryCurationActionImportScope, error) {
+	out := memoryCurationActionImportScope{
+		id: actionID, owner: owner, runID: runID, ordinal: ordinal,
+		planRevision: planRevision, state: state, primitive: primitive,
+	}
+	_, scrubbed, err := importedOptionalTimestamp(obj, "scrubbed_at")
+	if err != nil {
+		return out, err
+	}
+	out.scrubbed = scrubbed
+	if scrubbed {
+		if !run.scrubbed || !importedEmptyCurationJSON(obj["input_refs"], []any{}) ||
+			!importedEmptyCurationJSON(obj["expected_heads"], []any{}) ||
+			!importedEmptyCurationJSON(obj["proposed_payload"], map[string]any{}) ||
+			!importedEmptyCurationJSON(obj["validation_result"], map[string]any{}) ||
+			!importedEmptyCurationJSON(obj["applied_result"], map[string]any{}) ||
+			!importedEmptyCurationJSON(obj["rollback_result"], map[string]any{}) {
+			return out, fmt.Errorf("scrubbed action retains value-bearing JSON")
+		}
+		actionHash, ok := obj["action_hash"].(string)
+		localRef, localOK := obj["local_ref"].(string)
+		if !ok || actionHash != "" || !localOK || localRef != "" {
+			return out, fmt.Errorf("scrubbed action retains its hash or local reference")
+		}
+		return out, nil
+	}
+	if run.scrubbed {
+		return out, fmt.Errorf("unscrubbed action belongs to a scrubbed run")
+	}
+	if err := decodeImportedCurationJSON(obj["proposed_payload"], &out.action); err != nil {
+		return out, fmt.Errorf("proposed_payload is invalid: %w", err)
+	}
+	if out.action.Ordinal != ordinal || out.action.Operation != primitive ||
+		!validMemoryCurationStoredActionEnvelope(out.action) {
+		return out, fmt.Errorf("proposed_payload does not match its action envelope")
+	}
+	localRef, ok := obj["local_ref"].(string)
+	if !ok || (out.action.Create != nil && localRef != out.action.Create.LocalRef) ||
+		(out.action.Create == nil && localRef != "") {
+		return out, fmt.Errorf("local_ref does not match proposed_payload")
+	}
+	if err := decodeImportedCurationJSON(obj["input_refs"], &out.inputRefs); err != nil {
+		return out, fmt.Errorf("input_refs are invalid: %w", err)
+	}
+	normalizedRefs, err := normalizeMemoryCurationActionInputRefs(out.inputRefs)
+	if err != nil || !sameCanonicalMemoryCurationJSON(out.inputRefs, normalizedRefs) {
+		return out, fmt.Errorf("input_refs are not canonical")
+	}
+	if err := decodeImportedCurationJSON(obj["expected_heads"], &out.expectedHeads); err != nil {
+		return out, fmt.Errorf("expected_heads are invalid: %w", err)
+	}
+	normalizedHeads, err := normalizeMemoryCurationExpectedHeads(out.expectedHeads)
+	if err != nil || !sameCanonicalMemoryCurationJSON(out.expectedHeads, normalizedHeads) {
+		return out, fmt.Errorf("expected_heads are not canonical")
+	}
+	var validation struct {
+		Authorized        bool `json:"authorized"`
+		InputRefCount     int  `json:"input_ref_count"`
+		ExpectedHeadCount int  `json:"expected_head_count"`
+	}
+	if err := decodeImportedCurationJSON(obj["validation_result"], &validation); err != nil ||
+		!validation.Authorized || validation.InputRefCount != len(out.inputRefs) ||
+		validation.ExpectedHeadCount != len(out.expectedHeads) {
+		return out, fmt.Errorf("validation_result does not match authorization indexes")
+	}
+	canonical, err := canonicalMemoryCurationJSON(out.action)
+	if err != nil {
+		return out, fmt.Errorf("proposed_payload is not canonicalizable")
+	}
+	sum := sha256.Sum256(canonical)
+	out.actionHash, ok = obj["action_hash"].(string)
+	if !ok || out.actionHash != hex.EncodeToString(sum[:]) {
+		return out, fmt.Errorf("action_hash does not match proposed_payload")
+	}
+
+	switch state {
+	case "applied", "reverted":
+		var result MemoryCurationActionApplyResult
+		if err := decodeImportedCurationJSON(obj["applied_result"], &result); err != nil ||
+			result.ActionID != actionID || result.Ordinal != ordinal || result.Operation != primitive {
+			return out, fmt.Errorf("applied_result does not match its action")
+		}
+		out.appliedResult = &result
+	default:
+		if !importedEmptyCurationJSON(obj["applied_result"], map[string]any{}) {
+			return out, fmt.Errorf("unapplied action carries applied_result")
+		}
+	}
+	if state == "reverted" {
+		var result MemoryCurationActionRollbackResult
+		if err := decodeImportedCurationJSON(obj["rollback_result"], &result); err != nil ||
+			result.ActionID != actionID || result.Ordinal != ordinal || result.Operation != primitive {
+			return out, fmt.Errorf("rollback_result does not match its action")
+		}
+		out.rollbackResult = &result
+	} else if !importedEmptyCurationJSON(obj["rollback_result"], map[string]any{}) {
+		return out, fmt.Errorf("unreverted action carries rollback_result")
+	}
+	return out, nil
+}
+
+func decodeImportedCurationJSON(value any, destination any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return decodeMemoryCurationStoredJSON(raw, destination)
+}
+
+func importedEmptyCurationJSON(value, empty any) bool {
+	return sameCanonicalMemoryCurationJSON(value, empty)
+}
+
+func validCurationMutationOperation(value string) bool {
+	switch value {
+	case "request", "start", "renew", "plan", "apply", "cancel", "abandon", "rollback":
+		return true
+	default:
+		return false
+	}
+}
+
+func (ic *importCtx) validateImportedMemoryEvidence(
+	obj map[string]any,
+	target memoryVersionImportKey,
+	owner memoryOwnerImportKey,
+	changeSeq int64,
+) error {
+	state, err := requireStringField(obj, "resolution_state")
+	if err != nil {
+		return fmt.Errorf("resolution_state is required")
+	}
+	pendingID, hasPending := optionalStringField(obj, "pending_evidence_id")
+	if hasPending {
+		pending, exists := ic.memoryEvidence[pendingID]
+		if !exists || pending.target != target || pending.state != "pending" {
+			return fmt.Errorf("pending evidence %q is not a pending row on the target version", pendingID)
+		}
+		if changeSeq <= pending.changeSeq {
+			return fmt.Errorf("terminal resolution change_seq must follow its pending evidence")
+		}
+	} else if changeSeq <= ic.memoryVersions[target].changeSeq {
+		return fmt.Errorf("initial evidence change_seq must follow its target version")
+	}
+	key, hasKey := optionalStringField(obj, "idempotency_key")
+	hash, hasHash := optionalStringField(obj, "request_hash")
+	if hasPending {
+		if !hasKey || key == "" || !hasHash || !validFactSHA256(hash) {
+			return fmt.Errorf("terminal resolution requires an idempotency_key and request_hash")
+		}
+	} else {
+		for _, field := range []string{"idempotency_key", "request_hash"} {
+			if value, supplied := obj[field]; supplied && value != nil {
+				return fmt.Errorf("initial evidence %s must be null", field)
+			}
+		}
+	}
+
+	switch state {
+	case "pending":
+		locator, present := optionalStringField(obj, "external_locator")
+		if !present || locator == "" || hasPending {
+			return fmt.Errorf("pending evidence requires only an external locator")
+		}
+	case "unavailable":
+		reason, present := optionalStringField(obj, "terminal_reason_code")
+		if !present || reason == "" || hasPending {
+			return fmt.Errorf("unavailable evidence requires only a terminal reason")
+		}
+	case "unresolvable":
+		reason, present := optionalStringField(obj, "terminal_reason_code")
+		if !hasPending || !present || reason == "" {
+			return fmt.Errorf("unresolvable evidence requires pending evidence and a reason")
+		}
+		if ic.memoryEvidenceTerminal[pendingID] {
+			return fmt.Errorf("pending evidence %q has more than one terminal resolution", pendingID)
+		}
+		ic.memoryEvidenceTerminal[pendingID] = true
+	case "resolved":
+		kind, err := requireStringField(obj, "resolved_kind")
+		if err != nil {
+			return fmt.Errorf("resolved evidence requires resolved_kind")
+		}
+		switch kind {
+		case "transcript":
+			transcriptID, err := requireStringField(obj, "source_transcript_id")
+			scope, exists := ic.transcripts[transcriptID]
+			from, fromOK := importedPositiveInteger(obj["source_sequence_from"])
+			until, untilOK := importedPositiveInteger(obj["source_sequence_until"])
+			if err != nil || !exists || scope.realmID != owner.realmID ||
+				scope.ownerAgentID != owner.ownerID || !fromOK || !untilOK ||
+				until < from || until >= scope.nextSequence {
+				return fmt.Errorf("transcript evidence range is outside its owner transcript")
+			}
+		case "memory":
+			memoryID, err := requireStringField(obj, "source_memory_id")
+			version, ok := importedPositiveInteger(obj["source_memory_version"])
+			source, exists := ic.memoryVersions[memoryVersionImportKey{
+				memoryID: memoryID, version: version,
+			}]
+			if err != nil || !ok || !exists || source.owner != owner {
+				return fmt.Errorf("source memory version is outside its owner scope")
+			}
+		case "message":
+			messageID, err := requireStringField(obj, "source_message_id")
+			message, exists := ic.messages[messageID]
+			if err != nil || !exists || message.realmID != owner.realmID ||
+				(message.fromAgentID != owner.ownerID && message.toAgentID != owner.ownerID) {
+				return fmt.Errorf("source message is outside its owner scope")
+			}
+		case "import_artifact":
+			locator, present := optionalStringField(obj, "source_import_locator")
+			if !present || locator == "" {
+				return fmt.Errorf("import artifact evidence requires a locator")
+			}
+		case "artifact":
+			artifact, present := obj["artifact_excerpt"]
+			if !present || artifact == nil {
+				return fmt.Errorf("artifact evidence requires an excerpt")
+			}
+		default:
+			return fmt.Errorf("resolved_kind %q is invalid", kind)
+		}
+		if hasPending {
+			if ic.memoryEvidenceTerminal[pendingID] {
+				return fmt.Errorf("pending evidence %q has more than one terminal resolution", pendingID)
+			}
+			ic.memoryEvidenceTerminal[pendingID] = true
+		}
+	default:
+		return fmt.Errorf("resolution_state %q is invalid", state)
 	}
 	return nil
 }
@@ -823,11 +2609,111 @@ func importedOptionalTimestamp(obj map[string]any, key string) (*time.Time, bool
 }
 
 func importedNonnegativeInteger(raw any) (int64, bool) {
-	value, ok := raw.(float64)
-	if !ok || value < 0 || value != math.Trunc(value) || value > math.MaxInt64 {
+	value, ok := importedInteger(raw)
+	if !ok || value < 0 {
 		return 0, false
 	}
-	return int64(value), true
+	return value, true
+}
+
+func importedOptionalNonnegativeInteger(obj map[string]any, key string) (int64, bool) {
+	raw, present := obj[key]
+	if !present {
+		return 0, true
+	}
+	return importedNonnegativeInteger(raw)
+}
+
+// importedInteger parses archive integers without ever routing JSON numbers
+// through float64. PostgreSQL BIGINT values can exceed JavaScript's 53-bit
+// integer range, and rounding them would corrupt change clocks and version
+// ordering before the original NDJSON reaches jsonb_populate_record.
+//
+// The concrete integer and float cases keep direct validator unit tests and
+// callers useful; ImportAccount itself always decodes JSON numbers as
+// json.Number via decodeImportRow.
+func importedInteger(raw any) (int64, bool) {
+	switch value := raw.(type) {
+	case json.Number:
+		parsed, err := value.Int64()
+		return parsed, err == nil
+	case int:
+		return int64(value), true
+	case int64:
+		return value, true
+	case int32:
+		return int64(value), true
+	case float64:
+		// float64 is accepted only for in-process callers. Reject the
+		// unrepresentable int64 boundary and every fractional/non-finite
+		// value rather than depending on implementation-defined conversion.
+		if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) ||
+			value < -float64(uint64(1)<<63) || value >= float64(uint64(1)<<63) {
+			return 0, false
+		}
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func importedFloat64(raw any) (float64, bool) {
+	var value float64
+	switch raw := raw.(type) {
+	case json.Number:
+		parsed, err := raw.Float64()
+		if err != nil {
+			return 0, false
+		}
+		value = parsed
+	case float64:
+		value = raw
+	case int:
+		value = float64(raw)
+	case int64:
+		value = float64(raw)
+	default:
+		return 0, false
+	}
+	return value, !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func importedPositiveInteger(raw any) (int64, bool) {
+	value, ok := importedNonnegativeInteger(raw)
+	return value, ok && value > 0
+}
+
+func importedOptionalPositiveInteger(obj map[string]any, key string) (int64, bool, bool) {
+	raw, present := obj[key]
+	if !present || raw == nil {
+		return 0, false, true
+	}
+	value, ok := importedPositiveInteger(raw)
+	return value, true, ok
+}
+
+func importedNormalizedMemoryStrings(raw any, maxCount, maxBytes int, label string) ([]string, error) {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%ss must be an array of strings", label)
+	}
+	original := make([]string, len(values))
+	for _, value := range values {
+		if _, ok := value.(string); !ok {
+			return nil, fmt.Errorf("%ss must be an array of strings", label)
+		}
+	}
+	for index := range values {
+		original[index] = values[index].(string)
+	}
+	normalized, err := normalizeMemoryStrings(original, maxCount, maxBytes, label)
+	if err != nil {
+		return nil, err
+	}
+	if !equalStrings(original, normalized) {
+		return nil, fmt.Errorf("%ss are not in normalized stored order", label)
+	}
+	return normalized, nil
 }
 
 func validFactSHA256(value string) bool {
@@ -896,7 +2782,7 @@ func validateImportedFactAssertionContent(obj map[string]any) error {
 	if err != nil {
 		return err
 	}
-	confidence, ok := obj["confidence"].(float64)
+	confidence, ok := importedFloat64(obj["confidence"])
 	if !ok {
 		return fmt.Errorf("confidence must be a number")
 	}
@@ -1028,7 +2914,7 @@ func validateImportedFactCandidateContent(obj map[string]any) error {
 	if !ok {
 		return fmt.Errorf("sensitive must be a boolean")
 	}
-	confidence, ok := obj["confidence"].(float64)
+	confidence, ok := importedFloat64(obj["confidence"])
 	if !ok {
 		return fmt.Errorf("confidence must be a number")
 	}
@@ -1113,8 +2999,23 @@ func validateImportedFactCandidateContent(obj map[string]any) error {
 		if hasResolved || decidedAt == nil {
 			return fmt.Errorf("rejected lifecycle fields are inconsistent")
 		}
+	case "withdrawn":
+		if hasResolved || decidedAt == nil || hasConflict != hasObserved {
+			return fmt.Errorf("withdrawn lifecycle fields are inconsistent")
+		}
 	default:
 		return fmt.Errorf("status %q is invalid", status)
+	}
+	withdrawalReason, _ := obj["withdrawal_reason"].(string)
+	withdrawalKey, _ := obj["withdrawal_idempotency_key"].(string)
+	withdrawalHash, _ := obj["withdrawal_request_hash"].(string)
+	if status == "withdrawn" {
+		if withdrawalReason != "curation_rollback" || len(withdrawalKey) < 1 ||
+			len(withdrawalKey) > 512 || !validFactSHA256(withdrawalHash) {
+			return fmt.Errorf("withdrawn receipt is invalid")
+		}
+	} else if withdrawalReason != "" || withdrawalKey != "" || withdrawalHash != "" {
+		return fmt.Errorf("non-withdrawn candidate carries withdrawal receipt")
 	}
 	return nil
 }
@@ -1136,6 +3037,11 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	ic := newImportCtx(expectedAccountID)
+	var importedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&importedAt); err != nil {
+		return export.Manifest{}, fmt.Errorf("read destination database clock: %w", err)
+	}
+	importedAt = importedAt.UTC()
 
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
@@ -1146,6 +3052,13 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if m.Status != "suspended" && m.Status != "closed" {
 				return fmt.Errorf("%w: manifest status %q — exports are only taken frozen", ErrArchiveContent, m.Status)
 			}
+			if err := validateArchiveManifestTables(m.SchemaVersion, m.Tables); err != nil {
+				return err
+			}
+			if err := validateArchiveExportedAt(m.ExportedAt, importedAt); err != nil {
+				return err
+			}
+			ic.exportedAt = m.ExportedAt.UTC()
 			var exists bool
 			if err := tx.QueryRow(ctx,
 				`SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1)`,
@@ -1161,14 +3074,21 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if _, ok := importColumns[table]; !ok {
 				return fmt.Errorf("%w: table %q not importable", ErrArchiveContent, table)
 			}
-			var obj map[string]any
-			if err := json.Unmarshal(row, &obj); err != nil {
+			obj, err := decodeImportRow(row)
+			if err != nil {
 				return fmt.Errorf("%w: %s row is not JSON: %v", ErrArchiveContent, table, err)
+			}
+			if err := ic.normalizeImportedCurationLease(table, obj, importedAt); err != nil {
+				return err
 			}
 			if err := ic.validateAndRecord(table, obj); err != nil {
 				return err
 			}
-			return insertProjected(ctx, tx, table, obj, row)
+			normalizedRow, err := json.Marshal(obj)
+			if err != nil {
+				return fmt.Errorf("%w: marshal normalized %s row: %v", ErrArchiveContent, table, err)
+			}
+			return insertProjected(ctx, tx, table, obj, normalizedRow)
 		},
 	})
 	if err != nil {
@@ -1178,6 +3098,45 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		if !ic.deliveries[messageID] {
 			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
 		}
+	}
+	for memoryID, memory := range ic.memories {
+		clock, hasClock := ic.memoryClocks[memory.owner]
+		if !hasClock || clock < memory.maxChangeSeq {
+			return export.Manifest{}, fmt.Errorf(
+				"%w: memory %q change clock %d is below imported change sequence %d",
+				ErrArchiveContent, memoryID, clock, memory.maxChangeSeq,
+			)
+		}
+		if memory.deleted {
+			if memory.versionCount != 0 {
+				return export.Manifest{}, fmt.Errorf(
+					"%w: permanently deleted memory %q still has %d versions",
+					ErrArchiveContent, memoryID, memory.versionCount,
+				)
+			}
+			if err := validateImportedMemoryRetryShields(
+				memoryID, memory, ic.memoryDeletedRetryShields[memoryID],
+			); err != nil {
+				return export.Manifest{}, err
+			}
+			continue
+		}
+		head, ok := ic.memoryVersions[memoryVersionImportKey{
+			memoryID: memoryID, version: memory.currentVersion,
+		}]
+		if !ok || head.owner != memory.owner || memory.currentVersion != memory.maxVersion ||
+			memory.versionCount != memory.maxVersion {
+			return export.Manifest{}, fmt.Errorf(
+				"%w: memory %q current version %d is not the contiguous latest version %d",
+				ErrArchiveContent, memoryID, memory.currentVersion, memory.maxVersion,
+			)
+		}
+	}
+	if err := validateImportedMemorySupersessionMembership(ic.memories, ic.memoryVersions); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: memory supersession membership: %v", ErrArchiveContent, err)
+	}
+	if err := validateImportedMemoryCurationGraph(ic); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: memory curation graph: %v", ErrArchiveContent, err)
 	}
 	for factID, scope := range ic.facts {
 		if scope.deleted {
@@ -1240,6 +3199,721 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, err
 	}
 	return m, nil
+}
+
+func validateImportedMemorySupersessionMembership(
+	memories map[string]memoryImportScope,
+	versions map[memoryVersionImportKey]memoryVersionImportScope,
+) error {
+	type setActivity struct {
+		active   int64
+		reverted int64
+	}
+	activities := map[memorySupersessionImportSet]setActivity{}
+	for key, version := range versions {
+		if !version.expectsSupersessionRelations {
+			continue
+		}
+		observed := int64(len(version.supersessionMembers))
+		activity := activities[version.supersessionSet]
+		activity.active += version.activeSupersessionMemberCount
+		activity.reverted += observed - version.activeSupersessionMemberCount
+		activities[version.supersessionSet] = activity
+		if observed > version.supersessionReplacementCount {
+			return fmt.Errorf(
+				"memory %q version %d has %d replacement relations, receipt commits to %d",
+				key.memoryID, key.version, observed, version.supersessionReplacementCount,
+			)
+		}
+		if observed == version.supersessionReplacementCount {
+			if memorySupersessionMembershipDigest(version.supersessionMembers) !=
+				version.supersessionReplacementDigest {
+				return fmt.Errorf("memory %q version %d replacement digest does not match its receipt",
+					key.memoryID, key.version)
+			}
+			continue
+		}
+
+		// A smaller set is a legitimate post-delete archive only after the
+		// original set was reverted. Keeping any surviving active edge, or
+		// importing the incomplete receipt as the current head, would create a
+		// live partial supersession. Historical incomplete receipts remain
+		// portable but can only fail closed on an exact retry.
+		memory := memories[key.memoryID]
+		if version.activeSupersessionMemberCount != 0 || memory.currentVersion == key.version {
+			return fmt.Errorf(
+				"memory %q version %d has an incomplete live replacement set",
+				key.memoryID, key.version,
+			)
+		}
+	}
+	for set, activity := range activities {
+		if activity.active > 0 && activity.reverted > 0 {
+			return fmt.Errorf(
+				"supersession set %q revision %d mixes active and reverted edges",
+				set.id, set.revision,
+			)
+		}
+	}
+	for memoryID, memory := range memories {
+		if memory.deleted {
+			continue
+		}
+		head := versions[memoryVersionImportKey{memoryID: memoryID, version: memory.currentVersion}]
+		requireCompleteActive := func(version memoryVersionImportScope) error {
+			if !version.expectsSupersessionRelations ||
+				int64(len(version.supersessionMembers)) != version.supersessionReplacementCount ||
+				version.activeSupersessionMemberCount != version.supersessionReplacementCount {
+				return fmt.Errorf("memory %q current superseded lineage is not complete and active", memoryID)
+			}
+			return nil
+		}
+		switch {
+		case head.state == MemoryStateSuperseded:
+			if err := requireCompleteActive(head); err != nil {
+				return err
+			}
+		case head.state == MemoryStateForgotten && head.priorState == MemoryStateSuperseded:
+			previous := versions[memoryVersionImportKey{
+				memoryID: memoryID, version: head.previousVersion,
+			}]
+			if err := requireCompleteActive(previous); err != nil {
+				return err
+			}
+		case (head.state == MemoryStateActive ||
+			head.state == MemoryStateForgotten && head.priorState == MemoryStateActive) &&
+			head.supersessionReplacementCount > 0:
+			if activities[head.supersessionSet].active > 0 {
+				return fmt.Errorf("memory %q active lineage retains active supersession edges", memoryID)
+			}
+		}
+	}
+	return nil
+}
+
+func validateImportedMemoryCurationGraph(ic *importCtx) error {
+	maxRequestByOwner := map[memoryOwnerImportKey]int64{}
+	maxFenceByOwner := map[memoryOwnerImportKey]int64{}
+	for requestID, request := range ic.memoryCurationRequests {
+		if request.requestGeneration > maxRequestByOwner[request.owner] {
+			maxRequestByOwner[request.owner] = request.requestGeneration
+		}
+		if request.claimedRunID != "" {
+			run, ok := ic.memoryCurationRuns[request.claimedRunID]
+			if !ok || run.requestID != requestID || run.owner != request.owner {
+				return fmt.Errorf("request %q claimed run is outside its owner scope", requestID)
+			}
+			if request.normalizedClaimed && !run.normalizedInterrupted {
+				return fmt.Errorf("request %q active run was not interrupted on import", requestID)
+			}
+		}
+		if request.replayRunID != "" {
+			run, ok := ic.memoryCurationRuns[request.replayRunID]
+			if !ok || run.owner != request.owner || run.state != "rolled_back" || run.scrubbed {
+				return fmt.Errorf("request %q replay run is outside its owner scope", requestID)
+			}
+		}
+	}
+	for runID, run := range ic.memoryCurationRuns {
+		if run.fencingGeneration > maxFenceByOwner[run.owner] {
+			maxFenceByOwner[run.owner] = run.fencingGeneration
+		}
+		if run.observedInputs != run.inputCount ||
+			run.observedByKind["memory"] != run.memoryInputCount ||
+			run.observedByKind["evidence"] != run.evidenceInputCount ||
+			run.observedByKind["transcript"] != run.transcriptInputCount ||
+			run.observedByKind["cursor"] != run.cursorInputCount {
+			return fmt.Errorf("run %q materialized input counts do not match its receipt", runID)
+		}
+	}
+	for owner, lane := range ic.memoryCurationLanes {
+		if lane.requestGeneration != maxRequestByOwner[owner] {
+			return fmt.Errorf("owner lane request generation %d does not match imported requests %d",
+				lane.requestGeneration, maxRequestByOwner[owner])
+		}
+		expectedFence := maxFenceByOwner[owner]
+		if lane.normalizedActive {
+			run, ok := ic.memoryCurationRuns[lane.activeRunID]
+			if !ok || run.owner != owner || !run.normalizedInterrupted ||
+				run.fencingGeneration+1 != lane.fencingGeneration {
+				return fmt.Errorf("owner lane active run was not coherently interrupted")
+			}
+			expectedFence++
+		} else if lane.fencingGeneration == expectedFence+1 {
+			// Expiry, cancel/abandon, and apply-conflict transitions consume
+			// the active fence when they release the lane. Prove the maximum
+			// imported run is one of those terminal outcomes before accepting
+			// the otherwise-idle +1 generation.
+			terminalFence := false
+			for _, run := range ic.memoryCurationRuns {
+				if run.owner == owner && run.fencingGeneration == expectedFence &&
+					(run.state == "abandoned" || run.state == "interrupted" || run.state == "conflict") {
+					terminalFence = true
+					break
+				}
+			}
+			if !terminalFence {
+				return fmt.Errorf("owner lane idle fence advance has no terminal run")
+			}
+			expectedFence++
+		}
+		if lane.fencingGeneration != expectedFence {
+			return fmt.Errorf("owner lane fencing generation %d does not match imported runs %d",
+				lane.fencingGeneration, expectedFence)
+		}
+	}
+	for actionID, action := range ic.memoryCurationActions {
+		run := ic.memoryCurationRuns[action.runID]
+		valid := true
+		switch run.state {
+		case "open":
+			valid = action.state == "draft"
+		case "planned", "conflict", "abandoned", "interrupted":
+			valid = action.state == "validated"
+		case "applied":
+			valid = action.state == "applied"
+		case "rolled_back":
+			valid = action.state == "reverted"
+		}
+		if !valid {
+			return fmt.Errorf("action %q state %q is inconsistent with run state %q",
+				actionID, action.state, run.state)
+		}
+	}
+	for runID, run := range ic.memoryCurationRuns {
+		actions := make([]MemoryCurationPlanAction, run.observedActions)
+		scrubbedActions := int64(0)
+		for _, action := range ic.memoryCurationActions {
+			if action.runID != runID {
+				continue
+			}
+			if action.scrubbed {
+				scrubbedActions++
+				continue
+			}
+			if action.ordinal < 1 || action.ordinal > int64(len(actions)) {
+				return fmt.Errorf("run %q action ordinal is outside its plan", runID)
+			}
+			actions[action.ordinal-1] = action.action
+		}
+		if run.scrubbed {
+			if scrubbedActions != run.observedActions {
+				return fmt.Errorf("run %q scrub state does not cover every action", runID)
+			}
+			continue
+		}
+		if scrubbedActions != 0 {
+			return fmt.Errorf("run %q contains an independently scrubbed action", runID)
+		}
+		if run.planRevision == 0 {
+			if run.observedActions != 0 {
+				return fmt.Errorf("unplanned run %q contains actions", runID)
+			}
+			continue
+		}
+		for index := range actions {
+			if actions[index].Ordinal != int64(index+1) {
+				return fmt.Errorf("run %q plan action sequence is incomplete", runID)
+			}
+		}
+		plan := MemoryCurationPlan{
+			Schema: run.planSchema, PlanRevision: run.planRevision, Actions: actions,
+		}
+		canonical, err := canonicalMemoryCurationJSON(plan)
+		if err != nil {
+			return fmt.Errorf("run %q plan cannot be canonicalized", runID)
+		}
+		sum := sha256.Sum256(canonical)
+		if run.planHash != hex.EncodeToString(sum[:]) {
+			return fmt.Errorf("run %q plan hash does not match its action rows", runID)
+		}
+	}
+	validateAttribution := func(runID, actionID string, owner memoryOwnerImportKey) error {
+		run, runOK := ic.memoryCurationRuns[runID]
+		action, actionOK := ic.memoryCurationActions[actionID]
+		if !runOK || !actionOK || run.owner != owner || action.owner != owner || action.runID != runID {
+			return fmt.Errorf("curation run/action attribution is outside its owner scope")
+		}
+		return nil
+	}
+	for _, version := range ic.memoryVersions {
+		if version.curationRunID == "" {
+			continue
+		}
+		if err := validateAttribution(version.curationRunID, version.curationActionID, version.owner); err != nil {
+			return err
+		}
+	}
+	for _, relation := range ic.memoryRelationCurations {
+		if relation.runID != "" {
+			if err := validateAttribution(relation.runID, relation.actionID, relation.owner); err != nil {
+				return err
+			}
+		}
+		if relation.revertedByRunID != "" {
+			if err := validateAttribution(relation.revertedByRunID, relation.revertedByActionID, relation.owner); err != nil {
+				return err
+			}
+		}
+	}
+	for candidateID, attribution := range ic.factCandidateCurations {
+		action, ok := ic.memoryCurationActions[attribution.actionID]
+		if !ok || action.owner != attribution.owner || action.runID != attribution.runID ||
+			action.primitive != "propose_fact" {
+			return fmt.Errorf("fact candidate %q curation attribution is invalid", candidateID)
+		}
+		if attribution.status == "withdrawn" && action.state != "reverted" {
+			return fmt.Errorf("withdrawn fact candidate %q does not belong to a reverted action", candidateID)
+		}
+		if action.state == "reverted" && attribution.status != "withdrawn" && attribution.status != "rejected" {
+			return fmt.Errorf("reverted fact candidate %q is neither withdrawn nor independently rejected", candidateID)
+		}
+	}
+	for actionID, action := range ic.memoryCurationActions {
+		if action.scrubbed {
+			continue
+		}
+		if err := validateImportedMemoryCurationActionResources(ic, action); err != nil {
+			return fmt.Errorf("action %q result provenance: %v", actionID, err)
+		}
+	}
+	return nil
+}
+
+func validateImportedMemoryCurationActionResources(
+	ic *importCtx,
+	action memoryCurationActionImportScope,
+) error {
+	if action.appliedResult == nil {
+		if action.rollbackResult != nil {
+			return fmt.Errorf("rollback result exists without an apply result")
+		}
+		return nil
+	}
+	applied := *action.appliedResult
+	if err := validateImportedCurationResultUniqueIDs(applied); err != nil {
+		return err
+	}
+	version := func(ref MemoryVersionReference, produced, compensation bool) (memoryVersionImportScope, error) {
+		if !validMemoryID(ref.MemoryID) || ref.Version < 1 {
+			return memoryVersionImportScope{}, fmt.Errorf("invalid memory version reference")
+		}
+		got, ok := ic.memoryVersions[memoryVersionImportKey{memoryID: ref.MemoryID, version: ref.Version}]
+		if !ok || got.owner != action.owner {
+			return memoryVersionImportScope{}, fmt.Errorf("memory version %s/%d is outside the action owner", ref.MemoryID, ref.Version)
+		}
+		if produced && (got.curationRunID != action.runID || got.curationActionID != action.id) {
+			return memoryVersionImportScope{}, fmt.Errorf("memory version %s/%d lacks exact action attribution", ref.MemoryID, ref.Version)
+		}
+		if compensation && got.operation != "reverted" {
+			return memoryVersionImportScope{}, fmt.Errorf("compensation head %s/%d is not a reverted version", ref.MemoryID, ref.Version)
+		}
+		return got, nil
+	}
+	for _, ref := range applied.BeforeHeads {
+		if _, err := version(ref, false, false); err != nil {
+			return err
+		}
+	}
+	for _, ref := range applied.AfterHeads {
+		if _, err := version(ref, true, false); err != nil {
+			return err
+		}
+	}
+	for _, memoryID := range applied.CreatedMemoryIDs {
+		memory, ok := ic.memories[memoryID]
+		created, versionOK := ic.memoryVersions[memoryVersionImportKey{memoryID: memoryID, version: 1}]
+		if !ok || memory.owner != action.owner || !versionOK ||
+			created.curationRunID != action.runID || created.curationActionID != action.id {
+			return fmt.Errorf("created memory %q lacks exact action attribution", memoryID)
+		}
+	}
+	for _, evidenceID := range applied.EvidenceIDs {
+		evidence, ok := ic.memoryEvidence[evidenceID]
+		produced := ic.memoryVersions[evidence.target]
+		if !ok || produced.owner != action.owner ||
+			produced.curationRunID != action.runID || produced.curationActionID != action.id {
+			return fmt.Errorf("evidence %q is not attached to this action output", evidenceID)
+		}
+	}
+	for _, relationID := range applied.RelationIDs {
+		relation, ok := ic.memoryRelations[relationID]
+		if !ok || relation.owner != action.owner || relation.runID != action.runID || relation.actionID != action.id {
+			return fmt.Errorf("relation %q lacks exact action attribution", relationID)
+		}
+	}
+	for _, candidateID := range applied.CandidateIDs {
+		candidate, ok := ic.factCandidateCurations[candidateID]
+		if !ok || candidate.owner != action.owner || candidate.runID != action.runID || candidate.actionID != action.id {
+			return fmt.Errorf("fact candidate %q lacks exact action attribution", candidateID)
+		}
+	}
+	if err := validateImportedCurationAppliedShape(ic, action, applied); err != nil {
+		return err
+	}
+
+	if action.rollbackResult == nil {
+		return nil
+	}
+	rollback := *action.rollbackResult
+	if err := validateImportedCurationRollbackUniqueIDs(rollback); err != nil {
+		return err
+	}
+	for _, ref := range rollback.CompensationHeads {
+		if _, err := version(ref, true, true); err != nil {
+			return err
+		}
+	}
+	expectedWithdrawnCandidates := make([]string, 0, len(applied.CandidateIDs))
+	for _, candidateID := range applied.CandidateIDs {
+		switch ic.factCandidateCurations[candidateID].status {
+		case "withdrawn":
+			expectedWithdrawnCandidates = append(expectedWithdrawnCandidates, candidateID)
+		case "rejected":
+			// A human rejection is already terminal and is never rewritten to
+			// make a later curation rollback look like the rejecting authority.
+		default:
+			return fmt.Errorf("rolled-back fact candidate %q has a live state", candidateID)
+		}
+	}
+	if !sameStringSlice(rollback.RevertedRelationIDs, applied.RelationIDs) ||
+		!sameStringSlice(rollback.WithdrawnCandidateIDs, expectedWithdrawnCandidates) {
+		return fmt.Errorf("rollback resources do not match the apply receipt")
+	}
+	for _, relationID := range rollback.RevertedRelationIDs {
+		relation := ic.memoryRelations[relationID]
+		if relation.revertedByRunID != action.runID || relation.revertedByActionID != action.id {
+			return fmt.Errorf("relation %q lacks exact rollback attribution", relationID)
+		}
+	}
+	for _, candidateID := range rollback.WithdrawnCandidateIDs {
+		if ic.factCandidateCurations[candidateID].status != "withdrawn" {
+			return fmt.Errorf("fact candidate %q was not withdrawn", candidateID)
+		}
+	}
+	var expectedCompensation []MemoryVersionReference
+	switch action.primitive {
+	case MemoryCurationOperationCreate:
+		expectedCompensation = []MemoryVersionReference{{
+			MemoryID: action.action.Create.MemoryID, Version: applied.AfterHeads[0].Version + 1,
+		}}
+	case MemoryCurationOperationReplace, MemoryCurationOperationSupersede:
+		expectedCompensation = []MemoryVersionReference{{
+			MemoryID: applied.AfterHeads[0].MemoryID, Version: applied.AfterHeads[0].Version + 1,
+		}}
+	default:
+		expectedCompensation = []MemoryVersionReference{}
+	}
+	if !sameMemoryVersionReferenceSlice(rollback.CompensationHeads, expectedCompensation) {
+		return fmt.Errorf("rollback compensation heads do not match the applied action")
+	}
+	return nil
+}
+
+func validateImportedCurationAppliedShape(
+	ic *importCtx,
+	action memoryCurationActionImportScope,
+	result MemoryCurationActionApplyResult,
+) error {
+	empty := func(values ...int) bool {
+		for _, value := range values {
+			if value != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	switch action.primitive {
+	case MemoryCurationOperationCreate:
+		create := action.action.Create
+		if len(result.BeforeHeads) != 0 || len(result.AfterHeads) != 1 ||
+			len(result.CreatedMemoryIDs) != 1 || result.CreatedMemoryIDs[0] != create.MemoryID ||
+			result.AfterHeads[0] != (MemoryVersionReference{MemoryID: create.MemoryID, Version: 1}) ||
+			len(result.EvidenceIDs) != len(create.Snapshot.Evidence) ||
+			len(result.RelationIDs) != len(create.Relations) ||
+			!empty(len(result.CandidateIDs), len(result.SupersessionReplacementIDs)) ||
+			result.SupersessionSetID != "" || result.SupersessionSetRevision != 0 {
+			return fmt.Errorf("create applied_result shape is invalid")
+		}
+		for index, relationID := range result.RelationIDs {
+			relation := ic.memoryRelations[relationID]
+			want := create.Relations[index]
+			if relation.relationType != want.RelationType || relation.from != result.AfterHeads[0] ||
+				relation.to != importedMemoryCurationVersionReference(want.To) {
+				return fmt.Errorf("create relation %q does not match the plan", relationID)
+			}
+		}
+	case MemoryCurationOperationReplace:
+		replace := action.action.Replace
+		before := MemoryVersionReference{MemoryID: replace.Target.MemoryID, Version: replace.Target.ExpectedVersion}
+		after := MemoryVersionReference{MemoryID: before.MemoryID, Version: before.Version + 1}
+		if !sameMemoryVersionReferenceSlice(result.BeforeHeads, []MemoryVersionReference{before}) ||
+			!sameMemoryVersionReferenceSlice(result.AfterHeads, []MemoryVersionReference{after}) ||
+			len(result.EvidenceIDs) != len(replace.Snapshot.Evidence) ||
+			!empty(len(result.CreatedMemoryIDs), len(result.RelationIDs), len(result.CandidateIDs), len(result.SupersessionReplacementIDs)) ||
+			result.SupersessionSetID != "" || result.SupersessionSetRevision != 0 {
+			return fmt.Errorf("replace applied_result shape is invalid")
+		}
+	case MemoryCurationOperationSupersede:
+		supersede := action.action.Supersede
+		before := MemoryVersionReference{MemoryID: supersede.Target.MemoryID, Version: supersede.Target.ExpectedVersion}
+		after := MemoryVersionReference{MemoryID: before.MemoryID, Version: before.Version + 1}
+		replacements := make([]MemoryVersionReference, len(supersede.Replacements))
+		for index := range supersede.Replacements {
+			replacements[index] = importedMemoryCurationVersionReference(supersede.Replacements[index])
+		}
+		if !sameMemoryVersionReferenceSlice(result.BeforeHeads, []MemoryVersionReference{before}) ||
+			!sameMemoryVersionReferenceSlice(result.AfterHeads, []MemoryVersionReference{after}) ||
+			!sameMemoryVersionReferenceSlice(result.SupersessionReplacementIDs, replacements) ||
+			len(result.RelationIDs) != len(supersede.Replacements) ||
+			!empty(len(result.CreatedMemoryIDs), len(result.EvidenceIDs), len(result.CandidateIDs)) ||
+			!validCurationID(result.SupersessionSetID, "mset") || result.SupersessionSetRevision != 1 {
+			return fmt.Errorf("supersede applied_result shape is invalid")
+		}
+		for index, relationID := range result.RelationIDs {
+			relation := ic.memoryRelations[relationID]
+			if relation.relationType != "supersedes" || relation.from != replacements[index] || relation.to != after {
+				return fmt.Errorf("supersede relation %q does not match the plan", relationID)
+			}
+		}
+	case MemoryCurationOperationRelate:
+		relate := action.action.Relate
+		if len(result.RelationIDs) != 1 ||
+			!empty(len(result.BeforeHeads), len(result.AfterHeads), len(result.CreatedMemoryIDs), len(result.EvidenceIDs), len(result.CandidateIDs), len(result.SupersessionReplacementIDs)) ||
+			result.SupersessionSetID != "" || result.SupersessionSetRevision != 0 {
+			return fmt.Errorf("relate applied_result shape is invalid")
+		}
+		relation := ic.memoryRelations[result.RelationIDs[0]]
+		if relation.relationType != relate.RelationType ||
+			relation.from != importedMemoryCurationVersionReference(relate.From) ||
+			relation.to != importedMemoryCurationVersionReference(relate.To) {
+			return fmt.Errorf("relate result does not match the plan")
+		}
+	case MemoryCurationOperationProposeFact:
+		if len(result.CandidateIDs) != 1 ||
+			!empty(len(result.BeforeHeads), len(result.AfterHeads), len(result.CreatedMemoryIDs), len(result.EvidenceIDs), len(result.RelationIDs), len(result.SupersessionReplacementIDs)) ||
+			result.SupersessionSetID != "" || result.SupersessionSetRevision != 0 {
+			return fmt.Errorf("propose_fact applied_result shape is invalid")
+		}
+	default:
+		return fmt.Errorf("unknown action primitive")
+	}
+	return nil
+}
+
+func validateImportedCurationResultUniqueIDs(result MemoryCurationActionApplyResult) error {
+	seen := map[string]bool{}
+	for _, values := range [][]string{
+		result.CreatedMemoryIDs, result.EvidenceIDs, result.RelationIDs, result.CandidateIDs,
+	} {
+		for _, value := range values {
+			if value == "" || seen[value] {
+				return fmt.Errorf("applied_result contains an empty or duplicate resource id")
+			}
+			seen[value] = true
+		}
+	}
+	if hasDuplicateMemoryVersionReference(result.BeforeHeads) ||
+		hasDuplicateMemoryVersionReference(result.AfterHeads) ||
+		hasDuplicateMemoryVersionReference(result.SupersessionReplacementIDs) {
+		return fmt.Errorf("applied_result contains duplicate memory versions")
+	}
+	return nil
+}
+
+func validateImportedCurationRollbackUniqueIDs(result MemoryCurationActionRollbackResult) error {
+	seen := map[string]bool{}
+	for _, values := range [][]string{result.RevertedRelationIDs, result.WithdrawnCandidateIDs} {
+		for _, value := range values {
+			if value == "" || seen[value] {
+				return fmt.Errorf("rollback_result contains an empty or duplicate resource id")
+			}
+			seen[value] = true
+		}
+	}
+	if hasDuplicateMemoryVersionReference(result.CompensationHeads) {
+		return fmt.Errorf("rollback_result contains duplicate compensation heads")
+	}
+	return nil
+}
+
+func hasDuplicateMemoryVersionReference(values []MemoryVersionReference) bool {
+	seen := map[MemoryVersionReference]bool{}
+	for _, value := range values {
+		if seen[value] {
+			return true
+		}
+		seen[value] = true
+	}
+	return false
+}
+
+func sameMemoryVersionReferenceSlice(a, b []MemoryVersionReference) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func importedMemoryCurationVersionReference(value MemoryCurationVersionReference) MemoryVersionReference {
+	return MemoryVersionReference{MemoryID: value.MemoryID, Version: value.Version}
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateImportedMemoryVersionTransition keeps a checksum-valid hostile
+// archive from relabelling arbitrary snapshots as lifecycle operations. The
+// schema-29 API produces one initial added/active version, then only these
+// state transitions. Future-only curation rollback/reverted transitions remain
+// invalid until a later archive schema can require their provenance.
+func validateImportedMemoryVersionTransition(
+	version, changeSeq int64,
+	payloadDigest string,
+	state, priorState, operation string,
+	previous memoryVersionImportScope,
+) error {
+	if version == 1 {
+		if operation != "added" || state != MemoryStateActive || priorState != "" {
+			return errors.New("initial version must be added and active without prior_state")
+		}
+		return nil
+	}
+	if changeSeq <= previous.changeSeq {
+		return errors.New("change_seq must increase across contiguous versions")
+	}
+
+	valid := false
+	switch operation {
+	case "adjusted":
+		valid = previous.state == MemoryStateActive &&
+			state == MemoryStateActive && priorState == ""
+	case "superseded":
+		valid = previous.state == MemoryStateActive &&
+			state == MemoryStateSuperseded && priorState == ""
+	case "forgotten":
+		valid = (previous.state == MemoryStateActive || previous.state == MemoryStateSuperseded) &&
+			state == MemoryStateForgotten && priorState == previous.state
+	case "restored":
+		valid = previous.state == MemoryStateForgotten &&
+			(previous.priorState == MemoryStateActive || previous.priorState == MemoryStateSuperseded) &&
+			state == previous.priorState && priorState == ""
+	case "reactivated":
+		valid = (previous.state == MemoryStateSuperseded || previous.state == "reverted") &&
+			state == MemoryStateActive && priorState == ""
+	case "reverted":
+		valid = ((previous.state == MemoryStateActive && state == "reverted") ||
+			(previous.state == MemoryStateSuperseded && state == MemoryStateActive) ||
+			(previous.state == MemoryStateActive && state == MemoryStateActive)) &&
+			priorState == ""
+	}
+	if !valid {
+		return fmt.Errorf(
+			"illegal %s transition from state %q (prior_state %q) to state %q (prior_state %q)",
+			operation, previous.state, previous.priorState, state, priorState,
+		)
+	}
+	if operation == "adjusted" || operation == "reverted" &&
+		previous.state == MemoryStateActive && state == MemoryStateActive {
+		if payloadDigest == previous.payloadDigest {
+			return fmt.Errorf("%s version does not change the semantic payload", operation)
+		}
+	} else if payloadDigest != previous.payloadDigest {
+		return fmt.Errorf("%s version changes the semantic payload", operation)
+	}
+	return nil
+}
+
+// validImportedGeneratedID proves the exact representation emitted by id.New:
+// a fixed prefix and 80 random bits encoded as 16 lowercase, unpadded base32
+// characters. Prefix-only validation would let a tombstone carry payload text
+// in the otherwise value-free deletion receipt id.
+func validImportedGeneratedID(value, prefix string) bool {
+	body := strings.TrimPrefix(value, prefix+"_")
+	if body == value || len(body) != 16 {
+		return false
+	}
+	for _, char := range body {
+		if (char < 'a' || char > 'z') && (char < '2' || char > '7') {
+			return false
+		}
+	}
+	return true
+}
+
+func validImportedMemoryRetryShieldKind(kind string) bool {
+	switch kind {
+	case "idempotency.added",
+		"idempotency.adjusted",
+		"idempotency.superseded",
+		"idempotency.forgotten",
+		"idempotency.restored",
+		"idempotency.reactivated",
+		"idempotency.evidence_resolution":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateImportedMemoryRetryShields(memoryID string, memory memoryImportScope, imported []memoryDeleteRetryShield) error {
+	shields := append([]memoryDeleteRetryShield(nil), imported...)
+	sort.Slice(shields, func(i, j int) bool {
+		if shields[i].Kind != shields[j].Kind {
+			return shields[i].Kind < shields[j].Kind
+		}
+		return shields[i].Hash < shields[j].Hash
+	})
+	if int64(len(shields)) != memory.deletedRetryShieldCount ||
+		memoryDeleteRetryShieldDigest(shields) != memory.deletedRetryShieldDigest {
+		return fmt.Errorf(
+			"%w: permanently deleted memory %q retry shields do not match its receipt",
+			ErrArchiveContent, memoryID,
+		)
+	}
+	return nil
+}
+
+// decodeImportRow preserves the exact spelling of every JSON number. In
+// particular, BIGINT counters such as change_seq must not pass through the
+// default interface{} float64 representation, which loses integer precision
+// above 2^53. Requiring EOF retains json.Unmarshal's one-value contract.
+func decodeImportRow(row []byte) (map[string]any, error) {
+	if err := rejectDuplicateJSONNames(row); err != nil {
+		return nil, fmt.Errorf("duplicate JSON member: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(row))
+	decoder.UseNumber()
+
+	var obj map[string]any
+	if err := decoder.Decode(&obj); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	if obj == nil {
+		return nil, errors.New("expected JSON object")
+	}
+	return obj, nil
 }
 
 func validateImportedFactMutationTombstoneCompleteness(facts map[string]factImportScope, counts map[string]int64) error {

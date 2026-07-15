@@ -1,8 +1,15 @@
 # Witself JSON Contracts
 
-Status: draft. This document defines the JSON contract for CLI `--json` output,
+Status: evolving contract. This document defines JSON shared by CLI `--json`,
 MCP tool results, managed API responses, self-hosted API responses, and local
-development responses before implementation.
+development responses; implementation-backed amendments override older target
+examples.
+
+Narrative-memory amendment (accepted 2026-07-14): Memory, evidence, lineage,
+capture, curation, and migration-0032 client-vector wire shapes must be derived from
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). Older
+shapes that ask the server to classify prose or choose semantic consolidation
+are superseded.
 
 ## Goals
 
@@ -24,9 +31,11 @@ development responses before implementation.
 Witself spans two planes. The **open plane** (memories + facts) protects the
 *integrity and authenticity* of identity data: there is no reveal ceremony, an
 authorized read of a single record returns its value directly, and the only
-`sensitive` facts and `sensitive`-flagged memory content are redacted in
-list/scan output as a PII/display posture, not an encryption boundary. The
-**sealed plane** (secrets + TOTP) protects the *confidentiality* of secret
+`sensitive` facts and value-bearing fields of `sensitive` memories are redacted
+in list/scan/recall output as a PII/display posture, not an encryption boundary.
+Memory redaction includes content/hash, tags, links, reasons, occurrence bounds,
+client provenance, and evidence. The **sealed plane** (secrets + TOTP) protects
+the *confidentiality* of secret
 material: values are KMS-backed envelope-encrypted, redacted by default, and
 returned only through the explicit, audited reveal / TOTP-code ceremony (see the
 [Sealed-Plane Shapes](#sealed-plane-shapes)). Sealed material is never embedded,
@@ -338,12 +347,20 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
     "facts": {
       "supported": true
     },
-    "semantic_recall": {
-      "supported": true,
-      "degraded": false,
-      "provider": "voyage",
-      "model": "voyage-3",
-      "dimensions": 1024
+    "memory_recall": { "supported": true },
+    "memory_supersede": { "supported": true },
+    "memory_permanent_delete": { "supported": true },
+    "memory_vector_profiles": { "supported": true },
+    "client_vector_recall": { "supported": true },
+    "semantic_recall": { "supported": true },
+    "automatic_capture": {
+      "supported": false,
+      "reason": "not_implemented"
+    },
+    "opportunistic_curation": { "supported": true },
+    "scheduled_curation": {
+      "supported": false,
+      "reason": "not_implemented"
     },
     "policies": {
       "supported": true
@@ -445,11 +462,11 @@ Rules:
   deployment, and `local` is reported by the CLI's local adapter and is never the
   server. `kind` is advisory — clients should branch on specific feature flags,
   and each feature is independently gated so a mislabeled kind unlocks nothing.
-- `semantic_recall` reports the active embedding provider, model, and vector
-  dimensionality. `degraded: true` means the provider is unavailable or disabled
-  and recall has fallen back to keyword/tag/kind/time ranking (see
-  [Recall Result](#recall-result)). The embedding-provider abstraction is
-  tracked in [memory-model.md](memory-model.md).
+- `memory_recall` reports the universal model-free lexical service.
+  `memory_vector_profiles`, `client_vector_recall`, and `semantic_recall`
+  report the implemented optional client-vector/hybrid surface. No capability
+  field names an active backend embedding provider because none exists; profile
+  identity is caller-authored data returned only from the profile surface.
 - `field_level_encryption` reflects optional encryption of `sensitive` fact
   values; it is a capability, not the default (see [storage.md](storage.md)).
 - `secrets` and `totp` advertise the **sealed plane** (secrets, TOTP). It is a
@@ -600,7 +617,19 @@ Rules:
 
 - `content` is returned in clear for an authorized read, including for
   `sensitive` memories. There is no reveal ceremony.
-- Binary-safe content should use `content_encoding: "base64"`.
+- `content_encoding` is always present on current-memory and immutable-version
+  outputs. It defaults to `plain`; binary-safe content uses canonical
+  `content_encoding: "base64"`. Capture and supersede replacements accept
+  `content_encoding`, while adjustment uses `set_content_encoding`.
+- The immutable version created by atomic supersede carries
+  `supersession_set_id`, `supersession_set_revision`,
+  `supersession_replacement_count`, and
+  `supersession_replacement_digest`. Current-memory and history records
+  separately expose `active_supersession_set_id` and
+  `active_supersession_set_revision`, derived from the currently unreverted
+  relation set for that stable memory. Reactivation clears the active fields but
+  does not alter the immutable receipt fields. All six fields are value-free and
+  remain present in otherwise redacted broad responses when applicable.
 - `links` are `witself://` references resolvable through authorized commands or
   MCP tools (see [Reference Parse and Resolve](#reference-parse-and-resolve)).
 - `history` lists versioned edits in ascending version order. History entries
@@ -614,66 +643,80 @@ Rules:
 ## Recall Result
 
 Used by `memory recall` and `/v1/memories:recall`. Returns ranked hits with
-per-hit scores. Recall is semantic by default.
+per-hit scores. Lexical/structured retrieval is the default; an explicit
+client-supplied profile plus query vector enables bounded hybrid retrieval.
 
 ```json
 {
-  "query": "slow recall on cold start",
-  "mode": "semantic",
-  "degraded": false,
+  "schema_version": "witself.v0",
   "hits": [
     {
       "memory": {
         "id": "mem_123",
+        "version": 2,
         "kind": "episodic",
-        "owner": {
-          "kind": "agent",
-          "agent_id": "agent_123",
-          "agent_name": "browser-agent"
-        },
-        "preview": "Visited the staging console and noted the slow recall path...",
+        "content": "Visited the staging console and noted the slow recall path...",
         "tags": ["staging", "performance"],
-        "source": "self",
+        "origin": "self",
         "salience": 0.8,
-        "sensitive": false,
-        "created_at": "2026-06-26T18:00:00Z",
-        "last_accessed_at": "2026-06-26T18:10:00Z"
+        "sensitive": false
       },
-      "score": 0.91,
-      "score_components": {
+      "score": {
         "similarity": 0.88,
+        "vector_used": true,
         "lexical": 0.42,
-        "tag_match": 1.0,
-        "kind_match": 0.0,
         "recency": 0.73,
-        "salience": 0.8
+        "salience": 0.8,
+        "total": 0.78
       }
     }
   ],
-  "next_cursor": null
+  "retrieval_mode": "hybrid",
+  "vector_coverage": 1.0,
+  "vector_profile_id": "mvp_abcdefghijklmnop",
+  "vector_candidates": 1,
+  "vector_matches": 1,
+  "candidate_limit": 256,
+  "degraded": false
 }
 ```
 
 Rules:
 
-- Each hit embeds a [Memory Summary](#memory-summary) under `memory` and adds a
-  blended `score` plus `score_components`. Hits are ordered by descending
-  `score`.
-- `mode` is `semantic` when embeddings drive ranking and `keyword` when recall
-  has degraded to keyword/tag/kind/time ranking.
-- `degraded: true` (mirrored by `mode: "keyword"`) means the embedding provider
-  was unavailable or disabled. When degraded, the response envelope should also
-  carry a `warnings` entry so callers never mistake a degraded result for a
-  fully ranked one. Recall never silently returns unranked or empty results
-  without surfacing the degraded state.
-- `score_components` weights are tunable; defaults and the hybrid ranking model
-  are documented in [memory-model.md](memory-model.md).
+- Each hit embeds the authorized memory under `memory` and a `score` with
+  `similarity`, `vector_used`, `lexical`, `salience`, `recency`, and `total`.
+  Hits are ordered by descending total, then stable recency/id tie-breakers.
+- `retrieval_mode` is `lexical` when no vector contract is requested or no
+  compatible rows are usable, and `hybrid` when compatible rows participate.
+  Missing coverage is data coverage, never backend-provider health.
+- Hybrid recall reports `vector_profile_id`, candidates, matches, coverage,
+  candidate limit/truncation, `degraded`, and `degraded_reason`. Stable reasons
+  include `no_compatible_vectors`, `partial_vector_coverage`, and
+  `candidate_budget_exceeded`. When the 256-candidate universe is truncated,
+  cursors remain inside that pinned universe and the truncation stays visible.
+- Omitting vector fields preserves the full lexical contract. Supplying vectors
+  requires both `vector_profile_id` and a finite `query_vector` matching the
+  immutable profile; the server never generates either vector.
 - Sensitive hits follow the [Memory Summary](#memory-summary) redaction posture:
   `preview` is omitted and `redacted: true` is set, but the hit and its score
   are still returned.
 - Recall over another agent's or a group's memories requires a policy granting
   `read` on the target and is metered as a cross-agent access (see
   [Policy](#policy)).
+
+## Memory Vector Profile And Receipt
+
+Migration `0032` profile responses contain `id`, caller-declared `provider`,
+`model`, `recipe`, `recipe_version`, `dimensions`, `distance_metric`,
+`normalization`, canonical `contract_hash`, and `created_at`. These fields are a
+portable client recipe, not backend configuration. Profile lists wrap them as
+`{"schema_version":"witself.v0","items":[...]}`.
+
+A vector write returns only `profile_id`, `memory_id`, `memory_version`,
+`content_hash`, `vector_hash`, `dimensions`, `created_at`, and optional
+`replayed`; raw components are never returned. The canonical array is stored as
+JSONB and exported/imported with its profile, but remains excluded from ordinary
+memory responses, logs, audits, errors, metrics labels, and support bundles.
 
 ## Remember Result
 
@@ -721,7 +764,7 @@ Rules:
 
 Used by `self show` and `GET /v1/self`. The bounded, always-loadable
 session-start digest: primary facts first, then top-N salient memories, then a
-one-line index. It is cheap and never requires the embedding provider. The
+one-line index. It is cheap and never requires a vector profile or query vector. The
 digest shape, hard cap, and `elided` behavior are defined in
 [context-hydration.md](context-hydration.md).
 
@@ -773,8 +816,8 @@ Rules:
   posture (`value: null`, `redacted: true`) used in list output.
 - `salient_memories` is the top-N set selected by a blended salience+recency
   score (with pinned kinds such as `profile`/`session`), excluding
-  archived/forgotten records. Selection is deterministic and never calls the
-  embedding provider; the algorithm is defined in
+  archived/forgotten records. Selection is deterministic and never calls a
+  model provider; the algorithm is defined in
   [memory-model.md](memory-model.md). Each entry carries a short `snippet`
   (redacted for `sensitive` content), its `kind`, and its `salience`.
 - `index` is a one-line summary of the store: the `kinds` and `tags` present and

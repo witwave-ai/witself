@@ -1,26 +1,38 @@
 # Witself Storage
 
-Status: draft. Decision: production Witself starts with Postgres (with the
-pgvector extension) as the system of record for both planes, an external
-embedding-provider abstraction (`voyage` default), an object/blob adapter added
-on demand, Goose for database migrations, and a provider-shaped KMS abstraction
+Status: draft. Last reviewed 2026-07-14. Decision: production Witself starts
+with PostgreSQL as the system of record for both planes, universal full-text
+retrieval, optional portable JSONB storage for client-supplied vectors, an
+object/blob adapter added on demand, Goose for database migrations, and a
+provider-shaped KMS abstraction
 (AWS KMS first) that backs the SEALED plane. Storage is two-tier: the OPEN plane
 (memories + facts) is ordinary data-at-rest; the SEALED plane (secrets + TOTP)
 is KMS-backed envelope encryption. KMS is **required when the sealed plane is
 enabled** and is not a dependency for an open-plane-only deployment.
 
+Open-plane amendment (accepted 2026-07-14): PostgreSQL remains the sole
+authoritative memory store, but
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md) supersedes
+the server-side embedding-provider boundary. Full-text retrieval is universal;
+optional memory/query vectors are generated and supplied by clients. Object
+storage and local outboxes are archive/delivery mechanisms, not live memory
+sources.
+
 ## Decision
 
-Production storage should start with Postgres as the system of record, with the
-`pgvector` extension enabled for memory embeddings.
+Production storage starts with PostgreSQL as the system of record. Its native
+full-text facilities are required for memory recall. Migration `0032` stores
+optional client-supplied vector profiles and arrays in ordinary PostgreSQL
+JSONB. `pgvector` is not required; a future pgvector/ANN projection may
+accelerate candidate generation without changing the canonical data contract.
 
-Postgres holds both planes. OPEN-plane state:
+PostgreSQL holds both planes. OPEN-plane state:
 
 - Account, realm, and agent metadata.
 - Token hashes and token metadata.
 - Memory records (content, kind, tags, source, salience, links, sensitive flag,
   timestamps) and their versioned edit history.
-- Memory embedding vectors via `pgvector`.
+- Optional version/profile-keyed memory vectors supplied by authorized clients.
 - Fact records (name, value, primary flag, sensitive flag, format hint, source,
   timestamps) and their versioned edit history.
 - Cross-agent access policies (the rename of Witpass's per-secret grants).
@@ -86,16 +98,19 @@ source of truth.
 - `agents` — `agent_…` id, realm, name, state (`active`/`disabled`/`archived`),
   timestamps. The durable named principal; identity is derived from the token,
   never from input.
-- `tokens` — `tok_…` id, agent, token hash, scopes, optional expiry, state.
-  Raw tokens are never stored. See [token-lifecycle.md](token-lifecycle.md).
+- `tokens` — `tok_…` id, principal, token hash, immutable access profile,
+  optional display name/expiry, and state. `full` is the compatibility default;
+  expiring `curator-preview` and `curator-apply` are valid only for agent
+  tokens. Raw tokens are never stored. See
+  [token-lifecycle.md](token-lifecycle.md).
 - `memories` — `mem_…` id, realm, owner (agent or group), content, kind, tags,
   source, salience, links, sensitive flag, timestamps (`created_at`,
   `updated_at`, `last_accessed_at`), tombstone state for soft `forget`.
 - `memory_versions` — append-only edit history per memory: version number,
   actor, timestamp, changed fields.
-- `memory_embeddings` — `pgvector` column keyed by memory id, plus the provider,
-  model, and dimensionality the vector was computed with (see
-  [Embedding Storage](#embedding-storage)).
+- `memory_vector_profiles` / `memory_vectors` (migration `0032`, optional use) —
+  immutable client-declared profiles and version/content-hash-bound portable
+  JSONB rows (see [Optional Vector Storage](#optional-vector-storage)).
 - `facts` — `fact_…` id, realm, owner (agent or group), name (unique per owner),
   value, primary flag, sensitive flag, format hint, source, timestamps.
 - `fact_versions` — append-only edit history per fact, same shape as
@@ -160,8 +175,9 @@ Ownership and uniqueness rules:
   because ownership disambiguates them.
 - At most one primary fact per logical kind per owner is enforced at the storage
   layer as part of the atomic promotion in [facts-model.md](facts-model.md).
-- Memories have no unique name; they are addressed by `id`, recalled
-  semantically, and filtered by metadata.
+- Memories have no unique name; they are addressed by `id`, recalled through
+  full-text/time/metadata ranking with optional compatible vectors, and filtered
+  by metadata.
 
 ## Policy Storage Replaces Per-Secret Grants
 
@@ -184,42 +200,35 @@ specified in [access-policy.md](access-policy.md). Cross-agent mutations are
 attributed in audit (for example, "memory `mem_…` of agent A was pruned by agent
 B under policy `pol_…`") per [audit-retention.md](audit-retention.md).
 
-## Embedding Storage
+## Optional Vector Storage
 
-Memory recall is semantic by default, so embedding vectors are first-class
-stored state, not a cache that can be silently lost.
+Vectors are optional derived indexes. PostgreSQL full-text, time, metadata,
+salience, and recency ranking remain available when no vectors exist.
 
-- Vectors are stored in Postgres via the `pgvector` extension, keyed by memory
-  id, alongside the provider, model, and dimensionality used to produce them.
-- The embedding migration enables the `pgvector` extension and creates the
-  vector column and its index. Vector index type and parameters (for example an
-  approximate index) are tuned per [memory-model.md](memory-model.md).
-- The embedding **provider is external** and behind a provider abstraction that
-  mirrors the KMS abstraction in [KMS Posture](#kms-posture): `voyage`
-  (default), `openai`, and
-  `local-dev`. Provider and model are selected with
-  `WITSELF_EMBEDDINGS_PROVIDER` and `WITSELF_EMBEDDINGS_MODEL` and reported by
-  the capabilities contract.
-- Witself does not host the embedding model. The provider is a configurable
-  production dependency, not part of the storage engine.
+- An authorized client supplies both memory vectors and query vectors under an
+  immutable profile that declares model/recipe identity, dimensions, distance
+  metric, and normalization.
+- A stored vector binds to the exact memory id, version, content hash, and
+  profile. It never replaces memory content as the source of truth.
+- The backend validates authorization, finite values, dimensions, profile,
+  version, and content hash, then performs deterministic bounded similarity
+  math over canonical JSONB arrays. It never calls a model, chooses a provider, or generates,
+  repairs, or re-embeds a vector.
+- Missing, stale, or incompatible vectors use the universal lexical path and
+  report profile coverage. They are not a server dependency failure.
+- Client software may regenerate vectors after a profile change and resubmit
+  them. PostgreSQL index rebuilds are ordinary database maintenance and do not
+  involve inference.
 
-Recomputability:
-
-- Vectors are **recomputable** from memory content. If a vector is lost or the
-  model changes, recall can be restored by re-embedding from the source content.
-- Re-embedding on provider/model change is an explicit, audited maintenance
-  operation, not an automatic side effect of reads or writes.
-- If the embedding provider is unavailable or disabled, recall degrades
-  deterministically to keyword/tag/kind/time ranking and the capability contract
-  reports the degraded state. Plain `read`/`get` by id and metadata `list` never
-  depend on the provider.
-
-Because vectors are stored, a backup that includes them can restore semantic
-recall without re-embedding (vectors are optional to back up; see
-[Backup And Restore Implications](#backup-and-restore-implications)); because
-vectors are recomputable, a model migration — or a restore without vectors — can
-rebuild them from content. Vector storage size is a metered dimension; see
-[billing-and-limits.md](billing-and-limits.md).
+The optional profile and vector rows participate in schema-32 logical account
+archives. Import validates profile contracts, owner/version/content-hash scope,
+vector values and hashes, chronology, and exact table membership. Derived FTS
+and any future ANN projection are rebuilt after import; canonical JSONB vector
+rows are imported data, not a rebuild-only index.
+No `WITSELF_EMBEDDINGS_*` server configuration or model credential exists.
+Vector storage size may remain a metered dimension; see
+[billing-and-limits.md](billing-and-limits.md) and
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## KMS Posture
 
@@ -230,8 +239,8 @@ needs a KMS provider configured. This is the two-tier posture: the open plane
 relies on ordinary data-at-rest encryption (managed RDS/disk), while the sealed
 plane relies on KMS envelope encryption.
 
-The KMS boundary is provider-shaped from day one, mirroring how the embedding
-provider is abstracted. Initial provider names:
+The KMS boundary is provider-shaped from day one because sealed-plane key
+custody is a real server responsibility. Initial provider names:
 
 - `aws-kms`
 - `gcp-kms`
@@ -251,8 +260,8 @@ sealed plane under the destination cell's KMS; see
 [Cross-Cell KMS Re-Wrap](#cross-cell-kms-re-wrap) and
 [deployment-cells.md](deployment-cells.md).
 
-Managed Witself Cloud uses AWS KMS first, alongside AWS RDS for Postgres (with
-`pgvector`) and S3; see [First Cloud Target](#first-cloud-target). Self-hosted
+Managed Witself Cloud uses AWS KMS first, alongside AWS RDS for PostgreSQL and
+S3; see [First Cloud Target](#first-cloud-target). Self-hosted
 deployments that enable the sealed plane select a provider through server
 configuration:
 
@@ -268,8 +277,11 @@ repository. Managed cloud must not expose raw KMS credentials to the
 application; the server uses deployment identity and tightly scoped IAM
 permissions.
 
-Readiness gates differ per plane. `pgvector` is a hard gate for the open plane
-(semantic recall) and the embedding provider is degradable. KMS readiness gates
+Readiness gates differ per plane. PostgreSQL and its full-text facilities gate
+the open plane. Migration-0032 vector-profile operations use ordinary
+PostgreSQL and require no extension; lexical recall remains healthy without any
+vector rows. A future ANN projection must never become a readiness gate. KMS
+readiness gates
 **only the sealed plane**: when the sealed plane is enabled, the server must be
 able to reach the configured KMS provider and unwrap the active per-realm KEK
 before serving secret reveal, TOTP code, or value-returning reference
@@ -316,7 +328,7 @@ design are tracked by [encryption-model.md](encryption-model.md) and
 [data-model.md](data-model.md).
 
 Sealed-plane carve-outs hold at the storage layer: secret values and TOTP seeds
-are **never embedded** (no `pgvector` row), **never returned by semantic
+are **never embedded** (no `memory_vectors` row), **never returned by semantic
 recall**, **never in the self-digest**, **never ingested** from
 CLAUDE.md/AGENTS.md, and **never written to a plaintext export**. Secret backup
 is encrypted-only; see [Backup And Restore Implications](#backup-and-restore-implications).
@@ -324,9 +336,10 @@ is encrypted-only; see [Backup And Restore Implications](#backup-and-restore-imp
 ## Cross-Cell KMS Re-Wrap
 
 Witself deploys as a fleet of independent cells under a thin global control
-plane: each cell is one complete, independent stack (its own Postgres + pgvector,
-its own KMS, its own blob store) and holds the full data and key material for the
-tenants homed on it. The control plane holds only routing metadata — the
+plane: each cell is one complete, independent stack (its own PostgreSQL, KMS,
+and blob store) and holds the full data
+and key material for the tenants homed on it. The control plane holds only
+routing metadata — the
 realm/account → home cell + endpoint + signing key mapping — and **no tenant
 data and no key material**. See [deployment-cells.md](deployment-cells.md).
 
@@ -361,8 +374,10 @@ and route to B directly.
 
 The open plane (memories, facts, messaging) moves over the same migration by the
 first-class export/import path rather than a re-wrap, since it carries no KMS
-envelope; embeddings are recomputed in the destination or moved directly when the
-destination cell uses the same embedding model. See
+envelope. Full-text indexes are rebuilt in the destination. Optional vector
+rows move with their immutable profiles as canonical schema-32 archive data;
+any future ANN projection is rebuilt. A profile with no vector rows still leaves
+the destination fully functional through lexical recall. See
 [backup-and-recovery.md](backup-and-recovery.md) and
 [Backup And Restore Implications](#backup-and-restore-implications).
 
@@ -385,14 +400,17 @@ Migration requirements:
   when destructive or backward changes are possible.
 - Migration commands should acquire a Postgres advisory lock so concurrent
   `witself-server` instances do not race migrations.
-- The migration that introduces semantic recall enables the `pgvector`
-  extension and is ordered before any migration that creates a vector column.
+- Full-text indexes are part of the universal PostgreSQL memory path. Migration
+  `0032` creates portable `memory_vector_profiles` and JSONB `memory_vectors`
+  tables on ordinary PostgreSQL. A future ANN migration must be additive and
+  must not make pgvector a gate for lexical or exact JSONB hybrid recall.
 - Helm should expose an explicit migration Job path.
 - Production chart guidance should prefer running migrations as a controlled
   operation before rolling `witself-server`; automatic migrations are opt-in
   and explicit.
-- CI should validate migration ordering and apply migrations against a test
-  Postgres instance with `pgvector` available when practical.
+- CI validates migration ordering and the complete vector/archive contract
+  against ordinary PostgreSQL. Any future ANN projection adds separate optional
+  extension tests without changing that baseline.
 
 The public customer/operator CLI should not manage database migrations.
 Migration commands belong to the separate `witself-server` binary; see
@@ -426,15 +444,15 @@ Witself implements AWS first.
 Reasoning:
 
 - AWS is the recommended first cloud target for managed deployment.
-- AWS RDS for Postgres (with `pgvector`) and S3 are mature and well understood
+- AWS RDS for PostgreSQL and S3 are mature and well understood
   by infrastructure teams.
 - Starting with one managed substrate keeps the first implementation focused.
 - Provider-neutral storage and object/blob interfaces still let self-hosted
   deployments target other clouds.
 
-Managed cloud should not expose raw database, object-store, or embedding-provider
-credentials to the application. The server should use deployment identity and
-tightly scoped IAM permissions.
+Managed cloud should not expose raw database or object-store credentials to the
+application. The server should use deployment identity and tightly scoped IAM
+permissions. It has no backend model-provider credentials.
 
 AWS is also the first cloud infrastructure target for managed Witself Cloud and
 self-hosted Terraform. GCP and Azure remain planned follow-up targets; see
@@ -480,19 +498,20 @@ lives in [encryption-model.md](encryption-model.md) and
 
 ## Backup And Restore Implications
 
-Backups must include enough state to restore the full system; semantic recall
-can then be restored either from backed-up vectors or by re-embedding:
+Backups must include enough state to restore the full system. Universal lexical
+recall is restored from PostgreSQL content and rebuilt full-text indexes:
 
 - Postgres backup (the required system of record).
-- `pgvector` vector data is **optional** to back up — it is recomputable from
-  memory content, so including it is an optimization that avoids a re-embedding
-  pass, not a must-include.
+- Migration-0032 vector profile/row data is included in PostgreSQL backup and in
+  every schema-32 logical account archive. It is derived client-authored data;
+  an older archive with no such tables can still upgrade into lexical recall,
+  and only a client may regenerate missing vectors.
 - Object/blob storage backup when used.
 - Migration version.
-- Embedding-provider and model identity (so restored vectors are interpreted
-  consistently).
-- Server configuration needed to reconnect to storage, the embedding provider,
-  and (when the sealed plane is enabled) KMS.
+- Immutable vector profile definitions when vector rows are retained, so the
+  restored rows are interpreted consistently.
+- Server configuration needed to reconnect to storage and, when the sealed
+  plane is enabled, KMS. There is no backend model-provider configuration.
 - KMS key identity and rotation metadata when the sealed plane is enabled, so
   the encrypted secret backup can be unwrapped.
 
@@ -503,16 +522,15 @@ identity, never plaintext), and `witself export` excludes secret values and TOTP
 seeds; see [backup-and-recovery.md](backup-and-recovery.md).
 
 Backups must not include raw tokens, raw database, object-store, or KMS
-credentials, embedding-provider credentials, payment provider secrets, wallet
+credentials, client model credentials, payment provider secrets, wallet
 credentials, or plaintext secret material or TOTP seeds.
 
 Recovery characteristics specific to Witself:
 
-- When vectors are included in the backup, restoring Postgres restores semantic
-  recall directly with no re-embedding pass. When they are not, recall is
-  restored by re-embedding from memory content.
-- Because vectors are recomputable from content, a deliberate embedding-model
-  change can also rebuild them as an explicit, audited operation.
+- Restoring PostgreSQL restores memory content and lexical recall. Retained
+  vector rows restore optional vector coverage after their derived indexes are
+  rebuilt. When vector rows are absent, an authorized client may regenerate and
+  resubmit them; the backend never performs that inference.
 - Losing KMS key material (when the sealed plane is enabled) makes the affected
   realm's secret values and TOTP seeds unrecoverable — crypto-shred — but does
   not affect memories, facts, policies, groups, or messages. The open plane is

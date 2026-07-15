@@ -1,7 +1,16 @@
 # Witself CLI Command Surface
 
-Status: draft. This document describes the proposed human and agent CLI
-contract before implementation.
+Status: draft target contract with implemented slices labeled below.
+
+Narrative-memory amendment (accepted 2026-07-14): direct capture, lifecycle,
+supersede, evidence, delete, lexical/hybrid recall, migration-0032 vector, and
+`memory curate`/`memory curate auto service` commands below are implemented.
+Direct commands handle exact user/client-authored changes;
+`memory curate` lets a client claim frozen inputs and submit one exact,
+reversible plan. Any older native-only or backend-consolidation language is
+superseded. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). Exact
+command spelling is frozen with the first public memory schema.
 
 The CLI command is `ws`. The backend binary stays `witself-server`; the
 `witself://` reference scheme, `WITSELF_` environment variables, and the
@@ -15,9 +24,9 @@ The CLI command is `ws`. The backend binary stays `witself-server`; the
 - Humans and AI assistants should be able to use the same command surface,
   subject to the same authentication, authorization, audit, and redaction rules.
 - Every command that returns data should support `--json`.
-- Identity recall should be semantic by default: `memory recall` is an
-  embedding-backed similarity search blended with keyword, tag, kind, and time
-  filters, while `memory read` and `fact get` stay deterministic.
+- Identity recall has a deterministic PostgreSQL lexical/structured baseline.
+  Optional implemented client-supplied vectors may extend ranking, while `memory
+  show` and `fact get` stay exact.
 - Witself spans two planes: the open plane (memories + facts) is plainly
   readable identity data; the sealed plane (secrets + TOTP) is reveal-gated,
   envelope-encrypted credential material. Secret-revealing actions
@@ -80,8 +89,6 @@ otherwise.
 | `WITSELF_REALM` | Default realm name or ID. |
 | `WITSELF_AGENT` | Default local agent name. |
 | `WITSELF_STORE_FILE` | Default local development store file path. |
-| `WITSELF_EMBEDDINGS_PROVIDER` | Embedding provider for semantic recall: `voyage` (default), `openai`, or `local-dev`. |
-| `WITSELF_EMBEDDINGS_MODEL` | Embedding model within the selected provider. |
 
 Token file conventions:
 
@@ -142,12 +149,11 @@ By default, human output should be readable and cautious:
   on a direct authorized `fact get`, a secret field is never readable without a
   reveal.
 - `whoami` and profile views surface `primary` facts first as identity anchors.
-- Mutating commands summarize what changed. Every mutation returns a
-  deterministic, human-readable `echo` line (such as
-  `Remembered fact display-name=Atlas`, `Added mem_123 (kind=profile, salience=0.6)`,
-  or `Merged into mem_120 (duplicate)`) so a human or agent can self-verify and
-  chain the result. The `echo` field is part of the Mutation Result contract in
-  [json-contracts.md](json-contracts.md).
+- Mutating commands summarize what changed according to their implemented JSON
+  contract. Direct memory writes return the resource plus value-free
+  idempotency, concurrency, supersession, lifecycle, or deletion receipts where
+  applicable. There is no universal `echo` field and no backend-authored
+  semantic duplicate/merge result.
 - Destructive or integrity-impacting commands require confirmation unless
   `--yes` is provided, and cross-agent or operator mutations require `--reason`.
 
@@ -211,7 +217,7 @@ witself
   self show
   usage
   session start|end
-  memory add|adjust|read|recall|list|forget|restore|delete|consolidate
+  memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
   digest emit
   ingest
   bootstrap-instructions
@@ -253,6 +259,27 @@ ws operator delete --endpoint URL --token-file OPERATOR_TOKEN --yes OPERATOR_ID
 operator's first token once. `witself token create --operator` is different: it mints
 another token for the already authenticated operator record.
 
+An operator can also mint a short-lived, server-enforced curator credential for
+an existing agent. Both an audit name and an expiry are required; 24 hours is
+the maximum. Curator tokens default to stdout unless `--out` is explicit, so an
+ephemeral credential never overwrites the agent's managed full-token file.
+
+```sh
+witself token create --agent agent_... --profile curator-preview \
+  --name "nightly memory preview" --ttl 30m --out ./curator.token
+
+# Adds exact-plan apply, but still grants no ordinary memory/fact/message,
+# request/cancel/rollback, sensitive-input, or permanent-delete authority.
+witself token create --agent agent_... --profile curator-apply \
+  --name "approved memory curator" --ttl 30m --out ./curator-apply.token
+```
+
+Omitting `--profile` preserves the existing durable `full` agent-token
+behavior. `curator-preview` may inspect, claim, page, renew, plan, abandon, and
+read status; `curator-apply` adds apply only. These restrictions are enforced
+by the HTTP authorization boundary and token row, not only by the CLI or MCP
+tool list.
+
 Destructive commands are explicit and guarded:
 
 ```sh
@@ -282,19 +309,20 @@ Flags:
 ## `witself capabilities`
 
 Show the active backend kind, version, supported features, unavailable features,
-limits, embedding provider, and endpoint context.
+limits, and endpoint context.
 
 This command is the CLI view of the backend capability contract. It lets a
 human, script, or AI assistant determine whether the current endpoint supports
-managed billing, payment flows, crypto payments, support tickets, audit, the
-active embedding provider/model, whether semantic recall is degraded, or
-local-development-only behavior before running a command.
+managed billing, payment flows, crypto payments, support tickets, audit, direct
+memory/recall/delete support, curation automation, or local-development-only
+behavior before running a command.
 
 ```sh
 ws capabilities
 ws capabilities --endpoint https://witself.internal.example.com
 ws capabilities --feature messaging --include-reasons
-ws capabilities --feature semantic_recall --include-reasons
+ws capabilities --feature memory_supersede --include-reasons
+ws capabilities --feature scheduled_curation --include-reasons
 ```
 
 Flags:
@@ -302,17 +330,22 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--feature FEATURE` | Show one feature flag. Repeatable. |
-| `--include-reasons` | Include unsupported or degraded feature reasons, including degraded semantic recall. |
+| `--include-reasons` | Include unsupported/degraded feature reasons. |
 | `--include-limits` | Include plan, rate, or backend limits when visible. |
-| `--include-embeddings` | Include the active embedding provider, model, and vector dimensionality. |
 | `--check` | Exit non-zero if any requested feature is unsupported. |
 
 Self-hosted or local backends may report billing, hosted payment flows, crypto
 payment flows, Witself support tickets, or managed-only features as unsupported.
-If the embedding provider is unavailable, capabilities should report semantic
-recall as degraded so callers know `memory recall` will fall back to
-keyword/tag/kind/time ranking. Commands should use the same capability data when
-returning `unsupported_operation`.
+The current server reports `memory_recall`, `memory_supersede`, and
+`memory_permanent_delete` as supported. It also reports
+`opportunistic_curation` as supported, while `automatic_capture` and
+`scheduled_curation` remain explicitly `not_implemented`. `semantic_recall`
+and `client_vector_recall` are supported when the migration-0032 vector surface
+is wired; lexical recall does not need a provider. Commands should
+use the same capability data when returning `unsupported_operation`. These are
+backend capabilities: an explicitly configured local `memory curate auto`
+worker can react to terminal transcript flushes, but the server and MCP cannot
+launch, schedule, or attest that client process.
 
 ## `witself whoami`
 
@@ -462,8 +495,8 @@ ws setup \
 ```
 
 Local mock/development setup is available for early implementation, demos, and
-tests, but it is not the production deployment path. It uses the `local-dev`
-embedding provider so semantic recall can be exercised offline:
+tests, but it is not the production deployment path. Its memory path uses the
+same model-free lexical contract as deployed cells:
 
 ```sh
 ws setup --local \
@@ -790,8 +823,7 @@ Flags:
 Create the local development store for local mock/development mode. This is the
 local backend bootstrap command; `realm create --local` may call it internally.
 When the store is empty, this also creates the first local operator/admin
-context. The local backend uses the `local-dev` embedding provider so semantic
-recall works offline.
+context. The local backend uses the same model-free lexical recall contract.
 
 ```sh
 ws realm init
@@ -908,7 +940,7 @@ Show usage and metering data.
 
 V0 usage dimensions should include `active_agent`, `stored_memory`,
 `stored_fact`, `memory_recall`, `memory_read`, `memory_write`,
-`embedding_operation`, `vector_storage_byte`, `crossagent_access`,
+`vector_write`, `vector_storage_byte`, `crossagent_access`,
 `security_group`, `message_sent`, `message_delivered`, `audit_event`, and
 `api_request`.
 
@@ -1244,24 +1276,22 @@ Flags:
 
 ## `witself remember` (deferred)
 
-The current CLI does not expose this command. Earlier drafts described a
-provider-agnostic quick-add that sent non-facts to Witself memory, but that is
-not the desired behavior for runtimes such as Codex that already have native
-memory.
+The current CLI does not expose this unified convenience command. Natural-
+language routing is an integration responsibility: an atomic durable assertion
+calls `witself.fact.set`, while narrative context calls the implemented
+`witself.memory.capture` operation by default. Runtime-native memory is used only
+when the user explicitly names it or asks for both providers.
 
-Natural-language routing is currently an integration responsibility: an atomic
-durable assertion calls `witself.fact.set`, while narrative context stays on the
-runtime-native memory path. If this CLI command is implemented later, invoking
-it will be an explicit choice of Witself rather than a silent replacement for
-native memory. See [Agent Memory Routing](agent-memory-routing.md).
+If `witself remember` is implemented later, it must compose those existing
+Witself operations and must not move classification or inference into the
+backend. See [Agent Memory Routing](agent-memory-routing.md).
 
 ## `witself self show`
 
 Show the always-loaded self-digest: a bounded, session-start view of who the
 agent is. The digest lists `primary` facts first, then the top-N salient memories
 (blended salience + recency), then a one-line index of kinds, tags, and counts.
-It is cheap and never requires the embedding provider, so it works even when
-semantic recall is degraded. This is the MCP/CLI analogue of an auto-loaded
+It is cheap and model-free. This is the MCP/CLI analogue of an auto-loaded
 CLAUDE.md head. The digest shape, cap, and `elided` behavior are tracked in
 [context-hydration.md](context-hydration.md).
 
@@ -1325,7 +1355,7 @@ Initial transcript dimensions are `transcript_created`,
 future realm/account billing commands aggregate from the same portable event
 ledger subject to operator permissions.
 
-## `witself session`
+## `witself session` (target; not implemented)
 
 Bootstrap and flush long-running, multi-session work. `session start` hydrates
 identity, open goals, and last progress in one round-trip; `session end` persists
@@ -1337,7 +1367,7 @@ single call rather than a list-and-recall crawl. The session model is tracked in
 ### `witself session start`
 
 Hydrate identity, open goals, and last progress for a new working session in one
-call. Reads only; never requires the embedding provider.
+call. Reads only; it never invokes a model provider.
 
 ```sh
 ws session start
@@ -1376,14 +1406,35 @@ Flags:
 Manage memories. A memory is free-form self-content owned by an agent (or, in
 the group case, by a security group). It is one of the two first-class identity
 payload types alongside facts. Memories are addressed by `id` (`mem_...`),
-recalled semantically, and filtered by metadata; they are not name-unique. The
+recalled lexically/structurally, and filtered by metadata; they are not name-unique. The
 memory model and recall ranking are tracked in
 [memory-model.md](memory-model.md).
 
-A memory carries `content`, a `kind` convention (such as `episodic`, `semantic`,
+The implemented agent-owned direct slice uses `memory capture`, `show`, `list`,
+`recall`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`,
+`memory evidence resolve`, and `memory delete`. Mutations require an explicit
+idempotency key; adjust and lifecycle changes also require the exact current
+version. Permanent-delete preview is the deliberate exception: it accepts only
+the memory id and creates no state. Client curation/automation and vector
+profiles/hybrid recall are also implemented below. Cross-agent/group mutation
+and recall remain target work.
+
+`witself memory evidence resolve EVIDENCE_ID` terminates one pending evidence
+locator with exactly one of an exact transcript range (`--transcript`,
+`--from-sequence`, `--until-sequence`), source memory/version, realm message,
+import-artifact locator, or `--unresolvable-reason`. It appends a terminal
+evidence row and requires `--idempotency-key`; the original pending row remains
+immutable.
+
+A memory carries `content` plus `content_encoding` (`plain` by default or
+canonical `base64`), a `kind` convention (such as `episodic`, `semantic`,
 `profile`, or `note`), `tags[]`, `source`, `salience`, `links[]` of `witself://`
 references, an optional `sensitive` marker, timestamps, and versioned edit
-history.
+history. Show, list, recall, and history output identify the effective encoding.
+Human `memory show` output also prints an immutable supersession receipt and the
+currently active relation set when present. Human `memory history` includes
+receipt-set/revision/replacement columns and active-set/revision columns so an
+operator can distinguish historical provenance from current relation state.
 
 Memory targeting rules:
 
@@ -1408,38 +1459,53 @@ ws memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --reason 
 ws memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
 ```
 
-### `witself memory add`
+### `witself memory capture`
 
-Add a memory. The creating agent is the owner unless an authorized caller
-targets another agent with `--owner-agent` (under a `contribute` policy or operator
-override) or a group with `--owner-group`.
+Capture one client-authored, agent-owned narrative with at least one exact,
+pending, or explicitly unavailable evidence item. The server derives actor,
+account, realm, stable owner, and origin from the agent token; it does not
+summarize or classify the content.
 
 ```sh
-ws memory add --content "Deployed v0.3 to prod; rollback plan documented." \
-  --kind episodic --tag deploy --tag prod
+witself memory capture \
+  --content "Chose PostgreSQL as the sole authoritative memory store." \
+  --kind decision --capture-reason explicit \
+  --evidence-transcript trn_123 --evidence-from-sequence 40 \
+  --evidence-until-sequence 44 --idempotency-key capture-db-decision
 
-ws memory add --content-file ./postmortem.md \
-  --kind semantic --salience 0.8 --link witself://fact/home-region
-
-echo "Operator prefers terse summaries." | ws memory add --content-stdin --kind profile
+echo "Session checkpoint" | witself memory capture --stdin --kind session \
+  --capture-reason session --evidence-unavailable-reason runtime_no_hook \
+  --idempotency-key capture-session-checkpoint
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--content TEXT` | Memory content from a flag. |
-| `--content-file PATH` | Read memory content from a file. |
-| `--content-stdin` | Read memory content from stdin. |
-| `--kind KIND` | Memory kind convention, such as `episodic`, `semantic`, `profile`, or `note`. Unknown kinds are allowed. |
-| `--tag TAG` | Add a tag. Repeatable. |
-| `--source TEXT` | Provenance, such as `self`, an agent name, a message id, or an import batch id. |
-| `--salience FLOAT` | Importance/weight hint used in recall ranking. |
-| `--link REF` | Add a `witself://` link to another memory or fact. Repeatable. |
-| `--sensitive` | Mark the memory as `sensitive` (PII); content is redacted in list/recall by default. |
-| `--owner-agent NAME_OR_ID` | Contribute the memory to a specific agent's store. Policy-gated or operator only. |
-| `--owner-group NAME_OR_ID` | Create the memory as group-owned (collective). |
-| `--reason TEXT` | Audit reason when contributing to another agent or group. |
+| `--content TEXT` | Client-authored narrative content. |
+| `--file PATH` | Read content from a file; `-` means stdin. |
+| `--stdin` | Read content from stdin. Exactly one content source is required. |
+| `--content-encoding ENCODING` | `plain` (default) or canonical `base64`. |
+| `--kind KIND` | Kind such as `decision`, `session`, `milestone`, or `lesson`; default `note`. |
+| `--tag TAG` | Add a tag; repeatable or comma-separated. |
+| `--salience FLOAT` | Optional rank hint from 0 to 1. |
+| `--link REF` | Add an identity link; repeatable or comma-separated. |
+| `--sensitive` | Redact content in broad list/recall output by default. |
+| `--occurred-from RFC3339` | Optional event-range start. |
+| `--occurred-until RFC3339` | Optional event-range end. |
+| `--capture-reason CODE` | Trigger such as `explicit`, `automatic`, `session`, or `manual`; default `manual`. |
+| `--evidence-file PATH` | JSON array of typed evidence objects. |
+| `--evidence-transcript ID` | Exact transcript id; pair with ordered positive sequence flags. |
+| `--evidence-from-sequence N` | First exact transcript entry. |
+| `--evidence-until-sequence N` | Last exact transcript entry. |
+| `--evidence-locator LOCATOR` | Stable pending locator for evidence not flushed yet. |
+| `--evidence-unavailable-reason CODE` | Explicit bounded reason exact/pending evidence is unavailable. |
+| `--evidence-role ROLE` | `supports`, `contradicts`, or `context`; default `supports`. |
+| `--evidence-source-digest SHA256` | Optional client-supplied source digest. |
+| `--client-runtime`, `--client-model`, `--client-recipe`, `--client-recipe-version` | Optional self-reported client provenance. |
+| `--idempotency-key KEY` | Required fresh retry key; reuse only for the exact capture retry. |
+
+The older proposed `memory add` name is not the implemented command.
 
 ### `witself memory adjust ID`
 
@@ -1450,28 +1516,86 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin or `curate`-policy caller: adjust a memory owned by a specific agent. |
-| `--owner-group NAME_OR_ID` | Adjust a group-owned memory. |
+| `--expected-version N` | Required exact current version. |
+| `--idempotency-key KEY` | Required retry key for this logical adjustment. |
 | `--content TEXT` | Replace memory content from a flag. |
-| `--content-file PATH` | Replace memory content from a file. |
-| `--content-stdin` | Replace memory content from stdin. |
+| `--file PATH` | Replace content from a file; `-` means stdin. |
+| `--stdin` | Replace content from stdin. |
+| `--content-encoding ENCODING` | Replace the encoding with `plain` or canonical `base64`; may be used with or without replacing content. |
 | `--kind KIND` | Change the memory kind. |
 | `--salience FLOAT` | Change the salience hint. |
-| `--source TEXT` | Change provenance. |
 | `--add-tag TAG` | Add a tag. Repeatable. |
 | `--remove-tag TAG` | Remove a tag. Repeatable. |
 | `--add-link REF` | Add a `witself://` link. Repeatable. |
 | `--remove-link REF` | Remove a `witself://` link. Repeatable. |
 | `--sensitive` | Mark as `sensitive`. |
 | `--not-sensitive` | Clear the `sensitive` marker. |
-| `--dry-run` | Show planned changes and the resulting version without writing. |
-| `--reason TEXT` | Audit reason. Required for cross-agent or group-owned curation. |
+| `--occurred-from RFC3339` / `--occurred-until RFC3339` | Replace event bounds. |
+| `--clear-occurred-from` / `--clear-occurred-until` | Clear event bounds. |
+| `--reason TEXT` | Optional bounded adjustment reason. |
+
+### `witself memory supersede ID`
+
+Atomically and reversibly replace one exact active memory version with 1-32
+client-authored memory capsules. The backend validates and stores the complete
+set in one transaction; it does not decide what to merge, split, or rewrite.
+
+```sh
+witself memory supersede mem_01H... --expected-version 2 \
+  --replacements-file replacements.json \
+  --idempotency-key supersede-mem-01H...
+```
+
+`replacements.json` is a JSON array. Every element uses the capture capsule
+shape and must include `content`, nonempty `evidence`, and an
+`idempotency_key` distinct from the operation key and every other replacement
+key. `kind` and `capture_reason` should identify the client-authored result.
+Omitted `content_encoding` defaults to `plain`; use `base64` only when
+`content` is canonical base64.
+
+```json
+[
+  {
+    "content": "PostgreSQL is the authoritative memory store.",
+    "content_encoding": "plain",
+    "kind": "decision",
+    "capture_reason": "curation",
+    "idempotency_key": "replacement-database-decision",
+    "evidence": [
+      {
+        "state": "resolved",
+        "type": "memory",
+        "role": "supports",
+        "source_memory_id": "mem_01H...",
+        "source_memory_version": 2
+      }
+    ]
+  }
+]
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--expected-version N` | Required exact current active source version. |
+| `--replacements-file PATH` | Required JSON array of 1-32 replacement capsules; `-` means stdin. |
+| `--idempotency-key KEY` | Required operation retry key, distinct from all replacement keys. |
+| `--reason TEXT` | Optional bounded reversible-supersession reason. |
+| `--client-runtime`, `--client-model`, `--client-recipe`, `--client-recipe-version` | Optional self-reported client provenance. |
+| `--json` | Emit the source, full replacements, and value-free receipt. |
+
+Success preserves the source as a `superseded` version, creates active
+replacements, and returns the supersession set id/revision, exact source and
+replacement version references, replacement count, and lowercase SHA-256
+membership digest. The command rejects an inconsistent response and is
+agent-self only.
 
 ### `witself memory read ID`
 
-Read one memory deterministically by `id`. Reading updates `last_accessed_at`.
-This is the deterministic counterpart to semantic `recall`; it does not require
-the embedding provider.
+Read one memory deterministically by `id`. This is the exact-id counterpart to
+ranked `recall`; neither operation makes a backend model call or mutates the
+memory.
 
 Flags:
 
@@ -1486,36 +1610,74 @@ Flags:
 
 ### `witself memory recall QUERY`
 
-Recall memories by semantic similarity (the core Witself differentiator). Recall
-performs an embedding-backed vector similarity search over the caller's
-accessible memories, then blends in keyword, tag, kind, and time filters with
-hybrid ranking (similarity, lexical match, tag/kind match, recency, and
-salience). If the embedding provider is unavailable, recall degrades
-deterministically to keyword/tag/kind/time ranking and the result reports the
-degraded state.
+The implemented command performs bounded deterministic recall over the current
+agent's active memory heads. It uses PostgreSQL literal full-text matching plus
+salience and recency; the backend calls no model or embedding provider. An
+optional profile plus caller-authored query vector enables deterministic hybrid
+ranking. A text query is optional when a structured filter or query vector is
+present. Natural phrases such as relative dates must be translated into RFC3339
+filters by the client.
+
+Results show total, similarity/vector-use, lexical, salience, and recency score
+components. JSON also reports retrieval mode, profile, vector coverage and
+candidate/match counts, candidate budget/truncation, degradation reason, and an
+opaque next cursor when another page exists. Sensitive content is redacted
+unless the exact intentional request uses `--include-sensitive`.
 
 ```sh
-ws memory recall "what do I know about the prod outage"
-ws memory recall "deploy preferences" --kind profile --limit 5 --json
-ws memory recall "shared runbooks" --owner-group shared-context
+witself memory recall "what do I know about the prod outage"
+witself memory recall "deploy preferences" --kind profile --limit 5 --json
+witself memory recall --tag architecture \
+  --occurred-from 2026-01-01T00:00:00Z
+witself memory recall "deployment" --vector-profile mvp_... \
+  --query-vector-file query-vector.json
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--kind KIND` | Restrict recall to a memory kind. Repeatable. |
-| `--tag TAG` | Restrict recall to a tag. Repeatable. |
-| `--since TIMESTAMP_OR_DURATION` | Only recall memories created/accessed since this point. |
-| `--until TIMESTAMP` | Recall window end. |
-| `--limit N` | Maximum number of ranked results. |
-| `--min-score FLOAT` | Minimum blended relevance score. |
-| `--owner-agent NAME_OR_ID` | Recall over a specific agent's memories. `read`-policy or operator. Metered as a cross-agent access. |
-| `--owner-group NAME_OR_ID` | Recall over a group's shared memories. |
-| `--all-agents` | Operator/admin only: recall across every agent in the realm. |
-| `--show-scores` | Include per-result similarity/recency/salience contributions. |
-| `--keyword-only` | Force keyword/tag/kind/time ranking without the embedding provider. |
-| `--reason TEXT` | Audit reason for cross-agent recall. |
+| `--query TEXT` | Literal full-text query; mutually exclusive with positional `QUERY`. |
+| `--kind KIND` | Exact memory-kind filter. |
+| `--tag TAG` | Require a tag; repeatable or comma-separated. |
+| `--link REF` | Require an identity link; repeatable or comma-separated. |
+| `--origin CODE` | Filter by immutable origin. |
+| `--capture-reason CODE` | Filter by capture trigger. |
+| `--occurred-from RFC3339` | Event-range lower bound. |
+| `--occurred-until RFC3339` | Event-range upper bound. |
+| `--captured-from RFC3339` | Capture-time lower bound. |
+| `--captured-until RFC3339` | Capture-time upper bound. |
+| `--include-sensitive` | Intentionally include authorized sensitive content; default is redacted. |
+| `--limit N` | Maximum ranked results, 1-100; default 20. |
+| `--cursor TOKEN` | Continue the exact same query/filter set with the opaque server cursor. |
+| `--vector-profile ID` | Immutable client-vector profile; requires `--query-vector-file`. |
+| `--query-vector-file FILE` | JSON array for the compatible query vector; `-` reads stdin and requires `--vector-profile`. |
+| `--json` | Emit the complete recall page and score metadata. |
+
+Cross-agent/group recall remains future work. Client-vector ranking is explicit,
+never a hidden fallback: omit both vector flags for the full lexical contract.
+
+### `witself memory vector profile create|list` / `vector set`
+
+Register/list immutable client-vector contracts and store exact memory-version
+vectors. Provider/model/recipe values are identifiers only; Witself never calls
+that model or accepts its credential. Each agent may register at most 100
+profiles. Dimensions are 1-4096; metric is `cosine`, `dot`, or `euclidean`;
+normalization is `none` or `l2`, with L2 required for dot.
+
+```sh
+witself memory vector profile create --provider local --model example \
+  --recipe whole-memory --recipe-version 1 --dimensions 3
+witself memory vector profile list
+witself memory vector set mem_... --profile mvp_... --memory-version 2 \
+  --content-hash SHA256 --vector-file vector.json
+```
+
+`vector set` binds the finite JSON array to the exact profile, memory version,
+and content hash. Exact retries return the existing value-free receipt; changed
+components conflict. Migration `0032` stores vectors as portable JSONB and
+includes both profile/vector tables in schema-32 account export/import. No
+pgvector extension is required.
 
 ### `witself memory list`
 
@@ -1523,105 +1685,206 @@ List memories visible to the current principal with metadata and filters.
 `sensitive` content is redacted by default.
 
 ```sh
-ws memory list
-ws memory list --kind episodic --tag deploy
-ws memory list --all-agents
-ws memory list --owner-group shared-context
+witself memory list
+witself memory list --kind decision --tag architecture
+witself memory list --state forgotten --limit 20
 ```
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--kind KIND` | Filter by memory kind. Repeatable. |
-| `--tag TAG` | Filter by tag. Repeatable. |
-| `--source TEXT` | Filter by provenance. |
-| `--since TIMESTAMP_OR_DURATION` | Filter by created/updated window start. |
-| `--until TIMESTAMP` | Filter window end. |
-| `--owner-agent NAME_OR_ID` | Filter by the agent that owns the memory. |
-| `--owner-group NAME_OR_ID` | Filter by group-owned memories. |
-| `--all-agents` | Operator/admin only: include memories owned by every agent in the realm. |
-| `--include-sensitive` | Include `sensitive` memories in results. Content remains redacted unless individually read. |
-| `--include-forgotten` | Include soft-deleted (tombstoned) memories within the retention window. |
-| `--limit N` | Maximum number of rows. |
-| `--cursor TOKEN` | Continue from a pagination cursor. |
+| `--owner-agent ID` | Optional explicit current-agent id; another owner is rejected. |
+| `--state STATE` | Exact lifecycle state, including `active`, `superseded`, `forgotten`, or `reverted`. |
+| `--kind KIND` | Exact memory-kind filter. |
+| `--tag TAG` | Require a tag; repeatable or comma-separated. |
+| `--origin CODE` | Filter by immutable origin. |
+| `--capture-reason CODE` | Filter by capture reason. |
+| `--occurred-from RFC3339` / `--occurred-until RFC3339` | Filter the event range. |
+| `--captured-from RFC3339` / `--captured-until RFC3339` | Filter capture time. |
+| `--include-sensitive` | Include authorized sensitive content; default is redacted. |
+| `--limit N` | Maximum rows, 1-100; default 100. |
+| `--cursor TOKEN` | Continue with the opaque cursor. |
 
 ### `witself memory forget ID`
 
-Forget a memory. Forget is a soft delete (tombstone), reversible within the
-retention window. This is the default destructive path; it is audited and
-reversible via `memory restore`.
+Forget a memory by appending a reversible `forgotten` version. This is the
+default removal path and is reversible via `memory restore`; it does not perform
+the physical purge used by `memory delete`.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin or `forget`-policy caller: forget a memory owned by a specific agent. |
-| `--owner-group NAME_OR_ID` | Forget a group-owned memory. |
-| `--dry-run` | Show the forget plan and retention window without tombstoning the memory. |
-| `--yes` | Skip confirmation. |
-| `--reason TEXT` | Audit reason. Required for cross-agent or group-owned forgets. |
+| `--expected-version N` | Required exact current version. |
+| `--idempotency-key KEY` | Required retry key for this logical forget. |
+| `--reason TEXT` | Optional bounded lifecycle reason. |
 
 ### `witself memory restore ID`
 
-Restore a forgotten (tombstoned) memory within the retention window.
+Restore a forgotten memory by appending a new active version.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin or `forget`-policy caller: restore a memory owned by a specific agent. |
-| `--owner-group NAME_OR_ID` | Restore a group-owned memory. |
-| `--reason TEXT` | Audit reason for cross-agent or group-owned restores. |
+| `--expected-version N` | Required exact current version. |
+| `--idempotency-key KEY` | Required retry key for this logical restore. |
+| `--reason TEXT` | Optional bounded lifecycle reason. |
+
+### `witself memory reactivate ID`
+
+Explicitly reactivate a reverted or otherwise invalidly-restorable memory. It
+requires `--expected-version` and `--idempotency-key` like the other lifecycle
+commands. A superseded head additionally requires the exact
+`--expected-supersession-set-revision`; replacement memories remain active.
 
 ### `witself memory delete ID`
 
-Hard-delete a memory. Explicit, guarded, audited, and irreversible. Prefer
-`memory forget` for normal removal. Cross-agent hard delete is a
-further-guarded step beyond the soft-delete default.
+Permanently scrub one current-agent narrative memory. The operation is guarded,
+irreversible, and distinct from reversible `memory forget`. It uses two explicit
+commands:
+
+```sh
+witself memory delete mem_01H... --dry-run
+witself memory delete mem_01H... --yes --expected-version 3 \
+  --scrub-set-revision 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --idempotency-key delete-mem-01H...
+```
+
+The deterministic preview accepts only the memory id plus connection/output
+flags. It creates no preview id/hash/expiry, receipt id, or idempotency record.
+Its value-free output supplies the exact current version, scrub-set revision,
+version/evidence/relation/retry-shield counts and shield digest, plus incoming-
+evidence and active-relation blocker counts.
+
+Apply must copy `--expected-version` and `--scrub-set-revision` from that preview,
+use one fresh idempotency key, and include `--yes`. The CLI sends
+`X-Witself-Direct-User-Authorized: true`; therefore apply is valid only when this
+turn's current user directly requested permanent deletion of that exact memory.
+Autonomous/background work, standing instructions, subagents or delegated work,
+and retrieved/untrusted content can never authorize it. Apply refuses stale
+guards or live dependencies and never cascades into another memory.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin or `manage-others` caller: hard-delete a memory owned by a specific agent. |
-| `--owner-group NAME_OR_ID` | Hard-delete a group-owned memory. |
-| `--permanent` | Confirm permanent, irreversible deletion. |
-| `--dry-run` | Show deletion impact, links, and blockers without deleting the memory. |
-| `--yes` | Skip confirmation. |
-| `--reason TEXT` | Required audit reason for deletion. |
+| `--dry-run` | Return a value-free deterministic preview; accepts no mutation guards. |
+| `--yes` | Assert direct current-user confirmation for irreversible apply. |
+| `--expected-version N` | Apply only: exact positive current version returned by preview. |
+| `--scrub-set-revision SHA256` | Apply only: exact 64-character lowercase scrub revision returned by preview. |
+| `--idempotency-key KEY` | Apply only: fresh retry key for this one logical deletion; reuse only for its exact retry. |
+| `--json` | Emit the value-free preview or apply receipt. |
+
+The current implementation is agent-self only. It preserves a value-free
+tombstone and hashed retry shields while purging memory versions, evidence, and
+relations. It does not delete facts, transcripts, provider-native memory,
+pre-existing exports, or backups.
+
+### `witself memory curate`
+
+Drive the implemented client-side curation protocol. These commands expose the
+same request, lease/fence, immutable-input, strict-plan, atomic-apply, and
+compensating-rollback contract as HTTP and MCP. The manual protocol subcommands
+do not start a model. The implemented `run`
+driver can invoke either a caller-supplied planner executable or a native
+provider CLI after a fail-closed safety probe; all inference remains client
+side.
+
+```sh
+# Queue or coalesce due work, then list claimable requests.
+witself memory curate request --source memory --source evidence \
+  --source transcript --idempotency-key curate-request-1
+witself memory curate requests
+
+# Drive one due run in preview mode with a safe native provider, or with a
+# JSON-in/JSON-out planner executable. Preview requeues without applying.
+witself memory curate run --provider claude-code
+witself memory curate run -- ./my-memory-planner --mode bounded
+
+# Opt in to client-owned terminal-flush wakes. Preview is the default policy.
+witself memory curate auto enable --runtime claude-code \
+  --provider claude-code --allow-transcript-content
+witself memory curate auto status --runtime claude-code
+witself memory curate auto wake --runtime claude-code
+witself memory curate auto service install --runtime claude-code
+witself memory curate auto service status --runtime claude-code
+
+# Claim the request and page the frozen inputs returned for this fence.
+witself memory curate start --request mcrq_... \
+  --idempotency-key curate-start-1
+witself memory curate show mrun_... --fence 7
+
+# Submit, then apply, the exact normalized plan receipt.
+witself memory curate plan mrun_... --fence 7 \
+  --file plan.json --idempotency-key curate-plan-1
+witself memory curate apply mrun_... --fence 7 --plan-revision 1 \
+  --plan-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --idempotency-key curate-apply-1 --yes
+```
+
+Subcommands:
+
+| Subcommand | Contract |
+|---|---|
+| `request` | Create or coalesce deterministic work. `--idempotency-key` is required. Scope flags are `--source`, `--memory-state`, `--include-sensitive`, `--max-memories`, `--max-evidence`, and `--max-transcript-entries`; queue metadata includes `--coalescing-key`, `--trigger-reason`, `--trigger-generation`, `--priority`, RFC3339 `--due-at`, and `--max-attempts`. |
+| `requests` (`list`) | List stable cursor-paged requests. Empty `--state` lists claimable due work; an explicit lifecycle state lists that state. `--limit` is 1-200 and `--cursor` continues the exact filter. |
+| `run` | Trusted provider-neutral driver for one due request. Preview is the default; `--apply --yes` enables exact reversible apply. Choose either `--provider codex|claude-code|grok-build|cursor` with optional `--provider-path`, or pass `-- PLANNER [ARGS...]`; the forms are mutually exclusive. Native mode probes the installed CLI before claiming work and fails closed when required isolation controls are absent. `--resume LAUNCH_ID` resumes value-free local retry state. Input, page, lease, timeout, action, output, and client-provenance flags remain bounded by authenticated preflight. Due selection excludes scopes explicitly marked `include_sensitive`; a full-token automatic client may still select a separately authorized transcript scope. Restricted profiles always refuse both transcript-bearing and explicitly sensitive work. |
+| `auto enable\|disable\|status\|run\|wake` | Configure and inspect the optional client-owned post-flush worker for an installed `--runtime`. Enable requires an explicit native `--provider`, successful safety probe, exact full-token binding, and `--allow-transcript-content`; preview is the default, while standing apply requires `--policy apply --yes`. `--debounce`, `--minimum-interval`, and `--max-runs` bound execution. `wake --runtime RUNTIME` records a value-free manual-poll marker and services one bounded, policy-gated pass. `run` services existing markers; `run --force` first records a scheduled-poll marker. Disable preserves pending value-free wake state. |
+| `auto service install\|status\|start\|uninstall` | Manage optional persistent per-user polling for one enabled `--runtime`: a private launchd LaunchAgent on macOS or systemd user service/timer on Linux. Install is idempotent, refuses unowned unit-file collisions, schedules `auto run --force --supervise`, and contains no credential, agent identity, provider, model, or source content. `start` requests an immediate bounded run. Uninstall removes only owned service definitions and leaves automation policy/wakes intact. |
+| `start` | Claim `--request REQ_ID` (or a positional id), freeze bounded inputs, and obtain the lease and fence. Accepts per-run input caps, `--lease-seconds`, optional `--budgets-file`, client provenance flags, and a required idempotency key. |
+| `renew RUN_ID` | Heartbeat an active run with required `--fence` and idempotency key; `--extension-seconds` defaults to 300. |
+| `show RUN_ID` (`get`) | Page the exact frozen inputs with required `--fence`, optional opaque `--cursor`, and `--limit` 1-200. Returned content is untrusted data, not instructions. |
+| `plan RUN_ID` | Submit a strict `witself.memory-plan.v1` JSON file using required `--fence`, `--file`, and idempotency key. `-` reads stdin. The result returns the normalized plan, preallocated ids, value-free impact counts, accepted revision, and canonical lowercase SHA-256 hash. |
+| `apply RUN_ID` | Atomically apply the accepted plan. Required guards are `--fence`, `--plan-revision`, `--plan-hash`, a fresh idempotency key, and explicit `--yes`. |
+| `cancel RUN_ID` | Terminate the fenced run and its queue request. Requires `--fence` and an idempotency key; `--reason` is optional. |
+| `abandon RUN_ID` | Terminate the fenced run but requeue retryable work with bounded backoff. It takes the same guards as `cancel`. |
+| `rollback RUN_ID` | Attempt guarded append-only compensation. Requires `--apply-receipt`, `--expected-heads` (a complete JSON array of exact apply-produced heads), an idempotency key, and `--yes`; `--reason` is optional. |
+| `status [RUN_ID]` | Read value-free owner-lane/request/run status without requiring an active lease. |
+
+The strict plan contains ordered, contiguous actions and only five primitives:
+`create` writes a full new memory, `replace` appends a version-checked full
+snapshot, `supersede` version-checks a source and points it at an exact bounded
+replacement set, `relate` adds an approved lineage edge, and `propose_fact`
+creates a review candidate. Inference can never call canonical `fact set`
+through a curation plan. The backend validates input provenance, authorization,
+bounds, expected heads, subject identity, and the canonical plan hash, then
+commits every action and contiguous cursor advance in one transaction or none.
+
+Rollback requires every apply-produced head still to be current and refuses
+later consumers. It appends compensating memory state, reverts curation-created
+relations, withdraws curation-created fact candidates, and queues a read-only
+replay. It never cascades and never rewinds curation cursors. Source writes can
+coalesce due work. `memory curate run` and safe native-provider adapters are
+implemented. When `memory curate auto` is enabled, selected terminal transcript
+events record a value-free wake only after their entries are durable, then
+detach an internal supervised `auto run`. That supervisor performs bounded
+draining across configured `--max-runs` batches and retries eligible transient
+failures from the persisted value-free backoff deadline; work left after a
+successful supervisor bound remains marked and can detach a continuation. The
+detached operating-system argv contains only the runtime binding and internal
+supervisor switch; provider/model policy is loaded from mode-0600 local state,
+the trusted parent retains the installed full token, and inference receives no
+Witself credential in argv, environment, or model input. The worker is
+debounced, single-flight, restart-safe, and preview-by-default. Persistent
+launchd/systemd user-service packaging is available through `auto service`; it
+starts with the user's service manager (at login on macOS/Linux, or before Linux
+login only when the host enables user lingering). It remains a client-owned
+launcher and does not make `scheduled_curation` a backend capability. MCP still
+cannot wake an AI. PostgreSQL remains the sole canonical memory and curation
+store.
 
 ### `witself memory consolidate`
 
-Consolidate (garbage-collect) the memory store: merge near-duplicate memories,
-supersede stale ones, surface (never auto-resolve) conflicting facts, and trim
-the digest/index. Consolidation respects `source` provenance and never silently
-overwrites human-, operator-, or import-authored records; such conflicts are
-surfaced for a human/agent to resolve. This addresses the primary failure mode of
-an append-only store. The selection and merge rules are tracked in
-[memory-model.md](memory-model.md).
+This command is not implemented. The autonomous server-classification design is
+superseded by the implemented `witself memory curate ...` commands that submit
+an exact client-authored plan; see
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). The backend
+validates and applies the plan but does not decide what to merge, split, or
+supersede.
 
-`--dry-run` defaults to true, so consolidation previews planned merges,
-supersessions, and conflicts without writing until the caller opts in. The
-command is excluded in `--read-only` MCP mode and emits a `memory.consolidated`
-audit event when it writes.
-
-```sh
-ws memory consolidate
-ws memory consolidate --dry-run=false --reason "post-session cleanup"
-ws memory consolidate --scope self --json
-```
-
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--dry-run` | Preview merges/supersessions/conflicts without writing. Default: true. |
-| `--scope SCOPE` | Restrict consolidation to a scope. |
-| `--reason TEXT` | Audit reason; required when writing. |
-| `--json` | Emit `{ merged[], superseded[], conflicts[], trimmed_index }`. |
-
-## `witself digest emit`
+## `witself digest emit` (target; not implemented)
 
 Render the self-digest as a CLAUDE.md / AGENTS.md fragment for file-load agent
 harnesses. This is the outbound half of the two-way file bridge: it makes
@@ -1631,7 +1894,7 @@ timestamp) so the emitted block is recognizable and round-trippable. The emit
 formats and provenance markers are tracked in
 [context-hydration.md](context-hydration.md).
 
-`digest emit` reads only and never requires the embedding provider. It optionally
+`digest emit` would read only and invoke no model provider. It may optionally
 emits a `self.digest.emitted` audit event.
 
 ```sh
@@ -1648,13 +1911,14 @@ Flags:
 | `--max-bytes N` | Hard cap on the emitted fragment size. |
 | `-o, --out PATH` | Write the fragment to a file instead of stdout. |
 
-## `witself ingest`
+## `witself ingest` (target; not implemented)
 
 Ingest existing agent context files into Witself: the inbound half of the file
 bridge. `ingest` parses CLAUDE.md / AGENTS.md / GEMINI.md, routing kv-shaped
-lines to facts (upsert) and prose paragraphs to memories, tagging everything
-`source=import:<file>`. Dedup/upsert prevents re-import duplication, so the same
-file can be re-ingested safely. This makes Witself a good citizen of the
+lines to typed fact assertions and prose paragraphs to client-authored memories,
+tagging everything with stable import provenance. Artifact identity plus exact
+idempotency keys make unchanged re-imports no-ops; the backend does not infer
+semantic duplicates. This makes Witself a good citizen of the
 AGENTS.md ecosystem rather than a competitor; it composes the existing fact and
 memory create paths and adds no new resource. The parser rules are tracked in
 [context-hydration.md](context-hydration.md).
@@ -1670,18 +1934,19 @@ Flags:
 |---|---|
 | `--source-label L` | Override the `source=import:<file>` label applied to ingested records. |
 | `--dry-run` | Show planned created/updated/deduplicated facts and memories without writing. |
-| `--json` | Emit the per-file ingest plan and results, including `echo` lines and `duplicate_of` on merges. |
+| `--json` | Emit the per-file exact write plan and idempotency results. |
 
 `ingest` emits `fact.imported` and `memory.imported` audit events. It is excluded
 in `--read-only` MCP mode.
 
-## `witself bootstrap-instructions`
+## `witself bootstrap-instructions` (target; not implemented)
 
 Print the paste-able teaching stanza that installs the Witself usage habit
-(recall-before-act, write-after-learn, consolidate-when-noisy) into an agent's
-file-loaded context. Witself is a service an agent must be taught to call, so the
-stanza is the file-ecosystem half of the teaching layer, mirroring the MCP server
-`instructions` text. The canonical stanza is pinned in
+(recall before relevant work, capture after durable learning, and curate through
+an explicit client-authored plan) into an agent's file-loaded context. Witself is
+a service an agent must be taught to call, so the stanza is the file-ecosystem
+half of the teaching layer, mirroring the MCP server `instructions` text. The
+canonical stanza is pinned in
 [context-hydration.md](context-hydration.md).
 
 ```sh
@@ -1887,7 +2152,7 @@ secret may contain. Field size limits and attachments are tracked in
 [secret-size-and-attachments.md](secret-size-and-attachments.md).
 
 Sealed-plane carve-outs: secret values are never embedded, never returned by
-semantic recall, never placed in the self-digest, and never included in the
+memory recall, never placed in the self-digest, and never included in the
 plaintext export; secret backup is encrypted-only. Sensitive field values are
 only returned by the explicit, audited `secret reveal` ceremony.
 
@@ -2623,6 +2888,18 @@ when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
 
+The installer also reports the runtime's automatic-hydration delivery modes.
+The transcript hook durably queues capture first, then uses the exact installed
+account/realm/agent binding for a bounded, fail-open open-plane read. Codex and
+Claude Code inject `self.show` at session start and focused lexical
+`memory.recall` context for deterministically history-dependent prompts. Cursor
+injects session-start context but its prompt hook cannot add model context.
+Grok passive-hook output is ignored. Those unsupported task/runtime paths are
+reported as `guided_mcp_fallback`: the managed routing rule tells the active
+agent to recall over MCP, but Witself does not mislabel that guidance as
+synchronous automatic injection. Sensitive and redacted values are never
+included in hook output.
+
 Install also writes the managed fact-versus-native-memory routing policy for
 the selected runtime. Cursor uses
 `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
@@ -3299,10 +3576,11 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current server exposes the 21-tool self, deterministic fact read/write,
-permanent fact deletion, candidate-review, transcript read, and direct-agent
-message surface documented
-in [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
+The current full server exposes 47 tools across self, deterministic facts and fact
+review/deletion, transcripts, direct-agent messages, the implemented direct
+narrative-memory lifecycle/recall/delete surface, and fourteen client-curation tools
+documented in
+[MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
 target contract as additional domain capabilities are wired in.
 
 The default MCP posture should be local-first. Stdio is the first target.
@@ -3324,8 +3602,11 @@ durable, `adjust`/`forget` instead of contradicting, and flush state with
 the pinned text and the file-ecosystem counterpart
 ([`witself bootstrap-instructions`](#witself-bootstrap-instructions)) are tracked
 in [context-hydration.md](context-hydration.md). In `--read-only` mode the server
-omits the mutating tools (`remember`, `session.end`, `memory.consolidate`,
-`ingest`); `self.show`, `session.start`, `recall`, and `digest.emit` remain.
+omits implemented mutating memory tools, including `capture`, `adjust`,
+`supersede`, lifecycle changes, evidence resolution, and permanent-delete
+apply; fact/candidate/subject mutations plus message `send` and the
+acknowledging message `read` are also omitted. Memory `read`, `list`, `history`,
+and `recall` remain alongside the other non-mutating lookup tools.
 
 Flags:
 
@@ -3335,6 +3616,8 @@ Flags:
 | `--listen ADDRESS` | Listen address for HTTP transport. |
 | `--auth-token-file PATH` | Token file for HTTP transport auth. |
 | `--read-only` | Serve without create/update/forget/delete tools (inspection-only). |
+| `--profile full|read-only|curator-preview|curator-apply` | Select the exact MCP surface. Curator profiles require a token with the same authenticated access profile; preview exposes 10 curation-only tools and apply exposes 11. |
+| `--token-file PATH` | Override the installed token file, including when launching a short-lived restricted curator profile. |
 | `--no-value-tools` | Disable sealed-plane MCP tools that return a sensitive value or one-time code (`secret.reveal`, `totp.code`, value-returning `reference.resolve`). |
 | `--agent NAME_OR_ID` | Operator/admin only: bind the server to one agent principal. Agent tokens are already bound by identity. |
 
@@ -3429,18 +3712,25 @@ is tracked in [v0-scope.md](v0-scope.md).
 - `witself realm status`
 - `witself agent create`
 - `witself token create`
-- `witself memory add`
+- `witself memory capture`
 - `witself memory recall`
-- `witself memory read`
+- `witself memory show`
 - `witself memory list`
-- `witself memory consolidate`
-- `witself remember`
+- `witself memory history`
+- `witself memory adjust`
+- `witself memory supersede`
+- `witself memory forget`
+- `witself memory restore`
+- `witself memory reactivate`
+- `witself memory evidence resolve`
+- `witself memory delete`
+- `witself remember` (target)
 - `witself self show`
-- `witself session start`
-- `witself session end`
-- `witself digest emit`
-- `witself ingest`
-- `witself bootstrap-instructions`
+- `witself session start` (target)
+- `witself session end` (target)
+- `witself digest emit` (target)
+- `witself ingest` (target)
+- `witself bootstrap-instructions` (target)
 - `witself fact set`
 - `witself fact get`
 - `witself password generate`
@@ -3463,9 +3753,9 @@ is tracked in [v0-scope.md](v0-scope.md).
   exists
 
 `realm init` is included so early CLI work has a local store to exercise commands
-before managed APIs are ready, using the `local-dev` embedding provider so
-semantic recall can be validated offline. It is not a production milestone. This
-slice is enough to validate human use, semantic recall, deterministic facts,
+before managed APIs are ready. It validates the same model-free lexical recall
+contract offline and is not a production milestone. This slice is enough to
+validate human use, deterministic recall, deterministic facts,
 default-deny policy, security groups, inter-agent messaging, identity references,
 and round-trippable export/import while the managed backend takes shape. The
 open-plane (memory/fact/identity) core ships first; the sealed credential plane

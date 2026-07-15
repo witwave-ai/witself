@@ -15,6 +15,8 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/memorycurator"
+	"github.com/witwave-ai/witself/internal/memoryhydration"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -272,6 +274,9 @@ func installCmd(args []string) int {
 	}
 	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
 	fmt.Println("mcp: witself")
+	hydrationCapability := memoryhydration.CapabilityFor(runtime)
+	fmt.Printf("automatic hydration: session=%s task=%s\n",
+		hydrationCapability.SessionHydration.Delivery, hydrationCapability.TaskRecall.Delivery)
 	if memoryRouting.managed {
 		fmt.Printf("memory routing: %s (managed)\n", memoryRouting.path)
 	}
@@ -500,6 +505,13 @@ func runtimeTargets(value string) ([]string, error) {
 }
 
 func transcriptHook(args []string) int {
+	// Curator processes intentionally inherit provider/runtime credentials so
+	// they can run local inference, but their own hooks must not feed the
+	// resulting synthesis conversation back into the transcript ledger. That
+	// would create a self-sustaining curation loop.
+	if strings.TrimSpace(os.Getenv("WITSELF_CURATOR_SESSION")) != "" {
+		return 0
+	}
 	fs := flag.NewFlagSet("transcript hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
@@ -515,7 +527,8 @@ func transcriptHook(args []string) int {
 		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
 		return 0
 	}
-	if _, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw); err != nil {
+	event, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself capture: %v\n", err)
 		return 0
 	}
@@ -524,7 +537,75 @@ func transcriptHook(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself capture: queued locally; background flush did not start: %v\n", err)
 		}
 	}
+	output, err := automaticHydrationHook(context.Background(), event)
+	if err != nil {
+		// Hydration is optional context, never an availability dependency for a
+		// user prompt. The transcript event remains queued and the runtime must
+		// continue without model-visible Witself context.
+		fmt.Fprintf(os.Stderr, "witself hydration: unavailable; continuing without automatic context: %v\n", err)
+		return 0
+	}
+	if len(output) > 0 {
+		_, _ = fmt.Fprintln(os.Stdout, string(output))
+	}
 	return 0
+}
+
+type installedHydrationSource struct {
+	cfg  transcriptcapture.Config
+	conn *agentConnection
+}
+
+func (s *installedHydrationSource) connect(ctx context.Context) (agentConnection, error) {
+	if s.conn != nil {
+		return *s.conn, nil
+	}
+	conn, err := connectAgent(ctx, s.cfg.Account, s.cfg.Realm, s.cfg.Agent, s.cfg.Endpoint, s.cfg.TokenFile)
+	if err != nil {
+		return agentConnection{}, err
+	}
+	s.conn = &conn
+	return conn, nil
+}
+
+func (s *installedHydrationSource) Self(ctx context.Context, opts client.SelfOptions) (client.SelfDigest, error) {
+	conn, err := s.connect(ctx)
+	if err != nil {
+		return client.SelfDigest{}, err
+	}
+	return client.GetSelf(ctx, conn.Endpoint, conn.Token, opts)
+}
+
+func (s *installedHydrationSource) Recall(ctx context.Context, in client.MemoryRecallInput) (client.MemoryRecallPage, error) {
+	conn, err := s.connect(ctx)
+	if err != nil {
+		return client.MemoryRecallPage{}, err
+	}
+	page, err := client.RecallMemories(ctx, conn.Endpoint, conn.Token, in)
+	if err != nil {
+		return client.MemoryRecallPage{}, err
+	}
+	return *page, nil
+}
+
+// automaticHydrationHook uses the exact installed identity and emits context
+// only for runtime/event pairs with a documented model-visible hook channel.
+// Execute owns the short deadline and the renderer's byte/sensitivity bounds.
+func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) ([]byte, error) {
+	cfg, err := transcriptcapture.LoadConfig(event.Runtime)
+	if err != nil {
+		return nil, err
+	}
+	result, err := memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
+		AccountID: cfg.AccountID, RealmID: cfg.RealmID, RealmName: cfg.Realm,
+		AgentID: cfg.AgentID, AgentName: cfg.AgentName,
+	}, memoryhydration.Request{
+		Runtime: event.Runtime, Event: event.HookEvent, Prompt: event.Body,
+	}, &installedHydrationSource{cfg: cfg})
+	if err != nil || !result.Injected {
+		return nil, err
+	}
+	return memoryhydration.HookOutput(event.Runtime, event.HookEvent, result.Context)
 }
 
 func transcriptFlush(args []string) int {
@@ -572,6 +653,11 @@ func transcriptFlush(args []string) int {
 				return 1
 			}
 		}
+		if cfg, cfgErr := transcriptcapture.LoadConfig(runtimeName); cfgErr == nil {
+			if err := startBackgroundAutomaticCuratorIfPending(runtimeName, cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: automatic curator wake remains pending: %v\n", err)
+			}
+		}
 		return 0
 	}
 	cfg, err := transcriptcapture.LoadConfig(runtimeName)
@@ -615,6 +701,14 @@ func transcriptFlush(args []string) int {
 					return 1
 				}
 			}
+			if event.TriggersMemoryCurationWake() {
+				if _, err := recordAutomaticCurationWake(cfg, memorycurator.AutoWakeTerminalFlush); err != nil {
+					// Transcript durability wins over optional local automation. The
+					// server-side due request remains canonical and can be picked up by
+					// a later active client or scheduler.
+					fmt.Fprintf(os.Stderr, "witself: record automatic curator wake: %v\n", err)
+				}
+			}
 			if err := transcriptcapture.RemovePending(pendingEvent.Path); err != nil {
 				fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
 				return 1
@@ -642,6 +736,9 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 			return 1
 		}
+	}
+	if err := startBackgroundAutomaticCuratorIfPending(runtimeName, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: automatic curator wake remains pending: %v\n", err)
 	}
 	fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)\n", flushed, runtimeName)
 	return 0
@@ -710,6 +807,60 @@ func startBackgroundFlush(runtime string) error {
 		return err
 	}
 	cmd := exec.Command(executable, "transcript", "flush", "--runtime", runtime)
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+func recordAutomaticCurationWake(cfg transcriptcapture.Config, reason memorycurator.AutoWakeReason) (bool, error) {
+	if strings.TrimSpace(cfg.AgentID) == "" {
+		return false, nil
+	}
+	store, err := memorycurator.DefaultAutoStore(cfg.AgentID)
+	if err != nil {
+		return false, err
+	}
+	inspection, err := store.Inspect()
+	if err != nil {
+		return false, err
+	}
+	if !inspection.Configured || !inspection.Config.Enabled {
+		return false, nil
+	}
+	if inspection.Config.AccountID != cfg.AccountID || inspection.Config.RealmID != cfg.RealmID ||
+		inspection.Config.AgentID != cfg.AgentID {
+		return false, errors.New("automatic curator configuration does not match the transcript integration binding")
+	}
+	if _, err := store.RecordWake(reason); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startBackgroundAutomaticCuratorIfPending(runtimeName string, cfg transcriptcapture.Config) error {
+	if strings.TrimSpace(cfg.AgentID) == "" {
+		return nil
+	}
+	store, err := memorycurator.DefaultAutoStore(cfg.AgentID)
+	if err != nil {
+		return err
+	}
+	inspection, err := store.Inspect()
+	if err != nil {
+		return err
+	}
+	if !inspection.Configured || !inspection.Config.Enabled || inspection.PendingWakeCount == 0 {
+		return nil
+	}
+	executable, err := currentExecutablePath()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(executable, "memory", "curate", "auto", "run", "--runtime", runtimeName, "--supervise")
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard

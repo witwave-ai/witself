@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -25,22 +28,50 @@ var ErrOperatorNotFound = errors.New("operator not found")
 // already revoked, or is not a revocable credential token.
 var ErrTokenNotFound = errors.New("token not found")
 
+var (
+	// ErrInvalidCuratorAccessProfile is returned when a curator token is
+	// requested with anything other than one of the two restricted profiles.
+	ErrInvalidCuratorAccessProfile = errors.New("invalid curator access profile")
+	// ErrInvalidCuratorTokenTTL is returned when a curator credential is not
+	// short-lived. Curator credentials always expire and cannot exceed one day.
+	ErrInvalidCuratorTokenTTL = errors.New("invalid curator token ttl")
+	// ErrInvalidCuratorTokenDisplayName is returned when the required audit-safe
+	// token label is blank, malformed, or too large.
+	ErrInvalidCuratorTokenDisplayName = errors.New("invalid curator token display name")
+)
+
 // Principal kinds returned by AuthenticatePrincipal.
 const (
 	PrincipalOperator = "operator"
 	PrincipalAgent    = "agent"
 )
 
+// Token access profiles are persisted on the credential and projected into
+// every authenticated principal. Full is the compatibility/default profile;
+// the two curator profiles are valid only for agent tokens.
+const (
+	AccessProfileFull           = "full"
+	AccessProfileCuratorPreview = "curator-preview"
+	AccessProfileCuratorApply   = "curator-apply"
+
+	MaxCuratorTokenTTL = 24 * time.Hour
+
+	maxCuratorTokenDisplayNameBytes = 255
+)
+
 // Principal is the token-derived identity used by domain surfaces that accept
 // both agent and operator tokens. RealmID is populated only for agents.
 type Principal struct {
-	Kind          string
-	ID            string
-	AccountID     string
-	RealmID       string
-	AgentName     string
-	RealmName     string
-	AccountStatus string
+	Kind           string
+	ID             string
+	TokenID        string
+	AccessProfile  string
+	TokenExpiresAt *time.Time
+	AccountID      string
+	RealmID        string
+	AgentName      string
+	RealmName      string
+	AccountStatus  string
 }
 
 func hashToken(plaintext string) string {
@@ -173,10 +204,12 @@ func (s *Store) AuthenticatePrincipal(ctx context.Context, plaintext string) (Pr
 	var p Principal
 	var realmID, agentName, realmName *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT principal_kind, principal_id, account_id, realm_id,
-		       agent_name, realm_name, account_status
+		SELECT principal_kind, principal_id, token_id, access_profile,
+		       token_expires_at, account_id, realm_id, agent_name,
+		       realm_name, account_status
 		FROM (
 		  SELECT 'operator'::text AS principal_kind, o.id AS principal_id,
+		         t.id AS token_id, t.access_profile, t.expires_at AS token_expires_at,
 		         t.account_id, NULL::text AS realm_id,
 		         NULL::text AS agent_name, NULL::text AS realm_name,
 		         a.status AS account_status
@@ -189,6 +222,7 @@ func (s *Store) AuthenticatePrincipal(ctx context.Context, plaintext string) (Pr
 		    AND o.deleted_at IS NULL
 		  UNION ALL
 		  SELECT 'agent'::text AS principal_kind, ag.id AS principal_id,
+		         t.id AS token_id, t.access_profile, t.expires_at AS token_expires_at,
 		         t.account_id, ag.realm_id, ag.name AS agent_name,
 		         r.name AS realm_name, a.status AS account_status
 		  FROM tokens t
@@ -201,7 +235,8 @@ func (s *Store) AuthenticatePrincipal(ctx context.Context, plaintext string) (Pr
 		    AND ag.deleted_at IS NULL AND r.deleted_at IS NULL
 		) principals
 		LIMIT 1`, hashToken(plaintext)).
-		Scan(&p.Kind, &p.ID, &p.AccountID, &realmID, &agentName, &realmName, &p.AccountStatus)
+		Scan(&p.Kind, &p.ID, &p.TokenID, &p.AccessProfile, &p.TokenExpiresAt,
+			&p.AccountID, &realmID, &agentName, &realmName, &p.AccountStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, false, nil
 	}
@@ -218,6 +253,107 @@ func (s *Store) AuthenticatePrincipal(ctx context.Context, plaintext string) (Pr
 		p.RealmName = *realmName
 	}
 	return p, true, nil
+}
+
+// CreateCuratorToken mints one short-lived, restricted agent token. The
+// caller is an authenticated operator supplied by the server boundary; the
+// target agent remains the token-derived principal. The raw token is returned
+// once and only its hash plus bounded, non-sensitive metadata are persisted.
+func (s *Store) CreateCuratorToken(
+	ctx context.Context,
+	accountID, actorOperatorID, agentID, accessProfile, displayName string,
+	ttl time.Duration,
+) (tok, tokenID, agentName string, expiresAt time.Time, err error) {
+	displayName, err = validateCuratorTokenInput(accessProfile, displayName, ttl)
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	err = tx.QueryRow(ctx,
+		`SELECT a.name FROM agents a
+		 JOIN realms r ON r.id = a.realm_id
+		 WHERE a.id = $1 AND r.account_id = $2
+		   AND a.deleted_at IS NULL AND r.deleted_at IS NULL`, agentID, accountID).Scan(&agentName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", time.Time{}, ErrAgentNotFound
+	}
+	if err != nil {
+		return "", "", "", time.Time{}, fmt.Errorf("verify curator agent: %w", err)
+	}
+
+	rawToken, err := token.New(token.KindAgent)
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	tokID, err := id.New("tok")
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	// PostgreSQL timestamps have microsecond precision. Return exactly the value
+	// that authentication will later project instead of a sub-microsecond variant.
+	expiresAt = time.Now().UTC().Add(ttl).Truncate(time.Microsecond)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tokens
+		   (id, account_id, agent_id, kind, token_hash, expires_at, display_name, access_profile)
+		 VALUES ($1, $2, $3, 'agent', $4, $5, $6, $7)`,
+		tokID, accountID, agentID, hashToken(rawToken), expiresAt, displayName, accessProfile); err != nil {
+		return "", "", "", time.Time{}, fmt.Errorf("store curator token: %w", err)
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
+		Verb: VerbAgentTokenMinted,
+		Metadata: map[string]any{
+			"token_id":       tokID,
+			"agent_id":       agentID,
+			"agent_name":     agentName,
+			"access_profile": accessProfile,
+			"display_name":   displayName,
+			"expires_at":     expiresAt.Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	return rawToken, tokID, agentName, expiresAt, nil
+}
+
+func validateCuratorTokenInput(accessProfile, displayName string, ttl time.Duration) (string, error) {
+	if accessProfile != AccessProfileCuratorPreview && accessProfile != AccessProfileCuratorApply {
+		return "", ErrInvalidCuratorAccessProfile
+	}
+	if ttl <= 0 || ttl > MaxCuratorTokenTTL {
+		return "", ErrInvalidCuratorTokenTTL
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" || len(displayName) > maxCuratorTokenDisplayNameBytes || !utf8.ValidString(displayName) {
+		return "", ErrInvalidCuratorTokenDisplayName
+	}
+	for _, r := range displayName {
+		if unicode.IsControl(r) {
+			return "", ErrInvalidCuratorTokenDisplayName
+		}
+	}
+	return displayName, nil
+}
+
+func validTokenAccessProfile(kind, accessProfile string) bool {
+	if kind != "agent" {
+		return accessProfile == AccessProfileFull
+	}
+	return accessProfile == AccessProfileFull ||
+		accessProfile == AccessProfileCuratorPreview ||
+		accessProfile == AccessProfileCuratorApply
 }
 
 // CreateOperatorToken mints a durable operator token bound to an operator that

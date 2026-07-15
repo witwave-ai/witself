@@ -4,6 +4,16 @@ Status: draft. This document defines the initial public HTTP API contract for
 managed Witself Cloud, self-hosted `witself-server`, and local development
 server mode.
 
+Narrative-memory amendment (accepted 2026-07-14): direct memory capture,
+history, lexical recall, atomic supersede, lifecycle, evidence resolution,
+permanent deletion, and the fenced client-curation protocol are implemented.
+The curation API queues deterministic work, freezes authorized inputs, accepts
+and hashes an exact client-authored plan, applies it transactionally, and can
+perform a guarded compensating rollback. It never runs a model. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). Conflicting
+`remember`, autonomous consolidation, server-embedding, or backend-synthesis
+shapes below are not implementation authority.
+
 ## Decision
 
 The backend API is a public product contract. The `witself` CLI, MCP adapter,
@@ -173,13 +183,22 @@ Capability results should include:
 - Supported feature flags.
 - Unsupported feature reasons.
 - Effective limits when available.
-- Active embedding provider, model, and vector dimensionality, plus whether
-  semantic recall is currently degraded to keyword/tag/time ranking.
+- Direct memory, lexical recall, atomic-supersede, permanent-delete,
+  automatic-curation, and client-vector capability states. Optional vector
+  profiles/hybrid recall are reported independently from the lexical baseline.
 - Authenticated principal and realm context when authenticated.
 
 Examples of feature flags:
 
 - `memories`
+- `memory_recall`
+- `memory_supersede`
+- `memory_permanent_delete`
+- `memory_vector_profiles`
+- `client_vector_recall`
+- `automatic_capture`
+- `opportunistic_curation`
+- `scheduled_curation`
 - `facts`
 - `self_digest`
 - `consolidate`
@@ -240,16 +259,22 @@ which decrypt path and KMS dependency are in effect. The CMK→per-realm KEK→
 per-secret/field DEK hierarchy is tracked in [key-hierarchy.md](key-hierarchy.md)
 and [encryption-model.md](encryption-model.md).
 
-The `semantic_recall` flag is a nested object reporting the active embedding
-provider, model, vector dimensionality, and whether recall is degraded. `read`,
-`get`, and `list` remain available even when the embedding provider is
-unavailable, while `recall` degrades deterministically to keyword/tag/kind/time
-ranking and the capabilities response marks `semantic_recall` as degraded rather
-than failing. The `self_digest` flag (`GET /v1/self`) is always available on any
-backend that supports memories and facts: the digest blends salience and recency
-deterministically and never calls the embedding provider, so it stays usable even
-when `semantic_recall` is degraded. The embedding-provider boundary is tracked in
-[memory-model.md](memory-model.md).
+The implemented surface advertises `memories`, `memory_recall`,
+`memory_supersede`, `memory_permanent_delete`, and
+`opportunistic_curation` independently. `opportunistic_curation` means an
+authorized client can create or claim queued work and drive the fenced
+request/run/plan/apply/rollback protocol. It does not mean the server can launch
+an AI runtime. `automatic_capture` and `scheduled_curation` remain explicitly
+unsupported with reason `not_implemented`; clients must not infer either from
+basic memory or curation support. Those flags describe the backend, not the
+optional client-owned `memory curate auto` process that can react to a terminal
+transcript flush or user-owned scheduler. `memory_recall` includes the
+deterministic lexical/structured baseline. `memory_vector_profiles`,
+`client_vector_recall`, and `semantic_recall` report the optional implemented
+migration-0032 vector/hybrid surface independently; there is no hidden backend
+embedding provider or fallback call. The `self_digest` flag
+(`GET /v1/self`) is independent and uses deterministic salience/recency
+hydration.
 
 The `cross_realm_collaboration`, `federation`, and `agent_card` flags report
 whether this backend speaks the cross-realm collaboration substrate: whether it
@@ -287,7 +312,11 @@ Idempotency is required for operations that create durable or external effects:
 - Realm creation.
 - Agent creation.
 - Token creation or rotation.
-- Memory add, adjust, forget, restore, and delete.
+- Memory capture, adjust, atomic supersede, forget, restore, reactivate,
+  evidence resolution, and permanent-delete apply. Permanent-delete preview is
+  read-only and has no key.
+- Memory-curation request, start, renew, plan, apply, cancel, abandon, and
+  rollback. Read-only request/run/input/status reads have no key.
 - Fact set, primary promotion, and delete.
 - Fact candidate proposal, confirmation, and rejection.
 - Policy create and delete.
@@ -303,6 +332,25 @@ Idempotency is required for operations that create durable or external effects:
 Idempotency records must not store memory content, fact values, message
 bodies/payloads, embedding vectors, raw tokens, payment details, provider
 secrets, secret field values, TOTP seeds, generated codes, or key material.
+
+Atomic memory supersede has one operation `Idempotency-Key` header and one
+distinct body `idempotency_key` for each replacement capsule. The operation key
+replays the complete source/replacement result only for the exact normalized
+request; a changed expected version, replacement set, reason, or provenance is
+a conflict. Retry receipts keep only value-free source/replacement version
+references and supersession-set metadata, including `replacement_count` and a
+lowercase SHA-256 `replacement_digest` over the sorted exact replacement set.
+Replay fails closed if live relation membership no longer matches that digest.
+
+Narrative `content` is paired with `content_encoding`, which is `plain` by
+default or `base64` for canonical binary-safe content. Capture and every
+supersede replacement accept `content_encoding`; adjustment uses
+`set_content_encoding`. Current-memory and immutable-version responses always
+return the effective encoding. The server admits worst-case JSON escaping for
+every store-legal payload: capture bodies are capped at 8 MiB, adjust bodies at
+16 MiB, and 32-replacement supersede bodies at 257 MiB. A body above its route
+ceiling returns `413 Request Entity Too Large`; malformed in-bound JSON remains
+`400 Bad Request`.
 
 Fact mutation retry keys are scoped to the authenticated agent and mutation
 surface (fact set, candidate proposal, or candidate decision). The service
@@ -347,8 +395,8 @@ Dry runs should validate:
 - Resource existence.
 - Conflicts and stale-version checks.
 - Quotas and rate limits.
-- Provider prerequisites, including embedding-provider availability for writes
-  that would compute a vector.
+- External-provider prerequisites for operations that actually use one. Direct
+  memory writes and lexical recall have no model/provider prerequisite.
 - Planned side effects, including which prior primary fact a promotion would
   demote and which records a forget would tombstone.
 
@@ -377,6 +425,16 @@ tombstone and immutable usage events. Responses use `Cache-Control: private,
 no-store` and never include values, evidence, candidate reasons, raw retry keys,
 or value-derived request fingerprints.
 
+Permanent memory deletion is a narrower dry-run exception. Its implemented
+preview is `DELETE /v1/memories/{memory_id}?dry_run=true` and accepts the memory
+id only; it rejects idempotency, version/scrub guards, and a direct-user header.
+It returns deterministic value-free impact and concurrency guards without
+creating a preview resource. Apply uses the same route without `dry_run`, binds
+`expected_version` and `scrub_set_revision`, and requires `Idempotency-Key` plus
+`X-Witself-Direct-User-Authorized: true`. Preview and apply responses use
+`Cache-Control: private, no-store` and contain no memory/evidence values, raw
+retry keys, or content-derived hashes.
+
 ## Pagination And Filtering
 
 List endpoints should use cursor pagination:
@@ -393,10 +451,11 @@ Rules:
 - Filter names should match CLI concepts where practical, such as `owner_agent`,
   `owner_group`, `kind`, `tag`, `source`, `name`, `prefix`, `primary`,
   `sensitive`, `state`, `template`, `since`, and `until`.
-- `sensitive` memory content and `sensitive` fact values must be redacted in
-  list and scan responses by default. List endpoints return metadata and
-  non-sensitive values; an authorized single-record read returns the value
-  (there is no reveal ceremony for the open plane).
+- `sensitive` memories and facts must be redacted in list, scan, and broad
+  recall responses by default. Memory redaction clears content and its hash,
+  tags, links, capture/lifecycle reasons, occurrence bounds, client provenance,
+  and evidence. An authorized single-record read returns the value (there is no
+  reveal ceremony for the open plane).
 - Embedding vectors must never be returned by list endpoints.
 - Sealed-plane secret field values, TOTP seeds, and generated codes are never
   returned by any list, scan, or single-record `GET`. Secret and TOTP list/show
@@ -442,7 +501,7 @@ Initial route groups:
 | `/startupz` | Startup probe. No auth, no sensitive config. |
 | `/healthz` | Alias probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
-| `/v1/capabilities` | Backend feature discovery, limits, and embedding-provider state. |
+| `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
 | `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
 | `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
 | `/v1/sessions` | Multi-session bootstrap: hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
@@ -452,7 +511,11 @@ Initial route groups:
 | `/v1/realms` | Realm lifecycle and membership. |
 | `/v1/agents` | Named agent lifecycle and policy summary. |
 | `/v1/tokens` | Token create, list, revoke, and rotate. |
-| `/v1/memories` | Memory add, read, list, scan, recall, consolidate, adjust, forget, restore, and delete. |
+| `/v1/memories` | Implemented agent-owned capture, read, list, history, lexical recall, adjust, atomic supersede, forget, restore, reactivate, evidence resolution, and permanent delete. |
+| `/v1/memory-curation-requests` | Implemented agent-self curation work queue: create/coalesce, list, inspect, and claim due work. List accepts `exclude_sensitive=true`: full tokens omit explicitly sensitive scopes but retain separately authorized transcript scopes; restricted profiles always omit both. |
+| `/v1/memory-curation-runs` | Implemented fenced runs: inspect frozen inputs, renew, plan, apply, cancel, abandon, and guarded rollback. |
+| `/v1/memory-curation-status` | Implemented value-free owner-lane/request/run status, optionally for one run. |
+| `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, and limits for a curator. |
 | `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
@@ -556,14 +619,32 @@ plaintext; secret and TOTP material is never embedded, recalled, in the
 self-digest, or in the plaintext identity export. Token create and token rotate
 remain the open-plane routes that return a raw token exactly once.
 
-Initial colon-action routes:
+Initial action and curation-workflow routes (curation uses durable slash
+subresources rather than colon verbs):
 
 ```http
 POST /v1/remember
 POST /v1/memories:recall
-POST /v1/memories:consolidate
+POST /v1/memories/{memory_id}/supersede
+POST /v1/memories:consolidate # superseded target; not implemented
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
+POST /v1/memories/{memory_id}:reactivate
+POST /v1/memory-evidence/{evidence_id}/resolution
+GET  /v1/memory-curation-preflight
+POST /v1/memory-curation-requests
+GET  /v1/memory-curation-requests # ?exclude_sensitive=true
+GET  /v1/memory-curation-requests/{request_id}
+POST /v1/memory-curation-requests/{request_id}/start
+GET  /v1/memory-curation-runs/{run_id}
+GET  /v1/memory-curation-runs/{run_id}/inputs
+POST /v1/memory-curation-runs/{run_id}/renew
+POST /v1/memory-curation-runs/{run_id}/plan
+POST /v1/memory-curation-runs/{run_id}/apply
+POST /v1/memory-curation-runs/{run_id}/cancel
+POST /v1/memory-curation-runs/{run_id}/abandon
+POST /v1/memory-curation-runs/{run_id}/rollback
+GET  /v1/memory-curation-status
 POST /v1/facts/{fact_id}:primary
 POST /v1/sessions:start
 POST /v1/sessions:end
@@ -581,7 +662,7 @@ POST /v1/totp/{secret_id}:code
 POST /v1/password:generate
 ```
 
-Notes on specific actions:
+Notes on specific actions and workflows:
 
 - `POST /v1/remember` is deferred. If implemented, calling it explicitly selects
   Witself, so it may route a clear name-to-value assertion to a fact and other
@@ -590,26 +671,67 @@ Notes on specific actions:
   It is not the router for an agent's natural-language remember request; that
   provider-aware behavior is defined in
   [Agent Memory Routing](agent-memory-routing.md).
-- `:recall` is a query against the caller's accessible memories. It is a `POST`
-  because the query and filters travel in the body and because cross-agent
-  recall is metered and policy-gated. Recall over another agent's or group's
-  memories requires a policy granting `read` on that target.
-- `:consolidate` is the guarded garbage-collection verb (`witself memory
-  consolidate`). It merges near-duplicate memories, supersedes stale ones, and
-  surfaces — never auto-resolves — conflicting facts, trimming the digest index.
-  It defaults to `dry_run: true`, requires `memory:update` (plus `memory:forget`
-  for supersede), is audited as `memory.consolidated`, respects `source`
-  provenance so it never silently overwrites human- or import-authored records,
-  and is excluded in `--read-only` MCP mode.
+- `:recall` is an implemented deterministic query over the token-bound agent's
+  active current memory heads. It is a `POST` because literal query text and
+  structured kind/tag/link/origin/capture/time/sensitivity filters travel in
+  the body. PostgreSQL lexical, salience, and recency signals are returned
+  separately. Supplying an immutable `vector_profile_id` and compatible
+  caller-authored `query_vector` adds deterministic bounded hybrid ranking and
+  explicit coverage/degradation metadata; there is no backend inference or
+  embedding-provider fallback. Cross-agent/group recall remains target work.
+- `/supersede` atomically replaces one expected active version with a nonempty
+  caller-authored set. The operation key is the `Idempotency-Key` header; each
+  replacement carries a distinct body `idempotency_key` and at least one exact,
+  pending, or explicitly unavailable evidence item. HTTP 201 returns the full
+  authorized source/replacements and a value-free supersession receipt with
+  exact references plus replacement count and membership digest. The backend
+  validates the proposed set but makes no semantic choice. The current HTTP/
+  client/CLI/MCP surface is agent-self.
+- `:consolidate` is superseded and not implemented. Semantic merge/split
+  decisions require an exact caller-authored curation plan; direct one-to-many
+  supersede uses the caller-authored route above. The backend may not choose any
+  of those semantic changes autonomously.
 - `:start` and `:end` are the multi-session bootstrap pair. `:start` hydrates
   identity, open goals, and last progress in one round-trip and mutates no state;
   `:end` persists a progress memory (kind `session`) and updates open goals, so
   it is `POST` with a body and is audited as `session.started` / `session.ended`.
-- `:forget` is the default destructive path: a soft delete (tombstone),
-  reversible within the retention window. `:restore` reverses it within that
-  window. Hard delete is the explicit, guarded `DELETE /v1/memories/{memory_id}`
-  and requires confirmation plus, for cross-agent or operator deletes, an audit
-  `reason`.
+- `:forget` is the default destructive path: a reversible versioned lifecycle
+  state. `:restore` reverses it, and `:reactivate` explicitly restores a
+  reverted or otherwise invalidly-restorable head. Permanent deletion is the
+  implemented, guarded `DELETE /v1/memories/{memory_id}` preview/apply contract
+  described under [Dry Runs](#dry-runs); the current surface is agent-self only.
+- `/v1/memory-evidence/{evidence_id}/resolution` appends one terminal exact or
+  explicitly unresolvable result to a pending evidence locator. It requires an
+  idempotency key and never edits the pending row.
+- The 14 `/v1/memory-curation-*` routes form one implemented agent-self
+  protocol. A request carries deterministic source scope, coalescing, priority,
+  due time, and retry metadata. `start` claims due work, freezes bounded memory,
+  evidence, transcript, and cursor inputs, and returns a lease plus fencing
+  generation. `inputs` pages those immutable snapshots; all value-bearing input
+  is untrusted data, never instructions. `renew` is a heartbeat. `plan` accepts
+  only strict `witself.memory-plan.v1` JSON with the five reversible primitives
+  `create`, `replace`, `supersede`, `relate`, and `propose_fact`; the last creates
+  a review candidate and never sets a canonical fact. The server normalizes and
+  hashes the plan but performs no synthesis. `apply` binds the fence, accepted
+  revision, and SHA-256 plan hash and either commits the complete plan plus
+  contiguous cursors or makes no semantic change. `cancel` terminates work;
+  `abandon` requeues retryable work. `rollback` requires the original apply
+  receipt and the complete exact set of apply-produced current heads, refuses
+  live downstream dependencies, performs append-only compensation, never
+  rewinds cursors, and creates read-only replay work. Status reads are
+  value-free. Every curation response uses `Cache-Control: private, no-store`.
+  There is no server-side scheduler or inference launcher; clients claim this
+  work opportunistically.
+- Curator credentials are immutable, expiring token profiles rather than an MCP
+  display filter. `curator-preview` admits only list/get/start/inputs/renew/
+  plan/abandon/status; `curator-apply` adds only apply. Both are rejected by
+  ordinary memory, fact, transcript, message, self, and permanent-delete
+  handlers, and both are barred from sensitive curation scopes. An operator
+  mints one with `POST /v1/agents/{agent_id}/curator-tokens`, a mandatory audit
+  display name, and a TTL of at most 24 hours. Existing tokens migrate as
+  `full`. The authenticated preflight route reports the effective permission
+  matrix for the presented token; `/v1/capabilities` remains deployment-wide
+  feature discovery and is not an authorization oracle.
 - `:primary` is an atomic promotion that demotes any prior primary of the same
   logical fact kind for the same owner. At most one primary per logical kind per
   owner. See [facts-model.md](facts-model.md).
@@ -720,20 +842,20 @@ product matures.
 Self-hosted deployments should support the core memory, fact, recall, policy,
 group, messaging, audit, reference, and export/import contracts. Billing, hosted
 payment flows, Witself support workflows, and internal admin workflows may be
-disabled unless configured by the operator. The embedding provider is
-deployment-owned; a self-hosted operator may run `local-dev`, `voyage`, or
-`openai`, and the capabilities response reports the active provider and whether
-recall is degraded. The sealed plane (secrets, TOTP, password generation,
-runtime injection) is optional and requires a configured KMS provider; when no
-KMS provider is configured the `secrets`/`totp` capabilities are off and the
-sealed-plane routes return deterministic `unsupported_operation`. Enabling the
-sealed plane gates readiness on the KMS provider, while pgvector remains the hard
-gate for the open plane.
+disabled unless configured by the operator. Direct memory and lexical recall
+require PostgreSQL but no model provider. Implemented vectors are
+client-supplied, optional, and stored as portable PostgreSQL JSONB; pgvector is
+not required. The sealed plane (secrets, TOTP, password generation, runtime
+injection) is optional and requires a configured KMS provider; when no KMS
+provider is configured the `secrets`/`totp` capabilities are off and the sealed-
+plane routes return deterministic `unsupported_operation`. Enabling the sealed
+plane gates readiness on the KMS provider; it does not affect the open-plane
+memory path.
 
 Local development mode should support enough API behavior to exercise the CLI,
-MCP adapter, JSON contracts, and integration tests. It uses the `local-dev`
-embedding provider so semantic recall can be exercised offline, and reports
-`backend.kind: "local"` in capabilities.
+MCP adapter, JSON contracts, and integration tests. It exercises the same model-
+free lexical recall contract and reports `backend.kind: "local"` in
+capabilities.
 
 ## Related Docs
 

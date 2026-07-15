@@ -66,6 +66,7 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			table: "tokens",
 			row: map[string]any{
 				"id": "tok_1", "account_id": acc, "operator_id": "op_stranger",
+				"kind": "operator", "access_profile": AccessProfileFull,
 			},
 			wantOK: false, want: "not present in this archive",
 		},
@@ -74,6 +75,7 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			table: "tokens",
 			row: map[string]any{
 				"id": "tok_1", "account_id": acc, "agent_id": "agt_stranger",
+				"kind": "agent", "access_profile": AccessProfileFull,
 			},
 			wantOK: false, want: "not present in this archive",
 		},
@@ -100,7 +102,7 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"id": "tok_1", "account_id": acc,
 				"operator_id": "op_ok", "agent_id": "agt_ok",
-				"kind": "agent",
+				"kind": "agent", "access_profile": AccessProfileCuratorPreview,
 			},
 			setup: func(ic *importCtx) {
 				ic.operators["op_ok"] = true
@@ -114,9 +116,30 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			row: map[string]any{
 				"id": "tok_bootstrap", "account_id": acc,
 				"operator_id": nil, "agent_id": nil,
-				"kind": "bootstrap",
+				"kind": "bootstrap", "access_profile": AccessProfileFull,
 			},
 			wantOK: true,
+		},
+		{
+			name:  "operator token cannot carry curator profile",
+			table: "tokens",
+			row: map[string]any{
+				"id": "tok_operator_curator", "account_id": acc,
+				"operator_id": "op_ok", "kind": "operator",
+				"access_profile": AccessProfileCuratorApply,
+			},
+			setup: func(ic *importCtx) { ic.operators["op_ok"] = true },
+			want:  "access_profile is invalid",
+		},
+		{
+			name:  "agent token rejects unknown profile",
+			table: "tokens",
+			row: map[string]any{
+				"id": "tok_agent_unknown", "account_id": acc,
+				"agent_id": "agt_ok", "kind": "agent", "access_profile": "curator-admin",
+			},
+			setup: func(ic *importCtx) { ic.agents["agt_ok"] = true },
+			want:  "access_profile is invalid",
 		},
 		{
 			// Regression: slice 1 of the audit-log feature initially
@@ -378,6 +401,44 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 	}
 }
 
+func TestDecodeImportRowPreservesChangeSequencesAboveTwoToThe53(t *testing.T) {
+	obj, err := decodeImportRow([]byte(`{
+		"last_change_seq": 9007199254740992,
+		"change_seq": 9007199254740993
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock, ok := importedNonnegativeInteger(obj["last_change_seq"])
+	if !ok || clock != 9007199254740992 {
+		t.Fatalf("last_change_seq = %d / %v", clock, ok)
+	}
+	change, ok := importedPositiveInteger(obj["change_seq"])
+	if !ok || change != 9007199254740993 {
+		t.Fatalf("change_seq = %d / %v", change, ok)
+	}
+	if clock == change {
+		t.Fatal("adjacent BIGINT change sequences collapsed to one float64 value")
+	}
+}
+
+func TestDecodeImportRowPreservesInt64Boundary(t *testing.T) {
+	obj, err := decodeImportRow([]byte(`{
+		"valid": 9223372036854775807,
+		"overflow": 9223372036854775808
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := importedNonnegativeInteger(obj["valid"])
+	if !ok || value != int64(9223372036854775807) {
+		t.Fatalf("max BIGINT = %d / %v", value, ok)
+	}
+	if value, ok := importedNonnegativeInteger(obj["overflow"]); ok {
+		t.Fatalf("overflow BIGINT accepted as %d", value)
+	}
+}
+
 // TestValidateAndRecordAccumulatesOverAStream ties the guarantees together:
 // the ORDER the exporter writes tables (accounts, operators, realms,
 // agents, tokens) matches the order rows must be recorded so later rows can
@@ -400,9 +461,11 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	feed("agents", map[string]any{"id": "agt_2", "realm_id": "rlm_default", "name": "coordinator"})
 	feed("tokens", map[string]any{
 		"id": "tok_op", "account_id": acc, "operator_id": "op_root", "kind": "operator",
+		"access_profile": AccessProfileFull,
 	})
 	feed("tokens", map[string]any{
 		"id": "tok_agent", "account_id": acc, "agent_id": "agt_1", "kind": "agent",
+		"access_profile": AccessProfileCuratorApply,
 	})
 	// Support tickets stream after account_events; messages FK-depend on
 	// tickets recorded here.

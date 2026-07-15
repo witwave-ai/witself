@@ -3,6 +3,15 @@
 Status: draft. Decision: v0 is a usable cloud-shaped slice, not only a local
 mock and not yet the full commercial managed service.
 
+Open-plane amendment (accepted 2026-07-14): the memory slice now follows
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). Narrative
+capture is a Witself capability, inference is client-side, PostgreSQL lexical
+recall is the universal baseline, and migration-0032 client-supplied vector
+profiles/JSONB rows plus bounded hybrid recall are implemented but optional to
+use.
+Conflicting native-only or server-embedding language later in this draft is
+superseded.
+
 ## Sequencing
 
 Decision: v0 ships in two sequenced slices on one platform. The **open-plane core
@@ -14,20 +23,19 @@ store can prove itself without blocking on KMS. This mirrors
 
 - **Open-plane core (ships first).** The CLI, MCP stdio, the backend API
   boundary, the local development adapter, the agent token lifecycle, the memory
-  model with semantic recall, the facts model with primary promotion, agent
+  model with lexical/structured recall and fenced client-side curation, the facts model with primary promotion, agent
   self-managed memory and context hydration, the cross-agent access policy
   engine, security groups, full inter-agent messaging, identity export/import,
   audit, metrics, health probes, and the delivery scaffolding below. The open
-  plane has **no KMS dependency**: pgvector is a **hard readiness gate**, and the
-  embedding provider is degradable.
+  plane has **no KMS or model-provider dependency**: PostgreSQL is the readiness
+  gate and optional client-vector indexes are derived, rebuildable data.
 - **Sealed credential plane (a defined v0 slice, may stage after the core).** The
   secret data model and lifecycle, secret references, TOTP/2FA, password
   generation, runtime injection (`witself run`), two-tier envelope encryption
   (CMK → per-realm KEK → per-secret/field DEK), the reveal ceremony, secret
   grants and realm roles, and the sealed-plane carve-outs. This slice adds a
   **KMS dependency** that is a readiness gate **only when the sealed plane is
-  enabled**; an open-plane-only deployment requires no KMS, and pgvector stays a
-  hard gate for the open plane regardless. Sealed-plane carve-out: secrets and
+  enabled**; an open-plane-only deployment requires no KMS. Sealed-plane carve-out: secrets and
   TOTP seeds are never embedded, recalled, in the self-digest, or
   plaintext-exported, and are reachable only through the audited reveal ceremony.
   See [secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md),
@@ -44,20 +52,24 @@ V0 should prove the end-to-end product boundary:
 - An operator can bootstrap a realm and named agents.
 - A named agent can authenticate from a token file or token environment.
 - The CLI can add, adjust, read, recall, list, forget, restore, and delete an
-  agent's own memories.
+  agent's own memories, and can drive an agent's fenced curation queue through
+  plan, apply, and rollback.
 - The CLI can set, get, list, and delete an agent's own facts, and promote a
   fact to primary.
-- An agent integration can route natural-language capture without replacing the
+- An agent integration routes natural-language capture without disabling the
   runtime's own memory: an explicitly requested atomic assertion goes to a
-  Witself fact, while narrative context stays on the runtime-native memory path.
-  Self-management also includes an always-loaded `self show` self-digest,
-  `session start`/`session end` bootstrap and
-  flush-before-long-ops, `memory consolidate` garbage collection, a two-way
-  `digest emit`/`ingest` file bridge with CLAUDE.md/AGENTS.md, and
-  `bootstrap-instructions` to install the teaching stanza.
-- `memory recall` performs semantic-by-default similarity search over the
-  caller's accessible memories, blended with keyword, tag, kind, and time
-  filters.
+  Witself fact, narrative context goes to portable Witself memory, and a native
+  write is added only when explicitly requested. Current self-management also
+  includes the `self show` digest and direct narrative-memory lifecycle. Session
+  helpers and the file bridge remain explicit future work. Per-user launchd and
+  systemd scheduling is available through `memory curate auto service`. The
+  opportunistic request/run/plan/apply/
+  rollback curation protocol and opt-in client-owned terminal-flush launcher are
+  implemented.
+- `memory recall` performs deterministic PostgreSQL lexical/structured ranking
+  over the caller's accessible memories. Optional vectors are supplied by the
+  client under an immutable profile and may add bounded hybrid ranking; the
+  backend generates none.
 - The CLI can create, list, show, delete, and `test` declarative cross-agent
   access policies under a default-deny stance.
 - The CLI can create, list, show, and manage membership of security groups,
@@ -70,13 +82,14 @@ V0 should prove the end-to-end product boundary:
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
 - `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
-  the self-management tools, and teach the always-loaded recall-before-act /
-  write-after-learn protocol through its server `instructions` field.
+  the self-management and fourteen curation tools, and teach the always-loaded
+  recall-before-act / write-after-learn protocol through its server
+  `instructions` field.
 - `witself-server serve --dev` can exercise the same core through HTTP.
 - `witself-server` exposes Prometheus metrics, structured logs, and Kubernetes
   health probes.
-- The Postgres path with pgvector and an embedding provider exists early enough
-  to keep the backend honest.
+- The Postgres path exists early enough to keep the backend honest and remains
+  the sole authoritative memory data source.
 - Public release artifacts, images, Helm chart scaffolding, Terraform AWS
   scaffolding, CI, linting, and release automation exist from the beginning.
 
@@ -108,35 +121,41 @@ Core user-facing capabilities:
 - Agent create/show/list/rename/copy/disable/enable/delete where operator
   policy allows.
 - Token create/list/show/rotate/revoke with raw token returned only once.
-- Memory add/adjust/read/recall/list/forget/restore/delete for the caller's own
-  memories, with soft-delete-by-default forget and a guarded hard delete.
+- Memory capture/show/list/recall/history/adjust/supersede/forget/restore/
+  reactivate/evidence-resolution/delete for the caller's own memories, with
+  reversible lifecycle operations and a separately guarded permanent delete.
+- `memory curate request|requests|start|renew|show|plan|apply|cancel|abandon|
+  rollback|status` for client-side inference over frozen agent-self inputs.
 - Fact set/get/list plus guarded permanent deletion by canonical
   subject/predicate. Deletion previews a value-free receipt, requires explicit
   confirmation, purges assertions/history/evidence and candidates, and retains
   only a value-free integrity tombstone and immutable usage history. Explicit
   recreation receives a new fact id and zero inherited usage rank.
 - Provider-aware agent routing for natural-language `remember`, `save`, and
-  `store`: explicit atomic assertions use `fact set`; narrative context remains
-  eligible for runtime-native memory; clearly mixed requests split; and the
-  same content is never silently duplicated. A future explicit
-  `witself remember` command may route within Witself, but it is not the natural
-  provider router.
+  `store`: explicit atomic assertions use `fact set`; narrative context uses
+  portable Witself narrative memory by default; runtime-native memory is used
+  only when explicitly named; clearly mixed requests split; and the same
+  content is never silently duplicated. A future unified `witself remember`
+  command may compose the existing Witself operations, but it is not a backend
+  inference router.
 - `self show` bounded session-start digest of primary facts, top-N salient
   memories, and a one-line kinds/tags/counts index, hard-capped with an
-  `elided` signal instead of silent truncation, and never requiring the
+  `elided` signal instead of silent truncation, and never requiring a model or
   embedding provider.
-- `session start`/`session end` for multi-session bootstrap: start hydrates
-  identity, open goals, and last progress in one round-trip; end persists a
-  `session` progress memory and updates open goals.
-- `memory consolidate` to merge near-duplicate memories, supersede stale ones,
-  surface conflicting facts, and trim the digest/index, dry-run by default and
-  respecting provenance.
-- `digest emit` and `ingest` for the two-way CLAUDE.md/AGENTS.md file bridge:
-  emit renders the self-digest as a provenance-stamped fragment; ingest parses
-  kv lines to fact upserts and prose to memories, tagged `import:<file>` with
-  dedup.
-- `bootstrap-instructions` to print the paste-able teaching stanza, with
-  `witself setup --write-agents-md` to install it into the project AGENTS.md.
+- Target `session start`/`session end` helpers for multi-session bootstrap remain
+  future; current clients capture bounded evidence-backed checkpoints directly.
+- Direct `memory supersede` applies one exact client-authored replacement set.
+  Deeper client-run curation is implemented through deterministic due requests,
+  lease/fence claims, immutable input pages, strict hashed plans, atomic apply,
+  cancellation/abandonment, and guarded rollback. The backend never chooses a
+  semantic merge or split and never launches inference. An opt-in local
+  `memory curate auto` worker now records value-free terminal-flush wakes and
+  launches the trusted client driver with explicit provider, transcript consent,
+  and preview/apply policy; optional persistent per-user launchd/systemd
+  scheduling is implemented through the `auto service` lifecycle.
+- Target `digest emit`, `ingest`, and `bootstrap-instructions` file-bridge
+  helpers remain future. Current `witself install` integrations install the
+  managed routing guidance and MCP server directly.
 - Policy create/list/show/delete/test under default deny.
 - Group create/list/show/add-member/remove-member/delete, including
   group-scoped shared memories and facts.
@@ -144,9 +163,11 @@ Core user-facing capabilities:
   and acknowledgement.
 - Identity reference parsing and resolution.
 - `witself export` and `witself import` for round-trippable structured
-  identity data.
+  identity data, including the portable curation graph and value-free receipts.
 - `witself mcp serve` over stdio, exposing the self-management tools and the
-  pinned server-instructions teaching protocol.
+  pinned server-instructions teaching protocol. The curation tools are
+  `request`, `start`, `renew`, `get`, `plan`, `apply`, `cancel`, `rollback`, and
+  `status`; read-only mode retains only `get` and `status`.
 
 Sealed credential-plane capabilities (the defined v0 slice that may stage after
 the open-plane core; secrets and TOTP seeds are never embedded, recalled, in the
@@ -181,12 +202,15 @@ Core backend capabilities:
 - Initial `/v1/realms`, `/v1/agents`, `/v1/tokens`, `/v1/memories`,
   `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/transcripts`, `/v1/messages`, and `/v1/audit`
   route groups.
-- Self-management routes including `/v1/remember`, `/v1/self`,
-  `/v1/sessions:start`, `/v1/sessions:end`, and `/v1/memories:consolidate`,
-  with `digest emit` rendering from `GET /v1/self?format=` and `ingest`
-  composing the existing fact/memory create paths.
+- Self-management routes including `/v1/self`, `/v1/memories`, bounded memory
+  reads/history/list/recall, exact lifecycle actions, evidence resolution, and
+  guarded permanent deletion. The 13 curation routes under
+  `/v1/memory-curation-requests`, `/v1/memory-curation-runs`, and
+  `/v1/memory-curation-status` are implemented. Unified remember, session, and
+  file-bridge routes remain future work.
 - Colon action subroutes including `/v1/memories:recall`,
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
+  `/v1/memories/{memory_id}:reactivate`, `/v1/memories/{memory_id}/supersede`,
   `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
   `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
 - Sealed credential-plane route groups for the sealed-plane slice:
@@ -195,7 +219,7 @@ Core backend capabilities:
   the capability flags `client_side_decrypt` / `server_side_decrypt` and the KMS
   readiness gate that applies only when the sealed plane is enabled.
 - Prometheus metrics for HTTP traffic, auth, token operations, memory
-  operations, recall and embedding operations, fact operations, policy
+  operations, recall and optional vector-index operations, fact operations, policy
   decisions, cross-agent accesses, group operations, messaging, audit events,
   usage, limits, storage, vector storage, and migrations. When the sealed plane
   is enabled, secret, reveal, TOTP, and KMS metric families
@@ -204,33 +228,31 @@ Core backend capabilities:
   (`stored_secret`, `secret_read`, `totp_code`, `runtime_injection`,
   `encrypted_storage_byte`) are added.
 - Local development adapter behind the same backend interface.
-- Postgres storage adapter with pgvector and Goose migrations; the open plane's
-  pgvector path is a hard readiness gate with no KMS dependency. When the sealed
+- Postgres storage adapter with Goose migrations; it is the authoritative open-
+  plane source and readiness gate. Migration `0030` adds the durable curation
+  lanes, cursors, requests, runs, inputs, actions, and mutation receipts;
+  migration `0032` adds portable JSONB vector profiles/rows. A future optional
+  pgvector/ANN projection is rebuildable and never required for baseline or
+  JSONB hybrid recall. When the sealed
   plane is enabled, the schema gains `realm_keys` and `secret_deks` and a KMS
   provider binding (`aws-kms`, `gcp-kms`, `azure-key-vault`, `local-dev`) becomes
   a readiness gate for that slice only.
-- Embedding-provider abstraction with `voyage` as default and `openai` and
-  `local-dev` selectable through `WITSELF_EMBEDDINGS_PROVIDER` /
-  `WITSELF_EMBEDDINGS_MODEL`.
-- Deterministic recall degradation to keyword/tag/kind/time ranking when the
-  embedding provider is unavailable, surfaced through the capability contract.
+- Deterministic lexical/structured recall with no backend model dependency;
+  capabilities independently report optional client-vector support/coverage.
 - Object/blob storage interface for exports and large artifacts, even if v0
   stores most data in Postgres.
 - Declarative policy engine with default deny and a `policy test` decision path.
-- Audit events for auth, token lifecycle, memory and fact changes, recall,
-  consolidation, session start/end, ingest import of memories and facts,
-  optional digest emit, cross-agent read/contribute/curate/forget, policy
+- Audit events for auth, token lifecycle, direct memory and fact changes, recall,
+  supersession, cross-agent read/contribute/curate/forget, policy
   decisions, group changes, message send/deliver/read, identity export/import,
   operator actions, limits, and billing/support stubs when invoked. When the
   sealed plane is enabled, secret create/update/rename/copy/archive/restore/
   delete, `secret.reveal`, secret grant/revoke, `totp.enrolled`/`totp.code`/
   seed-revealed/deleted, and `key.rotated` (KEK) events are emitted, with a
   `server_side_decrypt` flag recorded on reveal and code.
-- A deterministic, human-readable `echo` string on every mutation result,
-  dedup/supersede on write that returns the existing id with a
-  `memory_duplicate`/`memory_merged` warning, and a first-class `source`
-  provenance field on memory and fact records (`self`, `agent:<name>`,
-  `operator`, `import:<file>`).
+- Deterministic resource/receipt mutation results, exact idempotent retries,
+  complete immutable memory versions, evidence, and token-derived provenance.
+  The backend never invents semantic duplicate/merge decisions.
 - Managed v0 audit retention default of 365 days.
 - Default per-memory content and per-fact size limits with reasonable v0 caps.
 
@@ -281,8 +303,9 @@ V0 does not include:
 - A private Witself staff admin CLI.
 - MCP HTTP or network transport.
 - A Witself utility token for account setup, billing, or access.
-- Automatic re-embedding on provider/model change (re-embedding is an explicit,
-  audited maintenance operation).
+- Server-side vector generation or regeneration. Clients own model inference
+  and may explicitly populate a new immutable profile while lexical recall
+  remains available.
 - Field-level encryption of `sensitive` facts as a default (it remains an
   optional open-plane capability). `sensitive` facts use lightweight redaction,
   not the sealed-plane reveal ceremony; a credential belongs in the sealed plane
@@ -306,9 +329,8 @@ V0 is credible when:
 - The CLI can run the core memory, fact, policy, group, message, token, agent,
   and identity-reference flows against local development mode.
 - The same flows can be exercised through `witself-server serve --dev`.
-- Semantic recall returns ranked results with the embedding provider active, and
-  degrades deterministically to keyword/tag/kind/time ranking with the degraded
-  state surfaced when the provider is unavailable.
+- Lexical/structured recall returns deterministic ranked results without a model
+  provider; optional vector coverage never changes PostgreSQL's authority.
 - Cross-agent access obeys default deny: with no matching `allow` policy,
   cross-agent read/contribute/curate/forget are denied, and `policy test`
   reports the deciding policy or deny reason.
@@ -324,20 +346,30 @@ V0 is credible when:
   an authorized read of a single record returns the value with no reveal
   ceremony.
 - Agent integrations route an explicitly requested atomic assertion to a fact
-  upsert and leave narrative capture on the runtime-native path; `self show`
+  upsert and narrative context to portable Witself memory, adding a native write
+  only when explicitly requested; `self show`
   returns a bounded digest that sets `elided` when
-  capped and works without the embedding provider; `session start`/`end`
-  round-trips identity and open goals; `memory consolidate` is dry-run by
-  default and never silently overwrites human- or import-authored records;
-  `digest emit`/`ingest` round-trip with CLAUDE.md/AGENTS.md fragments; and
-  `--read-only` MCP mode excludes the mutating self-management tools.
+  capped and works without a model provider; direct lifecycle and exact
+  client-authored supersession round-trip through CLI/MCP/API; client-authored
+  curation requests, leases/fences, frozen inputs, strict plans, atomic apply,
+  cancel/abandon, and rollback round-trip through CLI/HTTP, with fourteen MCP
+  tools; the optional client-owned terminal-flush worker is configurable through
+  `memory curate auto` and keeps credentials out of inference;
+  `opportunistic_curation` is supported while `automatic_capture` and
+  `scheduled_curation` remain explicitly unsupported backend capabilities; and
+  `--read-only` MCP mode excludes the mutating self-management and curation
+  tools while retaining curation `preflight`, request list/get, run get, input
+  `get`, and `status`.
 - `witself export` produces structured, round-trippable identity data and
   `witself import` restores it, preserving primary flags, sensitive markers,
-  links, and edit history.
-- Managed recovery restores customer identity data and service availability,
-  including the vector data needed to restore semantic recall.
-- The Postgres adapter and the pgvector recall path pass at least a smoke or
-  integration test in a controlled environment.
+  links, edit history, curation lanes/cursors/requests/runs/inputs/actions/
+  receipts, and curation attribution. Import terminates active leases and
+  advances the fence rather than reviving in-flight work in another cell.
+- Managed recovery restores authoritative customer identity data and service
+  availability; schema-32 vector profiles/rows round-trip, while FTS and any
+  future ANN projection are rebuilt.
+- The Postgres adapter and lexical/structured recall path pass integration tests
+  in a controlled environment.
 - Release dry runs produce verifiable artifacts, images, checksums, SBOMs, and
   provenance.
 - Helm and Terraform scaffolding lint and render/validate without embedding raw
@@ -348,8 +380,8 @@ V0 is credible when:
 When the sealed credential-plane slice ships, it is additionally credible when:
 
 - An open-plane-only deployment passes readiness with **no KMS** configured;
-  enabling the sealed plane makes KMS a readiness gate while pgvector stays a hard
-  gate for the open plane.
+  enabling the sealed plane makes KMS a readiness gate while PostgreSQL remains
+  the open-plane gate.
 - `secret reveal` and `totp code` are the only value-returning sealed-plane ops,
   each emits an audited event with the `server_side_decrypt` flag, and
   `--no-value-tools` disables them in MCP while `--read-only` disables mutations.

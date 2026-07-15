@@ -3,17 +3,22 @@
 Status: draft. This document defines the initial public-code, self-hosting,
 support, and contribution boundaries before implementation.
 
+Narrative-memory amendment (accepted 2026-07-14): the public backend includes
+client-vector validation/search and curation-plan application, not an embedding
+provider or its credentials. Conflicting support language below is superseded
+by [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Public Code Stance
 
 Witself should be inspectable and self-hostable. The public repository should
 contain the CLI, MCP adapter, backend API server, storage adapters,
-authorization and policy logic, audit model, embedding-provider abstraction,
-Helm chart, Terraform modules, and release definitions unless a clear security
-or operational reason requires a split.
+authorization and policy logic, audit model, deterministic retrieval and
+client-vector validation, Helm chart, Terraform modules, and release definitions
+unless a clear security or operational reason requires a split.
 
 Public code is part of the trust model across both planes. It lets users,
 customers, and security reviewers inspect how Witself stores, authorizes,
-audits, embeds, recalls, and serves open-plane identity material — memories,
+audits, ranks, recalls, and serves open-plane identity material — memories,
 facts, policies, groups, and messages — and how it encrypts, key-manages, and
 reveal-gates sealed-plane credential material — secrets and TOTP enrollments.
 
@@ -40,9 +45,9 @@ Decision: Witself is source-available under the Functional Source License
 (FSL-1.1-ALv2).
 
 The FSL applies to the public repository as a whole, including the CLI, MCP
-adapter, backend API server, storage adapters, embedding-provider abstraction,
-Helm chart, infrastructure modules, release automation, and docs unless a later
-file clearly states a different license.
+adapter, backend API server, storage adapters, deterministic
+retrieval/client-vector code, Helm chart, infrastructure modules, release
+automation, and docs unless a later file clearly states a different license.
 
 Why this fits Witself:
 
@@ -88,7 +93,8 @@ Before accepting outside contributions, add:
 Until then, public visibility should not imply that arbitrary pull requests are
 accepted or that external contributors can influence security-sensitive
 architecture — the authorization layer, the cross-agent policy engine, the
-audit model, the messaging trust boundary, or the embedding pipeline — without
+audit model, the messaging trust boundary, or the client-vector and curation
+plan validation paths — without
 maintainer review.
 
 ## Support Boundary
@@ -120,10 +126,12 @@ Self-hosted operators remain responsible for:
 - Cloud account security.
 - Kubernetes cluster security.
 - IAM and workload identity.
-- Database operations, including the Postgres `pgvector` extension and stored
-  embedding vectors.
-- Embedding-provider configuration and credentials (`voyage`, `openai`, or
-  `local-dev`).
+- Database operations, including PostgreSQL full-text indexes and migration-0032
+  JSONB tables containing optional client-supplied vectors. A future ANN
+  projection is separately optional.
+- Client-vector profile policy and capacity when that optional feature is
+  enabled. `witself-server` has no embedding-provider configuration,
+  credentials, egress, or health dependency.
 - KMS provider configuration, key access, and key rotation for the sealed plane
   (`aws-kms`, `gcp-kms`, `azure-key-vault`, or `local-dev`), when the sealed
   plane is enabled. KMS loss makes secret values unrecoverable (crypto-shred)
@@ -131,8 +139,8 @@ Self-hosted operators remain responsible for:
   and [backup-and-recovery.md](backup-and-recovery.md).
 - Object/blob storage for exports, attachments, and backups.
 - Network ingress and TLS.
-- Backups and disaster recovery, including vector data needed to restore
-  semantic recall.
+- Backups and disaster recovery, including full-text index rebuilds and optional
+  vector profile/row handling. Vector data is not needed for lexical recall.
 - Terraform state protection.
 - Helm values and Kubernetes Secret management for agent token delivery.
 - Federation governance (post-v0), when cross-realm collaboration is enabled:
@@ -197,7 +205,8 @@ The public repository must not contain:
 - Cloud credentials.
 - Kubeconfigs.
 - Database passwords.
-- Embedding-provider API keys or credentials.
+- Client-side model API keys or credentials that may appear in optional client
+  tooling or examples. These are never backend configuration or server secrets.
 - KMS credentials, KMS configuration secrets, or local-dev passphrase files
   (`WITSELF_PASSPHRASE_FILE`).
 - Sealed-plane key material — CMK, per-realm KEK, or per-secret/field DEK

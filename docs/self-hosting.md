@@ -3,6 +3,12 @@
 Status: draft. This document describes the intended self-hosted Witself backend
 experience before implementation.
 
+Narrative-memory decision (accepted 2026-07-14): self-hosted memory requires
+PostgreSQL but no backend AI, model, or embedding-provider credential. Curation
+and any optional vector generation run in clients. Client-supplied vector
+profiles remain a future, unsupported capability as specified by
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Positioning
 
 Self-hosting should let an operator run the Witself backend API in their own
@@ -11,7 +17,7 @@ contracts, and agent token model as managed Witself Cloud.
 
 Managed Witself Cloud remains the default path for most users. Self-hosting is
 for operators who need stronger control over infrastructure, network placement,
-data residency, compliance boundaries, embedding-provider choice, or internal
+data residency, compliance boundaries, client-inference choice, or internal
 review of identity data.
 
 The self-hosted backend runs as the separate `witself-server` binary. The
@@ -24,8 +30,8 @@ and Helm gives operators a reviewable way to manage service accounts, configured
 secrets, networking, migrations, and upgrade policy.
 
 Terraform should live alongside that chart for operators who want Witself to
-provision the cloud substrate. Terraform owns Kubernetes, the Postgres database
-(with the pgvector extension), object/blob storage, workload identity,
+provision the cloud substrate. Terraform owns Kubernetes, the PostgreSQL
+database, object/blob storage, workload identity,
 networking, and the outputs the Helm chart consumes. Witself runs two planes:
 the **open plane** (memories + facts) and the **sealed plane** (secrets + TOTP).
 For deployments that enable the sealed plane, Terraform also provisions a KMS key
@@ -39,12 +45,12 @@ Initial support should be explicit:
 
 | Level | Meaning |
 |---|---|
-| Local development | Runs on a laptop or CI using the local development adapter with the `local-dev` embedding provider. Community or best-effort only. Not production. |
-| Self-host preview | Runs `witself-server` with production-shaped config, Postgres with pgvector, and a configured embedding provider. Best-effort issue triage, no SLA. |
-| Production self-hosted | Paid or contracted support only after documented deployment, migrations, backups (including vector data, and — for the sealed plane — KMS key identity and rotation metadata), observability, disaster recovery, and upgrade path exist. |
+| Local development | Runs on a laptop or CI using the local development adapter with deterministic lexical recall plus optional client-vector hybrid ranking. Community or best-effort only. Not production. |
+| Self-host preview | Runs `witself-server` with production-shaped config and PostgreSQL. Best-effort issue triage, no SLA. |
+| Production self-hosted | Paid or contracted support only after documented deployment, migrations, canonical PostgreSQL backups, observability, disaster recovery, and upgrade paths exist. Sealed-plane deployments also preserve KMS key identity and rotation metadata. |
 
 Witself should not claim production self-host support until migrations,
-backup/restore, disaster recovery, observability, embedding re-index guidance,
+backup/restore, disaster recovery, observability, lexical-recall verification,
 and operational guidance are real. Deployments that enable the sealed plane also
 need KMS key rotation and crypto-shred posture documented before claiming
 production support.
@@ -61,15 +67,17 @@ flowchart LR
   API --> Core["Core service"]
   Core --> Policy["Policy engine"]
   Core --> Audit["Audit sink"]
-  Core --> Store["Postgres + pgvector"]
-  Core --> Embed["Embedding provider (open plane)"]
+  Client["AI clients: inference and curation"] --> API
+  Core --> Store["PostgreSQL: canonical rows + lexical recall"]
   Core --> Blob["Object/blob storage"]
   Core -. "sealed plane only" .-> KMS["KMS-compatible key boundary"]
 ```
 
-The embedding provider serves the open plane (memories + facts). The KMS key
-boundary serves the **sealed plane** (secrets + TOTP) and is wired only when that
-plane is enabled; an open-plane-only deployment omits it.
+AI clients author narrative content and curation decisions before calling the
+API. The backend stores and retrieves those results deterministically and never
+calls the clients' models. The KMS key boundary serves the **sealed plane**
+(secrets + TOTP) and is wired only when that plane is enabled; an open-plane-only
+deployment omits it.
 
 The public API contract should be the same for managed and self-hosted
 deployments. Operators point the CLI at their deployment with `--endpoint` or
@@ -82,10 +90,10 @@ local mock/development mode and is not a production setup path.
 
 Self-hosted deployments should expose `/v1/capabilities` so clients can see
 which managed-service features are available, disabled, or replaced by
-operator-owned integrations. The capabilities contract also reports the active
-embedding provider, the embedding model, the vector dimensionality, and whether
-semantic recall is degraded (see
-[Embedding Provider](#embedding-provider)). When the sealed plane is enabled it
+operator-owned integrations. The capabilities contract reports the active
+retrieval mode and optional client-vector profile support independently; it
+never reports a backend model/provider because none exists. When the sealed
+plane is enabled it
 additionally reports the active KMS provider and the `client_side_decrypt` /
 `server_side_decrypt` reveal modes the deployment supports (see
 [key-hierarchy.md](key-hierarchy.md)).
@@ -94,7 +102,7 @@ additionally reports the active KMS provider and the `client_side_decrypt` /
 
 Witself deploys as a fleet of independent cells under a thin global control
 plane, and the same topology covers self-hosting. A **cell** is one complete,
-isolated Witself stack — `witself-server`, Postgres with pgvector for the open
+isolated Witself stack — `witself-server`, PostgreSQL for the open
 plane, blob storage, and (when the sealed plane is enabled) KMS rooted in that
 cell's cloud — running in a single cloud account/region. A self-hosted
 deployment can run as a cell on any supported cloud; an AWS account, a GCP
@@ -135,20 +143,16 @@ A production self-hosted deployment will likely require:
 - `witself-server` backend API process.
 - Helm chart deployment to Kubernetes.
 - Terraform-provisioned substrate or equivalent operator-owned infrastructure.
-- Postgres with the **pgvector** extension for relational state and embedding
-  vectors. pgvector is a hard requirement for production self-hosting, not an
-  optional add-on, because semantic recall stores and queries vectors in
-  Postgres.
-- An **embedding provider** (`voyage` by default, `openai`, or `local-dev`) and
-  its credentials, supplied by the operator. The operator owns this contract;
-  Witself does not proxy a managed embedding key to self-hosted deployments.
+- PostgreSQL for canonical relational state and deterministic lexical recall.
+  No vector extension is required for the current production contract.
 - Object/blob storage when large exports, diagnostic bundles, support
   attachments, or backup artifacts require it.
 - TLS termination through an ingress, load balancer, or reverse proxy.
 - Structured logs with redaction that never leak identity content.
 - Prometheus metrics.
 - Kubernetes liveness, readiness, and startup probes.
-- Backup and restore process, including embedding vectors.
+- Backup and restore process for all canonical PostgreSQL rows, including
+  narrative-memory history, evidence, relations, and deletion tombstones.
 - Database migration process via `witself-server migrate`.
 - **KMS-compatible key management — required only when the sealed plane is
   enabled.** The sealed plane (secrets + TOTP) uses KMS-backed envelope
@@ -166,7 +170,7 @@ belongs in the sealed plane as a secret, not as a sensitive fact (see
 The exact cloud provider should not be hard-coded into the application. The
 first Terraform targets should be AWS, GCP, and Azure, with AWS implemented
 first. Other Kubernetes platforms should remain possible when they provide the
-required primitives, including a Postgres offering that supports pgvector.
+required primitives, including a supported PostgreSQL offering.
 
 ## Configuration Shape
 
@@ -178,9 +182,6 @@ WITSELF_SERVER_LISTEN=:8080
 WITSELF_HEALTH_LISTEN=:8081
 WITSELF_PUBLIC_URL=https://witself.internal.example.com
 WITSELF_DATABASE_URL=postgres://...
-WITSELF_EMBEDDINGS_PROVIDER=voyage
-WITSELF_EMBEDDINGS_MODEL=voyage-3
-WITSELF_EMBEDDINGS_API_KEY_FILE=/run/secrets/witself-embeddings-key
 WITSELF_OBJECT_STORE_PROVIDER=s3
 WITSELF_OBJECT_STORE_BUCKET=witself-prod
 # Sealed plane only (omit when the sealed plane is disabled):
@@ -194,21 +195,14 @@ WITSELF_LOG_LEVEL=info
 ```
 
 Config files should be allowed for non-secret settings. Raw tokens, database
-passwords, embedding-provider API keys, object-store credentials, KMS
-credentials, and any provider secrets should come from secret files, environment
+passwords, object-store credentials, KMS credentials, and any provider secrets
+should come from secret files, environment
 variables supplied by the runtime, or cloud identity, not checked-in config.
 Server config validation should redact sensitive fields in errors.
 
-Notes on the embedding configuration:
-
-- `WITSELF_EMBEDDINGS_PROVIDER` selects `voyage` (default), `openai`, or
-  `local-dev`. `WITSELF_EMBEDDINGS_MODEL` selects the model within that
-  provider.
-- A self-hosted operator supplies their own provider key
-  (`WITSELF_EMBEDDINGS_API_KEY_FILE` or the runtime's secret mechanism). Witself
-  does not ship a usable embedding key for self-hosted deployments.
-- `local-dev` is for tests, demos, and `witself-server serve --dev`. It is a
-  deterministic or low-cost local embedder and is not a production provider.
+There is intentionally no server-side model or embedding-provider block. A
+client may use any inference runtime it is authorized to use, but its credentials
+remain with that client and are never mounted into `witself-server`.
 
 Notes on the KMS configuration (sealed plane only):
 
@@ -226,36 +220,22 @@ Notes on the KMS configuration (sealed plane only):
   [encryption-model.md](encryption-model.md) and
   [key-hierarchy.md](key-hierarchy.md).
 
-## Embedding Provider
+## Client-Authored Inference And Optional Vectors
 
-Semantic recall is the core Witself differentiator, so the embedding provider is
-a first-class self-hosting dependency rather than an optional integration. The
-recall and embedding model is tracked in [memory-model.md](memory-model.md).
+The self-hosted backend accepts narrative content and curation decisions already
+authored by an authenticated client. It does not run synthesis, choose a model,
+hold model credentials, or generate embeddings. The required recall path is
+deterministic PostgreSQL lexical/tag/kind/time ranking.
 
-Self-hosted embedding posture:
-
-- The provider is a capability-gated boundary. The capabilities contract reports
-  the active provider, model, and vector dimensionality so the CLI can show what
-  recall will use before an operation runs.
-- Memories are embedded at write time; vectors are stored in Postgres via
-  pgvector. Vector storage size is a metered dimension (see
-  [billing-and-limits.md](billing-and-limits.md)).
-- Plain `read`/`get` by id and `list` by metadata never require the embedding
-  provider. They remain available even when no provider is configured.
-- If the configured provider is unavailable or disabled, recall degrades
-  deterministically to keyword/tag/kind/time ranking, and the capabilities
-  contract reports that semantic recall is degraded. Recall never silently
-  returns unranked or empty results without surfacing the degraded state.
-- Changing the provider or model is an explicit, audited maintenance operation.
-  Re-embedding existing memories is not an automatic side effect; operators
-  trigger it deliberately. Backed-up vectors can restore recall without
-  re-embedding when the provider/model identity is unchanged (see
-  [backup-and-recovery.md](backup-and-recovery.md)).
-
-The embedding-provider abstraction is a swappable, capability-gated provider
-boundary for the open plane, mirroring the KMS provider boundary for the sealed
-plane. The storage and provider decisions are tracked in
-[storage.md](storage.md).
+Migration `0032` implements that optional path. An authenticated client
+registers an immutable profile and supplies exact memory/query vectors; the
+server validates them, stores portable JSONB rows, and performs bounded
+deterministic hybrid ranking. Profiles and vectors are portable account data,
+while generation credentials and model execution remain entirely client-side.
+No pgvector extension is required; a future ANN projection is an optional
+performance optimization. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md) and
+[memory-model.md](memory-model.md).
 
 ## Sealed Plane (KMS)
 
@@ -288,7 +268,7 @@ Self-hosted sealed-plane posture:
   `secret:reveal` and `totp:code` scopes (see
   [authorization-and-roles.md](authorization-and-roles.md)).
 - Sealed-plane carve-outs hold in every self-hosted deployment: secret values
-  and TOTP seeds are **never embedded, never returned by semantic recall, never
+  and TOTP seeds are **never vectorized, never returned by memory recall, never
   in the self-digest, never ingested from CLAUDE.md/AGENTS.md, and never in the
   plaintext export**. Secret backup is encrypted-only (envelope plus KMS key
   identity), never plaintext (see [backup-and-recovery.md](backup-and-recovery.md)).
@@ -314,10 +294,10 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 
 The chart should expose an explicit migration Job path for production upgrades.
 Operators should be able to inspect migration status and run migrations before
-rolling the server deployment. The chart configures external Postgres (with
-pgvector), the embedding provider, object/blob storage, and — when the sealed
-plane is enabled — the KMS provider, through values that reference existing
-Kubernetes Secrets rather than inlining raw secrets.
+rolling the server deployment. The chart configures external PostgreSQL,
+object/blob storage, and — when the sealed plane is enabled — the KMS provider,
+through values that reference existing Kubernetes Secrets rather than inlining
+raw secrets.
 
 After the backend endpoint is ready, the same customer/operator CLI should
 bootstrap the operator context, realm, named agents, and token files:
@@ -383,9 +363,8 @@ Self-hosted deployments may differ from managed Witself Cloud:
   self-hosted deployments.
 - Managed-service abuse controls, quotas, and plan limits may be replaced by
   self-host policy.
-- The embedding provider is operator-owned. A self-hosted operator may run
-  `voyage`, `openai`, or `local-dev` under their own contracts, and may choose
-  to run with semantic recall intentionally degraded.
+- Client inference is operator-owned. Clients may use any supported AI runtime
+  under their own contracts; backend configuration and behavior do not change.
 
 The shared contracts that must remain consistent across managed and self-hosted
 deployments are the memory, fact, policy, group, message, audit, and export
@@ -450,8 +429,8 @@ and confidentiality for the sealed plane (secrets + TOTP). The open-plane rules
 emphasize attribution, default-deny cross-agent access, and untrusted message
 input; the sealed-plane rules emphasize that secret material never leaks:
 
-- No memory content, fact values, message bodies or payloads, embedding vectors,
-  raw tokens, database URLs, embedding-provider credentials, object-store
+- No memory content, fact values, message bodies or payloads, client-supplied
+  vectors, raw tokens, database URLs, object-store
   credentials, KMS credentials, or provider secrets in logs, audit records,
   analytics, support data, or errors.
 - When the sealed plane is enabled: no plaintext secret values in ordinary
@@ -481,9 +460,10 @@ input; the sealed-plane rules emphasize that secret material never leaks:
 - Health and readiness endpoints must not leak configuration, identity material,
   or secret material.
 - Metrics, dashboards, alert labels, and scrape metadata must not leak memory
-  content, fact values, message bodies, embedding vectors, fact names treated as
-  sensitive, secret names or field names, TOTP seeds or codes, raw paths, query
-  strings, arbitrary user input, payment identifiers, or provider credentials.
+  content, fact values, message bodies, client-supplied vectors, fact names
+  treated as sensitive, secret names or field names, TOTP seeds or codes, raw
+  paths, query strings, arbitrary user input, payment identifiers, or provider
+  credentials.
   Low-cardinality route-template labels only.
 - Server config validation should redact sensitive fields in errors.
 
@@ -493,8 +473,8 @@ vulnerability-handling posture in [security-policy.md](security-policy.md).
 ## Local Development Is Different
 
 Local development mode can be useful for tests, demos, and early CLI work. It
-uses the local development adapter and the `local-dev` embedding provider so
-semantic recall can be exercised offline without a paid provider. It stores the
+uses the local development adapter and deterministic lexical recall, with no
+model or embedding-provider process. It stores the
 serialized identity store at rest with ordinary data-at-rest protection, writes
 store files atomically, and keeps tokens out of config files by default.
 
@@ -502,17 +482,17 @@ When the sealed plane is exercised locally it uses the `local-dev` KMS provider,
 which is for tests and demos only and is not a production key boundary.
 
 Local development mode is not production self-hosting. Production self-hosting
-needs production Postgres with pgvector, a real embedding provider, migrations,
-backups (including vector data), operational monitoring, and — for the sealed
-plane — a real KMS provider and key rotation. The local mock backend is tracked
+needs production PostgreSQL, migrations, canonical backups, operational
+monitoring, and — for the sealed plane — a real KMS provider and key rotation.
+The local mock backend is tracked
 as development scaffolding behind the same backend interface in
 [backend-architecture.md](backend-architecture.md).
 
 ## Open Decisions
 
 - Exact Terraform module boundaries after the AWS-first implementation.
-- Default embedding model per provider for self-hosted deployments, and the
-  re-index workflow for an operator-initiated embedding-model change.
+- Whether and when to add an optional pgvector/ANN performance projection over
+  the implemented portable JSONB vector rows.
 - KEK rotation cadence and the operator runbook for a KMS CMK rotation when the
   sealed plane is enabled.
 - Whether a self-host is always a single cell or may itself be a multi-cell fleet

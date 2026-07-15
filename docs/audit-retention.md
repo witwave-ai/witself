@@ -4,6 +4,11 @@ Status: draft. Decision: managed v0 keeps audit events for one year by default,
 with plan-configurable retention later. Audit is part of the integrity product,
 not only backend diagnostics.
 
+Narrative-memory amendment (accepted 2026-07-14): the memory event registry
+below now follows client-authored capture and curation plans. Autonomous
+`memory.consolidated` and server-routed `remember` behavior are retired; see
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 Witself audit answers a different question than Witpass audit. Witpass audit
 exists mostly to prove who *read* secret material (confidentiality). Witself
 audit exists to prove who *changed*, *recalled*, *forgot*, or *messaged* identity
@@ -139,22 +144,52 @@ exports.
 
 ### Memory
 
-- `memory.added`
-- `memory.adjusted` (records changed-field set and new version number, never the
-  content)
-- `memory.read` (deterministic read by id; updates `last_accessed_at`)
-- `memory.recalled` (semantic recall; records query metadata, result count, and
-  whether recall was degraded, never the query text or content)
-- `memory.forgotten` (soft delete / tombstone; reversible window)
-- `memory.restored`
-- `memory.deleted` (hard delete; guarded, requires reason)
-- `memory.consolidated` (GC verb; records counts of merged/superseded memories and
-  surfaced conflicts, plus the resolved-against `source` provenance, never content)
+The implemented mutation registry is metadata-only:
 
-A future explicit Witself `remember` action would not emit its own event; it
-would route to `memory.added`, `fact.created`, or `fact.updated` depending on
-what the core resolves it to. Natural provider routing uses the event emitted by
-the actual selected operation.
+- `memory.added`
+- `memory.adjusted`
+- `memory.superseded`
+- `memory.forgotten`
+- `memory.restored`
+- `memory.reactivated`
+- `memory.evidence.resolved`
+- `memory.deleted`
+
+Version events record only memory id, new version, and lifecycle state.
+Evidence resolution records memory id/version, terminal evidence id, pending
+evidence id, and resolution state. Permanent deletion records memory id,
+receipt id, prior version, and version/evidence/relation/retry-shield counts.
+No event contains memory content, tags, links, evidence locator/excerpt, query
+text, content/scrub/shield hash, client provenance, reason text, or raw retry
+key.
+
+The deterministic deletion preview creates no state, preview resource, or audit
+event. `memory.read` and `memory.recalled` remain target retrieval events; they
+are not emitted by the current direct slice.
+
+An explicit narrative capture emits `memory.added`. An atomic explicit fact
+write emits the existing fact mutation event. The client chooses that route;
+the server does not classify prose. A requested native-provider action is
+outside Witself audit except for an optional value-free integration outcome.
+
+### Memory Curation
+
+- `memory.curation.requested`
+- `memory.curation.started`
+- `memory.curation.planned`
+- `memory.curation.applied`
+- `memory.curation.conflicted`
+- `memory.curation.interrupted`
+- `memory.curation.cancelled`
+- `memory.curation.rolled_back`
+
+Curation events may contain request/run/action ids, owner/scope ids, captured
+generation, fencing generation number, plan revision, operation counts,
+before/after version ids, cursor interval counts, runtime/model/recipe identity,
+result code, and deciding policy id. They never contain content, transcript
+text, evidence excerpts, plan payload/hash, vectors, raw query, lease token,
+fence credential, or raw idempotency key. Lease renewals are metrics/usage
+signals, not stable audit events.
 
 ### Session
 
@@ -171,6 +206,9 @@ the actual selected operation.
   evidence, source text, or raw idempotency key)
 - `fact.primary_changed` — records the promotion and the matching demotion of the
   prior primary of the same logical kind, with both fact ids.
+- `fact.candidate.withdrawn` — reserved target verb for curation rollback of a
+  still-open, run-attributed candidate. The current rollback updates the
+  candidate with curation attribution but does not emit this separate verb.
 
 The `fact set` command and the `remember` upsert do not have their own event: a
 name with no existing fact emits `fact.created`, and a name that already exists

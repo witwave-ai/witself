@@ -362,8 +362,8 @@ land in the follow-up contract pass; the surface deltas are:
 ### MCP — `witself.message.listen`
 
 - `witself.message.listen` — the long-poll verb, full parity with the CLI; same
-  authorization; honors `--read-only` (in read-only, `listen` and `read`/`list`
-  remain available, `send` does not).
+  authorization; honors `--read-only` (in read-only, non-mutating `listen` and
+  `list` remain available, while `send` and the acknowledging `read` do not).
 - `witself.message.send` / `.list` / `.read` extend to realm-qualified
   addressing. The agent-token MCP session can still only send **as** the
   token-bound agent.

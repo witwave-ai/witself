@@ -3,6 +3,12 @@
 Status: draft. This document describes the intended vulnerability reporting,
 security response, and supported-surface policy before implementation.
 
+Narrative-memory amendment (accepted 2026-07-14): memory inference and vector
+generation are client-side. Security scope now includes curator credentials,
+untrusted transcript evidence, fencing/plans, and client-supplied vectors; any
+backend embedding-provider assumptions below are superseded by
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 Witself spans two planes. The OPEN plane stores agent self/identity data
 (memories, facts, policies, security groups, and inter-agent messages) and is
 protected for its *integrity and authenticity*. The SEALED plane stores secret
@@ -92,11 +98,14 @@ affect production code paths, leak local identity data or local secret material,
 weaken developer safety, weaken authorization or policy evaluation, or create
 unsafe defaults.
 
-The embedding-provider abstraction (`voyage`, `openai`, `local-dev`) is a
-configurable production dependency. Issues that let identity content leak to or
-through an embedding provider, or that let a degraded provider silently weaken
-authorization or recall correctness, are in scope; see
-[memory-model.md](memory-model.md).
+The server's deterministic recall and optional client-vector boundary are
+supported security surfaces. Scope/profile/version/content-hash validation
+bypasses, non-finite or dimension-confused vectors, cross-owner vector writes,
+unsafe vector logging, and ranking-integrity failures are in scope. The backend
+does not call an embedding provider or possess model credentials; client model
+security remains outside the server boundary except where submitted data
+crosses the Witself API. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 The KMS-provider abstraction (`aws-kms`, `gcp-kms`, `azure-key-vault`,
 `local-dev`) is the sealed plane's required dependency when that plane is
@@ -120,7 +129,8 @@ include:
 - Generated TOTP codes.
 - Raw agent/operator tokens.
 - Self-hosted database URLs or storage credentials.
-- Embedding-provider credentials.
+- Client-side model credentials captured by optional client tooling. They are
+  never backend configuration or server-held secrets.
 - KMS-provider credentials, key identifiers, or wrapped key material.
 - Raw payment details.
 - Wallet seed phrases, private keys, or raw wallet credentials.
@@ -203,8 +213,9 @@ Memory poisoning:
 - Writing or curating memories/facts as or into another agent without policy,
   including via message-driven writes (a received message must not itself
   authorize a cross-agent write).
-- Tampering with embeddings, salience, links, tags, kind, or `source` so that
-  semantic recall surfaces attacker-controlled or misattributed content.
+- Tampering with client-supplied vectors, vector profiles, FTS documents,
+  salience, links, tags, kind, or `source` so recall surfaces
+  attacker-controlled or misattributed content.
 - Forging or corrupting versioned edit history, or making a `forget`/`delete`
   evade tombstoning, the retention window, or audit attribution.
 - Poisoning import/restore or group-shared identity data so trusted recall
@@ -353,7 +364,7 @@ Security fixes should preserve the release hardening requirements:
 
 When a vulnerability affects a Helm chart or Terraform module, release notes
 should clearly identify whether users need to update application images, upgrade
-charts, apply Terraform changes, or change storage, embedding-provider, or
+charts, apply Terraform changes, or change storage, client-vector, KMS, or
 deployment configuration.
 
 When a vulnerability affected authorization, policy evaluation, group

@@ -13,6 +13,21 @@ entry order. When file artifacts land, an export is complete only when its blob
 manifest/content travels with the relational metadata; restoring dangling
 object references is not acceptable.
 
+Narrative-memory amendment (accepted 2026-07-14): the implemented account
+archive carries memory heads, full versions, evidence, lineage, value-free
+permanent-delete tombstones, and complete hashed retry-shield sets. Transcripts
+restore before evidence-bearing versions, and the derived full-text index
+rebuilds. Superseded versions carry a value-free replacement count/digest
+commitment. Migration `0030` curation lanes, cursors, requests, runs, frozen
+inputs, actions, mutation receipts, and their memory/relation/fact-candidate
+attribution participate in the same implemented account archive. Migration
+`0032` vector profiles and exact version/content-hash-bound JSONB vector rows
+also participate in export/import. Cross-cell moves require source freeze or
+placement-epoch fencing as specified in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+Later instructions to reconnect a backend embedding provider or run server-side
+re-embedding are superseded.
+
 ## Decision
 
 Witself treats backup, export, and recovery as two distinct postures matched to
@@ -35,9 +50,10 @@ V0 posture (open plane — memories + facts):
   There is no encrypted-only export, no no-plaintext rule, and no break-glass
   decrypt path for identity data, because identity has no secret-confidentiality
   pillar to protect.
-- Embedding vectors are recomputable from memory `content`, so backing them up
-  is an optimization, not a correctness requirement. See
-  [Embedding Vectors](#embedding-vectors).
+- Optional client-supplied vectors are derived data rather than memory authority,
+  but schema-32 archives preserve their immutable profiles and rows. Lexical
+  recall remains the correctness baseline. See
+  [Client-Supplied Vectors](#client-supplied-vectors).
 
 V0 posture (sealed plane — secrets + TOTP):
 
@@ -64,10 +80,10 @@ V0 posture (sealed plane — secrets + TOTP):
 
 Managed cloud recovery restores both planes: customer identity data, encrypted
 secret material, and service availability. Self-hosted operators are responsible
-for backing up Postgres (including pgvector data when retained), object/blob
-storage when used, migration version, server configuration,
-embedding-provider/model identity, and — when the sealed plane is enabled — KMS
-key identity and rotation metadata.
+for backing up Postgres, object/blob storage when used, migration version,
+server configuration, and — when the sealed plane is enabled — KMS key identity
+and rotation metadata. Client-vector profiles/rows are ordinary PostgreSQL and
+schema-32 archive data, not backend provider configuration.
 
 The threat framing is **dual**: integrity and authenticity of open-plane
 identity data, and confidentiality of sealed-plane secret material.
@@ -80,10 +96,12 @@ Production backups should include:
 
 - Postgres backup. This is the system of record and carries memories, facts,
   primary flags, memory edit history, policies, group membership, group-owned
-  records, messages and per-recipient delivery/read/ack state, tokens (hashes
-  and metadata only), audit records, and usage/limit state.
-- pgvector embedding data when the operator chooses to back it up (optional;
-  recomputable — see [Embedding Vectors](#embedding-vectors)).
+  records, curation queue/run/receipt state, messages and per-recipient
+  delivery/read/ack state, tokens (hashes and metadata only), audit records, and
+  usage/limit state.
+- Migration-0032 client-vector profiles/rows; vector rows are optional derived
+  data to use, but their table streams and existing rows are part of a complete
+  schema-32 archive (see [Client-Supplied Vectors](#client-supplied-vectors)).
 - Object/blob storage backup when object storage is used (large exports,
   diagnostic bundles, support attachments, backup artifacts).
 - Encrypted sealed-plane material when the sealed plane is enabled: the at-rest
@@ -99,11 +117,10 @@ Production backups should include:
   [key-hierarchy.md](key-hierarchy.md).
 - Migration version, so a restored database is matched to a compatible
   `witself-server` build. See [storage.md](storage.md).
-- Embedding-provider and model identity (provider name, model, and vector
-  dimensionality), so recall behavior and re-embedding decisions are
-  reproducible after restore.
-- Server configuration needed to reconnect to storage, the embedding provider,
-  and (when the sealed plane is enabled) KMS.
+- Immutable client-vector profile identity (provider/model/recipe, dimensions,
+  distance metric, and normalization) for every retained vector row.
+- Server configuration needed to reconnect to storage and, when the sealed
+  plane is enabled, KMS. The server has no embedding-provider credentials.
 - Helm release values without raw secrets. See [helm-chart.md](helm-chart.md).
 - Terraform state stored outside the public repo and protected as sensitive
   infrastructure state. See
@@ -138,7 +155,7 @@ Production backups must not include:
   material is present in the backup only as the at-rest AEAD envelope
   (ciphertext), never decrypted. See [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
 - Payment provider secrets or wallet credentials.
-- Memory content, fact values, message bodies/payloads, or embedding vectors in
+- Memory content, fact values, message bodies/payloads, or client-supplied vectors in
   logs, metrics, or diagnostic output. Identity content lives in the backup
   payload itself, not in operational telemetry. See
   [observability-and-operations.md](observability-and-operations.md).
@@ -229,29 +246,22 @@ operator-controlled passphrase escrow. Backups carry KMS key identity + rotation
 metadata so a restore reconnects to a *retained* CMK — they cannot resurrect a
 destroyed one.
 
-## Embedding Vectors
+## Client-Supplied Vectors
 
-Embedding vectors are derived data, not source of truth.
+Vectors are optional derived data, never a source of truth. Migration `0032`
+adds `memory_vector_profiles` and `memory_vectors`; both table streams and all
+existing rows are included in every schema-32 account archive. Recall remains
+fully functional in lexical mode when profiles or compatible rows are absent.
 
-- Each memory's vector is computed from its `content` (and optionally tags/kind)
-  at write time by the configured embedding provider. See
-  [memory-model.md](memory-model.md).
-- Backing up pgvector data is **optional**. A restore that omits vectors is
-  still complete: every memory, fact, policy, group, message, and edit-history
-  entry is intact, and semantic recall is recomputable by re-embedding restored
-  memory content.
-- Backing up vectors is an optimization: it avoids a re-embedding pass and the
-  associated embedding-operation cost and load on restore, and it lets recall
-  come back immediately without contacting the embedding provider.
-- Re-embedding after restore is an explicit, audited maintenance operation, the
-  same operation used when intentionally changing the embedding model. It is not
-  an automatic side effect of restore.
-- If the embedding provider or model is changed at restore time, vectors should
-  be recomputed rather than reused; the backed-up vector dimensionality and the
-  new provider's dimensionality must match for reuse to be valid.
-- Until re-embedding completes, recall degrades deterministically to
-  keyword/tag/kind/time ranking and the capabilities contract reports the
-  degraded state. Recall never silently returns unranked or empty results.
+An authorized client supplies memory/query vectors under an immutable
+provider/model/recipe/dimension/distance/normalization profile. The backend only
+validates, stores canonical JSONB arrays, compares, exports/imports, and
+deterministically blends them; it never contacts an embedding provider. Each row
+is bound to the exact owner, profile, memory version, and content hash. Import
+validates that binding, dimensions, finite values, vector/contract hashes,
+chronology, and table completeness. Restore reports coverage rather than
+scheduling server-side re-embedding. Any future pgvector/ANN projection is
+rebuildable acceleration, not canonical archive data or a restore prerequisite.
 
 ## Identity Export And Import
 
@@ -297,6 +307,11 @@ Export rules:
   supported.
 - Identity references (`witself://…`) are preserved on export and re-resolved on
   import. Dangling references are reported, not silently dropped.
+- A permanently deleted memory exports only its value-free head tombstone and
+  the complete `memory_deleted_references` retry-shield set. The tombstone binds
+  receipt/idempotency hashes, prior version, deterministic scrub revision,
+  purged row counts, and retry-shield count/digest; no purged version, evidence,
+  relation, content-derived hash, locator, or raw retry key may reappear.
 - Export requires an explicit output path selection.
 - Export produces an `identity.exported` audit event when audit is available.
 - Export must not include raw tokens.
@@ -328,6 +343,38 @@ Import rules:
   primary of the same logical kind so the at-most-one-primary invariant holds.
 - Imported references are re-resolved and re-checked for authorization; a
   cross-agent or cross-group reference resolves only when policy permits.
+- Import rejects a live memory carrying deletion metadata, a deleted memory
+  with live version/evidence/relation rows, any non-idempotency or non-SHA-256
+  deleted-reference row, and any retry-shield count/digest mismatch. This keeps
+  a crafted archive from turning tombstones into a payload side channel or
+  weakening delayed-retry protection.
+- Import verifies that a complete supersession relation set matches its
+  committed replacement count/digest and rejects an incomplete live set. A
+  smaller historical set is portable only after the set was reverted and cannot
+  become the current head; an exact retry then fails closed.
+- The logical archive includes seven curation streams in dependency order:
+  `memory_curation_lanes`, `memory_curation_cursors`,
+  `memory_curation_requests`, `memory_curation_runs`,
+  `memory_curation_run_inputs`, `memory_curation_actions`, and
+  `memory_curation_mutations`. It also preserves curation attribution on memory
+  versions/relations and fact candidates. Import validates owner scope, ids,
+  request/run/action graph membership, plan/action hashes, result provenance,
+  cursor streams, and receipt references before writing the graph.
+- A schema-32 logical archive also includes `memory_vector_profiles` before
+  `memory_vectors`. Import rejects missing streams, duplicate contracts/keys,
+  cross-owner references, profile/dimension/normalization mismatches,
+  content-hash or vector-hash mismatches, invalid components, and a profile or
+  vector timestamp that predates its required source row.
+- Active curation work never resumes across an archive boundary. Export retains
+  enough state for audit and compensation, but import clears the lane's active
+  run, interrupts an open/planned run and claimed request, removes the live
+  lease, and reserves the next fencing generation. A destination client must
+  claim fresh due work; an old source-cell fence cannot apply.
+
+The implemented whole-account exporter requires the account to be suspended or
+closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
+and holds a shared lock on the account row, so a concurrent resume cannot create
+a torn archive.
 
 Local development exports use the same `witself export`/`witself import` paths
 for fixtures, demos, backup, and migration, so the local backend exercises the
@@ -345,8 +392,10 @@ Restore should validate:
 - Target realm/agent/account conflicts, including fact-name uniqueness and
   primary logical-kind uniqueness per owner.
 - Whether the restore is a merge, a replace, or a new-realm/new-agent import.
-- Whether embedding vectors are present and whether their dimensionality matches
-  the active embedding provider/model; if not, schedule re-embedding.
+- Every imported vector row has its matching immutable profile, exact live
+  owner-scoped memory version/content hash, valid dimensions/components/hash,
+  and valid chronology. An archive from before schema 32 may upgrade with zero
+  vector coverage without blocking lexical recall.
 - When the sealed plane is enabled: that the retained KMS key identity
   (`kms_provider`, `kms_key_ref`) resolves to a reachable CMK and that the
   `realm_keys` / `secret_deks` wrapping rows restore consistently, so restored
@@ -358,17 +407,20 @@ Restore should reconstruct integrity-critical structures in dependency order:
 1. Agents and groups, so ownership targets exist.
 2. Group membership and admins, so group-scoped ownership and policy subjects
    resolve.
-3. Memories and facts (with edit history), assigning owners and re-resolving
-   `witself://` references.
-4. Fact primary flags, enforcing at-most-one-primary per logical kind per owner.
-5. Policies, so the default-deny access surface is restored before cross-agent
+3. Transcripts, memories, evidence, lineage, and facts (with edit history),
+   assigning owners and re-resolving `witself://` references.
+4. Curation owner lanes and cursors, then requests, normalized runs, frozen
+   inputs, actions, mutation receipts, and curation attribution. Active source
+   leases are interrupted and fences advanced during import.
+5. Fact primary flags, enforcing at-most-one-primary per logical kind per owner.
+6. Policies, so the default-deny access surface is restored before cross-agent
    access resumes.
-6. Messages and per-recipient delivery/read/ack state.
-7. When the sealed plane is enabled: `realm_keys` and `secret_deks` wrapping
+7. Messages and per-recipient delivery/read/ack state.
+8. When the sealed plane is enabled: `realm_keys` and `secret_deks` wrapping
    rows, then the secret/field/TOTP envelopes and grants (`grt_…`), re-bound to
    the retained KMS key identity. These restore as ciphertext; no decryption
    occurs during restore.
-8. Audit records, when included.
+9. Audit records, when included.
 
 Open-plane restore does **not** require KMS or any key-material custody — there
 is no plaintext-exposure exception to manage, because identity data is plaintext
@@ -399,8 +451,9 @@ encrypted secret material, and service availability.
 - **Sealed-plane** recovery does depend on the CMK being retained: CMK loss
   crypto-shreds secret values and TOTP seeds for the affected realms while
   leaving the open plane intact.
-- Embedding vectors are recomputed when not restored from backup; recall returns
-  in degraded mode and is fully restored after re-embedding completes.
+- Lexical recall is immediately available after index rebuild. Restored vector
+  coverage reflects the imported profile/rows and may be zero for an older
+  archive; the backend does not schedule re-embedding.
 - Operator account recovery may restore access to the account or realm
   administration surface, but it must not bypass authorization. Operator access
   to identity data after recovery is audited exactly like any operator override.
@@ -416,13 +469,13 @@ encrypted secret material, and service availability.
 Self-hosted operators own:
 
 - Database backup and restore, including memories, facts, primary flags, memory
-  edit history, policies, group membership, group-owned records, messages, and
-  audit.
-- Optional pgvector backup and restore, or re-embedding on restore.
+  edit history, curation queue/run/receipt state, policies, group membership,
+  group-owned records, messages, and audit.
+- Migration-0032 client-vector profile/row backup and restore.
 - Object/blob backup and restore when used.
 - Migration version tracking and upgrade ordering. See [storage.md](storage.md).
-- Embedding-provider and model configuration retention, so recall is
-  reproducible after restore.
+- Client-vector profile retention for every vector row; no backend
+  embedding-provider configuration exists.
 - When the sealed plane is enabled: KMS key retention, rotation, and access
   policy — the CMK under the configured `WITSELF_KMS_PROVIDER`
   (`aws-kms` / `gcp-kms` / `azure-key-vault`), with rotation enabled and prior
@@ -458,13 +511,12 @@ control-plane repoint that completes a move.
 
 Migration is dual-plane, matching the two postures above:
 
-- **Open plane (memories + facts + messaging)** moves via the first-class
+- **Open plane (memories + facts + curation + messaging)** moves via the first-class
   export/import described in [Identity Export And Import](#identity-export-and-import):
   `witself export` from cell A, `witself import` into cell B. Identity data
-  travels in clear by design, so no KMS custody is involved. Embedding vectors
-  follow the [Embedding Vectors](#embedding-vectors) rule — recomputed in the
-  destination cell, or moved directly when the destination uses the same
-  embedding provider/model and dimensionality.
+  travels in clear by design, so no KMS custody is involved. Migration-0032
+  client-supplied vector profiles/rows move in the same archive under the
+  [Client-Supplied Vectors](#client-supplied-vectors) validation rules.
 - **Sealed plane (secrets + TOTP)** is KMS-rooted per cell/cloud, so it cannot be
   carried as a plaintext export. Migration performs an audited **KMS re-wrap**:
   the data keys are unwrapped under cell A's CMK and re-encrypted under cell B's
@@ -496,11 +548,11 @@ A managed or self-hosted restore should proceed in this order:
    database matches the build (advisory lock; Helm migration Job in Kubernetes).
    See [storage.md](storage.md).
 4. Restore object/blob storage when used.
-5. Restore or omit pgvector data. If omitted or dimensionality-mismatched,
-   schedule re-embedding.
-6. Restore server configuration and reconnect to storage and the embedding
-   provider; verify the embedding provider/model identity matches the backup or
-   record an intentional change.
+5. Rebuild the derived full-text index. Restore schema-32 vector profiles and
+   rows through the validated archive streams; rebuild any future ANN
+   projection separately. For an older archive, report zero vector coverage.
+6. Restore server configuration and reconnect to storage. No backend embedding
+   provider is involved.
 7. When the sealed plane is enabled: reconnect to KMS, confirm the retained
    `kms_provider` / `kms_key_ref` resolves to a reachable CMK, and verify the
    `realm_keys` / `secret_deks` wrapping rows restored consistently — a probe
@@ -510,10 +562,12 @@ A managed or self-hosted restore should proceed in this order:
    [key-hierarchy.md](key-hierarchy.md).
 8. Verify integrity invariants: fact-name uniqueness per owner, at-most-one
    primary per logical kind per owner, group membership and admins, policy
-   bindings (default-deny surface), memory edit-history continuity, and message
-   delivery/read/ack state.
-9. Run re-embedding if needed; confirm recall leaves degraded mode and the
-   capabilities contract reports semantic recall as healthy.
+   bindings (default-deny surface), memory edit-history continuity, curation
+   request/run/action/receipt ownership and attribution, inactive imported
+   leases with reserved fences, and message delivery/read/ack state.
+9. Confirm lexical recall works. Confirm restored hybrid recall and reported
+   coverage when compatible vector rows exist; zero coverage remains a supported
+   lexical fallback, not an unsupported memory service.
 10. Verify health and readiness probes and metrics. See
     [observability-and-operations.md](observability-and-operations.md).
 11. Confirm a sample of cross-agent access decisions with `policy test` so the

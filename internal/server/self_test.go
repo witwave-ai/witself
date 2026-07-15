@@ -195,6 +195,65 @@ func TestSelfDigestReportsCountWhenFactsExcludedAndRedactsSensitiveValues(t *tes
 	}
 }
 
+func TestSelfDigestHydratesSalientMemoriesDeterministically(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1",
+			RealmID: "realm_1", AccountStatus: "active",
+		}, true, nil
+	}
+	getCalls := 0
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfMemories: func(_ context.Context, _ DomainPrincipal, limit int) ([]SelfMemory, int, error) {
+			getCalls++
+			if limit != 2 {
+				t.Fatalf("limit=%d, want 2", limit)
+			}
+			return []SelfMemory{
+				{ID: "mem_1", Snippet: "picked postgres", Kind: "decision", Tags: []string{"storage", "architecture"}, Salience: 0.9},
+				{ID: "mem_2", Snippet: "private", Kind: "lesson", Tags: []string{"secret"}, Salience: 0.8, Sensitive: true},
+			}, 3, nil
+		},
+		CountSelfMemories: func(context.Context, DomainPrincipal) (int, error) {
+			return 3, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_facts=false&include_salient=true&salient_limit=2", "token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.SalientMemories) != 2 || digest.Index.Counts["memories"] != 3 || !digest.Elided {
+		t.Fatalf("memory digest=%+v", digest)
+	}
+	if got := digest.Index.Kinds; len(got) != 2 || got[0] != "decision" || got[1] != "lesson" {
+		t.Fatalf("kinds=%v", got)
+	}
+	if got := digest.Index.Tags; len(got) != 2 || got[0] != "architecture" || got[1] != "storage" {
+		t.Fatalf("tags=%v", got)
+	}
+	if sensitive := digest.SalientMemories[1]; sensitive.Snippet != "" || len(sensitive.Tags) != 0 || !sensitive.Redacted {
+		t.Fatalf("sensitive memory was not redacted: %+v", sensitive)
+	}
+
+	resp = selfRequest(t, srv.URL+"/v1/self?include_facts=false&include_salient=false", "token")
+	defer closeBody(t, resp)
+	digest = SelfDigest{}
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.SalientMemories) != 0 || digest.Index.Counts["memories"] != 3 {
+		t.Fatalf("excluded memory digest=%+v", digest)
+	}
+	if getCalls != 1 {
+		t.Fatalf("memory values loaded %d times, want one included request", getCalls)
+	}
+}
+
 func selfRequest(t *testing.T, url, token string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, url, nil)

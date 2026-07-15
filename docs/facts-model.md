@@ -9,6 +9,11 @@ Status: implementation in progress. Last reviewed 2026-07-12.
 > still describe `name`, `primary`, group ownership, or consolidation
 > are forward-looking until reconciled with the subject/assertion model.
 
+Narrative-boundary amendment (accepted 2026-07-14): facts remain canonical
+atomic assertions. Portable narratives now belong in Witself narrative memory,
+not native-only memory; curators may propose but never auto-confirm facts. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 A fact is a `name`→`value` identity attribute: the canonical, queryable identity
 card for an agent. Facts are the deterministic counterpart to memories. Where a
 [memory](memory-model.md) is free-form self-content addressed by `id` and
@@ -127,9 +132,10 @@ fuzzy-matching step.
   `--source`. Setting `NAME` when it already exists updates `value` and the
   named fields and appends to edit history; it never creates a duplicate.
 - Natural-language `remember` routing is provider-aware at the agent boundary.
-  Atomic durable assertions use the fact upsert path; free-form narrative stays
-  on the runtime-native memory path unless the user explicitly selects
-  Witself. The current CLI does not expose the earlier provider-agnostic
+  Atomic durable assertions use the fact upsert path; free-form narrative uses
+  portable Witself narrative memory by default through `memory capture`.
+  Runtime-native memory is used only when explicitly named, and a request for
+  both performs separate writes. The current CLI does not expose a unified
   `remember` command. See [Agent Memory Routing](agent-memory-routing.md).
 - `fact list` enumerates the caller's facts with metadata and filters (by
   `name` prefix/namespace, `primary`, `sensitive`, `format`, `source`), with
@@ -146,10 +152,10 @@ fuzzy-matching step.
   files as facts, tagging each with `source=import:<file>`. Upsert by `name`
   prevents re-import from creating duplicates. See
   [context-hydration.md](context-hydration.md).
-- `memory consolidate` SURFACES conflicting facts (for example two imports that
-  disagree on the same `name`); it never auto-picks a winner and never silently
-  overwrites a `self`-, `operator`-, or `import`-authored value. Conflicts are
-  reported for explicit resolution. See [memory-model.md](memory-model.md).
+- Client-run curation may SURFACE conflicting fact candidates (for
+  example two imports that disagree on one predicate), but it may only propose
+  them for review. It never auto-picks a canonical assertion or silently
+  overwrites user-authorized truth. See [memory-model.md](memory-model.md).
 
 Cross-agent and group-owned facts follow the same surface with an explicit
 owner. Reading another owner's fact requires a `read` policy; contributing,
@@ -218,7 +224,7 @@ This is deliberately distinct from a [secret](secret-model.md). If you need a
 credential — a password, API key, SSH key, certificate, or TOTP seed — store it
 as a secret in the sealed plane, **not** as a sensitive fact. Secrets are
 KMS-backed envelope-encrypted, reveal-gated, and never embedded, never returned
-by semantic recall, never in the self-digest, and never in the plaintext export
+by broad memory recall, never in the self-digest, and never in the plaintext export
 (see [secret-model.md](secret-model.md)). The `sensitive` flag is a display/PII
 guard for identity attributes that happen to be personal; it is not a
 confidentiality boundary and must not be used as a substitute for a secret.
@@ -303,9 +309,9 @@ Reference rules:
 | ------------- | ----------------------------- | ----------------------------------- |
 | Id prefix     | `fact_`                       | `mem_`                              |
 | Addressing    | by `name` (unique per owner)  | by `id`                             |
-| Lookup        | deterministic, exact          | semantic recall + filters           |
+| Lookup        | deterministic, exact          | lexical/structured recall + filters |
 | Value         | single attribute value        | free-form `content`                 |
-| Embedding     | none                          | embedding vector (pgvector)         |
+| Vector index  | none                          | optional client vector (JSONB)      |
 | Anchors       | `primary` flag per kind       | `salience`, `kind`, `tags`          |
 | Size budget   | 64 KiB value                  | 256 KiB content                     |
 

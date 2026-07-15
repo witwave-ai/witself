@@ -1,13 +1,26 @@
 # Witself Data Model (Postgres Schema)
 
-Status: draft. Last reviewed 2026-06-26. Decision: Witself uses a single
-multi-tenant Postgres schema (with the `pgvector` extension) as the system of
+Status: draft. Last reviewed 2026-07-14. Decision: Witself uses a single
+multi-tenant PostgreSQL schema as the system of
 record, scoped on every row by `account_id` / `realm_id`, spanning **two
 planes** — the **open plane** (memories + facts, stored as ordinary identity
 data) and the **sealed plane** (secrets + TOTP, stored only as AEAD envelopes,
 never plaintext columns). Tokens are stored only as hashes, optimistic
 concurrency is via a `row_version` column, soft delete via tombstone timestamps,
 and Goose expand/contract migrations are owned by `witself-server`.
+
+Narrative-memory schema amendment (accepted 2026-07-14): migration `0029` is
+the source for the implemented direct lifecycle, and migration `0030` adds the
+implemented curation queue, fencing, immutable inputs, strict plan/actions,
+receipts, cursors, rollback attribution, and archive participation. Migration
+`0032` adds implemented immutable vector profiles and exact
+version/content-hash-bound JSONB vector rows. PostgreSQL full-text search is
+universal, and deterministic bounded hybrid ranking requires no extension.
+`pgvector`/ANN is only a possible future projection; the backend never calls a
+model. The narrative projection in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md) supersedes
+the earlier memory draft in this document. Other domain tables remain governed
+by this document.
 
 This doc is the prerequisite for the first Goose migration and the
 authorization/storage layers. It is the relational view of the domain objects in
@@ -29,7 +42,8 @@ recall/digest rule:
   `group_members`, `messages`): identity content lives in **ordinary columns**,
   protected by data-at-rest encryption (RDS/disk) for integrity and
   authenticity — *not* secret confidentiality. Open-plane content is
-  semantically indexed (pgvector), recallable, cross-agent readable under
+  indexed with PostgreSQL full-text search, optionally indexed with
+  client-supplied vectors, recallable, cross-agent readable under
   [policy](access-policy.md), in the self-digest, and plaintext-exportable. There
   is **no reveal ceremony**; `sensitive` is a PII/redaction display flag, not an
   encryption boundary.
@@ -50,8 +64,9 @@ recall/digest rule:
 Sealed-plane envelope columns and `realm_keys` / `secret_deks` are needed only
 when the sealed plane is enabled. An **open-plane-only** deployment runs without
 KMS; the sealed plane re-introduces KMS as a required dependency when enabled.
-`pgvector` is a hard gate for the open plane; the embedding provider is
-degradable (see [storage.md](storage.md)).
+PostgreSQL and its full-text facilities are the open-plane storage and recall
+gate. Migration-0032 vectors use JSONB, so pgvector is not a dependency, and
+there is no backend embedding provider (see [storage.md](storage.md)).
 
 **This schema is the per-cell schema.** Under the go-forward fleet of
 independent cells, each cell runs one instance of this schema and is the single
@@ -131,6 +146,11 @@ generate stable local ids.
 | `agent_` | named agent | spine | `agents` |
 | `tok_` | token (DB id; raw token text uses `witself_at_`) | spine | `agent_tokens` |
 | `mem_` | memory | open | `memories` |
+| `mcrq_` | memory-curation request | open | `memory_curation_requests` |
+| `mrun_` | memory-curation run | open | `memory_curation_runs` |
+| `mact_` | memory-curation action | open | `memory_curation_actions` |
+| `mcmu_` | memory-curation mutation record | open | `memory_curation_mutations` |
+| `mrec_` | value-free curation plan/apply/rollback receipt id | open | receipt columns in curation rows |
 | `fact_` | fact | open | `facts` |
 | `pol_` | cross-agent access policy | open | `policies` |
 | `grp_` | security group | open | `security_groups` |
@@ -251,8 +271,11 @@ CREATE UNIQUE INDEX ux_secrets_group_name
   WHERE owner_kind = 'group' AND deleted_at IS NULL;
 ```
 
-Memories are **not** name-unique — they are addressed by `id` and recalled
-semantically (see [memory-model.md](memory-model.md)); only `agents`, `facts`,
+Memories are **not** name-unique — they are addressed by `id` and recalled with
+full-text, time, metadata, salience, recency, and optional compatible vector
+signals (see
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md)); only
+`agents`, `facts`,
 `secrets`, and `security_groups` carry name uniqueness. Agent-created records
 default to the creating agent's ownership; group ownership is explicit and
 auditable. Cross-agent open-plane access is governed by
@@ -419,6 +442,7 @@ operator tokens via `principal_kind`. See [token-lifecycle.md](token-lifecycle.m
 | `token_hash` | `bytea NOT NULL` | hash/HMAC of the raw token (e.g. SHA-256/HMAC); never the raw value |
 | `hash_alg` | `text NOT NULL` | hash scheme + version for rotation |
 | `scopes` | `text[] NOT NULL DEFAULT '{}'` | granted scope vocabulary (open + sealed + spine) |
+| `access_profile` | `text NOT NULL DEFAULT 'full'` | implemented immutable credential class: `full`, `curator-preview`, or `curator-apply`; restricted values are valid only for agent tokens |
 | `last_used_at` | `timestamptz NULL` | best-effort, updated on auth |
 | `expires_at` | `timestamptz NULL` | NULL = durable (v0 default); set only via `--ttl`/`--expires-at` |
 | `revoked_at` | `timestamptz NULL` | immediate revocation; revoked tokens cannot authenticate |
@@ -436,6 +460,14 @@ totp:code, message:send, message:read}` over OWN data only (see
 [token-lifecycle.md](token-lifecycle.md)). Raw token values MUST NOT appear in
 any column, audit row, or log.
 
+Migration `0031_add_curator_token_profiles.sql` adds the implemented
+`access_profile` constraint to the physical `tokens` table. Existing rows are
+backfilled as `full`; non-agent rows must remain `full`. Curator rows also have
+a mandatory bounded display name and an issuance TTL no greater than 24 hours.
+The profile and expiry are projected into the authenticated principal so route
+authorization is server-enforced, and `access_profile` is preserved in logical
+account archives for cross-cell migration.
+
 Token mutations (create / rotate / revoke) use `revoked_at` and rotation
 semantics rather than the `If-Match` / `row_version` optimistic-lock contract, so
 `agent_tokens` carries no `row_version` column and is intentionally excluded from
@@ -443,7 +475,7 @@ the [Optimistic Concurrency](#optimistic-concurrency-and-history) table list.
 
 ## Open-Plane Tables
 
-Open-plane content lives in **ordinary columns** (data at rest), is semantically
+Open-plane content lives in **ordinary columns** (data at rest), is full-text
 indexed, recallable, cross-agent readable under policy, in the self-digest, and
 plaintext-exportable. There is no reveal ceremony; `sensitive` is a
 PII/redaction display flag only.
@@ -451,7 +483,7 @@ PII/redaction display flag only.
 ### `memories`
 
 Purpose: free-form self-content owned by an agent or a group, addressed by `id`
-(never name-unique), recalled semantically. Maps to the Memory JSON shape in
+(never name-unique), recalled deterministically. Maps to the Memory JSON shape in
 [json-contracts.md](json-contracts.md); semantics in
 [memory-model.md](memory-model.md).
 
@@ -463,7 +495,7 @@ Purpose: free-form self-content owned by an agent or a group, addressed by `id`
 | `owner_kind` | `text NOT NULL` | `agent` \| `group` discriminator |
 | `owner_agent_id` | `text NULL` FK -> `agents(id)` | set iff `owner_kind = 'agent'` |
 | `owner_group_id` | `text NULL` FK -> `security_groups(id)` | set iff `owner_kind = 'group'` |
-| `content` | `text NOT NULL` | free-form payload; **ordinary column** (data at rest), <= 256 KiB; input to embedding |
+| `content` | `text NOT NULL` | free-form payload; **ordinary column** (data at rest), <= 256 KiB; indexed by PostgreSQL FTS |
 | `kind` | `text NOT NULL DEFAULT 'note'` | open string label (`episodic`/`semantic`/`profile`/`note`/…); not a closed enum |
 | `tags` | `text[] NOT NULL DEFAULT '{}'` | filter/rank tags (<= 64) |
 | `source` | `text NOT NULL DEFAULT 'self'` | provenance: `self` \| `agent:<name>` \| `operator` \| `import:<file>` \| `msg_…` |
@@ -479,11 +511,12 @@ Purpose: free-form self-content owned by an agent or a group, addressed by `id`
 Constraints: the `owner_kind` / `owner_agent_id` / `owner_group_id` `CHECK`
 (above). FKs `account_id`, `realm_id`, `owner_agent_id`, `owner_group_id`.
 Indexes `(realm_id, owner_agent_id)`, `(realm_id, owner_group_id)`, and on
-`(realm_id, kind)` for metadata `list`/digest selection. The embedding vector is
-a separate column (see [Embedding Storage](#embedding-storage)).
+`(realm_id, kind)` support metadata `list`/digest selection. PostgreSQL FTS
+indexes support universal recall. Optional client vectors are separate derived
+rows (see [Optional Vector Storage](#optional-vector-storage)).
 
 ```sql
--- metadata/digest filters never touch the embedding provider
+-- metadata/digest filters and FTS require no model provider
 CREATE INDEX ix_memories_realm_state_kind
   ON memories (realm_id, state, kind)
   WHERE deleted_at IS NULL;
@@ -495,33 +528,88 @@ and [context-hydration.md](context-hydration.md). Memory `content` is never an
 ordinary readable column for unauthorized callers, but it is **not**
 encrypted-as-product — that is the sealed plane's job.
 
-### `memory_embeddings`
+### Memory Curation Protocol (Migration `0030`)
 
-Purpose: the pgvector embedding column, keyed by memory id, plus the provider,
-model, and dimensionality the vector was computed with. Vectors are
-storage-internal: never returned in API responses, logs, audit, or export (see
-[memory-model.md](memory-model.md) Recall and Embeddings).
+Status: implemented for token-bound agent-owned memories. Curation is a
+client-inference protocol: PostgreSQL stores and validates deterministic work
+state, while the calling client authors every semantic decision. No curation
+table is a prompt queue for a backend model, and no backend worker calls an LLM.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `memory_id` | `text` PK FK -> `memories(id)` ON DELETE CASCADE | one vector per memory |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | |
-| `embedding` | `vector(N)` NULL | pgvector column; `N` = provider/model dimensionality; NULL when flagged-for-embedding |
-| `provider` | `text NOT NULL` | `voyage` \| `openai` \| `local-dev` |
-| `model` | `text NOT NULL` | provider-specific model id |
-| `dimensions` | `integer NOT NULL` | vector dimensionality |
-| `embedded_at` | `timestamptz NULL` | NULL while pending; set on successful embed |
-| `created_at` / `updated_at` | `timestamptz` | |
+Migration `0030_add_memory_curation.sql` adds seven owner-scoped tables:
 
-Constraints: FKs all above. An approximate vector index (e.g. HNSW/IVFFlat) is
-created over `embedding` per [storage.md](storage.md); index type and parameters
-are tuned in [memory-model.md](memory-model.md). The migration that introduces
-recall enables `pgvector` and is ordered before this column is created. Vectors
-are recomputable from `content`; recall degrades deterministically to
-keyword/tag/kind/time ranking when the provider is unavailable.
-**Sealed-plane carve-out:** secret values and TOTP seeds are NEVER embedded and
-never appear here.
+| Table | Purpose |
+|---|---|
+| `memory_curation_lanes` | One `(account, realm, agent owner)` concurrency lane with monotonic request and fencing generations plus at most one active run. |
+| `memory_curation_cursors` | Contiguous consumed positions for `memory`, `evidence`, and per-transcript source streams. Cursors advance only during successful apply and never rewind during rollback. |
+| `memory_curation_requests` | Coalesced due work with strict JSON source scope, trigger metadata, priority, retry state, generation, actor, and idempotency fingerprint. Requests may also name a read-only replay of one prior run. |
+| `memory_curation_runs` | One fenced claim: request generation, lease, client provenance, frozen change uppers/counts, budgets, strict plan revision/hash, value-free apply/rollback receipt ids, state, conflict/terminal codes, and timestamps. |
+| `memory_curation_run_inputs` | Immutable ordered references to exact memory versions, evidence rows, transcript ranges, and expected-prior/upper cursor intervals frozen for the run. |
+| `memory_curation_actions` | Ordered normalized `witself.memory-plan.v1` actions with primitive, exact inputs/heads, payload, validation/apply/rollback results, canonical action hash, and lifecycle state. |
+| `memory_curation_mutations` | Value-free idempotency receipts for request, start, renew, plan, apply, cancel, abandon, and rollback. |
+
+All graph rows carry the full account/realm/owner scope and use composite
+foreign keys so an imported or malformed id cannot cross an owner lane. Request
+and fencing generations are monotonic; an expired or abandoned claim releases
+the lane under a newer fence. The only plan primitives are `create`, `replace`,
+`supersede`, `relate`, and `propose_fact`. Plan JSON is strictly decoded,
+normalized, bounded, and canonically SHA-256 hashed. `create` ids are
+preallocated during plan acceptance. Apply re-hashes the stored plan, locks the
+affected current heads and fact subject namespace, checks the lease/fence,
+versions, subject identity, and cursor compare-and-swap values, then commits all
+semantic changes and cursor advances in one transaction.
+
+Migration `0030` also extends the direct-memory graph for reversible
+attribution:
+
+- `memory_versions` accepts the `reverted` state/operation and binds optional
+  `curation_run_id` plus `curation_action_id` as an inseparable same-owner pair.
+- `memory_relations` adds `derived_from`, `summarizes`, `merged_from`,
+  `split_from`, and `conflicts_with`; curation and rollback action/run
+  attribution is exact, and reverted edges retain history.
+- `fact_candidates` records curation run/action attribution and a distinct
+  `withdrawn` terminal state for rollback. Curation may propose a candidate but
+  cannot set a canonical fact.
+- The memory tombstone records counts of scrubbed curation runs, actions,
+  inputs, and mutation receipts so permanent deletion remains verifiable while
+  purging value-bearing plan/input material.
+
+All seven curation tables are account archive streams introduced at schema 30.
+Import validates the graph and normalizes active leases: an open/planned run is
+interrupted, its request is no longer claimed, the lane's active run is cleared,
+and the next fence is reserved. Historical applied/rolled-back state and
+value-free receipts remain portable, but an in-flight source-cell client can
+never apply with its old fence after import.
+
+### Optional Vector Storage
+
+Status: implemented by migration `0032`, but optional to use.
+`memory_vector_profiles` and `memory_vectors` are canonical portable tables in
+the schema and archive. Witself remains fully functional when they contain no
+rows; no pgvector extension is needed.
+
+An immutable profile records a profile id, client-declared model/recipe
+identity, dimensions, distance metric, and normalization contract. A vector row
+is keyed by account, realm, owner, memory id, exact memory version/content
+hash, and profile id; its vector is non-null and has the profile's exact
+dimension. A new memory version makes an older row stale rather than mutating it
+into a vector for different content.
+
+Both memory vectors and per-request query vectors come from an authorized
+client. The backend validates scope, finite values, dimensions, profile,
+version, and content hash, then stores JSONB arrays and compares them with
+deterministic bounded similarity math. It never generates vectors, queues
+records for embedding, calls a model provider, stores model credentials, or
+performs re-embedding. Missing,
+stale, or incompatible vectors report partial coverage and use the universal
+full-text/time/metadata ranking path.
+
+Vectors are never returned in ordinary memory responses, logs, audit metadata,
+or support artifacts. Schema-32 account archives include both tables and import
+validates profile contracts, owner/version/content-hash scope, vector hashes,
+chronology, and table completeness. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+**Sealed-plane carve-out:** secret values and TOTP seeds are never submitted as
+memory-vector inputs and never appear in these tables.
 
 ### `memory_versions`
 
@@ -1355,7 +1443,7 @@ windows are persisted per realm per dimension. See
 
 The canonical `usage_dimension` values are the open-plane/spine dimensions
 (`active_agent`, `stored_memory`, `stored_fact`, `memory_recall`, `memory_write`,
-`embedding_operation`, `vector_storage_byte`, `crossagent_access`,
+`vector_write`, `vector_storage_byte`, `crossagent_access`,
 `security_group`, `message_sent`, `message_delivered`, `storage_byte`,
 `api_request`, `audit_event`) plus the **sealed-plane** dimensions added by the
 consolidation (`stored_secret`, `secret_read` — reveal + reference resolution,
@@ -1522,14 +1610,22 @@ public repo. See [storage.md](storage.md) and
   destructive/backward). Migration commands acquire a Postgres advisory lock.
   Helm exposes an explicit migration Job; production guidance prefers running
   migrations as a controlled step before rolling `witself-server`. CI validates
-  ordering and applies against a test Postgres instance with `pgvector`
-  available.
+  ordering and applies against a test PostgreSQL instance, including migration
+  `0032` and vector/archive round trips on ordinary PostgreSQL.
+- Narrative memory is currently split across migration `0029` (direct heads,
+  full versions, evidence, lineage, change clocks, lexical recall, lifecycle,
+  permanent-delete tombstones/retry shields), migration `0030` (curation
+  lanes, cursors, requests, fenced runs, frozen inputs, strict actions, mutation
+  receipts, rollback attribution, and archive streams), and migration `0032`
+  (immutable vector profiles and JSONB vector rows). None enables pgvector or
+  adds a backend model dependency.
 - **Expand/contract.** Schema changes follow expand → migrate/backfill →
   contract: additive changes (new nullable columns, new tables, new indexes built
   `CONCURRENTLY`) ship first and are forward-compatible; destructive changes ship
-  only after all running instances no longer depend on the old shape. The
-  `pgvector` extension + the memory vector column are an expand-phase migration
-  ordered before any vector use. The sealed-plane envelope columns, `realm_keys`,
+  only after all running instances no longer depend on the old shape. Migration
+  `0032` is the additive vector-table phase. Any future optional pgvector/ANN
+  projection is a separate expand phase and must not gate lexical or JSONB
+  hybrid recall. The sealed-plane envelope columns, `realm_keys`,
   and `secret_deks` are introduced as expand-phase additive migrations; KEK
   rotation backfills are metadata-only re-wrap jobs, not schema migrations.
 - **Destructive-down classification.** Each migration is classified `reversible`,
@@ -1559,8 +1655,9 @@ Owner / engineering sign-off items.
 - **DEK granularity policy.** Per-secret DEK default with opt-in per-field DEK for
   TOTP seeds / highest-value fields, and whether per-field reveal grants ever
   imply per-field DEKs or remain pure authorization checks.
-- **Vector index type/params.** HNSW vs IVFFlat (and parameters) for the
-  `memory_embeddings.embedding` index, tuned per [memory-model.md](memory-model.md).
+- **Optional vector index type/params.** HNSW vs IVFFlat (and parameters) for
+  enabled client-vector profiles, tuned without making pgvector an availability
+  gate for full-text recall.
 - **Id format.** ULID vs UUIDv7 vs random for the body under each prefix.
 - **Usage-counter granularity.** Single rolling row per `(realm, dimension)` vs
   windowed rows per `(realm, dimension, window_start)` for rate dimensions.

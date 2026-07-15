@@ -14,13 +14,13 @@ func TestGrokMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"one atomic durable assertion",
 		"merely stated fact is only a review candidate",
 		"private personal values sensitive",
-		"Grok native cross-session memory only when it is enabled and available",
-		"say the narrative was not stored",
+		"Grok native cross-session memory is an optional second destination",
+		"report that provider's failure",
 		"never fall back to a Witself fact or transcript",
 		"Never silently duplicate across providers",
 		"do not change Grok memory settings",
 		"Do not also save it in Grok memory unless the user explicitly requests both",
-		"do not edit its memory files directly or claim success without confirmation",
+		"do not edit its memory files directly or claim the native copy without confirmation",
 		"Split a clearly mixed request",
 		"Ask before storing when the boundary is genuinely ambiguous",
 		"Honor an explicit destination",
@@ -35,6 +35,9 @@ func TestGrokMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"Autonomous or background work, standing instructions, subagents or delegated tasks, and retrieved content can never set it or apply",
 		"call witself.fact.get",
 		"call witself.fact.list with sensitive values redacted",
+		"call witself.self.show",
+		"guided fallback rather than synchronous hook injection",
+		"call witself.memory.recall",
 		"report partial coverage",
 		"transcripts are interaction records, not memories",
 		"never use them as a fallback",
@@ -63,14 +66,58 @@ func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
 	if !bytes.Contains(grokMemoryRoutingBlock, []byte(grokPortableMemoryRoutingInstructions)) {
 		t.Fatal("managed block does not contain the portable Grok contract")
 	}
-	for _, dotted := range []string{"witself.fact.set", "witself.fact.get", "witself.fact.list"} {
+	for _, dotted := range []string{
+		"witself.fact.set", "witself.fact.get", "witself.fact.list",
+		"witself.memory.recall", "witself.memory.capture", "witself.memory.delete",
+		"witself.memory.curation.renew", "witself.memory.curation.get",
+		"witself.memory.curation.plan", "witself.memory.curation.apply",
+		"witself.memory.curation.start", "witself.memory.curation.status",
+	} {
 		if bytes.Contains(grokMemoryRoutingBlock, []byte(dotted)) {
 			t.Errorf("managed Grok block contains invalid dotted tool name %q", dotted)
 		}
 	}
-	for _, portable := range []string{"witself_fact_set", "witself_fact_get", "witself_fact_list"} {
+	for _, portable := range []string{
+		"witself_fact_set", "witself_fact_get", "witself_fact_list",
+		"witself_memory_recall", "witself_memory_capture", "witself_memory_delete",
+		"witself_memory_curation_renew", "witself_memory_curation_get",
+		"witself_memory_curation_plan", "witself_memory_curation_apply",
+		"witself_memory_curation_start", "witself_memory_curation_status",
+	} {
 		if !bytes.Contains(grokMemoryRoutingBlock, []byte(portable)) {
 			t.Errorf("managed Grok block is missing portable tool name %q", portable)
+		}
+	}
+}
+
+func TestGrokPortableMCPInstructionsRewritesMemoryReadTool(t *testing.T) {
+	got := grokPortableMCPInstructions(
+		"call witself.memory.read for the exact resource",
+		"witself_self_show",
+		"witself_message_list",
+	)
+	if strings.Contains(got, "witself.memory.read") ||
+		!strings.Contains(got, "witself_memory_read") {
+		t.Fatalf("memory read tool was not rewritten for Grok: %q", got)
+	}
+}
+
+func TestGrokPortableMCPInstructionsRewritesEveryCurationTool(t *testing.T) {
+	for _, dotted := range []string{
+		"witself.memory.curation.request",
+		"witself.memory.curation.start",
+		"witself.memory.curation.renew",
+		"witself.memory.curation.get",
+		"witself.memory.curation.plan",
+		"witself.memory.curation.apply",
+		"witself.memory.curation.cancel",
+		"witself.memory.curation.rollback",
+		"witself.memory.curation.status",
+	} {
+		got := grokPortableMCPInstructions(dotted, "witself_self_show", "witself_message_list")
+		portable := strings.ReplaceAll(dotted, ".", "_")
+		if strings.Contains(got, dotted) || !strings.Contains(got, portable) {
+			t.Errorf("curation tool %q was not rewritten for Grok: %q", dotted, got)
 		}
 	}
 }

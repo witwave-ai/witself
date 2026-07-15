@@ -251,8 +251,8 @@ The full CLI surface is enumerated in
 
 - `witself.message.send`, `witself.message.list`, `witself.message.read`.
 - stdio-first; same authorization as the CLI; honors `--read-only` mode (in which
-  `send` is unavailable and only `list`/`read` are exposed; there is no separate
-  `ack` MCP tool — ack is a side effect of `read` on MCP).
+  only `list` is exposed; `send` and `read` are unavailable because there is no
+  separate `ack` MCP tool and acknowledgement is a side effect of `read`).
 - The agent-token MCP session can only send **as** the token-bound agent.
 - Tool inputs/outputs and exposure rules are pinned in
   [mcp-tools.md](mcp-tools.md).

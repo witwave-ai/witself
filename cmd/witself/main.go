@@ -66,6 +66,8 @@ func run(args []string) int {
 		return usageCmd(args[1:])
 	case "fact":
 		return factCmd(args[1:])
+	case "memory":
+		return memoryCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
 	case "message":
@@ -789,22 +791,37 @@ func tokenCreate(args []string) int {
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	agent := fs.String("agent", "", "agent id to mint a token for")
 	operator := fs.Bool("operator", false, "mint another token for the authenticated operator")
-	name := fs.String("name", "", "display name for an operator token")
-	ttl := fs.String("ttl", "", "operator token lifetime, such as 24h or 30m")
+	profile := fs.String("profile", "full", "agent token profile: full, curator-preview, or curator-apply")
+	name := fs.String("name", "", "display name for an operator or curator token")
+	ttl := fs.String("ttl", "", "operator or curator token lifetime, such as 24h or 30m")
 	out := fs.String("out", "", "write the new token to this file (0600) instead of stdout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if (*agent == "" && !*operator) || (*agent != "" && *operator) {
-		fmt.Fprintln(os.Stderr, "usage: witself token create [--account NAME] (--agent AGENT | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself token create [--account NAME] (--agent AGENT [--profile full|curator-preview|curator-apply] | --operator) [--name NAME] [--ttl DURATION] [--out FILE]")
 		return 2
 	}
-	if *agent != "" && *ttl != "" {
-		fmt.Fprintln(os.Stderr, "witself: --ttl is currently supported only with --operator")
+	*profile = strings.TrimSpace(*profile)
+	if *operator && *profile != "full" {
+		fmt.Fprintln(os.Stderr, "witself: --profile is supported only with --agent")
 		return 2
 	}
-	if *agent != "" && *name != "" {
-		fmt.Fprintln(os.Stderr, "witself: --name is currently supported only with --operator")
+	curator := *profile == "curator-preview" || *profile == "curator-apply"
+	if *agent != "" && *profile != "full" && !curator {
+		fmt.Fprintln(os.Stderr, "witself: --profile must be full, curator-preview, or curator-apply")
+		return 2
+	}
+	if *agent != "" && curator && (strings.TrimSpace(*name) == "" || strings.TrimSpace(*ttl) == "") {
+		fmt.Fprintln(os.Stderr, "witself: curator tokens require --name and --ttl")
+		return 2
+	}
+	if *agent != "" && !curator && *ttl != "" {
+		fmt.Fprintln(os.Stderr, "witself: --ttl requires a curator profile when used with --agent")
+		return 2
+	}
+	if *agent != "" && !curator && *name != "" {
+		fmt.Fprintln(os.Stderr, "witself: --name requires a curator profile when used with --agent")
 		return 2
 	}
 	ctx := context.Background()
@@ -863,16 +880,29 @@ func tokenCreate(args []string) int {
 		return 0
 	}
 
-	agentTok, tokenID, agentName, err := client.CreateAgentToken(ctx, ep, op, *agent)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
-		return 1
+	var agentTok, tokenID, agentName string
+	if curator {
+		result, createErr := client.CreateCuratorToken(ctx, ep, op, *agent, *profile, *name, *ttl)
+		if createErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", createErr)
+			return 1
+		}
+		agentTok, tokenID, agentName = result.AgentToken, result.TokenID, result.AgentName
+		fmt.Fprintf(os.Stderr, "created %s token %s for %s; expires %s\n",
+			result.AccessProfile, result.TokenID, result.AgentID, result.ExpiresAt.Format(time.RFC3339))
+	} else {
+		var createErr error
+		agentTok, tokenID, agentName, createErr = client.CreateAgentToken(ctx, ep, op, *agent)
+		if createErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", createErr)
+			return 1
+		}
 	}
-	if tokenID != "" {
+	if tokenID != "" && !curator {
 		fmt.Fprintf(os.Stderr, "created agent token %s\n", tokenID)
 	}
 	dest := *out
-	if dest == "" && managedAccount != "" {
+	if dest == "" && managedAccount != "" && !curator {
 		// Managed home: agents/<agent-name>.token, falling back to the agent
 		// id when the name isn't filename-safe (or the cell predates the
 		// field) — both charsets are collision-free.
@@ -900,7 +930,7 @@ func tokenCreate(args []string) int {
 			fmt.Println(agentTok)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "wrote agent token to %s\n", dest)
+		fmt.Fprintf(os.Stderr, "wrote agent token for %s to %s\n", agentName, dest)
 		return 0
 	}
 	fmt.Println(agentTok)
@@ -3734,6 +3764,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
 	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
+	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|list|read|ack  Exchange durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")

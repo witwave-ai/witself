@@ -4,14 +4,19 @@ Status: draft. Decision: self-hosting is available from the public repo, but
 production self-host support is paid or contracted once the hardening path is
 real.
 
+Narrative-memory amendment (accepted 2026-07-14): self-host support includes
+the deterministic PostgreSQL memory path, not a backend embedding provider.
+Client curation and optional client-supplied vectors follow
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 Managed Witself Cloud is the default supported product.
 
 Self-hosting is first-class in the sense that the public repo should include the
 backend server, Helm chart, Terraform modules, configuration docs, migration
-paths, embedding-provider guidance, and operational guidance needed to run
-Witself outside Witself Cloud.
+paths, PostgreSQL retrieval and optional client-vector guidance, and operational
+guidance needed to run Witself outside Witself Cloud.
 
 Self-hosting is not automatically a production support entitlement. Production
 self-host support should be paid or contracted after the required production
@@ -40,11 +45,12 @@ plaintext export; reveal is the only audited value-returning path. See
 Notes:
 
 - Local development covers `witself realm init`, `witself setup --local`, and a
-  future `witself-server serve --dev` running the `local-dev` embedding
-  provider. It is scaffolding, not a production mode.
+  future `witself-server serve --dev` using local PostgreSQL. It runs the same
+  full-text retrieval path and no model provider. It is scaffolding, not a
+  production mode.
 - Self-host preview covers the public `witself-server` image, Helm chart, and
-  Terraform modules run against externally managed Postgres (with pgvector) and
-  a real embedding provider, on a best-effort basis.
+  Terraform modules run against externally managed PostgreSQL, on a best-effort
+  basis. Optional client vectors use migration-0032 JSONB and need no extension.
 - Production self-hosted is the only tier that carries a support commitment, and
   only under a paid or contracted agreement.
 
@@ -58,12 +64,13 @@ Witself should not claim production self-host support until these are real:
 
 Open-plane (memory, fact, identity) prerequisites:
 
-- Backup and restore documentation, including Postgres **pgvector** vector data
-  so semantic recall is restored without re-embedding.
+- Backup and restore documentation for PostgreSQL memory content and full-text
+  index rebuilds, plus optional vector profile/row handling when enabled.
 - Database migration and rollback guidance (`witself-server migrate`, advisory
   lock, Helm migration Job).
-- Embedding provider and model configuration guidance, including degraded-recall
-  behavior and the explicit re-embedding/re-index path on model change.
+- Optional client-vector profile, validation, JSONB storage, coverage, and
+  future ANN-projection guidance. Client software, not the server, owns vector
+  generation after a profile change.
 - Upgrade guide.
 - Production Helm values examples.
 - Terraform state and configuration-management guidance.
@@ -113,8 +120,8 @@ as more than one cell (whether a self-host is always a single cell or may itself
 a fleet is an Open decision in [deployment-cells.md](deployment-cells.md)):
 
 - Per-cell operational ownership: each cell is one complete, isolated Witself stack
-  (`witself-server`, Postgres + pgvector, sealed-plane KMS rooted in that cell, and
-  blob storage) with its own backup, recovery, and KMS. A cell holds the full data
+  (`witself-server`, PostgreSQL, sealed-plane KMS rooted
+  in that cell, and blob storage) with its own backup, recovery, and KMS. A cell holds the full data
   and key material for its own tenants and depends on nothing in another cell.
 - Tenant migration between cells, when used, leans on the first-class export/import
   for the open plane and a KMS **re-wrap** (decrypt-at-source / re-encrypt-at-dest)
@@ -136,12 +143,12 @@ Self-hosted operators remain responsible for:
 - Kubernetes cluster security.
 - IAM and workload identity.
 - Database operations.
-- **Memory store and pgvector backup**: backing up Postgres including the
-  pgvector embedding vectors, and validating that restored vectors reproduce
-  semantic recall without re-embedding.
-- Embedding-provider configuration and credentials
-  (`WITSELF_EMBEDDINGS_PROVIDER`, `WITSELF_EMBEDDINGS_MODEL`, provider API keys),
-  including provider availability and cost.
+- **Memory store backup**: backing up PostgreSQL memory content, versions,
+  evidence, lineage, curation state, and schema-32 vector profiles/rows;
+  rebuilding full-text and any future ANN indexes.
+- Capacity and policy for optional client-supplied vectors. Any model selection,
+  model credentials, inference availability, and inference cost stay entirely
+  in client software and are not `witself-server` configuration.
 - Object/blob storage for exports, attachments, diagnostic bundles, and backup
   artifacts.
 - **KMS configuration (sealed plane)**: provisioning the KMS provider and root
@@ -152,8 +159,8 @@ Self-hosted operators remain responsible for:
 - Network ingress and TLS.
 - Backups and disaster recovery execution.
 - Terraform state protection.
-- Helm values and Kubernetes Secret management (agent token files, embedding
-  provider credentials, database URLs, and — when the sealed plane is enabled —
+- Helm values and Kubernetes Secret management (agent token files, database
+  URLs, and — when the sealed plane is enabled —
   KMS provider configuration and the `WITSELF_KMS_KEY_ID` reference).
 - Policy, security-group, and messaging configuration appropriate to their
   deployment (see [Identity Configuration Guidance](#identity-configuration-guidance)).
@@ -174,24 +181,24 @@ Self-hosted operators configure the identity payload that the managed service
 would otherwise tune for them. The following are operator responsibilities in
 production self-hosting.
 
-### Memory store and embeddings
+### Memory store and retrieval
 
-- Provision Postgres with the **pgvector** extension as the system of record for
-  memories, facts, policies, groups, and messages, and for embedding vectors.
-- Select and configure the embedding provider behind the capability boundary:
-  `voyage` (default), `openai`, or `local-dev`. Production deployments should not
-  run `local-dev`. Provide provider credentials through Kubernetes Secrets, not
-  Helm values or environment files committed to source.
-- Size vector storage. Vector storage is a metered dimension and grows with
-  stored memories; plan disk, index, and backup capacity accordingly.
-- Understand degradation: if the embedding provider is unavailable or disabled,
-  recall degrades deterministically to keyword/tag/kind/time ranking and the
-  capability contract reports the degraded state. Operators should monitor for
-  the degraded condition rather than treating recall as silently healthy.
-- Treat re-embedding on a provider/model change as an explicit, audited
-  maintenance operation. Backed-up vectors restore recall as-is; re-embedding is
-  only required when intentionally changing the embedding model. See
-  [memory-model.md](memory-model.md) and [backup-and-recovery.md](backup-and-recovery.md).
+- Provision PostgreSQL as the sole system of record for memories, facts,
+  policies, groups, messages, transcript evidence, and curation state.
+- Enable and operate PostgreSQL full-text indexes for the universal recall path.
+  Capture, recall, export/import, and recovery must work with no pgvector
+  extension and no model service.
+- If optional vectors are used, size the migration-0032 JSONB tables. An
+  authorized client supplies version/content-hash-bound
+  memory vectors and per-request query vectors under immutable profiles.
+- Monitor vector validation failures and profile coverage, not model-provider
+  health. Missing, stale, or incompatible vectors fall back to full-text recall
+  and do not make the server unready.
+- Rebuild FTS and any future ANN indexes after import. If vectors need regeneration,
+  a client does it and submits new rows; `witself-server` never performs
+  inference or holds model credentials. See
+  [narrative-memory-and-curation.md](narrative-memory-and-curation.md) and
+  [backup-and-recovery.md](backup-and-recovery.md).
 
 ### Cross-agent policy
 
@@ -294,7 +301,8 @@ operator configures equivalents:
 - Witself support ticket workflows.
 - Managed abuse controls.
 - Managed plan enforcement.
-- Managed embedding-provider provisioning and quota.
+- Managed client-curation scheduling or optional vector-generation assistance;
+  neither changes the backend no-inference boundary.
 - Internal Witself staff admin workflows.
 
 Account on self-host: a self-hosted deployment still has an account as the
@@ -307,9 +315,9 @@ themselves. See [deployment-cells.md](deployment-cells.md).
 
 The CLI should surface unavailable self-hosted features through
 `witself capabilities` and deterministic `unsupported_operation` errors. The
-capability contract also reports the active embedding provider, model, and vector
-dimensionality so callers can detect degraded or unconfigured recall before
-running an operation.
+capability contract reports full-text recall availability and optional
+vector-profile support/coverage. It does not report an active backend model
+provider because `witself-server` has none.
 
 ## Related Docs
 

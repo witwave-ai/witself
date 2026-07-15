@@ -4,6 +4,11 @@ Status: first implementation slice. Decision: Witself stores an append-only
 ledger of the visible conversation an agent runtime chooses to record. The
 ledger is distinct from addressed inter-agent messaging.
 
+The accepted narrative-memory design uses this ledger as immutable evidence,
+never as memory or instruction. Client-side capture and curation attach exact
+entry/range references as specified in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Goal
 
 Give agent runtimes and enterprise operators a portable record of what crossed

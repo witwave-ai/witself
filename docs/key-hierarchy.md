@@ -431,7 +431,8 @@ into the docs named below.
   unwrap to `realm_id` + purpose + KEK identity/version; confirm KMS wraps the KEK (not per
   field), that the wrapped DEK has a single source of truth in `secret_deks`, and that
   server-side unwrap authority exists only via the deployment IAM identity in managed mode.
-  Keep Postgres + pgvector as the open-plane hard gate; KMS gates only the sealed plane.
+  Keep ordinary PostgreSQL as the open-plane hard gate; migration-0032 JSONB
+  vectors need no extension, and KMS gates only the sealed plane.
 
 - **[threat-model.md](threat-model.md) — open items.** Envelope format, key hierarchy,
   rotation, tenant/realm separation, and managed-vs-self-hosted parity are settled as one

@@ -213,6 +213,11 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 	if err := verifyLiveAgentScope(ctx, tx, accountID, realmID, agentID); err != nil {
 		return nil, err
 	}
+	p := Principal{Kind: PrincipalAgent, ID: agentID, AccountID: accountID, RealmID: realmID}
+	lane, err := lockMemoryCurationSourceLaneTx(ctx, tx, p)
+	if err != nil {
+		return nil, err
+	}
 
 	var storedRealmID, ownerAgentID string
 	var sequence int64
@@ -327,6 +332,10 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			return nil, fmt.Errorf("advance transcript sequence: %w", err)
 		}
 		batchKey := usageBatchKey(insertedIDs)
+		if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+			"transcript_appended", MemoryCurationSourceTranscript, batchKey); err != nil {
+			return nil, err
+		}
 		if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
 			AccountID: accountID, RealmID: realmID, AgentID: agentID,
 			Dimension: UsageDimensionTranscriptEntryWrite, Quantity: int64(len(insertedIDs)), Unit: UsageUnitEntry,

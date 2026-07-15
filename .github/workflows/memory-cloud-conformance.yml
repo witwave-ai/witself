@@ -1,0 +1,65 @@
+name: memory cloud conformance
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-cloud-conformance
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    # Managed databases are private. This label intentionally keeps their
+    # credentials and network paths off a general GitHub-hosted runner.
+    runs-on: [self-hosted, linux, witself-memory-conformance]
+    environment: memory-cloud-conformance
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify protected endpoint configuration
+        shell: bash
+        env:
+          WITSELF_MEMORY_AWS_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_AWS_DATABASE_URL }}
+          WITSELF_MEMORY_GCP_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_GCP_DATABASE_URL }}
+          WITSELF_MEMORY_AZURE_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_AZURE_DATABASE_URL }}
+          WITSELF_MEMORY_AWS_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AWS_RESOURCE_ID }}
+          WITSELF_MEMORY_GCP_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_GCP_RESOURCE_ID }}
+          WITSELF_MEMORY_AZURE_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AZURE_RESOURCE_ID }}
+        run: |
+          for name in \
+            WITSELF_MEMORY_AWS_DATABASE_URL \
+            WITSELF_MEMORY_GCP_DATABASE_URL \
+            WITSELF_MEMORY_AZURE_DATABASE_URL \
+            WITSELF_MEMORY_AWS_RESOURCE_ID \
+            WITSELF_MEMORY_GCP_RESOURCE_ID \
+            WITSELF_MEMORY_AZURE_RESOURCE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not configured in the protected environment"
+              exit 1
+            fi
+          done
+
+      - name: Run every provider and directed account-move pair
+        env:
+          WITSELF_MEMORY_CLOUD_CONFORMANCE: "1"
+          WITSELF_MEMORY_CLOUD_CERTIFY: "1"
+          WITSELF_MEMORY_AWS_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_AWS_DATABASE_URL }}
+          WITSELF_MEMORY_GCP_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_GCP_DATABASE_URL }}
+          WITSELF_MEMORY_AZURE_DATABASE_URL: ${{ secrets.WITSELF_MEMORY_AZURE_DATABASE_URL }}
+          WITSELF_MEMORY_AWS_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AWS_RESOURCE_ID }}
+          WITSELF_MEMORY_GCP_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_GCP_RESOURCE_ID }}
+          WITSELF_MEMORY_AZURE_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AZURE_RESOURCE_ID }}
+        run: |
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryManagedCloudConformance$' \
+            -count=1 -v -timeout 80m

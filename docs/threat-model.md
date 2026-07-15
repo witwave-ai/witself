@@ -2,8 +2,14 @@
 
 Status: draft. This document captures the initial security model before
 implementation. It should be reviewed before the first backend release and
-updated whenever the storage, policy, token, embedding-provider, messaging,
+updated whenever the storage, policy, token, client-vector, messaging,
 encryption/KMS, MCP, or deployment model changes.
+
+Narrative-memory amendment (accepted 2026-07-14): the backend makes no model or
+embedding call and holds no model secret. Client-side inference, scoped curator
+credentials, transcript-as-untrusted-evidence, fenced plans, and optional
+client-supplied vectors follow
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Witself is one product with two planes, and this threat model is deliberately
 **dual posture**. The **open plane** (memories + facts) is identity data: the
@@ -20,8 +26,9 @@ is the master decision; see [requirements.md](requirements.md),
 [key-hierarchy.md](key-hierarchy.md).
 
 Sealed-plane invariant (stated wherever secrets appear in this doc): secret
-values and TOTP seeds are **never embedded, never returned by semantic recall,
-never in the self-digest, never plaintext-exported, and never ingested** from
+values and TOTP seeds are **never submitted for vector generation, never
+returned by memory recall, never in the self-digest, never plaintext-exported,
+and never ingested** from
 CLAUDE.md/AGENTS.md, and are released only through the audited, reveal-gated
 sealed-plane operations.
 
@@ -49,7 +56,8 @@ trustworthy:
   destructive actions soft, reversible, and audited by default (availability).
 - PII carried in memories and facts (the `sensitive` marker) is redacted by
   default, least-privilege read, and never leaked to logs, metrics, audit, or
-  the embedding provider beyond what recall requires (PII confidentiality).
+  an optional client-vector path without explicit scoped authorization (PII
+  confidentiality).
 
 The product's first duty for the sealed plane is to keep credential material
 secret:
@@ -80,7 +88,7 @@ The product should assume attackers will try to:
 - Silently erase or rewrite identity (unauthorized `forget`, `curate`, or hard
   delete) to make an agent forget or misremember.
 - Exfiltrate PII held in `sensitive` memories and facts from storage, exports,
-  logs, audit, metrics, support bundles, or the embedding provider.
+  logs, audit, metrics, support bundles, or client-side vector generation.
 - Misconfigure policy or group membership so default-deny silently becomes
   default-allow.
 - Steal stored sealed-plane secret values, TOTP seeds, or generated TOTP codes
@@ -141,7 +149,8 @@ Open-plane (identity) high-value assets:
   not an asset because Witself does not request or store it.
 - **Identity availability** — memories and facts staying present and
   recallable; tombstones being reversible within the retention window; the
-  embedding index supporting semantic recall.
+  PostgreSQL lexical index remaining rebuildable, with optional vector indexes
+  treated as derived and non-authoritative.
 - **PII confidentiality** — values of `sensitive` memories and facts, plus PII
   that may sit in non-marked content. (The open plane's only confidentiality
   asset; sealed-plane confidentiality is covered below.)
@@ -173,8 +182,9 @@ Sensitive supporting assets:
   [authorization-and-roles.md](authorization-and-roles.md)). Over-broadening a
   grant or role is a credential-access escalation.
 - Audit records (the integrity ledger for identity changes).
-- Embedding vectors and the embedding-provider request stream (a data-egress
-  channel; see [Embedding-Provider Risks](#embedding-provider-risks)).
+- Client-supplied vectors, immutable vector-profile metadata, and the client's
+  vector-generation request stream (a client-controlled privacy boundary; see
+  [Client Vector-Profile Risks](#client-vector-profile-risks)).
 - Payment-provider tokens and billing metadata (managed service), plus wallet
   credentials, wallet private keys, and raw payment data where crypto/wallet
   payment flows apply (see [security-policy.md](security-policy.md)).
@@ -237,7 +247,7 @@ Trust boundaries:
 - Agent runtime to `witself` CLI.
 - `witself` CLI to managed or self-hosted `witself-server`.
 - MCP client to `witself mcp serve`.
-- `witself-server` to storage adapters (Postgres with pgvector, object/blob).
+- `witself-server` to storage adapters (PostgreSQL, optional object/blob).
 - `witself-server` to the KMS or key-management provider (`aws-kms`, `gcp-kms`,
   `azure-key-vault`, `local-dev`) — present only when the sealed plane is
   enabled; the boundary that unwraps per-realm KEKs and thus gates all
@@ -250,9 +260,10 @@ Trust boundaries:
   appears transiently inside `witself-server` and its KMS-capable deployment IAM
   identity (see [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md)).
-- `witself-server` to the embedding provider (`voyage`, `openai`,
-  `local-dev`) — a network egress boundary that carries memory content out of
-  the realm. Sealed-plane material never crosses this boundary (carve-out).
+- The authorized inference client to any local or remote model it selects for
+  curation or vector generation. This client-controlled boundary may expose
+  memory content outside the realm; `witself-server` never crosses it and never
+  holds that model credential. Sealed-plane material is excluded (carve-out).
 - One named agent to another named agent, through cross-agent policy,
   group-scoped shared records, and identity references (`witself://`).
 - One named agent to another, through **inter-agent messaging** — message
@@ -285,12 +296,13 @@ accidentally serialized into logs, audit events, support bundles, CI artifacts,
 Helm values, Terraform state examples, metrics, or model-visible AI output, and
 (c) cross-agent and message-driven writes are attributed and policy-checked
 below the frontend, and (d) sealed plaintext crosses the fewest boundaries
-possible — never the embedding-provider, export, digest, or ingest boundaries,
+possible — never a client-vector, export, digest, or ingest boundary,
 and across the KMS/server-side-decrypt boundary only under an audited,
-capability-gated reveal. The agent-to-agent, embedding-provider, and
-server-side-decrypt boundaries carry the highest-novelty risk: the first two are
-identity-integrity and PII-egress boundaries, the last is a sealed-plane
-confidentiality boundary that transiently expands the plaintext TCB.
+capability-gated reveal. The agent-to-agent, client-inference, and
+server-side-decrypt boundaries carry the highest-novelty risk: the first is an
+identity-integrity boundary, the second is a client-controlled PII/privacy
+boundary, and the last is a sealed-plane confidentiality boundary that
+transiently expands the plaintext TCB.
 
 ## Attacker Model
 
@@ -319,7 +331,7 @@ Witself should consider:
 - A prompt-injected agent coaxed into revealing an unrelated secret or TOTP
   code, or into overusing reveal/code because the tools are easy to call.
 - An attacker trying to exfiltrate sealed plaintext through a non-reveal
-  channel — semantic recall, the self-digest, plaintext export, or
+  channel — memory recall, the self-digest, plaintext export, or
   CLAUDE.md/AGENTS.md ingest — bypassing the reveal ceremony.
 - A compromised `witself-server`, deployment KMS role, or `server_side_decrypt`
   path unwrapping any reachable per-realm KEK; under the v0 single-CMK +
@@ -332,12 +344,14 @@ Witself should consider:
 - A fake or malicious login page attempting to trick an operator during setup.
 - A backend application bug that misattributes a write or mis-evaluates policy.
 - A compromised database snapshot or object-storage bucket holding PII.
-- A compromised or malicious **embedding provider**, or interception of the
-  embedding request stream, exfiltrating memory content.
+- A compromised or malicious client-selected vector model, or interception of
+  the client's generation request stream, exfiltrating memory content or
+  returning adversarial vectors.
 - A support operator with excessive access to identity data or to sealed
   material.
-- A self-hosted operator misconfiguring Helm, Terraform, IAM, KMS, network
-  policy, or the embedding-provider credential.
+- A self-hosted operator misconfiguring Helm, Terraform, IAM, KMS, or network
+  policy, or incorrectly treating an untrusted client vector profile as server
+  authority.
 - A CI or release pipeline attempting to publish artifacts containing PII or
   identity content.
 
@@ -395,15 +409,15 @@ extend to the open plane.
 - Sealed-plane plaintext is released only by the reveal-gated operations and is
   never embedded, recalled, placed in the self-digest, plaintext-exported, or
   ingested.
-- Identity data sent to the embedding provider for recall leaves the realm's
-  storage boundary; provider choice and data egress are an explicit, capability
-  -gated decision.
+- Identity data sent by a client to its selected curation or vector model leaves
+  the realm's storage boundary. That client-side choice requires explicit
+  scoped authority for sensitive material; it is not server egress.
 - A message can deliver content but cannot itself authorize a write; writes
   always require policy and scope independent of any message.
 - Local development mode is not the production security model.
 - Self-hosted operators are responsible for their cloud account, Kubernetes
-  cluster, IAM, database, network controls, backups, embedding-provider
-  credentials, and operational monitoring.
+  cluster, IAM, database, network controls, backups, KMS credentials, and
+  operational monitoring. Witself requires no backend model credential.
 
 ## Required Controls
 
@@ -457,21 +471,23 @@ Required controls:
   plaintext); sealed material excluded from the plaintext identity export and
   from any digest/ingest path (see [backup-and-recovery.md](backup-and-recovery.md)).
 - Audit records that never contain memory content, fact values, message bodies
-  or payloads, embedding vectors, sealed secret values, TOTP seeds, generated
-  TOTP codes, key material/passphrases, raw tokens, or raw payment details; the
-  same rule applies to errors, logs, and JSON responses.
-- Embedding-provider egress controls: capability-gated provider/model
-  selection, the ability to run `local-dev` or disable semantic recall, and a
-  documented degradation path to keyword/tag/time recall (see
-  [Embedding-Provider Risks](#embedding-provider-risks)).
+  or payloads, client-supplied vectors, sealed secret values, TOTP seeds,
+  generated TOTP codes, key material/passphrases, raw tokens, or raw payment
+  details; the same rule applies to errors, logs, and JSON responses.
+- PostgreSQL lexical recall that works without a model call. Optional vector
+  inputs require an immutable compatible profile, authorization, finite-value
+  and dimension validation, content-hash/version binding, coverage reporting,
+  and deterministic fallback to lexical ranking (see
+  [Client Vector-Profile Risks](#client-vector-profile-risks)).
 - Backend capability discovery so clients can understand unsupported
-  self-hosted or local operations and the active embedding posture.
+  operations, lexical availability, and optional vector-profile support and
+  coverage without implying that a server model is running.
 - Strict config/log redaction for server, CLI, Helm, Terraform, and CI.
 - Strict metrics, dashboard, and alert redaction with low-cardinality
   route-template labels that do not include raw paths, query strings, user
-  input, memory/fact content, fact names, message bodies, embedding vectors,
-  secret/field names or paths, TOTP issuer labels, key identifiers, or provider
-  credentials.
+  input, memory/fact content, fact names, message bodies, client-supplied
+  vectors, secret/field names or paths, TOTP issuer labels, key identifiers, or
+  provider credentials.
 - CLI-initiated operator auth that avoids raw password collection and supports
   device-code fallback for headless environments.
 - Cross-realm trust controls (post-v0): **mandatory signed cards** (an unsigned
@@ -508,8 +524,10 @@ data.
 Open-plane (identity) posture:
 
 - Identity data is stored with ordinary data-at-rest protection (RDS/disk
-  encryption), semantically indexed, recallable, and plaintext-exportable. It
-  has no envelope encryption, no reveal ceremony, and no KMS dependency (see
+  encryption), lexically indexed, recallable, and plaintext-exportable. Optional
+  client-supplied vectors are derived indexes, never identity authority. The
+  open plane has no envelope encryption, no reveal ceremony, and no KMS
+  dependency (see
   [storage.md](storage.md), [encryption-model.md](encryption-model.md)).
 - Optional field-level encryption of `sensitive` fact values is a capability,
   not the default and not the authorization boundary.
@@ -547,8 +565,8 @@ Open posture details that need implementation design:
   database snapshot.
 - Whether group-scoped shared records need a distinct integrity/attribution
   treatment from single-agent records.
-- Re-embedding and re-index behavior on embedding-provider/model change, and
-  how degraded recall is surfaced.
+- Optional vector-profile replacement and re-index behavior, including how
+  stale, missing, or incompatible client vectors and coverage are surfaced.
 - Whether self-hosted and managed deployments share identical or configurable
   field-level-encryption and audit-integrity options.
 - Whether to promote per-realm cryptographic isolation (per-realm KMS grants or
@@ -577,7 +595,7 @@ write. The highest-severity risks are AI-specific:
   another agent by supplying a name. Structurally mitigated: `from`/actor is
   always token-derived.
 - **Recall poisoning and salience gaming.** An attacker inflates `salience`,
-  stuffs tags/kinds, or crafts content to dominate semantic recall results,
+  stuffs tags/kinds, or crafts content to dominate ranked recall results,
   steering what an agent "remembers first".
 - **Cross-agent write/curation abuse.** A legitimately granted `contribute` or
   `curate` policy is used at volume or with subtle edits to corrupt a target's
@@ -587,11 +605,12 @@ write. The highest-severity risks are AI-specific:
 - **PII over-collection and over-exposure.** An agent records PII into memories
   or facts without the `sensitive` marker, or an injected instruction triggers
   a plaintext identity export of `sensitive` records.
-- **Provider data egress.** Memory content is sent to an external embedding
-  provider during recall/write; an agent or operator may not realize identity
-  content leaves the realm (see
-  [Embedding-Provider Risks](#embedding-provider-risks)). Sealed-plane material
-  never takes this path.
+- **Client inference and vector privacy.** A client may send memory content to a
+  local or remote model for curation or vector generation; an agent or operator
+  may not realize identity content leaves the realm. The server never makes
+  that call or holds its credential (see
+  [Client Vector-Profile Risks](#client-vector-profile-risks)). Sealed-plane
+  material never takes this path.
 - **Identity confusion.** An agent confuses its own identity, a peer's, or a
   group's, writing to or reading from the wrong owner.
 - **Coaxed secret reveal.** Prompt injection drives an agent to reveal an
@@ -631,9 +650,11 @@ Mitigations:
 - Reveal-gating for the sealed plane: `secret reveal` / `totp code` are the
   only value-returning operations, each audited; prefer `witself run` and
   reference resolution over printing secrets.
-- Capability-gated embedding provider with `local-dev` and recall-disable
-  options; degradation to keyword/tag/time recall is deterministic and
-  surfaced. Sealed material is never embedded or recalled.
+- PostgreSQL lexical recall is always available without a model. Optional
+  client-supplied vectors are profile-, version-, and content-hash-bound,
+  validated as finite and dimension-compatible, and report coverage; missing or
+  incompatible vectors fall back deterministically. Sealed material is never
+  submitted for vector generation or recalled.
 - `sensitive` redaction by default in inventory/scan; `sensitive` open-plane
   export warns, requires `--reason`, and is least-privilege; sealed secret
   values are excluded from the plaintext export entirely.
@@ -646,33 +667,41 @@ the detailed open-plane surface controls, and
 [secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md), and
 [encryption-model.md](encryption-model.md) for the sealed-plane ones.
 
-## Embedding-Provider Risks
+## Client Vector-Profile Risks
 
-Semantic recall is core to the open plane and introduces a data-egress boundary
-that the sealed plane never touches (secrets are never embedded or recalled):
+PostgreSQL lexical recall is the complete baseline and introduces no model
+egress. Optional vectors introduce a client-controlled privacy and integrity
+boundary that the sealed plane never touches:
 
-- Memory content (and optionally tags/kind) is sent to an embedding provider at
-  write time and at recall time. With `voyage` or `openai`, that content leaves
-  the realm's storage boundary to a third party.
-- A compromised, malicious, or over-logging provider, or interception of the
-  request stream, can capture memory content including PII.
-- Provider/model choice changes vector semantics; an unplanned change can
-  silently degrade recall or require a re-embedding pass that re-sends content.
+- An authorized client may send memory content (and optionally tags/kind) to a
+  local or remote model to generate memory and query vectors. That egress occurs
+  from the client, not from `witself-server`, and may expose PII.
+- A compromised, malicious, or over-logging client-selected model, or
+  interception of the client's request stream, can capture memory content or
+  return vectors crafted to poison ranking.
+- Provider/model/recipe changes alter vector semantics. Mixing vectors from
+  incompatible recipes, dimensions, normalization contracts, owners, versions,
+  or content hashes can silently distort recall.
+- Vectors can retain information about source content. Treat them as sensitive
+  derived data even though they are not a reversible encoding contract.
 
 Mitigations:
 
-- Capability-gated provider/model selection via `WITSELF_EMBEDDINGS_PROVIDER`
-  and `WITSELF_EMBEDDINGS_MODEL`; the capabilities contract reports the active
-  provider, model, and vector dimensionality.
-- `local-dev` provider for offline/test use and for deployments that must not
-  egress content; the ability to disable semantic recall and fall back to
-  keyword/tag/kind/time ranking, with the degraded state surfaced.
-- TLS to the provider; provider credentials handled like other backend secrets
-  and never logged, exported, or placed in metrics labels.
-- Re-embedding on provider/model change is an explicit, audited maintenance
-  operation, not an automatic side effect.
-- Operators choosing a third-party provider accept that identity content egress
-  to that provider, which should be documented for their compliance boundary.
+- The backend has no embedding-model credential, provider endpoint, or
+  generation worker. It accepts vectors only from authorized clients.
+- Immutable profiles bind provider/model/recipe identity, dimensions, distance
+  metric, and normalization contract. Rows bind owner, memory id/version,
+  content hash, and profile; query vectors must use the same profile.
+- The backend validates vector size, finite numeric values, profile
+  compatibility, and tenant/owner scope before bounded deterministic JSONB
+  similarity math.
+- Missing, stale, or incompatible vectors fall back to deterministic lexical
+  ranking and report profile coverage rather than silently changing semantics.
+- Sensitive memories are excluded from vector generation by default and need
+  an explicit scoped opt-in for the selected client/model.
+- Profile migration is client-driven and auditable. A client registers a new
+  profile and supplies replacement vectors without holding recall availability
+  hostage; the old profile can remain until coverage and rollback are verified.
 
 ## Policy and Group Misconfiguration Risks
 
@@ -705,7 +734,8 @@ Mitigations:
 ## Sealed-Plane Confidentiality Risks
 
 The sealed plane (secrets + TOTP) carries confidentiality risks the open plane
-does not. These are the inverse of the embedding/poisoning risks above:
+does not. These are the inverse of the integrity/poisoning and client-vector
+privacy risks above:
 
 - **Reveal abuse.** The audited reveal/code operations are the legitimate
   plaintext channel; an attacker (or coaxed agent) overuses them, or uses a
@@ -826,13 +856,13 @@ incident, deliberately not a tenant-data breach. See
 Self-hosted deployments add infrastructure risks:
 
 - Terraform state leakage exposing infrastructure shape and credentials.
-- Embedding-provider credentials or database URLs embedded in raw Helm values.
+- Database URLs, KMS credentials, or tokens embedded in raw Helm values.
 - Overbroad cloud IAM or Kubernetes RBAC over identity-data storage.
-- Public ingress without TLS, exposing the identity API and the provider egress
-  path.
-- Weak database/backup controls over Postgres holding memories, facts, and
-  PII, plus pgvector embeddings, and over sealed-plane ciphertext in `secrets`,
-  `secret_fields`, `totp_enrollments`, `secret_deks`, and `realm_keys`.
+- Public ingress without TLS, exposing the identity API.
+- Weak database/backup controls over PostgreSQL holding memories, facts, PII,
+  and optional client-supplied vector indexes, and over sealed-plane ciphertext
+  in `secrets`, `secret_fields`, `totp_enrollments`, `secret_deks`, and
+  `realm_keys`.
 - Misconfigured KMS keys, over-broad KMS grants, or a KMS key/grant deletion
   that crypto-shreds sealed secret values.
 - Logs shipped to third-party systems without redaction, leaking PII or
@@ -840,18 +870,18 @@ Self-hosted deployments add infrastructure risks:
 - Metrics or alert labels that leak memory/fact content, fact names, message
   bodies, secret/field names or paths, key identifiers, customer metadata, or
   arbitrary user input.
-- Misdirected embedding egress (wrong provider endpoint) sending identity
-  content to an unintended destination.
+- An operator assuming optional client vectors are harmless metadata and
+  exposing them through backups, diagnostics, or broad read paths.
 
 Mitigations:
 
 - Terraform state and secret policy.
 - Helm values that reference existing Kubernetes Secrets instead of embedding
-  raw database, provider, token, or KMS credentials; least-privilege KMS
+  raw database, token, or KMS credentials; least-privilege KMS
   grants/workload identity for the sealed plane when enabled.
 - Workload identity support.
-- NetworkPolicy templates, including egress controls toward the embedding
-  provider.
+- NetworkPolicy templates with no model-provider egress requirement for
+  `witself-server`; unrelated server egress remains allow-listed.
 - Health checks that do not leak config.
 - Prometheus metrics that use route templates and low-cardinality labels with
   no identity content.
@@ -885,11 +915,11 @@ Initial non-goals:
   injection, not pursuing the secret after release.
 - A v0 managed break-glass plaintext-decrypt path, or recovery of sealed secret
   values after KMS key material is lost (crypto-shred).
-- Replacing cloud-provider IAM, KMS, database backup, embedding-provider
-  security, or Kubernetes security responsibilities in self-hosted deployments.
-- Preventing identity-content egress to a third-party embedding provider an
-  operator deliberately selects; the control is provider choice and
-  `local-dev`/disable, not interception of an enabled provider.
+- Replacing cloud-provider IAM, KMS, database backup, or Kubernetes security
+  responsibilities in self-hosted deployments.
+- Preventing identity-content egress from an authorized client that deliberately
+  selects a local or remote curation/vector model; Witself controls server
+  authorization and storage, not the client's downstream model boundary.
 - Supporting MCP network transport, a web admin dashboard, a private admin CLI,
   or a Witself utility token in v0.
 
@@ -902,8 +932,8 @@ Revisit this threat model when:
 - Security-group semantics or group-scoped shared records change.
 - Inter-agent messaging gains new delivery, fan-out, or payload behavior, or
   any path that lets message content drive a write.
-- The embedding-provider abstraction, default provider, or egress posture
-  changes, or MCP/network egress paths are added.
+- Client-vector profile semantics, validation, generation authority, privacy
+  posture, or hybrid ranking change, or MCP/network egress paths are added.
 - The token model changes, or actor/sender derivation is altered.
 - Soft-delete, retention-window, or hard-delete behavior changes.
 - Identity export/import behavior or `sensitive` handling changes.

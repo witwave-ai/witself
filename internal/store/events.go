@@ -95,6 +95,26 @@ const (
 	// never an assertion/candidate value, source, reason, or retry key.
 	VerbFactDeleted = "fact.deleted"
 
+	// Narrative-memory lifecycle events contain resource ids, versions, state,
+	// and counts only. Memory/evidence values, locators, query text, hashes, and
+	// raw retry keys never enter the account audit ledger.
+	VerbMemoryAdded               = "memory.added"
+	VerbMemoryAdjusted            = "memory.adjusted"
+	VerbMemorySuperseded          = "memory.superseded"
+	VerbMemoryForgotten           = "memory.forgotten"
+	VerbMemoryRestored            = "memory.restored"
+	VerbMemoryReactivated         = "memory.reactivated"
+	VerbMemoryEvidenceResolved    = "memory.evidence.resolved"
+	VerbMemoryDeleted             = "memory.deleted"
+	VerbMemoryCurationRequested   = "memory.curation.requested"
+	VerbMemoryCurationStarted     = "memory.curation.started"
+	VerbMemoryCurationPlanned     = "memory.curation.planned"
+	VerbMemoryCurationApplied     = "memory.curation.applied"
+	VerbMemoryCurationConflicted  = "memory.curation.conflicted"
+	VerbMemoryCurationInterrupted = "memory.curation.interrupted"
+	VerbMemoryCurationCancelled   = "memory.curation.cancelled"
+	VerbMemoryCurationRolledBack  = "memory.curation.rolled_back"
+
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
 	// owner's audit ledger surfaces "you filed a ticket / support
@@ -164,8 +184,11 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbAgentTokenMinted: {
-		requiredKeys:  []string{"token_id", "agent_id"},
-		allowedKeys:   []string{"token_id", "agent_id", "agent_name"},
+		requiredKeys: []string{"token_id", "agent_id"},
+		allowedKeys: []string{
+			"token_id", "agent_id", "agent_name", "access_profile",
+			"display_name", "expires_at",
+		},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbTokenRevoked: {
@@ -333,6 +356,39 @@ var verbMetadataSchema = map[string]verbSpec{
 		},
 		allowedActors: []string{ActorAgent},
 	},
+	VerbMemoryAdded:       memoryVersionEventSpec(),
+	VerbMemoryAdjusted:    memoryVersionEventSpec(),
+	VerbMemorySuperseded:  memoryVersionEventSpec(),
+	VerbMemoryForgotten:   memoryVersionEventSpec(),
+	VerbMemoryRestored:    memoryVersionEventSpec(),
+	VerbMemoryReactivated: memoryVersionEventSpec(),
+	VerbMemoryEvidenceResolved: {
+		requiredKeys: []string{
+			"memory_id", "memory_version", "evidence_id", "pending_evidence_id",
+			"resolution_state",
+		},
+		allowedKeys: []string{
+			"memory_id", "memory_version", "evidence_id", "pending_evidence_id",
+			"resolution_state",
+		},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbMemoryDeleted: {
+		requiredKeys: []string{"memory_id", "receipt_id", "prior_version"},
+		allowedKeys: []string{
+			"memory_id", "receipt_id", "prior_version", "version_count",
+			"evidence_count", "relation_count", "retry_shield_count",
+		},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbMemoryCurationRequested:   memoryCurationEventSpec(),
+	VerbMemoryCurationStarted:     memoryCurationEventSpec(),
+	VerbMemoryCurationPlanned:     memoryCurationEventSpec(),
+	VerbMemoryCurationApplied:     memoryCurationEventSpec(),
+	VerbMemoryCurationConflicted:  memoryCurationEventSpec(),
+	VerbMemoryCurationInterrupted: memoryCurationEventSpec(),
+	VerbMemoryCurationCancelled:   memoryCurationEventSpec(),
+	VerbMemoryCurationRolledBack:  memoryCurationEventSpec(),
 
 	// Support-ticket verbs. ticket_id is required on all four so the
 	// owner can correlate an audit entry back to the ticket. subject
@@ -366,6 +422,25 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedKeys:   []string{"policy_from", "policy_to", "admin_handle"},
 		allowedActors: []string{ActorControlPlane},
 	},
+}
+
+func memoryVersionEventSpec() verbSpec {
+	return verbSpec{
+		requiredKeys:  []string{"memory_id", "version", "state"},
+		allowedKeys:   []string{"memory_id", "version", "state"},
+		allowedActors: []string{ActorAgent},
+	}
+}
+
+func memoryCurationEventSpec() verbSpec {
+	return verbSpec{
+		requiredKeys: []string{"request_id", "request_generation", "state"},
+		allowedKeys: []string{
+			"request_id", "run_id", "request_generation",
+			"fencing_generation", "state",
+		},
+		allowedActors: []string{ActorAgent},
+	}
 }
 
 // EventInput is one row to write. The store fills in the id and

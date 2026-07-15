@@ -86,7 +86,11 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 	// Columns we deliberately do NOT export/restore, with the reason.
 	// Anything added here needs an explicit call-out — it's a policy
 	// decision, not an oversight.
-	omittedColumns := map[string]map[string]string{}
+	omittedColumns := map[string]map[string]string{
+		"memory_versions": {
+			"search_document": "generated full-text index is rebuilt from content on import",
+		},
+	}
 
 	for table := range importColumns { // scope: tables the arc restores
 		schema, ok := schemaColumns[table]
@@ -108,6 +112,28 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 	}
 }
 
+func TestParseSchemaColumnsCoversMultiColumnAlter(t *testing.T) {
+	schemaColumns, err := parseSchemaColumns()
+	if err != nil {
+		t.Fatalf("parse migrations: %v", err)
+	}
+
+	// Migration 0030 adds these four columns in one comma-separated ALTER TABLE
+	// statement. Missing any column here would let the archive coverage test
+	// silently overlook a current or future multi-column schema change.
+	want := []string{
+		"deleted_curation_run_count",
+		"deleted_curation_action_count",
+		"deleted_curation_input_count",
+		"deleted_curation_mutation_count",
+	}
+	for _, column := range want {
+		if !schemaColumns["memories"][column] {
+			t.Errorf("migration 0030 column memories.%s was not parsed", column)
+		}
+	}
+}
+
 //go:embed export.go
 var exportGoFS embed.FS
 
@@ -125,7 +151,7 @@ func parseExportedColumns() (map[string]map[string]bool, error) {
 
 	// Split into per-table blocks by finding each querySource entry.
 	// A block looks like:
-	//   &querySource{s: s, table: "accounts", q: `
+	//   &querySource{tx: tx, table: "accounts", q: `
 	//       SELECT jsonb_build_object(
 	//         'id', id, 'is_default', is_default, ...
 	//       ) FROM ...`, arg: accountID},
@@ -164,7 +190,8 @@ func parseSchemaColumns() (map[string]map[string]bool, error) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	createTableRe := regexp.MustCompile(`(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_]+)\s*\(([^;]+?)\)\s*;`)
-	addColumnRe := regexp.MustCompile(`(?i)alter\s+table\s+([a-z_]+)\s+add\s+column\s+(?:if\s+not\s+exists\s+)?([a-z_]+)`)
+	alterTableRe := regexp.MustCompile(`(?is)alter\s+table\s+([a-z_]+)\s+([^;]+);`)
+	addColumnRe := regexp.MustCompile(`(?i)\badd\s+column\s+(?:if\s+not\s+exists\s+)?([a-z_]+)\b`)
 	// A column definition line inside CREATE TABLE begins with a name.
 	// Filter out constraint lines (PRIMARY KEY, UNIQUE, CHECK, etc.).
 	colHeadRe := regexp.MustCompile(`(?im)^\s*([a-z_]+)\s+[a-z]`)
@@ -205,13 +232,15 @@ func parseSchemaColumns() (map[string]map[string]bool, error) {
 				out[table][name] = true
 			}
 		}
-		for _, m := range addColumnRe.FindAllStringSubmatch(src, -1) {
-			table := m[1]
-			col := m[2]
-			if out[table] == nil {
-				out[table] = map[string]bool{}
+		for _, alter := range alterTableRe.FindAllStringSubmatch(src, -1) {
+			table := alter[1]
+			for _, addition := range addColumnRe.FindAllStringSubmatch(alter[2], -1) {
+				col := addition[1]
+				if out[table] == nil {
+					out[table] = map[string]bool{}
+				}
+				out[table][col] = true
 			}
-			out[table][col] = true
 		}
 	}
 	return out, nil
@@ -219,7 +248,8 @@ func parseSchemaColumns() (map[string]map[string]bool, error) {
 
 func isSQLConstraintKeyword(s string) bool {
 	switch s {
-	case "primary", "unique", "check", "foreign", "constraint", "exclude", "not":
+	case "primary", "unique", "check", "foreign", "constraint", "exclude", "not",
+		"references", "on", "deferrable":
 		return true
 	}
 	return false

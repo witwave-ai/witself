@@ -3,6 +3,13 @@
 Status: draft. This document defines the observability and Kubernetes
 operations requirements for `witself-server`.
 
+Narrative-memory contract (accepted 2026-07-14): memory observability covers
+deterministic search, client-supplied vectors, curation queues/leases/conflicts,
+and archive rebuilds. `witself-server` never calls a model, so there are no
+backend embedding-provider metrics, credentials, egress checks, or health
+probes. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 `witself-server` must be instrumented from the beginning. Prometheus-compatible
@@ -25,8 +32,9 @@ The initial operational surface should include:
   autoscaling, disruption budgets, security context, and network policy.
 
 Witself's telemetry spans both planes. The **open plane** (memories and facts)
-is instrumented for memory operations, semantic recall, embedding calls, fact
-operations, policy decisions, cross-agent access, groups, and inter-agent
+is instrumented for memory operations, deterministic recall, optional vector
+validation/search, curation state, fact operations, policy decisions,
+cross-agent access, groups, and inter-agent
 messaging; its threat focus is the **integrity and authenticity** of identity
 data. The **sealed plane** (secrets and TOTP) is instrumented for secret
 operations, reveals, TOTP codes, and KMS calls; its threat focus is the
@@ -68,8 +76,8 @@ development profile.
 ## Health Probes
 
 Health endpoints must never expose memory content, fact values, message bodies
-or payloads, embedding vectors, secret values, TOTP seeds, generated TOTP codes,
-raw tokens, database URLs, embedding-provider credentials, object-store
+or payloads, vector values, secret values, TOTP seeds, generated TOTP codes,
+raw tokens, database URLs, client model credentials, object-store
 credentials, KMS credentials or key material, private keys, passphrases, raw
 payment details, wallet credentials, or provider secrets.
 
@@ -85,16 +93,17 @@ Probe semantics:
 | `/startupz` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
 | `/healthz` | Alias for the liveness probe. | Minimal process-local checks only. |
 
-Liveness should be conservative. A transient database, object-store,
-embedding-provider, or KMS failure should normally make readiness fail, not
+Liveness should be conservative. A transient database, object-store, or KMS
+failure should normally make readiness fail, not
 force Kubernetes to restart a healthy process.
 
 Readiness should fail when:
 
 - Required storage is unavailable.
 - Required migrations are missing or incompatible.
-- The pgvector extension required for semantic recall is unavailable when vector
-  storage is required.
+- PostgreSQL full-text facilities required for universal recall are unavailable.
+- Migration-0032 vector tables are missing or invalid. This gates vector
+  operations, not lexical memory traffic; no extension is required.
 - Required KMS operations cannot complete when the sealed plane is enabled.
   KMS is a hard readiness gate only for sealed-plane deployments; an
   open-plane-only deployment does not depend on KMS (see
@@ -103,18 +112,15 @@ Readiness should fail when:
   traffic.
 - The server is draining or shutting down.
 
-The embedding provider is treated as a degradable dependency, not a hard
-readiness gate. When the configured provider (`voyage`, `openai`, or
-`local-dev`) is unavailable, recall degrades to keyword/tag/kind/time ranking
-and the capabilities contract reports the degraded state (see
-[memory-model.md](memory-model.md)). Embedding-provider unavailability should be
-surfaced through metrics and the capability contract, and should not by itself
-fail readiness unless the deployment explicitly requires semantic recall.
+There is no embedding provider in server readiness. Missing, stale, or
+incompatible client vectors use the PostgreSQL full-text path and are reported
+as vector coverage, not dependency health. A deployment with optional vector
+support disabled remains ready for all universal memory operations.
 
 Startup should cover slow boot paths such as config validation, first database
-connection, migration status checks, pgvector availability,
-embedding-provider client initialization, and KMS provider client
-initialization when the sealed plane is enabled.
+connection, migration status checks, full-text index availability,
+migration-0032 vector-table validation, and KMS provider client initialization when the
+sealed plane is enabled.
 
 ## Prometheus Metrics
 
@@ -145,20 +151,22 @@ Initial metric families should include:
 | `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
 | `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
 | `witself_memory_operations_total` | Memory operations by operation (`add`, `adjust`, `read`, `list`, `forget`, `restore`, `delete`), owner kind, and result. |
-| `witself_memory_recalls_total` | Recall requests by mode (`semantic`, `degraded`), owner kind, and result. |
+| `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), owner kind, and result. |
 | `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and owner kind. |
 | `witself_memory_recall_hits` | Histogram of result counts returned per recall, by mode. |
-| `witself_embedding_operations_total` | Embedding operations by provider, operation (`embed`, `reembed`), and result. |
-| `witself_embedding_operation_duration_seconds` | Embedding provider call latency histogram by provider. |
-| `witself_embedding_failures_total` | Embedding provider failures by provider and reason class. |
-| `witself_embedding_degrade_events_total` | Recall degrade-to-lexical events by provider and reason class. |
+| `witself_memory_vector_validations_total` | Optional client-vector submissions by operation (`memory`, `query`), validation result, and bounded reason class. |
+| `witself_memory_vector_searches_total` | Optional bounded hybrid searches by coverage class (`full`, `partial`, `none`) and result. No profile id, model name, or vector value is a label. |
+| `witself_memory_vector_search_duration_seconds` | Deterministic JSONB-vector comparison latency by coverage class. |
+| `witself_memory_vector_fallbacks_total` | Hybrid requests that used lexical-only ranking because vectors were missing, stale, or incompatible. This is coverage, not provider health. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
 | `witself_remember_total` | Deferred metric for a future explicit Witself `remember` action, by `routed_kind` (`fact`, `memory`), owner kind, and result. It never carries captured text. |
 | `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
-| `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path never calls the embedding provider. |
+| `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path performs no model call. |
 | `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
-| `witself_memory_consolidations_total` | Memory consolidation runs by `mode` (`dry_run`, `apply`), owner kind, and result. |
-| `witself_memory_consolidation_actions_total` | Consolidation outcomes by `action` (`merged`, `superseded`, `conflict`) and `mode` (`dry_run`, `apply`). Conflicts are surfaced, never auto-resolved. |
+| `witself_memory_curation_requests` | Due curation requests by bounded state/priority class. No transcript or memory content is exposed. |
+| `witself_memory_curation_runs_total` | Client-run curation transitions by state (`started`, `planned`, `applied`, `conflict`, `abandoned`, `interrupted`, `rolled_back`) and result. |
+| `witself_memory_curation_actions_total` | Caller-authored plan actions by primitive (`create`, `replace`, `supersede`, `relate`, `propose_fact`), mode (`preview`, `apply`, `rollback`), and result. |
+| `witself_memory_curation_lease_events_total` | Lease claim, renew, fence, expire, and release events by result. |
 | `witself_session_operations_total` | Session lifecycle operations by `phase` (`start`, `end`), owner kind, and result. |
 | `witself_ingest_operations_total` | Ingest runs (CLAUDE.md/AGENTS.md/GEMINI.md import) by `mode` (`dry_run`, `apply`) and result. Source labels are never raw file paths. |
 | `witself_ingest_records_total` | Records produced by ingest by `outcome` (`fact_added`, `memory_added`, `duplicate_skipped`). |
@@ -183,7 +191,7 @@ Initial metric families should include:
 | `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
 | `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
 | `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |
-| `witself_vector_storage_bytes` | Approximate pgvector storage size when known. |
+| `witself_vector_storage_bytes` | Approximate client-vector JSONB storage size when known. |
 | `witself_object_store_operations_total` | Object/blob storage operations when configured. |
 | `witself_migration_version` | Applied migration version. |
 | `witself_migration_pending` | Pending migration count when known. |
@@ -246,7 +254,7 @@ Forbidden metric labels and values include:
 - KMS key material, data keys, ciphertext blobs, private keys, or passphrases.
 - Token IDs, raw tokens, or token prefixes.
 - Email addresses, customer names, support ticket text, invoice IDs, payment
-  method IDs, wallet addresses, database URLs, embedding-provider credentials,
+  method IDs, wallet addresses, database URLs, client model credentials,
   object-store credentials, or provider secrets.
 - Raw HTTP paths, query strings, request bodies, user agents, IP addresses, or
   error messages.
@@ -268,13 +276,13 @@ Allowed labels should be low cardinality and pre-normalized, such as:
 - `decision`, such as `allow` or `deny`, for policy evaluations.
 - `permission`, the policy verb: `read`, `contribute`, `curate`, or `forget`.
 - `scope`, such as `memory`, `fact`, or `both`.
-- `mode`, such as `semantic` or `degraded`, for recall, and `dry_run` or
-  `apply` for consolidation and ingest.
+- `mode`, such as `lexical` or `hybrid`, for recall, and `preview`, `apply`, or
+  `rollback` for curation.
 - `routed_kind`, such as `fact` or `memory`, reserved for a future explicit
   Witself `remember` action; it never carries the captured text.
 - `phase`, such as `start` or `end`, for session lifecycle operations.
-- `action`, such as `merged`, `superseded`, or `conflict`, for consolidation
-  outcomes.
+- `action`, such as `create`, `replace`, `supersede`, `relate`, or
+  `propose_fact`, for client-authored curation plans.
 - `outcome`, such as `fact_added`, `memory_added`, or `duplicate_skipped`, for
   ingest records.
 - `elided`, `true` or `false`, for self-digest renders.
@@ -306,7 +314,8 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   model for memories, facts, and secrets. In every case it must never carry an
   agent name, group name, or realm id.
 - `recipient_kind`, such as `agent` or `group`.
-- `embedding_provider`, such as `voyage`, `openai`, or `local_dev`.
+- `vector_coverage`, one of `full`, `partial`, or `none`; it never carries a
+  profile id, model name, dimensions, or vector value.
 - `backend_kind`, such as `managed`, `self_hosted`, or `local`.
 - `store_backend`, `object_store_provider`.
 - `kms_provider`, the KMS provider family for sealed-plane operations, such as
@@ -316,12 +325,13 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   a reveal or TOTP code: `true` when the server mediates decryption for a
   token-only pod, `false` for client-held decryption. It never carries a key,
   a value, or any plaintext.
-- `reason_class`, a small normalized set such as `unavailable`, `timeout`,
-  `rejected`, or `rate_limited`, for embedding and degrade events.
+- `reason_class`, a small normalized set such as `missing`, `stale`,
+  `incompatible`, `non_finite`, `wrong_dimension`, or `unauthorized`, for
+  optional-vector validation and fallback events.
 - `limit_dimension`, using the canonical metered-dimension names from
   [billing-and-limits.md](billing-and-limits.md): `active_agent`,
   `stored_memory`, `stored_fact`, `memory_recall`, `memory_write`,
-  `embedding_operation`, `vector_storage_byte`, `crossagent_access`,
+  `vector_write`, `vector_storage_byte`, `crossagent_access`,
   `security_group`, `message_sent`, `message_delivered`, `audit_event`,
   `api_request`, and the sealed-plane dimensions `stored_secret`,
   `secret_read`, `totp_code`, `runtime_injection`, or
@@ -334,10 +344,9 @@ normalized to exactly `self`, `other_agent`, or `group` when recording access
 perspective, or to exactly `agent` or `group` when recording data ownership; it
 must never carry an agent name, group name, or realm id.
 
-The `embedding_provider` label identifies the provider family only. It must
-never carry the model name as free text, an API key, an endpoint URL, or any
-provider credential. Vector dimensionality, when exposed, belongs in the
-capabilities contract, not in metric labels.
+There is no backend model-provider label. Model and recipe identity live in
+immutable vector profiles and are too high-cardinality for metrics. Vector
+dimensions, profile ids, query text, and vector values must not become labels.
 
 Route metrics must use route templates rather than raw request paths.
 
@@ -358,7 +367,7 @@ Expected log fields:
 - Principal kind when authenticated.
 - Owner kind (`self`, `other_agent`, or `group`) for identity operations.
 - Permission verb and decision for policy-gated operations.
-- Embedding provider and recall mode for recall operations.
+- Recall mode and bounded vector coverage class for recall operations.
 - KMS provider, KMS operation, and the `server_side_decrypt` flag for
   sealed-plane reveal, TOTP code, and key operations.
 - Backend kind.
@@ -477,8 +486,11 @@ Initial alert candidates:
 - High 5xx rate.
 - Readiness failures.
 - Audit write failures.
-- Embedding provider failure rate above a baseline.
-- Sustained recall degrade-to-lexical events (semantic recall unavailable).
+- PostgreSQL full-text search failures or latency above a baseline.
+- Optional vector validation failures or sustained low coverage above a
+  baseline. These indicate client/profile drift, not backend provider health.
+- Curation request backlog, lease expiry, fencing conflict, or failed plan
+  application above a baseline.
 - Storage operation failures.
 - KMS operation failures (sealed plane).
 - Secret reveal spikes (possible credential-exfiltration signal).
@@ -520,11 +532,13 @@ Required checks once the server and chart exist:
   logs, or health responses.
 - Tests proving the `kms_provider` label carries only the provider family and
   never a key id, ARN, endpoint, or key material.
-- Tests proving the `embedding_provider` label carries only the provider family
-  and never a model name, endpoint, or credential.
+- Tests proving no backend model-provider label/config/health path is
+  registered, and vector metrics never carry a profile id, model name,
+  dimensions, query text, endpoint, credential, or vector value.
 - Health endpoint tests for live, ready, and startup behavior.
-- Readiness test proving embedding-provider unavailability degrades recall
-  rather than failing readiness, and is reflected in metrics.
+- Readiness tests proving lexical recall requires PostgreSQL FTS but does not
+  require pgvector or model connectivity; migration-0032 table failures gate
+  only vector operations and are reflected in capabilities/metrics.
 - Server smoke test that `/metrics` returns Prometheus text format.
 - Server smoke test that API, health, and metrics listeners bind separately.
 - Server smoke test that metrics can be disabled and the metrics listener is

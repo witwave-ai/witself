@@ -4,6 +4,11 @@ Status: draft. This document captures the go-forward deployment topology for bot
 managed Witself Cloud and self-hosted Witself: a fleet of independent cells under a
 thin global control plane. Decided 2026-06-28.
 
+Narrative-memory amendment (accepted 2026-07-14): cells have no backend memory
+inference provider. Account movement uses source freeze or placement-epoch
+fencing, clears imported leases, and rebuilds derived indexes under
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 Witself deploys as a fleet of independent cells. A cell is one complete, isolated
@@ -20,7 +25,8 @@ the difference is how many cells exist and who operates them.
 A cell is one complete, independent Witself stack in a single cloud account/region:
 
 - `witself-server` (see [backend-architecture.md](backend-architecture.md))
-- Postgres + pgvector for the open plane (memories, facts, messaging) — see
+- PostgreSQL for the open plane (memories, facts, messaging, and optional
+  migration-0032 JSONB vectors) — see
   [storage.md](storage.md)
 - KMS for the sealed plane (secrets), rooted in that cell's cloud — see
   [storage.md](storage.md) and [key-hierarchy.md](key-hierarchy.md)
@@ -130,8 +136,9 @@ Per plane:
 
 - **Open plane** (memories, facts, messaging) moves via the existing first-class
   export/import (see [storage.md](storage.md) and
-  [backup-and-recovery.md](backup-and-recovery.md)). Embeddings are recomputed in the
-  destination, or moved directly if the destination cell uses the same embedding model.
+  [backup-and-recovery.md](backup-and-recovery.md)). Immutable vector profiles and
+  client-supplied JSONB vector rows move in that archive. Only derived full-text
+  indexes and any future optional ANN projection are rebuilt in the destination.
 - **Sealed plane** (secrets) is KMS-rooted per cell/cloud, so migration **re-wraps**
   keys under the destination KMS: an audited decrypt-at-source / re-encrypt-at-dest
   pass. The plaintext data keys are unwrapped under cell A's KMS and re-wrapped under

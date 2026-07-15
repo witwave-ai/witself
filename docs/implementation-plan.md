@@ -1,17 +1,31 @@
 # Witself Implementation Plan
 
-Status: draft. This document describes a practical build order for a repo that
+Status: historical sequencing draft with current amendments. This document
+describes a practical build order for a repo that
 contains the CLI, MCP adapter, backend API server, images, Helm chart, Terraform
 substrate, release automation, and docs.
 
+Memory-plan amendment (accepted 2026-07-14): the narrative-memory phases and
+first coding slice in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md) replace
+this draft's server-embedding milestone and autonomous
+`memory.consolidate(scope, dry_run)` work. Facts and non-memory platform
+milestones remain applicable.
+
+Every server embedding-provider, embed-on-write, local embedder, pgvector
+prerequisite, or provider-health fallback below is preserved only as rejected
+historical context. It is not a current requirement. Migration `0032` instead
+implements optional client-authored profiles/JSONB rows and bounded hybrid
+recall on ordinary PostgreSQL; pgvector/ANN can only be a future accelerator.
+
 Witself reuses the Witpass platform spine and folds the former Witpass secret
 payload back in as one of two planes of agent durable state. Witself runs an
-**open plane** (memories + facts: plaintext at rest, embedded, recallable,
+**open plane** (memories + facts: plaintext at rest, indexed, recallable,
 in the self-digest, plaintext-exportable) and a **sealed plane** (secrets +
 TOTP: KMS-backed envelope encryption, reveal-gated, never embedded, never
 recalled, never in the self-digest, never plaintext-exported). The build
 sequences the open-plane domains first (memory, fact, policy, security-group,
-and messaging, plus an embeddings/pgvector semantic-recall path) and then lands
+and messaging, plus lexical and optional client-vector recall) and then lands
 the sealed credential plane (secret model, envelope/KMS, key hierarchy, reveal,
 TOTP, grants/roles) as a defined v0 slice on top of the same spine. The platform
 milestones (core-behind-adapters, API skeleton, storage boundary, images, Helm,
@@ -26,9 +40,9 @@ the real product boundaries:
 - One shared core service.
 - CLI and MCP adapters over that core.
 - A separate `witself-server` API process over that core.
-- A local development adapter (file-backed, `local-dev` embedding provider).
-- A production storage boundary ready for Postgres with pgvector, an embedding
-  provider, KMS (required only when the sealed plane is enabled), and
+- A local development adapter using the same model-free retrieval contract.
+- A production storage boundary ready for ordinary PostgreSQL, KMS (required
+  only when the sealed plane is enabled), and
   object/blob storage.
 - Public release, image, Helm, and Terraform scaffolding from the beginning.
 
@@ -42,17 +56,18 @@ target includes:
 
 - Installable `witself` CLI.
 - `witself-server serve --dev`.
-- Local development adapter with the `local-dev` embedding provider.
+- Local development adapter with deterministic model-free recall.
 - Agent token lifecycle.
 - Memory, fact, recall, policy, security-group, messaging, reference,
   export/import, and audit flows.
 - Sealed-plane secret, password, TOTP, reveal, grant, and runtime-injection
   flows, with envelope encryption (CMK → per-realm KEK → per-secret/field DEK)
   behind the KMS-backed capability switch.
-- Semantic recall over pgvector with deterministic keyword/tag/time degradation.
+- Deterministic lexical recall with optional migration-0032 client-vector hybrid
+  ranking.
 - Prometheus metrics, structured logs, and Kubernetes health probes.
 - MCP stdio tools.
-- Postgres storage adapter with the pgvector extension.
+- PostgreSQL storage adapter with full text and JSONB support.
 - KMS path (AWS-first) for the sealed plane: `realm_keys` and `secret_deks`
   envelope storage, required only when the sealed plane is enabled.
 - Public CLI/MCP and backend images.
@@ -85,8 +100,7 @@ Deliverables:
 - Root `CONTRIBUTING.md`.
 - Root FSL-1.1-ALv2 `LICENSE`.
 - `.gitignore` covering local store files, token files, identity export bundles,
-  Terraform state, cloud credentials, kubeconfigs, embedding-provider
-  credentials, and local build output.
+  Terraform state, cloud credentials, kubeconfigs, and local build output.
 - Initial docs index under `docs/`.
 - Initial GitHub Actions CI skeleton.
 - Initial release workflow skeleton.
@@ -195,8 +209,9 @@ Deliverables:
   CLI flags, and Helm values, with `WITSELF_METRICS_ENABLED` as the canonical
   variable.
 - `/v1/whoami`.
-- `/v1/capabilities` reporting backend kind, active embedding provider, model,
-  vector dimensionality, and whether semantic recall is degraded.
+- `/v1/capabilities` reporting backend kind, lexical memory support, optional
+  client-vector profile/hybrid support, and curation capabilities independently,
+  with no backend provider/model field.
 - Prometheus metric registration and label-normalization (route-template
   labels, never raw paths).
 - Structured JSON logs with request IDs and redaction.
@@ -215,7 +230,7 @@ Exit criteria:
 - A local dev server and the CLI produce equivalent behavior for the same core
   operations.
 - `witself capabilities --endpoint http://127.0.0.1:8080` reports
-  `backend.kind: "local"` and the active embedding provider.
+  `backend.kind: "local"` and explicit model-free memory capabilities.
 - Health endpoints report live, ready, and startup status without exposing
   sensitive config.
 - `/metrics` emits Prometheus text format without raw paths, user input, memory
@@ -225,7 +240,12 @@ Exit criteria:
 - Unsupported service-admin commands return deterministic
   `unsupported_operation`.
 
-## Milestone 3: Embeddings And Semantic Recall
+## Rejected Historical Milestone 3: Server Embeddings And Semantic Recall
+
+Do not implement any deliverable in this archived milestone. Use Phases 1, 2,
+and 5 of
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md): lexical
+recall first, then optional client-supplied vectors.
 
 Goal: make semantic recall real — the core Witself differentiator — behind a
 provider abstraction and stored in pgvector.
@@ -269,6 +289,11 @@ Exit criteria:
 - The recall and embedding model matches [memory-model.md](memory-model.md).
 
 ## Milestone 3.5: Agent Self-Management And Hydration
+
+Do not implement the native-only narrative routing or server consolidation
+below. Use the immediate capture, automatic retrieval, and client curation
+phases in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Goal: make Witself reliable for the agent that owns it without silently
 replacing memory supplied by the agent runtime. Witself is a service the agent
@@ -598,11 +623,10 @@ Goal: make the sealed plane actually sealed — envelope encryption behind a
 capability-gated KMS boundary, the key hierarchy, and the explicit reveal
 ceremony — so no secret value is ever stored as an ordinary database value.
 
-This is the sealed-plane analogue of the open-plane embeddings milestone (M3): a
-capability-gated provider boundary with a `local-dev` implementation. Where the
-open plane gates on an embedding provider, the sealed plane gates on KMS. KMS is
-**required only when the sealed plane is enabled**; an open-plane-only deployment
-does not need it.
+Unlike the open plane, which needs only ordinary PostgreSQL for lexical and
+optional client-vector recall, the sealed plane has a capability-gated provider
+boundary with a `local-dev` implementation. KMS is **required only when the
+sealed plane is enabled**; an open-plane-only deployment does not need it.
 
 Deliverables:
 
@@ -739,13 +763,14 @@ Exit criteria:
 
 ## Milestone 7: Production Storage Boundary
 
-Goal: introduce production-shaped storage with pgvector and migrations.
+Goal: introduce production-shaped PostgreSQL storage and migrations.
 
 Deliverables:
 
-- Postgres storage adapter with the pgvector extension as the production system
-  of record for realm, account, operator, agent, token, memory, fact, embedding
-  vector, policy, group, message, audit, usage counter, and idempotency records
+- PostgreSQL storage adapter with full text and migration-0032 JSONB vectors as
+  the production system of record for realm, account, operator, agent, token,
+  memory, fact, client-vector profile/row, policy, group, message, audit, usage
+  counter, and idempotency records
   (open plane), plus the sealed-plane tables: secrets, secret fields, secret
   grants, TOTP enrollments, `realm_keys`, `secret_deks`, and attachments.
 - Goose migration framework.
@@ -768,9 +793,9 @@ Deliverables:
 
 Exit criteria:
 
-- `witself-server` can run against Postgres with pgvector in development.
-- Memory/fact records and their embedding vectors persist and recall correctly
-  from Postgres.
+- `witself-server` can run against ordinary PostgreSQL in development.
+- Memory/fact records and optional client-vector profiles/JSONB rows persist and
+  recall correctly from PostgreSQL.
 - Sealed-plane secret values persist only as ciphertext + wrapped DEK; no
   plaintext secret value, TOTP seed, or generated password is stored as an
   ordinary database value.
@@ -816,10 +841,10 @@ Deliverables:
 - ServiceAccount.
 - Service.
 - ConfigMap.
-- Secret references by existing Secret names (token, database, embedding-provider
+- Secret references by existing Secret names (token, database, KMS
   credentials), never raw secrets in `values.yaml`.
-- External Postgres-with-pgvector and embedding-provider configuration as
-  first-class values.
+- External PostgreSQL configuration as a first-class value; no model-provider
+  or vector-extension setting is required.
 - KMS provider configuration (`kms.*` values) as first-class values for the
   sealed plane, required only when the sealed plane is enabled.
 - Optional Ingress.
@@ -848,7 +873,7 @@ Exit criteria:
   not block ordinary installs when disabled.
 - Health and metrics ports are not exposed through public ingress by default.
 - Dev chart install can boot `witself-server` against a test dependency set
-  (Postgres with pgvector and the `local-dev` embedder).
+  (ordinary PostgreSQL with no model service).
 - The chart matches [helm-chart.md](helm-chart.md).
 
 ## Milestone 10: Terraform Substrate
@@ -875,8 +900,7 @@ Deliverables:
   `infra/terraform/stacks/witself-cloud/aws`.
 - Outputs consumed by the Helm chart:
   - Kubernetes context or cluster identity.
-  - Postgres-with-pgvector endpoint and secret references.
-  - Embedding-provider credential references.
+  - PostgreSQL endpoint and secret references.
   - KMS key references for the sealed plane (when enabled).
   - Object/blob storage references.
   - Workload identity references.
@@ -887,8 +911,8 @@ Exit criteria:
 - `terraform fmt` passes.
 - `terraform validate` passes for modules and examples.
 - Static Terraform checks run in CI.
-- No real state, credentials, kubeconfigs, tfvars, embedding-provider secrets,
-  or database passwords are committed.
+- No real state, credentials, kubeconfigs, tfvars, or database passwords are
+  committed.
 - The substrate matches [terraform-infrastructure.md](terraform-infrastructure.md)
   and the provider order in [cloud-targets.md](cloud-targets.md).
 
@@ -947,7 +971,8 @@ Deliverables:
   `client_side_decrypt`/`server_side_decrypt`, audited reveal/code/grant paths).
 - Token rotation and revocation tests.
 - Migration rollback and forward-upgrade tests.
-- Re-embedding maintenance and embedding-model-change tests.
+- Client-vector profile replacement, coverage, and archive-round-trip tests;
+  Witself never generates vectors or owns model credentials.
 - Rate-limit and quota tests (including messaging send/delivery limits).
 - Policy-engine coverage tests (default-deny, cross-agent guardrails, operator
   override attribution).
@@ -983,9 +1008,10 @@ Exit criteria:
   that the API and MCP adapter need later.
 - `witself-server serve --dev` should arrive early enough to keep the API
   honest.
-- Semantic recall (M3) lands before the policy engine (M4) so cross-agent recall
-  has something real to authorize, but recall must degrade deterministically so
-  the rest of the build does not depend on a live embedding provider.
+- Recall lands before the policy engine (M4) so cross-agent recall has something
+  real to authorize. PostgreSQL lexical recall is the universal baseline;
+  optional client-supplied vectors add deterministic hybrid ranking without a
+  live backend embedding provider.
 - Agent self-management and hydration (M3.5) lands right after core memory/fact
   CRUD (M1) and recall (M3), before cross-agent policy (M4): it adds no new
   resources and only composes those paths, but Witself is a service the agent
@@ -1010,8 +1036,8 @@ Exit criteria:
 - Managed billing, payments, crypto payment rails, and support can be capability
   gated while the core memory/fact/policy/group/message product matures.
 - Post-v0 features tracked in [post-v0-roadmap.md](post-v0-roadmap.md) — MCP
-  network transport, web dashboard, additional embedding providers, cross-realm
-  federation, policy `deny` effects, automated re-embedding — should not be
+  network transport, web dashboard, advanced vector-profile migration,
+  cross-realm federation, and policy `deny` effects — should not be
   mixed into the first build slice.
 
 ## Related Docs

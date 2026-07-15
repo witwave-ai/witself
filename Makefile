@@ -14,7 +14,7 @@ ENDPOINT      := http://localhost:8080
 # and CI can never disagree about what clean means.
 GOLANGCI_LINT_VERSION := v2.12.2
 
-.PHONY: help db-up db-down db-reset serve login test test-integration build check
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance build check
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -52,6 +52,10 @@ test: ## Run the Go tests
 
 test-integration: db-up ## Run the PostgreSQL-backed store tests
 	WITSELF_TEST_DATABASE_URL="$(DEV_DSN)" go test ./internal/store -count=1
+
+test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
+	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \
+		-run '^TestNarrativeMemoryManagedCloudConformance$$' -count=1 -v -timeout 90m
 
 check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lint) — run before every push
 	@unformatted="$$(gofmt -l .)"; \

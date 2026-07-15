@@ -1,13 +1,20 @@
 # Agent Memory Routing
 
-Status: implemented for Codex, Claude Code, Grok Build, and Cursor. Provider
-aggregation remains an agent behavior contract, not a new Witself API.
+Status: portable fact, direct narrative-memory, automatic-recall, and
+opportunistic-curation guidance is implemented for Codex, Claude Code, Grok
+Build, and Cursor. Provider aggregation remains an agent behavior contract, not
+a new Witself API. Witself narrative memory is the portable default; native
+memory is an optional explicitly selected second destination. Automatic client
+launch and curation scheduling are implemented through the opt-in
+`memory curate auto` worker and per-user launchd/systemd service in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Authority and delivery
 
 The CLI owns installation and lifecycle, MCP owns runtime tool guidance, and
-the Witself API remains the fact system of record. Witself does not copy the
-policy into an independent server-side classifier.
+the Witself API remains the portable fact and narrative-memory system of
+record. Witself does not copy the policy into an independent server-side
+classifier.
 
 | Runtime | Managed file installed by `witself install` | MCP initialization policy |
 |---|---|---|
@@ -58,7 +65,7 @@ not by a product-specific incantation.
 | Content | Default destination |
 |---|---|
 | Explicit request to store one atomic, durable assertion or preference | Witself fact |
-| Narrative context, rationale, project history, lesson, or multi-step incident | Current runtime's native memory, subject to its availability and guarantees |
+| Narrative context, rationale, project history, lesson, or multi-step incident | Portable Witself narrative memory |
 | Clearly mixed request | Split the fact and narrative portions |
 | Genuinely ambiguous boundary | Ask before storing |
 | Explicit provider or request for both | Honor the explicit destination |
@@ -72,8 +79,10 @@ subject keys, display names, or aliases.
 The same information is not silently duplicated across providers. An explicit
 request to remember a fact authorizes the synchronous `witself.fact.set` call in
 that turn. A fact merely stated without a save request is a review candidate,
-not canonical truth. Narrative context is never reduced to a fact or transcript
-as a fallback when native memory is unavailable.
+not canonical truth. A narrative request authorizes a bounded,
+evidence-supported `witself.memory.capture` in that turn. Narrative context is
+never reduced to a fact or transcript. Runtime-native memory is used too or
+instead only when the user explicitly selects it.
 
 ## Deletion contract
 
@@ -120,26 +129,26 @@ provider and advisory status named.
 
 ### Provider-specific native memory
 
-- **Codex:** Native memory is host-owned generated state, updated in the
+- **Codex:** When explicitly selected, native memory is host-owned generated state, updated in the
   background, and has no supported transactional write or full-store search
   API. Narrative material may remain eligible for that background process, but
   the agent must not promise an immediate write, claim a generated record id,
   or create a manual Markdown memory file. A user setting may exclude tasks that
   used external context such as MCP; Witself never changes that setting.
-- **Claude Code:** Auto memory is current-repository and machine-local. Use only
-  Claude Code's supported auto-memory facility for narrative capture; do not
+- **Claude Code:** Auto memory is current-repository and machine-local. When it
+  is explicitly selected, use only Claude Code's supported auto-memory facility; do not
   substitute `CLAUDE.md`, project Markdown, a Witself fact, or a transcript.
-  Claim that the narrative was stored only after a confirmed native write. If
-  auto memory is disabled, unavailable, or the write fails, report that it was
-  not stored and do not change the user's settings.
+  Claim that the native copy was stored only after a confirmed native write. If
+  auto memory is disabled, unavailable, or the write fails, report that the
+  native copy was not stored and do not change the user's settings.
 - **Grok Build:** Cross-session memory is experimental and disabled by default.
-  Route narrative capture there only when the supported facility is enabled and
+  Route an explicitly selected native write there only when the supported facility is enabled and
   available. Do not edit native memory files directly or claim success without
-  confirmation. If memory is unavailable, report that the narrative was not
+  confirmation. If memory is unavailable, report that the native copy was not
   stored; do not fall back to a Witself fact or transcript and do not change the
   user's settings.
 - **Cursor:** Cursor Memories are advisory context scoped to the current project
-  or repository. Route narrative capture only through Cursor's supported native
+  or repository. Route an explicitly selected native write only through Cursor's supported native
   memory facility when it is surfaced, enabled, and available, and claim success
   only after the facility confirms the write. Passive memory generation may
   require user approval, and privacy settings can make Memories unavailable.
@@ -154,8 +163,8 @@ The provider router follows the user's retrieval intent.
 | Intent | Default behavior |
 |---|---|
 | Exact fact question | Resolve the subject and query `witself.fact.get` |
-| Broad question such as "what do you remember about this?" | Query redacted Witself facts and consult available native-memory context |
-| Narrative history question | Consult available native-memory context; use Witself memory recall only after that tool actually exists |
+| Broad question such as "what do you remember about this?" | Query redacted Witself facts and Witself narrative memory; consult native-memory context only when the user explicitly requests that provider or all sources |
+| Narrative history question | Query `witself.memory.recall` automatically; add explicitly requested native context with its provider named |
 | Explicit Witself | Use only available Witself sources |
 | Explicit runtime-native memory | Use only the named runtime's available native-memory context |
 | Explicit both/all sources | Consult every available requested provider and report partial coverage |
@@ -181,7 +190,7 @@ that provider and marks the result partial instead of claiming comprehensive
 recall. Results retain their provider and authority:
 
 - A resolved Witself fact is a canonical assertion in Witself.
-- Native or future Witself narrative memories are advisory context.
+- Native and Witself narrative memories are advisory context.
 - Provider-local scores are never combined into a cross-provider ranking.
 - Duplicate statements are collapsed for presentation without dropping their
   separate provenance.

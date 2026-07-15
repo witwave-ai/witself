@@ -3,14 +3,21 @@
 Status: draft. This document captures implementation, module, and distribution
 requirements before code exists.
 
+Narrative-memory decision (accepted 2026-07-14): release artifacts have no
+backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
+deterministic lexical baseline; inference and any vector generation are client
+responsibilities. Optional client-supplied vector profiles, portable JSONB
+vector rows, and deterministic hybrid ranking are implemented under the
+contract in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Goals
 
 - Build Witself as a Go project with one shared core, one public CLI/MCP
   binary, and one public backend API server binary.
 - Treat v0 as a usable cloud-shaped slice with CLI, MCP stdio, `witself-server
-  serve --dev`, local development storage, Postgres with pgvector, an embedding
-  provider, images, Helm skeleton, Terraform AWS skeleton, CI, and release
-  automation.
+  serve --dev`, PostgreSQL-backed deterministic lexical memory, images, a Helm
+  skeleton, a Terraform AWS skeleton, CI, and release automation.
 - Start from the scaffold boundary in [docs/scaffold-readiness.md](scaffold-readiness.md).
 - Keep the project on the latest stable Go release that is practical at the time
   implementation or release work happens.
@@ -59,9 +66,9 @@ test and release smoke path before publishing.
 
 - Use Go modules only.
 - Start with one module at `github.com/witwave-ai/witself`.
-- Keep CLI, MCP, backend API server, storage adapters, the embedding-provider
-  abstraction, and shared core packages in the same module unless a real release
-  boundary appears later.
+- Keep CLI, MCP, backend API server, storage adapters, and shared core packages
+  in the same module unless a real release boundary appears later. Client-side
+  inference integrations are not backend dependencies.
 - Commit `go.mod` and `go.sum`.
 - Run `go mod tidy` after dependency changes.
 - Run `go mod verify` in CI.
@@ -94,10 +101,10 @@ Required checks:
 - `go vet ./...`
 - `go mod tidy` cleanliness check.
 - `go mod verify`
-- Backend API route, auth, policy, audit, storage-adapter, embedding-provider,
-  and migration tests once those packages exist.
-- Goose migration ordering and apply tests against Postgres, including pgvector
-  extension and vector-column migrations, where practical.
+- Backend API route, auth, policy, audit, storage-adapter, narrative-memory, and
+  migration tests once those packages exist.
+- Goose migration ordering and apply tests against PostgreSQL, including
+  canonical memory history, generated search documents, and lexical indexes.
 - Server config validation tests with redacted error output.
 - Server health endpoint tests for liveness, readiness, and startup behavior.
 - Prometheus metrics registration, route-template labeling, and redaction tests.
@@ -105,9 +112,11 @@ Required checks:
   server exists.
 - Server smoke tests that API, health, and metrics listeners bind separately and
   that metrics can be disabled.
-- Embedding-provider abstraction tests, including the `local-dev` provider for
-  offline semantic recall and deterministic degradation to keyword/tag/kind/time
-  ranking when no provider is available.
+- Deterministic lexical recall tests and guards proving server config, health,
+  images, and charts contain no backend model/provider dependency or credential.
+- Capability tests proving optional client-supplied vector profiles are
+  explicit, owner-scoped, client-authored data and never imply a backend model
+  or pgvector deployment dependency.
 - `golangci-lint`.
 - `govulncheck`.
 - Markdown lint or formatting checks for docs.
@@ -264,13 +273,13 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 
 Chart requirements:
 
-- Production values should assume external Postgres with the pgvector extension,
-  a configured embedding provider, and optional external object/blob storage.
+- Production values should assume external PostgreSQL and optional external
+  object/blob storage. No backend model/provider configuration is permitted.
   KMS is optional and demoted: field-level encryption of `sensitive` facts is a
   capability, not a default chart dependency.
-- Raw database passwords, embedding-provider credentials, KMS credentials,
-  provider secrets, tokens, passphrases, private keys, and wallet credentials
-  must not be placed directly in default values.
+- Raw database passwords, KMS credentials, provider secrets, tokens,
+  passphrases, private keys, and wallet credentials must not be placed directly
+  in default values.
 - Values should support existing Kubernetes Secret references and
   deployment-native identity such as service account annotations.
 - The chart should include Deployment, Service, ServiceAccount, ConfigMap,
@@ -279,7 +288,7 @@ Chart requirements:
   ServiceMonitor, PodMonitor, resource, autoscaling, disruption-budget,
   security-context, and network-policy support where practical.
 - Migration jobs should be explicit and opt-in for production upgrades, and
-  should cover the pgvector extension and vector-column migrations.
+  should cover canonical narrative-memory tables and lexical indexes.
 - Chart releases should include rendered-template smoke tests, schema
   validation, signing or provenance attestation, and public publication.
 
@@ -303,9 +312,9 @@ Required release checks once the API exists:
 - `/v1/capabilities` smoke test for managed, self-hosted, and local development
   profiles where available.
 - Capability-surface checks that `/v1/capabilities` reports the state of the
-  memory, fact, policy, group, and message subsystems, and the active embedding
-  provider, model, and vector dimensionality, including the degraded-recall
-  state when no embedding provider is available.
+  memory, fact, policy, group, and message subsystems, the active lexical
+  retrieval mode, and the implemented client-vector profile capability
+  independently. It must not report a backend model/provider.
 - Capability-surface checks for the post-v0 cross-realm collaboration surface:
   `/v1/capabilities` should report the `cross_realm_collaboration`,
   `federation`, and `agent_card` flags as capability-gated and off by default
@@ -314,8 +323,8 @@ Required release checks once the API exists:
 - CLI `witself capabilities --json` smoke test.
 - MCP `witself.capabilities` schema check.
 - Deterministic `unsupported_operation` checks for unavailable backend
-  features, including capability-gated embeddings, cross-agent access policy,
-  group-scoped shared identity data, messaging, and billing.
+  features, including client-supplied vector profiles, cross-agent access
+  policy, group-scoped shared identity data, messaging, and billing.
 - `witself://` reference parse/resolve smoke tests for memory, fact, agent, and
   group reference forms.
 - `witself://` reference parse/resolve smoke tests for the post-v0
@@ -356,8 +365,8 @@ module "witself_aws" {
 }
 ```
 
-Modules should provision Postgres with the pgvector extension, object/blob
-storage, Kubernetes, workload identity, and networking where practical. KMS
+Modules should provision PostgreSQL, object/blob storage, Kubernetes, workload
+identity, and networking where practical. KMS
 provisioning is optional and only required when field-level encryption of
 `sensitive` facts is enabled.
 
@@ -406,8 +415,8 @@ Image requirements:
 - Include version, commit, and build date metadata labels.
 - Publish immutable version tags such as `v0.1.0` and a moving `latest` tag.
 - Support `linux/amd64` and `linux/arm64`.
-- Avoid embedding tokens, passphrases, store files, identity exports,
-  embedding-provider credentials, or test fixtures.
+- Do not include tokens, passphrases, store files, identity exports,
+  model/provider credentials, or test fixtures in an image.
 - Smoke test `witself version` in the CLI/MCP image before publishing.
 - Smoke test `witself-server version` and `witself-server healthcheck` in the
   backend image before publishing.

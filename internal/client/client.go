@@ -37,6 +37,18 @@ type OperatorTokenResult struct {
 	ExpiresAt     string
 }
 
+// CuratorTokenResult is the one-time response for a short-lived,
+// server-restricted agent credential used by a client-side memory curator.
+type CuratorTokenResult struct {
+	AgentToken    string    `json:"agent_token"`
+	TokenID       string    `json:"token_id"`
+	AgentID       string    `json:"agent_id"`
+	AgentName     string    `json:"agent_name"`
+	AccessProfile string    `json:"access_profile"`
+	DisplayName   string    `json:"display_name"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
 // OperatorToken is safe token metadata returned in operator listings.
 type OperatorToken struct {
 	ID          string     `json:"id"`
@@ -335,6 +347,31 @@ func CreateAgentToken(ctx context.Context, endpoint, token, agentID string) (age
 		return "", "", "", fmt.Errorf("server returned no token")
 	}
 	return out.AgentToken, out.TokenID, out.AgentName, nil
+}
+
+// CreateCuratorToken mints a bounded, expiring curator credential. The
+// operator token authorizes issuance; the returned agent token is shown once.
+func CreateCuratorToken(
+	ctx context.Context,
+	endpoint, operatorToken, agentID, accessProfile, displayName, ttl string,
+) (*CuratorTokenResult, error) {
+	body, err := json.Marshal(map[string]string{
+		"access_profile": accessProfile,
+		"display_name":   displayName,
+		"ttl":            ttl,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out CuratorTokenResult
+	url := strings.TrimRight(endpoint, "/") + "/v1/agents/" + agentID + "/curator-tokens"
+	if err := doJSON(ctx, http.MethodPost, url, operatorToken, body, &out); err != nil {
+		return nil, err
+	}
+	if out.AgentToken == "" || out.TokenID == "" || out.AccessProfile == "" || out.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("server returned an incomplete curator token")
+	}
+	return &out, nil
 }
 
 // RenameAccount changes the account's server-side display name (owner-only)

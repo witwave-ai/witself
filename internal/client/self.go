@@ -32,11 +32,14 @@ type SelfFact struct {
 
 // SelfMemory is the bounded salient-memory shape carried by a self digest.
 type SelfMemory struct {
-	ID       string  `json:"id"`
-	Snippet  string  `json:"snippet"`
-	Kind     string  `json:"kind"`
-	Salience float64 `json:"salience"`
-	Source   string  `json:"source,omitempty"`
+	ID        string   `json:"id"`
+	Snippet   string   `json:"snippet"`
+	Kind      string   `json:"kind"`
+	Tags      []string `json:"tags,omitempty"`
+	Salience  float64  `json:"salience"`
+	Sensitive bool     `json:"sensitive,omitempty"`
+	Redacted  bool     `json:"redacted,omitempty"`
+	Source    string   `json:"source,omitempty"`
 }
 
 // SelfIndex summarizes discoverable open-plane identity state.

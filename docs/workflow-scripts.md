@@ -6,6 +6,13 @@ human and agent tasks. They are meant to expose CLI gaps before implementation.
 The commands are examples of intended behavior. They should become smoke tests
 or docs tests after the CLI exists.
 
+Narrative-memory amendment (accepted 2026-07-14): these examples use the
+client-side capture/curation workflow in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). PostgreSQL
+lexical recall is the baseline, Witself never calls a backend model, optional
+vectors are client-supplied, and provider-native memory is used only when the
+user explicitly selects it.
+
 Witself is one product with two data planes. These walkthroughs cover both. The
 **open plane** is the Witself identity payload: adding and recalling memories,
 setting and reading facts, granting cross-agent access through policy, organizing
@@ -57,8 +64,9 @@ Expected behavior:
 - `witself version` should work without auth.
 - `witself capabilities` should show the default managed Witself Cloud endpoint
   when no endpoint/profile is configured.
-- `witself capabilities` should report the active embedding provider, model, and
-  vector dimensionality, and whether semantic recall is degraded.
+- `witself capabilities` should report lexical memory recall as available and
+  report optional client-supplied vector-profile support independently. It does
+  not report a backend model or embedding credential because none exists.
 
 ## 2. First Managed Account, Realm, Agents, Promo Code, And Checkout
 
@@ -225,7 +233,7 @@ ws memory add \
   --json
 ```
 
-Recall semantically (the core Witself differentiator):
+Recall ranked narrative memory (the core Witself differentiator):
 
 ```sh
 ws memory recall "what does the operator want from status updates" \
@@ -256,13 +264,13 @@ ws memory adjust mem_123 \
 
 Expected behavior:
 
-- `memory recall` is semantic by default; vector similarity is blended with
-  keyword, tag, kind, recency, and salience ranking.
-- `memory read`/`memory list` work by id/metadata and do not require the
-  embedding provider.
-- If the embedding provider is unavailable, `recall` degrades deterministically
-  to keyword/tag/kind/time ranking and the result surfaces the degraded state;
-  it never silently returns unranked or empty results.
+- `memory recall` always has a deterministic PostgreSQL lexical baseline using
+  keyword, tag, kind, recency, time, and salience signals.
+- `memory read`/`memory list` work by id/metadata and never require a model.
+- A compatible vector profile may add client-supplied memory and query vectors
+  later. Missing, stale, or incompatible vectors fall back to lexical ranking
+  and report vector coverage; the backend never generates them or silently
+  returns unranked results.
 - `memory adjust` appends a new version to edit history; prior versions are
   retained for audit and export.
 
@@ -888,7 +896,11 @@ never embeds the token in the MCP registration. The installed server command is
 equivalent to `witself mcp serve --runtime` with `codex`, `claude-code`,
 `grok-build`, or `cursor`.
 
-Each runtime also receives managed fact-versus-native-memory routing guidance.
+Each runtime also receives managed fact-versus-portable-narrative-memory
+routing guidance. Atomic assertions go to Witself facts. Narrative remember
+requests go to Witself narrative memory by default; a provider-native memory is
+an independent destination used only when the user explicitly selects native
+memory or asks for both.
 Cursor's rule is
 `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
 `~/.cursor/rules/witself-memory-routing.mdc`), with `alwaysApply: true`
@@ -896,7 +908,8 @@ frontmatter. The default managed rule is discovered from the workspace's ancesto
 chain; a custom `CURSOR_CONFIG_DIR` is effective for routing only when the
 selected Cursor installation also discovers its `rules` directory. Cursor MCP
 keeps the standard dotted tool names, while Cursor Memories remain
-project-scoped and broad recall reports partial native-memory coverage.
+project-scoped; when a user explicitly includes native Cursor memory in broad
+recall, its coverage is reported as partial.
 
 Expected behavior:
 
@@ -940,8 +953,7 @@ curl -fsS http://127.0.0.1:8081/startupz
 curl -fsS http://127.0.0.1:9090/metrics | head
 ```
 
-Run migrations when appropriate (Postgres with pgvector is the system of
-record):
+Run migrations when appropriate (PostgreSQL is the sole system of record):
 
 ```sh
 witself-server migrate status --config ./witself-server.toml
@@ -977,9 +989,10 @@ Expected behavior:
 - The bootstrap token is short-lived, single-use, and not an ordinary operator
   token.
 - The chart owns Kubernetes probes and metrics wiring through values.
-- The self-hosted backend needs Postgres with pgvector and a configured
-  embedding provider (`voyage`, `openai`, or `local-dev`); `witself
-  capabilities` reports the active provider and whether recall is degraded.
+- The self-hosted backend needs PostgreSQL and serves deterministic lexical
+  recall without any model credential or model egress. Optional implemented
+  client-supplied vectors use portable JSONB, and capability discovery reports
+  vector-profile support and coverage separately from the lexical baseline.
 - When the sealed plane is enabled, a configured KMS provider
   (`WITSELF_KMS_PROVIDER` / `WITSELF_KMS_KEY_ID`) is a required dependency and
   gates readiness; the open plane does not depend on KMS. See
@@ -987,8 +1000,8 @@ Expected behavior:
 
 ## 18. Local Development Mode
 
-Initialize a local development realm and store. Local mode uses the `local-dev`
-embedding provider so semantic recall can be exercised offline:
+Initialize a local development realm and store. Local mode exercises the same
+deterministic lexical recall path and does not launch or configure an embedder:
 
 ```sh
 ws setup --local \
@@ -1004,7 +1017,6 @@ Use it:
 ```sh
 export WITSELF_STORE_FILE="$PWD/witself.store.json"
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
-export WITSELF_EMBEDDINGS_PROVIDER=local-dev
 
 ws memory add \
   --content "Local development demo memory." \
@@ -1020,8 +1032,9 @@ Expected behavior:
 - Local mode is labeled development-only and is not a production setup path.
 - Local mode persists the serialized identity store at rest with ordinary
   data-at-rest protection and atomic writes.
-- The `local-dev` embedding provider lets semantic recall run offline without a
-  paid provider.
+- Lexical recall runs offline without a model, model secret, or paid provider.
+- A test that exercises optional hybrid vector ranking supplies its own profile and
+  finite vectors; local mode does not synthesize vectors.
 - Local behavior still uses the shared core, JSON, policy, audit, and storage
   interfaces.
 - Sealed-plane work in local mode uses the `local-dev` KMS provider

@@ -1,6 +1,18 @@
 # Witself Requirements
 
-Status: pre-implementation draft. Last reviewed 2026-06-26.
+Status: evolving implementation-backed requirements. Narrative-memory sections
+reconciled 2026-07-14; explicitly labeled target sections remain prospective.
+
+Architecture amendment (accepted 2026-07-14): portable narrative memory and
+client-side curation are now specified by
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md) and
+[ADR 0002](decisions/0002-client-side-narrative-memory.md). They supersede any
+later draft requirement that routes narratives only to native-provider memory,
+has the server classify or consolidate prose, or has the backend generate
+embeddings. Facts and the transcript ledger keep their existing authority.
+Migration `0032` implements optional immutable client-vector profiles, portable
+JSONB rows, and bounded deterministic hybrid recall. It requires no pgvector
+extension; any later pgvector/ANN projection is derived acceleration only.
 
 ## Product Summary
 
@@ -18,7 +30,7 @@ collaboration substrate that is not built yet.
 Witself gives AI agents (and the humans who operate them) a safe, auditable CLI,
 MCP, and API surface across two planes:
 
-- **Open plane** (memories + facts): plaintext at rest, semantically indexed,
+- **Open plane** (memories + facts): plaintext at rest, deterministically
   recallable, cross-agent readable/curatable under declarative **policy**,
   organized into **security groups**, exchanged as durable **messages**, and
   plaintext-exportable. This is the identity store and the headline feature.
@@ -39,7 +51,7 @@ observability, release, and billing apparatus — and differ only in their
 data-at-rest posture and value-handling ceremony.
 
 The sealed-plane carve-out is a load-bearing invariant repeated throughout this
-spec: secret and TOTP-seed material is never embedded, never returned by semantic
+spec: secret and TOTP-seed material is never embedded, never returned by memory
 recall, never present in the self-digest or `digest emit`, never ingested from
 `CLAUDE.md`/`AGENTS.md`, and never written to a plaintext export. See
 [Sealed-Plane Invariants](#sealed-plane-invariants).
@@ -81,7 +93,9 @@ not the production model.
   are pinned in [Secret References](#secret-references). The former Witpass `wp://`
   scheme is fully retired.
 - ID prefixes: `acct_`, `realm_`, `agent_`, `opr_`, `tok_`, `mem_`, `fact_`,
-  `grp_`, `pol_`, `trn_`, `ent_`, `msg_`, `thr_`, `aud_`, and the sealed-plane prefixes `sec_`
+  `grp_`, `pol_`, `trn_`, `ent_`, `msg_`, `thr_`, `aud_`, curation prefixes
+  `mcrq_` (request), `mrun_` (run), `mact_` (action), `mcmu_` (mutation), and
+  `mrec_` (receipt), and the sealed-plane prefixes `sec_`
   (secret), `fld_` (secret field), `grt_` (secret grant), `totp_` (TOTP
   enrollment), `kek_` (per-realm key-encryption key), `dek_` (per-secret/field
   data-encryption key), `att_` (attachment), `usg_` (usage counter), and `idem_`
@@ -91,6 +105,8 @@ not the production model.
 
 - Let agents add, adjust, read, recall, list, forget, and restore their own
   memories.
+- Let clients opportunistically curate an agent's memories through exact frozen
+  inputs and reversible plans without requiring backend inference.
 - Let agents set, get, list, and delete their own facts, and promote a fact to
   primary.
 - Let agents recall memories **semantically by default** through embedding-backed
@@ -145,16 +161,19 @@ identity store can prove itself without blocking on KMS.
 
 Open-plane core (ships first). A usable cloud-shaped slice that proves the CLI,
 MCP stdio, the backend API boundary, a local development adapter, the agent token
-lifecycle, the memory model with semantic recall, the facts model with primary
-promotion, agent self-managed memory and context hydration (the always-loaded
-self-digest, provider-aware capture, session bootstrap, memory consolidation, the
-two-way CLAUDE.md/AGENTS.md file bridge, and the teaching layer that gets agents
-to call Witself), the cross-agent access policy engine, security groups, full
+lifecycle, the memory model with PostgreSQL lexical/structured recall, the facts
+model with primary promotion, agent self-managed memory and context hydration
+(the self-digest, provider-aware capture, managed teaching layer, and fenced
+client-curation protocol plus opt-in terminal-flush local launcher, with
+session/file-bridge extensions tracked as future work and persistent per-user
+launchd/systemd scheduling implemented), the cross-agent access
+policy engine, security groups, full
 inter-agent messaging, identity export/import, audit events, Prometheus metrics,
-Kubernetes health probes, the Postgres storage path with pgvector, public images,
+Kubernetes health probes, the Postgres storage path, public images,
 a Helm chart skeleton, a Terraform AWS skeleton, CI, linting, and release
-automation. The open plane has **no KMS dependency**: pgvector is a hard readiness
-gate, and the embedding provider is degradable.
+automation. The open plane has **no KMS or model-provider dependency**. Optional
+client-supplied vectors are derived indexes, not a readiness gate or source of
+record.
 
 Sealed credential plane (a defined v0 slice, may stage after the core). The
 secret data model and lifecycle, secret references, TOTP/2FA, password generation,
@@ -364,118 +383,50 @@ Service-admin command requirements:
 
 ### Memory Model
 
-A memory is free-form self-content owned by an agent (or, in the group case, by a
-security group). It is one of the two first-class identity payload types
-alongside facts. The memory model is tracked in [memory-model.md](memory-model.md).
+A memory is a bounded, evidence-bearing narrative capsule authored by a client
+and owned by the authenticated agent. It is one of the two first-class open-
+plane identity payloads alongside facts. The detailed schema is canonical in
+[memory-model.md](memory-model.md),
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md), and the
+database migrations.
 
-A memory has:
+The implemented shape has one stable `mem_...` head and complete immutable
+versions containing content/encoding, kind, tags, links, salience, sensitivity,
+occurrence bounds, capture reason, lifecycle state, token-derived provenance,
+client diagnostics, and append-only evidence. Broad list and recall redact
+sensitive content by default; exact authorized reads may return it. Memories are
+addressed by id, never by a unique name.
 
-- A stable `id` with the `mem_` prefix.
-- An owning agent (or owning group), and the enclosing realm.
-- `content`: free-form text. This is the primary payload.
-- `kind`: a convention-driven type such as `episodic`, `semantic`, `profile`, or
-  `note`. Kind is a label used for filtering and ranking, not a fixed storage
-  column with a closed enum. Unknown kinds are allowed.
-- `tags[]`: an array of short string tags for filtering.
-- `source`: first-class provenance/authorship for the memory. Canonical values are
-  `self` (the owning agent authored it), `agent:<name>` (a cross-agent
-  contribution), `operator`, and `import:<file>` (ingested from a file). Makes
-  human-, agent-, and import-authored records distinguishable so the self-digest
-  and `memory consolidate` can prioritize and never silently overwrite human or
-  imported intent.
-- `salience`: an importance/weight hint (numeric) used in recall ranking.
-- `links[]`: references to other memories or facts, expressed as `witself://`
-  references (see [Identity References](#identity-references)).
-- `sensitive`: an optional PII marker. Sensitive memory content is redacted in
-  list/scan output by default and is handled carefully in audit and logs.
-- Timestamps: `created_at`, `updated_at`, `last_accessed_at`.
-- Versioned edit history (see below).
-
-Memory lifecycle:
-
-- `add` — create a memory. The creating agent is the owner unless an authorized
-  caller targets a group via `--group`.
-- `adjust` — edit the content, kind, tags, source, salience, links, or sensitive
-  marker. Adjust appends to versioned edit history; prior versions are retained.
-- `read`/`get` — deterministic retrieval by `id`. Reading updates
-  `last_accessed_at`.
-- `recall` — semantic-by-default search over the caller's accessible memories
-  (see [Memory Recall and Embeddings](#memory-recall-and-embeddings)).
-- `list` — enumerate memories with metadata and filters (kind, tag, owner, source,
-  time, sensitive), with cursor pagination.
-- `forget` — soft delete (tombstone). Reversible within a retention window. This
-  is the default destructive path; it is audited and reversible.
-- `restore` — undo a forget within the retention window.
-- `delete` — hard delete. Explicit, guarded, audited, and irreversible. Requires
-  confirmation and, for cross-agent or operator deletes, an audit `--reason`.
-
-Edit history:
-
-- Every `adjust` records a new version with a monotonically increasing version
-  number, the actor (derived from token), a timestamp, and the changed fields.
-- History is retained for audit, conflict detection, safe operator recovery, and
-  export. History is included in identity export.
-- History entries inherit the `sensitive` posture of the memory.
-
-Size limits (v0 defaults):
-
-- Maximum memory `content` size: 256 KiB before storage overhead.
-- Maximum `tags` per memory: 64.
-- Maximum tag length: 128 characters.
-- Maximum `links` per memory: 256.
-- Maximum `source` length: 1 KiB.
-- Memory names are not unique within an agent; identity is by `id`. Memories are
-  addressed by id, recalled semantically, and filtered by metadata, not by a
-  unique name. (Facts, by contrast, are name-unique; see
-  [Facts Model](#facts-model).)
+The implemented agent-owned lifecycle is `capture`, `show`, `list`, `history`,
+`recall`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, evidence
+resolution, and guarded permanent `delete`. Mutations append complete versions
+and converge through idempotency; updates and lifecycle transitions require the
+exact current version. `supersede` applies one exact client-authored replacement
+set. Permanent deletion is a separate value-free preview/apply ceremony that
+requires same-turn direct-current-user authority. Group/cross-agent writes and
+cross-agent curation remain future work. Agent-self client curation is
+implemented through deterministic requests, lease/fence claims, immutable input
+pages, strict hashed plans, atomic apply, cancellation/abandonment, and guarded
+rollback.
 
 ### Memory Recall and Embeddings
 
-Recall is **semantic by default** and is the core Witself differentiator. The
-recall and embedding model is tracked in [memory-model.md](memory-model.md).
+The universal recall baseline is deterministic PostgreSQL full-text and
+structured ranking. A request supplies literal query text or filters such as
+kind, tags, links, origin, capture reason, occurrence/capture time, sensitivity,
+salience, and recency. The backend does not interpret relative dates and calls no
+LLM or embedding provider. Results use query-bound cursors and identify the
+retrieval mode.
 
-Recall posture:
+Optional vector similarity is implemented under an immutable versioned profile.
+The backend validates, stores portable JSONB arrays, and compares compatible
+client-supplied vectors with bounded deterministic ranking, but never generates
+them. Vector rows are derived data, are included with profiles in schema-32
+account archives, and are not the memory source of record or a deployment
+readiness dependency.
 
-- Each memory carries an embedding vector computed from its `content` (and
-  optionally tags/kind) at write time.
-- `memory recall <query>` performs vector similarity search over the caller's
-  accessible memories, then blends in keyword, tag, kind, and time filters.
-- Hybrid ranking combines, at minimum: vector similarity, lexical/keyword match,
-  tag and kind match, recency (favoring recent `created_at`/`last_accessed_at`),
-  and `salience`. Weights are tunable; defaults are documented in
-  [memory-model.md](memory-model.md).
-- Plain `read`/`get` by `id` and `list` by metadata are always available and do
-  not require the embedding provider.
-- Recall over another agent's memories requires a policy granting `read` on that
-  target (see [Cross-Agent Access Policy](#cross-agent-access-policy)) and is
-  metered as a cross-agent access.
-
-Embedding provider abstraction (mirrors the way Witpass abstracted KMS):
-
-- Providers: `voyage` (default; the Anthropic-recommended embedding family),
-  `openai`, and `local-dev`.
-- Provider and model are selectable via `WITSELF_EMBEDDINGS_PROVIDER` and
-  `WITSELF_EMBEDDINGS_MODEL`.
-- `local-dev` is for tests, demos, and `witself-server serve --dev`; it is a
-  deterministic or low-cost local embedder and is not a production provider.
-- Provider choice is capability-gated. The capabilities contract reports the
-  active provider, model, and vector dimensionality.
-
-Storage and degradation:
-
-- Embedding vectors are stored in Postgres via pgvector. Vector storage size is a
-  metered dimension.
-- If the embedding provider is unavailable or disabled, recall degrades
-  deterministically to keyword/tag/kind/time ranking, and the capability contract
-  reports that semantic recall is degraded. Recall never silently returns
-  unranked or empty results without surfacing the degraded state.
-- Re-embedding on provider/model change is an explicit, audited maintenance
-  operation, not an automatic side effect.
-
-Sealed-plane carve-out (#4): the embedding and recall path is **open-plane only**.
-Secret field values and TOTP seeds are never embedded and are never returned by
-semantic recall, `self show`, or any ranking path. There is no vector
-representation of sealed material. See
+Recall is **open-plane only**. Secret field values and TOTP seeds are never
+embedded or returned by memory recall, `self show`, or any ranking path. See
 [Sealed-Plane Invariants](#sealed-plane-invariants).
 
 ### Memory Self-Management and Hydration
@@ -487,39 +438,41 @@ file bridge, and a few convergent capture/maintenance primitives, the core produ
 is unreliable for the agents it exists to serve. The canonical bridge and teaching
 doc is [context-hydration.md](context-hydration.md).
 
-Hydration and self-management verbs (each a thin, tested path over the existing
-memory/fact core — never a bypass of validation, limits, scopes, or audit):
+Implemented direct primitives and explicitly labeled target hydration flows
+share the existing memory/fact validation, limits, scopes, and audit boundary:
 
 - Natural-language remember routing is provider-aware. An atomic durable
-  assertion synchronously upserts a Witself fact; narrative context stays on
-  the runtime-native memory path unless the user explicitly selects Witself.
-  Clearly mixed requests may be split, genuinely ambiguous requests are
-  clarified, and the same content is never silently duplicated. See
+  assertion synchronously upserts a Witself fact; narrative context uses
+  portable `witself.memory.capture` by default. Runtime-native memory is used
+  only when the user explicitly names it or asks for both providers. Clearly
+  mixed requests may be split, genuinely ambiguous requests are clarified, and
+  the same content is never silently duplicated. See
   [Agent Memory Routing](agent-memory-routing.md).
 - `self show` — the always-loaded self-digest: primary facts first, then top-N
   salient memories, then a one-line index of kinds/tags/counts. It is the MCP
-  analogue of an auto-loaded `CLAUDE.md` head: cheap, never requiring the embedding
-  provider, and hard-capped (default ~8 KiB / ~200 lines, configurable). When
-  capped it sets `elided=true` and points to `memory recall` rather than silently
-  truncating.
-- `session start` / `session end` — multi-session bootstrap. `start` hydrates
-  identity, open goals, and last progress in one round-trip; `end` persists a
-  progress memory (kind `session`) and updates open goals. Resuming is one call,
-  not a list-then-recall crawl.
-- `memory consolidate` — the garbage-collection verb. It merges near-duplicate
-  memories, supersedes stale ones, **surfaces** (does not auto-pick) conflicting
-  facts, and trims the digest/index. It is guarded (`--dry-run` defaults true),
-  audited, excluded in `--read-only` MCP mode, and respects provenance — it never
-  silently overwrites human- or import-authored records.
-- `digest emit` / `ingest` — the two-way file bridge. `emit` renders the
+  analogue of an auto-loaded `CLAUDE.md` head: model-free and hard-capped. When
+  capped it sets `elided=true` rather than silently truncating.
+- Direct narrative-memory capture, read/list/history/recall, adjust, atomic
+  supersede, reversible lifecycle, evidence resolution, and guarded permanent
+  deletion are implemented. The client authors every capsule and replacement;
+  the backend performs no semantic classification or synthesis.
+- Client-run curation requests, leases/fences, frozen input pages, strict plans,
+  atomic apply, cancellation/abandonment, and rollback are implemented. Source
+  writes can queue or coalesce due work, and the opt-in client-owned
+  `memory curate auto` layer can launch after terminal transcript flushes.
+  Optional persistent per-user launchd/systemd scheduling is managed through
+  `memory curate auto service`. The
+  retired `memory consolidate` design must not let the backend choose a merge,
+  split, or supersession.
+- `session start` / `session end`, `digest emit` / `ingest`, and
+  `bootstrap-instructions` remain target hydration/file-bridge flows. `emit`
+  will render the
   self-digest as a `CLAUDE.md`/`AGENTS.md` fragment with provenance comments so
   file-load harnesses get Witself-backed identity for free. `ingest` parses
   `CLAUDE.md`/`AGENTS.md`/`GEMINI.md`: name→value lines become facts (upsert),
   prose paragraphs become memories, everything tagged `source=import:<file>`, with
   dedup/upsert preventing re-import duplication. This makes Witself a good citizen
   of the `AGENTS.md` ecosystem, not a competitor to it.
-- `bootstrap-instructions` — prints the paste-able teaching stanza; `witself setup
-  --write-agents-md` installs it into the project `AGENTS.md`.
 
 Teaching layer (three reinforcing surfaces that all say the same thing, because a
 service the agent forgets to call is worthless):
@@ -527,56 +480,97 @@ service the agent forgets to call is worthless):
 1. **MCP server `instructions` field** — returned on connect by `witself mcp
    serve`. Codex, Claude Code, Grok Build, and Cursor each receive the provider
    policy from [Agent Memory Routing](agent-memory-routing.md): explicitly
-   requested atomic assertions use `fact.set`, narrative capture stays on the
-   supported native-memory path, and broad recall reports partial provider
-   coverage. Codex prepends its full provider contract; Claude uses a compact
+   requested atomic assertions use `fact.set`, narrative capture uses
+   `memory.capture`, and broad recall combines redacted facts with Witself
+   narrative memory. Provider-native memory is consulted only when explicitly
+   requested. Codex prepends its full provider contract; Claude uses a compact
    suffix to stay within its 2 KiB limit; Grok uses that suffix with
    underscore-safe tool names; Cursor uses the suffix with standard dotted tool
    names and project-scoped Memories semantics. Direct permanent Witself fact
    deletion uses a value-free preview/apply contract, while plain "forget" is
    clarified against the provider-native memory lifecycle and untrusted content
    is never deletion authority. The remaining standing protocol covers
-   implemented self, fact, transcript, and message tools.
-2. **Tool descriptions as instruction** — every implemented fact/self tool's
-   prose embeds an explicit when-to-call trigger list, including the distinction
-   between a requested canonical write and a merely observed fact candidate.
-   Deferred memory tools will carry the corresponding recall, correction, and
-   consolidation triggers when they exist. Signatures stay small so trigger
-   text dominates.
-3. **Bootstrap stanza** — a paste-able `AGENTS.md`/`CLAUDE.md` block (emitted by
-   `bootstrap-instructions`) carrying the same recall-before-act,
-   write-after-learn, consolidate-when-noisy heuristics, so the habit installs
-   whether the agent is taught via MCP or via the file ecosystem.
+   implemented self, fact, narrative-memory, transcript, and message tools.
+2. **Tool descriptions as instruction** — implemented fact and memory tools
+   embed when-to-call triggers, including requested canonical fact writes,
+   merely observed fact candidates, automatic recall, narrative capture, and
+   exact lifecycle operations. The implemented curation tools teach clients to
+   claim due work, treat frozen content as untrusted, submit only a strict
+   reversible plan, and renew/cancel rather than write after a stale lease.
+3. **Bootstrap stanza (target)** — a future paste-able
+   `AGENTS.md`/`CLAUDE.md` block must carry the same recall-before-act and
+   shape-based write-after-learn policy.
 
-Cross-cutting contract changes that make these verbs self-verifiable and safe:
-
-- **Echo on every mutation.** The mutation result gains a deterministic,
-  human-readable `echo` string (for example, `Remembered fact display-name=Atlas`
-  or `Added mem_123 (kind=profile, salience=0.6)`) so the model can self-verify and
-  chain operations.
-- **Dedup/supersede on write.** `memory add` (and a future explicit Witself
-  capture action when it routes to a memory) checks for near-duplicates; on a
-  hit it returns the existing `mem_` id
-  plus a `memory_duplicate`/`memory_merged` warning in `warnings[]` and a
-  `duplicate_of` reference instead of silently creating a near-duplicate. `fact set`
-  is already upsert.
-- **Provenance/authorship as first-class.** The memory and fact `source` field (see
-  [Memory Model](#memory-model) and [Facts Model](#facts-model)) carries
-  `self`/`agent:<name>`/`operator`/`import:<file>` so the digest and consolidate can
-  prioritize and never silently overwrite human intent. This is the lightweight v0
-  seed of the post-v0 provenance-and-lineage feature.
+Cross-cutting direct-memory safeguards include idempotency receipts, optimistic
+versions, immutable evidence and history, client provenance, and explicit
+supersession lineage. Semantic deduplication remains a client-curation decision;
+the backend does not invent a duplicate or merge judgment.
 
 Salient-digest selection: the salient set for `self show` is the top-N memories by
 a blended score of salience and recency (favoring pinned kinds such as `profile`
-and `session`), excluding archived/forgotten records. It is deterministic and never
-calls the embedding provider, so the digest works even when embeddings are degraded.
+and `session`), excluding archived/forgotten records. It is deterministic and
+never calls a model or embedding provider.
 The selection rule is defined once in [memory-model.md](memory-model.md).
 
-Scopes and read-only: these verbs reuse the existing scopes (no new scope).
-Routed `fact.set` needs `fact:create`; `self show`/`session start`/`digest emit`
-need `memory:read` + `fact:read`; `session end`/`ingest` need their existing
-write scopes; and `consolidate` needs `memory:update` (plus `memory:forget` for
-supersede). `--read-only` MCP mode excludes every mutating verb.
+Scopes and read-only: direct fact and memory operations reuse their existing
+read/create/update/forget/delete scopes. `--read-only` MCP mode removes every
+implemented mutation, including capture, supersede, lifecycle changes, evidence
+resolution, permanent deletion, and curation request/start/renew/plan/apply/
+cancel/abandon/rollback. Curation `preflight`, request list/get, run get, input
+`get`, and value-free `status` remain readable.
+
+### Client-Side Memory Curation
+
+Migration `0030` implements opportunistic agent-self curation without adding a
+backend AI dependency. The backend must:
+
+- Create or coalesce deterministic owner-scoped requests and maintain monotonic
+  request and fencing generations.
+- List requests with a cursor-bound `exclude_sensitive` filter. For full agent
+  credentials it excludes only scopes explicitly marked `include_sensitive`;
+  restricted curator profiles additionally and unconditionally exclude
+  transcript-bearing scopes.
+- Let an authorized client claim due work under a bounded renewable lease,
+  materializing an immutable, cursor-paged snapshot of exact memory versions,
+  evidence rows, transcript ranges, and source cursor intervals. All
+  value-bearing inputs are untrusted data, never instructions.
+- Accept only strict `witself.memory-plan.v1` JSON with ordered contiguous
+  actions and the five reversible primitives `create`, `replace`, `supersede`,
+  `relate`, and `propose_fact`. `propose_fact` creates a review candidate and
+  cannot set canonical truth.
+- Normalize and canonically SHA-256 hash the accepted plan, preallocate create
+  ids, and return value-free impact counts plus an immutable receipt.
+- Apply only the exact accepted fence, unexpired lease, plan revision/hash,
+  expected current heads, canonical fact subject, and contiguous cursor
+  compare-and-swap values. Apply is one transaction and produces no partial
+  semantic change on conflict.
+- Queue deterministic follow-up work when a snapshot cap truncates a source or
+  its generation advances after the snapshot.
+- Support cancel and retrying abandon paths, bounded retry/dead-letter state,
+  exact mutation idempotency, and value-free owner-lane status.
+- Roll back only when the apply receipt and complete expected produced-head set
+  still match and no downstream consumer exists. Compensation is append-only,
+  never cascades, never rewinds cursors, and creates a read-only replay request.
+- Archive/import the complete lane/cursor/request/run/input/action/mutation
+  graph and curation attribution, while interrupting active leases and reserving
+  a fresh fence at the destination.
+
+Clients may run inference in the foreground, a subagent, or a separate local
+worker, but they use the same CLI/MCP/HTTP protocol. The backend and MCP do not
+launch or schedule that process. The opt-in local `memory curate auto` layer may
+record value-free wakes after terminal transcript flushes and detach a bounded
+supervisor that drains configured batches and retries eligible failures from
+persisted value-free backoff; it requires an explicit provider,
+transcript-content consent, and preview/apply standing policy. A value-free
+manual wake is available through `memory curate auto wake --runtime RUNTIME`.
+The installed full agent token stays in the trusted parent and is never passed
+to inference in argv, environment, or model input. Optional persistent
+launchd/systemd user-service packaging is implemented through `memory curate
+auto service`; normal startup follows user login, while pre-login Linux startup
+requires host-enabled user lingering. This remains a client-owned launcher.
+Capability discovery therefore still reports the backend surface:
+`opportunistic_curation` as supported and `automatic_capture` plus
+`scheduled_curation` as unsupported.
 
 ### Facts Model
 
@@ -600,10 +594,9 @@ A fact has:
   list/scan/show output.
 - `format`: an optional type hint such as `string`, `email`, `url`, `date`, or
   `number`, used for validation and display.
-- `source`: first-class provenance/authorship, sharing the memory `source`
-  vocabulary: `self`, `agent:<name>`, `operator`, and `import:<file>`. Lets the
-  digest and `memory consolidate` prioritize and avoid overwriting human- or
-  import-authored facts.
+- `source`: first-class provenance/authorship. Implemented client curation may use it
+  to prioritize review, but it may only propose inferred facts and never
+  overwrite a canonical assertion.
 - Timestamps: `created_at`, `updated_at`.
 - Versioned edit history (same shape as memory edit history).
 
@@ -828,6 +821,11 @@ Export posture:
   timestamps, and **edit history**), all facts (with values, `primary` flags,
   `sensitive` flags, format hints, and edit history), and the agent's identity
   anchors.
+- Account export also carries the complete curation graph introduced by
+  migration `0030`: lanes, cursors, requests, runs, frozen inputs, actions,
+  mutation receipts, and curation attribution. Import validates graph scope and
+  hashes, interrupts active leases, clears active lanes, and advances fences so
+  an in-flight source-cell client cannot apply after the move.
 - For operators, export can include realm-level context: policies, security-group
   membership, and group-owned memories and facts.
 - Export is round-trippable: `witself import` restores an exported self into the
@@ -899,8 +897,8 @@ consolidation invariants from folding Witpass into Witself. Anything touching
 secret material must honor all of them.
 
 - **Never embedded, never recalled.** Secret field values and TOTP seeds are never
-  embedded and are never returned by semantic recall. The embedding/recall path is
-  open-plane only. (Carve-out #4; see
+  embedded and are never returned by memory recall. The recall path is open-plane
+  only. (Carve-out #4; see
   [Memory Recall and Embeddings](#memory-recall-and-embeddings).)
 - **Never in the digest, never ingested.** Secrets and TOTP seeds are never in the
   self-digest (`self show`), never rendered by `digest emit`, and never created by
@@ -1101,7 +1099,7 @@ is the encryption reconciliation from the consolidation (carve-out #1).
 
 - **Open plane** uses ordinary data-at-rest protection (managed RDS/disk
   encryption, or self-host-owned disk encryption). Memory content, fact values,
-  and embedding vectors are ordinary identity data. There is no KMS dependency, no
+  and optional derived vectors are ordinary identity data. There is no KMS dependency, no
   envelope, and no reveal for the open plane. Optional field-level encryption of
   `sensitive` facts remains a capability, not a pillar (see
   [Data-At-Rest Note](#data-at-rest-note)).
@@ -1123,7 +1121,8 @@ is the encryption reconciliation from the consolidation (carve-out #1).
   KEK/DEK structure with a `WITSELF_PASSPHRASE_FILE`-derived key, for tests and
   `witself-server serve --dev` only). KMS is required and a readiness gate **only
   when the sealed plane is enabled**; an open-plane-only deployment requires no
-  KMS. pgvector remains a hard gate for the open plane regardless.
+  KMS. PostgreSQL is the open-plane readiness dependency; optional vector indexes
+  are not.
 - **Crypto-shred posture.** Loss of the CMK/KMS access renders sealed secret
   values unrecoverable (crypto-shred). This does **not** affect the open plane,
   whose plaintext identity data is recoverable from ordinary backups and export.
@@ -1227,8 +1226,8 @@ and sealed planes.
 ### Public Backend And Self-Hosting
 
 Witself should be an inspectable public-code product. The CLI, MCP adapter,
-backend API server, storage adapters, authorization and policy logic, audit
-model, embedding-provider abstraction, and release/deployment definitions should
+backend API server, storage and optional vector-index adapters, authorization and
+policy logic, audit model, and release/deployment definitions should
 live in the same public repository unless a clear security or operational reason
 requires a split later.
 
@@ -1240,7 +1239,7 @@ boundary.
 Public backend goals:
 
 - Let customers and security reviewers inspect the code that stores, authorizes,
-  audits, embeds, recalls, and serves identity material.
+  audits, ranks, and serves identity material.
 - Let operators choose managed convenience or self-hosted control without changing
   the agent-facing CLI, MCP tools, identity references, or JSON contracts.
 - Keep the managed service, self-hosted service, and local development backend on
@@ -1251,9 +1250,10 @@ Public backend goals:
   claiming production self-host support.
 - Include public Terraform modules and example stacks for AWS, GCP, and Azure
   substrate provisioning.
-- Document the production dependencies required for self-hosting (Postgres with
-  pgvector, an embedding provider, object/blob storage) rather than hiding them
-  behind the managed service.
+- Document the production dependencies required for self-hosting (Postgres and
+  object/blob storage) rather than hiding them behind the managed service.
+  Migration-0032 vector indexing uses JSONB, and no backend model provider or
+  pgvector extension is a dependency.
 
 Self-hosted backend requirements:
 
@@ -1261,19 +1261,20 @@ Self-hosted backend requirements:
   repository.
 - Support configuration by environment variables and files suitable for
   containers, Kubernetes, and ordinary service managers.
-- Use Postgres with the pgvector extension as the first production storage adapter.
+- Use Postgres as the first production storage adapter and sole authoritative
+  memory data source. This includes curation queue/run/receipt state and
+  migration-0032 client-vector profiles/JSONB rows; any future ANN indexes are
+  derived and rebuildable.
 - Add object/blob storage for large exports, diagnostic bundles, support
   attachments, and backup artifacts.
-- Treat an embedding provider (`voyage` by default, `openai`, or `local-dev`) as a
-  configurable production dependency behind a capability boundary.
 - Expose health endpoints and structured logs that do not leak identity content.
 - Expose Kubernetes-compatible liveness, readiness, and startup probes.
 - Expose Prometheus-compatible metrics for HTTP traffic, auth, memory operations,
-  recall and embedding operations, fact operations, policy decisions, group
+  recall and optional vector-index operations, fact operations, policy decisions, group
   operations, messaging, audit events, usage, limits, storage, migrations, and
   runtime health.
 - Support database migrations, backup/restore guidance, upgrade notes, and (when
-  enabled) embedding re-index guidance before claiming production self-host
+  enabled) vector re-index guidance before claiming production self-host
   support.
 - Provide a Helm chart that deploys `witself-server` and supports externally
   managed production dependencies.
@@ -1281,7 +1282,7 @@ Self-hosted backend requirements:
   ServiceMonitor, PodMonitor, resources, autoscaling, disruption budgets, security
   context, and network policy where practical.
 - Provide Terraform under `infra/terraform` for AWS, GCP, and Azure
-  infrastructure, including Kubernetes, Postgres with pgvector, object/blob
+  infrastructure, including Kubernetes, ordinary PostgreSQL, object/blob
   storage, workload identity, and networking where practical.
 - Implement AWS first for managed cloud and self-hosted Terraform. Keep GCP and
   Azure as planned provider targets with visible repo structure and
@@ -1359,22 +1360,18 @@ inverse of the Witpass encrypted-only stance.
 
 Backup and recovery posture:
 
-- Production backups preserve all identity data (memories, facts, policies, groups,
-  messages, audit) and the embedding vectors needed to restore semantic recall
-  without re-embedding.
-- Backups include Postgres (with pgvector data), object/blob storage when used,
-  migration version, embedding-provider/model identity, and server configuration
-  needed to reconnect to storage and the embedding provider.
+- Production backups preserve all authoritative identity data (memories, facts,
+  curation queue/run/receipt state, policies, groups, messages, and audit) in
+  Postgres. Optional vector indexes may
+  be backed up for convenience but are rebuildable derived data.
+- Backups include Postgres, object/blob storage when used, the migration version,
+  and server configuration needed to reconnect to storage.
 - Identity export is a supported plaintext feature, not a forbidden one (see
   [Identity Export and Import](#identity-export-and-import)). `witself export`
   produces structured, round-trippable identity data; `witself import` restores
   it.
-- Self-hosted operators are responsible for backing up Postgres (including vector
-  data), object/blob storage when used, Terraform state, deployment configuration,
-  and embedding-provider configuration.
-- If the embedding provider or model changes, recall can be restored from backed-up
-  vectors; re-embedding is only required when intentionally changing the embedding
-  model.
+- Self-hosted operators are responsible for backing up Postgres, object/blob
+  storage when used, Terraform state, and deployment configuration.
 - Managed cloud recovery restores customer identity data and service availability.
 
 Because export is plaintext by default, exports of `sensitive` open-plane records
@@ -1492,7 +1489,8 @@ Open plane:
 - Stored facts.
 - Memory recalls and reads.
 - Memory writes (add/adjust).
-- Embedding operations.
+- Client-vector writes (`vector_write`); the backend performs no embedding
+  inference.
 - Vector storage size (`vector_storage_byte`).
 - General data-at-rest storage size (`storage_byte`).
 - Cross-agent accesses.
@@ -1694,16 +1692,14 @@ The CLI noun surface spans both planes:
 
 Open plane:
 
-- `memory` (`add`/`adjust`/`read`/`recall`/`list`/`forget`/`restore`/`delete`/
-  `consolidate`).
+- `memory` (`capture`/`show`/`list`/`history`/`recall`/`adjust`/`supersede`/
+  `forget`/`restore`/`reactivate`/`evidence resolve`/`delete`).
 - `fact` (`set`/`get`/`list`/`delete`, with `--primary`).
 - `remember` (a future explicit Witself quick-add, not the runtime-natural
   provider router).
 - `self` (`show`, the always-loaded self-digest).
-- `session` (`start`/`end`, multi-session bootstrap).
-- `digest` (`emit`, the self-digest rendered as a `CLAUDE.md`/`AGENTS.md` fragment).
-- `ingest` (parse `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` into facts and memories).
-- `bootstrap-instructions` (print the paste-able teaching stanza).
+- Target-only `session`, `digest`, `ingest`, and `bootstrap-instructions`
+  commands remain documented for future hydration/file-bridge work.
 - `policy` (`create`/`list`/`show`/`delete`/`test`).
 - `group` (`create`/`list`/`show`/`add-member`/`remove-member`/`delete`).
 - `message` (`send`/`list`/`read`/`ack`).
@@ -1726,13 +1722,12 @@ Inherited: `version`, `capabilities`, `whoami`, `auth`, `setup`, `account`,
 The MCP tool catalog spans both planes:
 
 - `witself.version`, `witself.whoami`, `witself.capabilities`.
-- `witself.memory.add/adjust/read/recall/list/forget/consolidate`.
+- `witself.memory.capture/read/list/history/recall/adjust/supersede/forget/restore/reactivate/evidence.resolve/delete`.
 - `witself.fact.set/get/list/delete`.
 - `witself.remember` (deferred; if exposed, explicitly Witself-scoped).
 - `witself.self.show` (the always-loaded self-digest; never includes secrets).
-- `witself.session.start/end` (multi-session bootstrap).
-- `witself.digest.emit` (ingest is CLI-first; an MCP `ingest` tool is optional;
-  neither carries secrets).
+- Target `witself.session.start/end` and `witself.digest.emit` helpers remain
+  unexposed; their behavior is documented for future hydration/file-bridge work.
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
 - `witself.group.list/show`.
 - `witself.message.send/list/read`.
@@ -1802,10 +1797,13 @@ Defaults:
   value-returning `witself.reference.resolve`) while leaving redacted/metadata
   tools available. `--no-value-tools` and `--read-only` are independent switches.
 
-MCP should expose agent-useful actions such as memory add/adjust/read/recall/list/
-forget, fact set/get/list/delete, policy test, group list/show, message
-send/list/read, reference parse/resolve, secret create/list/show/reveal/update,
-totp enroll/code/show, and password generate. High-risk admin actions such as
+MCP exposes direct agent-useful memory capture/adjust/read/history/recall/list/
+supersede/lifecycle/evidence/delete tools, fourteen curation tools
+(`preflight`, `requests`, `request.get`, `request`, `start`, `run.get`, `renew`,
+`get`, `plan`, `apply`, `cancel`, `abandon`, `rollback`, and `status`), plus the
+implemented fact tools. The
+broader target also includes policy, group, message, reference, secret, TOTP,
+and password operations as their product slices land. High-risk admin actions such as
 realm deletion, broad agent lifecycle operations, policy mutation, secret grant,
 and token management should be operator-only and may be excluded from MCP v0 even
 if they exist in the CLI. Sealed-plane reveal tools carry an explicit reveal
@@ -1819,9 +1817,11 @@ including:
 
 - Authentication success and failure.
 - Memory add, adjust, read, recall, forget, restore, and delete.
-- Memory consolidation, session start/end, and file ingest of memories and facts.
-  (`remember` needs no event of its own; it routes to `memory.added` /
-  `fact.created` / `fact.updated`.)
+- Direct memory supersession and lifecycle changes.
+- Curation requested, started, planned, applied, conflicted, interrupted,
+  cancelled, and rolled back. Events contain value-free ids, generations,
+  counts, and outcomes only; never frozen content or plan values.
+- Session helpers and file ingest gain audit events only when implemented.
 - Fact set, get (of `sensitive` facts), delete, and primary promotion.
 - Cross-agent read, contribute, curate, and forget actions, attributed to the
   acting agent and the deciding policy.
@@ -1869,8 +1869,16 @@ reconciliation, and customer exports. Initial event names include:
 - `memory.forgotten`
 - `memory.restored`
 - `memory.deleted`
-- `memory.consolidated`
+- `memory.superseded`
 - `memory.imported`
+- `memory.curation.requested`
+- `memory.curation.started`
+- `memory.curation.planned`
+- `memory.curation.applied`
+- `memory.curation.conflicted`
+- `memory.curation.interrupted`
+- `memory.curation.cancelled`
+- `memory.curation.rolled_back`
 - `session.started`
 - `session.ended`
 - `fact.created` (the `fact set` / `remember` upsert emits this for a new fact)
@@ -1957,8 +1965,8 @@ Local backend requirements:
 - Keep tokens out of config files by default.
 - Support export/import for test fixtures, demos, backup, and migration (using the
   same `witself export`/`witself import` paths).
-- Use the `local-dev` embedding provider so semantic recall can be exercised
-  offline without a paid provider.
+- Exercise the same model-free lexical/structured recall contract used by
+  deployed cells; no paid or local model provider is required.
 
 The local backend is not the managed-service or production self-hosted model. It
 should be kept behind the same backend interface so it helps build and test the
@@ -1977,7 +1985,7 @@ Local bootstrap decision:
 ### Managed Cloud Backend
 
 Witself should design the managed cloud backend as the default hosted product
-backend. When Witself is offered as a service, memories, facts, embedding vectors,
+backend. When Witself is offered as a service, memories, facts, optional derived vectors,
 policies, security groups, messages, agent metadata, envelope-encrypted secrets
 and TOTP enrollments, the per-realm KEK and wrapped DEKs, secret grants, audit
 records, and usage counters are expected to be stored remotely in Witself-operated
@@ -1986,33 +1994,32 @@ is never stored.
 
 Managed backend requirements:
 
-- Use Postgres with pgvector as the managed cloud system of record for account,
-  realm, agent, token, memory, fact, embedding vector, policy, group, message,
+- Use Postgres as the managed cloud system of record for account, realm, agent,
+  token, memory, curation lane/cursor/request/run/input/action/receipt, fact,
+  policy, group, message,
   grant, audit, usage counter, idempotency record, and backend metadata.
-- Use `voyage` as the default embedding provider, behind the same provider boundary
-  used by the local backend.
 - Apply ordinary data-at-rest protection (managed RDS/disk encryption). Optional
   field-level encryption of `sensitive` facts is a capability, not a core
   dependency (see [Data-At-Rest Note](#data-at-rest-note)).
-- Keep storage and embedding providers behind the same backend boundaries used by
-  the local mock/development backend.
+- Keep storage and optional derived-index adapters behind the same backend
+  boundaries used by the local mock/development backend.
 - Preserve the same CLI, MCP, JSON, and authorization contracts across the managed
   backend and any local mock/development backend where practical.
 - Support per-realm usage metering for agent count, stored memories, stored facts,
-  recalls/reads, writes, embedding operations, vector storage size
-  (`vector_storage_byte`), general data-at-rest storage size (`storage_byte`),
+  recalls/reads, writes, optional vector-index operations/storage, general
+  data-at-rest storage size (`storage_byte`),
   cross-agent accesses, security groups, messages, audit retention, and general
   API load.
-- Keep memory content, fact values, message bodies/payloads, embedding vectors,
+- Keep memory content, fact values, message bodies/payloads, optional vectors,
   and raw tokens out of logs, audit records, analytics, and errors.
 - Design for backup, restore, and disaster recovery from the beginning, including
-  vector data.
+  authoritative Postgres data; optional vector indexes are rebuildable.
 
 ### Self-Hosted Backend
 
 The self-hosted backend should run the same public API server used by the managed
-service, with deployment-owned configuration, storage, embedding-provider
-selection, networking, and observability.
+service, with deployment-owned configuration, storage, networking, and
+observability.
 
 Self-hosting should preserve the same external contracts:
 
@@ -2027,16 +2034,16 @@ Self-hosting should preserve the same external contracts:
 Self-hosting is not a promise that every managed-service feature is available
 immediately. Managed billing, hosted payment flows, Witself support workflows, and
 internal service administration may be disabled, stubbed, or replaced by
-self-host-owned integrations in self-hosted deployments. The embedding provider is
-deployment-owned; a self-hosted operator may run `local-dev`, `voyage`, or
-`openai` per their own contracts.
+self-host-owned integrations in self-hosted deployments. No backend model or
+embedding provider is required for memory capture or recall.
 
 Backend feature discovery is required. Managed, self-hosted, and local development
 backends should expose a capabilities contract so the CLI can show which features
-are supported, which are unavailable, and why (including the active embedding
-provider and whether semantic recall is degraded). Unsupported commands should
-fail predictably with `unsupported_operation`, not with vague provider, route, or
-config errors.
+are supported, which are unavailable, and why (including direct memory lifecycle,
+recall, optional vector, opportunistic curation, automatic capture, and scheduled
+curation support). Unsupported commands
+should fail predictably with `unsupported_operation`, not with vague provider,
+route, or config errors.
 
 ### Backend API Contract
 
@@ -2051,17 +2058,27 @@ API contract requirements:
   they return a bare/flat object with a top-level `schema_version` and no
   `ok`/`data` wrapper.
 - Authenticate remote calls with bearer tokens loaded by the CLI or MCP adapter.
-- Expose `/v1/capabilities` for backend feature discovery, including the active
-  embedding provider/model and, when the sealed plane is enabled, the KMS provider
-  and the decrypt-custody capability flags `client_side_decrypt` /
+- Expose `/v1/capabilities` for backend feature discovery, including direct
+  memory/recall support, optional vector-profile support, supported
+  `opportunistic_curation`, unsupported `automatic_capture` and
+  `scheduled_curation` (the optional post-flush worker is client-owned and does
+  not change this server response), and, when the sealed plane is enabled, the
+  KMS provider and the decrypt-custody capability flags `client_side_decrypt` /
   `server_side_decrypt` (see [Encryption (Two-Tier)](#encryption-two-tier)).
 - Use resource-oriented `/v1` REST-ish routes with plural resources, including
   the open-plane `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and
-  `/v1/messages`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
+  `/v1/messages`, the curation resources `/v1/memory-curation-requests` and
+  `/v1/memory-curation-runs`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
+- Expose all 13 curation routes: request create/list/get/start; run get/inputs/
+  renew/plan/apply/cancel/abandon/rollback; and value-free status. Mutations
+  require `Idempotency-Key`; lease-bound operations require the exact fencing
+  generation; apply also requires the accepted plan revision/hash; rollback
+  requires the apply receipt and complete expected produced-head set. All
+  curation responses are `Cache-Control: private, no-store`.
 - Use colon action subroutes for sensitive or workflow operations, such as
   `/v1/memories:recall` (a query over the collection),
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
-  `/v1/memories:consolidate`, `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
+  `/v1/memories/{memory_id}:supersede`, `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
   `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
 - Use the sealed-plane action subroutes
   `/v1/secrets/{secret_id}:reveal` (returns one sensitive field; carries the
@@ -2157,9 +2174,9 @@ Helm chart requirements:
 - Initial chart path: `charts/witself-server`.
 - Public chart package: `ghcr.io/witwave-ai/charts/witself-server`.
 - The chart should deploy `witself-server`, not the customer/operator CLI.
-- External Postgres with pgvector should be the production default.
-- External embedding-provider configuration and object/blob storage configuration
-  should be first-class chart values.
+- External Postgres should be the production default. Object/blob storage
+  configuration should be a first-class chart value; vector support requires no
+  extension or chart-side model setting.
 - Chart values must support referencing existing Kubernetes Secrets rather than
   placing raw secrets in `values.yaml`.
 - The chart should include Service, Deployment, ServiceAccount, ConfigMap,
@@ -2187,11 +2204,11 @@ Terraform infrastructure requirements:
 - Managed Witself Cloud stack examples may live under
   `infra/terraform/stacks/witself-cloud`, but real state, credentials, and
   environment-specific secrets must stay outside the public repo.
-- Terraform should provision cloud substrate (including Postgres with pgvector) and
+- Terraform should provision cloud substrate (including ordinary PostgreSQL) and
   output the values or references needed by the Helm chart.
 - Terraform must not render raw secrets into Helm values files.
 - Terraform state files, state credentials, real `.tfvars`, cloud credentials,
-  database passwords, embedding-provider credentials, private keys, raw Witself
+  database passwords, private keys, raw Witself
   tokens, payment provider credentials, and wallet credentials must not be
   committed.
 
@@ -2367,7 +2384,7 @@ collaboration epic, after the realm-local core. The model is tracked in
 Model:
 
 - **Cell.** One complete, independent Witself stack (`witself-server` +
-  Postgres/pgvector + KMS + blob) in a cloud account/region (AWS account #1, AWS
+  PostgreSQL + KMS + blob) in a cloud account/region (AWS account #1, AWS
   account #2, a GCP project, Azure, …). Cells are isolated; a cell outage affects only
   its tenants (blast-radius containment). An independent second AWS account is simply
   another cell.
@@ -2460,7 +2477,7 @@ plane**; the sealed plane is the encryption-pillar plane.
 
 Open-plane posture:
 
-- The open plane (memories, facts, embedding vectors) is identity data protected
+- The open plane (memories, facts, and optional derived vectors) is identity data protected
   for integrity and authenticity, not a secret vault. Use ordinary data-at-rest
   encryption (managed RDS/disk, or self-host-owned disk encryption). The open plane
   has no KMS/envelope/client-side-decrypt pillar, no reveal ceremony, and no
@@ -2484,14 +2501,18 @@ This is tracked in [storage.md](storage.md).
 
 ### Production Storage
 
-Decision: use Postgres with pgvector first, an embedding-provider abstraction
-(`voyage` default), a KMS-provider abstraction for the sealed plane, object/blob
-storage where the data shape needs it, and Goose for database migrations.
+Decision: use PostgreSQL as the authoritative data source, migration-0032
+portable JSONB vector data, a KMS-provider abstraction for the sealed plane,
+object/blob storage where the data shape needs it, and Goose for database
+migrations.
 
 Storage posture:
 
-- Postgres with the pgvector extension is the production system of record. Identity
-  records and their embedding vectors live in Postgres; sealed-plane envelope
+- Postgres is the production system of record. Identity records live in
+  PostgreSQL, including migration `0030` curation state and attribution and
+  migration `0032` immutable vector profiles/exact JSONB rows. Any future
+  pgvector/ANN projection is rebuildable acceleration only.
+  Sealed-plane envelope
   ciphertext, the `realm_keys` (wrapped per-realm KEK), and `secret_deks` (wrapped
   per-secret/field DEK) live in Postgres too.
 - Object/blob storage is for large exports, diagnostic bundles, support
@@ -2509,14 +2530,16 @@ KMS posture (sealed plane only):
 - KMS providers are `aws-kms` (managed v0 first), `gcp-kms`, `azure-key-vault`, and
   `local-dev`. The provider is selected by `WITSELF_KMS_PROVIDER` and the key by
   `WITSELF_KMS_KEY_ID`. KMS is required and a readiness gate only when the sealed
-  plane is enabled; pgvector remains a hard gate for the open plane regardless. The
+  plane is enabled; PostgreSQL remains the open-plane readiness gate. The
   KMS provider config and key tables are detailed in [storage.md](storage.md).
 
-Embedding posture:
+Optional vector posture:
 
-- The embedding provider is a configurable boundary: `voyage` (default), `openai`,
-  `local-dev`. Vectors are stored via pgvector. The provider and model are reported
-  by the capabilities contract.
+- Clients may supply vectors under a compatible immutable versioned profile.
+  The server stores/compares portable JSONB rows with bounded deterministic
+  hybrid ranking, but never calls an embedding provider; PostgreSQL narrative
+  rows remain the source of record. Capabilities report vector support and
+  coverage, not a backend model provider.
 
 Migration posture:
 
@@ -2525,6 +2548,11 @@ Migration posture:
   rather than through the public customer/operator CLI.
 - Helm should expose an explicit migration Job path before rolling
   `witself-server`.
+- Migration `0030` introduces the curation lanes, cursors, requests, runs,
+  frozen inputs, strict actions, mutation receipts, reversible attribution, and
+  account-archive streams. It adds no vector extension and no model provider.
+- Migration `0032` adds immutable client-vector profiles and exact JSONB rows to
+  the schema and account archive, with no extension or model provider.
 
 The storage model is tracked in [storage.md](storage.md). The separate backend
 server command surface is tracked in
@@ -2535,7 +2563,7 @@ server command surface is tracked in
 Decision: implement AWS first.
 
 AWS is the first implementation target for managed Witself Cloud, the first
-self-hosted Terraform module and stack, the first production Postgres/pgvector
+self-hosted Terraform module and stack, the first production PostgreSQL
 integration (RDS), and the first production-shaped Helm values example.
 
 GCP and Azure remain planned provider targets. Their directories, docs, and
@@ -2564,11 +2592,12 @@ The following features are intentionally outside the v0 scope and are tracked in
 - Web dashboard.
 - Private Witself admin CLI.
 - Witself utility token.
-- Additional embedding providers and on-cluster local embedding services.
+- Multi-vector/chunk profiles and optional derived ANN adapters beyond the
+  implemented bounded profile/JSONB contract.
 - Policy `deny` effects and richer policy expressions beyond v0 default-deny/allow.
 - Message attachments and large structured payloads in object/blob storage.
 - Field-level encryption of `sensitive` facts as a managed default.
-- Automated re-embedding and embedding-model migration tooling.
+- Advanced client-vector profile migration and optional ANN rebuild tooling.
 
 These are not first-release blockers. Each one needs a threat-model update, clear
 permissions, audit events, CLI/API/MCP contracts where applicable, capability
@@ -2579,7 +2608,7 @@ active release plan.
 
 Witself should follow a one-core, multiple-frontends architecture:
 
-- The core service owns the memory, fact, recall/embedding, policy, security-group,
+- The core service owns the memory, fact, model-free recall, policy, security-group,
   messaging, export/import, and audit behavior.
 - The CLI is a thin adapter over the core service.
 - The MCP server is a thin adapter over the same core service.
@@ -2588,10 +2617,9 @@ Witself should follow a one-core, multiple-frontends architecture:
   practical.
 
 The local mock backend can start as a file-backed store, but it should live behind
-the same storage/provider boundary as production adapters. That lets the local
-adapter exercise the real service path (including the `local-dev` embedding
-provider) while managed cloud and self-hosted deployments use production storage,
-embedding providers, and operational controls.
+the same storage boundary as production adapters. That lets the local adapter
+exercise the real model-free service path while managed cloud and self-hosted
+deployments use production storage and operational controls.
 
 The proposed CLI command surface is tracked in
 [cli-command-surface.md](cli-command-surface.md).
@@ -2602,7 +2630,7 @@ JSON output and shared resource contracts are tracked in
 The public backend API contract is tracked in [api-contract.md](api-contract.md).
 The public backend route style is tracked in [api-routes.md](api-routes.md).
 
-The memory model and semantic recall are tracked in
+The memory model and lexical/structured recall are tracked in
 [memory-model.md](memory-model.md).
 
 The facts model is tracked in [facts-model.md](facts-model.md).
@@ -2613,7 +2641,7 @@ The sealed-plane secret model and lifecycle are tracked in
 [secret-size-and-attachments.md](secret-size-and-attachments.md).
 
 The full data model for both planes (realm/account/operator/agent/token tables;
-open-plane memories with the pgvector embedding column, facts, policies,
+open-plane versioned memories plus optional JSONB vector rows, facts, policies,
 security_groups, group_members, messages, audit, usage; and sealed-plane secrets,
 secret_fields, secret_grants, totp_enrollments, realm_keys, secret_deks,
 attachments) is tracked in [data-model.md](data-model.md).

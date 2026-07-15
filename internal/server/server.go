@@ -15,9 +15,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/version"
@@ -67,6 +69,11 @@ type Config struct {
 	// durable agent token (returned once, with the agent's name for client-side
 	// file naming).
 	CreateAgentToken func(ctx context.Context, accountID, actorOperatorID, agentID string) (token, tokenID, agentName string, err error)
+
+	// CreateCuratorToken, when set, enables an operator to mint a short-lived,
+	// server-restricted agent credential for a client-side memory curator. The
+	// access profile is immutable for the life of the token.
+	CreateCuratorToken func(ctx context.Context, accountID, actorOperatorID, agentID, accessProfile, displayName string, ttl time.Duration) (token, tokenID, agentName string, expiresAt time.Time, err error)
 
 	// CreateOperatorToken, when set, enables POST /v1/operators/self/tokens to mint
 	// an additional operator token for the authenticated operator (returned once).
@@ -296,10 +303,48 @@ type Config struct {
 	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (FactCandidate, error)
 	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfFact, int, error)
 	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
+	GetSelfMemories         func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfMemory, int, error)
+	CountSelfMemories       func(ctx context.Context, p DomainPrincipal) (int, error)
 	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
 	UpsertFactSubject       func(ctx context.Context, p DomainPrincipal, canonicalKey string, in UpsertFactSubjectRequest) (FactSubject, error)
 	AddFactSubjectAlias     func(ctx context.Context, p DomainPrincipal, canonicalKey, alias string) (FactSubject, error)
 	ListFactSubjects        func(ctx context.Context, p DomainPrincipal) ([]FactSubject, error)
+
+	// Narrative memory is agent-owned in the first vertical slice. The server
+	// authenticates the principal and validates the HTTP contract; callbacks
+	// enforce tenant/owner isolation, optimistic concurrency, and idempotency.
+	CaptureMemory             func(ctx context.Context, p DomainPrincipal, in CaptureMemoryRequest) (MemoryMutationResult, error)
+	GetMemory                 func(ctx context.Context, p DomainPrincipal, memoryID string) (Memory, error)
+	ListMemories              func(ctx context.Context, p DomainPrincipal, opts MemoryListOptions) (MemoryPage, error)
+	RecallMemories            func(ctx context.Context, p DomainPrincipal, in MemoryRecallRequest) (MemoryRecallPage, error)
+	GetMemoryHistory          func(ctx context.Context, p DomainPrincipal, memoryID string, opts MemoryHistoryOptions) (MemoryHistoryPage, error)
+	AdjustMemory              func(ctx context.Context, p DomainPrincipal, memoryID string, in AdjustMemoryRequest) (MemoryMutationResult, error)
+	SupersedeMemory           func(ctx context.Context, p DomainPrincipal, memoryID string, in SupersedeMemoryRequest) (SupersedeMemoryResult, error)
+	ForgetMemory              func(ctx context.Context, p DomainPrincipal, memoryID string, in MemoryLifecycleRequest) (MemoryMutationResult, error)
+	RestoreMemory             func(ctx context.Context, p DomainPrincipal, memoryID string, in MemoryLifecycleRequest) (MemoryMutationResult, error)
+	ReactivateMemory          func(ctx context.Context, p DomainPrincipal, memoryID string, in MemoryLifecycleRequest) (MemoryMutationResult, error)
+	ResolveMemoryEvidence     func(ctx context.Context, p DomainPrincipal, evidenceID string, in ResolveMemoryEvidenceRequest) (MemoryEvidence, error)
+	DeleteMemory              func(ctx context.Context, p DomainPrincipal, in DeleteMemoryRequest) (MemoryDeletionReceipt, error)
+	CreateMemoryVectorProfile func(ctx context.Context, p DomainPrincipal, in CreateMemoryVectorProfileRequest) (MemoryVectorProfile, error)
+	ListMemoryVectorProfiles  func(ctx context.Context, p DomainPrincipal) ([]MemoryVectorProfile, error)
+	PutMemoryVector           func(ctx context.Context, p DomainPrincipal, in PutMemoryVectorRequest) (MemoryVectorReceipt, error)
+
+	// Memory curation is a client-inference work queue. The HTTP boundary owns
+	// authentication, bounded strict JSON, seconds-on-the-wire conversion, and
+	// retry headers; implementations own the fenced transactional state machine.
+	RequestMemoryCuration      func(ctx context.Context, p DomainPrincipal, in RequestMemoryCurationRequest) (any, error)
+	ListMemoryCurationRequests func(ctx context.Context, p DomainPrincipal, opts MemoryCurationRequestListOptions) (any, error)
+	GetMemoryCurationRequest   func(ctx context.Context, p DomainPrincipal, requestID string) (any, error)
+	StartMemoryCuration        func(ctx context.Context, p DomainPrincipal, in StartMemoryCurationRequest) (any, error)
+	GetMemoryCurationRun       func(ctx context.Context, p DomainPrincipal, runID string) (any, error)
+	GetMemoryCurationRunInputs func(ctx context.Context, p DomainPrincipal, runID string, opts MemoryCurationRunInputOptions) (any, error)
+	RenewMemoryCuration        func(ctx context.Context, p DomainPrincipal, runID string, in RenewMemoryCurationRequest) (any, error)
+	PlanMemoryCuration         func(ctx context.Context, p DomainPrincipal, runID string, in PlanMemoryCurationRequest) (any, error)
+	ApplyMemoryCuration        func(ctx context.Context, p DomainPrincipal, runID string, in ApplyMemoryCurationRequest) (any, error)
+	CancelMemoryCuration       func(ctx context.Context, p DomainPrincipal, runID string, in FinishMemoryCurationRequest) (any, error)
+	AbandonMemoryCuration      func(ctx context.Context, p DomainPrincipal, runID string, in FinishMemoryCurationRequest) (any, error)
+	RollbackMemoryCuration     func(ctx context.Context, p DomainPrincipal, runID string, in RollbackMemoryCurationRequest) (any, error)
+	GetMemoryCurationStatus    func(ctx context.Context, p DomainPrincipal, runID string) (any, error)
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
@@ -494,18 +539,29 @@ type AuthFunc func(ctx context.Context, token string) (operatorID, accountID, ac
 const (
 	PrincipalKindOperator = "operator"
 	PrincipalKindAgent    = "agent"
+
+	// Access profiles are immutable properties of a bearer token. Full is the
+	// existing operator/agent credential behavior. Curator profiles are
+	// deliberately narrow and are admitted only by the memory-curation
+	// handlers that name an allowed operation.
+	AccessProfileFull           = "full"
+	AccessProfileCuratorPreview = "curator-preview"
+	AccessProfileCuratorApply   = "curator-apply"
 )
 
 // DomainPrincipal is a bearer-token-derived identity. RealmID is populated for
 // agents and empty for operators.
 type DomainPrincipal struct {
-	Kind          string
-	ID            string
-	AccountID     string
-	RealmID       string
-	AgentName     string
-	RealmName     string
-	AccountStatus string
+	Kind           string
+	ID             string
+	AccountID      string
+	RealmID        string
+	AgentName      string
+	RealmName      string
+	AccountStatus  string
+	TokenID        string
+	AccessProfile  string
+	TokenExpiresAt *time.Time
 }
 
 // PrincipalAuthFunc resolves either an operator or agent bearer token.
@@ -548,11 +604,14 @@ type SelfFact struct {
 // SelfMemory is the bounded salient-memory representation included in a self
 // digest once the memory store is implemented.
 type SelfMemory struct {
-	ID       string  `json:"id"`
-	Snippet  string  `json:"snippet"`
-	Kind     string  `json:"kind"`
-	Salience float64 `json:"salience"`
-	Source   string  `json:"source,omitempty"`
+	ID        string   `json:"id"`
+	Snippet   string   `json:"snippet"`
+	Kind      string   `json:"kind"`
+	Tags      []string `json:"tags,omitempty"`
+	Salience  float64  `json:"salience"`
+	Sensitive bool     `json:"sensitive,omitempty"`
+	Redacted  bool     `json:"redacted,omitempty"`
+	Source    string   `json:"source,omitempty"`
 }
 
 // SelfIndex summarizes the kinds, tags, and open-plane record counts available
@@ -774,6 +833,14 @@ var ErrIdempotencyConflict = errors.New("idempotency conflict")
 // explicitly authorized without exposing the former fact value.
 var ErrFactDeleted = errors.New("fact deleted")
 
+// ErrMemoryDeleted signals a request against a permanently deleted narrative
+// memory tombstone (-> 410).
+var ErrMemoryDeleted = errors.New("memory deleted")
+
+// ErrMemoryDependency signals that permanent deletion would silently alter a
+// distinct live memory or active lineage edge (-> 409).
+var ErrMemoryDependency = errors.New("memory has live dependencies")
+
 // ErrNotFound signals a missing resource (-> 404), e.g. a realm not in the account.
 var ErrNotFound = errors.New("not found")
 
@@ -968,7 +1035,30 @@ func apiMux(cfg Config) http.Handler {
 		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
 	messagingSupported := selfDigestSupported && cfg.SendMessage != nil &&
 		cfg.ListMessages != nil && cfg.ReadMessage != nil && cfg.AckMessage != nil
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID, cfg.PlanInfo, selfDigestSupported, transcriptsSupported, messagingSupported))
+	memoriesSupported := selfDigestSupported && cfg.CaptureMemory != nil &&
+		cfg.GetMemory != nil && cfg.ListMemories != nil && cfg.RecallMemories != nil &&
+		cfg.GetMemoryHistory != nil && cfg.AdjustMemory != nil &&
+		cfg.SupersedeMemory != nil &&
+		cfg.ForgetMemory != nil && cfg.RestoreMemory != nil &&
+		cfg.ReactivateMemory != nil && cfg.ResolveMemoryEvidence != nil &&
+		cfg.DeleteMemory != nil
+	memoryRecallSupported := selfDigestSupported && cfg.RecallMemories != nil
+	memorySupersedeSupported := selfDigestSupported && cfg.SupersedeMemory != nil
+	memoryDeleteSupported := selfDigestSupported && cfg.DeleteMemory != nil
+	memoryVectorsSupported := selfDigestSupported && cfg.CreateMemoryVectorProfile != nil &&
+		cfg.ListMemoryVectorProfiles != nil && cfg.PutMemoryVector != nil
+	memoryCurationSupported := selfDigestSupported &&
+		cfg.RequestMemoryCuration != nil && cfg.ListMemoryCurationRequests != nil &&
+		cfg.GetMemoryCurationRequest != nil && cfg.StartMemoryCuration != nil &&
+		cfg.GetMemoryCurationRun != nil && cfg.GetMemoryCurationRunInputs != nil &&
+		cfg.RenewMemoryCuration != nil && cfg.PlanMemoryCuration != nil &&
+		cfg.ApplyMemoryCuration != nil && cfg.CancelMemoryCuration != nil &&
+		cfg.AbandonMemoryCuration != nil && cfg.RollbackMemoryCuration != nil &&
+		cfg.GetMemoryCurationStatus != nil
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
+		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
+		messagingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
+		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -1008,6 +1098,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.CreateAgentToken != nil {
 			mux.HandleFunc("POST /v1/agents/{agent}/tokens", createAgentTokenHandler(cfg.Authenticate, cfg.CreateAgentToken))
+		}
+		if cfg.CreateCuratorToken != nil {
+			mux.HandleFunc("POST /v1/agents/{agent}/curator-tokens", createCuratorTokenHandler(cfg.Authenticate, cfg.CreateCuratorToken))
 		}
 		if cfg.CreateOperatorToken != nil {
 			mux.HandleFunc("POST /v1/operators/self/tokens", createOperatorTokenHandler(cfg.Authenticate, cfg.CreateOperatorToken))
@@ -1065,7 +1158,95 @@ func apiMux(cfg Config) http.Handler {
 		}
 	}
 	if cfg.AuthenticatePrincipal != nil {
-		mux.HandleFunc("GET /v1/self", selfHandler(cfg.AuthenticatePrincipal, cfg.GetSelfFacts, cfg.CountSelfFacts))
+		mux.HandleFunc("GET /v1/self", selfHandler(
+			cfg.AuthenticatePrincipal,
+			cfg.GetSelfFacts,
+			cfg.CountSelfFacts,
+			cfg.GetSelfMemories,
+			cfg.CountSelfMemories,
+		))
+		if memoryCurationSupported {
+			mux.HandleFunc("GET /v1/memory-curation-preflight", getMemoryCurationPreflightHandler(cfg.AuthenticatePrincipal))
+		}
+		if cfg.CaptureMemory != nil {
+			mux.HandleFunc("POST /v1/memories", captureMemoryHandler(cfg.AuthenticatePrincipal, cfg.CaptureMemory))
+		}
+		if cfg.ListMemories != nil {
+			mux.HandleFunc("GET /v1/memories", listMemoriesHandler(cfg.AuthenticatePrincipal, cfg.ListMemories))
+		}
+		if cfg.RecallMemories != nil {
+			mux.HandleFunc("POST /v1/memories:recall", recallMemoriesHandler(cfg.AuthenticatePrincipal, cfg.RecallMemories))
+		}
+		if cfg.GetMemory != nil {
+			mux.HandleFunc("GET /v1/memories/{memory}", getMemoryHandler(cfg.AuthenticatePrincipal, cfg.GetMemory))
+		}
+		if cfg.GetMemoryHistory != nil {
+			mux.HandleFunc("GET /v1/memories/{memory}/history", memoryHistoryHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryHistory))
+		}
+		if cfg.AdjustMemory != nil {
+			mux.HandleFunc("PATCH /v1/memories/{memory}", adjustMemoryHandler(cfg.AuthenticatePrincipal, cfg.AdjustMemory))
+		}
+		if cfg.SupersedeMemory != nil {
+			mux.HandleFunc("POST /v1/memories/{memory}/supersede", supersedeMemoryHandler(cfg.AuthenticatePrincipal, cfg.SupersedeMemory))
+		}
+		if cfg.ForgetMemory != nil || cfg.RestoreMemory != nil || cfg.ReactivateMemory != nil {
+			mux.HandleFunc("POST /v1/memories/{action}", memoryLifecycleHandler(cfg.AuthenticatePrincipal,
+				cfg.ForgetMemory, cfg.RestoreMemory, cfg.ReactivateMemory))
+		}
+		if cfg.ResolveMemoryEvidence != nil {
+			mux.HandleFunc("POST /v1/memory-evidence/{evidence}/resolution", resolveMemoryEvidenceHandler(cfg.AuthenticatePrincipal, cfg.ResolveMemoryEvidence))
+		}
+		if cfg.DeleteMemory != nil {
+			mux.HandleFunc("DELETE /v1/memories/{memory}", deleteMemoryHandler(cfg.AuthenticatePrincipal, cfg.DeleteMemory))
+		}
+		if cfg.CreateMemoryVectorProfile != nil {
+			mux.HandleFunc("POST /v1/memory-vector-profiles", createMemoryVectorProfileHandler(cfg.AuthenticatePrincipal, cfg.CreateMemoryVectorProfile))
+		}
+		if cfg.ListMemoryVectorProfiles != nil {
+			mux.HandleFunc("GET /v1/memory-vector-profiles", listMemoryVectorProfilesHandler(cfg.AuthenticatePrincipal, cfg.ListMemoryVectorProfiles))
+		}
+		if cfg.PutMemoryVector != nil {
+			mux.HandleFunc("POST /v1/memory-vectors", putMemoryVectorHandler(cfg.AuthenticatePrincipal, cfg.PutMemoryVector))
+		}
+		if cfg.RequestMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-requests", requestMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.RequestMemoryCuration))
+		}
+		if cfg.ListMemoryCurationRequests != nil {
+			mux.HandleFunc("GET /v1/memory-curation-requests", listMemoryCurationRequestsHandler(cfg.AuthenticatePrincipal, cfg.ListMemoryCurationRequests))
+		}
+		if cfg.GetMemoryCurationRequest != nil {
+			mux.HandleFunc("GET /v1/memory-curation-requests/{request}", getMemoryCurationRequestHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationRequest))
+		}
+		if cfg.StartMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-requests/{request}/start", startMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.StartMemoryCuration))
+		}
+		if cfg.GetMemoryCurationRun != nil {
+			mux.HandleFunc("GET /v1/memory-curation-runs/{run}", getMemoryCurationRunHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationRun))
+		}
+		if cfg.GetMemoryCurationRunInputs != nil {
+			mux.HandleFunc("GET /v1/memory-curation-runs/{run}/inputs", getMemoryCurationRunInputsHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationRunInputs))
+		}
+		if cfg.RenewMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/renew", renewMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.RenewMemoryCuration))
+		}
+		if cfg.PlanMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/plan", planMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.PlanMemoryCuration))
+		}
+		if cfg.ApplyMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/apply", applyMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.ApplyMemoryCuration))
+		}
+		if cfg.CancelMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/cancel", finishMemoryCurationHandler(cfg.AuthenticatePrincipal, memoryCurationPermissionCancel, cfg.CancelMemoryCuration))
+		}
+		if cfg.AbandonMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/abandon", finishMemoryCurationHandler(cfg.AuthenticatePrincipal, memoryCurationPermissionAbandon, cfg.AbandonMemoryCuration))
+		}
+		if cfg.RollbackMemoryCuration != nil {
+			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/rollback", rollbackMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.RollbackMemoryCuration))
+		}
+		if cfg.GetMemoryCurationStatus != nil {
+			mux.HandleFunc("GET /v1/memory-curation-status", getMemoryCurationStatusHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationStatus))
+		}
 		if cfg.SetFact != nil {
 			mux.HandleFunc("POST /v1/facts", setFactHandler(cfg.AuthenticatePrincipal, cfg.SetFact))
 		}
@@ -1238,9 +1419,15 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
+		featureState := func(supported bool) feature {
+			if supported {
+				return feature{Supported: true}
+			}
+			return notImpl
+		}
 		caps := capabilities{
 			SchemaVersion: "witself.v0",
 			Backend: backendInfo{
@@ -1249,15 +1436,24 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				APIVersion: "v1",
 			},
 			Features: map[string]feature{
-				"memories":        notImpl,
-				"facts":           notImpl,
-				"self_digest":     {Supported: selfDigestSupported},
-				"semantic_recall": notImpl,
-				"policies":        notImpl,
-				"groups":          notImpl,
-				"messaging":       {Supported: messagingSupported},
-				"transcripts":     {Supported: transcriptsSupported},
-				"audit":           notImpl,
+				"memories":                featureState(memoriesSupported),
+				"memory_recall":           featureState(memoryRecallSupported),
+				"memory_supersede":        featureState(memorySupersedeSupported),
+				"memory_permanent_delete": featureState(memoryDeleteSupported),
+				"memory_vector_profiles":  featureState(memoryVectorsSupported),
+				"client_vector_recall":    featureState(memoryVectorsSupported && memoryRecallSupported),
+				"automatic_capture":       notImpl,
+				"opportunistic_curation":  featureState(memoryCurationSupported),
+				"scheduled_curation":      notImpl,
+				"transcript_capture":      featureState(transcriptsSupported),
+				"facts":                   notImpl,
+				"self_digest":             {Supported: selfDigestSupported},
+				"semantic_recall":         featureState(memoryVectorsSupported && memoryRecallSupported),
+				"policies":                notImpl,
+				"groups":                  notImpl,
+				"messaging":               {Supported: messagingSupported},
+				"transcripts":             {Supported: transcriptsSupported},
+				"audit":                   notImpl,
 			},
 			Limits:  map[string]any{},
 			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
@@ -1273,6 +1469,9 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 		}
 		if !messagingSupported {
 			caps.Features["messaging"] = notImpl
+		}
+		if !memoriesSupported {
+			caps.Features["memories"] = notImpl
 		}
 		if accountID != "" {
 			caps.Account = &accountInfo{ID: accountID}
@@ -1344,10 +1543,26 @@ func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.R
 	}
 }
 
-// requireDomainPrincipal authenticates an operator-or-agent token for domain
-// surfaces and requires an active account. Authorization within the account is
-// still the resource handler/store's job.
+// requireDomainPrincipal authenticates an ordinary operator-or-agent token for
+// domain surfaces and requires an active account. Restricted credentials fail
+// closed here: only the purpose-built curation wrappers below may admit a
+// curator profile. This means a future domain route cannot accidentally become
+// available to an unattended curator merely because it uses the shared domain
+// authentication helper.
 func requireDomainPrincipal(auth PrincipalAuthFunc, h func(http.ResponseWriter, *http.Request, DomainPrincipal)) http.HandlerFunc {
+	return requireDomainPrincipalAnyProfile(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if profile := effectiveAccessProfile(p); profile != AccessProfileFull {
+			writeJSONError(w, http.StatusForbidden, "credential profile is not authorized for this route")
+			return
+		}
+		h(w, r, p)
+	})
+}
+
+// requireDomainPrincipalAnyProfile performs authentication and account-state
+// gating without granting any route permission. Callers must make an explicit
+// access-profile decision before invoking the domain handler.
+func requireDomainPrincipalAnyProfile(auth PrincipalAuthFunc, h func(http.ResponseWriter, *http.Request, DomainPrincipal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok {
@@ -1372,10 +1587,22 @@ func requireDomainPrincipal(auth PrincipalAuthFunc, h func(http.ResponseWriter, 
 	}
 }
 
+func effectiveAccessProfile(p DomainPrincipal) string {
+	if strings.TrimSpace(p.AccessProfile) == "" {
+		// Empty is accepted only for compatibility with embedders and tests that
+		// predate token profiles. PostgreSQL-authenticated principals always
+		// carry an explicit profile after migration 0031.
+		return AccessProfileFull
+	}
+	return p.AccessProfile
+}
+
 func selfHandler(
 	auth PrincipalAuthFunc,
 	getFacts func(context.Context, DomainPrincipal, int) ([]SelfFact, int, error),
 	countFacts func(context.Context, DomainPrincipal) (int, error),
+	getMemories func(context.Context, DomainPrincipal, int) ([]SelfMemory, int, error),
+	countMemories func(context.Context, DomainPrincipal) (int, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		// Self digests can contain durable personal context and must never be
@@ -1401,6 +1628,10 @@ func selfHandler(
 				writeJSONError(w, http.StatusBadRequest, "salient_limit must be between 1 and 100")
 				return
 			}
+		}
+		salientLimit := 12
+		if value := q.Get("salient_limit"); value != "" {
+			salientLimit, _ = strconv.Atoi(value)
 		}
 		maximumBytes := 8192
 		if value := q.Get("max_bytes"); value != "" {
@@ -1452,6 +1683,63 @@ func selfHandler(
 			}
 			factCount = total
 		}
+
+		memories := []SelfMemory{}
+		memoryCount := 0
+		includeSalient := true
+		if raw := q.Get("include_salient"); raw != "" {
+			includeSalient, _ = strconv.ParseBool(raw)
+		}
+		if includeSalient && getMemories != nil {
+			hydratedMemories, total, err := getMemories(r.Context(), p, salientLimit)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not hydrate memories")
+				return
+			}
+			memoryCount = total
+			if hydratedMemories != nil {
+				memories = hydratedMemories
+			}
+			for i := range memories {
+				if memories[i].Sensitive {
+					memories[i].Snippet = ""
+					memories[i].Tags = nil
+					memories[i].Redacted = true
+				}
+			}
+		} else if countMemories != nil {
+			var err error
+			memoryCount, err = countMemories(r.Context(), p)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not count memories")
+				return
+			}
+		} else if getMemories != nil {
+			_, total, err := getMemories(r.Context(), p, salientLimit)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not count memories")
+				return
+			}
+			memoryCount = total
+		}
+
+		kindSet := map[string]struct{}{}
+		tagSet := map[string]struct{}{}
+		for _, memory := range memories {
+			if memory.Kind != "" {
+				kindSet[memory.Kind] = struct{}{}
+			}
+			if memory.Sensitive {
+				continue
+			}
+			for _, tag := range memory.Tags {
+				if tag != "" {
+					tagSet[tag] = struct{}{}
+				}
+			}
+		}
+		kinds := sortedSelfIndexKeys(kindSet)
+		tags := sortedSelfIndexKeys(tagSet)
 		digest := SelfDigest{
 			SchemaVersion: "witself.v0",
 			Identity: SelfIdentity{
@@ -1462,13 +1750,14 @@ func selfHandler(
 				RealmName: p.RealmName,
 			},
 			PrimaryFacts:    facts,
-			SalientMemories: []SelfMemory{},
+			SalientMemories: memories,
 			Index: SelfIndex{
-				Kinds:  []string{},
-				Tags:   []string{},
-				Counts: map[string]int{"facts": factCount, "memories": 0},
+				Kinds:  kinds,
+				Tags:   tags,
+				Counts: map[string]int{"facts": factCount, "memories": memoryCount},
 			},
-			Elided: includeFacts && factCount > len(facts),
+			Elided: (includeFacts && factCount > len(facts)) ||
+				(includeSalient && memoryCount > len(memories)),
 		}
 		encoded, err := marshalBoundedSelfDigest(digest, maximumBytes)
 		if err != nil {
@@ -1478,6 +1767,15 @@ func selfHandler(
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(encoded)
 	})
+}
+
+func sortedSelfIndexKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // marshalBoundedSelfDigest applies the wire-size budget to the encoded JSON,
@@ -3095,6 +3393,89 @@ func createAgentTokenHandler(auth AuthFunc, create func(ctx context.Context, acc
 			"token_id":       tokenID,
 			"agent_id":       agentID,
 			"agent_name":     agentName,
+		})
+	})
+}
+
+func createCuratorTokenHandler(
+	auth AuthFunc,
+	create func(context.Context, string, string, string, string, string, time.Duration) (string, string, string, time.Time, error),
+) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		var req struct {
+			AccessProfile string `json:"access_profile"`
+			DisplayName   string `json:"display_name"`
+			TTL           string `json:"ttl"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid curator token request")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, "invalid curator token request")
+			return
+		}
+		req.AccessProfile = strings.TrimSpace(req.AccessProfile)
+		req.DisplayName = strings.TrimSpace(req.DisplayName)
+		if req.AccessProfile != AccessProfileCuratorPreview && req.AccessProfile != AccessProfileCuratorApply {
+			writeJSONError(w, http.StatusBadRequest, "access_profile must be curator-preview or curator-apply")
+			return
+		}
+		if req.DisplayName == "" || len(req.DisplayName) > 255 {
+			writeJSONError(w, http.StatusBadRequest, "display_name is required and must not exceed 255 bytes")
+			return
+		}
+		for _, char := range req.DisplayName {
+			if unicode.IsControl(char) {
+				writeJSONError(w, http.StatusBadRequest, "display_name must not contain control characters")
+				return
+			}
+		}
+		ttl, err := time.ParseDuration(strings.TrimSpace(req.TTL))
+		if err != nil || ttl <= 0 || ttl > 24*time.Hour {
+			writeJSONError(w, http.StatusBadRequest, "ttl must be greater than zero and no more than 24h")
+			return
+		}
+
+		agentID := strings.TrimSpace(r.PathValue("agent"))
+		if agentID == "" {
+			writeJSONError(w, http.StatusBadRequest, "agent id is required")
+			return
+		}
+		tok, tokenID, agentName, expiresAt, err := create(
+			r.Context(), p.accountID, p.operatorID, agentID,
+			req.AccessProfile, req.DisplayName, ttl,
+		)
+		switch {
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, "invalid curator token request")
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		case errors.Is(err, ErrAccountNotActive):
+			writeJSONError(w, http.StatusForbidden, "account is not active")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not create curator token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"agent_token":    tok,
+			"token_id":       tokenID,
+			"agent_id":       agentID,
+			"agent_name":     agentName,
+			"access_profile": req.AccessProfile,
+			"display_name":   req.DisplayName,
+			"expires_at":     expiresAt,
 		})
 	})
 }

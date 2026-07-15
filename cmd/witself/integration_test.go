@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/memorycurator"
+	"github.com/witwave-ai/witself/internal/memoryhydration"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -878,5 +881,304 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	defer mu.Unlock()
 	if len(pending) != 0 || appended != 2 {
 		t.Fatalf("pending/appended = %d/%d", len(pending), appended)
+	}
+}
+
+func TestCuratorSessionHookDoesNotCaptureItself(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv("WITSELF_CURATOR_SESSION", "1")
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex, CaptureMode: transcriptcapture.ModeRaw,
+		HookMode: transcriptcapture.HookModeUser, Account: "default", Realm: "default",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott", Location: location,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input, err := os.CreateTemp(t.TempDir(), "curator-hook-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = input.Close() }()
+	if _, err := input.WriteString(`{"session_id":"curator-session","hook_event_name":"SessionStart"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := input.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	previousStdin := os.Stdin
+	os.Stdin = input
+	t.Cleanup(func() { os.Stdin = previousStdin })
+
+	if code := transcriptHook([]string{"--runtime", transcriptcapture.RuntimeCodex}); code != 0 {
+		t.Fatalf("hook code = %d", code)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("curator hook queued %d self-capture events", len(pending))
+	}
+}
+
+func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
+	tests := []struct {
+		name, runtime, event, body string
+		wantCalls                  int
+		wantOutput                 string
+	}{
+		{name: "Codex session", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
+		{name: "Codex prompt", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior database decision", wantCalls: 2, wantOutput: "hookSpecificOutput"},
+		{name: "Claude session", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
+		{name: "Claude prompt", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "pick up where we left off", wantCalls: 2, wantOutput: "hookSpecificOutput"},
+		{name: "Cursor session fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventSessionStart},
+		{name: "Cursor prompt fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior plan"},
+		{name: "Grok session fallback", runtime: transcriptcapture.RuntimeGrokBuild, event: memoryhydration.EventSessionStart},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+			var mu sync.Mutex
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				if r.Header.Get("Authorization") != "Bearer hydration-token-canary" {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				switch r.URL.Path {
+				case "/v1/self":
+					_ = json.NewEncoder(w).Encode(client.SelfDigest{
+						SchemaVersion:   "witself.v0",
+						Identity:        client.SelfIdentity{AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default", AgentID: "agt_1", AgentName: "atlas"},
+						PrimaryFacts:    []client.SelfFact{{ID: "fact_1", Name: "database", Value: "Postgres", Primary: true}},
+						SalientMemories: []client.SelfMemory{{ID: "mem_self", Kind: "decision", Snippet: "Use portable narrative memory", Salience: .8}},
+						Index:           client.SelfIndex{Kinds: []string{"decision"}, Tags: []string{}, Counts: map[string]int{"facts": 1, "memories": 1}},
+					})
+				case "/v1/memories:recall":
+					var input client.MemoryRecallInput
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Errorf("decode recall: %v", err)
+					}
+					if input.IncludeSensitive || input.Query == "" || input.Limit != memoryhydration.DefaultRecallLimit {
+						t.Errorf("unsafe recall input = %#v", input)
+					}
+					_ = json.NewEncoder(w).Encode(client.MemoryRecallPage{
+						RetrievalMode: "lexical",
+						Hits: []client.MemoryRecallHit{{
+							Memory: client.Memory{ID: "mem_1", AccountID: "acc_1", RealmID: "rlm_1", Owner: client.MemoryOwner{AgentID: "agt_1"}, Content: "Postgres is canonical", ContentEncoding: "plain", Kind: "decision"},
+							Score:  client.MemoryRecallScore{Total: .9},
+						}},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			tokenPath := filepath.Join(t.TempDir(), "agent.token")
+			if err := os.WriteFile(tokenPath, []byte("hydration-token-canary\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			location, err := transcriptcapture.EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+				Runtime: test.runtime, CaptureMode: transcriptcapture.ModeMessages, HookMode: transcriptcapture.HookModeUser,
+				Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "rlm_1",
+				Agent: "atlas", AgentID: "agt_1", AgentName: "atlas", Location: location,
+				Endpoint: server.URL, TokenFile: tokenPath,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			output, err := automaticHydrationHook(context.Background(), transcriptcapture.Event{
+				Runtime: test.runtime, HookEvent: test.event, Body: test.body,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			gotCalls := calls
+			mu.Unlock()
+			if gotCalls != test.wantCalls {
+				t.Fatalf("server calls = %d, want %d", gotCalls, test.wantCalls)
+			}
+			if test.wantOutput == "" {
+				if len(output) != 0 {
+					t.Fatalf("fallback emitted hook output: %s", output)
+				}
+				return
+			}
+			if !json.Valid(output) || !strings.Contains(string(output), test.wantOutput) ||
+				!strings.Contains(string(output), "WITSELF_AUTOMATIC_CONTEXT_V1") ||
+				strings.Contains(string(output), "hydration-token-canary") {
+				t.Fatalf("hook output = %s", output)
+			}
+		})
+	}
+}
+
+func TestTranscriptHookHydrationFailsOpenOnIdentityMismatch(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/self" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(client.SelfDigest{Identity: client.SelfIdentity{
+			AccountID: "acc_1", RealmID: "rlm_wrong", RealmName: "other", AgentID: "agt_1", AgentName: "atlas",
+		}})
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("identity-token-canary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex, CaptureMode: transcriptcapture.ModeMessages, HookMode: transcriptcapture.HookModeUser,
+		Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "rlm_1",
+		Agent: "atlas", AgentID: "agt_1", AgentName: "atlas", Location: location,
+		Endpoint: server.URL, TokenFile: tokenPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.CreateTemp(t.TempDir(), "hydration-hook-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = input.Close() }()
+	if _, err := input.WriteString(`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := input.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	previousStdin := os.Stdin
+	os.Stdin = input
+	t.Cleanup(func() { os.Stdin = previousStdin })
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return transcriptHook([]string{
+			"--runtime", transcriptcapture.RuntimeCodex,
+			"--account", "default", "--realm", "default", "--agent", "atlas", "--location", "home",
+		})
+	})
+	if code != 0 || stdout != "" || !strings.Contains(stderr, "continuing without automatic context") ||
+		strings.Contains(stderr, "identity-token-canary") {
+		t.Fatalf("fail-open hook = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("durable capture after hydration failure = %d / %v", len(pending), err)
+	}
+}
+
+func TestAutomaticCurationWakeIsOptInAndBindingScoped(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	binding := transcriptcapture.Config{
+		Runtime:   transcriptcapture.RuntimeClaudeCode,
+		AccountID: "acc_1", RealmID: "rlm_1", AgentID: "agt_1",
+	}
+	store, err := memorycurator.DefaultAutoStore(binding.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || recorded {
+		t.Fatalf("unconfigured wake = %v / %v", recorded, err)
+	}
+	if _, err := store.Enable(memorycurator.AutoSettings{
+		AccountID: binding.AccountID, RealmID: binding.RealmID, AgentID: binding.AgentID,
+		Provider: memorycurator.ProviderClaudeCode, ProviderPath: filepath.Join(t.TempDir(), "claude"),
+		ApplyPolicy: memorycurator.ApplyPolicyPreview, AllowTranscriptContent: true,
+		Debounce: time.Second, MinimumInterval: 0, MaxRuns: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || !recorded {
+		t.Fatalf("configured wake = %v / %v", recorded, err)
+	}
+	markers, err := store.PendingWakes()
+	if err != nil || len(markers) != 1 || markers[0].Reason != "terminal_flush" {
+		t.Fatalf("markers = %#v / %v", markers, err)
+	}
+	mismatched := binding
+	mismatched.RealmID = "rlm_other"
+	if _, err := recordAutomaticCurationWake(mismatched, memorycurator.AutoWakeTerminalFlush); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched binding error = %v", err)
+	}
+	if err := store.Disable(); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || recorded {
+		t.Fatalf("disabled wake = %v / %v", recorded, err)
+	}
+}
+
+func TestBackgroundAutomaticCuratorLaunchExposesNoCredential(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", home)
+	binding := transcriptcapture.Config{
+		Runtime:   transcriptcapture.RuntimeClaudeCode,
+		AccountID: "acc_1", RealmID: "rlm_1", AgentID: "agt_1",
+		TokenFile: "/private/curator-token-canary",
+	}
+	store, err := memorycurator.DefaultAutoStore(binding.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Enable(memorycurator.AutoSettings{
+		AccountID: binding.AccountID, RealmID: binding.RealmID, AgentID: binding.AgentID,
+		Provider: memorycurator.ProviderClaudeCode, ProviderPath: filepath.Join(t.TempDir(), "claude"),
+		ApplyPolicy: memorycurator.ApplyPolicyPreview, AllowTranscriptContent: true,
+		Debounce: time.Second, MinimumInterval: 0, MaxRuns: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordWake(memorycurator.AutoWakeTerminalFlush); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "auto-args.log")
+	helperPath := filepath.Join(t.TempDir(), "witself-helper")
+	helper := "#!/bin/sh\ntmp=\"$AUTO_ARGS_FILE.tmp.$$\"\nprintf '%s\\n' \"$@\" > \"$tmp\"\nmv \"$tmp\" \"$AUTO_ARGS_FILE\"\n"
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(witselfExecutableTestEnv, helperPath)
+	t.Setenv("AUTO_ARGS_FILE", logPath)
+	if err := startBackgroundAutomaticCuratorIfPending(transcriptcapture.RuntimeClaudeCode, binding); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err = os.ReadFile(logPath)
+		if err == nil && len(raw) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(raw)
+	if args != "memory\ncurate\nauto\nrun\n--runtime\nclaude-code\n--supervise\n" {
+		t.Fatalf("background argv = %q", args)
+	}
+	if strings.Contains(args, binding.TokenFile) || strings.Contains(args, "claude") && strings.Contains(args, "--provider") {
+		t.Fatalf("background argv exposed credential/provider configuration: %q", args)
 	}
 }

@@ -4,6 +4,17 @@ Status: draft. Decision: Witself uses resource-oriented `/v1` routes with
 explicit action subroutes for sensitive, integrity-impacting, or workflow
 operations.
 
+Narrative-memory amendment (accepted 2026-07-14): direct capture, history,
+lexical and optional client-vector hybrid recall, atomic supersede, lifecycle,
+evidence resolution, permanent deletion, migration-0032 vector profiles/rows,
+and the 14-route client-curation protocol (including authenticated effective
+preflight) are implemented below. The
+curation routes manage a deterministic queue, fenced snapshots, exact
+client-authored plans, transactional apply, and guarded compensation; they do
+not run inference. Older server-classification/consolidation routes are
+superseded. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 The public HTTP API should be REST-ish and resource-oriented under `/v1`.
@@ -14,6 +25,12 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/realms`
 - `/v1/agents`
 - `/v1/memories`
+- `/v1/memory-evidence`
+- `/v1/memory-vector-profiles`
+- `/v1/memory-vectors`
+- `/v1/memory-curation-requests`
+- `/v1/memory-curation-runs`
+- `/v1/memory-curation-status`
 - `/v1/facts`
 - `/v1/secrets`
 - `/v1/totp`
@@ -41,8 +58,10 @@ Action routes should use a colon suffix:
 
 ```text
 POST /v1/memories:recall
+POST /v1/memories/{memory_id}/supersede
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
+POST /v1/memory-evidence/{evidence_id}/resolution
 POST /v1/facts/{fact_id}:primary
 POST /v1/secrets/{secret_id}:reveal
 POST /v1/secrets/{secret_id}:rotate
@@ -54,6 +73,10 @@ POST /v1/tokens/{token_id}:rotate
 ```
 
 Sensitive/action routes must use `POST`, never `GET`.
+
+The implemented supersede action is the existing slash subresource
+`POST /v1/memories/{memory_id}/supersede`; clients must not translate it to a
+colon route.
 
 Witself's action verbs span both planes. The open-plane verbs (`:recall`,
 `:forget`, `:restore`, `:primary`, `:test`, `:ack`) protect the integrity and
@@ -119,6 +142,8 @@ GET  /v1/operators
 POST /v1/operators
 DELETE /v1/operators/{operator_id}
 POST /v1/operators/self/tokens
+POST /v1/agents/{agent_id}/tokens
+POST /v1/agents/{agent_id}/curator-tokens
 
 GET  /v1/accounts
 POST /v1/accounts
@@ -148,12 +173,45 @@ DELETE /v1/agents/{agent_id}
 GET  /v1/memories            # ?all_agents=true is operator/admin-only (realm-wide scan)
 POST /v1/memories
 GET  /v1/memories/{memory_id}
+GET  /v1/memories/{memory_id}/history
 PATCH /v1/memories/{memory_id}
 POST /v1/memories:recall
-POST /v1/memories:consolidate
+POST /v1/memories/{memory_id}/supersede
+POST /v1/memories:consolidate              # superseded target; not implemented
 POST /v1/memories/{memory_id}:forget
 POST /v1/memories/{memory_id}:restore
+POST /v1/memories/{memory_id}:reactivate
+POST /v1/memory-evidence/{evidence_id}/resolution
 DELETE /v1/memories/{memory_id}
+POST /v1/memory-vector-profiles
+GET  /v1/memory-vector-profiles
+POST /v1/memory-vectors
+
+# Client-side narrative-memory curation. These slash action subresources are
+# the implemented workflow contract; every mutating route requires an
+# Idempotency-Key header.
+GET  /v1/memory-curation-preflight
+POST /v1/memory-curation-requests
+GET  /v1/memory-curation-requests # ?exclude_sensitive=true omits explicitly sensitive scopes
+GET  /v1/memory-curation-requests/{request_id}
+POST /v1/memory-curation-requests/{request_id}/start
+GET  /v1/memory-curation-runs/{run_id}
+GET  /v1/memory-curation-runs/{run_id}/inputs
+POST /v1/memory-curation-runs/{run_id}/renew
+POST /v1/memory-curation-runs/{run_id}/plan
+POST /v1/memory-curation-runs/{run_id}/apply
+POST /v1/memory-curation-runs/{run_id}/cancel
+POST /v1/memory-curation-runs/{run_id}/abandon
+POST /v1/memory-curation-runs/{run_id}/rollback
+GET  /v1/memory-curation-status
+
+The curation-request list also accepts `state`, `limit`, `cursor`, and boolean
+`exclude_sensitive`. For a full agent credential, `exclude_sensitive=true`
+omits scopes whose `include_sensitive` field is explicitly true; it does not
+omit a transcript scope merely because transcripts are conservatively treated
+as sensitive for restricted curator profiles. `curator-preview` and
+`curator-apply` credentials always omit both explicit-sensitive and
+transcript-bearing scopes, regardless of the query flag.
 
 GET  /v1/agents/{agent_id}/memories
 POST /v1/agents/{agent_id}/memories
@@ -317,29 +375,108 @@ on a default admin password.
 
 ## Action Route Notes
 
-The colon-action routes carry Witself's integrity-sensitive verbs. They are
-`POST`-only, audited, and (where they mutate) support idempotency keys and
-`dry_run`:
+The action routes carry Witself's integrity-sensitive verbs. They are
+`POST`-only. Implemented memory mutations use idempotency keys and metadata-only
+audit events; read-only recall does neither:
 
-- `POST /v1/memories:recall` runs semantic-by-default recall over the caller's
-  accessible memories. The query, filters (kind, tag, time), and ranking
-  options travel in the request body, never in the path or query string. Recall
-  over another agent's memories requires a policy granting `read` and is
-  metered as a cross-agent access. When the embedding provider is unavailable,
-  recall degrades to keyword/tag/kind/time ranking and the response surfaces the
-  degraded state through `warnings`.
-- `POST /v1/memories:consolidate` is the guarded garbage-collection verb
-  (`witself memory consolidate`). It merges near-duplicate memories, supersedes
-  stale ones, surfaces (never auto-resolves) conflicting facts, and trims the
-  digest index. It defaults to `dry_run=true`, is audited as
-  `memory.consolidated`, respects `source` provenance so human-/import-authored
-  records are never silently overwritten, and is excluded in `--read-only` MCP
-  mode.
-- `POST /v1/memories/{memory_id}:forget` is the soft-delete (tombstone) path. It
-  is reversible within the retention window. `DELETE /v1/memories/{memory_id}`
-  is the guarded hard delete.
-- `POST /v1/memories/{memory_id}:restore` reverses a forget within the retention
-  window.
+- `POST /v1/memories:recall` is implemented for the token-bound agent's active
+  current heads. The body accepts literal query text plus kind, tags, links,
+  origin, capture reason, occurrence/capture ranges, sensitivity, limit, and an
+  opaque filter-bound cursor. PostgreSQL full-text, salience, and recency produce
+  explicit score components and stable ordering; the backend makes no model or
+  embedding call. Supplying both `vector_profile_id` and a compatible
+  `query_vector` enables deterministic hybrid scoring over the bounded candidate
+  universe. Responses expose similarity, per-hit vector use, profile, coverage,
+  candidate counts/limit, truncation, retrieval mode, and degradation reason.
+  With no profile, or zero compatible rows, lexical recall remains the baseline.
+  Cross-agent/group recall remains future work.
+- `POST /v1/memory-vector-profiles` creates or exactly replays one immutable
+  agent-owned profile declaring provider/model/recipe identity, dimensions,
+  distance metric, and normalization. `GET /v1/memory-vector-profiles` returns
+  the caller's bounded profile set. These identifiers describe a client recipe;
+  they are not backend provider configuration or credentials.
+- `POST /v1/memory-vectors` stores or exactly replays one finite vector bound to
+  a profile, exact memory id/version, and content hash. The response is a
+  value-free receipt and never returns vector components. Migration `0032`
+  stores vectors as portable JSONB; no pgvector extension is required.
+- `POST /v1/memories/{memory_id}/supersede` atomically supersedes one exact
+  active version with a nonempty caller-authored replacement set. It requires
+  an operation `Idempotency-Key` header, positive `expected_version`, and one
+  body `idempotency_key` plus exact, pending, or explicitly unavailable evidence
+  for every replacement. HTTP 201 returns the full authorized source and
+  replacements plus a value-free receipt containing the supersession set,
+  exact version references, replacement count and SHA-256 membership digest,
+  actor, request hash, and retry key. The current HTTP, Go client, CLI, and MCP
+  surfaces are agent-self only.
+- Current-memory and history outputs preserve the immutable source-version
+  receipt fields (`supersession_set_id`, `supersession_set_revision`,
+  `supersession_replacement_count`, `supersession_replacement_digest`) and
+  separately project the currently unreverted relation set as
+  `active_supersession_set_id` and `active_supersession_set_revision`.
+  Reactivation clears only the active projection; it does not rewrite the
+  historical receipt. These fields are value-free and survive broad-response
+  redaction.
+- `content_encoding` is `plain` by default and may be `base64` for canonical
+  binary-safe content. Capture and supersede replacements use that field;
+  adjust uses `set_content_encoding`; current and historical outputs include
+  the effective value. JSON body ceilings account for worst-case escaping of
+  store-legal inputs: 8 MiB for capture, 16 MiB for adjust, and 257 MiB for a
+  32-replacement supersede. Exceeding a ceiling returns HTTP 413.
+- `POST /v1/memories:consolidate` is not implemented and must not make semantic
+  decisions in the backend. Deeper merge/split work uses an exact,
+  caller-authored plan submitted through the implemented curation run; direct
+  one-to-many supersede already uses the exact caller-authored route above. See
+  [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+- The 14 curation routes are deliberately resource/action slash routes because
+  they operate on durable queue requests and fenced run resources. Request
+  creation coalesces equivalent open work. Request listing uses stable,
+  filter-bound cursor pagination; an empty state filter lists claimable due
+  work, while an explicit state lists that lifecycle state. `start` claims one
+  due request and freezes bounded, authorized memory/evidence/transcript/cursor
+  inputs under one lease and fencing generation. `GET .../inputs` requires that
+  fence and pages the immutable snapshot. `renew`, `plan`, `apply`, `cancel`,
+  and `abandon` also require the fence; `plan` accepts strict
+  `witself.memory-plan.v1`, and `apply` additionally binds its accepted revision
+  and lowercase SHA-256 hash. `rollback` instead binds the apply receipt and the
+  complete expected produced-head set. It refuses downstream consumers, never
+  cascades, never rewinds source cursors, and queues a read-only replay. All
+  responses are `private, no-store`; the input content is untrusted data. The
+  backend provides concurrency, validation, persistence, and compensation only
+  and never launches or calls an AI model.
+- `POST /v1/agents/{agent_id}/curator-tokens` is operator-authorized and returns
+  one short-lived agent credential once. Its required immutable
+  `access_profile` is `curator-preview` or `curator-apply`, its audit display
+  name is mandatory, and its TTL must be greater than zero and no more than
+  24 hours. Existing and ordinary tokens have profile `full`. Curator profiles
+  fail closed on every ordinary domain route. Preview may list/get/start/page/
+  renew/plan/abandon/status curation; apply adds only apply. Neither profile may
+  create/cancel/rollback work, include sensitive inputs, write facts/messages/
+  direct memories, or permanently delete anything. The credential response is
+  `private, no-store`, and normal token revocation applies.
+- `GET /v1/memory-curation-preflight` is authenticated and reports the effective
+  principal, token id/profile/expiry, exact allowed operations, plan schema,
+  inference boundary, and server limits for the presented credential. Clients
+  must use it instead of treating deployment-wide `/v1/capabilities` as an
+  authorization decision.
+- `POST /v1/memories/{memory_id}:forget` appends a reversible `forgotten`
+  version. `DELETE /v1/memories/{memory_id}` is the guarded physical purge.
+- `POST /v1/memories/{memory_id}:restore` appends an active version from a valid
+  forgotten state.
+- `POST /v1/memory-evidence/{evidence_id}/resolution` appends one terminal
+  resolution to a pending evidence row. The body selects exactly one exact
+  transcript range, source memory/version, realm message, import-artifact
+  locator, or explicit unresolvable reason; `Idempotency-Key` is required. The
+  pending row is immutable.
+- `DELETE /v1/memories/{memory_id}?dry_run=true` is the implemented value-free
+  permanent-deletion preview. It accepts the memory id only: mutation guards,
+  authorization assertion, and idempotency key are rejected, and no preview
+  resource/id/expiry is created. Apply omits `dry_run`, supplies
+  `expected_version` and `scrub_set_revision` query parameters, and requires
+  both `Idempotency-Key` and `X-Witself-Direct-User-Authorized: true`. The latter
+  is valid only for this turn's direct current-user request for that exact
+  memory. `reason_code` is server-owned (`direct_user_request`) and a supplied
+  query value is rejected. Apply conflicts on stale guards or live incoming
+  dependencies and returns an exact replay for the same apply key and guards.
 - `POST /v1/facts/{fact_id}:primary` is the atomic primary promotion. It demotes
   any prior primary of the same logical kind for the same owner.
 - `DELETE /v1/facts?dry_run=true&subject={subject}&predicate={predicate}`
@@ -497,12 +634,13 @@ GET  /v1/self                # ?format=claude-md|agents-md|markdown for digest e
 POST /v1/remember
 POST /v1/sessions:start
 POST /v1/sessions:end
-POST /v1/memories:consolidate
+POST /v1/memories:consolidate # superseded target; not implemented
 ```
 
 - `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
   facts first, then top-N salient memories, then a one-line index of
-  kinds/tags/counts. It is cheap, never requires the embedding provider, and is
+  kinds/tags/counts. It is cheap, never requires a vector profile or query
+  vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
   `:recall` rather than silently truncating. Query parameters select what to
   include (facts, salient memories, salient limit, byte cap). Passing `?format=`

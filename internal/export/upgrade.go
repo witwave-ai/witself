@@ -27,6 +27,52 @@ var upgraders = map[int]Upgrader{
 	25: addFactIdempotencyDefaults,
 	26: addFactDeletionDefaults,
 	27: preserveSchema27Rows,
+	28: preserveSchema28Rows,
+	29: addMemoryCurationDefaults,
+	30: addTokenAccessProfileDefault,
+}
+
+// addTokenAccessProfileDefault preserves the pre-schema-31 authority of every
+// archived credential. Curator profiles are only created explicitly after the
+// migration; an older archive can never acquire restricted or elevated
+// semantics by inference during import.
+func addTokenAccessProfileDefault(table string, row map[string]any) (map[string]any, error) {
+	if table == "tokens" {
+		row["access_profile"] = "full"
+	}
+	return row, nil
+}
+
+// addMemoryCurationDefaults lifts schema-29 rows through the columns added to
+// existing tables by migration 0030. New curation tables are absent from an
+// old archive; the destination therefore imports them as empty streams.
+func addMemoryCurationDefaults(table string, row map[string]any) (map[string]any, error) {
+	switch table {
+	case "fact_candidates":
+		row["curation_run_id"] = nil
+		row["curation_action_id"] = nil
+		row["withdrawal_reason"] = ""
+		row["withdrawal_idempotency_key"] = ""
+		row["withdrawal_request_hash"] = ""
+	case "memory_relations":
+		row["reverted_by_action_id"] = nil
+	case "memories":
+		row["deleted_curation_run_count"] = 0
+		row["deleted_curation_action_count"] = 0
+		row["deleted_curation_input_count"] = 0
+		row["deleted_curation_mutation_count"] = 0
+	}
+	return row, nil
+}
+
+// preserveSchema28Rows is the archive-discipline acknowledgement for the
+// narrative-memory schema introduced by migration 0029. That migration adds
+// new tables and foreign keys but does not change the shape of any row an
+// older archive can contain. Archives written at schema 28 therefore pass
+// through unchanged; the destination simply imports no rows for the new
+// tables.
+func preserveSchema28Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema27Rows is an explicit archive-discipline acknowledgement for

@@ -140,6 +140,20 @@ type sessionState struct {
 	PromptEventID        string `json:"prompt_event_id,omitempty"`
 }
 
+// TriggersMemoryCurationWake reports whether a durably flushed hook event is a
+// useful client-side curation boundary. Ordinary tool, thought, prompt, and
+// subagent events still mark PostgreSQL work due, but they do not launch local
+// inference. Stop/session-end and pre-compaction boundaries provide a bounded
+// trailing-edge wake without putting model latency on the hook path.
+func (e Event) TriggersMemoryCurationWake() bool {
+	switch e.HookEvent {
+	case "Stop", "StopFailure", "SessionEnd", "PreCompact":
+		return true
+	default:
+		return false
+	}
+}
+
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
 func EnqueueHook(runtime string, raw []byte) (Event, error) {
 	return EnqueueHookForBinding(runtime, "", "", "", "", raw)

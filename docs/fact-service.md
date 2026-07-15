@@ -2,6 +2,11 @@
 
 Status: implemented core slice. Last reviewed 2026-07-13.
 
+Narrative-boundary amendment (accepted 2026-07-14): this implemented fact core
+remains canonical. The target client curator may create evidence-backed fact
+candidates but never promote inferred assertions; portable narrative context
+uses [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 The fact service is the deterministic durable-knowledge facility beside
 semantic memory. Exact lookup never uses embeddings or usage ranking. A fact is
 addressed by the token-bound owning agent, a stable subject, and a namespaced
@@ -135,9 +140,11 @@ witself.fact.subject.list
 The installed routing instructions tell supported agents to write a canonical
 fact in the same turn when the user explicitly says to remember, save, or store
 one atomic durable assertion. They do not claim every use of “remember”:
-narrative rationale, project history, lessons, and multi-step incidents stay on
-the runtime-native memory path. A clearly mixed request is split without
-duplicating the same content; an ambiguous one is clarified. See
+narrative rationale, project history, lessons, and multi-step incidents use
+portable `witself.memory.capture` by default. Runtime-native memory is used only
+when the user explicitly names it or asks for both providers. A clearly mixed
+request is split without duplicating the same content; an ambiguous one is
+clarified. See
 [Agent Memory Routing](agent-memory-routing.md) for the provider-aware capture
 and retrieval contract.
 

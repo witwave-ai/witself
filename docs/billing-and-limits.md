@@ -3,6 +3,11 @@
 Status: draft. Decision: v0 billing is account-level, plan-based, usage-aware,
 and not raw per-call billing at launch.
 
+Narrative-memory amendment (accepted 2026-07-14): Witself may meter vector
+storage/search and curation records, but it performs no billable backend model
+or re-embedding inference. Client model cost stays with the client under
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 The account is the billing target, and usage rolls up by realm. One paying
@@ -82,8 +87,8 @@ Witself should meter these dimensions internally in v0:
 | `stored_fact` | Identity-card inventory size. |
 | `memory_recall` | Semantic search load and security-relevant access. |
 | `memory_write` | Add/adjust load and integrity-relevant mutation. |
-| `embedding_operation` | Embedding-provider cost and write-path load. |
-| `vector_storage_byte` | pgvector storage cost and backup size. |
+| `vector_write` | Validation and persistence load for client-supplied vectors. |
+| `vector_storage_byte` | Client-vector JSONB storage and backup size. |
 | `crossagent_access` | Cross-agent read/write load and security signal. |
 | `security_group` | Group count, policy-evaluation surface. |
 | `message_sent` | Outbound mailbox load and abuse control. |
@@ -114,11 +119,10 @@ Notes on a few dimensions:
 
 - `memory_recall` covers semantic recall and plain read/get. Recall that runs
   over another agent's memories also increments `crossagent_access`.
-- `embedding_operation` is incremented on write-time embedding and on explicit,
-  audited re-embedding maintenance, not on plain reads (see
-  [memory-model.md](memory-model.md)).
+- `vector_write` counts accepted client-supplied vector writes. The backend does
+  not generate or regenerate vectors and therefore meters no model inference.
 - `vector_storage_byte` is a sub-dimension of overall storage; it is metered
-  separately because pgvector storage scales with corpus size and vector
+  separately because vector storage scales with corpus size and vector
   dimensionality and is the dominant storage cost driver for active realms.
 - `message_delivered` can exceed `message_sent` because a message addressed to a
   security group fans out to current group members (see
@@ -159,7 +163,7 @@ usage dimension. They are reused verbatim as:
 Whether a dimension is a point-in-time cap (`active_agent`, `stored_memory`,
 `stored_fact`, `security_group`, `vector_storage_byte`, `storage_byte`,
 `stored_secret`, `encrypted_storage_byte`) or a rate (`memory_recall`,
-`memory_write`, `embedding_operation`, `crossagent_access`, `message_sent`,
+`memory_write`, `vector_write`, `crossagent_access`, `message_sent`,
 `message_delivered`, `secret_read`, `totp_code`, `runtime_injection`,
 `api_request`, `audit_event`) is conveyed by the limit object's fields
 (`max`/`used` for caps; `unit`, `included`, `soft_limit`, `hard_limit` for

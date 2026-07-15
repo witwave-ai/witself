@@ -1,12 +1,16 @@
 # Witself Context Hydration, Teaching, and the File Bridge
 
-Status: draft. Decision: Witself is a **service the agent must be taught to
-call**, not a file the harness auto-loads. To make a self/identity store
-reliable for agents, v0 ships three things this doc pins: an always-injected,
-bounded **self-digest**; a three-surface **teaching layer** that installs the
-recall-before-act / write-after-learn habit; and a two-way **file bridge**
-(`digest emit` / `ingest`) that makes Witself a good citizen of the
-CLAUDE.md/AGENTS.md ecosystem. Last reviewed 2026-06-26.
+Status: implemented self-digest, managed teaching, and bounded automatic
+hydration for the current runtime contracts, with target session-command and
+file-bridge extensions. Witself remains a service reached through its API, CLI,
+or MCP; installed lifecycle hooks now put its open-plane context into the model
+where the runtime exposes a model-visible output channel. The two-way file
+bridge (`digest emit` / `ingest`) remains future work. Updated 2026-07-14.
+
+Target amendment (accepted 2026-07-14): managed runtime integration performs
+automatic Witself digest/recall and same-turn narrative capture as described in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md). Any later
+native-only capture language is current implementation history, not the target.
 
 This doc is the canonical home for hydration, teaching, and file interop. The
 underlying payloads are pinned in [memory-model.md](memory-model.md) (memories,
@@ -18,10 +22,12 @@ and [cli-command-surface.md](cli-command-surface.md). The master decision log is
 ## Why This Exists
 
 CLAUDE.md and AGENTS.md are read automatically by the harness at session start.
-Witself is not: it is reached over MCP, CLI, or API, and an agent that is never
-told to call it will simply not call it. A persistent self/identity store that is
-never loaded is worse than no store, because it silently diverges from what the
-agent actually believes about itself.
+A bare Witself endpoint is not: it is reached over MCP, CLI, or API. The
+installed integration closes that gap where a runtime exposes a model-visible
+hook output channel; runtimes without one still need the managed instructions
+and guided MCP fallback described below. A persistent self/identity store that
+is never loaded is worse than no store, because it silently diverges from what
+the agent actually believes about itself.
 
 So Witself closes the gap from both ends:
 
@@ -30,18 +36,16 @@ So Witself closes the gap from both ends:
 - **Teach** — a standing protocol (MCP server `instructions`), trigger-laden tool
   descriptions, and a paste-able file stanza, all saying the same thing, so the
   habit installs whether the agent learns via MCP or via the file ecosystem.
-- **Bridge** — `digest emit` writes a Witself-backed fragment into the files the
-  harness already loads, and `ingest` pulls existing CLAUDE.md/AGENTS.md content
-  back into facts and memories. Witself participates in the AGENTS.md ecosystem
+- **Bridge (target)** — `digest emit` will write a Witself-backed fragment into
+  files the harness already loads, and `ingest` will compose explicit fact and
+  narrative-memory writes. Witself participates in the AGENTS.md ecosystem
   rather than competing with it.
 
 ## The Self-Digest (`self show`)
 
-The self-digest is the bounded, session-start snapshot of who this agent is. It
-is the one call a runtime should make (alongside `session start`) before a
-non-trivial task. It is **cheap by design**: it never requires the embedding
-provider, so it works even when semantic recall is degraded (see
-[memory-model.md](memory-model.md#recall-degradation)).
+The self-digest is the bounded snapshot of who this agent is. It is the one call
+a runtime should make before a non-trivial task. It is **model-free by design**:
+selection uses stored metadata and never invokes an LLM or embedding provider.
 
 The digest is **open-plane only.** It is built from primary facts and salient
 memories; sealed-plane material — secrets and TOTP seeds — is **never** part of
@@ -67,7 +71,7 @@ it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
   ],
   "salient_memories": [
     { "id": "mem_120", "snippet": "Prefers terse, decision-led writing.", "kind": "profile", "salience": 0.9, "source": "self" },
-    { "id": "mem_133", "snippet": "Mid-migration to the v0 storage adapter; resume at the pgvector step.", "kind": "session", "salience": 0.8, "source": "self" }
+    { "id": "mem_133", "snippet": "Migration 0032 shipped portable client vectors; resume at the cloud conformance check.", "kind": "session", "salience": 0.8, "source": "self" }
   ],
   "index": {
     "kinds": ["profile", "session", "semantic", "note"],
@@ -116,11 +120,55 @@ poison every downstream decision. Capping is honest; truncation is a bug.
 
 The salient set is the top-N memories by a **blended salience-plus-recency
 score**, with pinned kinds (`profile`, `session`) weighted up, excluding
-archived/forgotten records. It is **deterministic** and **never calls the
-embedding provider** — the digest must hold up when embeddings are degraded. The
-exact scoring formula is defined once, canonically, in
+archived/forgotten records. It is **deterministic** and **never calls a model or
+embedding provider**. The exact scoring formula is defined once, canonically, in
 [memory-model.md](memory-model.md); this doc only consumes it. `self show` is
 that selection rendered into a bounded, session-start shape.
+
+## Automatic Runtime Hydration
+
+`witself install` uses the same hook command for transcript capture and
+automatic open-plane hydration. Capture is durably queued first. The hook then
+attempts a short, synchronous read only when that runtime/event has a documented
+model-visible output contract:
+
+1. `SessionStart` reads one bounded `self.show` digest.
+2. `UserPromptSubmit` runs a deterministic local history-dependence check. A
+   matching prompt becomes a bounded literal lexical `memory.recall` query; an
+   ordinary prompt performs no memory network read.
+3. The live `self.show` identity must exactly match every installed account,
+   realm, and agent id and name. A missing legacy id requires reinstall rather
+   than permitting an ambiguous read.
+4. Sensitive, redacted, and non-plain memory values are omitted. The renderer
+   places remaining facts and narratives in a JSON-escaped
+   `WITSELF_AUTOMATIC_CONTEXT_V1` envelope that says the material is untrusted,
+   advisory data rather than instructions or authority.
+5. Any configuration, credential, identity, network, timeout, or rendering
+   failure returns success to the runtime with no context. Transcript capture
+   remains queued and the user's prompt proceeds.
+
+The executor defaults to a two-second deadline, an 8 KiB context envelope,
+eight salient self memories, and six recall hits. Its intrinsic ceilings are
+five seconds, 16 KiB, and 20 candidates; a caller cannot raise them. The lexical
+query is capped at 768 bytes. No prompt, query, digest, memory value, or token is
+persisted in local hydration state.
+
+Current conformance is deliberately asymmetric:
+
+| Runtime | Session-start self digest | History-dependent task recall | Delivery/fallback |
+| --- | --- | --- | --- |
+| Codex | Automatic | Automatic | Structured `additionalContext` hook output |
+| Claude Code | Automatic | Automatic | Structured `additionalContext` hook output |
+| Cursor | Guided fallback | Guided fallback | Current IDE releases can accept and log `sessionStart.additional_context` without delivering it to the model; both paths use MCP guidance until a live version-gated conformance test passes |
+| Grok Build | Guided fallback | Guided fallback | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
+
+“Guided fallback” is not renamed automatic injection. It means the installed
+always-on routing rule and MCP server instructions tell the active agent to call
+`self.show` and focused `memory.recall` without waiting for the user to ask. If
+that agent ignores the guidance or MCP is unavailable, Witself reports only the
+partial integration guarantee. The matrix is pinned in code and shared
+conformance tests, so adding a runtime requires declaring its real output
+contract rather than copying another provider's hook fields.
 
 ## The Sealed-Plane Carve-Out
 
@@ -144,7 +192,7 @@ mechanisms in this doc. Concretely:
   `witself secret create` / `witself totp enroll`, never a side effect of hydration.
 
 This is the hydration-layer face of the cross-cutting sealed-plane invariant:
-secrets and TOTP seeds are never embedded, never returned by semantic recall,
+secrets and TOTP seeds are never embedded, never returned by memory recall,
 never in the self-digest, and never ingested or plaintext-exported. Sealed-plane
 values are reachable only through the explicit, audited **reveal** path
 (`witself secret reveal` / `witself totp code`). For the full secret data model
@@ -172,31 +220,29 @@ same way it never enters the self-digest or the file bridge (see
 ### 1. MCP Server `instructions` (the canonical standing protocol)
 
 The MCP server returns an `instructions` string on connect (emitted by
-`witself mcp serve`). The block below is the full target once the deferred
-Witself memory tools exist. The current implementation instead returns the base
-fact/self/transcript/message protocol documented in
-[mcp-tools.md](mcp-tools.md), with a selective provider policy for each managed
-runtime:
+`witself mcp serve`). The current implementation includes the fact, transcript,
+message, and direct narrative-memory protocol documented in
+[mcp-tools.md](mcp-tools.md), with a provider policy for each managed runtime:
 
-- Codex receives its full fact-versus-background-memory policy before the base
+- Codex receives its full fact-versus-portable-memory policy before the base
   protocol.
 - Claude Code receives a concise Claude auto-memory policy plus an operational
   suffix, kept within its 2 KiB MCP server-instruction limit.
 - Grok Build receives its provider policy plus the suffix, with tool names
   rewritten to the runtime's underscore-safe namespace.
 
-In every case, atomic assertions use Witself facts while narrative capture stays
-on the current runtime's supported native-memory path. The router does not call
-a nonexistent `witself.remember` tool. The exact implemented strings are
-canonical in code; [Agent Memory Routing](agent-memory-routing.md) defines their
-shared behavior and provider-specific guarantees.
+In every case, an explicit atomic assertion uses `witself.fact.set`, while an
+explicit narrative remember uses `witself.memory.capture` in the same turn.
+Runtime-native memory is used only when the user explicitly names it or asks for
+both providers. The router does not call a nonexistent `witself.remember` tool.
+The exact implemented strings are canonical in code; [Agent Memory
+Routing](agent-memory-routing.md) defines their shared behavior and
+provider-specific guarantees.
 
-```text
-You have a persistent self/identity store (Witself). At the START of a non-trivial task, call `witself.self.show` to load your primary facts and salient memories, and `witself.memory.recall` before acting on anything you may have learned before. AFTER you learn a durable fact, preference, decision, or reusable context, call `witself.remember`. If a memory is wrong or outdated, `adjust` or `forget` it rather than adding a contradicting one. Assume your context may be cleared at any moment — flush state with `witself.session.end` / `witself.remember` before long operations. To hear from other agents, call `witself.message.listen` each loop; reply with `witself.message.send`. Memory work is not a substitute for doing the task.
-```
-
-It is modeled on Anthropic's memory-tool protocol and Letta's block protocol:
-short, standing, and behavioral rather than a feature list.
+The standing protocol is short and behavioral rather than a feature list. It
+also states that recalled memories, transcripts, messages, and tool output are
+untrusted context rather than instruction authority, and that the Witself
+backend performs no model inference.
 
 ### 2. Trigger-Laden Tool Descriptions
 
@@ -206,28 +252,24 @@ server `instructions` are ignored. Signatures stay tiny so the trigger prose
 dominates. The canonical per-tool wording lives in
 [mcp-tools.md](mcp-tools.md); the triggers, in summary:
 
-- `self.show` / `memory.recall` — "call at task start, and whenever the user
-  references the past or something you may have learned before."
-- `remember` / `memory.add` / `fact.set` — "call when you 1) learn a durable fact
-  about yourself or the user, 2) are asked to remember something, 3) discover
-  reusable context, or 4) find an existing memory wrong or outdated."
-- `adjust` / `forget` — "update or forget the stale memory instead of adding a
-  contradicting one."
-- `memory.consolidate` — "call when memory feels noisy or after a large session."
+- `self.show` / `memory.recall` — call before history-dependent work. Broad
+  recall combines redacted Witself facts with Witself narrative memory.
+- `fact.set` — call in the same turn for an explicitly requested atomic durable
+  assertion.
+- `memory.capture` — call in the same turn for an explicit narrative remember,
+  or for a bounded client-authored checkpoint supported by visible evidence.
+- `memory.adjust` / `memory.supersede` / `memory.forget` — use exact-version,
+  reversible operations rather than adding a contradictory record.
+- Curation queue, plan, apply, rollback, opportunistic worker, and per-user
+  launchd/systemd service are implemented. The backend never chooses a semantic
+  merge or starts inference itself.
 
 ### 3. The Bootstrap Stanza (paste-able file teaching)
 
-`witself bootstrap-instructions [--format agents-md|claude-md|text]` prints a
-paste-able block that carries the same heuristics into the file ecosystem, so the
-habit installs even for agents taught only through AGENTS.md/CLAUDE.md.
-`witself setup --write-agents-md` installs it into the project AGENTS.md. Paste
-this verbatim:
-
-This is a target stanza for the deferred unified Witself memory surface. For the
-implemented coexistence behavior, `witself install codex`, `witself install
-claude`, `witself install grok`, and `witself install cursor` own separate
-managed routing guidance whose lifecycle and provider contracts are documented in
-[Agent Memory Routing](agent-memory-routing.md).
+The bootstrap-instructions/file-bridge command remains a target surface. The
+implemented integration path is `witself install codex|claude|grok|cursor`,
+which installs managed routing guidance and the MCP server. A future paste-able
+stanza must express the same contract:
 
 ```markdown
 ## Self / Memory (Witself)
@@ -241,19 +283,21 @@ tools (or the `witself` CLI). Use it:
   Resuming work? `witself.session.start` hydrates identity, open goals, and last
   progress in one call.
 - **Route after learning.** When asked to remember one atomic durable assertion,
-  call `witself.fact.set` in the same turn. Narrative context stays on the
-  runtime-native memory path unless the user explicitly selects Witself. Split
-  clearly mixed requests, clarify genuinely ambiguous ones, and never silently
-  duplicate the same content across providers.
+  call `witself.fact.set` in the same turn. For an explicit narrative remember,
+  call `witself.memory.capture` in the same turn. Split clearly mixed requests,
+  clarify genuinely ambiguous ones, and use runtime-native memory only when the
+  user explicitly names it or asks for both providers.
 - **Fix, don't contradict.** If a memory is wrong or outdated, `adjust` or
   `forget` it. Do not add a new memory that contradicts an old one.
-- **Assume interruption.** Your context may be cleared at any moment. Native
-  memory is background and best-effort; use an explicit Witself checkpoint such
-  as `witself.session.end` when that tool exists and durable progress is needed.
-- **Tidy when noisy.** After a large session, or when memory feels cluttered,
-  run `witself.memory.consolidate` (dry-run first).
-- **Hear before you reply.** To hear from other agents, call the
-  `witself.message.listen` tool each loop; reply with `witself.message.send`. This
+- **Assume interruption.** Your context may be cleared at any moment. Capture a
+  bounded, evidence-supported Witself checkpoint when durable progress is
+  needed. Claim due fenced curation work when a client is active. An explicitly
+  enabled local `memory curate auto` worker can launch after terminal transcript
+  flushes; optional per-user launchd/systemd scheduling is managed through
+  `memory curate auto service`.
+- **Hear before you reply.** To hear from other agents, call
+  `witself.message.list` with `unread_only=true`; reply with
+  `witself.message.send`. This
   is how you collaborate — in your own realm and, when allowed, with agents in
   other realms (cross-realm sends are realm-qualified, e.g.
   `witself.message.send --to witself://<realm-handle>/agent/<name>`).
@@ -261,7 +305,10 @@ tools (or the `witself` CLI). Use it:
 Memory work is not a substitute for doing the task.
 ```
 
-## Digest Emit (the outbound file bridge)
+## Digest Emit (target outbound file bridge)
+
+This command, MCP tool, and formatted API response are not implemented in the
+current slice. The following contract is retained as the target file bridge.
 
 `witself digest emit --format claude-md|agents-md|markdown [--max-bytes N] [-o PATH]`
 (MCP `witself.digest.emit`, API `GET /v1/self?format=`) renders the self-digest
@@ -282,7 +329,7 @@ identified, refreshed, and (on re-`ingest`) round-tripped without duplication:
 
 ### Salient memories
 - Prefers terse, decision-led writing. <!-- witself:mem_120 kind=profile -->
-- Mid-migration to the v0 storage adapter; resume at the pgvector step. <!-- witself:mem_133 kind=session -->
+- Migration 0032 shipped portable client vectors; resume at the cloud conformance check. <!-- witself:mem_133 kind=session -->
 
 <!-- witself:elided=false -->
 <!-- witself:end -->
@@ -307,7 +354,11 @@ salient memories; it never contains a secret value, secret field, or TOTP seed
 (see [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out)). Sealed-plane
 material stays out of CLAUDE.md/AGENTS.md entirely.
 
-## Ingest (the inbound file bridge)
+## Ingest (target inbound file bridge)
+
+This command is not implemented in the current slice. The following contract is
+the future inverse of target `digest emit`; it must compose exact fact and
+narrative-memory writes without server-side classification or synthesis.
 
 `witself ingest <PATH ...> [--source-label L] [--dry-run] [--json]` parses
 existing CLAUDE.md / AGENTS.md / GEMINI.md files into Witself records. There is
@@ -333,12 +384,12 @@ Parser rules:
 - **provenance tag.** Every imported record is tagged
   `source=import:<file>` (overridable with `--source-label`). This keeps
   imported records distinguishable from `self`-authored ones, so the digest and
-  `memory.consolidate` can prioritize and never silently overwrite human intent
+  implemented client-authored curation can preserve and prioritize human intent
   (see [requirements.md](requirements.md#memory-self-management-and-hydration)).
-- **dedup / upsert.** Facts upsert by name; memories run the standard
-  near-duplicate check and return the existing `mem_…` id with a
-  `memory_duplicate` warning rather than creating a near-dup. Re-importing an
-  unchanged file is a no-op.
+- **Idempotent import.** Facts use their typed assertion semantics. Narrative
+  imports carry stable artifact/source identity and exact idempotency keys so an
+  unchanged re-import is a no-op. The backend does not infer near-duplicates or
+  merge prose.
 - **Witself-generated blocks round-trip.** Content inside `witself:begin`/`end`
   markers (from a prior `digest emit`) is matched back to its
   `witself:mem_…` / `witself:fact_…` ids and upserted in place, never
@@ -350,27 +401,28 @@ Parser rules:
 
 | Concern | CLAUDE.md / AGENTS.md | Witself |
 | --- | --- | --- |
-| Loaded automatically | Yes, by the harness at session start | No — must be called; `self show` / `session start` are the explicit hydration calls |
+| Loaded automatically | Yes, by the harness at session start | Hook-injected for Codex/Claude; guided MCP fallback for Grok and Cursor |
 | Authority | Static file, edited by hand | Live store, mutated through an audited, versioned lifecycle |
-| Recall | Whole file injected every time | Bounded digest + on-demand semantic `recall` |
+| Recall | Whole file injected every time | Bounded digest + deterministic lexical/structured `recall`; optional implemented client-supplied hybrid vectors |
 | Provenance | None (flat text) | First-class `source` on every fact and memory |
-| Multi-session state | None | `session start` / `session end` carry open goals and last progress |
+| Multi-session state | None | Salient portable state hydrates now; the composed `session start` / `session end` commands remain future |
 | Cross-agent / policy | None | Policy-gated cross-agent access ([access-policy.md](access-policy.md)) |
 
 These are complementary, not competing. The file ecosystem is the
 zero-configuration on-ramp; Witself is the durable, auditable, queryable store
-behind it. `digest emit` and `ingest` keep the two in sync: emit so a
+behind it. Target `digest emit` and `ingest` will keep the two in sync: emit so a
 file-only harness still gets Witself identity, ingest so an existing file project
 adopts Witself without rewriting its notes.
 
 ## Read-Only Mode
 
-In `witself mcp serve --read-only`, the inbound and mutating verbs are excluded
-(`remember`, `session.end`, `memory.consolidate`, `ingest`). The pull and outbound
-verbs remain available: `self.show`, `session.start`, `memory.recall`, and
-`digest.emit`. Hydration is always safe; teaching the agent to read its self
-never depends on write access. See [mcp-tools.md](mcp-tools.md) for the full
-read-only matrix.
+In `witself mcp serve --read-only`, every implemented mutation is removed. That
+includes memory capture, adjust, supersede, lifecycle changes, evidence
+resolution, and permanent deletion; fact writes and review mutations; and
+message send/read. Memory read, list, history, and recall, `self.show`, redacted
+fact reads, transcript reads, and mailbox listing remain available. Hydration is
+always safe; teaching the agent to read its self never depends on write access.
+See [mcp-tools.md](mcp-tools.md) for the full read-only matrix.
 
 ## Related Docs
 
@@ -382,8 +434,8 @@ read-only matrix.
   the only way sealed-plane values are surfaced.
 - [mcp-tools.md](mcp-tools.md) — the pinned server `instructions` string,
   trigger-laden tool descriptions, and the read-only matrix.
-- [cli-command-surface.md](cli-command-surface.md) — `self show`, `remember`,
-  `session start/end`, `memory consolidate`, `digest emit`, `ingest`,
-  `bootstrap-instructions`.
+- [cli-command-surface.md](cli-command-surface.md) — the implemented direct
+  memory lifecycle and the separately labeled target hydration, curation, and
+  file-bridge commands.
 - [requirements.md](requirements.md#memory-self-management-and-hydration) — the
   master decision log for self-management and hydration.

@@ -76,6 +76,52 @@ func TestCreateOperatorToken(t *testing.T) {
 	}
 }
 
+func TestCreateCuratorToken(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/agents/agent_1/curator-tokens" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var body struct {
+			AccessProfile string `json:"access_profile"`
+			DisplayName   string `json:"display_name"`
+			TTL           string `json:"ttl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.AccessProfile != "curator-preview" || body.DisplayName != "nightly curator" || body.TTL != "30m" {
+			t.Errorf("request body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "agent_token": "witself_agt_curator",
+			"token_id": "tok_curator", "agent_id": "agent_1", "agent_name": "memory-agent",
+			"access_profile": "curator-preview", "display_name": "nightly curator", "expires_at": expiresAt,
+		})
+	}))
+	defer srv.Close()
+
+	result, err := CreateCuratorToken(
+		context.Background(), srv.URL, "witself_opr_parent", "agent_1",
+		"curator-preview", "nightly curator", "30m",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentToken != "witself_agt_curator" || result.TokenID != "tok_curator" ||
+		result.AgentID != "agent_1" || result.AgentName != "memory-agent" ||
+		result.AccessProfile != "curator-preview" || result.DisplayName != "nightly curator" ||
+		!result.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("curator token result = %#v", result)
+	}
+}
+
 func TestOperatorLifecycleClient(t *testing.T) {
 	now := time.Date(2026, 7, 2, 1, 2, 3, 0, time.UTC).Format(time.RFC3339)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

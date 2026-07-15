@@ -3,6 +3,14 @@
 Status: draft. This document describes the separate `witself-server` binary for
 managed and self-hosted backend API deployments.
 
+Narrative-memory decision (accepted 2026-07-14): the server never invokes an LLM
+or embedding provider. PostgreSQL is the canonical store and provides the
+deterministic lexical recall baseline. Inference and any vector generation are
+client responsibilities. Migration `0032` implements portable client-supplied
+vector profiles and JSONB vector rows; this is data-plane input, not server
+model/provider configuration or a pgvector prerequisite. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 `witself-server` is a separate binary from `ws`.
@@ -26,16 +34,15 @@ and [key-hierarchy.md](key-hierarchy.md).
 - Run the backend API server for managed Witself Cloud and self-hosted
   deployments.
 - Keep server operation separate from agent/operator identity workflows.
-- Validate configuration before booting, including the Postgres/pgvector and
-  embedding-provider prerequisites for the open plane, and the KMS prerequisite
-  when the sealed plane is enabled.
+- Validate configuration before booting, including PostgreSQL for the open
+  plane and KMS when the sealed plane is enabled.
 - Run migrations explicitly and safely.
 - Provide liveness, readiness, and startup checks for containers and service
   managers.
 - Provide Prometheus-compatible metrics and Kubernetes-compatible health probes.
-- Never print memory content, fact values, message bodies or payloads, embedding
-  vectors, raw tokens, database passwords, provider credentials, embedding-provider
-  API keys, raw payment details, or raw wallet credentials. Never print sealed-plane
+- Never print memory content, fact values, message bodies or payloads,
+  client-supplied vectors, raw tokens, database passwords, provider credentials,
+  raw payment details, or raw wallet credentials. Never print sealed-plane
   material: secret values, TOTP seeds, plaintext private keys, per-realm KEKs,
   per-secret/field DEKs, or KMS credentials. There is no secret-reveal or TOTP-code
   surface on `witself-server`; reveal is reserved for the audited `ws` value
@@ -72,16 +79,12 @@ Expected server environment variables may include:
 | `WITSELF_SERVER_LISTEN` | Public API listen address. Default should be `:8080`. |
 | `WITSELF_HEALTH_LISTEN` | Dedicated health probe listen address. Default should be `:8081`. |
 | `WITSELF_PUBLIC_URL` | Public URL for generated callbacks and metadata. |
-| `WITSELF_DATABASE_URL` | Postgres connection string, supplied by the runtime or secret manager. The target database must have the pgvector extension available. |
+| `WITSELF_DATABASE_URL` | PostgreSQL connection string, supplied by the runtime or secret manager. PostgreSQL is the canonical memory store and supplies deterministic lexical recall. |
 | `WITSELF_BOOTSTRAP_TOKEN_FILE` | File containing a first-operator bootstrap token. Default deployment path: `/.witself/tokens/bootstrap.token`; cell deployments mount a cell-scoped path under `/.witself/tokens/<cell>/`. |
 | `WITSELF_BOOTSTRAP_TOKEN_TTL` | Lifetime applied when the server adopts the bootstrap token. Current deployment default: `24h`. |
 | `WITSELF_FACT_DELETION_ENABLED` | Enable permanent fact deletion routes and explicit recreation of a deleted fact. Default: `false`. Invalid booleans fail startup, and enabling requires compiled store schema 28 or newer. Existing deployments must first converge all writers on the schema-27 compatibility release, then converge schema 28 with this flag still false, and only then set it true; skipping the compatibility release is unsafe. Helm maps `features.factDeletion.enabled` to this variable. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
-| `WITSELF_EMBEDDINGS_PROVIDER` | Embedding provider name: `voyage` (default), `openai`, or `local-dev`. |
-| `WITSELF_EMBEDDINGS_MODEL` | Embedding model identifier for the active provider. |
-| `WITSELF_EMBEDDINGS_API_KEY_FILE` | Path to a file holding the embedding-provider API key. Preferred over passing the key inline. |
-| `WITSELF_EMBEDDINGS_API_KEY` | Embedding-provider API key supplied directly. Least-safe option; prefer the `_FILE` form or a secret mount. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |
 | `WITSELF_KMS_PROVIDER` | KMS provider for sealed-plane envelope encryption: `aws-kms` (default), `gcp-kms`, `azure-key-vault`, or `local-dev`. Required when the sealed plane is enabled; ignored otherwise. |
 | `WITSELF_KMS_KEY_ID` | KMS customer master key (CMK) identifier that roots the per-realm KEK / per-secret-and-field DEK hierarchy. Required when the sealed plane is enabled. |
@@ -91,15 +94,18 @@ Expected server environment variables may include:
 | `WITSELF_METRICS_PATH` | Metrics path. Default: `/metrics`. |
 | `WITSELF_LOG_LEVEL` | Log level. |
 
-Embedding-provider credentials should be supplied through a file or secret mount,
-not inline, wherever the deployment substrate supports it. Config validation and
-logs must redact embedding-provider keys, database passwords, KMS credentials,
-and all other sensitive values.
+Config validation and logs must redact database passwords, KMS credentials, and
+all other sensitive values. There are no backend model or embedding-provider
+credentials to configure.
 
 Witself serves two planes with two distinct production dependency sets. The OPEN
-plane (memories, facts) is backed by ordinary data-at-rest; a pgvector-capable
-Postgres is the hard dependency that gates semantic recall, and the embedding
-provider is degradable. The SEALED plane (secrets, TOTP) is backed by KMS
+plane (memories, facts) is backed by PostgreSQL. Its required recall path is
+deterministic lexical/tag/kind/time ranking over canonical PostgreSQL rows; no
+backend inference or vector service gates availability. The optional vector
+path accepts vectors authored by an authenticated client under an immutable
+profile and performs bounded deterministic hybrid ranking over portable JSONB
+rows. Missing vectors preserve the lexical baseline. The SEALED
+plane (secrets, TOTP) is backed by KMS
 envelope encryption: a CMK roots a per-realm KEK, which wraps per-secret and
 per-field DEKs (XChaCha20-Poly1305 / AES-256-GCM). KMS is therefore a required
 dependency when, and only when, the sealed plane is enabled — it is not required
@@ -141,7 +147,7 @@ Flags:
 | `--listen ADDRESS` | Public API listen address. Overrides config. |
 | `--health-listen ADDRESS` | Dedicated health probe listen address. Overrides config. |
 | `--public-url URL` | Public URL. Overrides config. |
-| `--dev` | Run with the local development adapter and the `local-dev` embedding provider. Not production. |
+| `--dev` | Run with the local development adapter and deterministic lexical recall. Not production. |
 | `--data-dir PATH` | Development data directory for `--dev`. |
 | `--migrate` | Run pending migrations before serving when safe. |
 | `--read-only` | Start in read-only maintenance mode when supported. |
@@ -150,16 +156,17 @@ Flags:
 | `--metrics-path PATH` | Metrics path. Default: `/metrics`. |
 | `--disable-metrics` | Convenience alias for `--metrics-enabled=false`. |
 
-`--dev` should use the local adapter, select the `local-dev` embedding provider
-so semantic recall works offline, and must clearly label itself as
-development-only in logs and health output.
+`--dev` should use the local adapter and the same deterministic lexical recall
+contract as deployed servers. It must clearly label itself as development-only
+in logs and health output and must not start an in-process model or embedder.
 
 Every server mode should expose `/v1/capabilities` so the public CLI can
 determine whether it is talking to a managed, self-hosted, or local backend,
-which features are supported, and the active embedding provider, model, and
-vector dimensionality. When the embedding provider is unavailable or disabled,
-the capability contract should report that semantic recall is degraded to
-keyword/tag/kind/time ranking rather than failing silently; see
+which features are supported, and the active retrieval mode. The current
+contract reports the deterministic PostgreSQL lexical baseline and implemented
+client-vector profile support independently. It does not advertise a backend
+provider or model; profile metadata describes caller-authored vectors, not a
+server inference dependency. See
 [memory-model.md](memory-model.md).
 
 The API listener, health listener, and metrics listener should be separate by
@@ -199,11 +206,12 @@ Migration commands should acquire a migration lock where the storage adapter
 supports it. The Postgres adapter should use advisory locking where practical so
 that concurrent rollouts and Helm migration Jobs do not race.
 
-Migrations must create and verify the pgvector extension and the vector columns
-and indexes that back open-plane semantic recall. `migrate status` should surface
-whether the required extension and vector indexes are present. Changing the
-embedding model or vector dimensionality is a separate, audited re-embedding
-maintenance operation, not an automatic migration side effect; see
+Migrations must create and verify the PostgreSQL tables, generated search
+documents, and lexical indexes that back open-plane recall. `migrate status`
+should surface whether that canonical schema is current. Migration `0032` adds
+`memory_vector_profiles` and `memory_vectors` as portable JSONB data without
+installing pgvector. It does not invoke a model, generate vectors, or perform a
+backend re-embedding side effect. See
 [storage.md](storage.md) and [backup-and-recovery.md](backup-and-recovery.md).
 
 Migrations must also cover the sealed-plane tables when the sealed plane is in
@@ -233,15 +241,12 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--check-connections` | Check Postgres (including pgvector availability), object store, embedding-provider, and — when the sealed plane is enabled — KMS connectivity. |
+| `--check-connections` | Check PostgreSQL, object storage when configured, and KMS connectivity when the sealed plane is enabled. |
 | `--strict` | Treat warnings as errors. |
 
-`--check-connections` should confirm that the configured Postgres has the
-pgvector extension available and that the configured embedding provider can be
-reached and returns the expected vector dimensionality. A missing or
-unreachable embedding provider should be reported as a degraded-recall warning,
-not a hard failure, because plain `read`/`list` by id and metadata do not depend
-on the embedding provider. When the sealed plane is enabled, `--check-connections`
+`--check-connections` should confirm that PostgreSQL is reachable and that the
+required relational and lexical-memory schema is present. It must not contact a
+model or embedding provider. When the sealed plane is enabled, `--check-connections`
 must also confirm that the configured KMS provider and CMK are reachable and
 usable for wrap/unwrap; an unreachable KMS is a hard failure for the sealed plane
 because secrets cannot be sealed or revealed without it. When the sealed plane is
@@ -261,12 +266,13 @@ Flags:
 |---|---|
 | `--show-source` | Show whether each value came from file, env, or default. |
 
-`config print` must never print embedding-provider API keys, database passwords,
-KMS credentials, raw tokens, provider secrets, secret values, TOTP seeds, KEKs,
-DEKs, or any memory content or fact values. The active embedding provider name,
-model, and vector dimensionality are safe to print and should be shown. The KMS
-provider name, the configured CMK key identifier, and whether the sealed plane is
-enabled are also safe to print and should be shown when configured.
+`config print` must never print database passwords, KMS credentials, raw tokens,
+provider secrets, secret values, TOTP seeds, KEKs, DEKs, or any memory content or
+fact values. There is no backend model or embedding-provider setting to print.
+The retrieval mode and whether the client-vector capability is supported
+are capabilities, not credentials. The KMS provider name, configured CMK key
+identifier, and whether the sealed plane is enabled are safe to print and should
+be shown when configured.
 
 ## `witself-server bootstrap`
 
@@ -320,16 +326,14 @@ Flags:
 
 Readiness should depend on Postgres connectivity (the system of record for
 memories, facts, policies, groups, messages, secrets, TOTP, and audit).
-Embedding-provider reachability should be reported as a recall-degradation signal
-in readiness detail rather than failing the readiness probe, so that a transient
-provider outage does not take the service offline for plain reads and metadata
-listing. When the sealed plane is enabled, readiness should also gate on KMS
+The deterministic lexical recall path has no model/provider health dependency.
+When the sealed plane is enabled, readiness should also gate on KMS
 reachability, because the sealed plane cannot seal or reveal secrets without it;
 when the sealed plane is disabled, KMS is not part of the readiness gate.
 
 Healthcheck output must not include memory content, fact values, message bodies,
-embedding vectors, raw tokens, secret values, TOTP seeds, key material, or full
-sensitive config.
+client-supplied vectors, raw tokens, secret values, TOTP seeds, key material, or
+full sensitive config.
 
 ## Non-Goals
 

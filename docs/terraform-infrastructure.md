@@ -4,6 +4,11 @@ Status: draft. This document describes where Terraform should live in the
 Witself repository and what it should provision for managed and self-hosted
 deployments.
 
+Narrative-memory amendment (accepted 2026-07-14): infrastructure provisions no
+memory inference or embedding-provider service/credential. The deterministic
+PostgreSQL-backed target is specified by
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 Witself should include public Terraform under `infra/terraform` for AWS, GCP,
@@ -11,9 +16,9 @@ and Azure infrastructure.
 
 Terraform owns cloud substrate. Helm owns application deployment.
 
-Terraform should provision Kubernetes, the PostgreSQL database with the
-`pgvector` extension, object/blob storage, workload identity, networking, KMS for
-the sealed plane, and the Kubernetes integration points that the Helm chart
+Terraform should provision Kubernetes, ordinary PostgreSQL, object/blob
+storage, workload identity, networking, KMS for the sealed plane, and the
+Kubernetes integration points that the Helm chart
 needs. The Helm chart should deploy `witself-server` onto that substrate and wire
 probes, metrics, and optional Prometheus Operator resources.
 
@@ -64,7 +69,7 @@ The `modules/` tree should hold reusable provider-specific modules. The
 show Helm values generated from, or aligned with, Terraform outputs.
 
 Actual Terraform state, cloud credentials, private account IDs, customer
-identifiers, production credentials, embedding-provider API keys, and
+identifiers, production credentials, and
 environment-specific `.tfvars` files must not be committed.
 
 ## AWS Target
@@ -72,8 +77,9 @@ environment-specific `.tfvars` files must not be committed.
 The AWS module is the first implementation target. It should support:
 
 - EKS cluster or integration with an existing EKS cluster.
-- RDS/Aurora PostgreSQL with the `pgvector` extension enabled, because Witself
-  stores memory embedding vectors in Postgres and semantic recall depends on it.
+- RDS/Aurora PostgreSQL with full-text and JSONB support. Migration `0032`
+  stores optional client-supplied vectors as portable JSONB, so no extension is
+  required for lexical or deterministic hybrid recall.
 - S3 bucket for object/blob storage when needed (large exports, diagnostic
   bundles, support attachments, backup artifacts).
 - IAM roles for service accounts (IRSA) for `witself-server` workload identity.
@@ -92,20 +98,14 @@ The AWS module is the first implementation target. It should support:
   secret reference, bucket name, public URL, and the KMS provider and key ID
   for the sealed plane.
 
-### pgvector enablement
+### Optional ANN projection
 
-The AWS module must make `pgvector` a first-class concern, not an afterthought:
-
-- Use an RDS/Aurora PostgreSQL engine version that ships `pgvector`.
-- Add `vector` to `shared_preload_libraries` where the engine requires it via a
-  managed parameter group.
-- Run `CREATE EXTENSION IF NOT EXISTS vector;` as a provisioning step (a
-  bootstrap SQL run, an init Job, or `witself-server migrate` on first start).
-- Surface the vector extension state and dimensionality expectations as outputs
-  so the Helm chart and capability contract can confirm semantic recall is
-  available. `pgvector` is a hard prerequisite of the backend; its absence is a
-  deployment error, not a recall-degrade trigger. Recall degrades only when the
-  embedding provider is unavailable.
+No vector extension is part of the current infrastructure contract. The same
+migration `0032` and JSONB hybrid-recall behavior runs on AWS, GCP, Azure, and
+ordinary self-hosted PostgreSQL. A future pgvector/ANN projection may be offered
+as an explicit optional accelerator. If added, Terraform may provision extension
+support and report its state, but the chart, readiness, capabilities, archive,
+and correctness tests must continue to work without it.
 
 ### KMS module (sealed plane)
 
@@ -132,8 +132,8 @@ of trust. It should:
   `witself-server` (see [helm-chart.md](helm-chart.md)).
 
 The KMS module is required only when the sealed plane is enabled. An
-open-plane-only deployment (memories and facts) can omit it; `pgvector` remains a
-hard gate for the open plane regardless. When the sealed plane is on, readiness
+open-plane-only deployment (memories and facts) can omit it; ordinary PostgreSQL
+is the open-plane gate. When the sealed plane is on, readiness
 gates on KMS reachability so a misconfigured key fails the deployment rather than
 silently disabling reveal. Losing the CMK crypto-shreds all secret values it
 roots and is unrecoverable; it does not affect open-plane data. KMS material
@@ -147,7 +147,8 @@ and [storage.md](storage.md).
 The GCP module is a planned follow-up target. It should eventually support:
 
 - GKE cluster or integration with an existing GKE cluster.
-- Cloud SQL for PostgreSQL with the `pgvector` extension enabled.
+- Cloud SQL for PostgreSQL with full-text and JSONB support; no vector extension
+  is required.
 - Cloud Storage bucket for object/blob storage when needed.
 - Workload Identity for `witself-server`.
 - A Cloud KMS key (CMK) for the sealed plane when secrets and TOTP are enabled,
@@ -165,7 +166,8 @@ The GCP module is a planned follow-up target. It should eventually support:
 The Azure module is a planned follow-up target. It should eventually support:
 
 - AKS cluster or integration with an existing AKS cluster.
-- Azure Database for PostgreSQL with the `pgvector` extension enabled.
+- Azure Database for PostgreSQL with full-text and JSONB support; no vector
+  extension is required.
 - Azure Blob Storage for object/blob storage when needed.
 - Azure Workload Identity for `witself-server`.
 - An Azure Key Vault key (CMK) for the sealed plane when secrets and TOTP are
@@ -221,7 +223,7 @@ Witself's go-forward topology is a fleet of independent cells under a thin globa
 control plane (see [deployment-cells.md](deployment-cells.md)). Terraform is how a
 cell is built. A **cell** is one complete, isolated Witself stack in a single cloud
 account/region: one instantiation of a `stacks/` composition over the existing
-per-provider `modules/` — `witself-server`, Postgres + `pgvector`, the sealed-plane
+per-provider `modules/` — `witself-server`, ordinary PostgreSQL, the sealed-plane
 KMS rooted in that cell's cloud, and object/blob storage. The repository layout above
 does not change for cells; a cell is one stack instance, and the fleet is many such
 instances stood up across multiple accounts and regions.
@@ -267,8 +269,7 @@ Example output categories:
 - Kubernetes namespace.
 - Service account name and annotations.
 - Database connection secret name and key.
-- Confirmation that the database has the `pgvector` extension and the expected
-  vector dimensionality.
+- Confirmation that PostgreSQL meets the migration/full-text/JSONB baseline.
 - Object/blob storage bucket/container.
 - Public URL or ingress host.
 - Required cloud identity metadata.
@@ -278,8 +279,8 @@ Example output categories:
   integration references when the platform provides them.
 
 Terraform should not render raw credential values into Helm values files. It
-should create or reference database credentials, embedding-provider API keys,
-and any other secrets through deployment-native mechanisms such as:
+should create or reference database, KMS, and other infrastructure credentials
+through deployment-native mechanisms such as:
 
 - Existing Kubernetes Secrets.
 - External Secrets Operator.
@@ -287,9 +288,10 @@ and any other secrets through deployment-native mechanisms such as:
 - Cloud workload identity.
 - Cloud secret managers.
 
-The embedding provider (`voyage` by default, `openai`, or `local-dev`) is a
-configurable production dependency; its API key is a deployment-native secret,
-never a Terraform-rendered Helm value.
+There is no backend embedding provider or model API key. Clients may submit
+vectors under immutable profiles; Terraform provisions only ordinary PostgreSQL
+storage for the canonical JSONB rows. Any future optional ANN projection must
+remain an accelerator rather than a production dependency.
 
 ## State And Secret Policy
 

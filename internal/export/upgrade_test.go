@@ -98,6 +98,73 @@ func TestSchema27FactDeletionActivationPreservesRows(t *testing.T) {
 	}
 }
 
+func TestSchema28NarrativeMemoryUpgradePreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(28)
+	if upgrade == nil {
+		t.Fatal("schema 28 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":            "transcript_1",
+		"account_id":    "acc_1",
+		"next_sequence": json.Number("9007199254740993"),
+	}
+	want := map[string]any{
+		"id":            "transcript_1",
+		"account_id":    "acc_1",
+		"next_sequence": json.Number("9007199254740993"),
+	}
+	got, err := upgrade("transcript_conversations", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 28 identity upgrade changed row: got %#v, want %#v", got, want)
+	}
+}
+
+func TestSchema29MemoryCurationUpgradeAddsExistingTableDefaults(t *testing.T) {
+	upgrade := UpgraderFor(29)
+	if upgrade == nil {
+		t.Fatal("schema 29 curation upgrader is not registered")
+	}
+	candidate, err := upgrade("fact_candidates", map[string]any{"id": "fcand_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"curation_run_id", "curation_action_id"} {
+		if candidate[field] != nil {
+			t.Fatalf("%s = %#v, want nil", field, candidate[field])
+		}
+	}
+	for _, field := range []string{"withdrawal_reason", "withdrawal_idempotency_key", "withdrawal_request_hash"} {
+		if candidate[field] != "" {
+			t.Fatalf("%s = %#v, want empty", field, candidate[field])
+		}
+	}
+	relation, err := upgrade("memory_relations", map[string]any{"id": "mrel_1"})
+	if err != nil || relation["reverted_by_action_id"] != nil {
+		t.Fatalf("relation defaults = %#v / %v", relation, err)
+	}
+}
+
+func TestSchema30TokenProfileUpgradeDefaultsToFull(t *testing.T) {
+	upgrade := UpgraderFor(30)
+	if upgrade == nil {
+		t.Fatal("schema 30 token-profile upgrader is not registered")
+	}
+	token, err := upgrade("tokens", map[string]any{"id": "tok_1", "kind": "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token["access_profile"] != "full" {
+		t.Fatalf("access_profile = %#v, want full", token["access_profile"])
+	}
+	other, err := upgrade("agents", map[string]any{"id": "agent_1"})
+	if err != nil || len(other) != 1 || other["id"] != "agent_1" {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

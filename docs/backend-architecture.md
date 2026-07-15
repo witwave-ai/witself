@@ -1,12 +1,19 @@
 # Witself Backend Architecture
 
 Status: draft. This document captures the public backend and self-hosting
-architecture direction before implementation. Last reviewed 2026-06-26.
+architecture direction. Last reviewed 2026-07-14.
+
+Inference-boundary amendment (accepted 2026-07-14): under
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md), the
+backend stores and deterministically searches/applies client-authored memory
+data and optional client-supplied vectors. It never calls an LLM or embedding
+model. Later server-provider language is superseded; PostgreSQL and the public
+backend boundary remain accepted.
 
 ## Decision
 
 Witself should keep the backend API server in the public `witself` repository.
-The code that stores, embeds, recalls, authorizes, audits, and serves identity
+The code that stores, indexes, recalls, authorizes, audits, and serves identity
 material should be inspectable alongside the CLI and MCP adapter.
 
 The managed Witself Cloud service is the default commercial deployment, but the
@@ -23,14 +30,14 @@ human, agent, and MCP workflows.
 
 | Mode | Purpose | Storage | Production posture |
 |---|---|---|---|
-| Managed Witself Cloud | Default paid service operated by Witwave | Cloud production adapters (Postgres + pgvector) | Production |
-| Self-hosted Witself Server | Customer-operated backend in their own cloud | Production self-host adapters (Postgres + pgvector) | Production once supported |
-| Local development backend | Tests, demos, offline prototyping, early CLI work | Local file adapter with the `local-dev` embedder | Development only |
+| Managed Witself Cloud | Default paid service operated by Witwave | PostgreSQL with full text and optional migration-0032 JSONB vectors | Production |
+| Self-hosted Witself Server | Customer-operated backend in their own cloud | PostgreSQL with full text and optional migration-0032 JSONB vectors | Production once supported |
+| Local development backend | Tests, demos, and early CLI work | Local PostgreSQL using the same schema and deterministic retrieval path | Development only |
 
-The local backend should be a real adapter behind the same service boundary, but
-it is not the production model. It uses the `local-dev` embedding provider so
-semantic recall can be exercised offline; see
-[memory-model.md](memory-model.md).
+The local backend uses the same server and PostgreSQL contract as production.
+It does not run or call a local model. Full-text recall works without optional
+vectors, so development does not need model credentials or model egress; see
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Repository Shape
 
@@ -44,12 +51,11 @@ internal/api/                 # HTTP handlers and request/response adapters
 internal/auth/                # Token validation and principal resolution
 internal/policy/              # Cross-agent policy engine and security groups
 internal/messaging/           # Mailbox/queue, delivery, ordering, ack state
-internal/embeddings/          # Embedding-provider abstraction and recall ranking
+internal/retrieval/           # Deterministic FTS, filters, and optional vector math
 internal/audit/               # Audit event generation and sinks
 internal/observability/       # Metrics, logs, request IDs, and health probes
 internal/store/               # Storage interfaces
-internal/store/local/         # Local development file adapter
-internal/store/postgres/      # Production relational + pgvector adapter
+internal/store/postgres/      # Authoritative relational store; FTS + JSONB vectors
 internal/store/blob/          # Object/blob storage adapter when needed
 internal/server/              # Server config, lifecycle, health, migrations
 images/witself/               # CLI/MCP container image
@@ -73,18 +79,15 @@ Witself should have these public entrypoints:
 - `witself-server`: separate backend API server for managed and self-hosted
   deployments.
 
-The CLI can operate in two broad ways:
-
-- Local mode: use the local development adapter directly.
-- Remote mode: call a managed or self-hosted `witself-server` endpoint through
-  the same public API contract.
+The CLI calls a managed, self-hosted, or locally running `witself-server`
+endpoint through the same public API contract. Local development changes the
+deployment profile, not the authoritative data model or inference boundary.
 
 Remote mode should use the versioned HTTP API contract described in
 [api-contract.md](api-contract.md), with the route style in
 [api-routes.md](api-routes.md). Every backend should expose capability discovery
-so clients can distinguish managed, self-hosted, and local behavior — including
-the active embedding provider and whether semantic recall is degraded — without
-guessing.
+so clients can distinguish managed, self-hosted, and local behavior, full-text
+recall availability, and optional vector-profile coverage without guessing.
 
 ## Interface Invariant
 
@@ -122,8 +125,9 @@ in shared services that own:
 - Memory behavior: add, adjust, read, recall, list, forget, restore, delete, and
   versioned edit history.
 - Fact behavior: set, get, list, delete, and atomic primary promotion.
-- Semantic recall: embedding generation and hybrid ranking (see the
-  [Embeddings Boundary](#embeddings-boundary)).
+- Deterministic recall: PostgreSQL full-text and structured ranking, plus
+  optional similarity math over compatible client-supplied vectors (see the
+  [Vector Boundary](#vector-boundary)).
 - The cross-agent policy engine and security-group evaluation (see the
   [Authorization Boundary](#authorization-boundary)).
 - Inter-agent messaging: send, deliver, list, read, and ack (see the
@@ -150,7 +154,7 @@ Required storage responsibilities:
 - Token hashes and token metadata.
 - Memory records, including content, kind, tags, source, salience, links,
   `sensitive` markers, timestamps, and versioned edit history.
-- Memory embedding vectors.
+- Optional version/profile-keyed memory vectors supplied by clients.
 - Fact records, including name, value, `primary` flag, `sensitive` flag, format
   hint, source, timestamps, and edit history.
 - Security groups and group membership.
@@ -160,75 +164,64 @@ Required storage responsibilities:
 - Usage counters and rate-limit state.
 - Idempotency records.
 
-The production storage adapter starts with Postgres as the system of record, with
-the pgvector extension for embedding vectors. Memory content and fact values are
-ordinary identity data living in normal columns under data-at-rest protection;
+The production storage adapter starts with PostgreSQL as the system of record.
+Full-text search is universal; migration `0032` stores optional client-supplied
+vector profiles and arrays in ordinary JSONB without an extension. Memory content and
+fact values are ordinary identity data living in normal columns under data-at-rest protection;
 there is no requirement to keep them out of the database (unlike Witpass secrets).
 Large exports, diagnostic bundles, support attachments, and backup artifacts may
 use an object/blob adapter when needed.
 
-The local development adapter should use a serialized file store and exercise the
-same storage interface, including the vector path through the `local-dev`
-embedder. It should not become a separate data model. The storage and migration
-model is tracked in [storage.md](storage.md).
+Local development should use a local PostgreSQL instance and the same
+migrations. A local transcript outbox may buffer delivery, but it is not a
+second live memory source. The storage and migration model is tracked in
+[storage.md](storage.md).
 
 ## Data-At-Rest Note
 
-Witself does not treat encryption as a product pillar. It stores identity data,
-protected for integrity and authenticity, not secret material.
+The two storage planes keep distinct, explicit postures:
 
-- Use ordinary data-at-rest encryption (managed RDS/disk, or self-host-owned disk
-  encryption). There is no KMS/envelope/client-side-decrypt pillar, no reveal
-  ceremony, and no end-to-end secret model.
-- KMS is **optional and demoted**, not a core dependency. Storage decisions live
-  in [storage.md](storage.md).
-- Optional field-level encryption for `sensitive` fact values is a capability an
-  operator can enable, not the default behavior.
-- `sensitive` is a PII/redaction display flag, not an encryption boundary. There
-  is no value-size split between sensitive and non-sensitive values.
+- Open-plane memories and facts use ordinary PostgreSQL columns under managed
+  disk/database encryption. Their `sensitive` flag controls disclosure and
+  redaction; it is not an encrypted-blob or reveal boundary.
+- When the sealed secret/TOTP plane is enabled, KMS-backed envelope encryption,
+  key rotation, reveal gates, and audit are required. KMS availability gates
+  sealed value operations but never open-plane memory capture or recall.
+- Model inference and sealed-plane cryptography are unrelated boundaries. The
+  server may legitimately hold KMS authority for sealed values while holding no
+  LLM or embedding-model credentials.
 
-The authorization and audit scaffolding once associated with a Witpass
-encryption model is reused by the policy engine in
-[access-policy.md](access-policy.md).
+Storage and key-custody details live in [storage.md](storage.md),
+[encryption-model.md](encryption-model.md), and
+[key-hierarchy.md](key-hierarchy.md).
 
-## Embeddings Boundary
+## Vector Boundary
 
-Semantic recall is the core Witself differentiator, so the backend treats the
-embedding provider as a first-class, capability-gated boundary (mirroring the way
-Witpass abstracted KMS). The recall and embedding model is tracked in
-[memory-model.md](memory-model.md).
+PostgreSQL full-text search, structured time/metadata filters, salience, and
+recency form the universal recall path. No model or vector provider is required
+for capture, storage, recall, export/import, or recovery.
 
-Provider abstraction:
+Optional vectors are a derived client-authored index:
 
-- Providers are `voyage` (default; the Anthropic-recommended embedding family),
-  `openai`, and `local-dev`.
-- Provider and model are selectable via `WITSELF_EMBEDDINGS_PROVIDER` and
-  `WITSELF_EMBEDDINGS_MODEL`, behind one interface in `internal/embeddings`.
-- `local-dev` is a deterministic or low-cost local embedder for tests, demos, and
-  `witself-server serve --dev`. It is not a production provider.
+- An authorized client selects its own model and submits both memory and query
+  vectors under an immutable profile describing model/recipe, dimensions,
+  distance metric, and normalization.
+- The backend validates authorization, finite values, profile compatibility,
+  dimensions, version, and content hash. It stores canonical JSONB vectors in
+  PostgreSQL and performs bounded deterministic similarity math; it never generates,
+  interprets, or repairs a vector.
+- Missing, stale, or incompatible vectors fall back to the fully functional
+  full-text path. Capabilities and recall receipts report profile availability
+  and coverage, not a server-side provider health state.
+- Regeneration after a profile change is a client responsibility. The server
+  may rebuild ordinary PostgreSQL indexes, but it never runs re-embedding.
 
-Storage and recall:
-
-- Each memory carries an embedding vector computed at write time. Vectors are
-  stored in Postgres via pgvector. Vector storage size is a metered dimension; see
-  [billing-and-limits.md](billing-and-limits.md).
-- `memory recall` performs vector similarity search blended with keyword, tag,
-  kind, time, and salience signals. Plain `read`/`get` by id and `list` by
-  metadata never require the provider.
-
-Degradation and capability reporting:
-
-- If the provider is unavailable or disabled, recall degrades deterministically
-  to keyword/tag/kind/time ranking, and the capabilities contract reports that
-  semantic recall is degraded, plus the active provider, model, and vector
-  dimensionality. Recall never silently returns unranked or empty results without
-  surfacing the degraded state.
-- Re-embedding on a provider/model change is an explicit, audited maintenance
-  operation run through `witself-server`, not an automatic side effect; see
-  [server-command-surface.md](server-command-surface.md).
-
-The backend must never put embedding vectors, memory content, or fact values in
-logs, audit metadata, analytics values, or support-ticket content.
+Consequently `witself-server` has no embedding-provider configuration, API key,
+model secret, outbound model egress, provider health probe, or inference cost.
+The backend must never put vectors, memory content, or fact values in logs,
+audit metadata, analytics values, or support-ticket content. The complete
+contract lives in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Authorization Boundary
 
@@ -353,7 +346,8 @@ database URLs, provider credentials, raw request paths, query strings, request
 bodies, or arbitrary user input.
 
 Metrics should cover HTTP traffic, authentication, token operations, memory
-operations, recall and embedding operations, fact operations, policy decisions
+operations, deterministic recall, optional vector validation/search, curation
+queues/plans, fact operations, policy decisions
 (allow/deny), cross-agent accesses, group operations, message send/deliver/read,
 audit events, usage metering, limit decisions, storage, vector storage,
 migrations, and runtime health. Metric labels should be low cardinality and use
@@ -366,10 +360,11 @@ Managed, self-hosted, and local development backends must expose a capabilities
 contract through `/v1/capabilities` so the CLI can show which features are
 supported, which are unavailable, and why, before running an operation.
 
-- The contract reports the deployment mode, the active embedding provider and
-  model, vector dimensionality, whether semantic recall is degraded, and which
-  managed-service surfaces (billing, payment, support, operator administration)
-  are available.
+- The contract reports the deployment mode, full-text recall availability,
+  optional vector-profile support and coverage, curation capabilities, and
+  which managed-service surfaces (billing, payment, support, operator
+  administration) are available. It never reports a backend embedding provider
+  because none exists.
 - Unsupported commands fail predictably with `unsupported_operation` and
   capability context, not with vague provider, route, or config errors.
 - Remote setup calls capability discovery before attempting account, realm,
@@ -383,7 +378,8 @@ a cell runs the same `witself-server` and the same core service described above.
 The full model is tracked in [deployment-cells.md](deployment-cells.md).
 
 A cell is one complete, independent Witself stack — `witself-server` plus its
-Postgres/pgvector, optional KMS, and blob storage — running in a single cloud
+PostgreSQL, optional sealed-plane KMS, and blob storage —
+running in a single cloud
 account/region (an AWS account, a second AWS account, a GCP project, an Azure
 subscription). Cells are isolated and each cell is authoritative for its own
 tenants; a cell outage affects only that cell's tenants, which contains blast
@@ -507,15 +503,18 @@ or query strings. The full contract is tracked in
 A pragmatic first backend path:
 
 1. Define core domain interfaces and JSON contract structs.
-2. Implement the local file storage adapter, including the vector path through the
-   `local-dev` embedder.
-3. Build CLI commands against the core service and local adapter.
-4. Add a minimal `witself-server serve --dev` path using the local adapter.
+2. Implement PostgreSQL storage and migrations as the sole authoritative data
+   path, including universal full-text indexes.
+3. Build CLI and MCP commands against the same service contract.
+4. Add a minimal `witself-server serve --dev` path using local PostgreSQL.
 5. Add `/v1/version`, `/livez`, `/readyz`,
    `/startupz`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
 6. Add HTTP API handlers over the same core service.
-7. Add Postgres-backed production storage with pgvector for embeddings.
-8. Wire the embedding-provider abstraction with `voyage` as default.
+7. Add client-authored narrative capture, lifecycle, deterministic recall, and
+   archive round trips.
+8. Add optional client-vector profiles, portable JSONB rows, and bounded hybrid
+   ranking after the full-text path is production-ready. (Implemented in
+   migration `0032`; pgvector/ANN remains only a future accelerator.)
 9. Add Goose migrations, server config validation, health checks, metrics, and
    container image.
 10. Add the `charts/witself-server` Helm chart as the first self-hosting artifact.
@@ -532,9 +531,11 @@ full sequence is tracked in [implementation-plan.md](implementation-plan.md).
   service.
 - Do not maintain different domain logic for managed and self-hosted
   deployments.
-- Do not let the local development backend define production behavior or the
-  production embedding path.
-- Do not treat encryption, KMS, or a reveal ceremony as core backend pillars.
+- Do not let local development define a second storage or inference path.
+- Do not add backend model inference, embedding-provider credentials, or model
+  egress. Client inference is the only semantic-authoring boundary.
+- Do not make sealed-plane KMS or reveal availability a dependency of the
+  open-plane memory path.
 - Do not require a web dashboard for ordinary account, realm, billing, support,
   or agent administration.
 

@@ -140,6 +140,25 @@ func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	}
 }
 
+func TestPrincipalAdaptersPreserveCredentialAuthority(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
+	stored := store.Principal{
+		Kind: store.PrincipalAgent, ID: "agent_1", TokenID: "tok_curator",
+		AccessProfile: store.AccessProfileCuratorPreview, TokenExpiresAt: &expiresAt,
+		AccountID: "acc_1", RealmID: "realm_1", AgentName: "memory-agent",
+		RealmName: "default", AccountStatus: "active",
+	}
+	domain := toServerPrincipal(stored)
+	if domain.TokenID != stored.TokenID || domain.AccessProfile != stored.AccessProfile ||
+		domain.TokenExpiresAt == nil || !domain.TokenExpiresAt.Equal(expiresAt) {
+		t.Fatalf("store to server principal lost credential fields: %#v", domain)
+	}
+	roundTrip := toStorePrincipal(domain)
+	if roundTrip != stored {
+		t.Fatalf("principal round trip = %#v, want %#v", roundTrip, stored)
+	}
+}
+
 // TestMapSupportErrorNoDoublePrefix pins the fix for the sentinel
 // double-print: when store.ErrX and server.ErrX have the same
 // Error() text, the mapper must NOT produce "invalid ...: invalid

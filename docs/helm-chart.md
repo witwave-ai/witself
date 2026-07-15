@@ -3,6 +3,12 @@
 Status: draft. This document describes the first self-hosting deployment
 artifact for Witself.
 
+Narrative-memory decision (accepted 2026-07-14): the chart does not configure a
+backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
+required deterministic lexical baseline. Optional client-supplied vector
+profiles and portable JSONB vector rows are implemented under
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+
 ## Decision
 
 Witself should go straight to Helm for the first self-hosted deployment
@@ -18,11 +24,10 @@ application deployment onto that infrastructure.
 Witself reuses the shared platform spine for deployment. The chart skeleton
 (Deployment, Service, ServiceAccount, ConfigMap, Ingress, NetworkPolicy,
 migration Job, monitors, autoscaling, disruption budget) is intentionally the
-same. The payload spans both planes: the chart adds an embedding provider for
-the open plane (memories + facts), Postgres is required to carry the pgvector
-extension, and KMS provider config returns for the sealed plane (secrets +
-TOTP). KMS values are only needed when the sealed plane is enabled; an
-open-plane-only deployment requires no KMS configuration. See
+same. PostgreSQL carries canonical open-plane data (memories + facts) and its
+deterministic lexical indexes. KMS provider config is present only for the
+sealed plane (secrets + TOTP). There is no server-side model/provider block or
+AI egress rule. An open-plane-only deployment requires no KMS configuration. See
 [encryption-model.md](encryption-model.md) and
 [key-hierarchy.md](key-hierarchy.md).
 
@@ -60,7 +65,8 @@ agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
 - Avoid storing raw credentials in chart defaults or recommended values files.
 - Support deployment-native identity and secret references.
 - Make migrations controlled and reviewable.
-- Make embedding-provider configuration explicit and capability-gated.
+- Keep model execution, vector generation, and their credentials out of the
+  backend chart.
 - Make KMS provider configuration explicit and required only when the sealed
   plane is enabled.
 - Render Kubernetes resources that security teams can inspect.
@@ -70,8 +76,8 @@ agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
 
 Production chart defaults should assume:
 
-- External Postgres with the pgvector extension available.
-- An external embedding provider (`voyage` by default, or `openai`).
+- External PostgreSQL with the features required by the canonical relational
+  and lexical-memory schema.
 - External KMS-compatible key management when the sealed plane is enabled
   (`aws-kms`, `gcp-kms`, `azure-key-vault`, or `local-dev` for tests/demos).
 - Optional external object/blob storage for exports, attachments, and backups.
@@ -88,35 +94,30 @@ Production chart defaults should assume:
 
 The chart should not install a production database by default. A bundled
 Postgres dependency may be considered later for development-only profiles, but
-it must be clearly labeled as non-production and must still provide pgvector for
-semantic recall to function.
+it must be clearly labeled as non-production and must still support the same
+canonical schema and lexical recall contract.
 
-The chart should not bundle a production embedding provider. The `local-dev`
-embedding provider exists for tests and demos only and is not a production
-default; see [memory-model.md](memory-model.md).
+The chart must not bundle or configure any model or embedding provider. Client
+inference is outside the pod and outside the chart; see
+[memory-model.md](memory-model.md).
 
-## Postgres With pgvector
+## PostgreSQL Canonical Store
 
-Witself's system of record is Postgres, and semantic recall depends on the
-pgvector extension. This is a hard self-hosting prerequisite, not a managed-only
-detail.
+Witself's system of record is PostgreSQL. The current recall contract uses
+generated search documents and deterministic lexical/tag/kind/time ranking; it
+does not require pgvector or an external AI service.
 
-- The external Postgres reached through the chart must have the `vector`
-  extension (pgvector) installed and enabled in the target database.
-- Migrations are server-owned (Goose) and include the `CREATE EXTENSION IF NOT
-  EXISTS vector` step, but the database role used by `witself-server` must be
-  permitted to create or use the extension. Some managed Postgres offerings
-  require enabling pgvector out of band before migrations run.
-- The chart surfaces a readable prerequisite check: the migration Job fails
-  deterministically if pgvector is unavailable, rather than silently degrading.
-- If pgvector is present but the embedding provider is unavailable, recall
-  degrades to keyword/tag/kind/time ranking and the capabilities contract
-  reports the degraded state; vector columns remain intact. See
-  [storage.md](storage.md).
+- The external PostgreSQL reached through the chart must support the schema and
+  indexes created by the server-owned Goose migrations.
+- The migration Job fails deterministically when the required canonical schema
+  or lexical-index prerequisites cannot be created.
+- Readiness gates on PostgreSQL availability, not model/provider reachability.
+- Optional client-vector profiles and JSONB vector rows are created by migration
+  `0032`; they require no chart setting or PostgreSQL extension and cannot
+  become a hidden production prerequisite.
 
-The chart does not manage the pgvector extension lifecycle itself. Extension
-installation and database provisioning belong to Terraform or the operator; the
-chart only consumes the connection reference. See
+Database provisioning belongs to Terraform or the operator; the chart only
+consumes the connection reference. See
 [terraform-infrastructure.md](terraform-infrastructure.md).
 
 ## Kubernetes Resources
@@ -147,8 +148,8 @@ access for ordinary identity, policy, group, or messaging operations.
 
 Service account annotations should support cloud-native identity systems such as
 IRSA, Workload Identity, or equivalent mechanisms, primarily so the workload can
-reach Postgres, the embedding provider, KMS (when the sealed plane is enabled),
-and object/blob storage without static credentials.
+reach PostgreSQL, KMS (when the sealed plane is enabled), and object/blob storage
+without static credentials.
 
 ## Network Policy
 
@@ -167,10 +168,7 @@ Default-deny posture, opened only where required:
   Prometheus scrapers.
 - Ingress to the health port (`health`) only from the kubelet and cluster-
   internal diagnostics; never from public ingress.
-- Egress to Postgres (pgvector) for the system of record.
-- Egress to the configured embedding provider endpoint (for example the
-  `voyage` or `openai` API) for embedding operations. `local-dev` requires no
-  egress.
+- Egress to PostgreSQL for the system of record.
 - Egress to the configured KMS endpoint when the sealed plane is enabled, for
   envelope encryption and reveal operations. `local-dev` and a disabled sealed
   plane require no KMS egress.
@@ -179,10 +177,8 @@ Default-deny posture, opened only where required:
 - Egress to the billing/payment provider when managed billing is enabled
   (optional for self-hosted; see [billing-and-limits.md](billing-and-limits.md)).
 
-Because the embedding provider is the one new outbound dependency relative to a
-pure Witpass deployment, the chart should make embedding-provider egress an
-explicit, reviewable allow rule rather than a blanket egress permit. Operators
-who run the `local-dev` provider can keep embedding egress closed entirely.
+The chart must not render AI/model-provider egress for `witself-server`.
+Inference clients manage their own networking outside this deployment.
 
 ## Secrets And Config
 
@@ -195,13 +191,6 @@ database:
   existingSecret:
     name: witself-database
     urlKey: database-url
-
-embeddings:
-  provider: voyage
-  model: voyage-3
-  existingSecret:
-    name: witself-embeddings
-    apiKeyKey: api-key
 
 sealedPlane:
   enabled: true
@@ -227,15 +216,13 @@ Recommended values should prefer:
 - Mounted secret files for credentials that should not be environment
   variables.
 
-The chart must not place database passwords, embedding-provider API keys, KMS
-credentials, object-store credentials, raw agent tokens, bootstrap tokens, raw
-payment details, wallet credentials, or provider secrets into default
-`values.yaml`.
+The chart must not place database passwords, KMS credentials, object-store
+credentials, raw agent tokens, bootstrap tokens, raw payment details, wallet
+credentials, or provider secrets into default `values.yaml`.
 
-The embedding-provider API key is referenced exclusively through an existing
-Secret. It is never a plaintext value in the chart, never a CLI flag, and never
-logged. When the active provider is `local-dev`, no API key is required and the
-embeddings Secret reference can be omitted.
+There is intentionally no `embeddings` values block, model setting, or AI
+provider Secret. Client inference credentials must never be mounted into the
+backend pod.
 
 KMS provider credentials are referenced exclusively through an existing Secret
 (or through cloud workload identity, which is preferred). The `kms.keyRef` is a
@@ -250,42 +237,28 @@ never embedded, recalled, placed in the self-digest, or plaintext-exported. See
 [encryption-model.md](encryption-model.md) and
 [key-hierarchy.md](key-hierarchy.md).
 
-## Embedding Provider
+## Client Inference Boundary
 
-Semantic recall is the core Witself differentiator, so the embedding provider is
-a first-class, capability-gated deployment dependency, mirroring how Witpass
-abstracted KMS. The provider selection is plumbed through config and an existing
-Secret, not hard-coded.
+The chart deploys a deterministic storage and retrieval service. It never
+selects a model, injects AI credentials, starts an embedder, or calls a model
+endpoint. Authenticated clients author memory content and curation decisions.
+The current backend reports lexical retrieval and implemented optional
+client-vector profile support independently.
 
-Chart behavior:
-
-- Select the provider with `embeddings.provider` (`voyage` default, `openai`, or
-  `local-dev`), mapped to `WITSELF_EMBEDDINGS_PROVIDER`.
-- Select the model with `embeddings.model`, mapped to
-  `WITSELF_EMBEDDINGS_MODEL`.
-- Supply the provider API key only through `embeddings.existingSecret`
-  (`name` plus `apiKeyKey`), injected as an environment variable from the
-  referenced Secret.
-- Treat the provider as optional at runtime: if it is unreachable, the server
-  degrades recall to keyword/tag/kind/time and reports the degraded state
-  through `/v1/capabilities`. The chart must not crash-loop the pod solely
-  because the embedding provider is unavailable.
-- Vector dimensionality follows the active model and is reported through the
-  capabilities contract; re-embedding after a model change is an explicit,
-  audited maintenance operation and is never a chart upgrade side effect. See
-  [memory-model.md](memory-model.md).
-
-The chart must never write the embedding API key into a ConfigMap, log line,
-metric label, annotation, or rendered manifest.
+Client-supplied vectors need no chart-side provider or pgvector configuration.
+If a future pgvector/ANN projection is introduced, the chart may expose only its
+optional storage/query acceleration switch. It still must not contain generation
+provider, model, credential, or provider-egress settings. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## KMS Provider
 
 The sealed plane (secrets + TOTP) uses KMS-backed envelope encryption
 (CMK -> per-realm KEK -> per-secret/field DEK). When the sealed plane is enabled,
-the KMS provider is a required, capability-gated deployment dependency, mirroring
-how the embedding provider gates the open plane. The provider selection is
-plumbed through config and an existing Secret (or workload identity), not
-hard-coded. See [key-hierarchy.md](key-hierarchy.md).
+the KMS provider is a required, capability-gated deployment dependency. The
+provider selection is plumbed through config and an existing Secret (or
+workload identity), not hard-coded. See
+[key-hierarchy.md](key-hierarchy.md).
 
 Chart behavior:
 
@@ -302,8 +275,8 @@ Chart behavior:
   carries the CMK, KEK, or DEK.
 - Treat the sealed plane as required-when-enabled: readiness gates on KMS
   reachability only when `sealedPlane.enabled` is true. The open plane stays
-  available even when KMS is unreachable; pgvector remains the hard gate for the
-  open plane. See [storage.md](storage.md).
+  available even when KMS is unreachable; PostgreSQL remains the hard gate for
+  the open plane. See [storage.md](storage.md).
 - Key rotation (per-realm KEK) is an explicit, audited maintenance operation and
   is never a chart upgrade side effect.
 
@@ -326,7 +299,7 @@ Initial chart behavior:
 - Require `--yes` or equivalent explicit confirmation for destructive migration
   paths when supported by the server command.
 - Treat Goose migrations as the server-owned migration mechanism, including the
-  pgvector extension and vector-column setup.
+  narrative-memory tables, generated search documents, and lexical indexes.
 - Acquire a database advisory lock so concurrent server replicas do not race the
   migration step.
 
@@ -404,13 +377,6 @@ database:
   existingSecret:
     name: witself-database
     urlKey: database-url
-
-embeddings:
-  provider: voyage
-  model: voyage-3
-  existingSecret:
-    name: witself-embeddings
-    apiKeyKey: api-key
 
 sealedPlane:
   enabled: true
@@ -509,16 +475,18 @@ Required chart behavior:
 - Support graceful shutdown settings such as termination grace period when the
   server needs them, so in-flight messaging and recall requests drain cleanly.
 
-The scraped metric set includes memory operations, recall and embedding
-operations, fact operations, policy decisions (allow/deny), cross-agent
+The scraped metric set includes memory and lexical-recall operations, fact
+operations, policy decisions (allow/deny), cross-agent
 accesses, group operations, message send/deliver/read, authentication, token
-lifecycle, audit events, usage metering, limit decisions, storage, vector
-storage, migrations, and HTTP latency. See
+lifecycle, audit events, usage metering, limit decisions, storage, migrations,
+and HTTP latency. The implemented client-vector surface contributes only
+value-free validation, coverage/fallback, latency, and storage metrics; a future
+ANN projection may add projection-specific health/latency metrics. See
 [observability-and-operations.md](observability-and-operations.md).
 
 Health responses, metrics, logs, chart annotations, and rendered manifests must
-not contain memory content, fact values, message bodies or payloads, embedding
-vectors, raw tokens, database URLs, embedding-provider API keys, or other
+not contain memory content, fact values, message bodies or payloads,
+client-supplied vectors, raw tokens, database URLs, or other
 sensitive configuration values.
 
 ## Terraform Handoff
@@ -530,8 +498,7 @@ Expected handoff data:
 
 - Namespace.
 - Service account annotations for workload identity.
-- Database connection secret name and key (Postgres with pgvector enabled).
-- Embedding-provider selection and the Secret name/key holding its API key.
+- Database connection secret name and key for PostgreSQL.
 - KMS provider, key identifier (`kms.keyRef`), and the Secret name/key (or
   workload identity) holding its credentials, when the sealed plane is enabled.
 - Object/blob storage bucket or container for exports, attachments, and backups.
@@ -541,8 +508,8 @@ Expected handoff data:
 Terraform should not generate Helm values files containing raw credentials. It
 should create or reference deployment-native secrets, then pass only secret
 names, keys, IDs, and non-sensitive configuration into Helm. Terraform is also
-responsible for ensuring pgvector is available in the provisioned database
-before the migration Job runs. See
+responsible for provisioning a supported PostgreSQL database before the
+migration Job runs. See
 [terraform-infrastructure.md](terraform-infrastructure.md).
 
 ## CI And Release Checks
@@ -554,12 +521,12 @@ Required checks once the chart exists:
 - `helm template` with representative production values.
 - Kubernetes schema validation for rendered manifests.
 - Secret scanning of chart defaults and examples.
-- Check that rendered resources do not include raw secret values, including the
-  embedding-provider API key and any KMS credentials.
+- Check that rendered resources do not include raw secret values, including KMS
+  credentials.
+- Check that rendered resources contain no backend AI/model/provider variables,
+  Secrets, sidecars, or egress rules.
 - Check that liveness, readiness, startup, and metrics paths render correctly.
 - Check ServiceMonitor and PodMonitor enabled and disabled render paths.
-- Check the NetworkPolicy renders embedding-provider egress only when a non
-  `local-dev` provider is selected.
 - Check the `kms` block and KMS egress render only when `sealedPlane.enabled` is
   true and the provider is not `local-dev`, and that no KMS block is required for
   an open-plane-only install.
@@ -574,9 +541,8 @@ See [release-and-build.md](release-and-build.md).
 
 - Do not make Docker Compose the initial self-hosting artifact.
 - Do not make Helm provision cloud infrastructure that belongs in Terraform.
-- Do not bundle a production database by default, and do not ship a Postgres
-  without pgvector.
-- Do not bundle or default to the `local-dev` embedding provider in production.
+- Do not bundle a production database by default.
+- Do not bundle, configure, or contact a backend model or embedding provider.
 - Do not hide production prerequisites behind managed-service assumptions.
 - Do not require Witself-managed billing or support integrations for self-hosted
   chart installs.

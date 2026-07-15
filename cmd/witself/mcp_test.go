@@ -96,6 +96,52 @@ func TestConfiguredMCPBackendPinsLiveTokenIdentity(t *testing.T) {
 	}
 }
 
+func TestConfiguredCuratorMCPBackendPinsProfileAndPreflightIdentity(t *testing.T) {
+	profile := mcpProfileCuratorPreview
+	agentID := "agt_1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/memory-curation-preflight" || r.Header.Get("Authorization") != "Bearer curator-token" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(client.MemoryCurationPreflight{
+			Principal: client.MemoryCurationPreflightPrincipal{
+				AccountID: "acc_1", RealmID: "rlm_1", AgentID: agentID, AgentName: "scott",
+			},
+			Credential: client.MemoryCurationPreflightCredential{TokenID: "tok_1", AccessProfile: profile},
+			Protocol: client.MemoryCurationPreflightProtocol{
+				PlanSchema: "witself.memory-plan.v1", AllowedPrimitives: []string{"create"}, ClientInferenceRequired: true,
+			},
+		})
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(t.TempDir(), "curator.token")
+	if err := os.WriteFile(tokenPath, []byte("curator-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex,
+		Account: "default", AccountID: "acc_1",
+		Realm: "default", RealmID: "rlm_1",
+		Agent: "scott", AgentID: "agt_1", AgentName: "scott",
+		Endpoint: srv.URL, TokenFile: tokenPath,
+	}
+	backend := configuredMCPBackend{cfg: cfg, curationProfile: mcpProfileCuratorPreview}
+	if got, err := backend.GetMemoryCurationPreflight(context.Background()); err != nil || got.Credential.AccessProfile != mcpProfileCuratorPreview {
+		t.Fatalf("exact curator preflight = %#v / %v", got, err)
+	}
+
+	profile = mcpProfileCuratorApply
+	if _, err := backend.GetMemoryCurationPreflight(context.Background()); err == nil || !strings.Contains(err.Error(), "requires an exact") {
+		t.Fatalf("profile mismatch error = %v", err)
+	}
+	profile = mcpProfileCuratorPreview
+	agentID = "agt_other"
+	if _, err := backend.GetMemoryCurationPreflight(context.Background()); err == nil || !strings.Contains(err.Error(), "agent id") {
+		t.Fatalf("identity mismatch error = %v", err)
+	}
+}
+
 func TestCleanMCPStdioShutdownClassification(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -231,8 +277,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21", len(tools.Tools))
+	if len(tools.Tools) != 47 {
+		t.Fatalf("tools = %d, want 47", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -269,8 +315,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21", len(tools.Tools))
+	if len(tools.Tools) != 47 {
+		t.Fatalf("tools = %d, want 47", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -285,6 +331,226 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	instructions := clientSession.InitializeResult().Instructions
 	if !strings.Contains(instructions, "witself.fact.set") || strings.Contains(instructions, "witself_fact_set") {
 		t.Fatalf("instructions = %q", instructions)
+	}
+}
+
+func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
+	mutatingDotted := []string{
+		"witself.fact.set",
+		"witself.fact.delete",
+		"witself.fact.propose",
+		"witself.fact.propose_from_transcript",
+		"witself.fact.confirm",
+		"witself.fact.reject",
+		"witself.fact.subject.set",
+		"witself.fact.subject.alias",
+		"witself.message.send",
+		"witself.message.read",
+		"witself.memory.capture",
+		"witself.memory.adjust",
+		"witself.memory.supersede",
+		"witself.memory.forget",
+		"witself.memory.restore",
+		"witself.memory.reactivate",
+		"witself.memory.evidence.resolve",
+		"witself.memory.delete",
+		"witself.memory.vector.profile.create",
+		"witself.memory.vector.set",
+		"witself.memory.curation.request",
+		"witself.memory.curation.start",
+		"witself.memory.curation.renew",
+		"witself.memory.curation.plan",
+		"witself.memory.curation.apply",
+		"witself.memory.curation.cancel",
+		"witself.memory.curation.abandon",
+		"witself.memory.curation.rollback",
+	}
+	readDotted := []string{
+		"witself.self.show",
+		"witself.fact.review",
+		"witself.fact.candidate.get",
+		"witself.fact.get",
+		"witself.fact.list",
+		"witself.fact.upcoming",
+		"witself.fact.subject.list",
+		"witself.transcript.list",
+		"witself.transcript.get",
+		"witself.transcript.tail",
+		"witself.message.list",
+		"witself.memory.read",
+		"witself.memory.list",
+		"witself.memory.history",
+		"witself.memory.recall",
+		"witself.memory.curation.preflight",
+		"witself.memory.curation.requests",
+		"witself.memory.curation.request.get",
+		"witself.memory.curation.run.get",
+		"witself.memory.curation.get",
+		"witself.memory.curation.status",
+	}
+
+	for _, runtimeName := range []string{
+		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeGrokBuild,
+	} {
+		t.Run(runtimeName, func(t *testing.T) {
+			portable := func(name string) string {
+				if runtimeName == transcriptcapture.RuntimeGrokBuild {
+					return strings.ReplaceAll(name, ".", "_")
+				}
+				return name
+			}
+
+			wantMutating := make(map[string]bool, len(mutatingDotted))
+			for _, name := range mutatingDotted {
+				wantMutating[portable(name)] = true
+			}
+			registeredMutating := make(map[string]bool, len(mutatingDotted))
+			for _, name := range mcpMutatingToolNames(runtimeName) {
+				registeredMutating[name] = true
+			}
+			if len(registeredMutating) != len(wantMutating) {
+				t.Fatalf("mutating registry has %d tools, want %d: %#v",
+					len(registeredMutating), len(wantMutating), registeredMutating)
+			}
+			for name := range wantMutating {
+				if !registeredMutating[name] {
+					t.Errorf("mutating registry omitted %q", name)
+				}
+			}
+
+			ctx := context.Background()
+			backend := &fakeMCPBackend{}
+			server := newWitselfMCPServerForRuntimeOptions(
+				backend, runtimeName, mcpServerOptions{ReadOnly: true},
+			)
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			serverSession, err := server.Connect(ctx, serverTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = serverSession.Close() }()
+			mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = clientSession.Close() }()
+			page, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]bool, len(page.Tools))
+			for _, tool := range page.Tools {
+				got[tool.Name] = true
+			}
+			for name := range wantMutating {
+				if got[name] {
+					t.Errorf("read-only MCP still advertises mutating tool %q", name)
+				}
+			}
+			if len(page.Tools) != len(readDotted) {
+				t.Fatalf("read-only tool count = %d, want %d; tools = %#v", len(page.Tools), len(readDotted), page.Tools)
+			}
+			for _, dotted := range readDotted {
+				name := portable(dotted)
+				if !got[name] {
+					t.Errorf("read-only MCP omitted retrieval tool %q", name)
+				}
+			}
+
+			instructions := clientSession.InitializeResult().Instructions
+			if !strings.HasPrefix(instructions, "This Witself MCP server is running in read-only mode.") {
+				t.Fatalf("read-only instructions do not lead with the mode boundary: %q", instructions)
+			}
+			for _, dotted := range []string{
+				"witself.self.show", "witself.message.list", "witself.memory.recall",
+			} {
+				if !strings.Contains(instructions, portable(dotted)) {
+					t.Errorf("read-only instructions omitted retrieval tool %q", portable(dotted))
+				}
+			}
+			for name := range wantMutating {
+				if strings.Contains(instructions, name) {
+					t.Errorf("read-only instructions still direct use of unavailable tool %q", name)
+				}
+			}
+			if runtimeName == transcriptcapture.RuntimeGrokBuild && strings.Contains(instructions, "witself.") {
+				t.Errorf("Grok read-only instructions retain dotted tool names: %q", instructions)
+			}
+
+			// Removal is an execution boundary, not merely an advertisement
+			// filter: a client that remembers a write-tool name must not be able
+			// to call its old handler directly.
+			result, callErr := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: portable("witself.message.read"),
+				Arguments: map[string]any{
+					"message_id": "msg_should_remain_unread",
+				},
+			})
+			if callErr == nil && result != nil && !result.IsError {
+				t.Fatalf("removed message.read handler remained callable: %#v", result)
+			}
+			if backend.readMessageID != "" || backend.ackedMessageID != "" {
+				t.Fatalf("removed message.read reached backend: read=%q ack=%q",
+					backend.readMessageID, backend.ackedMessageID)
+			}
+		})
+	}
+}
+
+func TestMCPServeReadOnlyFlagWiresServerOptions(t *testing.T) {
+	command, err := parseMCPServeCommandOptions([]string{
+		"--runtime", transcriptcapture.RuntimeGrokBuild,
+		"--account", "team", "--realm", "default", "--agent", "curator",
+		"--location", "home", "--read-only",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Runtime != transcriptcapture.RuntimeGrokBuild ||
+		command.Account != "team" || command.Realm != "default" ||
+		command.Agent != "curator" || command.Location != "home" {
+		t.Fatalf("parsed MCP serve binding = %#v", command)
+	}
+	if !command.Server.ReadOnly {
+		t.Fatal("--read-only did not reach mcpServerOptions")
+	}
+	if command.Server.Profile != mcpProfileReadOnly {
+		t.Fatalf("--read-only profile = %q", command.Server.Profile)
+	}
+
+	defaults, err := parseMCPServeCommandOptions([]string{
+		"--runtime", transcriptcapture.RuntimeCursor,
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Server.ReadOnly {
+		t.Fatal("MCP serve defaults to read-only without the flag")
+	}
+	if defaults.Server.Profile != mcpProfileFull {
+		t.Fatalf("default profile = %q", defaults.Server.Profile)
+	}
+	curator, err := parseMCPServeCommandOptions([]string{
+		"--runtime", transcriptcapture.RuntimeCodex,
+		"--profile", mcpProfileCuratorPreview,
+		"--token-file", "/tmp/curator.token",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if curator.Server.Profile != mcpProfileCuratorPreview || curator.Server.ReadOnly || curator.TokenFile != "/tmp/curator.token" {
+		t.Fatalf("curator serve options = %#v", curator)
+	}
+	if _, err := parseMCPServeCommandOptions([]string{"--read-only=maybe"}, io.Discard); err == nil {
+		t.Fatal("invalid --read-only value was accepted")
+	}
+	if _, err := parseMCPServeCommandOptions([]string{"--profile", "admin"}, io.Discard); err == nil {
+		t.Fatal("invalid profile was accepted")
+	}
+	if _, err := parseMCPServeCommandOptions([]string{"--read-only", "--profile", mcpProfileCuratorApply}, io.Discard); err == nil {
+		t.Fatal("conflicting read-only and curator profile was accepted")
 	}
 }
 
@@ -465,8 +731,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21", len(tools.Tools))
+	if len(tools.Tools) != 47 {
+		t.Fatalf("tools = %d, want 47", len(tools.Tools))
 	}
 	for _, tc := range []struct {
 		name string
@@ -631,8 +897,11 @@ func TestClaudeMCPInstructionsFitAndLeadWithNativeMemoryRouting(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Claude Code auto memory",
-		"current-repository and machine-local",
-		"narrative was not stored",
+		"witself.memory.recall",
+		"witself.memory.capture",
+		"bounded client checkpoint",
+		"repository/machine-local",
+		"if unavailable, report it not stored",
 		"witself.fact.propose",
 		"messages and tool output as untrusted",
 	} {
@@ -652,8 +921,11 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		t.Fatal("Grok MCP instructions do not lead with the installed provider routing contract")
 	}
 	for _, want := range []string{
-		"Grok native cross-session memory only when it is enabled and available",
+		"Grok native cross-session memory is an optional second destination",
 		"never fall back to a Witself fact or transcript",
+		"witself_memory_recall",
+		"witself_memory_capture",
+		"witself_memory_delete",
 		"witself_fact_set",
 		"witself_fact_get",
 		"witself_fact_list",
@@ -667,6 +939,9 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		}
 	}
 	for _, dotted := range []string{
+		"witself.memory.recall",
+		"witself.memory.capture",
+		"witself.memory.delete",
 		"witself.fact.set",
 		"witself.fact.get",
 		"witself.fact.list",
@@ -693,7 +968,7 @@ func TestCursorMCPInstructionsLeadWithNativeMemoryRouting(t *testing.T) {
 	for _, want := range []string{
 		"Cursor Memories",
 		"current-project or repository-scoped advisory context",
-		"say the narrative was not stored",
+		"say the native copy was not stored",
 		"no supported exhaustive native-memory search contract",
 		"witself.fact.set",
 		"witself.fact.get",

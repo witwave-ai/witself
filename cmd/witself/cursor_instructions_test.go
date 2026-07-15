@@ -15,7 +15,7 @@ func TestCursorMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"explicit remember/save/store request",
 		"call `witself.fact.set` in the same turn",
 		"one atomic durable assertion",
-		"Cursor's supported native Memories facility",
+		"Cursor Memories are an optional second destination",
 		"Split a clearly mixed request",
 		"An explicit destination wins",
 		"both providers only when explicitly requested",
@@ -24,9 +24,9 @@ func TestCursorMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"merely stated without a save request is a review candidate",
 		"call `witself.fact.propose`",
 		"current-project or repository-scoped advisory context",
-		"claim success only after it confirms a write",
+		"claim that native copy only after it confirms a write",
 		"Never substitute or manually edit `.cursor/rules`, User Rules, `AGENTS.md`, project or plan Markdown, a Witself fact, or a transcript",
-		"say the narrative was not stored",
+		"say the native copy was not stored",
 		"do not change Cursor settings",
 		"Do not silently duplicate content across Witself and Cursor Memories",
 		"direct current-user request to \"permanently forget\"",
@@ -41,6 +41,10 @@ func TestCursorMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"call `witself.fact.get`",
 		"exact, intentional, authorized lookup",
 		"call `witself.fact.list` with sensitive values redacted",
+		"call `witself.self.show`",
+		"may accept and log a `sessionStart.additional_context` field without reliably delivering it to the model",
+		"always use this managed-instruction/MCP fallback unless a version-gated live conformance check proves delivery",
+		"call `witself.memory.recall`",
 		"no supported exhaustive native-memory search contract",
 		"report partial coverage",
 		"transcripts are interaction records, not memories",
@@ -94,6 +98,9 @@ func TestCursorMCPInstructionsUseDottedToolNames(t *testing.T) {
 		"witself.fact.get",
 		"witself.fact.list",
 		"witself.fact.propose",
+		"witself.memory.recall",
+		"witself.memory.capture",
+		"witself.memory.delete",
 		"witself.self.show",
 		"witself.message.list",
 	} {
@@ -106,6 +113,9 @@ func TestCursorMCPInstructionsUseDottedToolNames(t *testing.T) {
 		"witself_fact_get",
 		"witself_fact_list",
 		"witself_fact_propose",
+		"witself_memory_recall",
+		"witself_memory_capture",
+		"witself_memory_delete",
 		"witself_self_show",
 		"witself_message_list",
 	} {
@@ -150,7 +160,7 @@ func TestCursorManagedRuleHasValidFrontmatterAndBoundary(t *testing.T) {
 		t.Fatalf("Cursor MDC frontmatter does not begin at byte zero:\n%s", cursorMemoryRoutingBlock)
 	}
 	wantFrontmatter := cursorMemoryRoutingBeginMarker + "\n" +
-		"description: Route durable facts to Witself and narrative context to Cursor Memories\n" +
+		"description: Route durable facts and narrative context to portable Witself memory\n" +
 		"alwaysApply: true\n" +
 		"---\n"
 	if !bytes.HasPrefix(cursorMemoryRoutingBlock, []byte(wantFrontmatter)) {

@@ -658,6 +658,19 @@ func TestFlushLockReclaimsDeadOwnerAndPreservesLiveOwner(t *testing.T) {
 	}
 }
 
+func TestEventTriggersMemoryCurationWakeOnlyAtTerminalBoundaries(t *testing.T) {
+	for _, event := range []string{"Stop", "StopFailure", "SessionEnd", "PreCompact"} {
+		if !(Event{HookEvent: event}).TriggersMemoryCurationWake() {
+			t.Errorf("%s did not trigger curation wake", event)
+		}
+	}
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "AgentResponse", "PreToolUse", "PostToolUse", "SubagentStop", "PostCompact"} {
+		if (Event{HookEvent: event}).TriggersMemoryCurationWake() {
+			t.Errorf("%s unexpectedly triggered curation wake", event)
+		}
+	}
+}
+
 func assertNullableProvenance(t *testing.T, value map[string]any, key, want string) {
 	t.Helper()
 	got, ok := value[key]

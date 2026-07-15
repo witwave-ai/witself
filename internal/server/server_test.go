@@ -432,6 +432,88 @@ func TestAgentTokenCreate(t *testing.T) {
 	}
 }
 
+func TestCuratorTokenCreate(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		if tok == "good" {
+			return "opr_x", "acc_y", "active", true, nil
+		}
+		return "", "", "", false, nil
+	}
+	expiresAt := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
+	called := 0
+	create := func(_ context.Context, accountID, actorOperatorID, agentID, accessProfile, displayName string, ttl time.Duration) (string, string, string, time.Time, error) {
+		called++
+		if accountID != "acc_y" || actorOperatorID != "opr_x" || agentID != "agent_1" ||
+			accessProfile != AccessProfileCuratorPreview || displayName != "nightly curator" || ttl != 30*time.Minute {
+			t.Fatalf("create curator arguments = %q %q %q %q %q %s", accountID, actorOperatorID, agentID, accessProfile, displayName, ttl)
+		}
+		return "witself_agt_curator", "tok_curator", "memory-agent", expiresAt, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateCuratorToken: create}))
+	defer srv.Close()
+
+	post := func(tok, body string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/agents/agent_1/curator-tokens", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	unauthorized := post("", `{"access_profile":"curator-preview","display_name":"nightly curator","ttl":"30m"}`)
+	closeBody(t, unauthorized)
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.StatusCode)
+	}
+	for _, body := range []string{
+		`{"access_profile":"full","display_name":"nightly curator","ttl":"30m"}`,
+		`{"access_profile":"curator-preview","display_name":"","ttl":"30m"}`,
+		`{"access_profile":"curator-preview","display_name":"nightly curator","ttl":"0s"}`,
+		`{"access_profile":"curator-preview","display_name":"nightly curator","ttl":"25h"}`,
+		`{"access_profile":"curator-preview","display_name":"nightly curator","ttl":"30m","unknown":true}`,
+	} {
+		response := post("good", body)
+		closeBody(t, response)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s status = %d, want 400", body, response.StatusCode)
+		}
+	}
+	if called != 0 {
+		t.Fatalf("invalid requests reached callback %d times", called)
+	}
+
+	response := post("good", `{"access_profile":"curator-preview","display_name":" nightly curator ","ttl":"30m"}`)
+	defer closeBody(t, response)
+	if response.StatusCode != http.StatusCreated || response.Header.Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("create response = %d headers=%v", response.StatusCode, response.Header)
+	}
+	var out struct {
+		AgentToken    string    `json:"agent_token"`
+		TokenID       string    `json:"token_id"`
+		AgentID       string    `json:"agent_id"`
+		AgentName     string    `json:"agent_name"`
+		AccessProfile string    `json:"access_profile"`
+		DisplayName   string    `json:"display_name"`
+		ExpiresAt     time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentToken != "witself_agt_curator" || out.TokenID != "tok_curator" || out.AgentID != "agent_1" ||
+		out.AgentName != "memory-agent" || out.AccessProfile != AccessProfileCuratorPreview ||
+		out.DisplayName != "nightly curator" || !out.ExpiresAt.Equal(expiresAt) || called != 1 {
+		t.Fatalf("curator token response = %#v, calls=%d", out, called)
+	}
+}
+
 func TestOperatorTokenCreate(t *testing.T) {
 	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		if tok == "good" {

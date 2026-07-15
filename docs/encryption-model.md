@@ -2,8 +2,8 @@
 
 Status: draft. Decision: this document specifies confidentiality for the **sealed
 plane** only — secrets and TOTP enrollments. The **open plane** (memories and
-facts) is ordinary application data-at-rest: stored in Postgres/pgvector and on
-disk under the deployment's standard volume/RDS encryption, semantically indexed,
+facts) is ordinary application data-at-rest: stored in PostgreSQL and on disk
+under the deployment's standard volume/RDS encryption, indexed for recall,
 recallable, and plaintext-exportable. The open plane has no reveal ceremony, no
 envelope encryption, and no KMS dependency. None of the guarantees below apply to
 it. The two-tier split is the master decision; see
@@ -54,8 +54,9 @@ capability-labeled, and audited.
 
 KMS is a required dependency only when the sealed plane is enabled. An
 open-plane-only deployment (memories + facts) does not need KMS. Readiness gates on
-KMS only when the sealed plane is enabled; pgvector remains a hard gate for the
-open plane. See [storage.md](storage.md).
+KMS only when the sealed plane is enabled; ordinary PostgreSQL is the open-plane
+gate and migration-0032 client vectors need no extension. See
+[storage.md](storage.md).
 
 ## Default reveal and TOTP flow
 

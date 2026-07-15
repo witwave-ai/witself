@@ -32,8 +32,11 @@ witself version
 
 Once an agent token exists under the normal `~/.witself` account layout, one
 command installs the Witself stdio MCP server and durable transcript hooks.
-Codex, Claude Code, Grok Build, and Cursor also receive managed
-fact-versus-native-memory routing guidance:
+Codex, Claude Code, Grok Build, and Cursor also receive managed portable
+fact-and-narrative-memory routing guidance. Witself is the default narrative
+destination; native-provider memory is an optional second destination used only
+when explicitly requested. See the
+[narrative-memory design](docs/narrative-memory-and-curation.md).
 
 - Codex: `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`)
 - Claude Code: `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md` (normally
@@ -110,6 +113,72 @@ payload alongside readable text. None of the modes can capture hidden
 chain-of-thought. See
 [Witself Transcript Ledger](docs/transcript-ledger.md) for the data and retry
 contract.
+
+## Narrative Memory
+
+Portable narrative memory is implemented with PostgreSQL as the canonical
+store and no backend AI. The calling client authors every capsule, refinement,
+and optional vector; the service provides durable versions, evidence,
+lifecycle, deterministic lexical recall, fenced curation plans, guarded
+rollback, and portable account archives.
+
+```sh
+witself memory capture --content "We chose PostgreSQL for durable memory." \
+  --kind decision --capture-reason explicit \
+  --evidence-unavailable-reason runtime_did_not_record \
+  --idempotency-key decision-postgres-1
+
+witself memory recall "PostgreSQL decision" --kind decision
+witself memory list --state active
+witself memory history mem_...
+witself memory curate status
+
+# Optional client-authored hybrid recall; Witself never runs the vector model.
+witself memory vector profile create --provider local --model example \
+  --recipe whole-memory --recipe-version 1 --dimensions 3
+witself memory vector set mem_... --profile mvp_... --memory-version 1 \
+  --content-hash SHA256 --vector-file memory-vector.json
+witself memory recall "PostgreSQL decision" --vector-profile mvp_... \
+  --query-vector-file query-vector.json
+
+# Optional client-side post-flush curation (preview is the default).
+witself memory curate auto enable --runtime claude-code \
+  --provider claude-code --allow-transcript-content
+witself memory curate auto status --runtime claude-code
+witself memory curate auto wake --runtime claude-code
+witself memory curate auto service install --runtime claude-code
+witself memory curate auto service status --runtime claude-code
+```
+
+Atomic one-to-many refinement uses `witself memory supersede`; reversible
+`forget`, `restore`, and `reactivate` operations retain immutable history.
+Permanent deletion is a separate value-free preview/apply flow. The same
+surface is available over HTTP, the Go client, CLI, and MCP memory tools. Run
+`witself mcp serve ... --read-only` to remove every mutating MCP tool. Dedicated
+`--profile curator-preview|curator-apply` servers expose only the bounded
+curation workflow and require an exactly matching restricted credential.
+
+Client-run curation requests, leased/fenced snapshots, strict plans, apply, and
+rollback are implemented. Source commits durably mark work due, and an active
+compatible client can claim it opportunistically. `witself memory curate run`
+can drive an explicit planner executable or a fail-closed native provider CLI.
+The opt-in `witself memory curate auto` worker adds value-free terminal-flush
+wakes, debounce/single-flight state, preview-by-default policy, and a detached
+client-side supervisor with bounded persisted-backoff retry/drain. Its trusted
+parent retains the installed full agent
+credential; no bearer token is placed in the inference child's argv, environment,
+or model input. MCP and the backend still cannot wake or schedule an AI, and
+the optional per-user `auto service` lifecycle packages restart-safe launchd
+(macOS) and systemd timer/service (Linux) polling. Those private service
+definitions contain only the executable, runtime, and value-free state root;
+provider/model policy and credentials remain in mode-0600 local state.
+Installed Codex and Claude hooks automatically hydrate session identity and
+focused history-dependent recall; Cursor and Grok use the explicitly reported
+managed-instruction/MCP fallback because their current hook contracts do not
+provide a reliable model-visible context channel. All runtimes retain bounded
+checkpoints and the provider-neutral
+curation recipe. See the
+[canonical design and delivery plan](docs/narrative-memory-and-curation.md).
 
 ## Agent Messaging
 
@@ -431,8 +500,10 @@ The product goal is a CLI-first agent durable-state service spanning both planes
 - Named agents inside an operator-managed realm.
 - Memories: free-form self-content with versioned edit history and a soft
   forget/restore lifecycle.
-- Semantic recall by default: embedding-backed similarity search blended with
-  keyword, tag, kind, and time filters.
+- Portable narrative memory: immediate client-authored capture, versioned
+  evidence and lineage, and low-touch client-side curation.
+- Recall by default: PostgreSQL keyword, tag, kind, time, salience, and recency
+  ranking, optionally blended with client-supplied vectors.
 - Facts: deterministic name→value identity cards, with a `primary` flag for
   identity anchors.
 - A sealed credential plane: secrets and TOTP authenticators under KMS-backed
@@ -481,6 +552,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 - [Context Hydration](docs/context-hydration.md)
 - [V0 Scope](docs/v0-scope.md)
 - [Memory Model](docs/memory-model.md)
+- [Narrative Memory](docs/narrative-memory-and-curation.md)
 - [Facts Model](docs/facts-model.md)
 - [Secret Model](docs/secret-model.md)
 - [TOTP 2FA](docs/totp-2fa.md)
@@ -510,6 +582,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 - [Helm Chart](docs/helm-chart.md)
 - [Terraform Infrastructure](docs/terraform-infrastructure.md)
 - [Cloud Targets](docs/cloud-targets.md)
+- [Memory Cloud Conformance](docs/memory-cloud-conformance.md)
 - [Backup And Recovery](docs/backup-and-recovery.md)
 - [Billing And Limits](docs/billing-and-limits.md)
 - [Release And Build](docs/release-and-build.md)

@@ -124,15 +124,7 @@ func serve() int {
 			if err != nil || !ok {
 				return server.DomainPrincipal{}, ok, err
 			}
-			return server.DomainPrincipal{
-				Kind:          p.Kind,
-				ID:            p.ID,
-				AccountID:     p.AccountID,
-				RealmID:       p.RealmID,
-				AgentName:     p.AgentName,
-				RealmName:     p.RealmName,
-				AccountStatus: p.AccountStatus,
-			}, true, nil
+			return toServerPrincipal(p), true, nil
 		}
 		cfg.CreateTranscript = func(ctx context.Context, p server.DomainPrincipal, in server.CreateTranscriptRequest) (server.Transcript, error) {
 			tr, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID, store.CreateTranscriptInput{
@@ -240,6 +232,8 @@ func serve() int {
 			}
 			return toServerUsageReport(report), nil
 		}
+		configureMemory(&cfg, st)
+		configureMemoryCuration(&cfg, st)
 		configureFactMutations(&cfg, st, factDeletionEnabled)
 		cfg.GetFact = func(ctx context.Context, p server.DomainPrincipal, subject, predicate string) (server.Fact, error) {
 			fact, err := st.GetFact(ctx, toStorePrincipal(p), subject, predicate)
@@ -523,6 +517,22 @@ func serve() int {
 				return "", "", "", server.ErrAccountNotActive
 			}
 			return tok, tokenID, agentName, err
+		}
+		cfg.CreateCuratorToken = func(ctx context.Context, accountID, actorOperatorID, agentID, accessProfile, displayName string, ttl time.Duration) (string, string, string, time.Time, error) {
+			tok, tokenID, agentName, expiresAt, err := st.CreateCuratorToken(
+				ctx, accountID, actorOperatorID, agentID, accessProfile, displayName, ttl,
+			)
+			switch {
+			case errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotFound):
+				return "", "", "", time.Time{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive):
+				return "", "", "", time.Time{}, server.ErrAccountNotActive
+			case errors.Is(err, store.ErrInvalidCuratorAccessProfile),
+				errors.Is(err, store.ErrInvalidCuratorTokenTTL),
+				errors.Is(err, store.ErrInvalidCuratorTokenDisplayName):
+				return "", "", "", time.Time{}, server.ErrBadInput
+			}
+			return tok, tokenID, agentName, expiresAt, err
 		}
 		cfg.RenameAccount = func(ctx context.Context, accountID, operatorID, displayName string) error {
 			err := st.UpdateAccountDisplayName(ctx, accountID, operatorID, displayName)
@@ -1401,13 +1411,31 @@ func mapFactError(err error) error {
 
 func toStorePrincipal(p server.DomainPrincipal) store.Principal {
 	return store.Principal{
-		Kind:          p.Kind,
-		ID:            p.ID,
-		AccountID:     p.AccountID,
-		RealmID:       p.RealmID,
-		AgentName:     p.AgentName,
-		RealmName:     p.RealmName,
-		AccountStatus: p.AccountStatus,
+		Kind:           p.Kind,
+		ID:             p.ID,
+		TokenID:        p.TokenID,
+		AccessProfile:  p.AccessProfile,
+		TokenExpiresAt: p.TokenExpiresAt,
+		AccountID:      p.AccountID,
+		RealmID:        p.RealmID,
+		AgentName:      p.AgentName,
+		RealmName:      p.RealmName,
+		AccountStatus:  p.AccountStatus,
+	}
+}
+
+func toServerPrincipal(p store.Principal) server.DomainPrincipal {
+	return server.DomainPrincipal{
+		Kind:           p.Kind,
+		ID:             p.ID,
+		TokenID:        p.TokenID,
+		AccessProfile:  p.AccessProfile,
+		TokenExpiresAt: p.TokenExpiresAt,
+		AccountID:      p.AccountID,
+		RealmID:        p.RealmID,
+		AgentName:      p.AgentName,
+		RealmName:      p.RealmName,
+		AccountStatus:  p.AccountStatus,
 	}
 }
 
