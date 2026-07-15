@@ -20,6 +20,18 @@ const (
 	RunStatusCompleted = "completed"
 	// RunStatusRecovered means an earlier completion was found and acknowledged.
 	RunStatusRecovered = "recovered"
+	// RunStatusRequestOffered means the local provider volunteered the pinned
+	// agent for one realm-wide open request.
+	RunStatusRequestOffered = "request_offered"
+	// RunStatusRequestDeclined means the local provider declined one open
+	// request on behalf of the pinned agent.
+	RunStatusRequestDeclined = "request_declined"
+	// RunStatusRequestSelected means a coordinator persisted one bounded,
+	// provider-ranked assignment decision.
+	RunStatusRequestSelected = "request_selected"
+	// RunStatusRequestCompleted means a selected agent atomically published one
+	// request result under its exact claim fence.
+	RunStatusRequestCompleted = "request_completed"
 
 	defaultLeaseSeconds      = 120
 	defaultListenWaitSeconds = 20
@@ -55,6 +67,7 @@ type Config struct {
 // record it without disclosing a message body or model response.
 type RunResult struct {
 	Status          string `json:"status"`
+	RequestID       string `json:"request_id,omitempty"`
 	MessageID       string `json:"message_id,omitempty"`
 	ThreadID        string `json:"thread_id,omitempty"`
 	ResultMessageID string `json:"result_message_id,omitempty"`
@@ -68,7 +81,8 @@ type Runner struct {
 	Config   Config
 }
 
-// RunOnce handles at most one oldest unacknowledged inbound message.
+// RunOnce handles at most one open-request transition or, when none is ready,
+// the oldest unacknowledged inbound message.
 func (r Runner) RunOnce(ctx context.Context) (RunResult, error) {
 	if ctx == nil {
 		return RunResult{}, errors.New("message runner context is required")
@@ -87,6 +101,22 @@ func (r Runner) RunOnce(ctx context.Context) (RunResult, error) {
 	}
 	if err := verifyExpectedIdentity(config.ExpectedIdentity, self.Identity); err != nil {
 		return RunResult{}, err
+	}
+	if requestAPI, ok := r.API.(MessageRequestAPI); ok {
+		checkpoint, err := r.State.LoadRequestScanCheckpoint(ctx)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("load message request scan checkpoint: %w", err)
+		}
+		handled, result, runErr := r.runMessageRequestOnce(
+			ctx, requestAPI, self.Identity, config, &checkpoint,
+		)
+		saveErr := r.State.SaveRequestScanCheckpoint(ctx, checkpoint)
+		if saveErr != nil {
+			saveErr = fmt.Errorf("save message request scan checkpoint: %w", saveErr)
+		}
+		if runErr != nil || saveErr != nil || handled {
+			return result, errors.Join(runErr, saveErr)
+		}
 	}
 
 	waitSeconds := config.ListenWaitSeconds
@@ -416,8 +446,12 @@ func verifyExpectedIdentity(expected, actual client.SelfIdentity) error {
 }
 
 func verifyInboundMessage(message client.Message, identity client.SelfIdentity) error {
+	validRecipient := message.To.Kind == "agent" && message.To.AgentID == identity.AgentID
+	if message.To.Kind == "agents" || message.To.Kind == "realm" {
+		validRecipient = message.To.AgentID == "" && message.To.Count > 0
+	}
 	if message.ID == "" || message.AccountID != identity.AccountID || message.RealmID != identity.RealmID ||
-		message.To.Kind != "agent" || message.To.AgentID != identity.AgentID || message.From.AgentID == "" ||
+		!validRecipient || message.From.AgentID == "" ||
 		message.ThreadID == "" || message.CausalDepth < 1 {
 		return errors.New("server returned a message outside the runner's pinned identity")
 	}

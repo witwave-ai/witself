@@ -41,8 +41,9 @@ type MessageAgent struct {
 // MessageRecipient identifies a resolved direct recipient.
 type MessageRecipient struct {
 	Kind      string `json:"kind"`
-	AgentID   string `json:"agent_id"`
-	AgentName string `json:"agent_name"`
+	AgentID   string `json:"agent_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	Count     int    `json:"count,omitempty"`
 }
 
 // MessageDelivery is the recipient delivery state.
@@ -60,7 +61,9 @@ type MessageReadState struct {
 
 // SendMessageInput carries one direct send and its optional retry key.
 type SendMessageInput struct {
+	AudienceKind   string
 	To             string
+	ToAgents       []string
 	Subject        string
 	Kind           string
 	Body           string
@@ -163,17 +166,27 @@ type CompleteMessageResult struct {
 
 // SendMessage sends one durable realm-local direct message.
 func SendMessage(ctx context.Context, endpoint, token string, in SendMessageInput) (Message, error) {
+	audienceKind := strings.TrimSpace(in.AudienceKind)
+	if audienceKind == "" {
+		audienceKind = "agent"
+	}
 	request := struct {
-		To       map[string]string `json:"to"`
-		Subject  string            `json:"subject,omitempty"`
-		Kind     string            `json:"kind,omitempty"`
-		Body     string            `json:"body"`
-		Payload  json.RawMessage   `json:"payload,omitempty"`
-		ThreadID string            `json:"thread_id,omitempty"`
+		To       map[string]any  `json:"to"`
+		Subject  string          `json:"subject,omitempty"`
+		Kind     string          `json:"kind,omitempty"`
+		Body     string          `json:"body"`
+		Payload  json.RawMessage `json:"payload,omitempty"`
+		ThreadID string          `json:"thread_id,omitempty"`
 	}{
-		To:      map[string]string{"kind": "agent", "id": in.To},
+		To:      map[string]any{"kind": audienceKind},
 		Subject: in.Subject, Kind: in.Kind, Body: in.Body,
 		Payload: in.Payload, ThreadID: in.ThreadID,
+	}
+	switch audienceKind {
+	case "agent":
+		request.To["id"] = in.To
+	case "agents":
+		request.To["ids"] = in.ToAgents
 	}
 	body, err := json.Marshal(request)
 	if err != nil {

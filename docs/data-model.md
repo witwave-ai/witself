@@ -868,9 +868,9 @@ always token-derived (sender forgery is structurally impossible). `body`/`payloa
 are untrusted on receipt and never authorize a write. Semantics in
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
-This section separates the implemented direct physical table from target
-fan-out/cross-realm additions. Migrations `0020`, `0033`, `0034`, `0035`, and
-`0036` are the source of truth for the current checkout.
+Migrations `0020`, `0033`, `0034`, `0035`, `0036`, and `0037` are the source
+of truth for the current realm-local physical table. Cross-realm additions
+remain separate future work.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -878,7 +878,7 @@ fan-out/cross-realm additions. Migrations `0020`, `0033`, `0034`, `0035`, and
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
 | `realm_id` | `text NOT NULL` FK -> `realms(id)` | realm-local only in v0 |
 | `from_agent_id` | `text NOT NULL` FK -> `agents(id)` | **always token-derived**, never from input |
-| `to_agent_id` | `text NOT NULL` FK -> `agents(id)` | current direct recipient, resolved in the token-derived realm |
+| `to_agent_id` | `text NULL` FK -> `agents(id)` | resolved direct recipient; NULL for `agents`/`realm` audiences |
 | `subject` | `text NOT NULL DEFAULT ''` | short classification (<= 256 bytes) |
 | `kind` | `text NOT NULL DEFAULT 'note'` | physical legacy default; current CLI/MCP/API/store writes normalize omission to actionable `request`; explicit `note` is runner FYI-only; open label |
 | `body` | `text NOT NULL` | free-form text (<= 64 KiB); ordinary column; untrusted on receipt |
@@ -887,15 +887,18 @@ fan-out/cross-realm additions. Migrations `0020`, `0033`, `0034`, `0035`, and
 | `reply_to_message_id` | `text NULL` scoped deferred FK -> `agent_messages` | migration-0033 validated causal parent; recipient/thread are server-derived on reply |
 | `causal_depth` | `bigint NOT NULL DEFAULT 1` | migration-0035 backend-derived reply depth; direct send = 1, validated reply = parent + 1; callers cannot set |
 | `idempotency_key` | `text NULL` | unique per account/sender when present; <= 512 bytes |
+| `audience_kind` | `text NOT NULL DEFAULT 'agent'` | migration-0037 closed `agent` \| `agents` \| `realm` discriminator |
+| `audience_fingerprint` | `text NOT NULL DEFAULT ''` | empty for direct; SHA-256 retry commitment to the requested fan-out audience |
 | `created_at` | `timestamptz NOT NULL` | server-assigned send time |
 
 `causal_depth` is constrained to 1–2,147,483,647. The server writes one for a
 direct send and locks/validates the durable parent before writing parent plus
 one for a reply or atomic completion result.
 
-Target explicit-list, realm, and group fan-out may add an audience discriminator
-and snapshot rows without changing the immutable direct message body. Those
-fields are not present in the current physical table.
+For a non-direct audience the per-recipient delivery rows are the authoritative
+send-time snapshot. `audience_fingerprint` stabilizes idempotent retry; it is not
+a substitute for those membership rows. Realm resolution excludes the sender
+and both realm/list fan-out are bounded to 64 recipients.
 
 **Cross-realm envelope columns (post-v0; additive, NULL for realm-local
 messages).** When `to`/`from` carry an optional `realm`, the message rides the
@@ -929,9 +932,10 @@ written and a delivery is created; the relay is blind (it cannot read `body` /
 
 ### `agent_message_deliveries` (logical `message_deliveries`)
 
-Purpose: per-recipient delivery + read/ack state for the mailbox/queue. A group
-send will produce N delivery rows at send time; each member's state is
-independent. The current direct slice creates exactly one row.
+Purpose: per-recipient delivery + read/ack state for the mailbox/queue. A direct
+send creates one row; an explicit-list or realm send creates one row per
+resolved member in one all-or-none transaction. Each member's state is
+independent.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -986,6 +990,92 @@ claim/key/lease fields so an old source-cell fence cannot survive. Schema-35
 import validates message causal depth against the reply graph; older archives
 have depth derived during upgrade/import. Schema-36 import validates the
 portable failure count; older archives receive zero during upgrade.
+
+### `agent_message_requests`
+
+Purpose: one durable, realm-wide, message-backed open job. Migration `0038` is
+the source of truth. The backend stores coordination and fences only; candidate
+and coordinator clients perform all inference and ranking.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `mrq_` prefix |
+| `account_id` / `realm_id` | scoped FKs | token-derived realm boundary |
+| `opening_message_id` | scoped unique FK -> `agent_messages` | realm `kind=open_request` message |
+| `coordinator_agent_id` | FK -> `agents` | token-derived opener and sole selector/canceller |
+| `selection_policy` | `text NOT NULL` | closed `client_ranked` value |
+| `state` | `text NOT NULL DEFAULT 'open'` | `open` \| `completed` \| `cancelled` \| `expired` |
+| `max_assignees` | `integer NOT NULL DEFAULT 1` | 1-8 capacity |
+| `offer_window_seconds` / `expires_in_seconds` | bounded integers | 1-900 offer window; expiry after it and <= 604800 |
+| `offer_deadline` / `expires_at` | `timestamptz NOT NULL` | database-time lifecycle boundaries |
+| `selection_generation` | `bigint NOT NULL DEFAULT 0` | monotonic immutable-selection sequence |
+| `completed_at` / `cancelled_at` / `expired_at` | nullable timestamps | closed terminal-state shape |
+| `created_at` / `updated_at` | timestamps | durable ordering and cursor inputs |
+
+`phase` is derived rather than stored: an unexpired open request with pending
+candidates inside its offer window is `collecting_offers`; one with a live
+reservation/claim is `assigned`; otherwise it is `awaiting_selection`. The
+persisted deadlines and child rows recover the phase after any restart.
+
+### `agent_message_request_candidates`
+
+Purpose: the immutable, sender-excluded send-time realm snapshot and each
+candidate's single response.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `request_id` + `agent_id` | composite PK | one snapshot candidate per request |
+| `account_id` / `realm_id` | scoped FKs | prevents cross-realm graph links |
+| `response_state` | `text NOT NULL` | `pending` \| `offered` \| `declined` |
+| `offer_message_id` | scoped unique nullable FK -> `agent_messages` | ordinary direct `kind=offer` reply |
+| `offer_key_hash` / `offer_request_hash` | SHA-256 hex or empty | exact idempotency/content replay shields; never returned |
+| `responded_at` | nullable timestamp | required for offer/decline |
+
+The closed shape check prevents a partial offer. Agents created after opening
+are not added, and deleting an agent does not retarget its snapshot identity.
+
+### `agent_message_request_selections`
+
+Purpose: immutable coordinator-authored client ranking decisions.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | `msel_` prefix |
+| `request_id` / `account_id` / `realm_id` | scoped FK | one request graph |
+| `coordinator_agent_id` | FK -> `agents` | must match request coordinator |
+| `generation` | positive unique bigint per request | monotonic selection history |
+| `idempotency_key_hash` | unique SHA-256 hex per request | exact retry shield |
+| `selection_hash` | SHA-256 hex | commits selected IDs and reservation duration |
+| `created_at` | timestamp | immutable decision time |
+
+The selected agent IDs live in the associated claim rows. Request-row locking,
+valid-offer checks, and active/completed capacity accounting make concurrent
+over-selection impossible without asking PostgreSQL to rank candidates.
+
+### `agent_message_request_claims`
+
+Purpose: one selected work slot with a bounded reservation, exact processing
+fence, and optional linked result.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` PK | opaque `mrc_` claim ID |
+| `request_id` / `selection_id` / scope columns | scoped FKs | immutable selection provenance |
+| `agent_id` | FK -> `agents` | token-derived claimant |
+| `state` | `text NOT NULL DEFAULT 'reserved'` | `reserved` \| `claimed` \| `released` \| `completed` \| `cancelled` |
+| `generation` | non-negative bigint | zero while reserved; positive exact stale-writer fence once claimed |
+| `claim_key_hash` / `complete_key_hash` | SHA-256 hex or empty | private replay shields |
+| `lease_expires_at` | nullable timestamp | database-time reservation/claim expiry |
+| `failure_count` | non-negative bigint | deterministic request-local failure count |
+| `result_message_id` | scoped unique nullable FK -> `agent_messages` | direct `kind=result` reply on completion |
+| lifecycle timestamps | nullable timestamps | selected, claimed, released, completed, cancelled, updated |
+
+Selection creates `reserved` rows atomically. The selected agent claims its
+latest live reservation, then every renew/release/complete presents the exact
+claim ID and generation. Completion inserts and links the result message in the
+same transaction. Export preserves the graph; import converts active source
+reservations/claims to cancelled history and advances a claimed fence so it
+cannot complete in the destination cell.
 
 ### `conversations` (cross-realm, post-v0)
 
@@ -1418,7 +1508,13 @@ MUST NOT be conflated. Stable actions span both planes:
   `group.member_added`, `group.member_removed`, `message.sent`,
   `message.delivered`, `message.read`, `message.acked`,
   `message.processing.claimed`, `message.processing.renewed`,
-  `message.processing.released`, `message.processing.completed`. The `fact set` /
+  `message.processing.released`, `message.processing.completed`,
+  `message.request.opened`, `message.request.offered`,
+  `message.request.declined`, `message.request.selected`,
+  `message.request.claimed`, `message.request.renewed`,
+  `message.request.released`, `message.request.completed`,
+  `message.request.cancelled`, and the exactly-once system action
+  `message.request.expired`. The `fact set` /
   `remember` upsert emits `fact.created` for a new fact or `fact.updated` for an
   existing one.
 - Sealed plane: `secret.created`, `secret.updated`, `secret.renamed`,

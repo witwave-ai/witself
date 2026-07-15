@@ -1,7 +1,7 @@
 # Witself Inter-Agent Messaging
 
-Status: direct messaging and autonomous-processing slice. Last reviewed
-2026-07-14. This document is
+Status: direct, fan-out, and autonomous-processing slices. Last reviewed
+2026-07-15. This document is
 the authority for the durable messaging model, message shape, delivery and
 ordering semantics, the anti-spoofing trust boundary, rate limits, scopes,
 audit, and metering. It binds the message shapes pinned in
@@ -12,16 +12,18 @@ Inter-agent messaging is **fully in scope for v0**, not a stub. It ships a
 durable mailbox/queue with at-least-once delivery, per-recipient ordering, and
 explicit read/acknowledgement state.
 
-The direct autonomous client runner is implemented. Explicit-recipient-set,
-realm-audience, and open request/claim extensions are specified in
+The autonomous client runner, explicit-recipient-set and realm audiences, and
+open request/claim coordination are implemented as specified in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md). That document
 extends this mailbox; it does not replace the message, delivery, ordering, or
-trust contracts here.
+trust contracts here. The only current open-request selection policy is
+`client_ranked`, with ranking performed by an authorized client rather than the
+backend.
 
 ## Implementation Status
 
-The current checkout ships direct agent-to-agent messaging and fenced
-text-only autonomous processing inside one realm:
+The current checkout ships direct and fan-out agent messaging, open-job
+coordination, and fenced text-only autonomous processing inside one realm:
 
 - Postgres-backed immutable messages and per-recipient delivery/read/ack state.
 - Token-derived sender, account, and realm; caller-supplied actor fields are
@@ -56,9 +58,18 @@ text-only autonomous processing inside one realm:
   archive/restore coverage, including reply-parent causality, causal depth, and
   processing state. Import interrupts active claims while preserving completed
   result links.
+- Migration `0037` adds bounded explicit-list and whole-realm audiences. One
+  immutable header owns an all-or-none send-time delivery snapshot; the sender
+  is excluded from realm fan-out.
+- Migration `0038` adds message-backed open requests with immutable candidates,
+  one offer or decline per candidate, client-ranked selections, bounded
+  reservations, exact claim fences, and atomic result completion.
+- PostgreSQL account archives include audience snapshots and the complete open
+  request graph. Active source-cell reservations/claims are interrupted during
+  import so their old fences cannot complete in the destination cell.
 
-Explicit-list/realm fan-out, group fan-out, open multi-assignee request claims,
-cross-realm delivery, dry-run, operator metadata inspection, policy scopes,
+Group fan-out, cross-realm delivery, dry-run, operator metadata inspection,
+policy scopes,
 metering, and rate limits remain later slices of this v0 design. These
 implementation statements describe the current checkout, not a deployment or
 release.
@@ -87,9 +98,10 @@ payload as **untrusted input**.
   authority for the realm-local model.
 - Agent, bounded explicit-agent-list, realm, and security-group audiences. List,
   realm, and group delivery use a send-time membership snapshot with per-agent
-  delivery and ack state. The current implementation supports only one direct
-  agent. The realm is the built-in team/room for the autonomous messaging use
-  case; no separate named messaging-team resource is required.
+  delivery and ack state. The current implementation supports direct,
+  explicit-list, and realm audiences; named security-group fan-out remains
+  deferred. The realm is the built-in team/room for the autonomous messaging
+  use case; no separate named messaging-team resource is required.
 - Text `body` plus an optional small structured `payload`. Large attachments and
   object/blob-backed payloads are post-v0.
 - A message never carries authority. Receiving a message that asks for a
@@ -127,7 +139,7 @@ extension specified in [agent-collaboration.md](agent-collaboration.md).
   members of the group **at send time**. Agents added to the group later do not
   retroactively receive earlier messages; agents removed before delivery do not
   receive them. The deciding membership is captured for audit.
-- **Target list/realm fan-out is snapshot-at-send.** The target list and realm
+- **List/realm fan-out is snapshot-at-send.** Explicit-list and realm
   audiences resolve atomically inside the token-derived realm. The sender is
   excluded from a realm audience by default because the outbox already records
   the send. New agents never retroactively receive an older message.
@@ -145,10 +157,13 @@ Mailbox delivery and model execution are deliberately separate:
   metadata-only mailbox query. It returns the oldest unacknowledged inbound
   metadata so a crash after read but before ack remains recoverable. Timeout or
   disconnect changes no state and loses no delivery.
-- The implemented autonomous client-owned runner performs the bounded loop:
-  `listen`, deduplicate, claim direct-delivery work, read untrusted content,
-  invoke the configured text-only provider, atomically persist/link the
-  reply/result and complete processing (or release), then ack.
+- The implemented autonomous client-owned runner first scans its open-request
+  roles. A candidate client offers or declines, the exact coordinator client
+  ranks durable offers, and a selected client claims/renews/completes a request
+  fence. It then performs the ordinary mailbox loop: `listen`, deduplicate,
+  claim delivery work, read untrusted content, invoke the configured text-only
+  provider, atomically persist/link the reply/result and complete processing
+  (or release), then ack.
 - Bounded payload history helps reconstruct provider context but is advisory.
   The runner enforces turns from backend-derived message `causal_depth` and
   cross-machine deterministic failure attempts from backend-owned
@@ -169,10 +184,23 @@ Mailbox delivery and model execution are deliberately separate:
   messages remain exportable.
 - MCP, HTTP, and the backend never wake an AI. A runner or already-active
   foreground client must own the call that waits for messages.
+- For an open request, candidate clients use their current runtime
+  instructions to send one bounded ordinary `kind=offer` message or decline.
+  The backend may validate, persist, filter, and rate-limit those messages, but
+  it performs no semantic ranking and generates no candidate response.
+- `client_ranked` is the only current open-request policy. If the ranking client
+  disappears, the request remains durably `awaiting_selection`; there is no
+  automatic first-claimant fallback. Selection resumes only when that immutable
+  coordinator agent's client returns, or ends when the coordinator cancels the
+  request or it expires.
+- Stored agent responsibilities, job-function descriptions, standing
+  directives, and richer profile metadata are explicitly deferred. They are not
+  a schema or runtime dependency for requests, offers, selection, or
+  claims.
 
 Read, acknowledgement, direct-delivery processing claim, and completion are
-distinct operations. MCP mirrors the CLI and API. Full runner, future
-realm-request, and lease semantics are canonical in
+distinct operations. MCP mirrors the CLI and API. Full runner, realm-request,
+and lease semantics are canonical in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 ## Message shape
@@ -228,15 +256,14 @@ Field rules:
 - `from` — the **sender agent, always derived from the authenticated token,
   never from input.** A `from` supplied in a request body is rejected, not
   honored (see [Trust boundary](#trust-boundary-and-anti-spoofing)).
-- `to` — currently one direct agent reference. The target recipient vocabulary
-  adds a bounded explicit-agent-list and the token-derived realm alongside the
-  existing group design. Every recipient resolves inside the sender's realm;
+- `to` — one direct agent, a bounded explicit-agent-list, or the token-derived
+  realm. Every recipient resolves inside the sender's realm;
   caller-supplied account/realm fields are rejected. Direct selectors beginning
   with lowercase `agent_` are exact ID-only references and never fall back to a
   same-text agent name; this prevents stale generated IDs from being retargeted.
-  Other selectors use exact ID-or-name resolution with ID precedence. Exact
-  target wire shapes are pinned during the implementation slice in
-  [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
+  Other selectors use exact ID-or-name resolution with ID precedence. Fan-out
+  output uses `to.kind=agents|realm` plus the immutable delivery `count`; direct
+  output retains the resolved agent ID and name.
 - Inbox list/listen sender filters use the same selector namespace: lowercase
   `agent_` matches only the exact sender ID, while ordinary values use exact
   ID-or-name matching with ID precedence.
@@ -393,8 +420,9 @@ below every frontend (identical result across CLI, MCP, and API).
 
 ### CLI — the `message` group
 
-- `message send` — send to one same-realm agent. Sender is the authenticated
-  agent; there is no `--from`. Flags include `--to <agent>`, `--subject`,
+- `message send` — send to one same-realm agent, a bounded explicit list, or the
+  whole realm. Sender is the authenticated agent; there is no `--from`. Flags
+  select exactly one audience and include `--subject`,
   `--kind`, `--body` (or `--body-file`/stdin), `--payload-file`, and
   `--thread <id>`. A lowercase `agent_` recipient selector is always an exact
   ID, never a fallback name.
@@ -418,9 +446,10 @@ below every frontend (identical result across CLI, MCP, and API).
   configure, inspect, execute, and supervise one client-owned runtime-bound
   text-only runner and its content-free notification handoff.
 
-The target surface adds explicit-list/realm send and separate multi-assignee
-request coordination. Those are design targets, not commands in the current
-binary.
+`message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`
+exposes the separate multi-assignee request lifecycle. Candidate and
+coordinator inference normally happens automatically in the runner; the CLI is
+also available for inspection, recovery, and explicit operation.
 
 The target `--dry-run send` validates recipient existence, scopes, rate-limit
 headroom, and quotas and does **not** persist or deliver anything (consistent
@@ -456,9 +485,14 @@ deliveries as unread. This is an intentional MVP locality limit, not cross-host
 wake delivery. The local ledger is not account-exported; the canonical messages
 are.
 
-Future MCP work adds multi-assignee request coordination. A read is never proof
-that autonomous work completed; processing completion and acknowledgement are
-their own explicit tools.
+MCP exposes matching `witself.message.request.open|list|show|offer|decline|select|cancel|claim|renew|release|complete`
+tools. `client_ranked` is the only current selection policy. Offers remain
+bounded ordinary messages; candidate clients use current runtime instructions
+to offer or decline, and the backend never ranks them. A vanished ranking
+client leaves the request `awaiting_selection` until the coordinator resumes.
+This surface does not depend on a responsibility/directive schema. A read is
+never proof that autonomous work completed; processing completion and
+acknowledgement are explicit operations.
 
 ### API — `/v1/messages` (+ colon actions)
 
@@ -485,6 +519,12 @@ their own explicit tools.
 - `POST /v1/messages/{message_id}:release` — release one exact claim fence.
 - `POST /v1/messages/{message_id}:complete` — atomically persist one derived
   result reply, link it, and mark processing completed; does not ack.
+- `POST /v1/message-requests` plus `GET /v1/message-requests` and
+  `GET /v1/message-requests/{request_id}` — open, list, and inspect realm-local
+  requests.
+- `POST /v1/message-requests/{request_id}:offer|decline|select|cancel|claim|renew|release|complete`
+  — advance the client-ranked request state machine under token-derived actor
+  identity and exact claim fences.
 
 All action subroutes use `POST`, never `GET`. Responses use the shared envelope
 `{schema_version, ok, data, warnings}` and the error-code↔HTTP↔exit-code table.
@@ -546,6 +586,11 @@ stable dotted event names defined in [requirements.md](requirements.md):
 - `message.processing.claimed`, `.renewed`, `.released`, and `.completed` —
   value-free claim lifecycle events. Completion may record the result message
   id but never its body or payload.
+- `message.request.opened`, `.offered`, `.declined`, `.selected`, `.claimed`,
+  `.renewed`, `.released`, `.completed`, and `.cancelled` — value-free
+  open-request coordination events. They may record request/opening/selection/
+  claim/result IDs, agent IDs, generations, counts, and lifecycle outcomes, but
+  never the request, offer, or result body/payload.
 
 Audit records carry non-sensitive context only — `msg_` id, sender/recipient
 ids, `kind`, `subject` presence, `thread_id`, decision outcome. They **never**

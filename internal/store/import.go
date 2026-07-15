@@ -182,6 +182,7 @@ var importColumns = map[string]map[string]bool{
 	"agent_messages": {
 		"id": true, "account_id": true, "realm_id": true,
 		"from_agent_id": true, "to_agent_id": true,
+		"audience_kind": true, "audience_fingerprint": true,
 		"subject": true, "kind": true, "body": true, "payload": true,
 		"thread_id": true, "reply_to_message_id": true, "causal_depth": true,
 		"idempotency_key": true, "created_at": true,
@@ -195,6 +196,36 @@ var importColumns = map[string]map[string]bool{
 		"claim_id":      true, "claim_key_hash": true,
 		"lease_expires_at": true, "completed_at": true,
 		"complete_key_hash": true, "result_message_id": true,
+	},
+	"agent_message_requests": {
+		"id": true, "account_id": true, "realm_id": true,
+		"opening_message_id": true, "coordinator_agent_id": true,
+		"selection_policy": true, "state": true, "max_assignees": true,
+		"offer_window_seconds": true, "expires_in_seconds": true,
+		"offer_deadline": true, "expires_at": true,
+		"selection_generation": true,
+		"completed_at":         true, "cancelled_at": true, "expired_at": true,
+		"created_at": true, "updated_at": true,
+	},
+	"agent_message_request_candidates": {
+		"request_id": true, "account_id": true, "realm_id": true,
+		"agent_id": true, "response_state": true,
+		"offer_message_id": true, "offer_key_hash": true,
+		"offer_request_hash": true, "responded_at": true, "created_at": true,
+	},
+	"agent_message_request_selections": {
+		"id": true, "request_id": true, "account_id": true, "realm_id": true,
+		"coordinator_agent_id": true, "generation": true,
+		"idempotency_key_hash": true, "selection_hash": true, "created_at": true,
+	},
+	"agent_message_request_claims": {
+		"id": true, "request_id": true, "selection_id": true,
+		"account_id": true, "realm_id": true, "agent_id": true,
+		"state": true, "generation": true, "claim_key_hash": true,
+		"lease_expires_at": true, "failure_count": true,
+		"complete_key_hash": true, "result_message_id": true,
+		"selected_at": true, "claimed_at": true, "released_at": true,
+		"completed_at": true, "cancelled_at": true, "updated_at": true,
 	},
 	"memory_change_clocks": {
 		"account_id": true, "realm_id": true, "owner_kind": true,
@@ -367,20 +398,63 @@ type transcriptImportScope struct {
 }
 
 type messageImportScope struct {
-	realmID          string
-	fromAgentID      string
-	toAgentID        string
-	threadID         string
-	replyToMessageID string
-	causalDepth      int64
+	realmID             string
+	fromAgentID         string
+	toAgentID           string
+	audienceKind        string
+	audienceFingerprint string
+	recipientAgentIDs   map[string]bool
+	kind                string
+	threadID            string
+	replyToMessageID    string
+	causalDepth         int64
+	createdAt           time.Time
 }
 
 type messageDeliveryImportScope struct {
+	messageID            string
+	recipientAgentID     string
 	processingState      string
 	processingGeneration int64
 	failureCount         int64
 	claimID              string
 	resultMessageID      string
+}
+
+type messageRequestImportScope struct {
+	realmID             string
+	openingMessageID    string
+	coordinatorAgentID  string
+	state               string
+	maxAssignees        int64
+	selectionGeneration int64
+}
+
+type messageRequestCandidateImportKey struct {
+	requestID string
+	agentID   string
+}
+
+type messageRequestCandidateImportScope struct {
+	responseState  string
+	offerMessageID string
+}
+
+type messageRequestSelectionImportScope struct {
+	requestID          string
+	realmID            string
+	coordinatorAgentID string
+	generation         int64
+}
+
+type messageRequestClaimImportScope struct {
+	requestID       string
+	selectionID     string
+	realmID         string
+	agentID         string
+	state           string
+	generation      int64
+	resultMessageID string
 }
 
 type factImportScope struct {
@@ -557,6 +631,7 @@ type importCtx struct {
 	operators                    map[string]bool
 	realms                       map[string]bool
 	agents                       map[string]bool
+	liveAgents                   map[string]bool
 	agentRealms                  map[string]string
 	tickets                      map[string]bool
 	transcripts                  map[string]transcriptImportScope
@@ -568,6 +643,10 @@ type importCtx struct {
 	factMutationTombstoneCounts  map[string]int64
 	messages                     map[string]messageImportScope
 	deliveries                   map[string]messageDeliveryImportScope
+	messageRequests              map[string]messageRequestImportScope
+	messageRequestCandidates     map[messageRequestCandidateImportKey]messageRequestCandidateImportScope
+	messageRequestSelections     map[string]messageRequestSelectionImportScope
+	messageRequestClaims         map[string]messageRequestClaimImportScope
 	memoryClocks                 map[memoryOwnerImportKey]int64
 	memories                     map[string]memoryImportScope
 	memoryVersions               map[memoryVersionImportKey]memoryVersionImportScope
@@ -594,6 +673,7 @@ func newImportCtx(accountID string) *importCtx {
 		operators:                    map[string]bool{},
 		realms:                       map[string]bool{},
 		agents:                       map[string]bool{},
+		liveAgents:                   map[string]bool{},
 		agentRealms:                  map[string]string{},
 		tickets:                      map[string]bool{},
 		transcripts:                  map[string]transcriptImportScope{},
@@ -605,6 +685,10 @@ func newImportCtx(accountID string) *importCtx {
 		factMutationTombstoneCounts:  map[string]int64{},
 		messages:                     map[string]messageImportScope{},
 		deliveries:                   map[string]messageDeliveryImportScope{},
+		messageRequests:              map[string]messageRequestImportScope{},
+		messageRequestCandidates:     map[messageRequestCandidateImportKey]messageRequestCandidateImportScope{},
+		messageRequestSelections:     map[string]messageRequestSelectionImportScope{},
+		messageRequestClaims:         map[string]messageRequestClaimImportScope{},
 		memoryClocks:                 map[memoryOwnerImportKey]int64{},
 		memories:                     map[string]memoryImportScope{},
 		memoryVersions:               map[memoryVersionImportKey]memoryVersionImportScope{},
@@ -748,6 +832,46 @@ func (ic *importCtx) normalizeImportedMessageClaim(table string, obj map[string]
 	return nil
 }
 
+// normalizeImportedMessageRequestClaim prevents a selection reservation or
+// runner fence from becoming live authority on a different cell. The source
+// row must first prove its strict lifecycle shape. Reserved and claimed work
+// is then retained as cancelled history; claimed work also consumes one
+// generation so every source-cell fence is permanently stale. Released,
+// completed, and already-cancelled history is preserved byte-for-byte.
+func (ic *importCtx) normalizeImportedMessageRequestClaim(
+	table string,
+	obj map[string]any,
+	importedAt time.Time,
+) error {
+	if table != "agent_message_request_claims" {
+		return nil
+	}
+	scope, err := validateImportedMessageRequestClaimContent(obj)
+	if err != nil {
+		return fmt.Errorf("%w: agent_message_request_claims row %v", ErrArchiveContent, err)
+	}
+	switch scope.state {
+	case "reserved":
+		obj["state"] = "cancelled"
+		obj["lease_expires_at"] = nil
+		obj["cancelled_at"] = importedAt.Format(time.RFC3339Nano)
+		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	case "claimed":
+		if scope.generation >= maxMessageProcessingGeneration {
+			return fmt.Errorf(
+				"%w: agent_message_request_claims active claim has no import fence reserve",
+				ErrArchiveContent,
+			)
+		}
+		obj["state"] = "cancelled"
+		obj["generation"] = scope.generation + 1
+		obj["lease_expires_at"] = nil
+		obj["cancelled_at"] = importedAt.Format(time.RFC3339Nano)
+		obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	}
+	return nil
+}
+
 const maxImportedCurationGeneration int64 = 4611686018427387903
 
 func importedGeneration(raw any, allowZero bool) (int64, bool) {
@@ -777,6 +901,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"usage_events", "usage_rollups",
 		"fact_subjects", "facts", "fact_mutation_tombstones", "fact_assertions", "fact_candidates",
 		"agent_messages", "agent_message_deliveries",
+		"agent_message_requests", "agent_message_request_candidates",
+		"agent_message_request_selections", "agent_message_request_claims",
 		"memory_change_clocks", "memories", "memory_versions",
 		"memory_vector_profiles", "memory_vectors",
 		"memory_evidence", "memory_relations", "memory_deleted_references",
@@ -862,8 +988,13 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if !ic.realms[realmID] {
 			return badf("agents row references realm %q not present in this archive", realmID)
 		}
+		_, deleted, err := importedOptionalTimestamp(obj, "deleted_at")
+		if err != nil {
+			return badf("agents row %v", err)
+		}
 		if id, ok := stringField(obj, "id"); ok {
 			ic.agents[id] = true
+			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
 		}
 	case "tokens":
@@ -1173,12 +1304,33 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil || !ic.agents[fromAgentID] {
 			return badf("agent_messages row references sender %q not present in this archive", fromAgentID)
 		}
-		toAgentID, err := requireStringField(obj, "to_agent_id")
-		if err != nil || !ic.agents[toAgentID] {
-			return badf("agent_messages row references recipient %q not present in this archive", toAgentID)
+		if ic.agentRealms[fromAgentID] != realmID {
+			return badf("agent_messages row sender must belong to realm %q", realmID)
 		}
-		if ic.agentRealms[fromAgentID] != realmID || ic.agentRealms[toAgentID] != realmID {
-			return badf("agent_messages row agents must belong to realm %q", realmID)
+		audienceKind, err := requireStringField(obj, "audience_kind")
+		if err != nil {
+			return badf("agent_messages row missing audience_kind")
+		}
+		audienceFingerprint, ok := obj["audience_fingerprint"].(string)
+		if !ok {
+			return badf("agent_messages row audience_fingerprint must be a string")
+		}
+		toAgentID, hasToAgent := optionalStringField(obj, "to_agent_id")
+		switch audienceKind {
+		case MessageRecipientAgent:
+			if !hasToAgent || !ic.agents[toAgentID] || ic.agentRealms[toAgentID] != realmID || audienceFingerprint != "" {
+				return badf("agent_messages direct audience recipient must belong to realm %q", realmID)
+			}
+		case MessageRecipientAgents:
+			if hasToAgent || !isSHA256Hex(audienceFingerprint) {
+				return badf("agent_messages agents audience is invalid")
+			}
+		case MessageRecipientRealm:
+			if hasToAgent || audienceFingerprint != messageRealmAudienceFingerprint() {
+				return badf("agent_messages realm audience is invalid")
+			}
+		default:
+			return badf("agent_messages audience_kind %q is invalid", audienceKind)
 		}
 		id, err := requireStringField(obj, "id")
 		if err != nil {
@@ -1189,13 +1341,27 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_messages row missing thread_id")
 		}
 		replyTo, _ := stringField(obj, "reply_to_message_id")
+		kind, err := requireStringField(obj, "kind")
+		if err != nil {
+			return badf("agent_messages row missing kind")
+		}
 		causalDepth, ok := importedPositiveInteger(obj["causal_depth"])
 		if !ok || causalDepth > maxMessageCausalDepth {
 			return badf("agent_messages row causal_depth is invalid")
 		}
+		createdAt, err := requireImportedTimestamp(obj, "created_at")
+		if err != nil {
+			return badf("agent_messages row created_at must be an RFC3339 timestamp")
+		}
+		if err := ic.requireTimestampAtOrBeforeExport("agent_messages created_at", *createdAt); err != nil {
+			return badf("%v", err)
+		}
 		ic.messages[id] = messageImportScope{
 			realmID: realmID, fromAgentID: fromAgentID, toAgentID: toAgentID,
-			threadID: threadID, replyToMessageID: replyTo, causalDepth: causalDepth,
+			audienceKind: audienceKind, audienceFingerprint: audienceFingerprint,
+			recipientAgentIDs: map[string]bool{},
+			kind:              kind, threadID: threadID, replyToMessageID: replyTo, causalDepth: causalDepth,
+			createdAt: *createdAt,
 		}
 	case "agent_message_deliveries":
 		messageID, err := requireStringField(obj, "message_id")
@@ -1211,17 +1377,87 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_message_deliveries row realm %q does not match message realm %q", realmID, scope.realmID)
 		}
 		recipientID, err := requireStringField(obj, "recipient_agent_id")
-		if err != nil || recipientID != scope.toAgentID {
+		audienceKind := scope.audienceKind
+		if audienceKind == "" {
+			audienceKind = MessageRecipientAgent
+		}
+		if audienceKind == MessageRecipientAgent && recipientID != scope.toAgentID {
 			return badf("agent_message_deliveries recipient %q does not match message recipient %q", recipientID, scope.toAgentID)
+		}
+		if err != nil || !ic.agents[recipientID] || ic.agentRealms[recipientID] != realmID {
+			return badf("agent_message_deliveries recipient %q is outside message realm %q", recipientID, realmID)
+		}
+		if audienceKind == MessageRecipientRealm && recipientID == scope.fromAgentID {
+			return badf("agent_message_deliveries realm audience includes its sender %q", recipientID)
 		}
 		processing, err := validateImportedMessageProcessingShape(obj)
 		if err != nil {
 			return badf("agent_message_deliveries row %v", err)
 		}
-		if _, duplicate := ic.deliveries[messageID]; duplicate {
-			return badf("agent_message_deliveries duplicates message %q", messageID)
+		deliveryKey := messageID + "\x00" + recipientID
+		if _, duplicate := ic.deliveries[deliveryKey]; duplicate {
+			return badf("agent_message_deliveries duplicates message %q recipient %q", messageID, recipientID)
 		}
-		ic.deliveries[messageID] = processing
+		processing.messageID = messageID
+		processing.recipientAgentID = recipientID
+		if ic.deliveries == nil {
+			ic.deliveries = map[string]messageDeliveryImportScope{}
+		}
+		ic.deliveries[deliveryKey] = processing
+		if scope.recipientAgentIDs == nil {
+			scope.recipientAgentIDs = map[string]bool{}
+			ic.messages[messageID] = scope
+		}
+		scope.recipientAgentIDs[recipientID] = true
+	case "agent_message_requests":
+		scope, err := ic.validateImportedMessageRequest(obj)
+		if err != nil {
+			return badf("agent_message_requests row %v", err)
+		}
+		requestID, _ := requireStringField(obj, "id")
+		if _, duplicate := ic.messageRequests[requestID]; duplicate {
+			return badf("agent_message_requests duplicates id %q", requestID)
+		}
+		if ic.messageRequests == nil {
+			ic.messageRequests = map[string]messageRequestImportScope{}
+		}
+		ic.messageRequests[requestID] = scope
+	case "agent_message_request_candidates":
+		key, scope, err := ic.validateImportedMessageRequestCandidate(obj)
+		if err != nil {
+			return badf("agent_message_request_candidates row %v", err)
+		}
+		if _, duplicate := ic.messageRequestCandidates[key]; duplicate {
+			return badf("agent_message_request_candidates duplicates request %q agent %q", key.requestID, key.agentID)
+		}
+		if ic.messageRequestCandidates == nil {
+			ic.messageRequestCandidates = map[messageRequestCandidateImportKey]messageRequestCandidateImportScope{}
+		}
+		ic.messageRequestCandidates[key] = scope
+	case "agent_message_request_selections":
+		selectionID, scope, err := ic.validateImportedMessageRequestSelection(obj)
+		if err != nil {
+			return badf("agent_message_request_selections row %v", err)
+		}
+		if _, duplicate := ic.messageRequestSelections[selectionID]; duplicate {
+			return badf("agent_message_request_selections duplicates id %q", selectionID)
+		}
+		if ic.messageRequestSelections == nil {
+			ic.messageRequestSelections = map[string]messageRequestSelectionImportScope{}
+		}
+		ic.messageRequestSelections[selectionID] = scope
+	case "agent_message_request_claims":
+		claimID, scope, err := ic.validateImportedMessageRequestClaim(obj)
+		if err != nil {
+			return badf("agent_message_request_claims row %v", err)
+		}
+		if _, duplicate := ic.messageRequestClaims[claimID]; duplicate {
+			return badf("agent_message_request_claims duplicates id %q", claimID)
+		}
+		if ic.messageRequestClaims == nil {
+			ic.messageRequestClaims = map[string]messageRequestClaimImportScope{}
+		}
+		ic.messageRequestClaims[claimID] = scope
 	case "memory_change_clocks":
 		owner, err := ic.importedMemoryOwner(obj)
 		if err != nil {
@@ -3147,6 +3383,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := ic.normalizeImportedMessageClaim(table, obj); err != nil {
 				return err
 			}
+			if err := ic.normalizeImportedMessageRequestClaim(table, obj, importedAt); err != nil {
+				return err
+			}
 			if err := ic.validateAndRecord(table, obj); err != nil {
 				return err
 			}
@@ -3165,16 +3404,17 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			return export.Manifest{}, fmt.Errorf("%w: normalize legacy message causal depth: %v", ErrArchiveContent, err)
 		}
 	}
+	if err := validateImportedMessageAudienceSnapshots(ic.messages); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: message audience snapshot: %v", ErrArchiveContent, err)
+	}
 	if err := validateImportedMessageReplies(ic.messages); err != nil {
 		return export.Manifest{}, fmt.Errorf("%w: message reply graph: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedMessageProcessingLinks(ic.messages, ic.deliveries); err != nil {
 		return export.Manifest{}, fmt.Errorf("%w: message processing graph: %v", ErrArchiveContent, err)
 	}
-	for messageID := range ic.messages {
-		if _, ok := ic.deliveries[messageID]; !ok {
-			return export.Manifest{}, fmt.Errorf("%w: message %q has no recipient delivery row", ErrArchiveContent, messageID)
-		}
+	if err := validateImportedMessageRequestGraph(ic); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: message request graph: %v", ErrArchiveContent, err)
 	}
 	for memoryID, memory := range ic.memories {
 		clock, hasClock := ic.memoryClocks[memory.owner]
@@ -3271,6 +3511,14 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	if status != m.Status {
 		return export.Manifest{}, fmt.Errorf("%w: landed account row status %q disagrees with manifest %q", ErrArchiveContent, status, m.Status)
 	}
+	// Import may happen long after the source snapshot. Materialize any request
+	// deadlines crossed in transit before the account becomes visible on this
+	// cell. The state transition, active-fence cancellation, and value-free
+	// system audit share this import transaction and are exactly-once because
+	// only state=open rows can transition.
+	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
+		return export.Manifest{}, fmt.Errorf("reconcile imported message requests: %w", err)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return export.Manifest{}, err
@@ -3290,8 +3538,17 @@ func deriveImportedMessageCausalDepths(messages map[string]messageImportScope) (
 		if !ok {
 			return nil, fmt.Errorf("message %q references missing parent %q", messageID, message.replyToMessageID)
 		}
+		parentDeliveredToSender := parent.recipientAgentIDs[message.fromAgentID]
+		if parent.audienceKind == "" || parent.audienceKind == MessageRecipientAgent {
+			parentDeliveredToSender = parent.toAgentID == message.fromAgentID
+		}
+		messageAudience := message.audienceKind
+		if messageAudience == "" {
+			messageAudience = MessageRecipientAgent
+		}
 		if parent.realmID != message.realmID || parent.threadID != message.threadID ||
-			parent.fromAgentID != message.toAgentID || parent.toAgentID != message.fromAgentID {
+			messageAudience != MessageRecipientAgent ||
+			parent.fromAgentID != message.toAgentID || !parentDeliveredToSender {
 			return nil, fmt.Errorf("message %q does not preserve parent participants, realm, and thread", messageID)
 		}
 	}
@@ -3342,6 +3599,29 @@ func validateImportedMessageReplies(messages map[string]messageImportScope) erro
 		if messages[messageID].causalDepth != expected {
 			return fmt.Errorf("message %q causal_depth %d does not match derived depth %d",
 				messageID, messages[messageID].causalDepth, expected)
+		}
+	}
+	return nil
+}
+
+func validateImportedMessageAudienceSnapshots(messages map[string]messageImportScope) error {
+	for messageID, message := range messages {
+		count := len(message.recipientAgentIDs)
+		audience := message.audienceKind
+		if audience == "" {
+			audience = MessageRecipientAgent
+		}
+		switch audience {
+		case MessageRecipientAgent:
+			if count != 1 || !message.recipientAgentIDs[message.toAgentID] {
+				return fmt.Errorf("direct message %q does not have its one recipient delivery", messageID)
+			}
+		case MessageRecipientAgents, MessageRecipientRealm:
+			if count < 1 || count > maxMessageAudienceRecipients {
+				return fmt.Errorf("message %q audience snapshot has %d recipients", messageID, count)
+			}
+		default:
+			return fmt.Errorf("message %q audience kind %q is invalid", messageID, audience)
 		}
 	}
 	return nil
@@ -3467,19 +3747,473 @@ func importedNullableNonemptyString(obj map[string]any, field string) (string, b
 	return value, true, nil
 }
 
+func messageRealmAudienceFingerprint() string {
+	sum := sha256.Sum256([]byte(MessageRecipientRealm))
+	return hex.EncodeToString(sum[:])
+}
+
+func requireImportedTimestamp(obj map[string]any, field string) (*time.Time, error) {
+	value, present, err := importedOptionalTimestamp(obj, field)
+	if err != nil || !present {
+		return nil, fmt.Errorf("%s must be an RFC3339 timestamp", field)
+	}
+	return value, nil
+}
+
+// requireTimestampAtOrBeforeExport bounds row-authored history by the exact
+// database timestamp in the manifest. The manifest itself may use the small
+// cross-cell skew allowance checked by validateArchiveExportedAt; rows never
+// receive an additional allowance.
+func (ic *importCtx) requireTimestampAtOrBeforeExport(field string, value time.Time) error {
+	// Direct validator tests construct partial import contexts. ImportAccount
+	// always sets exportedAt before streaming the first row.
+	if ic.exportedAt.IsZero() {
+		return nil
+	}
+	if value.After(ic.exportedAt) {
+		return fmt.Errorf("%s is later than manifest exported_at", field)
+	}
+	return nil
+}
+
+func (ic *importCtx) validateImportedMessageRequest(obj map[string]any) (messageRequestImportScope, error) {
+	requestID, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(requestID, "mrq") {
+		return messageRequestImportScope{}, fmt.Errorf("id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return messageRequestImportScope{}, fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	coordinatorID, err := requireStringField(obj, "coordinator_agent_id")
+	if err != nil || !ic.agents[coordinatorID] || ic.agentRealms[coordinatorID] != realmID {
+		return messageRequestImportScope{}, fmt.Errorf("coordinator %q is outside realm %q", coordinatorID, realmID)
+	}
+	openingID, err := requireStringField(obj, "opening_message_id")
+	opening, ok := ic.messages[openingID]
+	if err != nil || !ok {
+		return messageRequestImportScope{}, fmt.Errorf("opening message %q is not present in this archive", openingID)
+	}
+	if opening.realmID != realmID || opening.fromAgentID != coordinatorID || opening.kind != "open_request" ||
+		opening.audienceKind != MessageRecipientRealm || opening.replyToMessageID != "" {
+		return messageRequestImportScope{}, fmt.Errorf("opening message %q has invalid request routing", openingID)
+	}
+	policy, err := requireStringField(obj, "selection_policy")
+	if err != nil || policy != "client_ranked" {
+		return messageRequestImportScope{}, fmt.Errorf("selection_policy is invalid")
+	}
+	maxAssignees, ok := importedPositiveInteger(obj["max_assignees"])
+	if !ok || maxAssignees > 8 {
+		return messageRequestImportScope{}, fmt.Errorf("max_assignees is invalid")
+	}
+	offerWindow, ok := importedPositiveInteger(obj["offer_window_seconds"])
+	if !ok || offerWindow > 900 {
+		return messageRequestImportScope{}, fmt.Errorf("offer_window_seconds is invalid")
+	}
+	expiresIn, ok := importedPositiveInteger(obj["expires_in_seconds"])
+	if !ok || expiresIn < 2 || expiresIn > 604800 || expiresIn <= offerWindow {
+		return messageRequestImportScope{}, fmt.Errorf("expires_in_seconds is invalid")
+	}
+	selectionGeneration, ok := importedGeneration(obj["selection_generation"], true)
+	if !ok || selectionGeneration > maxMessageRequestSelectionHistory {
+		return messageRequestImportScope{}, fmt.Errorf("selection_generation is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	if err := ic.requireTimestampAtOrBeforeExport("agent_message_requests created_at", *createdAt); err != nil {
+		return messageRequestImportScope{}, err
+	}
+	offerDeadline, err := requireImportedTimestamp(obj, "offer_deadline")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	expiresAt, err := requireImportedTimestamp(obj, "expires_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	if !createdAt.Equal(opening.createdAt) ||
+		!offerDeadline.Equal(opening.createdAt.Add(time.Duration(offerWindow)*time.Second)) ||
+		!expiresAt.Equal(opening.createdAt.Add(time.Duration(expiresIn)*time.Second)) {
+		return messageRequestImportScope{}, fmt.Errorf("request deadlines are invalid")
+	}
+	// Deadlines are prospective schedules, so a portable open request may
+	// legitimately expire after export. Their exact derivation from a bounded
+	// creation time plus the protocol-capped 15-minute/7-day durations prevents
+	// an attacker from smuggling an unbounded future lifetime.
+	updatedAt, err := requireImportedTimestamp(obj, "updated_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	if err := ic.requireTimestampAtOrBeforeExport("agent_message_requests updated_at", *updatedAt); err != nil {
+		return messageRequestImportScope{}, err
+	}
+	completedAt, hasCompleted, err := importedOptionalTimestamp(obj, "completed_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	cancelledAt, hasCancelled, err := importedOptionalTimestamp(obj, "cancelled_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	expiredAt, hasExpired, err := importedOptionalTimestamp(obj, "expired_at")
+	if err != nil {
+		return messageRequestImportScope{}, err
+	}
+	for field, value := range map[string]*time.Time{
+		"completed_at": completedAt,
+		"cancelled_at": cancelledAt,
+		"expired_at":   expiredAt,
+	} {
+		if value != nil {
+			if err := ic.requireTimestampAtOrBeforeExport("agent_message_requests "+field, *value); err != nil {
+				return messageRequestImportScope{}, err
+			}
+		}
+	}
+	state, err := requireStringField(obj, "state")
+	if err != nil {
+		return messageRequestImportScope{}, fmt.Errorf("state is invalid")
+	}
+	validLifecycle := state == "open" && !hasCompleted && !hasCancelled && !hasExpired ||
+		state == "completed" && hasCompleted && !hasCancelled && !hasExpired ||
+		state == "cancelled" && !hasCompleted && hasCancelled && !hasExpired ||
+		state == "expired" && !hasCompleted && !hasCancelled && hasExpired
+	if !validLifecycle {
+		return messageRequestImportScope{}, fmt.Errorf("state lifecycle is invalid")
+	}
+	if state == MessageRequestStateOpen && !ic.liveAgents[coordinatorID] {
+		return messageRequestImportScope{}, fmt.Errorf("open request coordinator %q is deleted", coordinatorID)
+	}
+	return messageRequestImportScope{
+		realmID: realmID, openingMessageID: openingID,
+		coordinatorAgentID: coordinatorID, state: state,
+		maxAssignees: maxAssignees, selectionGeneration: selectionGeneration,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedMessageRequestCandidate(
+	obj map[string]any,
+) (messageRequestCandidateImportKey, messageRequestCandidateImportScope, error) {
+	requestID, err := requireStringField(obj, "request_id")
+	request, ok := ic.messageRequests[requestID]
+	if err != nil || !ok {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("request %q is not present in this archive", requestID)
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || realmID != request.realmID {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("realm does not match request %q", requestID)
+	}
+	agentID, err := requireStringField(obj, "agent_id")
+	opening := ic.messages[request.openingMessageID]
+	if err != nil || !ic.agents[agentID] || ic.agentRealms[agentID] != realmID ||
+		agentID == request.coordinatorAgentID || !opening.recipientAgentIDs[agentID] {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("candidate %q is outside request audience", agentID)
+	}
+	state, err := requireStringField(obj, "response_state")
+	if err != nil {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("response_state is invalid")
+	}
+	offerID, hasOffer, err := importedNullableNonemptyString(obj, "offer_message_id")
+	if err != nil {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, err
+	}
+	offerKey, keyOK := obj["offer_key_hash"].(string)
+	offerHash, hashOK := obj["offer_request_hash"].(string)
+	_, hasResponded, err := importedOptionalTimestamp(obj, "responded_at")
+	if err != nil {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, err
+	}
+	if _, err := requireImportedTimestamp(obj, "created_at"); err != nil {
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, err
+	}
+	switch state {
+	case "pending":
+		if hasOffer || !keyOK || offerKey != "" || !hashOK || offerHash != "" || hasResponded {
+			return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("pending response shape is invalid")
+		}
+		if request.state == MessageRequestStateOpen && !ic.liveAgents[agentID] {
+			return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("pending candidate %q is deleted", agentID)
+		}
+	case "declined":
+		if hasOffer || !keyOK || offerKey != "" || !hashOK || offerHash != "" || !hasResponded {
+			return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("declined response shape is invalid")
+		}
+	case "offered":
+		offer, exists := ic.messages[offerID]
+		if !hasOffer || !exists || !keyOK || !isSHA256Hex(offerKey) || !hashOK ||
+			!isSHA256Hex(offerHash) || !hasResponded {
+			return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("offered response shape is invalid")
+		}
+		if offer.realmID != realmID || offer.kind != "offer" || offer.audienceKind != MessageRecipientAgent ||
+			offer.fromAgentID != agentID || offer.toAgentID != request.coordinatorAgentID ||
+			offer.replyToMessageID != request.openingMessageID || offer.threadID != opening.threadID {
+			return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("offer message %q has invalid routing", offerID)
+		}
+	default:
+		return messageRequestCandidateImportKey{}, messageRequestCandidateImportScope{}, fmt.Errorf("response_state is invalid")
+	}
+	return messageRequestCandidateImportKey{requestID: requestID, agentID: agentID},
+		messageRequestCandidateImportScope{responseState: state, offerMessageID: offerID}, nil
+}
+
+func (ic *importCtx) validateImportedMessageRequestSelection(
+	obj map[string]any,
+) (string, messageRequestSelectionImportScope, error) {
+	selectionID, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(selectionID, "msel") {
+		return "", messageRequestSelectionImportScope{}, fmt.Errorf("id is invalid")
+	}
+	requestID, err := requireStringField(obj, "request_id")
+	request, ok := ic.messageRequests[requestID]
+	if err != nil || !ok {
+		return "", messageRequestSelectionImportScope{}, fmt.Errorf("request %q is not present in this archive", requestID)
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	coordinatorID, coordinatorErr := requireStringField(obj, "coordinator_agent_id")
+	if err != nil || coordinatorErr != nil || realmID != request.realmID || coordinatorID != request.coordinatorAgentID {
+		return "", messageRequestSelectionImportScope{}, fmt.Errorf("selection scope does not match request %q", requestID)
+	}
+	generation, ok := importedGeneration(obj["generation"], false)
+	if !ok || generation > maxMessageRequestSelectionHistory || generation > request.selectionGeneration {
+		return "", messageRequestSelectionImportScope{}, fmt.Errorf("generation is invalid")
+	}
+	for _, existing := range ic.messageRequestSelections {
+		if existing.requestID == requestID && existing.generation == generation {
+			return "", messageRequestSelectionImportScope{}, fmt.Errorf("request %q repeats generation %d", requestID, generation)
+		}
+	}
+	keyHash, keyOK := obj["idempotency_key_hash"].(string)
+	selectionHash, selectionOK := obj["selection_hash"].(string)
+	if !keyOK || !isSHA256Hex(keyHash) || !selectionOK || !isSHA256Hex(selectionHash) {
+		return "", messageRequestSelectionImportScope{}, fmt.Errorf("selection hashes are invalid")
+	}
+	if _, err := requireImportedTimestamp(obj, "created_at"); err != nil {
+		return "", messageRequestSelectionImportScope{}, err
+	}
+	return selectionID, messageRequestSelectionImportScope{
+		requestID: requestID, realmID: realmID,
+		coordinatorAgentID: coordinatorID, generation: generation,
+	}, nil
+}
+
+func validateImportedMessageRequestClaimContent(obj map[string]any) (messageRequestClaimImportScope, error) {
+	claimID, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(claimID, "mrc") {
+		return messageRequestClaimImportScope{}, fmt.Errorf("id is invalid")
+	}
+	requestID, err := requireStringField(obj, "request_id")
+	if err != nil || !validImportedGeneratedID(requestID, "mrq") {
+		return messageRequestClaimImportScope{}, fmt.Errorf("request_id is invalid")
+	}
+	selectionID, err := requireStringField(obj, "selection_id")
+	if err != nil || !validImportedGeneratedID(selectionID, "msel") {
+		return messageRequestClaimImportScope{}, fmt.Errorf("selection_id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil {
+		return messageRequestClaimImportScope{}, fmt.Errorf("realm_id is invalid")
+	}
+	agentID, err := requireStringField(obj, "agent_id")
+	if err != nil {
+		return messageRequestClaimImportScope{}, fmt.Errorf("agent_id is invalid")
+	}
+	state, err := requireStringField(obj, "state")
+	if err != nil {
+		return messageRequestClaimImportScope{}, fmt.Errorf("state is invalid")
+	}
+	generation, ok := importedGeneration(obj["generation"], true)
+	if !ok {
+		return messageRequestClaimImportScope{}, fmt.Errorf("generation is invalid")
+	}
+	failureCount, ok := importedGeneration(obj["failure_count"], true)
+	if !ok {
+		return messageRequestClaimImportScope{}, fmt.Errorf("failure_count is invalid")
+	}
+	_ = failureCount
+	claimKey, keyOK := obj["claim_key_hash"].(string)
+	completeKey, completeOK := obj["complete_key_hash"].(string)
+	resultID, hasResult, err := importedNullableNonemptyString(obj, "result_message_id")
+	if err != nil || !keyOK || !completeOK {
+		return messageRequestClaimImportScope{}, fmt.Errorf("claim receipt fields are invalid")
+	}
+	_, hasLease, err := importedOptionalTimestamp(obj, "lease_expires_at")
+	if err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	_, hasClaimed, err := importedOptionalTimestamp(obj, "claimed_at")
+	if err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	_, hasReleased, err := importedOptionalTimestamp(obj, "released_at")
+	if err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	_, hasCompleted, err := importedOptionalTimestamp(obj, "completed_at")
+	if err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	_, hasCancelled, err := importedOptionalTimestamp(obj, "cancelled_at")
+	if err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	if _, err := requireImportedTimestamp(obj, "selected_at"); err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	if _, err := requireImportedTimestamp(obj, "updated_at"); err != nil {
+		return messageRequestClaimImportScope{}, err
+	}
+	valid := false
+	switch state {
+	case "reserved":
+		valid = generation == 0 && claimKey == "" && hasLease && !hasClaimed &&
+			!hasReleased && !hasCompleted && !hasCancelled && completeKey == "" && !hasResult
+	case "claimed":
+		valid = generation >= 1 && isSHA256Hex(claimKey) && hasLease && hasClaimed &&
+			!hasReleased && !hasCompleted && !hasCancelled && completeKey == "" && !hasResult
+	case "released":
+		valid = generation >= 1 && isSHA256Hex(claimKey) && !hasLease && hasClaimed &&
+			hasReleased && !hasCompleted && !hasCancelled && completeKey == "" && !hasResult
+	case "completed":
+		valid = generation >= 1 && isSHA256Hex(claimKey) && !hasLease && hasClaimed &&
+			!hasReleased && hasCompleted && !hasCancelled && isSHA256Hex(completeKey) &&
+			hasResult && validImportedGeneratedID(resultID, "msg")
+	case "cancelled":
+		valid = !hasLease && !hasReleased && !hasCompleted && hasCancelled &&
+			completeKey == "" && !hasResult &&
+			(generation == 0 && claimKey == "" && !hasClaimed ||
+				generation >= 1 && isSHA256Hex(claimKey) && hasClaimed)
+	}
+	if !valid {
+		return messageRequestClaimImportScope{}, fmt.Errorf("%s claim shape is invalid", state)
+	}
+	return messageRequestClaimImportScope{
+		requestID: requestID, selectionID: selectionID, realmID: realmID,
+		agentID: agentID, state: state, generation: generation,
+		resultMessageID: resultID,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedMessageRequestClaim(
+	obj map[string]any,
+) (string, messageRequestClaimImportScope, error) {
+	scope, err := validateImportedMessageRequestClaimContent(obj)
+	if err != nil {
+		return "", messageRequestClaimImportScope{}, err
+	}
+	claimID, _ := requireStringField(obj, "id")
+	request, requestOK := ic.messageRequests[scope.requestID]
+	selection, selectionOK := ic.messageRequestSelections[scope.selectionID]
+	if !requestOK || !selectionOK || selection.requestID != scope.requestID ||
+		scope.realmID != request.realmID || selection.realmID != request.realmID {
+		return "", messageRequestClaimImportScope{}, fmt.Errorf("claim scope does not match its request and selection")
+	}
+	if !ic.agents[scope.agentID] || ic.agentRealms[scope.agentID] != scope.realmID {
+		return "", messageRequestClaimImportScope{}, fmt.Errorf("agent %q is outside claim realm", scope.agentID)
+	}
+	candidate, ok := ic.messageRequestCandidates[messageRequestCandidateImportKey{
+		requestID: scope.requestID, agentID: scope.agentID,
+	}]
+	if !ok || candidate.responseState != "offered" {
+		return "", messageRequestClaimImportScope{}, fmt.Errorf("agent %q has no offer for request %q", scope.agentID, scope.requestID)
+	}
+	for _, existing := range ic.messageRequestClaims {
+		if existing.selectionID == scope.selectionID && existing.agentID == scope.agentID {
+			return "", messageRequestClaimImportScope{}, fmt.Errorf("selection %q repeats agent %q", scope.selectionID, scope.agentID)
+		}
+	}
+	if scope.state == "completed" {
+		result, ok := ic.messages[scope.resultMessageID]
+		opening := ic.messages[request.openingMessageID]
+		if !ok || result.realmID != request.realmID || result.kind != "result" ||
+			result.audienceKind != MessageRecipientAgent ||
+			result.fromAgentID != scope.agentID || result.toAgentID != request.coordinatorAgentID ||
+			result.replyToMessageID != request.openingMessageID || result.threadID != opening.threadID {
+			return "", messageRequestClaimImportScope{}, fmt.Errorf("result message %q has invalid routing", scope.resultMessageID)
+		}
+	}
+	return claimID, scope, nil
+}
+
+func validateImportedMessageRequestGraph(ic *importCtx) error {
+	candidateCounts := make(map[string]int64)
+	for key := range ic.messageRequestCandidates {
+		candidateCounts[key.requestID]++
+	}
+	selectionCounts := make(map[string]int64)
+	maxSelectionGeneration := make(map[string]int64)
+	claimCounts := make(map[string]int64)
+	completedClaimCounts := make(map[string]int64)
+	for selectionID, selection := range ic.messageRequestSelections {
+		selectionCounts[selection.requestID]++
+		if selection.generation > maxSelectionGeneration[selection.requestID] {
+			maxSelectionGeneration[selection.requestID] = selection.generation
+		}
+		for _, claim := range ic.messageRequestClaims {
+			if claim.selectionID == selectionID {
+				claimCounts[selectionID]++
+			}
+		}
+	}
+	for _, claim := range ic.messageRequestClaims {
+		if claim.state == MessageRequestClaimCompleted {
+			completedClaimCounts[claim.requestID]++
+		}
+	}
+	for requestID, request := range ic.messageRequests {
+		opening := ic.messages[request.openingMessageID]
+		if candidateCounts[requestID] != int64(len(opening.recipientAgentIDs)) ||
+			candidateCounts[requestID] < 1 || candidateCounts[requestID] > maxMessageAudienceRecipients {
+			return fmt.Errorf("request %q candidate snapshot does not match its opening audience", requestID)
+		}
+		if maxSelectionGeneration[requestID] != request.selectionGeneration {
+			return fmt.Errorf("request %q selection generation does not match its selection history", requestID)
+		}
+		if selectionCounts[requestID] != request.selectionGeneration {
+			return fmt.Errorf("request %q selection history is not contiguous", requestID)
+		}
+		if request.selectionGeneration == 0 && selectionCounts[requestID] != 0 {
+			return fmt.Errorf("request %q has selections at generation zero", requestID)
+		}
+		completed := completedClaimCounts[requestID]
+		if completed > request.maxAssignees {
+			return fmt.Errorf("request %q has more completed results than its capacity", requestID)
+		}
+		if request.state == MessageRequestStateCompleted && completed == 0 {
+			return fmt.Errorf("completed request %q does not have a result", requestID)
+		}
+	}
+	for selectionID, selection := range ic.messageRequestSelections {
+		request := ic.messageRequests[selection.requestID]
+		if claimCounts[selectionID] < 1 || claimCounts[selectionID] > request.maxAssignees {
+			return fmt.Errorf("selection %q has %d claims outside request capacity", selectionID, claimCounts[selectionID])
+		}
+	}
+	return nil
+}
+
 func validateImportedMessageProcessingLinks(messages map[string]messageImportScope, deliveries map[string]messageDeliveryImportScope) error {
 	seenResults := make(map[string]string)
-	for messageID, delivery := range deliveries {
+	for deliveryKey, delivery := range deliveries {
 		if delivery.processingState != MessageProcessingCompleted {
 			continue
+		}
+		messageID := delivery.messageID
+		if messageID == "" {
+			messageID = deliveryKey
 		}
 		result, ok := messages[delivery.resultMessageID]
 		if !ok {
 			return fmt.Errorf("message %q references missing processing result %q", messageID, delivery.resultMessageID)
 		}
 		source := messages[messageID]
+		recipientAgentID := delivery.recipientAgentID
+		if recipientAgentID == "" {
+			recipientAgentID = source.toAgentID
+		}
 		if result.replyToMessageID != messageID || result.realmID != source.realmID ||
-			result.threadID != source.threadID || result.fromAgentID != source.toAgentID ||
+			result.threadID != source.threadID || result.fromAgentID != recipientAgentID ||
 			result.toAgentID != source.fromAgentID {
 			return fmt.Errorf("message %q has an invalid processing result %q", messageID, delivery.resultMessageID)
 		}

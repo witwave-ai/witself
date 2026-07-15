@@ -77,15 +77,17 @@ V0 should prove the end-to-end product boundary:
 - The CLI can create, append, list, and show visible interaction transcripts;
   agents write their own ledger and account operators have read-only audit
   visibility.
-- The CLI can send, reply, list, listen, read, acknowledge, and coordinate
-  fenced processing for durable inter-agent messages, with sender identity
-  derived from the token. Its client-owned runner keeps a bounded content-free
-  local notification handoff.
+- The CLI can send to one agent, a bounded explicit agent set, or the current
+  realm; reply, list, listen, read, acknowledge, and coordinate fenced delivery
+  processing; and operate the realm-wide open-request lifecycle. Sender and the
+  immutable request coordinator are derived from the token. Its client-owned
+  runner also handles request offers, selection, and selected work while keeping
+  a bounded content-free local notification handoff.
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
 - `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
-  the self-management, fourteen curation, direct-message, and local notification
-  bridge tools. Its server `instructions` teach the always-loaded
+  the self-management, fourteen curation, ordinary-message, message-request, and
+  local notification bridge tools. Its server `instructions` teach the always-loaded
   recall-before-act/write-after-learn protocol plus non-blocking message listen
   and notification-list startup checks.
 - `witself-server serve --dev` can exercise the same core through HTTP.
@@ -162,16 +164,21 @@ Core user-facing capabilities:
 - Policy create/list/show/delete/test under default deny.
 - Group create/list/show/add-member/remove-member/delete, including
   group-scoped shared memories and facts.
-- Message send/reply/list/listen/read/ack and fenced processing over a durable
-  mailbox with per-recipient ordering and acknowledgement, plus local MCP
-  notification list/consume bridging for background-runner handoff.
+- Message send to one agent, a bounded explicit set, or the current realm;
+  reply/list/listen/read/ack and fenced processing over a durable mailbox with
+  per-recipient ordering and acknowledgement; the realm-wide open-request
+  offer/select/claim lifecycle; and local MCP notification list/consume bridging
+  for background-runner handoff. The client-owned runner handles candidate,
+  coordinator, and selected-worker request phases without backend inference.
 - Identity reference parsing and resolution.
 - `witself export` and `witself import` for round-trippable structured
   identity data, including the portable curation graph and value-free receipts.
 - `witself mcp serve` over stdio, exposing the self-management tools and the
   pinned server-instructions teaching protocol. The curation tools are
   `request`, `start`, `renew`, `get`, `plan`, `apply`, `cancel`, `rollback`, and
-  `status`; read-only mode retains only `get` and `status`.
+  `status`; read-only mode retains only `get` and `status`. Messaging includes
+  the ordinary message tools and
+  `witself.message.request.open|list|show|offer|decline|select|cancel|claim|renew|release|complete`.
 
 Sealed credential-plane capabilities (the defined v0 slice that may stage after
 the open-plane core; secrets and TOTP seeds are never embedded, recalled, in the
@@ -204,8 +211,8 @@ Core backend capabilities:
 - `/v1/version`, `/livez`, `/readyz`,
   `/startupz`, `/metrics`, `/v1/whoami`, and `/v1/capabilities`.
 - Initial `/v1/realms`, `/v1/agents`, `/v1/tokens`, `/v1/memories`,
-  `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/transcripts`, `/v1/messages`, and `/v1/audit`
-  route groups.
+  `/v1/facts`, `/v1/policies`, `/v1/groups`, `/v1/transcripts`, `/v1/messages`,
+  `/v1/message-requests`, and `/v1/audit` route groups.
 - Self-management routes including `/v1/self`, `/v1/memories`, bounded memory
   reads/history/list/recall, exact lifecycle actions, evidence resolution, and
   guarded permanent deletion. The 13 curation routes under
@@ -216,7 +223,13 @@ Core backend capabilities:
   `/v1/memories/{memory_id}:forget`, `/v1/memories/{memory_id}:restore`,
   `/v1/memories/{memory_id}:reactivate`, `/v1/memories/{memory_id}/supersede`,
   `/v1/facts/{fact_id}:primary`, `/v1/policies:test`,
-  `/v1/messages/{message_id}:ack`, and `/v1/tokens/{token_id}:rotate`.
+  `/v1/messages:listen`, `/v1/messages/{message_id}:reply`,
+  `/v1/messages/{message_id}:read`, `/v1/messages/{message_id}:ack`,
+  `/v1/messages/{message_id}:claim`, `/v1/messages/{message_id}:renew`,
+  `/v1/messages/{message_id}:release`, `/v1/messages/{message_id}:complete`,
+  the `/v1/message-requests/{request_id}` actions `:offer`, `:decline`, `:select`,
+  `:cancel`, `:claim`, `:renew`, `:release`, and `:complete`,
+  and `/v1/tokens/{token_id}:rotate`.
 - Sealed credential-plane route groups for the sealed-plane slice:
   `/v1/secrets` (with `:reveal`, `:rotate`, `:archive`, `:restore`, `:grant`,
   `:revoke`), `/v1/totp` (with `:code`), and `/v1/password:generate`, all behind
@@ -248,8 +261,13 @@ Core backend capabilities:
 - Declarative policy engine with default deny and a `policy test` decision path.
 - Audit events for auth, token lifecycle, direct memory and fact changes, recall,
   supersession, cross-agent read/contribute/curate/forget, policy
-  decisions, group changes, message send/deliver/read, identity export/import,
-  operator actions, limits, and billing/support stubs when invoked. When the
+  decisions, group changes, ordinary message and request-coordination lifecycle,
+  identity export/import, operator actions, limits, and billing/support stubs
+  when invoked. Request coordination emits the events
+  `message.request.opened|offered|declined|selected|claimed|renewed|released|completed|cancelled`
+  plus the system event `message.request.expired`; cancellation is agent-driven
+  for an explicit coordinator action or system-driven when coordinator deletion
+  closes open work. When the
   sealed plane is enabled, secret create/update/rename/copy/archive/restore/
   delete, `secret.reveal`, secret grant/revoke, `totp.enrolled`/`totp.code`/
   seed-revealed/deleted, and `key.rotated` (KEK) events are emitted, with a

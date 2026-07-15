@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,12 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbMessageRead, VerbMessageAcked,
 		VerbMessageProcessingClaimed, VerbMessageProcessingRenewed,
 		VerbMessageProcessingReleased, VerbMessageProcessingCompleted,
+		VerbMessageRequestOpened, VerbMessageRequestOffered,
+		VerbMessageRequestDeclined, VerbMessageRequestSelected,
+		VerbMessageRequestClaimed, VerbMessageRequestRenewed,
+		VerbMessageRequestReleased, VerbMessageRequestCompleted,
+		VerbMessageRequestCancelled, VerbMessageRequestExpired,
+		VerbMessageRequestCancelledSystem,
 		VerbFactDeleted,
 		VerbMemoryAdded, VerbMemoryAdjusted, VerbMemorySuperseded,
 		VerbMemoryForgotten, VerbMemoryRestored, VerbMemoryReactivated,
@@ -91,6 +98,207 @@ func TestVerbRegistryCoverage(t *testing.T) {
 			t.Errorf("verbMetadataSchema has stale entry %q not in the verb-constant list", k)
 		}
 	}
+}
+
+func TestMessageRequestAuditSchemasAreExactAgentOnlyAndContentFree(t *testing.T) {
+	tests := []struct {
+		verb string
+		keys []string
+	}{
+		{VerbMessageRequestOpened, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+		}},
+		{VerbMessageRequestOffered, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		}},
+		{VerbMessageRequestDeclined, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+		}},
+		{VerbMessageRequestSelected, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+			"selection_id", "generation", "max_assignees",
+		}},
+		{VerbMessageRequestClaimed, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+			"selection_id", "generation", "failure_count",
+		}},
+		{VerbMessageRequestRenewed, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+			"selection_id", "generation", "failure_count",
+		}},
+		{VerbMessageRequestReleased, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+			"selection_id", "generation", "failure_count",
+		}},
+		{VerbMessageRequestCompleted, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "agent_id",
+			"selection_id", "generation", "failure_count", "result_message_id",
+		}},
+		{VerbMessageRequestCancelled, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+		}},
+	}
+	valueFor := func(key string) string {
+		switch key {
+		case "request_id":
+			return "mrq_aaaaaaaaaaaaaaaa"
+		case "opening_message_id", "result_message_id":
+			return "msg_aaaaaaaaaaaaaaaa"
+		case "coordinator_agent_id":
+			return "agent_coordinator"
+		case "agent_id":
+			return "agent_worker"
+		case "selection_id":
+			return "msel_aaaaaaaaaaaaaaaa"
+		case "generation", "failure_count", "max_assignees":
+			return "1"
+		default:
+			t.Fatalf("test has no value for metadata key %q", key)
+			return ""
+		}
+	}
+	forbidden := []string{
+		"body", "payload", "subject", "idempotency_key", "idempotency_key_hash",
+		"claim_id", "claim_key_hash", "complete_key_hash", "lease_expires_at",
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.verb, func(t *testing.T) {
+			spec, ok := verbMetadataSchema[tc.verb]
+			if !ok {
+				t.Fatalf("verb %q has no schema", tc.verb)
+			}
+			if !reflect.DeepEqual(spec.requiredKeys, tc.keys) || !reflect.DeepEqual(spec.allowedKeys, tc.keys) {
+				t.Fatalf("schema = required %#v allowed %#v, want exact %#v",
+					spec.requiredKeys, spec.allowedKeys, tc.keys)
+			}
+			if !reflect.DeepEqual(spec.allowedActors, []string{ActorAgent}) {
+				t.Fatalf("allowed actors = %#v, want agent only", spec.allowedActors)
+			}
+			metadata := make(map[string]any, len(tc.keys))
+			for _, key := range tc.keys {
+				metadata[key] = valueFor(key)
+			}
+			valid := EventInput{
+				AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_actor",
+				Verb: tc.verb, Metadata: metadata,
+			}
+			if err := checkEventShape(valid); err != nil {
+				t.Fatalf("valid content-free metadata: %v", err)
+			}
+			wrongActor := valid
+			wrongActor.ActorKind = ActorSystem
+			wrongActor.ActorID = ""
+			if err := checkEventShape(wrongActor); err == nil || !strings.Contains(err.Error(), `actor_kind "system" not allowed`) {
+				t.Fatalf("system actor error = %v", err)
+			}
+			for _, key := range forbidden {
+				if slicesContains(spec.allowedKeys, key) {
+					t.Fatalf("schema allows forbidden key %q", key)
+				}
+			}
+			withContent := make(map[string]any, len(metadata)+1)
+			for key, value := range metadata {
+				withContent[key] = value
+			}
+			withContent["body"] = "private"
+			invalid := valid
+			invalid.Metadata = withContent
+			if err := checkEventShape(invalid); err == nil || !strings.Contains(err.Error(), `unknown key "body"`) {
+				t.Fatalf("content metadata error = %v", err)
+			}
+		})
+	}
+
+	numericCounter := EventInput{
+		AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_coordinator",
+		Verb: VerbMessageRequestOpened,
+		Metadata: map[string]any{
+			"request_id": "mrq_aaaaaaaaaaaaaaaa", "opening_message_id": "msg_aaaaaaaaaaaaaaaa",
+			"coordinator_agent_id": "agent_coordinator", "max_assignees": 1,
+		},
+	}
+	if err := checkEventShape(numericCounter); err == nil || !strings.Contains(err.Error(), `max_assignees" must be a non-empty string`) {
+		t.Fatalf("numeric counter error = %v", err)
+	}
+}
+
+func TestMessageRequestSystemAuditSchemasAreExactAndContentFree(t *testing.T) {
+	tests := []struct {
+		verb string
+		keys []string
+	}{
+		{VerbMessageRequestExpired, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
+		}},
+		{VerbMessageRequestCancelledSystem, []string{
+			"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees", "reason_code",
+		}},
+	}
+	valueFor := func(key string) string {
+		switch key {
+		case "request_id":
+			return "mrq_aaaaaaaaaaaaaaaa"
+		case "opening_message_id":
+			return "msg_aaaaaaaaaaaaaaaa"
+		case "coordinator_agent_id":
+			return "agent_coordinator"
+		case "max_assignees":
+			return "1"
+		case "reason_code":
+			return "coordinator_deleted"
+		default:
+			t.Fatalf("test has no value for metadata key %q", key)
+			return ""
+		}
+	}
+	forbidden := []string{
+		"body", "payload", "subject", "idempotency_key", "idempotency_key_hash",
+		"claim_id", "claim_key_hash", "complete_key_hash", "lease_expires_at",
+	}
+	for _, tc := range tests {
+		t.Run(tc.verb, func(t *testing.T) {
+			spec := verbMetadataSchema[tc.verb]
+			if !reflect.DeepEqual(spec.requiredKeys, tc.keys) || !reflect.DeepEqual(spec.allowedKeys, tc.keys) {
+				t.Fatalf("schema = required %#v allowed %#v, want exact %#v",
+					spec.requiredKeys, spec.allowedKeys, tc.keys)
+			}
+			if !reflect.DeepEqual(spec.allowedActors, []string{ActorSystem}) {
+				t.Fatalf("allowed actors = %#v, want system only", spec.allowedActors)
+			}
+			metadata := make(map[string]any, len(tc.keys))
+			for _, key := range tc.keys {
+				metadata[key] = valueFor(key)
+			}
+			valid := EventInput{
+				AccountID: "acc_1", ActorKind: ActorSystem,
+				Verb: tc.verb, Metadata: metadata,
+			}
+			if err := checkEventShape(valid); err != nil {
+				t.Fatalf("valid content-free metadata: %v", err)
+			}
+			wrongActor := valid
+			wrongActor.ActorKind = ActorAgent
+			wrongActor.ActorID = "agent_actor"
+			if err := checkEventShape(wrongActor); err == nil || !strings.Contains(err.Error(), `actor_kind "agent" not allowed`) {
+				t.Fatalf("agent actor error = %v", err)
+			}
+			for _, key := range forbidden {
+				if slicesContains(spec.allowedKeys, key) {
+					t.Fatalf("schema allows forbidden key %q", key)
+				}
+			}
+		})
+	}
+}
+
+func slicesContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCheckEventShape exercises the metadata-shape enforcement: missing

@@ -50,11 +50,11 @@ internal/core/                # Domain service and use cases
 internal/api/                 # HTTP handlers and request/response adapters
 internal/auth/                # Token validation and principal resolution
 internal/policy/              # Cross-agent policy engine and security groups
-internal/messaging/           # Mailbox/queue, delivery, ordering, ack state
+internal/messagerunner/       # Client-local autonomous message/request handling
 internal/retrieval/           # Deterministic FTS, filters, and optional vector math
 internal/audit/               # Audit event generation and sinks
 internal/observability/       # Metrics, logs, request IDs, and health probes
-internal/store/               # Storage interfaces
+internal/store/               # Canonical Postgres services, including messaging
 internal/store/postgres/      # Authoritative relational store; FTS + JSONB vectors
 internal/store/blob/          # Object/blob storage adapter when needed
 internal/server/              # Server config, lifecycle, health, migrations
@@ -300,8 +300,9 @@ spoofing. See [threat-model.md](threat-model.md).
 
 ## Messaging Boundary
 
-Inter-agent messaging is fully in scope for v0 and lives in the core service
-behind `internal/messaging`. The messaging model is tracked in
+Inter-agent messaging is fully in scope for v0 and lives across the core
+`internal/store`, `internal/server`, and `internal/client` boundaries, with
+client-local autonomous handling in `internal/messagerunner`. The messaging model is tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
 - Durable mailbox/queue per recipient. Messages (`msg_…`) survive process and
@@ -311,8 +312,8 @@ behind `internal/messaging`. The messaging model is tracked in
   Migration `0034` adds `available`/`claimed`/`completed` state, a monotonic
   generation, opaque claim id and retry-key hash, database-time lease,
   completion-key hash/time, and a unique result-message link. It does not
-  overload read or acknowledgement and does not pre-create the future
-  multi-assignee request-claim model.
+  overload read or acknowledgement; migration `0038` adds the separate
+  multi-assignee request-claim model below.
 - Migration `0035` adds backend-derived causal depth to each direct message.
   Direct sends start at one and replies/results advance exactly one from their
   locked durable parent; callers cannot set or reset the value.
@@ -320,6 +321,14 @@ behind `internal/messaging`. The messaging model is tracked in
   delivery. Only release of the exact fence with `deterministic_failure=true`
   increments it; provider-wide, configuration, cancellation, and
   lease-maintenance release paths do not.
+- Migration `0037` lets one message target a direct agent, a bounded explicit
+  agent set, or the authenticated realm. One immutable message header owns the
+  send-time audience fingerprint; recipient delivery rows remain the
+  authoritative snapshot, and realm fanout excludes the sender.
+- Migration `0038` adds message-backed realm open requests, their immutable
+  candidate snapshot, append-only client-ranked selections, and bounded
+  reservation/claim fences. PostgreSQL owns validation, capacity, deadlines,
+  leases, and result linkage only; clients author offers and perform ranking.
 - Claim, renew, and release require the token-bound recipient and exact live
   fence. Completion validates that unexpired fence, creates a parent-derived
   result reply, links it, and marks processing complete in one transaction;
@@ -329,15 +338,18 @@ behind `internal/messaging`. The messaging model is tracked in
   the deterministic failure budget. The current runner uses `failure_count` and
   escalates the fifth deterministic attempt by default.
 - Delivery is at-least-once with per-recipient (and per-conversation) ordering
-  and explicit read/acknowledgement state. A message addressed to a group is
-  fanned out to current group members with per-member delivery and ack state.
+  and explicit read/acknowledgement state. Explicit-list and realm audiences
+  are atomically resolved into per-member delivery rows. Group fanout remains a
+  follow-on policy slice.
 - `from` is **always derived from the authenticated token, never from input**, so
   sender forgery is structurally impossible through the API. `message:send` and
   `message:read` scopes gate the surface, and send/deliver/read events are
   audited.
-- Ordinary direct sends normalize omitted kind to actionable `request` on every
+- Ordinary sends normalize omitted kind to actionable `request` on every
   frontend/core path. Explicit `note` is FYI-only to the runner and follows its
-  notification/ack path without provider inference.
+  notification/ack path without provider inference. The separate open-request
+  state machine uses ordinary `open_request`, `offer`, and `result` messages for
+  content while keeping coordination state authoritative and model-free.
 - Message bodies and payloads are **untrusted input** to the receiving agent. A
   message can carry data toward a memory or fact write, but it cannot itself
   authorize a cross-agent write — writes still require a matching policy through
@@ -354,16 +366,19 @@ behind `internal/messaging`. The messaging model is tracked in
   Native Claude Code and Grok Build adapters are capability-probed; Codex and
   Cursor native adapters fail closed. A strict generic command adapter exists
   for separately integrated wrappers. Tool-capable execution remains a
-  different, sandboxed contract. Direct replies carry bounded advisory
-  continuation history. The runner enforces its automated turn bound from
+  different, sandboxed contract. Before polling the ordinary mailbox, the
+  runner scans open-request roles: candidates offer/decline, the exact
+  coordinator client ranks durable offers, and selected agents execute fenced
+  claims. Direct replies carry bounded advisory continuation history. The runner enforces its automated turn bound from
   backend-derived causal depth, not payload metadata; the default is 12 turns
   and the hard configurable maximum is 64.
-- Surfaces: CLI `message send|reply|list|listen|read|ack|claim|renew|release|complete`
-  plus local
-  `message runner enable|disable|status|notifications|run|serve|start`; MCP
-  mirrors the ten server-backed message operations and adds local
-  `message.notification.list|consume` bridge tools; HTTP uses `/v1/messages`,
-  `/v1/messages:listen`, and recipient action routes through `:complete`.
+- Surfaces: CLI `message send|reply|list|listen|read|ack|claim|renew|release|complete`,
+  `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`,
+  and local `message runner enable|disable|status|notifications|run|serve|start`.
+  MCP mirrors those ordinary and request operations and adds local
+  `message.notification.list|consume` bridge tools. HTTP uses `/v1/messages`,
+  `/v1/messages:listen`, the recipient actions through `:complete`, and
+  `/v1/message-requests` with its eight action routes.
 - The runner records terminal and other non-provider deliveries in a private,
   content-free, bounded notification ledger before ack. Status exposes the
   count, while CLI and MCP list operations expose pointers; content remains
@@ -378,11 +393,13 @@ behind `internal/messaging`. The messaging model is tracked in
 - Status also exposes private content-free cycle health: last cycle/success
   timestamps, bounded status/error class, and consecutive failures. It stores
   no raw error, message identifier/content, provider output, or credential.
-- Account export preserves causal depth, completed processing, result links, and
-  deterministic `failure_count`. Import validates or derives causal depth,
-  preserves the failure count, and interrupts an active claim by advancing its
-  generation and clearing its claim/key/lease fields before the destination
-  account resumes. Archives older than schema 36 upgrade to `failure_count=0`.
+- Account export preserves causal depth, fanout audience fingerprints and
+  delivery snapshots, completed processing, result links, deterministic
+  `failure_count`, and the full request candidate/selection/claim graph. Import
+  validates or derives causal depth, validates fanout/request graph integrity,
+  interrupts an active direct claim by advancing its generation, and cancels
+  and fences active request reservations/claims before the destination account
+  resumes. Archives older than schema 36 upgrade direct `failure_count` to zero.
   Canonical PostgreSQL messages are exported; the derived host-local
   notification ledger is not.
 

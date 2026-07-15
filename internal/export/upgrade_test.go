@@ -258,6 +258,27 @@ func TestSchema35MessageFailureCountUpgradeDefaultsToZero(t *testing.T) {
 	}
 }
 
+func TestSchema36MessageAudienceUpgradeDefaultsToDirect(t *testing.T) {
+	upgrade := UpgraderFor(36)
+	if upgrade == nil {
+		t.Fatal("schema 36 message-audience upgrader is not registered")
+	}
+	row, err := upgrade("agent_messages", map[string]any{
+		"id": "msg_1", "to_agent_id": "agent_2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row["audience_kind"] != "agent" || row["audience_fingerprint"] != "" ||
+		row["to_agent_id"] != "agent_2" {
+		t.Fatalf("schema 36 audience defaults = %#v", row)
+	}
+	other, err := upgrade("agent_message_deliveries", map[string]any{"message_id": "msg_1"})
+	if err != nil || len(other) != 1 {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

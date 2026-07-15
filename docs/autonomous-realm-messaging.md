@@ -1,12 +1,11 @@
 # Autonomous Realm Messaging
 
-Status: accepted design under active implementation (2026-07-14). Direct
-receive correctness, the migration-0034 delivery-processing fence,
-migration-0035 server-derived causal depth, migration-0036 deterministic
-per-message failure counting, and the client-owned text-only autonomous runner
-are implemented in the current checkout. This is not a deployment or release
-statement. Explicit-list/realm fan-out, open realm requests, multi-assignee
-claims, and their budget controls remain future slices.
+Status: implemented in the current checkout (2026-07-15), pending release and
+deployment. Migration 0037 adds immutable explicit-list and realm delivery
+snapshots. Migration 0038 adds message-backed open requests, bounded offers,
+client-ranked selection, multi-assignee reservations, and exact claim fences.
+The client-owned runner participates without adding inference to the backend.
+This status is not a deployment statement.
 
 This document defines autonomous, same-realm agent communication on top of the
 durable mailbox in [inter-agent-messaging.md](inter-agent-messaging.md). It does
@@ -50,8 +49,8 @@ protocol.
   result.
 - **Realm** — both the security boundary and the built-in team/room for this
   design.
-- **Open request** — a realm-visible delegation for which eligible agents may
-  offer or claim work.
+- **Open request** — a realm-visible delegation for which snapshotted candidates
+  may offer and coordinator-selected agents may claim work.
 - **Claim** — authoritative ownership of one work slot under a bounded lease.
 - **Runner** — a client-owned process that listens, claims, invokes the locally
   configured AI, and sends messages as one installed Witself agent.
@@ -89,10 +88,19 @@ inference, and an agent-to-agent exchange and is not the backend feature name.
    export/import; active leases do not move between cells.
 10. Offline recipients are normal. Sending is durable and asynchronous and does
     not require a recipient runtime to be open.
+11. `client_ranked` is the only current open-request selection policy. Candidate
+    clients use their current runtime instructions to send a bounded offer or
+    decline; the immutable, token-derived coordinator client ranks offers. The
+    backend stores coordination state and bounded offer messages but never
+    filters or ranks agents or generates an offer, decline, responsibility, or
+    directive.
+12. Agent responsibilities, job-function descriptions, standing directives,
+    and richer capability/profile metadata remain deferred identity work. Open
+    request storage and claiming must not depend on that future schema.
 
-## Current Baseline And Missing Behavior
+## Current Implementation And Remaining Boundaries
 
-The implemented direct slice has:
+The implemented messaging slice has:
 
 - direct agent-to-agent delivery inside one realm;
 - immutable PostgreSQL messages and per-recipient delivery/read/ack rows;
@@ -116,19 +124,25 @@ The implemented direct slice has:
   exact-fence release marked as a deterministic message failure;
 - account archive/restore of completed processing state, with every imported
   active claim interrupted before the destination account resumes; and
-- a client-owned direct runner with identity pinning, lease renewal, bounded
+- a client-owned messaging runner with identity pinning, lease renewal, bounded
   continuation context, provider isolation, retry/recovery, local singleton
   locking, a private metadata-only notification ledger, content-free cycle
   health, and per-user launchd/systemd supervision; and
 - full-profile MCP notification list/consume bridging that local ledger to a
   canonical read, with list retained in read-only and both tools absent from
-  curator profiles.
+  curator profiles;
+- one immutable PostgreSQL message plus a bounded send-time delivery snapshot
+  for direct, explicit-agent-list, and whole-realm audiences;
+- realm-wide open requests with an immutable candidate snapshot, bounded offer
+  and expiry windows, `client_ranked` selection, reservations, exact claim
+  fences, result linkage, and audit events;
+- HTTP, Go client, CLI, and MCP operations for the full request lifecycle; and
+- account archive/restore of request candidates, offers, selections, claims,
+  and results, with active source-cell work interrupted on import.
 
 It does **not** yet have:
 
 - deterministic mailbox checks in runtime lifecycle hooks;
-- explicit-recipient-set or whole-realm delivery;
-- open requests, offers, multi-assignee request claims, or reassignment;
 - tool-capable autonomous execution;
 - native autonomous execution through Codex or Cursor, whose current CLIs do
   not pass the required text-only isolation probe; and
@@ -181,15 +195,18 @@ Named security-group recipients may continue to exist for policy-oriented use
 cases, but they are not required to represent "the team." In this design the
 realm is the room.
 
-The sender client translates natural-language intent into one closed
-coordination mode. The backend validates and enforces the selected mode but
-never infers it from message text.
+The sender client translates natural-language intent into one conceptual
+coordination behavior and chooses either an ordinary message send or the
+separate open-request operation. The current schema does not persist a
+`coordination.mode` field, and the backend does not infer one from message text.
+It validates only the concrete audience and request fields supplied through the
+chosen operation.
 
-| Mode | Expected behavior |
+| Conceptual mode | Expected client behavior |
 | --- | --- |
 | `notify` | Deliver information; no response is required. |
 | `each` | Every addressed agent handles the request and returns a result. |
-| `claim` | Eligible agents offer; the coordinator selects at most N. |
+| `claim` | Eligible agents offer; under `client_ranked` the immutable coordinator client selects at most N. |
 | `collaborate` | Agents coordinate in one thread and return one result. |
 
 A direct request to Bob is `each` with one recipient. "Have someone do X" is
@@ -197,13 +214,12 @@ A direct request to Bob is `each` with one recipient. "Have someone do X" is
 `max_assignees=2`. "Tell everyone" is `notify` or `each` depending on whether
 the sentence asks for work. "Have everyone collaborate" is `collaborate`.
 
-Realm `notify`, `each`, and `collaborate` create snapshot delivery state for the
-agents present when the message is sent. A realm `claim` creates one indexed,
-realm-visible open request rather than triggering inference in every agent.
-Eligible runners discover that opportunity through the same listen loop and
-only invoke inference when their local deterministic filters or declared
-capabilities make the request relevant. The server records the audience
-snapshot or equivalent membership version for audit and export.
+Realm `notify`, `each`, and `collaborate` map to ordinary snapshot fan-out; their
+different response expectations are client protocol, not stored backend modes.
+A conceptual `claim` maps to the separate open-request operation. Candidate
+runners discover it through the request list and may invoke one bounded
+client-side turn to offer or decline. The server itself invokes no model and
+records the immutable candidate snapshot for authorization, audit, and export.
 
 Agents created after the snapshot do not retroactively receive or become
 eligible for the old request. Agent availability is runtime state and does not
@@ -215,14 +231,15 @@ change who was in the realm at send time.
 `request`, `question`, `reply`, `offer`, `result`, and `event`; unknown kinds do
 not fail storage.
 
-Omitting `kind` on an ordinary direct send normalizes to actionable `request`
+Omitting `kind` on an ordinary send normalizes to actionable `request`
 on the CLI, MCP, and backend. `note` must be explicit and means FYI-only to the
 implemented runner: it records the content-free notification pointer and acks
 without provider invocation. The runner's provider-invoking kinds are
 `request`, `question`, and `reply`; other labels use the notification path.
 
-Coordination mode and `max_assignees` are closed, validated request controls and
-must not be inferred later from `kind` or prose.
+For an open request, `selection_policy` and `max_assignees` are closed,
+validated controls. The conceptual coordination behavior remains client-side
+and is not reconstructed later from `kind` or prose.
 
 The caller-supplied `thread_id` on a raw send is correlation metadata, not proof
 of reply causality and not permission to participate. The implemented reply
@@ -287,33 +304,52 @@ authorized Witself context.
 
 The realm-shout path is:
 
-1. Scott sends a realm `request` with `coordination.mode=claim`, an expiry, and
-   an immutable `max_assignees`.
-2. Eligible agent runners see the open request. They may reject it locally or
-   send an ordinary direct `offer` reply containing a bounded proposed approach,
-   relevant capability labels, availability, and estimates.
-3. Offers are advisory messages and reserve no capacity. The initiating Scott
-   runner waits through a short bounded offer window and uses client-side
-   inference to select the best one or several candidates.
+1. Scott calls `message request open` (or `POST /v1/message-requests`). The
+   backend atomically creates one realm `kind=open_request` message, the
+   immutable candidate snapshot, `selection_policy=client_ranked`, an expiry,
+   and an immutable `max_assignees`.
+2. Eligible agent runners see the open request. Their current runtime
+   instructions tell them to decline or send an ordinary direct `kind=offer`
+   reply containing a bounded proposed approach, availability, and estimates.
+   Any self-description in the offer is untrusted content interpreted only by
+   clients; this does not require a stored responsibility, job-function, or
+   directive schema.
+3. An offer is advisory and reserves no capacity. Each candidate may send at
+   most one current idempotent offer during the bounded offer window, using the
+   ordinary message body/payload ceilings and rate limits. The request enters
+   `awaiting_selection` when every candidate responds or the offer deadline
+   passes; Scott's runner then uses client-side inference to rank the offers and
+   select the best one or several candidates.
 4. The server atomically creates claims for the chosen agents while enforcing
    `max_assignees`. Each claim has an expiry and fencing generation.
-5. Selected agents work and renew their leases while inference or tools run.
+5. Selected agents work and renew their leases while the implemented bounded
+   text-only inference turn runs.
    Non-selected agents stand down; they do not receive every subsequent work
    message merely because they saw the opening request.
-6. Selected participants send questions, answers, progress, and results in the
-   same thread, addressing only the participants who need each message.
+6. Selected participants may use ordinary thread messages for questions,
+   answers, and progress, addressing only the participants who need each
+   message. The current automatic open-request execution itself is one bounded
+   result turn; it does not synthesize a separate multi-turn request-clarification
+   state machine.
 7. A result is persisted before claim completion. If a claimant fails, releases,
-   or lets its lease expire, Scott may select the next offer or reopen the
-   request.
+   or lets its lease expire, the request remains open and Scott may select the
+   next offer or otherwise reassign available capacity.
 
-The default selector is the initiating client AI, not the backend and not the
-first claimant. An explicit `first_eligible` policy may be added for cheap queue
-work, but it is not the default meaning of "most capable."
+`client_ranked` means that the one immutable coordinator agent, normally the
+initiating client AI, ranks durable offers. The backend never ranks and never
+silently converts disappearance of that client into first-claimant selection.
+If the coordinator client stops, disconnects, or otherwise becomes unavailable,
+the request and offers remain durable in `awaiting_selection` until that same
+coordinator resumes, cancels the request, or the request expires. There is no
+current coordinator delegation or `first_eligible` policy.
 
-Selection may use declared role/capabilities, available tools and permissions,
-runner availability, the proposed approach, estimated time/cost, and later
-observed reliability. Every self-reported value remains advisory. The backend
-stores and filters those values but performs no semantic ranking.
+Selection inference may use the proposed approach, availability, estimated
+time/cost, and any other bounded self-description in the untrusted offer, plus
+runtime-local context already available to the coordinator. The backend stores
+the offer body/payload but does not interpret or filter capability,
+responsibility, directive, availability, or profile fields. A future structured
+agent profile is not a prerequisite for opening, offering on, selecting, or
+claiming a request.
 
 ## Claims, Leases, And Recovery
 
@@ -331,7 +367,8 @@ The claim contract requires:
 - active and completed claims consuming capacity until the request policy says
   otherwise;
 - expired/released/failed claims becoming replaceable;
-- disabling an agent or canceling a request invalidating active claims;
+- canceling a request invalidating active claims; disabled-agent-specific claim
+  handling remains guardrail hardening;
 - idempotent mutation keys and durable audit events; and
 - import interrupting every active lease and reserving a fresh destination
   fence.
@@ -384,9 +421,10 @@ Account export preserves completed processing state and result links. Import
 interrupts active claims by incrementing the generation and clearing claim,
 retry-key, and lease fields before the account resumes. Account events retain
 value-free generation and failure-count history. Import preserves
-`failure_count`; archives older than schema 36 upgrade it to zero. Dedicated
-request/claim tables remain reserved for realm-wide maximum-assignee
-coordination, where they are actually needed.
+`failure_count`; archives older than schema 36 upgrade it to zero. Migration
+0038 supplies separate request, candidate, selection, and claim tables for
+realm-wide maximum-assignee coordination; they do not overload the direct
+delivery-processing fence.
 
 ## Implemented Client Messaging Runner
 
@@ -577,60 +615,65 @@ memory/fact writes, permanent deletion, secret access, policy changes, or
 unrelated account mutations. Any such operation runs its ordinary independent
 authorization path.
 
-## Target Storage Roles
+## Implemented Storage Roles
 
-The direct-delivery processing shape is pinned above; realm-request tables
-remain target work. The storage roles are:
+The current checkout uses these PostgreSQL roles:
 
-- `agent_messages` — immutable sender, content, kind, thread, parent reply,
-  backend-derived causal depth, and coordination reference.
-  Sender/account/realm are token-derived. Migration `0035` adds the depth field.
-- `agent_message_deliveries` — snapshot recipient plus delivery/read/ack state.
-  Migration `0034` adds the direct processing generation, claim/lease fields,
-  completion time, and result link; migration `0036` adds the independent
-  deterministic `failure_count`. Neither overloads read/ack as a lease.
-- `agent_message_requests` — opening message, audience snapshot/version,
-  coordination mode, requester/coordinator, state, expiry, and immutable
-  assignment capacity.
-- `agent_message_claims` — selected agent, state, lease expiry, fence,
-  attempts, and completion outcome.
+- `agent_messages` — one immutable token-derived sender/content record with
+  thread, validated parent, backend-derived causal depth, migration-0037
+  audience kind, and audience fingerprint. Openings, offers, and results are
+  ordinary messages with `open_request`, `offer`, and `result` kinds.
+- `agent_message_deliveries` — the immutable recipient snapshot plus independent
+  delivery/read/ack state. Migration `0034` adds the direct processing
+  generation, claim/lease fields, completion time, and result link; migration
+  `0036` adds the independent deterministic `failure_count`.
+- `agent_message_requests` — one realm opening-message link, immutable
+  token-derived coordinator, closed `client_ranked` policy, lifecycle state,
+  offer and expiry deadlines, selection generation, and assignment capacity.
+- `agent_message_request_candidates` — the immutable sender-excluded candidate
+  snapshot plus each candidate's `pending`, `offered`, or `declined` response
+  and optional offer-message link.
+- `agent_message_request_selections` — append-only, idempotent decisions authored
+  by the immutable coordinator, with a monotonic selection generation and hash.
+- `agent_message_request_claims` — selected-agent reservations and
+  `reserved`, `claimed`, `released`, `completed`, or `cancelled` work state,
+  including lease, exact fence, failure count, and optional result-message link.
 
-Offers remain ordinary `kind=offer` messages rather than a separate table. A
-thread id remains correlation, while `reply_to_message_id` records causality.
-The service validates parent participation rather than trusting a caller that
-knows a thread id.
+Offers remain bounded, idempotent ordinary `kind=offer` messages linked through
+the candidate row rather than copied into a capability table. A thread id
+remains correlation, while `reply_to_message_id` records causality. The request
+graph stores coordination and fencing state, not a conceptual coordination mode
+or future agent responsibilities, directives, capabilities, or availability.
 
-Logical account export/import currently includes messages, deliveries, causal
-links and depths, completed direct-processing state, result links, and
-deterministic failure counts plus audit-safe lifecycle data. Import validates
-account/realm/agent, recomputes or validates depth against the reply graph, and
-validates result-link closure and the non-negative failure count. A `claimed`
-delivery is restored as `available` with its generation incremented, its failure
-count unchanged, and its claim id, key hash, and lease cleared, so no source-cell
-runner can complete on the destination. Completed processing and its result link
-are preserved. Pre-schema-36 archives receive `failure_count=0`. Future
-request/claim rows must follow the same rule. PostgreSQL
-remains the sole canonical message data source across AWS, Azure, and Google
-Cloud. Client-local runner configuration, notification pointers, and provider
-credentials are host state and are not account-exported.
+Logical account export/import includes the message header and exact delivery
+snapshot, causal links/depths, direct-processing state and results, and all four
+migration-0038 request graph streams. Import preserves completed and terminal
+history. It restores an active direct claim as `available` with a newer
+generation and clears its claim/key/lease fields; it converts active request
+reservations and claims to cancelled history and advances the fence. No
+source-cell worker can complete after the move. Pre-schema-36 archives receive
+direct `failure_count=0`. PostgreSQL remains the sole canonical message data
+source across AWS, Azure, and Google Cloud. Client-local runner configuration,
+notification pointers, cycle health, and provider credentials are host state
+and are not account-exported.
 
 ## Surfaces
 
-The implemented direct same-realm surface is `send`, `reply`, `list`, `listen`,
-`read`, `ack`, `claim`, `renew`, `release`, and `complete` across HTTP
-client/server, CLI, and MCP. MCP also exposes local notification list/consume;
-these have no backend route because the pointer ledger is host-local. Read,
-acknowledgement, processing claim, and completion are separate on every
-server-backed surface. The CLI additionally implements
-`message runner enable|disable|status|notifications|run|serve|start`; this local
-process lifecycle is not a backend operation. Target additions are:
+The current checkout implements `send`, `reply`, `list`, `listen`, `read`,
+`ack`, `claim`, `renew`, `release`, and `complete` across HTTP client/server,
+CLI, and MCP. Send accepts one direct agent, a bounded explicit list, or the
+token-derived realm. The separate request surface implements
+`open`, `list`, `show`, `offer`, `decline`, `select`, `cancel`, `claim`, `renew`,
+`release`, and `complete` through the HTTP client/server, CLI, and MCP. Read,
+acknowledgement, direct processing, request selection, and request claims remain
+separate transitions.
 
-- send to repeated explicit agents or the token-derived realm;
-- coordination mode, expiry, offer window, and maximum assignees on a request;
-- request list/show/cancel plus separate multi-assignee request-claim
-  operations;
-- hook-delivered unread metadata at supported runtime boundaries; and
-- tool-capable, explicitly sandboxed runner adapters.
+MCP also exposes local notification list/consume; these have no backend route
+because the pointer ledger is host-local. The CLI additionally implements
+`message runner enable|disable|status|notifications|run|serve|start`; this local
+process lifecycle is not a backend operation. Remaining additions include
+hook-delivered unread metadata at supported runtime boundaries, named-group and
+cross-realm delivery, and tool-capable explicitly sandboxed runner adapters.
 
 Every server-backed agent operation has CLI/MCP parity over the same
 client/core contract. Host-local runner configuration and launchd/systemd
@@ -653,19 +696,25 @@ service lifecycle remain CLI-only because they are not backend resources.
 4. **Provider conformance (partially complete)** — Claude Code and Grok Build
    are capability-probed and supported; Codex and Cursor stay unsupported until
    they pass. Tool-capable execution remains a separately sandboxed contract.
-5. **Recipient fan-out** — add bounded explicit lists and realm snapshots with
-   per-recipient delivery/read/ack and archive coverage.
-6. **Open realm requests** — add coordination state, offers as messages, atomic
-   max-assignee claims, leases/fences, selection, renewal, expiry, and
-   reassignment.
-7. **Guardrails and conformance** — add rates/budgets, cancellation, disabled
-   agent behavior, multi-runner races, restart recovery, metrics, audit, and
-   three-cloud/export-import tests.
+5. **Recipient fan-out (complete in the current checkout)** — bounded explicit
+   lists and realm snapshots with per-recipient delivery/read/ack and archive
+   coverage.
+6. **Open realm requests (complete in the current checkout)** — coordination
+   state, bounded ordinary offers, client-ranked selection with durable
+   `awaiting_selection`, atomic max-assignee reservations/claims, leases/fences,
+   renewal, expiry, release, completion, reassignment, and archive interruption.
+   This slice consumes current runtime instructions and does not wait for a
+   future responsibility/directive schema.
+7. **Guardrails and conformance** — add rate/budget enforcement,
+   disabled-agent-specific behavior, broader multi-runner races, restart
+   recovery, metrics, audit, and three-cloud/export-import tests.
 
-The implemented backend/runner vertical is direct processing, not realm
-bidding: one durable request is automatically claimed, read, passed to a safe
-text-only provider, completed with one atomically linked reply, and
-acknowledged. Multi-turn question/reply continuation uses bounded advisory
+The implemented runner handles both direct deliveries and open requests. Before
+ordinary mailbox work, it pages selected request work, pending candidate work,
+and coordinator work awaiting selection. It can invoke one bounded text-only
+turn to offer or decline, rank durable offers as the immutable coordinator,
+claim selected work, renew its lease, and atomically complete a linked result.
+Direct multi-turn question/reply continuation still uses bounded advisory
 payload context while backend causal depth enforces the turn limit. A fully
 native Codex-to-Claude unattended pair remains blocked specifically on the Codex
 native isolation contract. Automatic injection of the final asynchronous
@@ -693,7 +742,12 @@ not a mailbox or fence gap.
 - A question requiring genuinely new authority escalates instead of inventing
   permission.
 - A realm request with `max_assignees=2` can receive many offers but has at most
-  two current claims.
+  two current claims. The coordinator may select fewer than two, and one
+  completed result closes the request once that selected batch has no other live
+  reservation or claim.
+- A `client_ranked` request whose ranking client disappears remains durably
+  `awaiting_selection`; no candidate becomes the winner until the same immutable
+  coordinator resumes.
 - A selected agent that stops renewing expires; the coordinator can select a
   replacement without accepting a stale completion fence.
 - Realm fan-out is a send-time snapshot and never crosses a realm boundary.
@@ -707,12 +761,11 @@ not a mailbox or fence gap.
 
 - Default short reply wait, offer window, request expiry, lease duration, and
   turn/message limits.
-- Exact wire names for explicit recipient lists and the token-derived realm.
-- The first restricted runner credential profile and its exact message/request
-  permissions.
-- Which declared capability and availability fields are deterministic enough to
-  filter before client inference.
+- Whether a future agent responsibility/directive/profile model should be
+  exposed as advisory client ranking context. The current backend has no such
+  fields and performs no responsibility/capability filtering.
 - Which client/UI should turn the implemented terminal-notification ledger into
   an automatic foreground task or user alert.
 - A user-facing configuration contract for the generic command adapter.
-- A separately sandboxed tool-capable execution adapter.
+- A separately sandboxed tool-capable execution adapter and its restricted
+  credential profile.

@@ -155,6 +155,8 @@ func TestMessageRunnerRunOnceCompletesFencedHTTPFlow(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/self":
 			_ = json.NewEncoder(w).Encode(client.SelfDigest{Identity: identity})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/message-requests":
+			_ = json.NewEncoder(w).Encode(client.MessageRequestPage{Requests: []client.MessageRequest{}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages:listen":
 			_ = json.NewEncoder(w).Encode(client.MessageListenResult{Messages: []client.Message{metadata}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/msg_1:claim":
@@ -224,7 +226,8 @@ func TestMessageRunnerRunOnceCompletesFencedHTTPFlow(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{
-		"GET /v1/self", "POST /v1/messages:listen", "POST /v1/messages/msg_1:claim",
+		"GET /v1/self", "GET /v1/message-requests", "GET /v1/message-requests", "GET /v1/message-requests",
+		"POST /v1/messages:listen", "POST /v1/messages/msg_1:claim",
 		"POST /v1/messages/msg_1:read", "POST /v1/messages/msg_1:complete", "POST /v1/messages/msg_1:ack",
 	}
 	if strings.Join(calls, "|") != strings.Join(want, "|") {
@@ -259,6 +262,12 @@ exit 1
 
 func setupMessageRunnerCLI(t *testing.T, endpoint string, identity client.SelfIdentity) (transcriptcapture.Config, string) {
 	t.Helper()
+	// Service definitions are user-home scoped rather than WITSELF_HOME scoped.
+	// Isolate both roots so tests never inspect or remove the developer's real
+	// launchd/systemd service for the same runtime label.
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(userHome, ".config"))
 	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
 	tokenPath := filepath.Join(t.TempDir(), "agent.token")
 	if err := os.WriteFile(tokenPath, []byte(messageRunnerTestToken+"\n"), 0o600); err != nil {

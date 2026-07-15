@@ -7,8 +7,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/client"
 )
 
 func TestMessageSendUsesAgentTokenAndCanonicalRequest(t *testing.T) {
@@ -85,6 +88,93 @@ func TestMessageSendDefaultsToActionableRequest(t *testing.T) {
 	}
 	if got.Kind != "request" {
 		t.Fatalf("default kind = %q, want request", got.Kind)
+	}
+}
+
+func TestMessageSendSupportsExplicitAndRealmAudiences(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		args       []string
+		wantKind   string
+		wantIDs    []string
+		responseTo string
+	}{
+		{
+			name: "explicit agents", args: []string{"--to-agents", "bob,alice", "--to-agents", "charlie"},
+			wantKind: "agents", wantIDs: []string{"bob", "alice", "charlie"},
+			responseTo: `{"kind":"agents","count":3}`,
+		},
+		{
+			name: "realm", args: []string{"--to-realm"}, wantKind: "realm",
+			responseTo: `{"kind":"realm","count":4}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got struct {
+				To struct {
+					Kind string   `json:"kind"`
+					IDs  []string `json:"ids"`
+				} `json:"to"`
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Fatal(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = fmt.Fprintf(w, `{"message":{"id":"msg_1","kind":"request","thread_id":"thr_1","from":{"kind":"agent","agent_id":"agent_scott","agent_name":"scott"},"to":%s,"delivery":{"state":"delivered"},"read_state":{"state":"unread"}}}`, tt.responseTo)
+			}))
+			defer srv.Close()
+
+			tokenFile := filepath.Join(t.TempDir(), "scott.token")
+			if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"message", "send", "--endpoint", srv.URL, "--token-file", tokenFile, "--body", "hello", "--json"}
+			args = append(args, tt.args...)
+			if code := run(args); code != 0 {
+				t.Fatalf("run code = %d", code)
+			}
+			if got.To.Kind != tt.wantKind || !reflect.DeepEqual(got.To.IDs, tt.wantIDs) {
+				t.Fatalf("audience = %#v, want kind %q ids %#v", got.To, tt.wantKind, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestMessageSendRejectsMissingOrConflictingAudienceWithoutHTTP(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"message", "send", "--endpoint", srv.URL, "--token-file", tokenFile, "--body", "hello"}
+	for _, audience := range [][]string{
+		nil,
+		{"--to", "bob", "--to-realm"},
+		{"--to", "bob", "--to-agents", "alice"},
+		{"--to-agents", "alice", "--to-realm"},
+	} {
+		if code := run(append(append([]string{}, base...), audience...)); code != 2 {
+			t.Fatalf("audience %q returned %d, want 2", audience, code)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("invalid audiences made %d HTTP requests", requests)
+	}
+}
+
+func TestMessageRecipientLabelsDescribeFanout(t *testing.T) {
+	if got := messageRecipientLabel(client.MessageRecipient{Kind: "agents", Count: 3}); got != "agents(3)" {
+		t.Fatalf("summary label = %q", got)
+	}
+	if got := messageRecipientDetailLabel(client.MessageRecipient{Kind: "realm", Count: 4}); got != "realm (4 recipients)" {
+		t.Fatalf("detail label = %q", got)
 	}
 }
 

@@ -138,13 +138,16 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 		 JOIN realms r ON r.id = a.realm_id
 		 WHERE a.id = $1 AND a.realm_id = $2 AND r.account_id = $3
 		   AND a.deleted_at IS NULL AND r.deleted_at IS NULL
-		 FOR UPDATE`,
+		 FOR NO KEY UPDATE`,
 		agentID, realmID, accountID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAgentNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("verify agent: %w", err)
+	}
+	if err := cancelMessageRequestsForDeletedAgentTx(ctx, tx, accountID, realmID, agentID); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(ctx,

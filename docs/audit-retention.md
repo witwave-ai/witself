@@ -255,6 +255,16 @@ deciding policy id.
 - `message.processing.released`
 - `message.processing.completed` (may carry the result message id, never
   body/payload)
+- `message.request.opened`
+- `message.request.offered`
+- `message.request.declined`
+- `message.request.selected`
+- `message.request.claimed`
+- `message.request.renewed`
+- `message.request.released`
+- `message.request.completed`
+- `message.request.cancelled`
+- `message.request.expired` (exactly once, with a system actor)
 
 Message lifecycle metadata may include value-free `message_id`, agent ids,
 kind, thread id, validated reply parent, backend-derived `causal_depth`, and—on
@@ -263,6 +273,17 @@ fence; failure count is the migration-0036 durable deterministic-message-failure
 counter. Neither is the client-local runner health field
 `consecutive_failures`. Audit never includes subject text, body, payload, claim
 id, lease, or idempotency material.
+
+The opened-through-completed request events are agent-driven. Cancellation is
+agent-driven for an explicit coordinator action or system-driven with
+`reason_code=coordinator_deleted`; expiry emits `message.request.expired`
+exactly once with a system actor. All request-coordination events use the same
+content-free rule. Their bounded
+metadata may include `request_id`, `opening_message_id`,
+`coordinator_agent_id`, `agent_id`, `selection_id`, `generation`,
+`failure_count`, `max_assignees`, and a completed `result_message_id`, as
+applicable to the event. They never include opening or offer body/payload,
+claim id, lease, or idempotency material.
 
 ### Identity Export and Import
 

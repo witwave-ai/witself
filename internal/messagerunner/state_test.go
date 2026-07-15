@@ -206,3 +206,40 @@ func TestConfigStoreRunnerHealthIsContentFreeAndClassified(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigStoreRequestScanCheckpointRoundTripIsContentFree(t *testing.T) {
+	store := testConfigStore(t, "claude-code")
+	ctx := context.Background()
+	want := RequestScanCheckpoint{
+		NextPhase: 2,
+		Cursors: map[string]string{
+			requestScanSelected: "1721064000000000000:mrq_aaaaaaaaaaaaaaaa",
+			requestScanPending:  "1721063900000000000:mrq_bbbbbbbbbbbbbbbb",
+		},
+	}
+	if err := store.SaveRequestScanCheckpoint(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadRequestScanCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NextPhase != want.NextPhase ||
+		got.Cursors[requestScanSelected] != want.Cursors[requestScanSelected] ||
+		got.Cursors[requestScanPending] != want.Cursors[requestScanPending] {
+		t.Fatalf("request scan checkpoint = %#v, want %#v", got, want)
+	}
+	got.Cursors[requestScanSelected] = "mutated"
+	again, err := store.LoadRequestScanCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Cursors[requestScanSelected] != want.Cursors[requestScanSelected] {
+		t.Fatalf("stored request scan checkpoint aliased caller map: %#v", again)
+	}
+	if err := store.SaveRequestScanCheckpoint(ctx, RequestScanCheckpoint{
+		Cursors: map[string]string{"unknown": "cursor"},
+	}); err == nil {
+		t.Fatal("invalid request scan lane was accepted")
+	}
+}

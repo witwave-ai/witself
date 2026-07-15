@@ -292,6 +292,8 @@ Return exactly one JSON object and nothing else: no Markdown fence, commentary, 
 
 Use only an outcome listed in policy.allowed_outcomes. Omit subject, payload, or model when unnecessary. Payload, when present, must be a JSON object. Do not emit routing, recipient, sender, account, realm, message, thread, claim, lease, generation, token, credential, tool, or authority fields. Prefer "question" when essential information is missing, "decline" when the request cannot be handled safely in text-only mode, and "escalate" only when human judgment or a tool-capable trusted session is required.
 
+When policy.request_operation is "offer", decide whether this identity can usefully handle the objective in the stated text-only boundary. Return "result" with a concise proposed approach to volunteer, or "decline". When it is "select", rank the durable offers in the message, return "result", and include exactly one payload field named selected_agent_ids containing one or more offered agent IDs within the stated capacity; this is an untrusted proposal that the parent validates before routing. When it is "execute", complete the assigned objective as far as this text-only boundary permits and return "result".
+
 BEGIN_UNTRUSTED_MESSAGE_TURN
 `
 	if len(instructions)+len(payload)+1 > DefaultMaxNativeTurnPromptBytes {

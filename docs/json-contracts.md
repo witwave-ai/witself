@@ -1258,9 +1258,11 @@ Rules:
 
 - `from` is always the token-bound sender. Sender forgery is structurally
   impossible through the API; passing a `from` field is rejected or ignored.
-- The implemented direct shape has `to.kind=agent`. Explicit-list, realm, and
-  group fan-out remain target extensions; each future resolved recipient gets
-  its own delivery/read/processing state.
+- `to.kind` is `agent`, `agents`, or `realm`. A direct projection includes the
+  resolved `agent_id` and `agent_name`. An explicit-list or realm projection
+  omits those singular fields and includes the immutable delivery `count`.
+  Every recipient has independent delivery/read/processing state; inbox views
+  are delivery-scoped and an outbox view summarizes the one immutable header.
 - Direct recipient input is an exact, case-sensitive agent ID or name. A
   selector beginning with lowercase `agent_` is ID-only and never falls back to
   a name; other selectors resolve by exact ID or name with ID precedence. The
@@ -1282,7 +1284,7 @@ Rules:
   `payload` as untrusted input; a message cannot itself authorize a cross-agent
   write (writes still require policy).
 - `subject`/`kind` are short classifications safe for list views. Omitted kind
-  on an ordinary direct send normalizes to actionable `request` across CLI,
+  on an ordinary send normalizes to actionable `request` across CLI,
   MCP, and API/store writes. Explicit `note` is FYI-only to the runner and uses
   its content-free notification/ack path without provider inference.
 - `thread_id` drives per-conversation ordering. A future cross-realm
@@ -1372,6 +1374,74 @@ Schema-36 import validates the failure count, while older archives upgrade to
 zero. A live `claimed` delivery is normalized to `available`, its generation is
 incremented without changing failure count, and its claim/key/lease fields are
 cleared. A completed delivery and valid result link remain completed.
+
+### Realm-wide message requests
+
+An open job is a message-backed coordination record. Its opening message has
+`to.kind=realm` and `kind=open_request`; the request carries only backend-owned
+coordination state:
+
+```json
+{
+  "id": "mrq_123",
+  "account_id": "acc_123",
+  "realm_id": "realm_123",
+  "opening_message_id": "msg_200",
+  "coordinator": {
+    "kind": "agent",
+    "agent_id": "agent_scott",
+    "agent_name": "Scott"
+  },
+  "selection_policy": "client_ranked",
+  "state": "open",
+  "phase": "awaiting_selection",
+  "max_assignees": 2,
+  "candidate_count": 4,
+  "offer_count": 3,
+  "decline_count": 1,
+  "selected_agent_ids": [],
+  "selection_generation": 0,
+  "offer_deadline": "2026-07-15T06:00:30Z",
+  "expires_at": "2026-07-15T07:00:00Z",
+  "created_at": "2026-07-15T06:00:00Z",
+  "updated_at": "2026-07-15T06:00:00Z"
+}
+```
+
+Rules:
+
+- `selection_policy` is currently the closed value `client_ranked`. Candidate
+  and coordinator runtimes perform all inference. The backend stores and
+  validates offers and selections but never generates or ranks them.
+- Stored `state` is `open`, `completed`, `cancelled`, or `expired`. An open
+  request's derived `phase` is `collecting_offers`, `awaiting_selection`, or
+  `assigned`; terminal requests omit phase. Deadlines and durable response/
+  claim rows make this view recoverable without a model or scheduling worker.
+- `max_assignees` is 1-8. `candidate_count` is the immutable send-time realm
+  snapshot, excluding the coordinator. Agents added later cannot participate.
+- A candidate response is `pending`, `offered`, or `declined`. An offer links
+  one ordinary direct `kind=offer` message to the coordinator. Offer content is
+  advisory, bounded, and untrusted and consumes no assignment capacity.
+- Each selection is an immutable, idempotent coordinator decision over agents
+  with valid offers. It may occur only after the offer deadline or once no
+  candidate remains pending. PostgreSQL locks the request and enforces capacity;
+  the client supplies the chosen set, whose IDs are canonicalized rather than
+  stored as a rank order, and the backend never substitutes a first-eligible
+  choice. `max_assignees` is an upper bound, so choosing fewer is valid.
+- A selected work slot begins `reserved`, becomes `claimed` with an opaque
+  `mrc_` claim ID and positive generation, and ends `released`, `completed`, or
+  `cancelled`. Renew, release, and complete require the exact live claim ID and
+  generation. Completion atomically creates and links one direct `kind=result`
+  reply to the coordinator. The request closes once that selected batch has no
+  other live reservation or claim, even when `max_assignees` was larger.
+- The coordinator sees the full candidate, offer, selection, and claim graph.
+  A candidate sees only its own response, offer, selections, and claims. Token
+  identity supplies account, realm, coordinator, candidate, and claimant;
+  callers cannot submit those fields.
+- Migration 0038 account export includes requests, candidate snapshots,
+  selections, claims, and the ordinary opening/offer/result messages. Import
+  preserves terminal history and interrupts every active source-cell
+  reservation or claim so an old fence cannot complete in the destination.
 
 ### Local message runner notifications
 
@@ -2025,7 +2095,13 @@ Rules:
     `group.record_changed`, `message.sent`, `message.delivered`, `message.read`,
     `message.acked`, `message.processing.claimed`,
     `message.processing.renewed`, `message.processing.released`,
-    `message.processing.completed`, `session.started`, `session.ended`,
+    `message.processing.completed`, `message.request.opened`,
+    `message.request.offered`, `message.request.declined`,
+    `message.request.selected`, `message.request.claimed`,
+    `message.request.renewed`, `message.request.released`,
+    `message.request.completed`, `message.request.cancelled`,
+    `message.request.expired`,
+    `session.started`, `session.ended`,
     `self.digest.emitted`, `identity.exported`, `identity.imported`.
   - Sealed plane (credentials): `secret.created`, `secret.updated`,
     `secret.renamed`, `secret.copied`, `secret.archived`, `secret.restored`,

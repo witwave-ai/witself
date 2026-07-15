@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
@@ -50,6 +51,51 @@ func TestNormalizeSendMessageInput(t *testing.T) {
 				t.Fatalf("error = %v, want ErrMessageInputInvalid containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeMessageAudiences(t *testing.T) {
+	explicit, err := normalizeSendMessageInput(SendMessageInput{
+		AudienceKind: MessageRecipientAgents,
+		ToAgents:     []string{" Bob ", "agent_aaaaaaaaaaaaaaaa", "Bob"},
+		Body:         "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.AudienceKind != MessageRecipientAgents || len(explicit.ToAgents) != 2 ||
+		explicit.ToAgents[0] != "Bob" || explicit.ToAgents[1] != "agent_aaaaaaaaaaaaaaaa" ||
+		len(explicit.audienceFingerprint()) != 64 {
+		t.Fatalf("normalized explicit audience = %#v", explicit)
+	}
+	realm, err := normalizeSendMessageInput(SendMessageInput{
+		AudienceKind: MessageRecipientRealm, Body: "hello",
+	})
+	if err != nil || realm.audienceFingerprint() == "" {
+		t.Fatalf("normalized realm audience = %#v / %v", realm, err)
+	}
+	realmAgain, err := normalizeSendMessageInput(SendMessageInput{
+		AudienceKind: MessageRecipientRealm, Body: "hello",
+	})
+	if err != nil || realmAgain.audienceFingerprint() != realm.audienceFingerprint() {
+		t.Fatalf("realm fingerprint = %q / %v, want %q", realmAgain.audienceFingerprint(), err, realm.audienceFingerprint())
+	}
+
+	tests := []SendMessageInput{
+		{AudienceKind: MessageRecipientAgents, Body: "x"},
+		{AudienceKind: MessageRecipientAgents, ToAgent: "Bob", ToAgents: []string{"Alice"}, Body: "x"},
+		{AudienceKind: MessageRecipientRealm, ToAgent: "Bob", Body: "x"},
+		{AudienceKind: MessageRecipientAgent, ToAgent: "Bob", ToAgents: []string{"Alice"}, Body: "x"},
+		{AudienceKind: "room", Body: "x"},
+		{AudienceKind: MessageRecipientAgents, ToAgents: make([]string, maxMessageAudienceRecipients+1), Body: "x"},
+	}
+	for i := range tests[len(tests)-1].ToAgents {
+		tests[len(tests)-1].ToAgents[i] = fmt.Sprintf("agent_%016d", i)
+	}
+	for i, in := range tests {
+		if _, err := normalizeSendMessageInput(in); !errors.Is(err, ErrMessageInputInvalid) {
+			t.Fatalf("invalid audience %d error = %v, want ErrMessageInputInvalid", i, err)
+		}
 	}
 }
 

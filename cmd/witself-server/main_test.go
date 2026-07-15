@@ -267,3 +267,82 @@ func TestMapFactDeletionErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestMapMessageRequestErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{name: "request input", in: fmt.Errorf("%w: invalid lease", store.ErrMessageRequestInputInvalid), want: server.ErrBadInput},
+		{name: "request cursor", in: store.ErrMessageRequestCursorInvalid, want: server.ErrBadInput},
+		{name: "message input", in: store.ErrMessageInputInvalid, want: server.ErrBadInput},
+		{name: "request missing", in: store.ErrMessageRequestNotFound, want: server.ErrNotFound},
+		{name: "audience missing", in: store.ErrMessageRecipientMissing, want: server.ErrNotFound},
+		{name: "busy", in: store.ErrMessageRequestBusy, want: server.ErrBusy},
+		{name: "claim lost", in: store.ErrMessageRequestClaimLost, want: server.ErrConflict},
+		{name: "state conflict", in: store.ErrMessageRequestConflict, want: server.ErrConflict},
+		{name: "forbidden", in: store.ErrMessageRequestForbidden, want: server.ErrForbidden},
+		{name: "inactive account", in: store.ErrAccountNotActive, want: server.ErrForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapMessageRequestError(tc.in); !errors.Is(got, tc.want) {
+				t.Fatalf("mapMessageRequestError(%v) = %v, want errors.Is(_, %v)", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessageRequestAdaptersPreserveProtocolFields(t *testing.T) {
+	createdAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	leaseExpiresAt := createdAt.Add(5 * time.Minute)
+	request := store.MessageRequest{
+		ID: "mrq_1", AccountID: "acct_1", RealmID: "realm_1", OpeningMessageID: "msg_open",
+		Coordinator:     store.MessageAgent{ID: "agent_scott", Name: "Scott"},
+		SelectionPolicy: store.MessageRequestSelectionClientRanked,
+		State:           store.MessageRequestStateOpen, Phase: store.MessageRequestPhaseAssigned,
+		MaxAssignees: 2, CandidateCount: 3, OfferCount: 2, DeclineCount: 1,
+		SelectedAgentIDs: []string{"agent_bob"}, SelectionGeneration: 4,
+		OfferDeadline: createdAt.Add(time.Minute), ExpiresAt: createdAt.Add(time.Hour),
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	}
+	opening := store.Message{
+		ID: "msg_open", AccountID: "acct_1", RealmID: "realm_1",
+		From: store.MessageAgent{ID: "agent_scott", Name: "Scott"},
+		To:   store.MessageRecipient{Kind: store.MessageRecipientRealm, Count: 3},
+		Kind: "open_request", ThreadID: "thr_1", CreatedAt: createdAt,
+	}
+	detail := toServerMessageRequestDetail(store.MessageRequestDetail{
+		Request: request, OpeningMessage: opening,
+		Candidates: []store.MessageRequestCandidate{{
+			Agent:         store.MessageAgent{ID: "agent_bob", Name: "Bob"},
+			ResponseState: store.MessageRequestCandidateOffered, OfferMessageID: "msg_offer", CreatedAt: createdAt,
+		}},
+		Selections: []store.MessageRequestSelection{{
+			ID: "msel_1", Generation: 4, Coordinator: request.Coordinator,
+			SelectedAgentIDs: []string{"agent_bob"}, CreatedAt: createdAt,
+		}},
+		Claims: []store.MessageRequestClaim{{
+			ClaimID: "mrc_1", RequestID: request.ID, SelectionID: "msel_1",
+			Agent: store.MessageAgent{ID: "agent_bob", Name: "Bob"}, State: store.MessageRequestClaimClaimed,
+			Generation: 2, LeaseExpiresAt: &leaseExpiresAt, SelectedAt: createdAt, UpdatedAt: createdAt,
+		}},
+	})
+
+	if detail.Request.ID != request.ID || detail.Request.Coordinator.Kind != "agent" || detail.Request.Phase != request.Phase || detail.Request.SelectionGeneration != 4 {
+		t.Fatalf("request adapter = %#v", detail.Request)
+	}
+	if detail.OpeningMessage.To.Kind != "realm" || detail.OpeningMessage.To.Count != 3 || detail.OpeningMessage.To.AgentID != "" {
+		t.Fatalf("opening message audience adapter = %#v", detail.OpeningMessage.To)
+	}
+	if len(detail.Candidates) != 1 || detail.Candidates[0].Agent.AgentID != "agent_bob" || detail.Candidates[0].Agent.Kind != "agent" {
+		t.Fatalf("candidate adapter = %#v", detail.Candidates)
+	}
+	if len(detail.Selections) != 1 || len(detail.Selections[0].SelectedAgentIDs) != 1 || detail.Selections[0].SelectedAgentIDs[0] != "agent_bob" {
+		t.Fatalf("selection adapter = %#v", detail.Selections)
+	}
+	if len(detail.Claims) != 1 || detail.Claims[0].ClaimID != "mrc_1" || detail.Claims[0].LeaseExpiresAt == nil || !detail.Claims[0].LeaseExpiresAt.Equal(leaseExpiresAt) {
+		t.Fatalf("claim adapter = %#v", detail.Claims)
+	}
+}

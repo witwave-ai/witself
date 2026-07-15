@@ -20,16 +20,27 @@ const (
 	// RunnerStateSchemaV1 identifies private, content-free operational state.
 	RunnerStateSchemaV1 = "witself.message-runner-state.v1"
 
-	maximumRunnerNotifications  = 1024
-	maximumRunnerStateBytes     = 4 * 1024 * 1024
-	maximumOperationalIDLength  = 256
-	maximumOperationalNameBytes = 256
+	maximumRunnerNotifications    = 1024
+	maximumRunnerStateBytes       = 4 * 1024 * 1024
+	maximumOperationalIDLength    = 256
+	maximumOperationalNameBytes   = 256
+	maximumRequestScanCursorBytes = 512
 )
 
 // OperationalState is the trusted parent runner's content-free local
 // notification boundary. Turn depth and processing attempts are backend-owned.
 type OperationalState interface {
 	RecordNotification(context.Context, client.Message) error
+	LoadRequestScanCheckpoint(context.Context) (RequestScanCheckpoint, error)
+	SaveRequestScanCheckpoint(context.Context, RequestScanCheckpoint) error
+}
+
+// RequestScanCheckpoint contains only opaque pagination cursors and the next
+// protocol lane. It lets a bounded runner cycle resume beyond irrelevant
+// request pages without retaining message or offer content locally.
+type RequestScanCheckpoint struct {
+	NextPhase int               `json:"next_phase"`
+	Cursors   map[string]string `json:"cursors,omitempty"`
 }
 
 // Notification is a durable, content-free pointer to a terminal or otherwise
@@ -57,11 +68,62 @@ type Health struct {
 }
 
 type persistedRunnerState struct {
-	Schema        string         `json:"schema"`
-	Revision      int64          `json:"revision"`
-	Notifications []Notification `json:"notifications,omitempty"`
-	Health        Health         `json:"health"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	Schema        string                `json:"schema"`
+	Revision      int64                 `json:"revision"`
+	Notifications []Notification        `json:"notifications,omitempty"`
+	Health        Health                `json:"health"`
+	RequestScan   RequestScanCheckpoint `json:"request_scan"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+}
+
+// LoadRequestScanCheckpoint reads the content-free request pagination state.
+func (s ConfigStore) LoadRequestScanCheckpoint(ctx context.Context) (RequestScanCheckpoint, error) {
+	if err := validateOperationalContext(ctx); err != nil {
+		return RequestScanCheckpoint{}, err
+	}
+	release, err := s.lockOperationalState()
+	if err != nil {
+		return RequestScanCheckpoint{}, err
+	}
+	defer func() { _ = release() }()
+	state, err := s.loadOperationalState()
+	if err != nil {
+		return RequestScanCheckpoint{}, err
+	}
+	return cloneRequestScanCheckpoint(state.RequestScan), nil
+}
+
+// SaveRequestScanCheckpoint updates only request pagination state under the
+// same lock as health and notification writes.
+func (s ConfigStore) SaveRequestScanCheckpoint(ctx context.Context, checkpoint RequestScanCheckpoint) error {
+	if err := validateOperationalContext(ctx); err != nil {
+		return err
+	}
+	if err := validateRequestScanCheckpoint(checkpoint); err != nil {
+		return err
+	}
+	release, err := s.lockOperationalState()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = release() }()
+	state, err := s.loadOperationalState()
+	if err != nil {
+		return err
+	}
+	state.RequestScan = cloneRequestScanCheckpoint(checkpoint)
+	return s.saveOperationalState(&state)
+}
+
+func cloneRequestScanCheckpoint(checkpoint RequestScanCheckpoint) RequestScanCheckpoint {
+	cloned := RequestScanCheckpoint{NextPhase: checkpoint.NextPhase}
+	if len(checkpoint.Cursors) != 0 {
+		cloned.Cursors = make(map[string]string, len(checkpoint.Cursors))
+		for operation, cursor := range checkpoint.Cursors {
+			cloned.Cursors[operation] = cursor
+		}
+	}
+	return cloned
 }
 
 // RecordNotification persists only routing metadata, never subject, body, or
@@ -411,6 +473,9 @@ func validateOperationalState(state persistedRunnerState) error {
 		!validRunnerErrorClass(state.Health.LastErrorClass) {
 		return fmt.Errorf("%w: persisted runner health is invalid", ErrInvalidConfiguration)
 	}
+	if err := validateRequestScanCheckpoint(state.RequestScan); err != nil {
+		return err
+	}
 	seen := map[string]struct{}{}
 	for _, notification := range state.Notifications {
 		if err := validateNotification(notification); err != nil {
@@ -420,6 +485,20 @@ func validateOperationalState(state persistedRunnerState) error {
 			return fmt.Errorf("%w: persisted runner notification is duplicated", ErrInvalidConfiguration)
 		}
 		seen[notification.MessageID] = struct{}{}
+	}
+	return nil
+}
+
+func validateRequestScanCheckpoint(checkpoint RequestScanCheckpoint) error {
+	if checkpoint.NextPhase < 0 || checkpoint.NextPhase >= requestScanPhaseCount ||
+		len(checkpoint.Cursors) > requestScanPhaseCount {
+		return fmt.Errorf("%w: persisted request scan checkpoint is invalid", ErrInvalidConfiguration)
+	}
+	for operation, cursor := range checkpoint.Cursors {
+		if operation != requestScanSelected && operation != requestScanPending && operation != requestScanCoordinator ||
+			len(cursor) > maximumRequestScanCursorBytes {
+			return fmt.Errorf("%w: persisted request scan checkpoint is invalid", ErrInvalidConfiguration)
+		}
 	}
 	return nil
 }
@@ -444,7 +523,8 @@ func sameNotification(left, right Notification) bool {
 
 func validRunnerCycleStatus(status string) bool {
 	switch status {
-	case "", "ok", "error", RunStatusIdle, RunStatusNotified, RunStatusCompleted, RunStatusRecovered:
+	case "", "ok", "error", RunStatusIdle, RunStatusNotified, RunStatusCompleted, RunStatusRecovered,
+		RunStatusRequestOffered, RunStatusRequestDeclined, RunStatusRequestSelected, RunStatusRequestCompleted:
 		return true
 	default:
 		return false

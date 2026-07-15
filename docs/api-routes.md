@@ -15,10 +15,12 @@ not run inference. Older server-classification/consolidation routes are
 superseded. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
-Messaging amendment (implemented in the current checkout): direct message
-actions include `:claim`, `:renew`, `:release`, and atomic `:complete` in
-addition to reply/read/ack. Realm fan-out and open-request routes remain future
-work; this is not a deployment or release statement.
+Messaging amendment (implemented in the current checkout): direct, bounded
+explicit-list, and whole-realm sends share one immutable message plus
+per-recipient delivery snapshots. Direct message actions include `:claim`,
+`:renew`, `:release`, and atomic `:complete`. `/v1/message-requests` adds
+message-backed open jobs, client-ranked selection, and separate exact claim
+fences. This is not a deployment or release statement.
 
 ## Decision
 
@@ -42,6 +44,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
+- `/v1/message-requests`
 - `/v1/transcripts`
 - `/v1/usage`
 - `/v1/conversations`
@@ -81,6 +84,18 @@ POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
+
+GET  /v1/message-requests
+POST /v1/message-requests
+GET  /v1/message-requests/{request_id}
+POST /v1/message-requests/{request_id}:offer
+POST /v1/message-requests/{request_id}:decline
+POST /v1/message-requests/{request_id}:select
+POST /v1/message-requests/{request_id}:cancel
+POST /v1/message-requests/{request_id}:claim
+POST /v1/message-requests/{request_id}:renew
+POST /v1/message-requests/{request_id}:release
+POST /v1/message-requests/{request_id}:complete
 POST /v1/tokens/{token_id}:rotate
 ```
 
@@ -297,6 +312,18 @@ POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
+
+GET  /v1/message-requests
+POST /v1/message-requests
+GET  /v1/message-requests/{request_id}
+POST /v1/message-requests/{request_id}:offer
+POST /v1/message-requests/{request_id}:decline
+POST /v1/message-requests/{request_id}:select
+POST /v1/message-requests/{request_id}:cancel
+POST /v1/message-requests/{request_id}:claim
+POST /v1/message-requests/{request_id}:renew
+POST /v1/message-requests/{request_id}:release
+POST /v1/message-requests/{request_id}:complete
 
 # Append-only visible conversation ledger. Agent tokens write their own;
 # account operators may read every transcript in their account.
@@ -523,10 +550,14 @@ audit events; read-only recall does neither:
   precedence.
 - `POST /v1/messages` normalizes an omitted `kind` to actionable `request`.
   Clients use explicit `kind=note` for FYI-only delivery that a runner records
-  and acknowledges without provider inference. Direct recipient resolution is
-  exact and case-sensitive. A selector beginning with lowercase `agent_` is an
-  ID-only reference and never falls back to an agent name; other selectors use
-  exact ID-or-name resolution with ID precedence.
+  and acknowledges without provider inference. `to.kind` is `agent`, `agents`,
+  or `realm`. Direct input uses one `id`; explicit-list input uses 1-64 `ids`;
+  realm input supplies neither. Every selector resolves exactly and
+  case-sensitively inside the token-derived realm, the whole operation is
+  all-or-none, and a realm snapshot excludes the sender. A selector beginning
+  with lowercase `agent_` is an ID-only reference and never falls back to an
+  agent name; other selectors use exact ID-or-name resolution with ID
+  precedence.
 - `POST /v1/messages/{message_id}:reply` is recipient-only. It verifies that the
   caller received the parent, then derives the recipient from the parent sender
   and derives the thread, `reply_to_message_id`, and `causal_depth` (parent plus
@@ -556,6 +587,41 @@ audit events; read-only recall does neither:
   return HTTP 409.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
+- `POST /v1/message-requests` requires an agent token and `Idempotency-Key` and
+  creates one realm `kind=open_request` message plus an immutable candidate
+  snapshot in the same transaction. `selection_policy` is omitted or
+  `client_ranked`; `max_assignees` is 1-8 (default 1),
+  `offer_window_seconds` is 1-900 (default 30), and `expires_in_seconds` must be
+  greater than the offer window and at most 604800 (default 3600). Sender,
+  realm, coordinator, thread, parent, and causal depth are derived.
+- `GET /v1/message-requests` returns metadata visible to the coordinator or one
+  immutable candidate, with optional `state`, `phase`, `role`, `limit`, and
+  `cursor`. `GET /v1/message-requests/{request_id}` returns authorized detail:
+  the coordinator sees the candidate/offer/selection/claim graph, while a
+  candidate sees only its own response, offer, selected ID, selections, and
+  claims; co-selected agent IDs are not exposed. Request and offer content is
+  untrusted input.
+- `:offer` and `:decline` are candidate-only during the bounded offer window.
+  An offer atomically creates one ordinary direct `kind=offer` reply; it reserves
+  no capacity. Each candidate has one idempotent response. `:select` is
+  coordinator-only, accepts 1-8 offered agent IDs plus a 30-900 second
+  reservation, and atomically enforces `max_assignees`. Selection is allowed
+  only after the offer deadline or once no candidate remains pending; the
+  backend validates but never ranks or chooses candidates. An offline
+  coordinator leaves the durable request in `awaiting_selection` rather than
+  falling back to first claimant. Deleting that coordinator system-cancels its
+  open requests and live claims.
+- `:claim` converts the selected agent's current live reservation into a claim
+  and returns an opaque `mrc_` claim ID plus generation. `:renew`, `:release`,
+  and `:complete` require that exact live fence. Completion atomically creates a
+  server-routed direct `kind=result` reply, links it, and closes the work slot.
+  `max_assignees` is a ceiling: selecting fewer is valid, and the request closes
+  after a completion once that selected batch has no other live reservation or
+  claim, even when the ceiling was larger.
+  Cancellation is coordinator-only and invalidates every live reservation and
+  claim. Deleting a candidate declines a pending response and cancels that
+  agent's live claims while preserving historical offers. Stored deadlines make
+  expiry and phase recoverable without a backend inference or scheduling worker.
 - `witself.message.notification.list/consume` have no HTTP product routes. They
   are MCP bridges over one runtime's private local pointer ledger; consume uses
   the canonical `:read` route and clears its exact pointer only after

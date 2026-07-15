@@ -42,10 +42,10 @@ func SchemaVersion() int {
 
 // ExportAccount streams the account's complete logical archive to w. The
 // account must be suspended or closed: the operational write freeze prevents
-// legitimate new mutations, while one REPEATABLE READ transaction holds a
-// shared lock on the account row and guarantees every table streams from the
-// same PostgreSQL snapshot. The row lock prevents a concurrent resume until
-// the archive has finished. Row order
+// legitimate new mutations, while one REPEATABLE READ transaction holds an
+// exclusive row lock on the account and guarantees every table streams from
+// the same PostgreSQL snapshot. The row lock serializes concurrent exports as
+// well as preventing a concurrent resume until the archive has finished. Row order
 // inside tables is stable (primary key) so repeated exports are deterministic
 // apart from manifest time metadata.
 func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVersion string, w io.Writer) error {
@@ -59,7 +59,7 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 
 	var status string
 	err = tx.QueryRow(ctx,
-		`SELECT status FROM accounts WHERE id = $1 FOR SHARE`, accountID).Scan(&status)
+		`SELECT status FROM accounts WHERE id = $1 FOR UPDATE`, accountID).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAccountNotFound
 	}
@@ -68,6 +68,12 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 	}
 	if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
+	}
+	// Export itself is a legitimate lazy-expiry touch. Materialize every due
+	// request and cancel its active fences before the snapshot streams, so an
+	// archive can never carry time-expired authority as state=open.
+	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, accountID); err != nil {
+		return fmt.Errorf("expire message requests before export: %w", err)
 	}
 	// Bind archive time to the same database clock that authored row
 	// timestamps. This guarantees every legitimate profile/vector timestamp is
@@ -262,6 +268,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
 			  'from_agent_id', from_agent_id, 'to_agent_id', to_agent_id,
+			  'audience_kind', audience_kind,
+			  'audience_fingerprint', audience_fingerprint,
 			  'subject', subject, 'kind', kind, 'body', body,
 			  'payload', payload, 'thread_id', thread_id,
 			  'reply_to_message_id', reply_to_message_id,
@@ -286,6 +294,60 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at)
 			FROM agent_message_deliveries WHERE account_id = $1
 			ORDER BY created_at, message_id, recipient_agent_id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_message_requests", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'opening_message_id', opening_message_id,
+			  'coordinator_agent_id', coordinator_agent_id,
+			  'selection_policy', selection_policy, 'state', state,
+			  'max_assignees', max_assignees,
+			  'offer_window_seconds', offer_window_seconds,
+			  'expires_in_seconds', expires_in_seconds,
+			  'offer_deadline', offer_deadline, 'expires_at', expires_at,
+			  'selection_generation', selection_generation,
+			  'completed_at', completed_at, 'cancelled_at', cancelled_at,
+			  'expired_at', expired_at,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM agent_message_requests WHERE account_id = $1
+			ORDER BY created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_message_request_candidates", q: `
+			SELECT jsonb_build_object(
+			  'request_id', request_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'agent_id', agent_id,
+			  'response_state', response_state,
+			  'offer_message_id', offer_message_id,
+			  'offer_key_hash', offer_key_hash,
+			  'offer_request_hash', offer_request_hash,
+			  'responded_at', responded_at, 'created_at', created_at)
+			FROM agent_message_request_candidates WHERE account_id = $1
+			ORDER BY request_id, agent_id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_message_request_selections", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'request_id', request_id,
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'coordinator_agent_id', coordinator_agent_id,
+			  'generation', generation,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'selection_hash', selection_hash, 'created_at', created_at)
+			FROM agent_message_request_selections WHERE account_id = $1
+			ORDER BY request_id, generation, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_message_request_claims", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'request_id', request_id,
+			  'selection_id', selection_id,
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'state', state,
+			  'generation', generation,
+			  'claim_key_hash', claim_key_hash,
+			  'lease_expires_at', lease_expires_at,
+			  'failure_count', failure_count,
+			  'complete_key_hash', complete_key_hash,
+			  'result_message_id', result_message_id,
+			  'selected_at', selected_at, 'claimed_at', claimed_at,
+			  'released_at', released_at, 'completed_at', completed_at,
+			  'cancelled_at', cancelled_at, 'updated_at', updated_at)
+			FROM agent_message_request_claims WHERE account_id = $1
+			ORDER BY request_id, selection_id, agent_id, id`, arg: accountID},
 		// Memory evidence may refer to transcripts, messages, or other memory
 		// versions, so the external interaction sources above must land first.
 		// Heads and versions form a deferrable FK cycle and can stream directly

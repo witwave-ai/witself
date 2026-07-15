@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +23,9 @@ const (
 	MessageDirectionInbox  = "inbox"
 	MessageDirectionOutbox = "outbox"
 
-	MessageRecipientAgent = "agent"
+	MessageRecipientAgent  = "agent"
+	MessageRecipientAgents = "agents"
+	MessageRecipientRealm  = "realm"
 
 	MessageDeliveryQueued    = "queued"
 	MessageDeliveryDelivered = "delivered"
@@ -44,6 +47,7 @@ const (
 	maxMessageReplyIDBytes               = 128
 	maxMessageIdempotencyKeyBytes        = 512
 	maxMessageRecipientBytes             = 256
+	maxMessageAudienceRecipients         = 64
 	maxMessageClaimIDBytes               = 128
 	maxMessageCausalDepth          int64 = 2147483647
 	defaultMessagePageSize               = 50
@@ -82,9 +86,10 @@ type MessageAgent struct {
 
 // MessageRecipient identifies one resolved direct recipient.
 type MessageRecipient struct {
-	Kind string `json:"kind"`
-	ID   string `json:"agent_id"`
-	Name string `json:"agent_name"`
+	Kind  string `json:"kind"`
+	ID    string `json:"agent_id,omitempty"`
+	Name  string `json:"agent_name,omitempty"`
+	Count int    `json:"count,omitempty"`
 }
 
 // MessageDelivery is the durable recipient delivery state.
@@ -115,27 +120,33 @@ type MessageProcessing struct {
 // Message is one direct realm-local agent message plus the recipient's state.
 // Body and Payload are empty on list results and populated only by send/read.
 type Message struct {
-	ID               string            `json:"id"`
-	AccountID        string            `json:"account_id"`
-	RealmID          string            `json:"realm_id"`
-	From             MessageAgent      `json:"from"`
-	To               MessageRecipient  `json:"to"`
-	Subject          string            `json:"subject,omitempty"`
-	Kind             string            `json:"kind"`
-	Body             string            `json:"body,omitempty"`
-	Payload          json.RawMessage   `json:"payload,omitempty"`
-	ThreadID         string            `json:"thread_id"`
-	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
-	CausalDepth      int64             `json:"causal_depth"`
-	CreatedAt        time.Time         `json:"created_at"`
-	Delivery         MessageDelivery   `json:"delivery"`
-	ReadState        MessageReadState  `json:"read_state"`
-	Processing       MessageProcessing `json:"processing"`
+	ID                  string            `json:"id"`
+	AccountID           string            `json:"account_id"`
+	RealmID             string            `json:"realm_id"`
+	From                MessageAgent      `json:"from"`
+	To                  MessageRecipient  `json:"to"`
+	Subject             string            `json:"subject,omitempty"`
+	Kind                string            `json:"kind"`
+	Body                string            `json:"body,omitempty"`
+	Payload             json.RawMessage   `json:"payload,omitempty"`
+	ThreadID            string            `json:"thread_id"`
+	ReplyToMessageID    string            `json:"reply_to_message_id,omitempty"`
+	CausalDepth         int64             `json:"causal_depth"`
+	CreatedAt           time.Time         `json:"created_at"`
+	Delivery            MessageDelivery   `json:"delivery"`
+	ReadState           MessageReadState  `json:"read_state"`
+	Processing          MessageProcessing `json:"processing"`
+	audienceFingerprint string
 }
 
 // SendMessageInput is the caller-controlled, non-identity send payload.
 type SendMessageInput struct {
+	// AudienceKind defaults to agent. Agent uses ToAgent, agents uses
+	// ToAgents, and realm derives its bounded recipient snapshot entirely from
+	// the token-bound realm.
+	AudienceKind     string
 	ToAgent          string
+	ToAgents         []string
 	Subject          string
 	Kind             string
 	Body             string
@@ -222,8 +233,9 @@ type MessagePage struct {
 	NextCursor string
 }
 
-// SendMessage resolves the direct recipient in the token-derived realm and
-// atomically creates the immutable message, delivery row, and audit events.
+// SendMessage resolves one direct, explicit-list, or realm audience inside the
+// token-derived realm and atomically creates the immutable message and its
+// bounded send-time delivery snapshot.
 func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInput) (Message, error) {
 	if p.Kind != PrincipalAgent {
 		return Message{}, ErrMessageForbidden
@@ -251,7 +263,7 @@ func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInpu
 	if existing, replay, err := messageReplayByIdempotencyKey(ctx, tx, p, in.IdempotencyKey); err != nil {
 		return Message{}, err
 	} else if replay {
-		if !messageMatchesDirectSendReplay(existing, in) {
+		if !messageMatchesSendReplay(existing, in) {
 			return Message{}, ErrMessageConflict
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -260,11 +272,11 @@ func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInpu
 		return redactMessageProcessingFence(existing), nil
 	}
 
-	to, err := resolveMessageAgent(ctx, tx, p.AccountID, p.RealmID, in.ToAgent)
+	recipients, err := resolveMessageAudience(ctx, tx, p, in)
 	if err != nil {
 		return Message{}, err
 	}
-	msg, err := s.insertMessageTx(ctx, tx, p, to, in)
+	msg, err := s.insertMessageAudienceTx(ctx, tx, p, recipients, in)
 	if err != nil {
 		return Message{}, err
 	}
@@ -321,9 +333,9 @@ func (s *Store) ReplyMessage(ctx context.Context, p Principal, parentMessageID s
 		return redactMessageProcessingFence(existing), nil
 	}
 
-	parent, err := scanMessage(tx.QueryRow(ctx, messageSelect(false)+`
+	parent, err := scanMessage(tx.QueryRow(ctx, messageDeliverySelect(false)+`
 		WHERE m.id = $1 AND m.account_id = $2 AND m.realm_id = $3
-		  AND m.to_agent_id = $4 AND d.recipient_agent_id = $4
+		  AND d.recipient_agent_id = $4
 		FOR SHARE OF m, d`, parentMessageID, p.AccountID, p.RealmID, p.ID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Message{}, ErrMessageNotFound
@@ -382,6 +394,9 @@ func (s *Store) ClaimMessage(ctx context.Context, p Principal, messageID string,
 	}
 	msg, err := lockMessageProcessingDelivery(ctx, tx, p, messageID, true)
 	if err != nil {
+		return Message{}, err
+	}
+	if err := rejectMessageRequestProtocolProcessingTx(ctx, tx, msg); err != nil {
 		return Message{}, err
 	}
 	if msg.Processing.State == MessageProcessingCompleted {
@@ -478,6 +493,9 @@ func (s *Store) RenewMessageClaim(ctx context.Context, p Principal, messageID st
 	if err != nil {
 		return Message{}, err
 	}
+	if err := rejectMessageRequestProtocolProcessingTx(ctx, tx, msg); err != nil {
+		return Message{}, err
+	}
 	if msg.Processing.State != MessageProcessingClaimed ||
 		msg.Processing.ClaimID != fence.ClaimID || msg.Processing.Generation != fence.ProcessingGeneration {
 		return Message{}, ErrMessageClaimLost
@@ -537,6 +555,9 @@ func (s *Store) ReleaseMessageClaim(ctx context.Context, p Principal, messageID 
 	}
 	msg, err := lockMessageProcessingDelivery(ctx, tx, p, messageID, false)
 	if err != nil {
+		return Message{}, err
+	}
+	if err := rejectMessageRequestProtocolProcessingTx(ctx, tx, msg); err != nil {
 		return Message{}, err
 	}
 	if msg.Processing.State != MessageProcessingClaimed ||
@@ -622,6 +643,9 @@ func (s *Store) CompleteMessage(ctx context.Context, p Principal, messageID stri
 	}
 	parent, err := lockMessageProcessingDelivery(ctx, tx, p, messageID, false)
 	if err != nil {
+		return CompleteMessageResult{}, err
+	}
+	if err := rejectMessageRequestProtocolProcessingTx(ctx, tx, parent); err != nil {
 		return CompleteMessageResult{}, err
 	}
 	var storedCompleteKeyHash string
@@ -721,6 +745,25 @@ func (s *Store) insertMessageTx(ctx context.Context, tx pgx.Tx, p Principal, to 
 	return s.insertMessageWithDeliveryTx(ctx, tx, p, to, in, MessageDeliveryDelivered)
 }
 
+func (s *Store) insertMessageAudienceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	p Principal,
+	recipients []Agent,
+	in SendMessageInput,
+) (Message, error) {
+	targets := make([]messageDeliveryTarget, len(recipients))
+	for i := range recipients {
+		targets[i] = messageDeliveryTarget{agent: recipients[i], state: MessageDeliveryDelivered}
+	}
+	return s.insertMessageTargetsTx(ctx, tx, p, targets, in)
+}
+
+type messageDeliveryTarget struct {
+	agent Agent
+	state string
+}
+
 // insertMessageWithDeliveryTx is deliberately private to the fenced
 // completion path. Direct sends and ordinary replies always use the delivered
 // wrapper above and still require a live recipient.
@@ -735,12 +778,30 @@ func (s *Store) insertMessageWithDeliveryTx(
 	if deliveryState != MessageDeliveryDelivered && deliveryState != MessageDeliveryFailed {
 		return Message{}, fmt.Errorf("%w: unsupported message delivery state", ErrMessageInputInvalid)
 	}
+	return s.insertMessageTargetsTx(ctx, tx, p, []messageDeliveryTarget{{agent: to, state: deliveryState}}, in)
+}
+
+func (s *Store) insertMessageTargetsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	p Principal,
+	targets []messageDeliveryTarget,
+	in SendMessageInput,
+) (Message, error) {
+	if len(targets) == 0 || len(targets) > maxMessageAudienceRecipients {
+		return Message{}, fmt.Errorf("%w: audience must resolve to 1-%d recipients", ErrMessageInputInvalid, maxMessageAudienceRecipients)
+	}
+	for _, target := range targets {
+		if target.state != MessageDeliveryDelivered && target.state != MessageDeliveryFailed {
+			return Message{}, fmt.Errorf("%w: unsupported message delivery state", ErrMessageInputInvalid)
+		}
+	}
 	var err error
 	if in.IdempotencyKey != "" {
 		existing, findErr := messageByIdempotencyKey(ctx, tx, p.AccountID, p.ID, in.IdempotencyKey)
 		switch {
 		case findErr == nil:
-			if !messageMatchesSend(existing, to.ID, in) {
+			if !messageMatchesSendReplay(existing, in) {
 				return Message{}, ErrMessageConflict
 			}
 			return existing, nil
@@ -751,13 +812,19 @@ func (s *Store) insertMessageWithDeliveryTx(
 
 	causalDepth := int64(1)
 	if in.ReplyToMessageID != "" {
+		if in.AudienceKind != MessageRecipientAgent || len(targets) != 1 {
+			return Message{}, fmt.Errorf("%w: replies require one derived agent recipient", ErrMessageInputInvalid)
+		}
+		to := targets[0].agent
 		var parentDepth int64
 		err := tx.QueryRow(ctx, `
-			SELECT causal_depth
-			FROM agent_messages
-			WHERE id=$1 AND account_id=$2 AND realm_id=$3 AND thread_id=$4
-			  AND from_agent_id=$5 AND to_agent_id=$6
-			FOR SHARE`, in.ReplyToMessageID, p.AccountID, p.RealmID,
+			SELECT m.causal_depth
+			FROM agent_messages m
+			JOIN agent_message_deliveries d
+			  ON d.message_id=m.id AND d.recipient_agent_id=$6
+			WHERE m.id=$1 AND m.account_id=$2 AND m.realm_id=$3 AND m.thread_id=$4
+			  AND m.from_agent_id=$5
+			FOR SHARE OF m, d`, in.ReplyToMessageID, p.AccountID, p.RealmID,
 			in.ThreadID, to.ID, p.ID).Scan(&parentDepth)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Message{}, ErrMessageNotFound
@@ -786,26 +853,33 @@ func (s *Store) insertMessageWithDeliveryTx(
 	if len(in.Payload) > 0 {
 		payload = string(in.Payload)
 	}
+	var toAgentID any
+	if in.AudienceKind == MessageRecipientAgent {
+		if len(targets) != 1 {
+			return Message{}, fmt.Errorf("%w: direct audience must resolve to one recipient", ErrMessageInputInvalid)
+		}
+		toAgentID = targets[0].agent.ID
+	}
 	var createdAt time.Time
 	err = tx.QueryRow(ctx, `
 		INSERT INTO agent_messages
 		  (id, account_id, realm_id, from_agent_id, to_agent_id,
 		   subject, kind, body, payload, thread_id, reply_to_message_id,
-		   idempotency_key, causal_depth)
+		   idempotency_key, causal_depth, audience_kind, audience_fingerprint)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
 		        CASE WHEN $9::text IS NULL THEN NULL ELSE $9::jsonb END,
-		        $10, NULLIF($11, ''), NULLIF($12, ''), $13)
+		        $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15)
 		ON CONFLICT (account_id, from_agent_id, idempotency_key) DO NOTHING
 		RETURNING created_at`,
-		messageID, p.AccountID, p.RealmID, p.ID, to.ID,
+		messageID, p.AccountID, p.RealmID, p.ID, toAgentID,
 		in.Subject, in.Kind, in.Body, payload, threadID, in.ReplyToMessageID,
-		in.IdempotencyKey, causalDepth).Scan(&createdAt)
+		in.IdempotencyKey, causalDepth, in.AudienceKind, in.audienceFingerprint()).Scan(&createdAt)
 	if errors.Is(err, pgx.ErrNoRows) && in.IdempotencyKey != "" {
 		existing, findErr := messageByIdempotencyKey(ctx, tx, p.AccountID, p.ID, in.IdempotencyKey)
 		if findErr != nil {
 			return Message{}, fmt.Errorf("find concurrent message retry: %w", findErr)
 		}
-		if !messageMatchesSend(existing, to.ID, in) {
+		if !messageMatchesSendReplay(existing, in) {
 			return Message{}, ErrMessageConflict
 		}
 		return existing, nil
@@ -815,36 +889,62 @@ func (s *Store) insertMessageWithDeliveryTx(
 	}
 
 	var delivery MessageDelivery
-	err = tx.QueryRow(ctx, `
-		INSERT INTO agent_message_deliveries
-		  (message_id, account_id, realm_id, recipient_agent_id, state, delivered_at)
-		VALUES ($1, $2, $3, $4, $5,
-		        CASE WHEN $5 = 'delivered' THEN clock_timestamp() ELSE NULL END)
-		RETURNING state, delivered_at`, messageID, p.AccountID, p.RealmID, to.ID, deliveryState).
-		Scan(&delivery.State, &delivery.DeliveredAt)
-	if err != nil {
-		return Message{}, fmt.Errorf("insert message delivery: %w", err)
+	for i, target := range targets {
+		var current MessageDelivery
+		err = tx.QueryRow(ctx, `
+			INSERT INTO agent_message_deliveries
+			  (message_id, account_id, realm_id, recipient_agent_id, state, delivered_at)
+			VALUES ($1, $2, $3, $4, $5,
+			        CASE WHEN $5 = 'delivered' THEN clock_timestamp() ELSE NULL END)
+			RETURNING state, delivered_at`, messageID, p.AccountID, p.RealmID,
+			target.agent.ID, target.state).Scan(&current.State, &current.DeliveredAt)
+		if err != nil {
+			return Message{}, fmt.Errorf("insert message delivery: %w", err)
+		}
+		if i == 0 {
+			delivery = current
+		} else if current.State != delivery.State {
+			delivery = MessageDelivery{State: MessageDeliveryQueued}
+		}
 	}
 
+	recipient := MessageRecipient{Kind: in.AudienceKind, Count: len(targets)}
+	if in.AudienceKind == MessageRecipientAgent {
+		recipient.ID = targets[0].agent.ID
+		recipient.Name = targets[0].agent.Name
+		recipient.Count = 0
+	}
 	msg := Message{
 		ID: messageID, AccountID: p.AccountID, RealmID: p.RealmID,
 		From:    MessageAgent{ID: p.ID, Name: p.AgentName},
-		To:      MessageRecipient{Kind: MessageRecipientAgent, ID: to.ID, Name: to.Name},
+		To:      recipient,
 		Subject: in.Subject, Kind: in.Kind, Body: in.Body, Payload: in.Payload,
 		ThreadID: threadID, ReplyToMessageID: in.ReplyToMessageID, CausalDepth: causalDepth,
 		CreatedAt: createdAt, Delivery: delivery,
-		ReadState:  MessageReadState{State: MessageReadUnread},
-		Processing: MessageProcessing{State: MessageProcessingAvailable},
+		ReadState:           MessageReadState{State: MessageReadUnread},
+		Processing:          MessageProcessing{State: MessageProcessingAvailable},
+		audienceFingerprint: in.audienceFingerprint(),
 	}
-	if err := logMessageEvent(ctx, tx, VerbMessageSent, ActorAgent, p.ID, msg); err != nil {
+	sentEvent := msg
+	if sentEvent.To.ID == "" {
+		// The current audit schema requires one non-empty recipient id. Keep the
+		// logical audience kind and use the first deterministic snapshot member;
+		// the per-recipient delivered events below retain the complete snapshot.
+		sentEvent.To.ID = targets[0].agent.ID
+	}
+	if err := logMessageEvent(ctx, tx, VerbMessageSent, ActorAgent, p.ID, sentEvent); err != nil {
 		return Message{}, err
 	}
-	deliveryVerb := VerbMessageDelivered
-	if delivery.State == MessageDeliveryFailed {
-		deliveryVerb = VerbMessageDeliveryFailed
-	}
-	if err := logMessageEvent(ctx, tx, deliveryVerb, ActorSystem, "", msg); err != nil {
-		return Message{}, err
+	for _, target := range targets {
+		deliveryMessage := msg
+		deliveryMessage.To = MessageRecipient{Kind: MessageRecipientAgent, ID: target.agent.ID, Name: target.agent.Name}
+		deliveryVerb := VerbMessageDelivered
+		if target.state == MessageDeliveryFailed {
+			deliveryVerb = VerbMessageDeliveryFailed
+		}
+		if err := logMessageEvent(ctx, tx, deliveryVerb, ActorSystem, "", deliveryMessage); err != nil {
+			return Message{}, err
+		}
 	}
 	return msg, nil
 }
@@ -876,11 +976,12 @@ func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFil
 
 	args := []any{p.AccountID, p.RealmID, p.ID}
 	q := &strings.Builder{}
-	q.WriteString(messageSelect(false))
 	if filter.Direction == MessageDirectionInbox {
+		q.WriteString(messageDeliverySelect(false))
 		q.WriteString(` WHERE d.account_id = $1 AND d.realm_id = $2 AND d.recipient_agent_id = $3
-			AND m.account_id = $1 AND m.realm_id = $2 AND m.to_agent_id = $3`)
+			AND m.account_id = $1 AND m.realm_id = $2`)
 	} else {
+		q.WriteString(messageOutboxSelect(false))
 		q.WriteString(` WHERE m.account_id = $1 AND m.realm_id = $2 AND m.from_agent_id = $3`)
 	}
 	if filter.Unread {
@@ -976,7 +1077,7 @@ func (s *Store) transitionMessage(ctx context.Context, p Principal, messageID st
 	// Ack is intentionally metadata-only. Reading untrusted body/payload is a
 	// separate explicit operation and must not happen as a side effect of
 	// acknowledging work discovered through list/listen.
-	row := tx.QueryRow(ctx, messageSelect(!ack)+`
+	row := tx.QueryRow(ctx, messageDeliverySelect(!ack)+`
 		WHERE m.id = $1 AND d.account_id = $2 AND d.realm_id = $3
 		  AND d.recipient_agent_id = $4
 		FOR UPDATE OF d`, messageID, p.AccountID, p.RealmID, p.ID)
@@ -1011,13 +1112,15 @@ func (s *Store) transitionMessage(ctx context.Context, p Principal, messageID st
 		return Message{}, fmt.Errorf("advance message state: %w", err)
 	}
 	msg.ReadState.State = readState(msg.ReadState.ReadAt, msg.ReadState.AckedAt)
+	auditMessage := msg
+	auditMessage.To.ID = p.ID
 	if wasUnread {
-		if err := logMessageEvent(ctx, tx, VerbMessageRead, ActorAgent, p.ID, msg); err != nil {
+		if err := logMessageEvent(ctx, tx, VerbMessageRead, ActorAgent, p.ID, auditMessage); err != nil {
 			return Message{}, err
 		}
 	}
 	if ack && wasUnacked {
-		if err := logMessageEvent(ctx, tx, VerbMessageAcked, ActorAgent, p.ID, msg); err != nil {
+		if err := logMessageEvent(ctx, tx, VerbMessageAcked, ActorAgent, p.ID, auditMessage); err != nil {
 			return Message{}, err
 		}
 	}
@@ -1028,7 +1131,29 @@ func (s *Store) transitionMessage(ctx context.Context, p Principal, messageID st
 }
 
 func normalizeSendMessageInput(in SendMessageInput) (SendMessageInput, error) {
+	in.AudienceKind = strings.TrimSpace(in.AudienceKind)
+	if in.AudienceKind == "" {
+		in.AudienceKind = MessageRecipientAgent
+	}
 	in.ToAgent = strings.TrimSpace(in.ToAgent)
+	selectors := make([]string, 0, len(in.ToAgents))
+	seenSelectors := make(map[string]struct{}, len(in.ToAgents))
+	for _, raw := range in.ToAgents {
+		selector := strings.TrimSpace(raw)
+		if selector == "" {
+			return SendMessageInput{}, fmt.Errorf("%w: audience contains an empty recipient", ErrMessageInputInvalid)
+		}
+		if len(selector) > maxMessageRecipientBytes {
+			return SendMessageInput{}, fmt.Errorf("%w: recipient exceeds %d bytes", ErrMessageInputInvalid, maxMessageRecipientBytes)
+		}
+		if _, duplicate := seenSelectors[selector]; duplicate {
+			continue
+		}
+		seenSelectors[selector] = struct{}{}
+		selectors = append(selectors, selector)
+	}
+	sort.Strings(selectors)
+	in.ToAgents = selectors
 	in.Subject = strings.TrimSpace(in.Subject)
 	in.Kind = strings.TrimSpace(in.Kind)
 	in.ThreadID = strings.TrimSpace(in.ThreadID)
@@ -1041,8 +1166,20 @@ func normalizeSendMessageInput(in SendMessageInput) (SendMessageInput, error) {
 		in.Kind = "request"
 	}
 	switch {
-	case in.ToAgent == "":
+	case in.AudienceKind != MessageRecipientAgent && in.AudienceKind != MessageRecipientAgents && in.AudienceKind != MessageRecipientRealm:
+		return SendMessageInput{}, fmt.Errorf("%w: audience kind must be agent, agents, or realm", ErrMessageInputInvalid)
+	case in.AudienceKind == MessageRecipientAgent && in.ToAgent == "":
 		return SendMessageInput{}, fmt.Errorf("%w: recipient is required", ErrMessageInputInvalid)
+	case in.AudienceKind == MessageRecipientAgent && len(in.ToAgents) != 0:
+		return SendMessageInput{}, fmt.Errorf("%w: direct audience cannot include recipient list", ErrMessageInputInvalid)
+	case in.AudienceKind == MessageRecipientAgents && in.ToAgent != "":
+		return SendMessageInput{}, fmt.Errorf("%w: agents audience cannot include direct recipient", ErrMessageInputInvalid)
+	case in.AudienceKind == MessageRecipientAgents && len(in.ToAgents) == 0:
+		return SendMessageInput{}, fmt.Errorf("%w: agents audience requires at least one recipient", ErrMessageInputInvalid)
+	case in.AudienceKind == MessageRecipientAgents && len(in.ToAgents) > maxMessageAudienceRecipients:
+		return SendMessageInput{}, fmt.Errorf("%w: audience exceeds %d recipients", ErrMessageInputInvalid, maxMessageAudienceRecipients)
+	case in.AudienceKind == MessageRecipientRealm && (in.ToAgent != "" || len(in.ToAgents) != 0):
+		return SendMessageInput{}, fmt.Errorf("%w: realm audience cannot include recipients", ErrMessageInputInvalid)
 	case len(in.ToAgent) > maxMessageRecipientBytes:
 		return SendMessageInput{}, fmt.Errorf("%w: recipient exceeds %d bytes", ErrMessageInputInvalid, maxMessageRecipientBytes)
 	case len(in.Subject) > maxMessageSubjectBytes:
@@ -1072,6 +1209,18 @@ func normalizeSendMessageInput(in SendMessageInput) (SendMessageInput, error) {
 	}
 	in.Payload = payload
 	return in, nil
+}
+
+func (in SendMessageInput) audienceFingerprint() string {
+	if in.AudienceKind == MessageRecipientAgent || in.AudienceKind == "" {
+		return ""
+	}
+	canonical := in.AudienceKind
+	if in.AudienceKind == MessageRecipientAgents {
+		canonical += "\x00" + strings.Join(in.ToAgents, "\x00")
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
 }
 
 func normalizeMessageFilter(filter MessageFilter) (MessageFilter, time.Time, string, error) {
@@ -1118,7 +1267,9 @@ func scanMessage(row rowScanner) (Message, error) {
 	var msg Message
 	if err := row.Scan(
 		&msg.ID, &msg.AccountID, &msg.RealmID,
-		&msg.From.ID, &msg.From.Name, &msg.To.ID, &msg.To.Name,
+		&msg.From.ID, &msg.From.Name,
+		&msg.To.Kind, &msg.To.ID, &msg.To.Name, &msg.To.Count,
+		&msg.audienceFingerprint,
 		&msg.Subject, &msg.Kind, &msg.Body, &msg.Payload, &msg.ThreadID, &msg.CreatedAt,
 		&msg.ReplyToMessageID, &msg.CausalDepth,
 		&msg.Delivery.State, &msg.Delivery.DeliveredAt,
@@ -1130,12 +1281,11 @@ func scanMessage(row rowScanner) (Message, error) {
 	); err != nil {
 		return Message{}, err
 	}
-	msg.To.Kind = MessageRecipientAgent
 	msg.ReadState.State = readState(msg.ReadState.ReadAt, msg.ReadState.AckedAt)
 	return msg, nil
 }
 
-func messageSelect(includeContent bool) string {
+func messageDeliverySelect(includeContent bool) string {
 	body := `''::text`
 	payload := `NULL::jsonb`
 	if includeContent {
@@ -1144,7 +1294,12 @@ func messageSelect(includeContent bool) string {
 	}
 	return fmt.Sprintf(`
 		SELECT m.id, m.account_id, m.realm_id,
-		       m.from_agent_id, sender.name, m.to_agent_id, recipient.name,
+		       m.from_agent_id, sender.name,
+		       m.audience_kind, COALESCE(m.to_agent_id, ''), COALESCE(recipient.name, ''),
+		       CASE WHEN m.audience_kind='agent' THEN 0 ELSE
+		         (SELECT COUNT(*)::integer FROM agent_message_deliveries audience_delivery
+		          WHERE audience_delivery.message_id=m.id) END,
+		       m.audience_fingerprint,
 		       m.subject, m.kind, %s, %s, m.thread_id, m.created_at,
 		       COALESCE(m.reply_to_message_id, ''), m.causal_depth,
 		       d.state, d.delivered_at, d.read_at, d.acked_at,
@@ -1153,9 +1308,62 @@ func messageSelect(includeContent bool) string {
 		       d.completed_at, COALESCE(d.result_message_id, '')
 		FROM agent_messages m
 		JOIN agents sender ON sender.id = m.from_agent_id
-		JOIN agents recipient ON recipient.id = m.to_agent_id
+		LEFT JOIN agents recipient ON recipient.id = m.to_agent_id
 		JOIN agent_message_deliveries d
-		  ON d.message_id = m.id AND d.recipient_agent_id = m.to_agent_id
+		  ON d.message_id = m.id
+	`, body, payload)
+}
+
+// messageOutboxSelect returns exactly one metadata projection per immutable
+// message. Direct messages retain their existing projection; fan-out delivery
+// state is summarized without multiplying rows or destabilizing cursors.
+func messageOutboxSelect(includeContent bool) string {
+	body := `''::text`
+	payload := `NULL::jsonb`
+	if includeContent {
+		body = `m.body`
+		payload = `m.payload`
+	}
+	return fmt.Sprintf(`
+		SELECT m.id, m.account_id, m.realm_id,
+		       m.from_agent_id, sender.name,
+		       m.audience_kind, COALESCE(m.to_agent_id, ''), COALESCE(recipient.name, ''),
+		       CASE WHEN m.audience_kind='agent' THEN 0 ELSE d.recipient_count END,
+		       m.audience_fingerprint,
+		       m.subject, m.kind, %s, %s, m.thread_id, m.created_at,
+		       COALESCE(m.reply_to_message_id, ''), m.causal_depth,
+		       d.state, d.delivered_at, d.read_at, d.acked_at,
+		       d.processing_state, d.processing_generation, d.failure_count,
+		       ''::text, NULL::timestamptz, d.completed_at, ''::text
+		FROM agent_messages m
+		JOIN agents sender ON sender.id=m.from_agent_id
+		LEFT JOIN agents recipient ON recipient.id=m.to_agent_id
+		JOIN LATERAL (
+		  SELECT
+		    CASE
+		      WHEN bool_and(delivery.state='delivered') THEN 'delivered'
+		      WHEN bool_and(delivery.state='failed') THEN 'failed'
+		      ELSE 'queued'
+		    END AS state,
+		    CASE WHEN bool_and(delivery.delivered_at IS NOT NULL)
+		      THEN max(delivery.delivered_at) END AS delivered_at,
+		    CASE WHEN bool_and(delivery.read_at IS NOT NULL)
+		      THEN max(delivery.read_at) END AS read_at,
+		    CASE WHEN bool_and(delivery.acked_at IS NOT NULL)
+		      THEN max(delivery.acked_at) END AS acked_at,
+		    CASE
+		      WHEN bool_and(delivery.processing_state='completed') THEN 'completed'
+		      WHEN bool_or(delivery.processing_state='claimed') THEN 'claimed'
+		      ELSE 'available'
+		    END AS processing_state,
+		    max(delivery.processing_generation) AS processing_generation,
+		    sum(delivery.failure_count) AS failure_count,
+		    CASE WHEN bool_and(delivery.completed_at IS NOT NULL)
+		      THEN max(delivery.completed_at) END AS completed_at,
+		    count(*)::integer AS recipient_count
+		  FROM agent_message_deliveries delivery
+		  WHERE delivery.message_id=m.id
+		) d ON true
 	`, body, payload)
 }
 
@@ -1179,6 +1387,117 @@ func resolveMessageAgent(ctx context.Context, tx pgx.Tx, accountID, realmID, sel
 		return Agent{}, fmt.Errorf("resolve message recipient: %w", err)
 	}
 	return agent, nil
+}
+
+func resolveMessageAudience(
+	ctx context.Context,
+	tx pgx.Tx,
+	p Principal,
+	in SendMessageInput,
+) ([]Agent, error) {
+	switch in.AudienceKind {
+	case MessageRecipientAgent:
+		agent, err := resolveMessageAgent(ctx, tx, p.AccountID, p.RealmID, in.ToAgent)
+		if err != nil {
+			return nil, err
+		}
+		return []Agent{agent}, nil
+	case MessageRecipientAgents:
+		return resolveExplicitMessageAudience(ctx, tx, p.AccountID, p.RealmID, in.ToAgents)
+	case MessageRecipientRealm:
+		rows, err := tx.Query(ctx, `
+			SELECT a.id, a.name
+			FROM agents a
+			JOIN realms r ON r.id=a.realm_id
+			WHERE r.account_id=$1 AND a.realm_id=$2 AND a.id<>$3
+			  AND a.deleted_at IS NULL AND r.deleted_at IS NULL
+			ORDER BY a.id
+			LIMIT 65
+			FOR SHARE OF a`, p.AccountID, p.RealmID, p.ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve realm message audience: %w", err)
+		}
+		defer rows.Close()
+		out := make([]Agent, 0, maxMessageAudienceRecipients)
+		for rows.Next() {
+			var agent Agent
+			if err := rows.Scan(&agent.ID, &agent.Name); err != nil {
+				return nil, fmt.Errorf("scan realm message audience: %w", err)
+			}
+			out = append(out, agent)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("resolve realm message audience: %w", err)
+		}
+		if len(out) == 0 {
+			return nil, ErrMessageRecipientMissing
+		}
+		if len(out) > maxMessageAudienceRecipients {
+			return nil, fmt.Errorf("%w: realm audience exceeds %d recipients", ErrMessageInputInvalid, maxMessageAudienceRecipients)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported audience kind", ErrMessageInputInvalid)
+	}
+}
+
+func resolveExplicitMessageAudience(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	realmID string,
+	selectors []string,
+) ([]Agent, error) {
+	ids := make([]string, 0, len(selectors))
+	names := make([]string, 0, len(selectors))
+	for _, selector := range selectors {
+		if messageAgentSelectorIsID(selector) {
+			ids = append(ids, selector)
+		} else {
+			names = append(names, selector)
+		}
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT a.id, a.name
+		FROM agents a
+		JOIN realms r ON r.id=a.realm_id
+		WHERE r.account_id=$1 AND a.realm_id=$2
+		  AND a.deleted_at IS NULL AND r.deleted_at IS NULL
+		  AND (a.id=ANY($3::text[]) OR a.name=ANY($4::text[]))
+		ORDER BY a.id
+		FOR SHARE OF a`, accountID, realmID, ids, names)
+	if err != nil {
+		return nil, fmt.Errorf("resolve explicit message audience: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Agent, 0, len(selectors))
+	byID := make(map[string]bool, len(selectors))
+	byName := make(map[string]bool, len(selectors))
+	for rows.Next() {
+		var agent Agent
+		if err := rows.Scan(&agent.ID, &agent.Name); err != nil {
+			return nil, fmt.Errorf("scan explicit message audience: %w", err)
+		}
+		out = append(out, agent)
+		byID[agent.ID] = true
+		byName[agent.Name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolve explicit message audience: %w", err)
+	}
+	for _, selector := range selectors {
+		matched := byName[selector]
+		if messageAgentSelectorIsID(selector) {
+			matched = byID[selector]
+		}
+		if !matched {
+			return nil, ErrMessageRecipientMissing
+		}
+	}
+	if len(out) == 0 || len(out) > maxMessageAudienceRecipients {
+		return nil, fmt.Errorf("%w: audience must resolve to 1-%d recipients", ErrMessageInputInvalid, maxMessageAudienceRecipients)
+	}
+	return out, nil
 }
 
 func messageAgentSelectorIsID(selector string) bool {
@@ -1254,7 +1573,7 @@ func resolveCompletionResultRecipient(
 }
 
 func messageByIdempotencyKey(ctx context.Context, tx pgx.Tx, accountID, senderID, key string) (Message, error) {
-	return scanMessage(tx.QueryRow(ctx, messageSelect(true)+`
+	return scanMessage(tx.QueryRow(ctx, messageOutboxSelect(true)+`
 		WHERE m.account_id = $1 AND m.from_agent_id = $2 AND m.idempotency_key = $3`,
 		accountID, senderID, key))
 }
@@ -1283,12 +1602,32 @@ func messageReplayByIdempotencyKey(
 }
 
 func messageByScopedID(ctx context.Context, tx pgx.Tx, accountID, realmID, messageID string, includeContent bool) (Message, error) {
-	return scanMessage(tx.QueryRow(ctx, messageSelect(includeContent)+`
+	return scanMessage(tx.QueryRow(ctx, messageOutboxSelect(includeContent)+`
 		WHERE m.id=$1 AND m.account_id=$2 AND m.realm_id=$3`, messageID, accountID, realmID))
 }
 
+// messageDeliveryByScopedID projects one fan-out message through exactly one
+// immutable recipient delivery. It is used by recipient-facing request detail
+// so another realm member's read or processing state is never summarized into
+// the caller's view.
+func messageDeliveryByScopedID(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	realmID string,
+	recipientAgentID string,
+	messageID string,
+	includeContent bool,
+) (Message, error) {
+	return scanMessage(tx.QueryRow(ctx, messageDeliverySelect(includeContent)+`
+		WHERE m.id=$1 AND d.account_id=$2 AND d.realm_id=$3
+		  AND d.recipient_agent_id=$4
+		  AND m.account_id=$2 AND m.realm_id=$3`,
+		messageID, accountID, realmID, recipientAgentID))
+}
+
 func lockMessageProcessingDelivery(ctx context.Context, tx pgx.Tx, p Principal, messageID string, requireUnacked bool) (Message, error) {
-	query := messageSelect(false) + `
+	query := messageDeliverySelect(false) + `
 		WHERE m.id=$1 AND d.account_id=$2 AND d.realm_id=$3
 		  AND d.recipient_agent_id=$4`
 	if requireUnacked {
@@ -1303,6 +1642,34 @@ func lockMessageProcessingDelivery(ctx context.Context, tx pgx.Tx, p Principal, 
 		return Message{}, fmt.Errorf("lock message processing delivery: %w", err)
 	}
 	return msg, nil
+}
+
+func rejectMessageRequestProtocolProcessingTx(ctx context.Context, tx pgx.Tx, msg Message) error {
+	var managed bool
+	err := tx.QueryRow(ctx, `
+		SELECT
+		  EXISTS (
+		    SELECT 1 FROM agent_message_requests request
+		    WHERE request.account_id=$2 AND request.realm_id=$3
+		      AND request.opening_message_id=$1
+		  )
+		  OR EXISTS (
+		    SELECT 1 FROM agent_message_request_candidates candidate
+		    WHERE candidate.account_id=$2 AND candidate.realm_id=$3
+		      AND candidate.offer_message_id=$1
+		  )
+		  OR EXISTS (
+		    SELECT 1 FROM agent_message_request_claims claim
+		    WHERE claim.account_id=$2 AND claim.realm_id=$3
+		      AND claim.result_message_id=$1
+		  )`, msg.ID, msg.AccountID, msg.RealmID).Scan(&managed)
+	if err != nil {
+		return fmt.Errorf("check message request protocol ownership: %w", err)
+	}
+	if managed {
+		return fmt.Errorf("%w: message request protocol messages use request-specific processing", ErrMessageForbidden)
+	}
+	return nil
 }
 
 func normalizeProcessingMessageID(messageID string) (string, error) {
@@ -1353,12 +1720,21 @@ func messageMatchesSend(msg Message, toAgentID string, in SendMessageInput) bool
 		msg.ReplyToMessageID == in.ReplyToMessageID
 }
 
-func messageMatchesDirectSendReplay(msg Message, in SendMessageInput) bool {
+func messageMatchesSendReplay(msg Message, in SendMessageInput) bool {
+	if msg.To.Kind != in.AudienceKind || msg.Subject != in.Subject || msg.Kind != in.Kind ||
+		msg.Body != in.Body || !rawJSONEqual(msg.Payload, in.Payload) ||
+		(in.ThreadID != "" && msg.ThreadID != in.ThreadID) ||
+		msg.ReplyToMessageID != in.ReplyToMessageID {
+		return false
+	}
+	if in.AudienceKind != MessageRecipientAgent {
+		return msg.audienceFingerprint == in.audienceFingerprint()
+	}
 	recipientMatches := msg.To.ID == in.ToAgent
 	if !messageAgentSelectorIsID(in.ToAgent) {
 		recipientMatches = recipientMatches || msg.To.Name == in.ToAgent
 	}
-	return recipientMatches && messageMatchesSend(msg, msg.To.ID, in)
+	return recipientMatches
 }
 
 func messageMatchesReplyReplay(msg Message, parentMessageID string, in SendMessageInput) bool {
@@ -1398,6 +1774,7 @@ func logMessageEvent(ctx context.Context, tx pgx.Tx, verb, actorKind, actorID st
 
 func logMessageProcessingEvent(ctx context.Context, tx pgx.Tx, verb, actorID string, msg Message, resultMessageID string) error {
 	metadata := messageEventMetadata(msg)
+	metadata["recipient_agent_id"] = actorID
 	metadata["processing_generation"] = strconv.FormatInt(msg.Processing.Generation, 10)
 	metadata["failure_count"] = strconv.FormatInt(msg.Processing.FailureCount, 10)
 	if resultMessageID != "" {
@@ -1410,9 +1787,13 @@ func logMessageProcessingEvent(ctx context.Context, tx pgx.Tx, verb, actorID str
 }
 
 func messageEventMetadata(msg Message) map[string]any {
+	recipientKind := msg.To.Kind
+	if recipientKind == "" {
+		recipientKind = MessageRecipientAgent
+	}
 	metadata := map[string]any{
 		"message_id": msg.ID, "from_agent_id": msg.From.ID,
-		"recipient_kind": MessageRecipientAgent, "recipient_agent_id": msg.To.ID,
+		"recipient_kind": recipientKind, "recipient_agent_id": msg.To.ID,
 		"kind": msg.Kind, "thread_id": msg.ThreadID,
 		"subject_present": msg.Subject != "",
 	}

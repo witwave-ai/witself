@@ -362,6 +362,22 @@ type Config struct {
 	RenewMessageClaim   func(ctx context.Context, p DomainPrincipal, messageID string, in RenewMessageClaimRequest) (MessageProcessing, error)
 	ReleaseMessageClaim func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error)
 	CompleteMessage     func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error)
+
+	// Open message requests are realm-local, message-backed delegations. The
+	// backend persists candidate snapshots, offers, coordinator selections, and
+	// fenced claims, but it never invokes a model or ranks an offer. Every hook
+	// derives account, realm, and actor identity from the agent principal.
+	CreateMessageRequest   func(ctx context.Context, p DomainPrincipal, in CreateMessageRequestRequest) (CreateMessageRequestResult, error)
+	ListMessageRequests    func(ctx context.Context, p DomainPrincipal, opts MessageRequestListOptions) (MessageRequestPage, error)
+	GetMessageRequest      func(ctx context.Context, p DomainPrincipal, requestID string) (MessageRequestDetail, error)
+	OfferMessageRequest    func(ctx context.Context, p DomainPrincipal, requestID string, in OfferMessageRequestRequest) (OfferMessageRequestResult, error)
+	DeclineMessageRequest  func(ctx context.Context, p DomainPrincipal, requestID string, in DeclineMessageRequestRequest) (MessageRequest, error)
+	SelectMessageRequest   func(ctx context.Context, p DomainPrincipal, requestID string, in SelectMessageRequestRequest) (SelectMessageRequestResult, error)
+	CancelMessageRequest   func(ctx context.Context, p DomainPrincipal, requestID string) (MessageRequest, error)
+	ClaimMessageRequest    func(ctx context.Context, p DomainPrincipal, requestID string, in ClaimMessageRequestRequest) (MessageRequestClaim, error)
+	RenewMessageRequest    func(ctx context.Context, p DomainPrincipal, requestID string, in RenewMessageRequestRequest) (MessageRequestClaim, error)
+	ReleaseMessageRequest  func(ctx context.Context, p DomainPrincipal, requestID string, in ReleaseMessageRequestRequest) (MessageRequestClaim, error)
+	CompleteMessageRequest func(ctx context.Context, p DomainPrincipal, requestID string, in CompleteMessageRequestRequest) (CompleteMessageRequestResult, error)
 }
 
 // SetAdminSupportPolicyRequest is the payload for the admin
@@ -765,8 +781,9 @@ type MessageAgent struct {
 // MessageRecipient identifies the resolved direct recipient in the wire shape.
 type MessageRecipient struct {
 	Kind      string `json:"kind"`
-	AgentID   string `json:"agent_id"`
-	AgentName string `json:"agent_name"`
+	AgentID   string `json:"agent_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	Count     int    `json:"count,omitempty"`
 }
 
 // MessageDelivery is the recipient delivery state in the wire shape.
@@ -785,7 +802,8 @@ type MessageReadState struct {
 // MessageRecipientRequest selects a direct recipient by name or id.
 type MessageRecipientRequest struct {
 	Kind      string          `json:"kind"`
-	ID        string          `json:"id"`
+	ID        string          `json:"id,omitempty"`
+	IDs       []string        `json:"ids,omitempty"`
 	Realm     json.RawMessage `json:"realm,omitempty"`
 	RealmID   json.RawMessage `json:"realm_id,omitempty"`
 	AccountID json.RawMessage `json:"account_id,omitempty"`
@@ -805,6 +823,8 @@ type SendMessageRequest struct {
 	From           json.RawMessage         `json:"from,omitempty"`
 	Sender         json.RawMessage         `json:"sender,omitempty"`
 	Actor          json.RawMessage         `json:"actor,omitempty"`
+	Account        json.RawMessage         `json:"account,omitempty"`
+	AccountID      json.RawMessage         `json:"account_id,omitempty"`
 	Realm          json.RawMessage         `json:"realm,omitempty"`
 	RealmID        json.RawMessage         `json:"realm_id,omitempty"`
 	CausalDepth    json.RawMessage         `json:"causal_depth,omitempty"`
@@ -928,6 +948,230 @@ type CompleteMessageRequest struct {
 type CompleteMessageResult struct {
 	Processing MessageProcessing `json:"processing"`
 	Message    Message           `json:"message"`
+}
+
+// MessageRequest is one durable realm-wide delegation. State is the stored
+// terminal/open state; Phase is a recoverable view of an open request
+// (collecting_offers, awaiting_selection, or assigned).
+type MessageRequest struct {
+	ID                  string       `json:"id"`
+	AccountID           string       `json:"account_id"`
+	RealmID             string       `json:"realm_id"`
+	OpeningMessageID    string       `json:"opening_message_id"`
+	Coordinator         MessageAgent `json:"coordinator"`
+	SelectionPolicy     string       `json:"selection_policy"`
+	State               string       `json:"state"`
+	Phase               string       `json:"phase,omitempty"`
+	MaxAssignees        int          `json:"max_assignees"`
+	CandidateCount      int          `json:"candidate_count"`
+	OfferCount          int          `json:"offer_count"`
+	DeclineCount        int          `json:"decline_count"`
+	SelectedAgentIDs    []string     `json:"selected_agent_ids"`
+	SelectionGeneration int64        `json:"selection_generation"`
+	OfferDeadline       time.Time    `json:"offer_deadline"`
+	ExpiresAt           time.Time    `json:"expires_at"`
+	CreatedAt           time.Time    `json:"created_at"`
+	UpdatedAt           time.Time    `json:"updated_at"`
+	CompletedAt         *time.Time   `json:"completed_at,omitempty"`
+	CancelledAt         *time.Time   `json:"cancelled_at,omitempty"`
+	ExpiredAt           *time.Time   `json:"expired_at,omitempty"`
+}
+
+// MessageRequestCandidate is one member of the immutable send-time realm
+// snapshot. It records only protocol response state, not an inferred skill.
+type MessageRequestCandidate struct {
+	Agent          MessageAgent `json:"agent"`
+	ResponseState  string       `json:"response_state"`
+	OfferMessageID string       `json:"offer_message_id,omitempty"`
+	RespondedAt    *time.Time   `json:"responded_at,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
+}
+
+// MessageRequestOffer links one candidate's ordinary kind=offer message to
+// the coordination record. Its content remains untrusted client input.
+type MessageRequestOffer struct {
+	Agent     MessageAgent `json:"agent"`
+	Message   Message      `json:"message"`
+	OfferedAt time.Time    `json:"offered_at"`
+}
+
+// MessageRequestSelection is one immutable client-ranked coordinator choice.
+type MessageRequestSelection struct {
+	ID               string       `json:"id"`
+	Generation       int64        `json:"generation"`
+	Coordinator      MessageAgent `json:"coordinator"`
+	SelectedAgentIDs []string     `json:"selected_agent_ids"`
+	CreatedAt        time.Time    `json:"created_at"`
+}
+
+// MessageRequestClaim is one selected work slot. ClaimID plus Generation is
+// the exact fence that must be presented to renew, release, or complete.
+type MessageRequestClaim struct {
+	ClaimID         string       `json:"claim_id"`
+	RequestID       string       `json:"request_id"`
+	SelectionID     string       `json:"selection_id"`
+	Agent           MessageAgent `json:"agent"`
+	State           string       `json:"state"`
+	Generation      int64        `json:"generation"`
+	FailureCount    int64        `json:"failure_count"`
+	LeaseExpiresAt  *time.Time   `json:"lease_expires_at,omitempty"`
+	ResultMessageID string       `json:"result_message_id,omitempty"`
+	SelectedAt      time.Time    `json:"selected_at"`
+	ClaimedAt       *time.Time   `json:"claimed_at,omitempty"`
+	ReleasedAt      *time.Time   `json:"released_at,omitempty"`
+	CompletedAt     *time.Time   `json:"completed_at,omitempty"`
+	CancelledAt     *time.Time   `json:"cancelled_at,omitempty"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+}
+
+// MessageRequestDetail is the complete authorized view used by GET. Store
+// implementations decide which candidate/claim fence details the principal
+// may see; the HTTP layer never widens realm membership.
+type MessageRequestDetail struct {
+	Request        MessageRequest            `json:"request"`
+	OpeningMessage Message                   `json:"opening_message"`
+	Candidates     []MessageRequestCandidate `json:"candidates"`
+	Offers         []MessageRequestOffer     `json:"offers"`
+	Selections     []MessageRequestSelection `json:"selections"`
+	Claims         []MessageRequestClaim     `json:"claims"`
+}
+
+// MessageRequestListOptions selects one bounded metadata page visible to the
+// authenticated agent. Role is candidate or coordinator when provided.
+type MessageRequestListOptions struct {
+	State  string
+	Phase  string
+	Role   string
+	Limit  int
+	Cursor string
+}
+
+// MessageRequestPage is one bounded page of request metadata.
+type MessageRequestPage struct {
+	Requests   []MessageRequest
+	NextCursor string
+}
+
+// MessageRequestDerivedFields are caller-forbidden routing/identity fields.
+// They are represented explicitly so permissive JSON decoding cannot silently
+// accept a spoofing attempt.
+type MessageRequestDerivedFields struct {
+	To               json.RawMessage `json:"to,omitempty"`
+	From             json.RawMessage `json:"from,omitempty"`
+	Sender           json.RawMessage `json:"sender,omitempty"`
+	Actor            json.RawMessage `json:"actor,omitempty"`
+	Account          json.RawMessage `json:"account,omitempty"`
+	AccountID        json.RawMessage `json:"account_id,omitempty"`
+	Realm            json.RawMessage `json:"realm,omitempty"`
+	RealmID          json.RawMessage `json:"realm_id,omitempty"`
+	Coordinator      json.RawMessage `json:"coordinator,omitempty"`
+	CoordinatorID    json.RawMessage `json:"coordinator_agent_id,omitempty"`
+	OpeningMessageID json.RawMessage `json:"opening_message_id,omitempty"`
+	ThreadID         json.RawMessage `json:"thread_id,omitempty"`
+	ReplyToMessageID json.RawMessage `json:"reply_to_message_id,omitempty"`
+	CausalDepth      json.RawMessage `json:"causal_depth,omitempty"`
+}
+
+// CreateMessageRequestRequest creates a realm-snapshot open delegation. The
+// only supported selection policy is client_ranked; omission selects it.
+type CreateMessageRequestRequest struct {
+	Subject            string          `json:"subject,omitempty"`
+	Body               string          `json:"body"`
+	Payload            json.RawMessage `json:"payload,omitempty"`
+	SelectionPolicy    string          `json:"selection_policy,omitempty"`
+	MaxAssignees       int             `json:"max_assignees,omitempty"`
+	OfferWindowSeconds int             `json:"offer_window_seconds,omitempty"`
+	ExpiresInSeconds   int             `json:"expires_in_seconds,omitempty"`
+	IdempotencyKey     string          `json:"-"`
+	DryRun             bool            `json:"dry_run,omitempty"`
+	MessageRequestDerivedFields
+}
+
+// CreateMessageRequestResult couples a request with its durable opening message.
+type CreateMessageRequestResult struct {
+	Request        MessageRequest `json:"request"`
+	OpeningMessage Message        `json:"opening_message"`
+}
+
+// OfferMessageRequestRequest creates one ordinary offer reply for the
+// candidate. Routing, kind, parent, thread, and identity are all derived.
+type OfferMessageRequestRequest struct {
+	Subject        string          `json:"subject,omitempty"`
+	Body           string          `json:"body"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	IdempotencyKey string          `json:"-"`
+	Kind           json.RawMessage `json:"kind,omitempty"`
+	MessageRequestDerivedFields
+}
+
+// OfferMessageRequestResult couples a request with one candidate's durable offer.
+type OfferMessageRequestResult struct {
+	Request MessageRequest      `json:"request"`
+	Offer   MessageRequestOffer `json:"offer"`
+}
+
+// DeclineMessageRequestRequest records one candidate's decision not to offer.
+type DeclineMessageRequestRequest struct {
+	IdempotencyKey string `json:"-"`
+	MessageRequestDerivedFields
+}
+
+// SelectMessageRequestRequest identifies the coordinator's ranked assignees.
+type SelectMessageRequestRequest struct {
+	SelectedAgentIDs   []string `json:"selected_agent_ids"`
+	ReservationSeconds int      `json:"reservation_seconds,omitempty"`
+	IdempotencyKey     string   `json:"-"`
+	MessageRequestDerivedFields
+}
+
+// SelectMessageRequestResult reports the selection and its reserved work slots.
+type SelectMessageRequestResult struct {
+	Request   MessageRequest          `json:"request"`
+	Selection MessageRequestSelection `json:"selection"`
+	Claims    []MessageRequestClaim   `json:"claims"`
+}
+
+// ClaimMessageRequestRequest starts or idempotently resumes selected work.
+type ClaimMessageRequestRequest struct {
+	LeaseSeconds   int    `json:"lease_seconds"`
+	IdempotencyKey string `json:"-"`
+	MessageRequestDerivedFields
+}
+
+// RenewMessageRequestRequest extends one exact request-claim fence.
+type RenewMessageRequestRequest struct {
+	ClaimID      string `json:"claim_id"`
+	Generation   int64  `json:"generation"`
+	LeaseSeconds int    `json:"lease_seconds"`
+	MessageRequestDerivedFields
+}
+
+// ReleaseMessageRequestRequest releases one exact request-claim fence.
+type ReleaseMessageRequestRequest struct {
+	ClaimID              string `json:"claim_id"`
+	Generation           int64  `json:"generation"`
+	DeterministicFailure bool   `json:"deterministic_failure"`
+	MessageRequestDerivedFields
+}
+
+// CompleteMessageRequestRequest atomically closes one exact claim fence and
+// creates its server-routed result message.
+type CompleteMessageRequestRequest struct {
+	ClaimID        string          `json:"claim_id"`
+	Generation     int64           `json:"generation"`
+	Subject        string          `json:"subject,omitempty"`
+	Body           string          `json:"body"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	IdempotencyKey string          `json:"-"`
+	Kind           json.RawMessage `json:"kind,omitempty"`
+	MessageRequestDerivedFields
+}
+
+// CompleteMessageRequestResult reports the completed claim and routed result message.
+type CompleteMessageRequestResult struct {
+	Request MessageRequest      `json:"request"`
+	Claim   MessageRequestClaim `json:"claim"`
+	Message Message             `json:"message"`
 }
 
 // Realm is the API view of a realm.
@@ -1159,6 +1403,13 @@ func apiMux(cfg Config) http.Handler {
 	messageProcessingSupported := selfDigestSupported &&
 		cfg.ClaimMessage != nil && cfg.RenewMessageClaim != nil &&
 		cfg.ReleaseMessageClaim != nil && cfg.CompleteMessage != nil
+	messageRequestsSupported := selfDigestSupported &&
+		cfg.CreateMessageRequest != nil && cfg.ListMessageRequests != nil &&
+		cfg.GetMessageRequest != nil && cfg.OfferMessageRequest != nil &&
+		cfg.DeclineMessageRequest != nil && cfg.SelectMessageRequest != nil &&
+		cfg.CancelMessageRequest != nil && cfg.ClaimMessageRequest != nil &&
+		cfg.RenewMessageRequest != nil && cfg.ReleaseMessageRequest != nil &&
+		cfg.CompleteMessageRequest != nil
 	memoriesSupported := selfDigestSupported && cfg.CaptureMemory != nil &&
 		cfg.GetMemory != nil && cfg.ListMemories != nil && cfg.RecallMemories != nil &&
 		cfg.GetMemoryHistory != nil && cfg.AdjustMemory != nil &&
@@ -1182,6 +1433,7 @@ func apiMux(cfg Config) http.Handler {
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
 		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
 		messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported,
+		messageRequestsSupported,
 		memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
 		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported))
 	if cfg.Login != nil {
@@ -1443,6 +1695,21 @@ func apiMux(cfg Config) http.Handler {
 				cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage, cfg.ReplyMessage,
 				cfg.ClaimMessage, cfg.RenewMessageClaim, cfg.ReleaseMessageClaim, cfg.CompleteMessage))
 		}
+		if cfg.CreateMessageRequest != nil {
+			mux.HandleFunc("POST /v1/message-requests", createMessageRequestHandler(cfg.AuthenticatePrincipal, cfg.CreateMessageRequest))
+		}
+		if cfg.ListMessageRequests != nil {
+			mux.HandleFunc("GET /v1/message-requests", listMessageRequestsHandler(cfg.AuthenticatePrincipal, cfg.ListMessageRequests))
+		}
+		if cfg.GetMessageRequest != nil {
+			mux.HandleFunc("GET /v1/message-requests/{request}", getMessageRequestHandler(cfg.AuthenticatePrincipal, cfg.GetMessageRequest))
+		}
+		if cfg.OfferMessageRequest != nil || cfg.DeclineMessageRequest != nil ||
+			cfg.SelectMessageRequest != nil || cfg.CancelMessageRequest != nil ||
+			cfg.ClaimMessageRequest != nil || cfg.RenewMessageRequest != nil ||
+			cfg.ReleaseMessageRequest != nil || cfg.CompleteMessageRequest != nil {
+			mux.HandleFunc("POST /v1/message-requests/{action}", messageRequestActionHandler(cfg))
+		}
 	}
 	// Provision-token-authorized cell-wide admin ticket list (feeds
 	// the CP's fan-out for /v1/admin/tickets). Mounted independently of
@@ -1458,7 +1725,7 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return messagingNoStoreMux(mux)
+	return messageRequestsNoStoreMux(messagingNoStoreMux(mux))
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
@@ -1549,7 +1816,7 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -1585,6 +1852,7 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				"message_listen":          featureState(messageListenSupported),
 				"message_reply":           featureState(messageReplySupported),
 				"message_processing":      featureState(messageProcessingSupported),
+				"message_requests":        featureState(messageRequestsSupported),
 				"transcripts":             {Supported: transcriptsSupported},
 				"audit":                   notImpl,
 			},

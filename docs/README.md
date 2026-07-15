@@ -65,13 +65,13 @@ plane.
   model, token-derived sender identity, recipient-only replies,
   oldest-unacknowledged listen, separate read/ack state, migration-0034 fenced
   direct processing, migration-0035 server-derived causal depth, migration-0036
-  deterministic failure counting, atomic result completion, local MCP
-  notification bridging, and message threats.
+  deterministic failure counting, migration-0037 explicit-list/realm fanout,
+  migration-0038 client-ranked open requests, atomic result completion, local
+  MCP notification bridging, and message threats.
 - [autonomous-realm-messaging.md](autonomous-realm-messaging.md): the working
-  same-realm design and implemented direct text-only client runner with a
-  content-free terminal-notification handoff and its explicit host-locality
-  limit, plus the future realm-audience, open-work, and multi-assignee claim
-  model.
+  same-realm design and implemented text-only client runner for direct and
+  client-ranked open-request work, with realm/explicit fanout, a content-free
+  terminal-notification handoff, and its explicit host-locality limit.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
   capture, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.

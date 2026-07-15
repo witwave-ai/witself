@@ -490,16 +490,50 @@ ws message send \
 Omitted `--kind` normalizes to actionable `request` across CLI, MCP, and the
 backend.
 
-Target follow-on (not in the current direct-only binary): send a message to a
-group, explicit list, or realm audience with per-member delivery and ack state:
+Send to a bounded explicit list or to every other live agent in the realm. Both
+forms create one immutable send-time snapshot with per-recipient delivery and
+ack state:
 
 ```sh
 ws message send \
-  --to analysts \
+  --to-agents analyst-1,analyst-2 \
   --subject "sync" \
   --kind note \
   --body "Standup notes attached." \
   --payload-file ./notes.json \
+  --json
+
+ws message send \
+  --to-realm \
+  --subject "maintenance" \
+  --kind note \
+  --body "The maintenance window starts now." \
+  --json
+```
+
+Open work that should be claimed by the best available agent uses the separate
+client-ranked request state machine. The backend stores and fences the request;
+candidate and coordinator clients perform all inference and ranking:
+
+```sh
+ws message request open \
+  --body "Investigate the failed rollout." \
+  --offer-window 30s \
+  --max-assignees 1 \
+  --idempotency-key failed-rollout \
+  --json
+
+# As one candidate.
+ws message request offer mrq_123 \
+  --body "I can inspect GKE and PostgreSQL." \
+  --idempotency-key offer-mrq-123 \
+  --json
+
+# As the coordinator, after ranking the returned offers locally.
+ws message request show mrq_123 --json
+ws message request select mrq_123 \
+  --selected-agent agent_123 \
+  --idempotency-key select-mrq-123 \
   --json
 ```
 
@@ -631,9 +665,9 @@ Expected behavior:
   requires a policy.
 - Current send, deliver, read/ack, and processing claim/renew/release/complete
   transitions are audited without content. The client runner owns repeated
-  listen calls and inference; the backend remains model-free. Target rate,
-  scope, meter, explicit-list/realm fan-out, and open-request coordination
-  remain later slices.
+  listen calls, open-request offer/ranking/execution, and inference; the backend
+  remains model-free. Group/cross-realm routing, responsibility-aware
+  eligibility, and target rate/scope/meter enforcement remain later slices.
 
 ## 10. Export And Import An Agent's Self
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -145,6 +146,48 @@ func TestMessageClientContracts(t *testing.T) {
 	}
 	if !sawSend || !sawReply || !sawList || !sawListen || !sawRead || !sawAck {
 		t.Fatalf("requests = send:%v reply:%v list:%v listen:%v read:%v ack:%v", sawSend, sawReply, sawList, sawListen, sawRead, sawAck)
+	}
+}
+
+func TestMessageClientAudienceContracts(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			To struct {
+				Kind string   `json:"kind"`
+				ID   string   `json:"id"`
+				IDs  []string `json:"ids"`
+			} `json:"to"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if calls == 1 {
+			if body.To.Kind != "agents" || body.To.ID != "" || !reflect.DeepEqual(body.To.IDs, []string{"bob", "alice"}) {
+				t.Fatalf("agents audience = %#v", body.To)
+			}
+			_, _ = w.Write([]byte(`{"message":{"id":"msg_agents","to":{"kind":"agents","count":2}}}`))
+			return
+		}
+		if body.To.Kind != "realm" || body.To.ID != "" || len(body.To.IDs) != 0 {
+			t.Fatalf("realm audience = %#v", body.To)
+		}
+		_, _ = w.Write([]byte(`{"message":{"id":"msg_realm","to":{"kind":"realm","count":3}}}`))
+	}))
+	defer server.Close()
+
+	agents, err := SendMessage(context.Background(), server.URL, "token", SendMessageInput{
+		AudienceKind: "agents", ToAgents: []string{"bob", "alice"}, Body: "hello",
+	})
+	if err != nil || agents.To.Kind != "agents" || agents.To.Count != 2 {
+		t.Fatalf("agents send = %#v / %v", agents, err)
+	}
+	realm, err := SendMessage(context.Background(), server.URL, "token", SendMessageInput{
+		AudienceKind: "realm", Body: "hello realm",
+	})
+	if err != nil || realm.To.Kind != "realm" || realm.To.Count != 3 {
+		t.Fatalf("realm send = %#v / %v", realm, err)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 
 // TestExportAccountUsesOnePostgresSnapshot is opt-in because it needs a
 // disposable real Postgres database. The writer pauses immediately after the
-// export transaction has read and share-locked the frozen account status (and
+// export transaction has read and exclusively locked the frozen account status (and
 // therefore fixed its REPEATABLE READ snapshot), then attempts a change through
 // another session. The change must remain blocked until the archive completes,
 // and every streamed table must retain the pre-change view.
@@ -74,6 +74,17 @@ func TestExportAccountUsesOnePostgresSnapshot(t *testing.T) {
 		t.Fatal("export did not reach the archive writer")
 	}
 
+	secondExportErr := make(chan error, 1)
+	go func() {
+		secondExportErr <- st.ExportAccount(ctx, provisioned.AccountID, "test-source-2", "test", io.Discard)
+	}()
+	select {
+	case err := <-secondExportErr:
+		t.Fatalf("concurrent export was not serialized by the account lock: %v", err)
+	case <-time.After(150 * time.Millisecond):
+		// Expected: only one export snapshot can own the account row at a time.
+	}
+
 	const concurrentName = "snapshot after concurrent update"
 	updateErr := make(chan error, 1)
 	go func() {
@@ -86,7 +97,7 @@ func TestExportAccountUsesOnePostgresSnapshot(t *testing.T) {
 	case err := <-updateErr:
 		t.Fatalf("account update was not held by export freeze lock: %v", err)
 	case <-time.After(150 * time.Millisecond):
-		// Expected: export owns a shared account-row lock until the stream ends.
+		// Expected: export owns the exclusive account-row lock until the stream ends.
 	}
 	release()
 
@@ -97,6 +108,14 @@ func TestExportAccountUsesOnePostgresSnapshot(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("export did not complete after writer release")
+	}
+	select {
+	case err := <-secondExportErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serialized export did not complete after the first export")
 	}
 	select {
 	case err := <-updateErr:
