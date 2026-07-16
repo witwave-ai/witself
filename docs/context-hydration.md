@@ -1,11 +1,12 @@
 # Witself Context Hydration, Teaching, and the File Bridge
 
-Status: implemented self-digest, managed teaching, and bounded automatic
-hydration for the current runtime contracts, with target session-command and
-file-bridge extensions. Witself remains a service reached through its API, CLI,
-or MCP; installed lifecycle hooks now put its open-plane context into the model
-where the runtime exposes a model-visible output channel. The two-way file
-bridge (`digest emit` / `ingest`) remains future work. Updated 2026-07-14.
+Status: implemented self-digest, managed teaching, foreground memory-checkpoint
+handling, and bounded automatic hydration for the current runtime contracts,
+with target session-command and file-bridge extensions. Witself remains a service
+reached through its API, CLI, or MCP; supported installed hooks put bounded
+open-plane context and value-free lifecycle control into the model where the
+runtime exposes a model-visible output channel. The two-way file bridge
+(`digest emit` / `ingest`) remains future work. Updated 2026-07-15.
 
 Target amendment (accepted 2026-07-14): managed runtime integration performs
 automatic Witself digest/recall and same-turn narrative capture as described in
@@ -47,9 +48,11 @@ The self-digest is the bounded snapshot of who this agent is. It is the one call
 a runtime should make before a non-trivial task. It is **model-free by design**:
 selection uses stored metadata and never invokes an LLM or embedding provider.
 
-The digest is **open-plane only.** It is built from primary facts and salient
-memories; sealed-plane material — secrets and TOTP seeds — is **never** part of
-it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
+The digest is **open-plane only.** Its content-bearing sections are built from
+primary facts and salient memories. It may also carry an authenticated,
+value-free `memory_checkpoint` describing pending client curation; that field
+contains no fact, memory, transcript, secret, or TOTP value. See
+[The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
 
@@ -73,6 +76,12 @@ it. See [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
     { "id": "mem_120", "snippet": "Prefers terse, decision-led writing.", "kind": "profile", "salience": 0.9, "source": "self" },
     { "id": "mem_133", "snippet": "Migration 0032 shipped portable client vectors; resume at the cloud conformance check.", "kind": "session", "salience": 0.8, "source": "self" }
   ],
+  "memory_checkpoint": {
+    "pending": true,
+    "request_id": "mcrq_123",
+    "request_generation": 7,
+    "due_at": "2026-07-15T12:00:00Z"
+  },
   "index": {
     "kinds": ["profile", "session", "semantic", "note"],
     "tags": ["preferences", "project:witself"],
@@ -93,6 +102,13 @@ Field rules:
   salience, source }`. `snippet` is a bounded excerpt, not full `content`; the
   full record is fetched by id via `memory.read`. Omit with `--no-salient` /
   `include_salient:false`; size with `--salient-limit N` (default 10).
+- `memory_checkpoint` — authenticated, value-free owner-lane/request/run state.
+  `pending:false` means there was no due or resumable work at the instant of the
+  read. `unavailable:true` means only that the additive checkpoint projection
+  could not be read; `/v1/self` fails open so its authenticated identity, facts,
+  and salient memories remain available. A pending field is a pointer into the
+  fenced curation workflow, never source content or deletion/canonical-fact
+  authority. It is independent of the fact and salient-memory inclusion flags.
 - `index` — a one-line summary of available kinds, tags, and counts so the agent
   knows what else exists and can `recall`/`list` for it.
 - `elided` — see the hard cap below.
@@ -108,13 +124,15 @@ agent that the self-digest is not the whole self, and that
 
 ```json
 {
-  "elided": true,
-  "elided_hint": "Digest capped at 8192 bytes; 41 memories and 4 facts omitted. Use memory.recall / fact.list."
+  "elided": true
 }
 ```
 
 This is deliberate: a digest that silently drops half the agent's identity would
-poison every downstream decision. Capping is honest; truncation is a bug.
+poison every downstream decision. The implemented wire shape has no separate
+`elided_hint` field; callers use `elided`, the retained index counts, and
+`memory.recall` / `fact.list` to reach the rest. Capping is honest; truncation is
+a bug.
 
 ### Salient-Memory Selection
 
@@ -133,49 +151,90 @@ attempts a short, synchronous read only when that runtime/event has a documented
 model-visible output contract:
 
 1. `SessionStart` reads one bounded `self.show` digest.
-2. `UserPromptSubmit` runs a deterministic local history-dependence check. A
-   matching prompt becomes a bounded literal lexical `memory.recall` query; an
-   ordinary prompt performs no memory network read.
+2. Every supported Codex/Claude `UserPromptSubmit` reads bounded `/v1/self` state
+   so an ordinary prompt can discover a pending checkpoint. A deterministic
+   local history-dependence check decides whether to add a bounded lexical
+   `memory.recall` query. That query is a deduplicated `OR` expression made from
+   meaningful prompt keywords after conversational glue is removed; it is not
+   the raw or literal whole prompt. An ordinary idle prompt makes the self read
+   but emits no hook context.
 3. The live `self.show` identity must exactly match every installed account,
    realm, and agent id and name. A missing legacy id requires reinstall rather
    than permitting an ambiguous read.
-4. Sensitive, redacted, and non-plain memory values are omitted. The renderer
-   places remaining facts and narratives in a JSON-escaped
+4. Authorized automatic hydration intentionally requests the owning agent's
+   `sensitive` open-plane facts and memories while preserving their sensitivity
+   markers. Only server-redacted and non-plain values are omitted. The renderer
+   places the remaining facts and narratives in a JSON-escaped
    `WITSELF_AUTOMATIC_CONTEXT_V1` envelope that says the material is untrusted,
-   advisory data rather than instructions or authority.
-5. Any configuration, credential, identity, network, timeout, or rendering
+   private advisory data rather than instructions or authority. The model must
+   keep sensitive values within the authenticated user's current task. The
+   separately rendered `memory_checkpoint` is authenticated value-free lifecycle
+   state, and its static checkpoint policy authorizes only reversible curation
+   and fact proposals. Sealed secret fields and TOTP material are a separate
+   plane and are never selected.
+5. The checkpoint projection is additive. If only that projection is unhealthy,
+   `/v1/self` still returns the identity and requested recall content with
+   `memory_checkpoint.unavailable:true` rather than failing the digest.
+6. Any configuration, credential, identity, network, timeout, or rendering
    failure returns success to the runtime with no context. Transcript capture
    remains queued and the user's prompt proceeds.
 
 The executor defaults to a two-second deadline, an 8 KiB context envelope,
 eight salient self memories, and six recall hits. Its intrinsic ceilings are
 five seconds, 16 KiB, and 20 candidates; a caller cannot raise them. The lexical
-query is capped at 768 bytes. No prompt, query, digest, memory value, or token is
-persisted in local hydration state.
+keyword-OR query is capped at 12 distinct terms and 768 bytes. No prompt, query,
+digest, memory value, or token is persisted in local hydration state.
 
 Current conformance is deliberately asymmetric:
 
-| Runtime | Session-start self digest | History-dependent task recall | Delivery/fallback |
-| --- | --- | --- | --- |
-| Codex | Automatic | Automatic | Structured `additionalContext` hook output |
-| Claude Code | Automatic | Automatic | Structured `additionalContext` hook output |
-| Cursor | Guided fallback | Guided fallback | Current IDE releases can accept and log `sessionStart.additional_context` without delivering it to the model; both paths use MCP guidance until a live version-gated conformance test passes |
-| Grok Build | Guided fallback | Guided fallback | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
+| Runtime | Session-start self digest | History-dependent task recall | Pending checkpoint | Delivery/fallback |
+| --- | --- | --- | --- | --- |
+| Codex | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
+| Claude Code | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
+| Cursor | Guided fallback | Guided fallback | Guided through `self.show` | Current IDE releases can accept and log `sessionStart.additional_context` without reliably delivering it to the model; both paths use MCP guidance until a live version-gated conformance test passes |
+| Grok Build | Guided fallback | Guided fallback | Guided through `self.show` | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
-`self.show` and focused `memory.recall` without waiting for the user to ask. If
-that agent ignores the guidance or MCP is unavailable, Witself reports only the
-partial integration guarantee. The matrix is pinned in code and shared
+`self.show`, inspect its `memory_checkpoint`, and use focused `memory.recall`
+without waiting for the user to ask. If that agent ignores the guidance or MCP
+is unavailable, Witself reports only the partial integration guarantee. The
+matrix is pinned in code and shared
 conformance tests, so adding a runtime requires declaring its real output
 contract rather than copying another provider's hook fields.
 
-This automatic hydration path currently reads identity, facts, and narrative
-memory only. It does not inspect the mailbox. The target same-realm messaging
-extension adds bounded unread **metadata** to supported `SessionStart` and
+For Codex and Claude, automatic means model-visible delivery, not guaranteed
+model execution. A prompt hook injects the checkpoint already durable when its
+bounded `/v1/self` read occurs. Because transcript flushing is asynchronous, the
+current prompt may not yet be included and the current assistant response cannot
+be included; those events can be reviewed on a later interaction. The foreground
+model is instructed to process at most one pending fenced request near turn end,
+including applying an empty plan when no durable memory is justified. No hook,
+MCP server, or backend process launches inference or a curator.
+
+Hydration never presents a degraded recall as complete. Any emitted envelope
+whose focused recall degraded or became unavailable carries
+`recall_status:"degraded"` and a bounded `recall_reason` (for an outage,
+`"recall_unavailable"`). If an authenticated checkpoint is still available, the
+hook may inject that explicitly marked checkpoint-only envelope; otherwise the
+hook fails open with no context and the foreground prompt continues.
+
+This automatic hydration path currently reads identity, facts, narrative memory,
+and value-free curation lifecycle state. It does not inspect the mailbox. The
+target same-realm messaging extension adds bounded unread **metadata** to
+supported `SessionStart` and
 `UserPromptSubmit` hook output; bodies remain behind explicit read and no hook
 marks read, acknowledges, or starts inference. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
+
+`GET /v1/self` keeps `include_sensitive=false` as its ordinary API default.
+Installed automatic hooks request `include_sensitive=true` for the authenticated
+owner, `include_counts=false` to avoid inventory scans, and
+`include_checkpoint=true`. MCP `witself.self.show` also defaults
+`include_sensitive` to true because its result is model context for that same
+authenticated agent; callers may explicitly disable it. The manual CLI remains
+redacted by default. These controls do not and cannot opt into sealed-plane
+secret or TOTP values.
 
 ## The Sealed-Plane Carve-Out
 
@@ -184,9 +243,10 @@ sealed plane — secrets and TOTP seeds — is **never** surfaced through any of
 mechanisms in this doc. Concretely:
 
 - **Not in the self-digest.** `self show` (and `witself.self.show` / `GET /v1/self`)
-  draws only on primary facts and salient memories. No secret value, secret field,
-  reference target, or TOTP seed is ever selected into the digest, the `index`
-  summary, or the `elided_hint`.
+  draws content only from primary facts and salient memories, plus value-free
+  curation lifecycle metadata. No secret value, secret field, reference target,
+  or TOTP seed is ever selected into the digest, the `index` summary, the
+  `memory_checkpoint`, or the value-free `elided` signal.
 - **Not in `digest emit`.** The outbound file bridge renders the same open-plane
   selection to Markdown. It **never** writes a secret or seed into CLAUDE.md /
   AGENTS.md / GEMINI.md. You do not put secrets in the files the harness
@@ -263,16 +323,21 @@ dominates. The canonical per-tool wording lives in
 [mcp-tools.md](mcp-tools.md); the triggers, in summary:
 
 - `self.show` / `memory.recall` — call before history-dependent work. Broad
-  recall combines redacted Witself facts with Witself narrative memory.
+  recall combines redacted Witself facts with Witself narrative memory. Near a
+  non-trivial foreground turn's end, inspect `self.show.memory_checkpoint` when
+  the runtime did not inject it automatically.
 - `fact.set` — call in the same turn for an explicitly requested atomic durable
   assertion.
 - `memory.capture` — call in the same turn for an explicit narrative remember,
   or for a bounded client-authored checkpoint supported by visible evidence.
 - `memory.adjust` / `memory.supersede` / `memory.forget` — use exact-version,
   reversible operations rather than adding a contradictory record.
-- Curation queue, plan, apply, rollback, opportunistic worker, and per-user
-  launchd/systemd service are implemented. The backend never chooses a semantic
-  merge or starts inference itself.
+- Curation queue, plan, apply, rollback, and foreground checkpoint handling are
+  implemented. One active agent processes at most one fenced request; a valid
+  empty actions plan is applied to advance reviewed cursors. The backend never
+  chooses a semantic merge or starts inference itself. The older explicit
+  `memory curate auto` and per-user launchd/systemd surfaces remain legacy/manual
+  compatibility paths and are never launched by runtime hooks.
 
 ### 3. The Bootstrap Stanza (paste-able file teaching)
 
@@ -293,8 +358,8 @@ tools (or the `witself` CLI). Use it:
   finds canonical unacknowledged metadata; notification list finds local
   pointers already acknowledged by this runtime's background runner. Then call
   `witself.memory.recall <topic>` for anything you may have learned before.
-  Resuming work? `witself.session.start` hydrates identity, open goals, and last
-  progress in one call.
+  Resuming work? Use `witself.self.show` plus focused recall today. The target
+  `witself.session.start` one-call helper is not implemented.
 - **Route after learning.** When asked to remember one atomic durable assertion,
   call `witself.fact.set` in the same turn. For an explicit narrative remember,
   call `witself.memory.capture` in the same turn. Split clearly mixed requests,
@@ -304,10 +369,13 @@ tools (or the `witself` CLI). Use it:
   `forget` it. Do not add a new memory that contradicts an old one.
 - **Assume interruption.** Your context may be cleared at any moment. Capture a
   bounded, evidence-supported Witself checkpoint when durable progress is
-  needed. Claim due fenced curation work when a client is active. An explicitly
-  enabled local `memory curate auto` worker can launch after terminal transcript
-  flushes; optional per-user launchd/systemd scheduling is managed through
-  `memory curate auto service`.
+  needed. Near the end of a non-trivial foreground turn, inspect the
+  authenticated value-free checkpoint from hook hydration or `self.show`;
+  process at most one due fenced request. Submit and apply an empty actions plan
+  when nothing merits memory so the reviewed cursors advance. Never launch or
+  delegate another curator. Explicit legacy `memory curate auto` or `auto
+  service` operation is a separately configured compatibility choice, not
+  runtime-hook behavior.
 - **Hear before you reply.** To hear from other agents, inspect both
   non-blocking `witself.message.listen` and
   `witself.message.notification.list`. Consume a selected runner handoff only
@@ -424,7 +492,7 @@ Parser rules:
 
 | Concern | CLAUDE.md / AGENTS.md | Witself |
 | --- | --- | --- |
-| Loaded automatically | Yes, by the harness at session start | Hook-injected for Codex/Claude; guided MCP fallback for Grok and Cursor |
+| Loaded automatically | Yes, by the harness at session start | Session, recall, and pending-checkpoint context is hook-injected for Codex/Claude; Grok and Cursor use a guided MCP/`self.show` fallback |
 | Authority | Static file, edited by hand | Live store, mutated through an audited, versioned lifecycle |
 | Recall | Whole file injected every time | Bounded digest + deterministic lexical/structured `recall`; optional implemented client-supplied hybrid vectors |
 | Provenance | None (flat text) | First-class `source` on every fact and memory |

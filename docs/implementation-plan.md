@@ -290,6 +290,11 @@ Exit criteria:
 
 ## Milestone 3.5: Agent Self-Management And Hydration
 
+Current-status amendment: `self show` and its JSON API/MCP surfaces are
+implemented. The `session start` / `session end`, `digest emit` / formatted
+`GET /v1/self?format=`, `ingest`, and bootstrap-instructions surfaces below
+remain target work and are not implemented in the current checkout.
+
 Do not implement the native-only narrative routing or server consolidation
 below. Use the immediate capture, automatic retrieval, and client curation
 phases in
@@ -328,7 +333,8 @@ Deliverables:
   (blended salience + recency), then a one-line index of kinds/tags/counts.
   Cheap; never requires the embedding provider; hard byte/line cap with
   `elided=true` pointing to `memory.recall` rather than silent truncation.
-- `witself session start/end` / `witself.session.start`/`.end` /
+- Target (not implemented): `witself session start/end` /
+  `witself.session.start`/`.end` /
   `POST /v1/sessions:start`,`:end`: start hydrates identity + open goals + last
   progress in one round-trip; end persists a progress memory (kind `session`)
   and updates open goals. Pairs with assume-interruption / flush-before-long-ops.
@@ -337,7 +343,8 @@ Deliverables:
   stale ones, surfaces (does not auto-pick) conflicting facts, trims the
   digest/index. Dry-run defaults true; guarded; respects provenance and never
   silently overwrites human-/import-authored records.
-- `witself digest emit --format claude-md|agents-md|markdown` and
+- Target (not implemented): the `witself digest emit` command with
+  `--format claude-md|agents-md|markdown`, and
   `witself ingest <PATH ...>` (the two-way file bridge): `emit` renders the
   self-digest as a CLAUDE.md/AGENTS.md fragment with witself-generated
   provenance comments; `ingest` parses CLAUDE.md/AGENTS.md/GEMINI.md — kv-shaped

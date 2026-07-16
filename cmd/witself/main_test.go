@@ -370,7 +370,9 @@ func TestSelfShowUsesAgentToken(t *testing.T) {
 			t.Errorf("Authorization = %q", got)
 		}
 		q := r.URL.Query()
-		if q.Get("include_facts") != "true" || q.Get("include_salient") != "true" || q.Get("salient_limit") != "10" || q.Get("max_bytes") != "8192" {
+		if q.Get("include_facts") != "true" || q.Get("include_salient") != "true" || q.Get("include_counts") != "true" ||
+			q.Get("include_checkpoint") != "true" || q.Get("include_sensitive") != "false" ||
+			q.Get("salient_limit") != "10" || q.Get("max_bytes") != "8192" {
 			t.Errorf("query = %s", r.URL.RawQuery)
 		}
 		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agent_1","agent_name":"scott","realm_id":"realm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{"facts":0,"memories":0}},"elided":false}`))
@@ -391,6 +393,41 @@ func TestSelfShowUsesAgentToken(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("run code = %d, want 0", code)
+	}
+}
+
+func TestSelfShowPlainOutputIncludesBoundedDigestWithoutSensitiveValues(t *testing.T) {
+	const canary = "must-not-print-private-self-value"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/self" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agent_1","agent_name":"scott","realm_id":"realm_1","realm_name":"default"},"primary_facts":[{"id":"fact_1","name":"preferences/database","value":"Postgres","primary":true},{"id":"fact_private","name":"identity/private","value":"` + canary + `","primary":true,"sensitive":true}],"salient_memories":[{"id":"mem_1","snippet":"Use client-side inference","kind":"decision","tags":["architecture"],"salience":0.9},{"id":"mem_private","snippet":"` + canary + `","kind":"profile","salience":0.8,"sensitive":true}],"memory_checkpoint":{"pending":false,"request_id":"","request_generation":0},"index":{"kinds":["decision","profile"],"tags":["architecture"],"counts":{"facts":2,"memories":2}},"elided":false}`))
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "scott.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return run([]string{"self", "show", "--endpoint", srv.URL, "--token-file", tokenFile, "--realm", "default", "--agent", "scott"})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("plain self show = %d / %q / %q", code, stdout, stderr)
+	}
+	for _, want := range []string{
+		"fact:\tpreferences/database\t\"Postgres\"", "fact:\tidentity/private\t<redacted>",
+		"memory:\tmem_1\tdecision\t0.900\tUse client-side inference", "memory:\tmem_private\tprofile\t0.800\t<redacted>",
+		"kinds:\tdecision,profile", "tags:\tarchitecture", "memory-checkpoint:\tidle",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("plain self output omitted %q: %q", want, stdout)
+		}
+	}
+	if strings.Contains(stdout+stderr, canary) {
+		t.Fatalf("plain self output exposed sensitive value: %q / %q", stdout, stderr)
 	}
 }
 

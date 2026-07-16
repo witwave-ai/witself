@@ -296,11 +296,119 @@ type mcpMemoryCurationRenewInput struct {
 	IdempotencyKey    string `json:"idempotency_key"`
 }
 
+// The foreground agent receives only MCP tool metadata when it is operating
+// outside the Witself repository. Keep the complete v1 plan language strongly
+// typed here so every supported runtime can discover the exact draft and action
+// shapes from tools/list instead of having to guess an opaque JSON object.
+type mcpMemoryCurationPlanDraft struct {
+	Schema        string                        `json:"schema" jsonschema:"must be witself.memory-plan.v1"`
+	DraftRevision int64                         `json:"draft_revision" jsonschema:"positive client-local draft revision; normally 1"`
+	Actions       []mcpMemoryCurationPlanAction `json:"actions" jsonschema:"ordered server-bounded actions; use an empty array when no durable memory is justified"`
+}
+
+type mcpMemoryCurationPlanAction struct {
+	Ordinal     int64                               `json:"ordinal" jsonschema:"one-based contiguous action ordinal"`
+	Operation   string                              `json:"operation" jsonschema:"exactly one of create, replace, supersede, relate, or propose_fact; set only the matching payload"`
+	Create      *mcpMemoryCurationCreateAction      `json:"create,omitempty" jsonschema:"required only when operation is create"`
+	Replace     *mcpMemoryCurationReplaceAction     `json:"replace,omitempty" jsonschema:"required only when operation is replace"`
+	Supersede   *mcpMemoryCurationSupersedeAction   `json:"supersede,omitempty" jsonschema:"required only when operation is supersede"`
+	Relate      *mcpMemoryCurationRelateAction      `json:"relate,omitempty" jsonschema:"required only when operation is relate"`
+	ProposeFact *mcpMemoryCurationProposeFactAction `json:"propose_fact,omitempty" jsonschema:"required only when operation is propose_fact; creates a review candidate, never a canonical fact"`
+}
+
+type mcpMemoryCurationCreateAction struct {
+	LocalRef  string                             `json:"local_ref" jsonschema:"client-local reference used by later actions in this draft"`
+	Snapshot  mcpMemoryCurationMemorySnapshot    `json:"snapshot" jsonschema:"complete new narrative-memory snapshot"`
+	Relations []mcpMemoryCurationLineageRelation `json:"relations,omitempty" jsonschema:"optional bounded lineage edges from this new memory"`
+}
+
+type mcpMemoryCurationReplaceAction struct {
+	Target   mcpMemoryCurationTargetReference `json:"target" jsonschema:"exact current memory head or new-memory local reference"`
+	Snapshot mcpMemoryCurationMemorySnapshot  `json:"snapshot" jsonschema:"complete replacement snapshot"`
+	Reason   string                           `json:"reason,omitempty" jsonschema:"bounded replacement reason"`
+}
+
+type mcpMemoryCurationSupersedeAction struct {
+	Target       mcpMemoryCurationTargetReference    `json:"target" jsonschema:"exact current memory head being superseded"`
+	Replacements []mcpMemoryCurationVersionReference `json:"replacements" jsonschema:"one or more bounded immutable replacement references"`
+	Reason       string                              `json:"reason,omitempty" jsonschema:"bounded supersession reason"`
+}
+
+type mcpMemoryCurationRelateAction struct {
+	RelationType string                            `json:"relation_type" jsonschema:"derived_from, summarizes, merged_from, split_from, or conflicts_with"`
+	From         mcpMemoryCurationVersionReference `json:"from" jsonschema:"immutable source memory version"`
+	To           mcpMemoryCurationVersionReference `json:"to" jsonschema:"immutable target memory version"`
+}
+
+type mcpMemoryCurationProposeFactAction struct {
+	Subject     string                      `json:"subject,omitempty" jsonschema:"stable fact subject key; defaults to self"`
+	Predicate   string                      `json:"predicate" jsonschema:"namespaced durable fact predicate"`
+	ValueType   string                      `json:"value_type,omitempty" jsonschema:"logical fact value type; inferred when omitted"`
+	Value       any                         `json:"value" jsonschema:"typed JSON value supported by exact evidence"`
+	Recurrence  string                      `json:"recurrence,omitempty" jsonschema:"annual only for an explicitly recurring date"`
+	Cardinality string                      `json:"cardinality,omitempty" jsonschema:"one, many, or one_at_a_time"`
+	Sensitive   bool                        `json:"sensitive,omitempty" jsonschema:"redact the candidate value from broad output"`
+	Confidence  *float64                    `json:"confidence,omitempty" jsonschema:"client confidence from 0 to 1"`
+	ValidFrom   string                      `json:"valid_from,omitempty" jsonschema:"optional RFC3339 start of real-world validity"`
+	ValidUntil  string                      `json:"valid_until,omitempty" jsonschema:"optional RFC3339 end of real-world validity"`
+	Reason      string                      `json:"reason,omitempty" jsonschema:"bounded proposal reason"`
+	Evidence    []mcpMemoryCurationEvidence `json:"evidence" jsonschema:"one or more exact frozen-input evidence references; required for fact proposals"`
+}
+
+type mcpMemoryCurationMemorySnapshot struct {
+	Content         string                      `json:"content" jsonschema:"complete client-authored narrative derived only from visible frozen inputs"`
+	ContentEncoding string                      `json:"content_encoding,omitempty" jsonschema:"plain (default) or canonical base64"`
+	Kind            string                      `json:"kind,omitempty" jsonschema:"memory kind such as decision, session, milestone, correction, or lesson"`
+	Tags            []string                    `json:"tags,omitempty" jsonschema:"bounded descriptive tags"`
+	Links           []string                    `json:"links,omitempty" jsonschema:"bounded typed identity links"`
+	Salience        *float64                    `json:"salience,omitempty" jsonschema:"salience from 0 to 1"`
+	Sensitive       bool                        `json:"sensitive,omitempty" jsonschema:"redact content from broad retrieval by default"`
+	OccurredFrom    string                      `json:"occurred_from,omitempty" jsonschema:"optional RFC3339 event range start"`
+	OccurredUntil   string                      `json:"occurred_until,omitempty" jsonschema:"optional RFC3339 event range end"`
+	Evidence        []mcpMemoryCurationEvidence `json:"evidence,omitempty" jsonschema:"bounded provenance references to frozen inputs"`
+}
+
+type mcpMemoryCurationTargetReference struct {
+	MemoryID        string `json:"memory_id,omitempty" jsonschema:"existing target memory id; mutually exclusive with local_ref"`
+	LocalRef        string `json:"local_ref,omitempty" jsonschema:"new-memory local reference; mutually exclusive with memory_id"`
+	ExpectedVersion int64  `json:"expected_version" jsonschema:"exact optimistic version; use 1 for a local new-memory reference"`
+}
+
+type mcpMemoryCurationVersionReference struct {
+	MemoryID string `json:"memory_id,omitempty" jsonschema:"existing memory id; mutually exclusive with local_ref"`
+	LocalRef string `json:"local_ref,omitempty" jsonschema:"new-memory local reference; mutually exclusive with memory_id"`
+	Version  int64  `json:"version" jsonschema:"exact immutable version; use 1 for a local new-memory reference"`
+}
+
+type mcpMemoryCurationLineageRelation struct {
+	RelationType string                            `json:"relation_type" jsonschema:"derived_from, summarizes, merged_from, split_from, or conflicts_with"`
+	To           mcpMemoryCurationVersionReference `json:"to" jsonschema:"immutable related memory version"`
+}
+
+type mcpMemoryCurationEvidence struct {
+	InputEvidenceID     string                             `json:"input_evidence_id,omitempty" jsonschema:"exact materialized evidence input id"`
+	Type                string                             `json:"type" jsonschema:"transcript, memory, message, import, or another supported evidence type"`
+	Role                string                             `json:"role,omitempty" jsonschema:"supports, contradicts, or context"`
+	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable"`
+	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator"`
+	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"resolved source kind"`
+	SourceTranscriptID  string                             `json:"source_transcript_id,omitempty" jsonschema:"exact frozen transcript id"`
+	SourceSequenceFrom  int64                              `json:"source_sequence_from,omitempty" jsonschema:"first exact frozen transcript sequence"`
+	SourceSequenceUntil int64                              `json:"source_sequence_until,omitempty" jsonschema:"last exact frozen transcript sequence"`
+	SourceMemory        *mcpMemoryCurationVersionReference `json:"source_memory,omitempty" jsonschema:"exact immutable source memory version"`
+	SourceMessageID     string                             `json:"source_message_id,omitempty" jsonschema:"exact source message id"`
+	SourceImportLocator string                             `json:"source_import_locator,omitempty" jsonschema:"exact import source locator"`
+	ArtifactExcerpt     string                             `json:"artifact_excerpt,omitempty" jsonschema:"canonical base64 artifact excerpt"`
+	ArtifactSensitive   bool                               `json:"artifact_sensitive,omitempty" jsonschema:"artifact excerpt contains sensitive material"`
+	TerminalReasonCode  string                             `json:"terminal_reason_code,omitempty" jsonschema:"bounded reason for unavailable evidence"`
+	SourceDigest        string                             `json:"source_digest,omitempty" jsonschema:"exact source digest when available"`
+}
+
 type mcpMemoryCurationPlanInput struct {
-	RunID             string         `json:"run_id"`
-	FencingGeneration int64          `json:"fencing_generation"`
-	Draft             map[string]any `json:"draft" jsonschema:"strict witself.memory-plan.v1 draft with ordered actions"`
-	IdempotencyKey    string         `json:"idempotency_key"`
+	RunID             string                     `json:"run_id"`
+	FencingGeneration int64                      `json:"fencing_generation"`
+	Draft             mcpMemoryCurationPlanDraft `json:"draft" jsonschema:"strict discoverable witself.memory-plan.v1 draft; exact empty plan is {\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}"`
+	IdempotencyKey    string                     `json:"idempotency_key"`
 }
 
 type mcpMemoryCurationApplyInput struct {
@@ -528,10 +636,11 @@ func registerMemoryCurationMCPTools(server *mcp.Server, runtimeName string, back
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.curation.plan"),
-		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal.",
+		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal. Never place credentials, secret values, private keys, TOTP seeds, or generated codes in an open-plane memory/fact plan; sensitive=true is not a sealed-secret substitute. Use an empty plan for that material. When no input merits durable memory, submit the exact empty plan draft={\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]} and apply the accepted plan so reviewed cursors advance.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryCurationPlanInput) (*mcp.CallToolResult, mcpMemoryCurationPlanOutput, error) {
-		if in.RunID == "" || in.FencingGeneration < 1 || in.IdempotencyKey == "" || in.Draft == nil {
-			return nil, mcpMemoryCurationPlanOutput{}, fmt.Errorf("run_id, positive fencing_generation, draft, and idempotency_key are required")
+		if in.RunID == "" || in.FencingGeneration < 1 || in.IdempotencyKey == "" ||
+			strings.TrimSpace(in.Draft.Schema) == "" || in.Draft.DraftRevision < 1 || in.Draft.Actions == nil {
+			return nil, mcpMemoryCurationPlanOutput{}, fmt.Errorf("run_id, positive fencing_generation, complete draft, and idempotency_key are required")
 		}
 		raw, err := json.Marshal(in.Draft)
 		if err != nil {
@@ -559,7 +668,7 @@ func registerMemoryCurationMCPTools(server *mcp.Server, runtimeName string, back
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.curation.apply"),
-		Description: "Atomically apply the exact accepted plan using its fence, revision, and hash. This deterministic backend call advances only frozen contiguous cursors and performs no model inference; stale state yields no partial semantic change.",
+		Description: "Atomically apply the exact accepted plan using its fence, revision, and hash. This deterministic backend call advances only frozen contiguous cursors and performs no model inference; applying an empty plan marks that frozen interval reviewed without creating memory or facts. Stale state yields no partial semantic change.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryCurationApplyInput) (*mcp.CallToolResult, client.ApplyMemoryCurationResult, error) {
 		if in.RunID == "" || in.FencingGeneration < 1 || in.PlanRevision < 1 ||
 			!factCandidateRevisionPattern.MatchString(strings.TrimSpace(in.PlanHash)) || in.IdempotencyKey == "" {
@@ -636,7 +745,7 @@ func registerMemoryCurationMCPTools(server *mcp.Server, runtimeName string, back
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.curation.status"),
-		Description: "Read value-free owner-lane/request/run status without requiring an active lease. This does not inspect or synthesize memory content.",
+		Description: "Read value-free owner-lane/request/run status without requiring an active lease. Use it to resume a pending memory_checkpoint in the current foreground turn; process at most one request and never launch another curator. This does not inspect or synthesize memory content.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryCurationStatusInput) (*mcp.CallToolResult, client.MemoryCurationStatus, error) {
 		b, err := curationBackend()
 		if err != nil {

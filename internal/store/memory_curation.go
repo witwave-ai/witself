@@ -48,6 +48,10 @@ const (
 	defaultMemoryCurationPageSize        = 50
 	maxMemoryCurationPageSize            = 200
 	defaultMemoryCurationMemories        = 200
+	maxMemoryCurationContextMemories     = 24
+	maxMemoryCurationContextEntries      = 64
+	maxMemoryCurationContextBodyChars    = 8192
+	maxMemoryCurationContextTerms        = 128
 	defaultMemoryCurationEvidence        = 500
 	defaultMemoryCurationTranscriptItems = 500
 	maxMemoryCurationMemories            = 500
@@ -1054,9 +1058,16 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 			  ON cursor.account_id=c.account_id AND cursor.realm_id=c.realm_id
 			 AND cursor.owner_kind='agent' AND cursor.owner_id=c.owner_agent_id
 			 AND cursor.source_kind='transcript' AND cursor.source_stream_id=c.id
+			JOIN transcript_entries oldest_unread
+			  ON oldest_unread.transcript_id=c.id
+			 AND oldest_unread.account_id=c.account_id
+			 AND oldest_unread.realm_id=c.realm_id
+			 AND oldest_unread.recorded_by_agent_id=c.owner_agent_id
+			 AND oldest_unread.sequence=COALESCE(cursor.position,0)+1
 			WHERE c.account_id=$1 AND c.realm_id=$2 AND c.owner_agent_id=$3
 			  AND c.next_sequence-1 > COALESCE(cursor.position,0)
-			ORDER BY c.id LIMIT $4 FOR SHARE OF c`, p.AccountID, p.RealmID, p.ID,
+			ORDER BY oldest_unread.created_at,oldest_unread.id,c.id
+			LIMIT $4 FOR SHARE OF c`, p.AccountID, p.RealmID, p.ID,
 			caps.MaxTranscriptEntries)
 		if err != nil {
 			return counts, 0, 0, fmt.Errorf("lock curation transcript streams: %w", err)
@@ -1080,7 +1091,7 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 		}
 		rows.Close()
 		remaining := caps.MaxTranscriptEntries
-		for _, stream := range streams {
+		for index, stream := range streams {
 			if remaining == 0 {
 				break
 			}
@@ -1093,8 +1104,16 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 			}
 			upper := stream.upper
 			available := upper - expected
-			if available > int64(remaining) {
-				upper = expected + int64(remaining)
+			// Share the remaining entry budget across every selected stream. A
+			// single noisy conversation therefore cannot consume the entire run
+			// while another selected conversation receives no cursor interval.
+			streamsRemaining := len(streams) - index
+			fairShare := remaining / streamsRemaining
+			if fairShare < 1 {
+				fairShare = 1
+			}
+			if available > int64(fairShare) {
+				upper = expected + int64(fairShare)
 			}
 			if err := appendInput(MemoryCurationRunInput{
 				Kind: MemoryCurationInputCursor, CursorSourceKind: MemoryCurationSourceTranscript,
@@ -1109,6 +1128,134 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 				return counts, 0, 0, err
 			}
 			remaining -= int(upper - expected)
+		}
+	}
+
+	// A transcript delta often refines a narrative that was reviewed in an
+	// earlier run. Changed-memory inputs alone cannot authorize a replace or
+	// supersede in that case, so freeze a small, deterministic set of existing
+	// heads as comparison context. Rank indexed lexical matches to a bounded
+	// sample of the frozen transcript evidence before filling remaining slots
+	// by salience. These inputs do not advance the memory cursor or create
+	// backlog work; they only let the foreground curator avoid duplicating a
+	// durable narrative and safely target a current head when a refinement is
+	// warranted. Respect the requested memory states and memory-source scope, and
+	// keep the total inside the caller's memory cap.
+	if counts.transcripts > 0 && curationHasSource(scope, MemoryCurationSourceMemory) &&
+		counts.memories < caps.MaxMemories {
+		contextLimit := caps.MaxMemories - counts.memories
+		if contextLimit > maxMemoryCurationContextMemories {
+			contextLimit = maxMemoryCurationContextMemories
+		}
+		rows, err := tx.Query(ctx, `
+			WITH sampled_transcript_entries AS MATERIALIZED (
+			  SELECT e.body,
+			         row_number() OVER (
+			           ORDER BY i.ordinal DESC,e.sequence DESC,e.id DESC
+			         ) AS evidence_rank
+			  FROM memory_curation_run_inputs i
+			  JOIN transcript_entries e
+			    ON e.transcript_id=i.transcript_id
+			   AND e.sequence BETWEEN i.sequence_from AND i.sequence_until
+			   AND e.account_id=i.account_id AND e.realm_id=i.realm_id
+			   AND e.recorded_by_agent_id=i.owner_id
+			  WHERE i.run_id=$6 AND i.input_kind='transcript'
+			  ORDER BY i.ordinal DESC,e.sequence DESC,e.id DESC
+			  LIMIT $7
+			), topic_terms AS MATERIALIZED (
+			  SELECT term.lexeme,min(sample.evidence_rank) AS evidence_rank,
+			         count(*) AS evidence_count
+			  FROM sampled_transcript_entries sample
+			  CROSS JOIN LATERAL unnest(
+			    tsvector_to_array(to_tsvector('simple'::regconfig,left(sample.body,$8)))
+			  ) AS term(lexeme)
+			  GROUP BY term.lexeme
+			  ORDER BY min(sample.evidence_rank),count(*) DESC,
+			           char_length(term.lexeme) DESC,term.lexeme
+			  LIMIT $9
+			), topic AS MATERIALIZED (
+			  SELECT CASE WHEN count(*)=0 THEN NULL::tsquery
+			         ELSE to_tsquery(
+			           'simple'::regconfig,
+			           string_agg(
+			             quote_literal(lexeme),' | '
+			             ORDER BY evidence_rank,evidence_count DESC,
+			                      char_length(lexeme) DESC,lexeme
+			           )
+			         ) END AS query
+			  FROM topic_terms
+			), relevant AS MATERIALIZED (
+			  SELECT m.id,v.version,
+			         ts_rank_cd(v.search_document,topic.query,32) AS relevance,
+			         v.salience,m.updated_at
+			  FROM topic
+			  JOIN memory_versions v
+			    ON topic.query IS NOT NULL AND v.search_document @@ topic.query
+			  JOIN memories m
+			    ON m.id=v.memory_id AND m.current_version=v.version
+			  WHERE m.account_id=$1 AND m.realm_id=$2
+			    AND m.owner_kind='agent' AND m.owner_id=$3
+			    AND v.state=ANY($4::text[]) AND ($5 OR NOT v.sensitive)
+			    AND NOT EXISTS (
+			      SELECT 1 FROM memory_curation_run_inputs i
+			      WHERE i.run_id=$6 AND i.input_kind='memory' AND i.memory_id=m.id
+			    )
+			  ORDER BY relevance DESC,v.salience DESC,m.updated_at DESC,m.id DESC
+			  LIMIT $10
+			), fallback AS MATERIALIZED (
+			  SELECT m.id,v.version,0::real AS relevance,v.salience,m.updated_at
+			  FROM memories m
+			  JOIN memory_versions v
+			    ON v.memory_id=m.id AND v.version=m.current_version
+			  WHERE m.account_id=$1 AND m.realm_id=$2
+			    AND m.owner_kind='agent' AND m.owner_id=$3
+			    AND v.state=ANY($4::text[]) AND ($5 OR NOT v.sensitive)
+			    AND NOT EXISTS (
+			      SELECT 1 FROM memory_curation_run_inputs i
+			      WHERE i.run_id=$6 AND i.input_kind='memory' AND i.memory_id=m.id
+			    )
+			    AND NOT EXISTS (SELECT 1 FROM relevant r WHERE r.id=m.id)
+			  ORDER BY v.salience DESC,m.updated_at DESC,m.id DESC
+			  LIMIT $10
+			), candidates AS (
+			  SELECT * FROM relevant
+			  UNION ALL
+			  SELECT * FROM fallback
+			)
+			SELECT id,version
+			FROM candidates
+			ORDER BY relevance DESC,salience DESC,updated_at DESC,id DESC
+			LIMIT $10`, p.AccountID, p.RealmID, p.ID, scope.MemoryStates,
+			scope.IncludeSensitive, runID, maxMemoryCurationContextEntries,
+			maxMemoryCurationContextBodyChars, maxMemoryCurationContextTerms,
+			contextLimit)
+		if err != nil {
+			return counts, 0, 0, fmt.Errorf("select curation memory context: %w", err)
+		}
+		type contextRef struct {
+			id      string
+			version int64
+		}
+		refs := make([]contextRef, 0, contextLimit)
+		for rows.Next() {
+			var item contextRef
+			if err := rows.Scan(&item.id, &item.version); err != nil {
+				rows.Close()
+				return counts, 0, 0, err
+			}
+			refs = append(refs, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return counts, 0, 0, err
+		}
+		rows.Close()
+		for index, item := range refs {
+			if err := appendInput(MemoryCurationRunInput{
+				Kind: MemoryCurationInputMemory, MemoryID: item.id, MemoryVersion: item.version,
+			}, fmt.Sprintf("07/memory-context/%06d/%s", index+1, item.id)); err != nil {
+				return counts, 0, 0, err
+			}
 		}
 	}
 	return counts, memoryUpper, evidenceUpper, nil

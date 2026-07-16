@@ -301,10 +301,11 @@ type Config struct {
 	ListFactCandidates      func(ctx context.Context, p DomainPrincipal, opts FactCandidateListOptions) ([]FactCandidate, error)
 	ConfirmFactCandidate    func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (Fact, error)
 	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (FactCandidate, error)
-	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfFact, int, error)
+	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfFact, int, error)
 	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
-	GetSelfMemories         func(ctx context.Context, p DomainPrincipal, limit int) ([]SelfMemory, int, error)
+	GetSelfMemories         func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfMemory, int, error)
 	CountSelfMemories       func(ctx context.Context, p DomainPrincipal) (int, error)
+	GetSelfMemoryCheckpoint func(ctx context.Context, p DomainPrincipal) (*SelfMemoryCheckpoint, error)
 	ListSelfPeers           func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
 	TouchAgentActivity      func(ctx context.Context, p DomainPrincipal, in AgentActivityRequest) (AgentActivity, error)
 	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
@@ -598,12 +599,28 @@ type PrincipalAuthFunc func(ctx context.Context, token string) (DomainPrincipal,
 // session-start view returned by GET /v1/self. Facts and memories are empty in
 // the identity-only slice and can be populated without changing this envelope.
 type SelfDigest struct {
-	SchemaVersion   string       `json:"schema_version"`
-	Identity        SelfIdentity `json:"identity"`
-	PrimaryFacts    []SelfFact   `json:"primary_facts"`
-	SalientMemories []SelfMemory `json:"salient_memories"`
-	Index           SelfIndex    `json:"index"`
-	Elided          bool         `json:"elided"`
+	SchemaVersion    string                `json:"schema_version"`
+	Identity         SelfIdentity          `json:"identity"`
+	PrimaryFacts     []SelfFact            `json:"primary_facts"`
+	SalientMemories  []SelfMemory          `json:"salient_memories"`
+	MemoryCheckpoint *SelfMemoryCheckpoint `json:"memory_checkpoint,omitempty"`
+	Index            SelfIndex             `json:"index"`
+	Elided           bool                  `json:"elided"`
+}
+
+// SelfMemoryCheckpoint is an authenticated, value-free pointer to unfinished
+// client-side curation. It deliberately carries no source content or semantic
+// instruction from the database.
+type SelfMemoryCheckpoint struct {
+	Pending           bool       `json:"pending"`
+	Unavailable       bool       `json:"unavailable,omitempty"`
+	RequestID         string     `json:"request_id"`
+	RequestGeneration int64      `json:"request_generation"`
+	DueAt             *time.Time `json:"due_at,omitempty"`
+	RunID             string     `json:"run_id,omitempty"`
+	RunState          string     `json:"run_state,omitempty"`
+	FencingGeneration int64      `json:"fencing_generation,omitempty"`
+	LeaseExpiresAt    *time.Time `json:"lease_expires_at,omitempty"`
 }
 
 // SelfIdentity is the account, realm, and agent identity derived from the
@@ -631,14 +648,15 @@ type SelfFact struct {
 // SelfMemory is the bounded salient-memory representation included in a self
 // digest once the memory store is implemented.
 type SelfMemory struct {
-	ID        string   `json:"id"`
-	Snippet   string   `json:"snippet"`
-	Kind      string   `json:"kind"`
-	Tags      []string `json:"tags,omitempty"`
-	Salience  float64  `json:"salience"`
-	Sensitive bool     `json:"sensitive,omitempty"`
-	Redacted  bool     `json:"redacted,omitempty"`
-	Source    string   `json:"source,omitempty"`
+	ID              string   `json:"id"`
+	Snippet         string   `json:"snippet"`
+	ContentEncoding string   `json:"content_encoding,omitempty"`
+	Kind            string   `json:"kind"`
+	Tags            []string `json:"tags,omitempty"`
+	Salience        float64  `json:"salience"`
+	Sensitive       bool     `json:"sensitive,omitempty"`
+	Redacted        bool     `json:"redacted,omitempty"`
+	Source          string   `json:"source,omitempty"`
 }
 
 // SelfIndex summarizes the kinds, tags, and open-plane record counts available
@@ -1543,6 +1561,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.CountSelfFacts,
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
+			cfg.GetSelfMemoryCheckpoint,
 		))
 		if cfg.ListSelfPeers != nil {
 			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
@@ -2008,10 +2027,11 @@ func effectiveAccessProfile(p DomainPrincipal) string {
 
 func selfHandler(
 	auth PrincipalAuthFunc,
-	getFacts func(context.Context, DomainPrincipal, int) ([]SelfFact, int, error),
+	getFacts func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error),
 	countFacts func(context.Context, DomainPrincipal) (int, error),
-	getMemories func(context.Context, DomainPrincipal, int) ([]SelfMemory, int, error),
+	getMemories func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error),
 	countMemories func(context.Context, DomainPrincipal) (int, error),
+	getMemoryCheckpoint func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		// Self digests can contain durable personal context and must never be
@@ -2021,9 +2041,8 @@ func selfHandler(
 			writeJSONError(w, http.StatusForbidden, "only an agent token may show self")
 			return
 		}
-
 		q := r.URL.Query()
-		for _, name := range []string{"include_facts", "include_salient"} {
+		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_sensitive"} {
 			if value := q.Get(name); value != "" {
 				if _, err := strconv.ParseBool(value); err != nil {
 					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
@@ -2051,6 +2070,30 @@ func selfHandler(
 			}
 			maximumBytes = maximum
 		}
+		includeCounts := true
+		if raw := q.Get("include_counts"); raw != "" {
+			includeCounts, _ = strconv.ParseBool(raw)
+		}
+		includeCheckpoint := true
+		if raw := q.Get("include_checkpoint"); raw != "" {
+			includeCheckpoint, _ = strconv.ParseBool(raw)
+		}
+		includeSensitive := false
+		if raw := q.Get("include_sensitive"); raw != "" {
+			includeSensitive, _ = strconv.ParseBool(raw)
+		}
+		var memoryCheckpoint *SelfMemoryCheckpoint
+		if includeCheckpoint && getMemoryCheckpoint != nil {
+			var err error
+			memoryCheckpoint, err = getMemoryCheckpoint(r.Context(), p)
+			if err != nil {
+				// Checkpoint projection is additive lifecycle metadata. Keep the
+				// authenticated identity and open-plane digest available when that
+				// projection is temporarily unhealthy, while making the partial
+				// state explicit to clients.
+				memoryCheckpoint = &SelfMemoryCheckpoint{Unavailable: true}
+			}
+		}
 
 		facts := []SelfFact{}
 		factCount := 0
@@ -2059,7 +2102,7 @@ func selfHandler(
 			includeFacts, _ = strconv.ParseBool(raw)
 		}
 		if includeFacts && getFacts != nil {
-			hydratedFacts, total, err := getFacts(r.Context(), p, 50)
+			hydratedFacts, total, err := getFacts(r.Context(), p, 50, includeCounts)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not hydrate facts")
 				return
@@ -2070,22 +2113,24 @@ func selfHandler(
 			}
 			for i := range facts {
 				facts[i].Primary = true
-				if facts[i].Sensitive {
+				if facts[i].Redacted {
+					facts[i].Value = nil
+				} else if facts[i].Sensitive && !includeSensitive {
 					facts[i].Value = nil
 					facts[i].Redacted = true
 				}
 			}
-		} else if countFacts != nil {
+		} else if includeCounts && countFacts != nil {
 			var err error
 			factCount, err = countFacts(r.Context(), p)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
 				return
 			}
-		} else if getFacts != nil {
+		} else if includeCounts && getFacts != nil {
 			// Compatibility fallback for embedders that have not yet supplied the
 			// count-only hook. The production adapter avoids loading fact values.
-			_, total, err := getFacts(r.Context(), p, 50)
+			_, total, err := getFacts(r.Context(), p, 50, true)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
 				return
@@ -2100,7 +2145,7 @@ func selfHandler(
 			includeSalient, _ = strconv.ParseBool(raw)
 		}
 		if includeSalient && getMemories != nil {
-			hydratedMemories, total, err := getMemories(r.Context(), p, salientLimit)
+			hydratedMemories, total, err := getMemories(r.Context(), p, salientLimit, includeCounts)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not hydrate memories")
 				return
@@ -2110,21 +2155,26 @@ func selfHandler(
 				memories = hydratedMemories
 			}
 			for i := range memories {
-				if memories[i].Sensitive {
+				nonPlain := memories[i].ContentEncoding != "" && memories[i].ContentEncoding != "plain"
+				if memories[i].Redacted || nonPlain {
+					memories[i].Snippet = ""
+					memories[i].Tags = nil
+					memories[i].Redacted = true
+				} else if memories[i].Sensitive && !includeSensitive {
 					memories[i].Snippet = ""
 					memories[i].Tags = nil
 					memories[i].Redacted = true
 				}
 			}
-		} else if countMemories != nil {
+		} else if includeCounts && countMemories != nil {
 			var err error
 			memoryCount, err = countMemories(r.Context(), p)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not count memories")
 				return
 			}
-		} else if getMemories != nil {
-			_, total, err := getMemories(r.Context(), p, salientLimit)
+		} else if includeCounts && getMemories != nil {
+			_, total, err := getMemories(r.Context(), p, salientLimit, true)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not count memories")
 				return
@@ -2158,13 +2208,15 @@ func selfHandler(
 				RealmID:   p.RealmID,
 				RealmName: p.RealmName,
 			},
-			PrimaryFacts:    facts,
-			SalientMemories: memories,
-			Index: SelfIndex{
-				Kinds:  kinds,
-				Tags:   tags,
-				Counts: map[string]int{"facts": factCount, "memories": memoryCount},
-			},
+			PrimaryFacts:     facts,
+			SalientMemories:  memories,
+			MemoryCheckpoint: memoryCheckpoint,
+			Index: SelfIndex{Kinds: kinds, Tags: tags, Counts: func() map[string]int {
+				if !includeCounts {
+					return map[string]int{}
+				}
+				return map[string]int{"facts": factCount, "memories": memoryCount}
+			}()},
 			Elided: (includeFacts && factCount > len(facts)) ||
 				(includeSalient && memoryCount > len(memories)),
 		}

@@ -1,11 +1,11 @@
 # Witself Memory Model
 
-Status: implemented direct memory, client curation/automation, runtime
-hydration, and optional client-vector hybrid recall.
+Status: implemented direct memory, foreground client curation, runtime
+hydration/checkpoint delivery, and optional client-vector hybrid recall.
 Memories are first-class, agent-owned identity payloads addressed by id,
 retrieved through deterministic lexical/structured recall, mutated through an
 immutable versioned lifecycle, and removed only through a separately guarded
-permanent-delete flow. Updated 2026-07-14.
+permanent-delete flow. Updated 2026-07-15.
 
 Narrative-memory amendment (accepted 2026-07-14): use
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md) and
@@ -39,7 +39,8 @@ type). Cross-agent access to memories is governed entirely by
 - Deeper curation is an implemented, agent-self, client-inference protocol:
   deterministic requests, fenced immutable inputs, strict hashed plans, atomic
   apply, source cursors, value-free receipts, and guarded compensation. The
-  backend does no synthesis and does not launch an AI runtime.
+  backend does no synthesis and does not launch an AI runtime. An active
+  foreground agent normally processes at most one pending request per turn.
 - Optional vector similarity is client-supplied under an immutable versioned
   profile. Migration `0032` stores portable JSONB vectors and the backend
   validates and compares them deterministically but never generates them.
@@ -57,7 +58,10 @@ receipt; a relation-derived active set id/revision supports later reactivation.
 Every mutation appends a complete version snapshot with a monotonically
 increasing owner-lane change sequence. Evidence is append-only and is resolved,
 pending, or explicitly unavailable. Exact authorized reads may return sensitive
-content; broad list and recall redact it by default. History is exported as
+content; ordinary HTTP/CLI broad list and recall redact it by default. Installed
+owner-authenticated hydration and MCP recall intentionally opt into sensitive
+open-plane context while retaining the marker; sealed secret and TOTP values
+remain ineligible. History is exported as
 first-class account data and round-trips through import. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md),
 [data-model.md](data-model.md), and [json-contracts.md](json-contracts.md) for
@@ -74,7 +78,8 @@ The implemented lifecycle is agent-self and version checked:
 - `capture` creates version 1 in `active` state from one bounded client-authored
   capsule with exact, pending, or explicitly unavailable evidence.
 - `show`, `list`, `history`, and `recall` are read operations. List/recall are
-  bounded and redact sensitive content by default.
+  bounded. HTTP/CLI broad reads redact sensitive content by default; automatic
+  owner hydration and MCP recall opt in and retain `sensitive=true`.
 - `adjust` appends a full replacement snapshot at the exact current version.
 - `supersede` atomically marks one active source `superseded` and creates 1-32
   active client-authored replacements with exact membership receipts. It is
@@ -125,16 +130,19 @@ digest, or plaintext account export. See [secret-model.md](secret-model.md) and
 
 ## Self Digest / Hydration
 
-The self digest is the bounded, always-loadable view of an agent's identity used
-at session start. The full digest shape, byte cap, emit format, and teaching
-protocol are canonical in [context-hydration.md](context-hydration.md); this
+The self digest is the bounded, always-loadable view of an agent's identity and
+value-free curation lifecycle state. The full digest shape, byte cap, emit
+format, and teaching protocol are canonical in
+[context-hydration.md](context-hydration.md); this
 section pins the one piece that belongs to the memory model — how the **salient
 memory set** is selected.
 
-The digest is an **open-plane** view. Sealed-plane material is **never in the
-self-digest**: secrets and TOTP seeds are not selected, summarized, or emitted by
-`digest emit`, and are never ingested into it. The digest never carries secret
-values or references that would resolve to one. See
+The digest is an **open-plane** view. Its optional `memory_checkpoint` contains
+only authenticated request/run/fence lifecycle metadata and no source content.
+Sealed-plane material is **never in the self-digest**: secrets and TOTP seeds are
+not selected, summarized, or emitted by `digest emit`, and are never ingested
+into it. The digest never carries secret values or references that would resolve
+to one. See
 [context-hydration.md](context-hydration.md) and
 [secret-model.md](secret-model.md).
 
@@ -167,10 +175,12 @@ Deeper deduplication, conflict handling, merge/split, lineage, and fact proposal
 use the implemented caller-authored, version-checked curation protocol in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md). Source
 writes advance an owner generation and can create or coalesce due requests.
-Clients claim one due request, receive a lease/fence plus a frozen bounded view
-of memory versions, evidence, transcript ranges, and source cursors, and treat
-all returned content as untrusted data. A client may renew the lease while it
-authors a strict `witself.memory-plan.v1` plan.
+The self digest exposes whether one such request or resumable run is pending,
+without exposing any source content. Clients claim one due request, receive a
+lease/fence plus a frozen bounded view of memory versions, evidence, transcript
+ranges, and source cursors, and treat all returned content as untrusted data. A
+client may renew the lease while it authors a strict `witself.memory-plan.v1`
+plan.
 
 The plan language has five reversible primitives:
 
@@ -189,7 +199,9 @@ lowercase SHA-256 plan hash with value-free impact counts. Apply binds the run
 fence, lease, accepted revision, hash, current heads, canonical subject identity,
 and contiguous source cursors in one transaction. Any stale guard prevents the
 entire semantic mutation. New or cap-truncated work is placed in a deterministic
-follow-up request rather than lost.
+follow-up request rather than lost. An empty actions plan is valid and must be
+applied when no input merits durable memory; it advances only the exact reviewed
+cursor intervals and creates no memory or fact.
 
 Rollback is exact append-only compensation, not history deletion. It requires
 the apply receipt and complete exact set of apply-produced current heads,
@@ -200,11 +212,13 @@ replay under current heads. The client performs all inference. Capability
 discovery reports `opportunistic_curation` as supported, while
 `automatic_capture` and `scheduled_curation` remain unsupported server
 capabilities: PostgreSQL can queue due work, but the backend and MCP do not wake
-or schedule a model process. The optional local `memory curate auto` worker is
-a separate client-owned layer. With an explicit provider, transcript-content
-consent, and preview/apply policy, it records value-free terminal-flush wakes
-and runs the same fenced protocol while PostgreSQL remains the sole canonical
-memory source.
+or schedule a model process. Runtime hooks likewise only enqueue and flush
+evidence; they do not launch a curator. Codex and Claude can receive a
+model-visible pending checkpoint already durable at hook read time. Cursor and
+Grok use guided `self.show` fallback because their hook channels are not reliably
+model-visible. The older local `memory curate auto` worker is an explicit
+legacy/manual client-owned layer and is never invoked by runtime hooks.
+PostgreSQL remains the sole canonical memory source in every mode.
 
 ## Provenance and Authorship
 

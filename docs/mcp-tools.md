@@ -472,8 +472,8 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 |---|---:|---:|---|
 | `witself.version` | yes | yes | No auth-sensitive data. |
 | `witself.whoami` | yes | yes | Shows effective principal, scopes, and primary facts. |
-| `witself.capabilities` | yes | yes | Reports backend surfaces independently; opportunistic curation is supported while server-side automatic capture and scheduled curation are not. Optional local `memory curate auto` execution is client-owned and is not an MCP capability. |
-| `witself.self.show` | yes | yes | Bounded digest; model-free and sets `elided` when capped. |
+| `witself.capabilities` | yes | yes | Reports backend surfaces independently; opportunistic curation is supported while server-side automatic capture and scheduled curation are not. Explicit legacy/manual local `memory curate auto` execution is client-owned and is not an MCP capability. |
+| `witself.self.show` | yes | yes | Bounded model-free digest plus authenticated value-free pending/idle/unavailable `memory_checkpoint`; checkpoint projection failure does not hide identity or recall, and `elided` is set when content is capped. |
 | `witself.agent.peers` | yes | yes | Lists other agents in the token-derived realm with optional last-observed activity fields; never infers availability. |
 | `witself.remember` | deferred | deferred | If implemented, explicitly Witself-scoped; natural provider routing remains an agent-integration responsibility. |
 | `witself.session.start` | deferred | deferred | Target one-round-trip hydration helper; not exposed by the current MCP server. |
@@ -483,7 +483,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.memory.adjust` | yes | no | Agent-self expected-version/idempotency mutation. |
 | `witself.memory.read` | yes | yes | Implemented exact current-agent read by id. |
 | `witself.memory.history` | yes | yes | Implemented bounded immutable-version pages. |
-| `witself.memory.recall` | yes | yes | Implemented model-free lexical/structured baseline with optional caller-supplied hybrid query vector; sensitive content redacted by default. |
+| `witself.memory.recall` | yes | yes | Implemented model-free lexical/structured baseline with optional caller-supplied hybrid query vector; authenticated owner-sensitive content is included by default and keeps its marker, while callers may request redacted output. |
 | `witself.memory.vector.profile.create` | yes | no | Create or exactly replay an immutable agent-owned client-vector contract. No model call or credential. |
 | `witself.memory.vector.profile.list` | yes | yes | List the caller's bounded immutable profiles; no vector components. |
 | `witself.memory.vector.set` | yes | no | Store or exactly replay one client vector bound to an exact memory version/content hash. |
@@ -621,11 +621,13 @@ visible limits. The current server reports `memories`, `memory_recall`,
 `client_vector_recall` independently, and explicitly reports
 `opportunistic_curation` as supported. `automatic_capture` and
 `scheduled_curation` remain unsupported with reason `not_implemented` because
-the backend and MCP cannot launch or supervise inference. An explicitly enabled
-local `witself memory curate auto` worker can react to terminal transcript
-flushes or a user-owned scheduler, but its provider, policy, credential
-boundary, and process health are client state and are not asserted by this
-server response.
+the backend and MCP cannot launch or supervise inference. Runtime hooks likewise
+never launch a curator: PostgreSQL stores due state, Codex and Claude can inject
+an already-durable pending checkpoint into model-visible hook context, and
+Cursor/Grok use guided `self.show`. The explicit legacy/manual `witself memory
+curate auto` worker and user-owned scheduler remain client state; their provider,
+policy, credential boundary, and process health are not asserted by this server
+response.
 
 Input:
 
@@ -646,13 +648,16 @@ client-vector/hybrid surface without implying a backend model provider.
 ### `witself.self.show`
 
 Return the bounded, always-loadable self-digest: primary facts first, then the
-top-N salient memories (blended salience + recency), then a one-line index of
-kinds, tags, and counts. This is the MCP analogue of an auto-loaded `CLAUDE.md`
-head. It is cheap and model-free, so it works independently of optional
-client-vector coverage.
+top-N salient memories (blended salience + recency), an authenticated value-free
+`memory_checkpoint`, then a one-line index of kinds, tags, and counts. This is
+the MCP analogue of an auto-loaded `CLAUDE.md` head. It is cheap and model-free,
+so it works independently of optional client-vector coverage.
 
-**Call this at the start of a non-trivial task and whenever the user references
-the past**, then use `witself.memory.recall` to reach anything not in the digest.
+**Call this at the start of a non-trivial task, whenever the user references the
+past, and near turn end on guided runtimes**, then use `witself.memory.recall` to
+reach anything not in the digest. A pending checkpoint tells the active agent to
+process at most one fenced curation request in that foreground turn. It is not
+source content and never authorizes deletion or a canonical fact write.
 
 Input:
 
@@ -660,6 +665,7 @@ Input:
 {
   "include_facts": true,
   "include_salient": true,
+  "include_sensitive": true,
   "salient_limit": 10,
   "max_bytes": null
 }
@@ -674,6 +680,11 @@ Output data:
   "salient_memories": [
     { "id": "mem_120", "snippet": "", "kind": "profile", "salience": 0.6 }
   ],
+  "memory_checkpoint": {
+    "pending": true,
+    "request_id": "mcrq_123",
+    "request_generation": 7
+  },
   "index": { "kinds": [], "tags": [], "counts": {} },
   "elided": false
 }
@@ -683,7 +694,18 @@ The digest has a hard cap (default ~8 KiB / ~200 lines, configurable). When the
 cap is hit the result sets `elided` to `true` and points the caller to
 `witself.memory.recall`; it never silently truncates. Salient-memory selection
 is defined in [memory-model.md](memory-model.md); the digest shape and cap are
-pinned in [context-hydration.md](context-hydration.md).
+pinned in [context-hydration.md](context-hydration.md). The checkpoint is
+independent of fact/salient inclusion and contains only request/run/fence
+lifecycle fields. `pending:false` means no due or resumable work was found at
+the instant of that read. `unavailable:true` means the additive checkpoint
+projection failed open; the identity, facts, salient memories, and index in the
+same digest remain usable.
+
+The MCP tool defaults `include_sensitive` to `true` so the authenticated owning
+agent receives its authorized private open-plane context automatically. The
+flag remains attached to each returned record and callers may set the option to
+`false` for a redacted digest. This never includes sealed secret fields, TOTP
+seeds, generated codes, or other reveal-gated values.
 
 ### `witself.agent.peers`
 
@@ -955,7 +977,10 @@ Implemented model-free recall over the token-bound agent's active current
 memories. PostgreSQL ranks literal full-text matches with salience and recency;
 the backend does not interpret relative dates or call an LLM/embedding provider.
 The caller must supply query text, at least one structured filter, or a profile
-and compatible query vector. Sensitive content is redacted by default.
+and compatible query vector. MCP recall includes the authenticated owner's
+authorized sensitive open-plane content by default and retains each result's
+`sensitive` marker; set `include_sensitive=false` for redacted recall. Sealed
+secret and TOTP values are never candidates.
 
 **Call this at the start of a non-trivial task and whenever the user references
 the past** — before acting on anything you may have learned before. Pair it with
@@ -972,7 +997,7 @@ Input:
   "links": [],
   "origin": null,
   "capture_reason": null,
-  "include_sensitive": false,
+  "include_sensitive": true,
   "occurred_from": null,
   "occurred_until": null,
   "captured_from": null,
@@ -1253,7 +1278,9 @@ id, fence, and idempotency key. Ordered actions use only `create`, `replace`,
 backend validates authorization, frozen-input provenance, bounds, expected
 versions, and subject identity; preallocates create ids; normalizes the plan;
 and returns its revision, canonical lowercase SHA-256 hash, and value-free
-impact preview. It does not synthesize content.
+impact preview. It does not synthesize content. An empty actions array is the
+correct foreground result when none of the frozen inputs merits durable memory;
+the client must still apply it so the reviewed cursor intervals advance.
 
 ### `witself.memory.curation.apply`
 
@@ -1262,7 +1289,9 @@ plan hash, and idempotency key. The backend revalidates the stored plan and live
 heads, writes all actions and contiguous cursor advances in one transaction,
 and returns a value-free apply receipt. A stale fence, lease, head, subject, or
 cursor produces no partial semantic change. Work beyond a frozen cap or arriving
-after the snapshot is queued as follow-up rather than silently skipped.
+after the snapshot is queued as follow-up rather than silently skipped. Applying
+an accepted empty plan creates no memory or fact and advances only the exact
+reviewed cursors.
 
 ### `witself.memory.curation.cancel`
 
@@ -1291,7 +1320,8 @@ and queues a read-only replay of the original evidence under current heads.
 
 Read value-free owner-lane/request/run status. `run_id` is optional; omitting it
 returns current lane status. This tool is available in read-only mode and never
-reads or synthesizes memory content.
+reads or synthesizes memory content. Use it to resume one pending checkpoint in
+the current foreground turn; it does not wake or launch another model.
 
 ### `witself.digest.emit` (target; not implemented)
 

@@ -168,6 +168,28 @@ func TestMemoryVectorHybridRecallPostgres(t *testing.T) {
 	}); !errors.Is(err, ErrMemoryInputInvalid) {
 		t.Fatalf("hybrid cursor accepted a different query vector: %v", err)
 	}
+	sensitiveResult, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+		Content: "Private PostgreSQL durable database decision.", Kind: "decision",
+		Sensitive: true, CaptureReason: "test", Evidence: []MemoryEvidenceInput{{
+			ResolutionState: MemoryEvidenceUnavailable, TerminalReasonCode: "test_fixture",
+		}}, IdempotencyKey: "vector-sensitive-memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(sensitiveResult.Memory, []float64{1, 0})
+	excludedHybrid, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		VectorProfileID: profile.ID, QueryVector: []float64{1, 0},
+		ExcludeSensitive: true, Limit: 10,
+	})
+	if err != nil || len(excludedHybrid.Hits) != 3 || excludedHybrid.VectorCandidates != 3 {
+		t.Fatalf("sensitive-excluded hybrid recall = %#v / %v", excludedHybrid, err)
+	}
+	for _, hit := range excludedHybrid.Hits {
+		if hit.Memory.ID == sensitiveResult.Memory.ID || hit.Memory.Sensitive || hit.Memory.Redacted {
+			t.Fatalf("sensitive memory survived excluded hybrid recall: %#v", hit)
+		}
+	}
 
 	// Fill to one slot below the hard owner ceiling, then race two distinct
 	// contracts for the final slot. The transaction advisory lock must admit

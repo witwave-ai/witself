@@ -118,6 +118,33 @@ func TestMemoryRecallPostgres(t *testing.T) {
 	if hit := seen[sensitive.ID]; !hit.Memory.Redacted || hit.Memory.Content != "" || hit.Memory.ContentHash != "" || len(hit.Memory.Tags) != 0 {
 		t.Fatalf("sensitive recall was not redacted = %#v", hit)
 	}
+	excluded, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		Query: "PostgreSQL database", ExcludeSensitive: true, Limit: 10,
+	})
+	if err != nil || len(excluded.Hits) != 2 {
+		t.Fatalf("sensitive-excluded recall = %#v / %v", excluded, err)
+	}
+	for _, hit := range excluded.Hits {
+		if hit.Memory.Sensitive || hit.Memory.Redacted || hit.Memory.ID == sensitive.ID {
+			t.Fatalf("sensitive memory survived excluded recall: %#v", hit)
+		}
+	}
+	excludedFirst, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		Query: "PostgreSQL database", ExcludeSensitive: true, Limit: 1,
+	})
+	if err != nil || excludedFirst.NextCursor == "" {
+		t.Fatalf("excluded recall first page = %#v / %v", excludedFirst, err)
+	}
+	if _, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		Query: "PostgreSQL database", Limit: 1, Cursor: excludedFirst.NextCursor,
+	}); !errors.Is(err, ErrMemoryInputInvalid) {
+		t.Fatalf("excluded recall cursor accepted changed sensitivity filter: %v", err)
+	}
+	if _, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		Query: "PostgreSQL database", IncludeSensitive: true, ExcludeSensitive: true,
+	}); !errors.Is(err, ErrMemoryInputInvalid) {
+		t.Fatalf("contradictory sensitive recall options error = %v", err)
+	}
 
 	firstPage, err := st.RecallMemories(ctx, p, MemoryRecallOptions{Query: "PostgreSQL database", Limit: 1})
 	if err != nil || len(firstPage.Hits) != 1 || firstPage.NextCursor == "" {

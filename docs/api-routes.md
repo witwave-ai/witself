@@ -156,7 +156,7 @@ GET  /v1/whoami
 GET  /v1/auth/whoami         # compatibility alias for authenticated whoami
 GET  /v1/capabilities
 
-GET  /v1/self                # the always-loaded self-digest; ?format= renders an emit fragment
+GET  /v1/self                # implemented JSON digest; target ?format= renderer is not implemented
 POST /v1/remember            # deferred explicit Witself-only capture action
 
 POST /v1/auth/sessions
@@ -284,8 +284,8 @@ DELETE /v1/totp/{secret_id}
 
 POST /v1/password:generate
 
-POST /v1/sessions:start
-POST /v1/sessions:end
+POST /v1/sessions:start      # target; not implemented
+POST /v1/sessions:end        # target; not implemented
 
 GET  /v1/policies
 POST /v1/policies
@@ -761,12 +761,12 @@ authored memory mutations return the deterministic `echo` string and any
 projection contract documented below.
 
 ```text
-GET  /v1/self                # ?format=claude-md|agents-md|markdown for digest emit
+GET  /v1/self                # implemented JSON digest; no formatted emit response yet
 GET  /v1/self/peers
 POST /v1/self/activity       # authenticated runtime-hook activity projection
-POST /v1/remember
-POST /v1/sessions:start
-POST /v1/sessions:end
+POST /v1/remember            # target; not implemented
+POST /v1/sessions:start      # target; not implemented
+POST /v1/sessions:end        # target; not implemented
 POST /v1/memories:consolidate # superseded target; not implemented
 ```
 
@@ -775,11 +775,12 @@ POST /v1/memories:consolidate # superseded target; not implemented
   kinds/tags/counts. It is cheap, never requires a vector profile or query
   vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
-  `:recall` rather than silently truncating. Query parameters select what to
-  include (facts, salient memories, salient limit, byte cap). Passing `?format=`
-  renders the digest as a CLAUDE.md/AGENTS.md/Markdown fragment with witself
-  provenance comments — this is the HTTP surface for `witself digest emit`; no
-  separate emit resource exists.
+  `:recall` rather than silently truncating. Implemented query parameters select
+  what to include (facts, salient memories, salient limit, byte cap). The target
+  `?format=claude-md|agents-md|markdown` renderer would be the HTTP surface for
+  `witself digest emit`, but neither that rendering behavior nor the command is
+  implemented in the current checkout. Passing `?format=` does not currently
+  produce an emit fragment.
 - `GET /v1/self/peers` lists every other non-deleted agent in the authenticated
   agent's realm, with each peer's optional last-observed activity fields. Realm
   scope and self exclusion come only from the agent token; there are no realm,
@@ -804,11 +805,12 @@ POST /v1/memories:consolidate # superseded target; not implemented
   or limits and composes the existing fact and memory create paths. It is not
   the natural-language provider router described in
   [Agent Memory Routing](agent-memory-routing.md).
-- `POST /v1/sessions:start` hydrates identity, open goals, and last progress in
-  one round-trip (`witself session start`), audited as `session.started`.
-- `POST /v1/sessions:end` persists a progress memory (kind `session`) and updates
-  open goals (`witself session end`); the summary and open goals travel in the
-  request body, audited as `session.ended`.
+- Target `POST /v1/sessions:start` would hydrate identity, open goals, and last
+  progress in one round-trip (`witself session start`) and emit
+  `session.started`; the route and command are not implemented.
+- Target `POST /v1/sessions:end` would persist a progress memory (kind
+  `session`), update open goals from the request body, and emit `session.ended`;
+  the route and `witself session end` command are not implemented.
 
 `witself ingest` has no dedicated route: it composes the existing
 `POST /v1/facts` (kv-shaped lines → upserted facts) and `POST /v1/memories`

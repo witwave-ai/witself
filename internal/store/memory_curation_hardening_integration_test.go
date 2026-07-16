@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -105,6 +106,439 @@ func TestMemoryCurationCapBacklogQueuesFollowUpPostgres(t *testing.T) {
 				t.Fatalf("follow-up %s inputs = %#v", sourceKind, secondPage.Inputs)
 			}
 		})
+	}
+}
+
+func TestMemoryCurationTranscriptRunFreezesExistingMemoryContextPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
+	existing := captureHardeningMemory(ctx, t, st, p,
+		"The client chose PostgreSQL as the portable memory source of truth.",
+		"transcript-context-existing")
+	for index := 0; index < maxMemoryCurationContextMemories+1; index++ {
+		captureHardeningMemoryWithSalience(ctx, t, st, p,
+			fmt.Sprintf("Elevated unrelated narrative %02d about watercolor pigments and hiking boots.", index),
+			fmt.Sprintf("transcript-context-unrelated-%02d", index), 1)
+	}
+
+	// First review the memory source so the next run has no changed-memory
+	// input. The existing head should still be frozen as comparison context
+	// when a later transcript delta is reviewed.
+	baselineRequest, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources: []string{MemoryCurationSourceMemory},
+		},
+		CoalescingKey: "transcript_context_baseline", TriggerReason: "manual_refine",
+		IdempotencyKey: "transcript-context-baseline-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineRun, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: baselineRequest.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "transcript-context-baseline-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselinePlan := planHardeningCuration(ctx, t, st, p, baselineRun, nil,
+		"transcript-context-baseline-plan")
+	if _, err := st.ApplyCuration(ctx, p, baselineRun.Run.ID, ApplyMemoryCurationInput{
+		FencingGeneration: baselineRun.Run.FencingGeneration,
+		PlanRevision:      baselinePlan.Plan.PlanRevision,
+		PlanHash:          baselinePlan.Receipt.PlanHash,
+		IdempotencyKey:    "transcript-context-baseline-apply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "transcript-context-thread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+		transcript.ID, AppendTranscriptEntryInput{
+			ExternalID: "transcript-context-turn", Role: TranscriptRoleUser,
+			Body: "We should refine that PostgreSQL database decision as the architecture evolves.",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources:              []string{MemoryCurationSourceMemory, MemoryCurationSourceTranscript},
+			MaxMemories:          maxMemoryCurationContextMemories,
+			MaxTranscriptEntries: 10,
+		},
+		CoalescingKey: "transcript_context_review", TriggerReason: "manual_refine",
+		IdempotencyKey: "transcript-context-review-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: request.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "transcript-context-review-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.GetCurationRunInputs(ctx, p, started.Run.ID,
+		started.Run.FencingGeneration, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countCurationInputKind(page.Inputs, MemoryCurationInputTranscript) != 1 {
+		t.Fatalf("transcript inputs = %#v", page.Inputs)
+	}
+	if countCurationInputKind(page.Inputs, MemoryCurationInputMemory) != maxMemoryCurationContextMemories {
+		t.Fatalf("comparison memory inputs = %#v", page.Inputs)
+	}
+	if !containsCurationMemoryInput(page.Inputs, existing.Memory.ID, existing.Memory.Version) {
+		t.Fatalf("existing memory was not frozen as transcript comparison context: %#v", page.Inputs)
+	}
+	const refinedContent = "PostgreSQL remains the portable source of truth while client inference refines narrative memory."
+	planned := planHardeningCuration(ctx, t, st, p, started, []MemoryCurationPlanAction{{
+		Ordinal: 1, Operation: MemoryCurationOperationReplace,
+		Replace: &MemoryCurationReplaceAction{
+			Target: MemoryCurationTargetReference{
+				MemoryID: existing.Memory.ID, ExpectedVersion: existing.Memory.Version,
+			},
+			Snapshot: MemoryCurationMemorySnapshot{
+				Content: refinedContent, Kind: "decision",
+				Evidence: []MemoryCurationEvidence{{
+					Type: "conversation", ResolutionState: MemoryEvidenceResolved,
+					ResolvedKind:       MemoryCurationSourceTranscript,
+					SourceTranscriptID: transcript.ID,
+					SourceSequenceFrom: entry.Sequence, SourceSequenceUntil: entry.Sequence,
+				}},
+			},
+			Reason: "refine an existing narrative from later conversation evidence",
+		},
+	}}, "transcript-context-review-plan")
+	if _, err := st.ApplyCuration(ctx, p, started.Run.ID, ApplyMemoryCurationInput{
+		FencingGeneration: started.Run.FencingGeneration,
+		PlanRevision:      planned.Plan.PlanRevision,
+		PlanHash:          planned.Receipt.PlanHash,
+		IdempotencyKey:    "transcript-context-review-apply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refined, err := st.GetMemory(ctx, p, existing.Memory.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refined.Version != existing.Memory.Version+1 || refined.Content != refinedContent {
+		t.Fatalf("refined context memory = %#v", refined)
+	}
+}
+
+func TestMemoryCurationTranscriptContextRespectsMemoryStatesPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
+	active := captureHardeningMemory(ctx, t, st, p,
+		"Scopequasar belongs to the active comparison head.", "context-state-active")
+	forgotten := captureHardeningMemory(ctx, t, st, p,
+		"Scopequasar belongs to the forgotten comparison head.", "context-state-forgotten")
+	forgotten, err := st.ForgetMemory(ctx, p, forgotten.Memory.ID, MemoryLifecycleInput{
+		ExpectedVersion: forgotten.Memory.Version,
+		Reason:          "exercise comparison state filtering",
+		IdempotencyKey:  "context-state-forget",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baselineRequest, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources:      []string{MemoryCurationSourceMemory},
+			MemoryStates: []string{MemoryStateForgotten},
+		},
+		CoalescingKey: "context_state_baseline", TriggerReason: "manual_refine",
+		IdempotencyKey: "context-state-baseline-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineRun, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: baselineRequest.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "context-state-baseline-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselinePlan := planHardeningCuration(ctx, t, st, p, baselineRun, nil,
+		"context-state-baseline-plan")
+	if _, err := st.ApplyCuration(ctx, p, baselineRun.Run.ID, ApplyMemoryCurationInput{
+		FencingGeneration: baselineRun.Run.FencingGeneration,
+		PlanRevision:      baselinePlan.Plan.PlanRevision,
+		PlanHash:          baselinePlan.Receipt.PlanHash,
+		IdempotencyKey:    "context-state-baseline-apply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "context-state-thread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+		transcript.ID, AppendTranscriptEntryInput{
+			ExternalID: "context-state-turn", Role: TranscriptRoleUser,
+			Body: "Scopequasar is the topic for this comparison.",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	request, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources:              []string{MemoryCurationSourceMemory, MemoryCurationSourceTranscript},
+			MemoryStates:         []string{MemoryStateForgotten},
+			MaxMemories:          1,
+			MaxTranscriptEntries: 10,
+		},
+		CoalescingKey: "context_state_review", TriggerReason: "manual_refine",
+		IdempotencyKey: "context-state-review-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: request.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "context-state-review-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.GetCurationRunInputs(ctx, p, started.Run.ID,
+		started.Run.FencingGeneration, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsCurationMemoryInput(page.Inputs, forgotten.Memory.ID, forgotten.Memory.Version) {
+		t.Fatalf("forgotten in-scope context was not frozen: %#v", page.Inputs)
+	}
+	if containsCurationMemoryInput(page.Inputs, active.Memory.ID, active.Memory.Version) {
+		t.Fatalf("active out-of-scope context was frozen: %#v", page.Inputs)
+	}
+}
+
+func TestMemoryCurationTranscriptContextRespectsOwnerAndSensitivityPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
+	public := captureHardeningMemory(ctx, t, st, p,
+		"Privacyscope identifies the public same-owner memory.", "context-scope-public")
+	sensitiveSalience := 1.0
+	sensitive, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+		Content: "Privacyscope identifies the private same-owner memory.",
+		Kind:    "decision", Salience: &sensitiveSalience, Sensitive: true,
+		Evidence: []MemoryEvidenceInput{{
+			Type: "system", ResolutionState: MemoryEvidenceUnavailable,
+			TerminalReasonCode: "not_recorded",
+		}},
+		IdempotencyKey: "context-scope-sensitive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance the non-sensitive filtered memory cursor. The later transcript run
+	// must discover the older public head as comparison context without admitting
+	// the sensitive head that this cursor intentionally skipped.
+	baselineRequest, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources: []string{MemoryCurationSourceMemory}, IncludeSensitive: false,
+		},
+		CoalescingKey: "context_scope_baseline", TriggerReason: "manual_refine",
+		IdempotencyKey: "context-scope-baseline-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineRun, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: baselineRequest.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "context-scope-baseline-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselinePlan := planHardeningCuration(ctx, t, st, p, baselineRun, nil,
+		"context-scope-baseline-plan")
+	if _, err := st.ApplyCuration(ctx, p, baselineRun.Run.ID, ApplyMemoryCurationInput{
+		FencingGeneration: baselineRun.Run.FencingGeneration,
+		PlanRevision:      baselinePlan.Plan.PlanRevision,
+		PlanHash:          baselinePlan.Receipt.PlanHash,
+		IdempotencyKey:    "context-scope-baseline-apply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	otherAgent, err := st.CreateAgent(ctx, p.AccountID, p.RealmID, "context-scope-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrincipal := p
+	otherPrincipal.ID = otherAgent.ID
+	other := captureHardeningMemoryWithSalience(ctx, t, st, otherPrincipal,
+		"Privacyscope identifies a different owner's memory.", "context-scope-other-memory", 1)
+
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "context-scope-thread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+		transcript.ID, AppendTranscriptEntryInput{
+			ExternalID: "context-scope-turn", Role: TranscriptRoleUser,
+			Body: "Privacyscope is the topic to review.",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	request, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources:     []string{MemoryCurationSourceMemory, MemoryCurationSourceTranscript},
+			MaxMemories: 3, MaxTranscriptEntries: 10,
+		},
+		CoalescingKey: "context_scope_review", TriggerReason: "manual_refine",
+		IdempotencyKey: "context-scope-review-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: request.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "context-scope-review-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.GetCurationRunInputs(ctx, p, started.Run.ID,
+		started.Run.FencingGeneration, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsCurationMemoryInput(page.Inputs, public.Memory.ID, public.Memory.Version) {
+		t.Fatalf("public same-owner context missing: %#v", page.Inputs)
+	}
+	if containsCurationMemoryInput(page.Inputs, sensitive.Memory.ID, sensitive.Memory.Version) ||
+		containsCurationMemoryInput(page.Inputs, other.Memory.ID, other.Memory.Version) {
+		t.Fatalf("out-of-scope context entered run: %#v", page.Inputs)
+	}
+}
+
+func TestMemoryCurationTranscriptBudgetIsSharedAcrossPendingStreamsPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
+	first, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "fair-transcript-first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "fair-transcript-second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// IDs are crypto-random. Put the multi-entry backlog on the lower ID so the
+	// former ORDER BY c.id implementation would consume the entire two-entry
+	// budget before reaching the other stream.
+	noisy, quiet := first, second
+	if second.ID < first.ID {
+		noisy, quiet = second, first
+	}
+	if _, err := st.AppendTranscriptEntries(ctx, p.AccountID, p.RealmID, p.ID,
+		noisy.ID, []AppendTranscriptEntryInput{
+			{ExternalID: "fair-noisy-1", Role: TranscriptRoleUser, Body: "First noisy turn."},
+			{ExternalID: "fair-noisy-2", Role: TranscriptRoleAssistant, Body: "Second noisy turn."},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+		quiet.ID, AppendTranscriptEntryInput{
+			ExternalID: "fair-quiet-1", Role: TranscriptRoleUser, Body: "One quiet turn.",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	requested, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope: MemoryCurationScope{
+			Sources: []string{MemoryCurationSourceTranscript}, MaxTranscriptEntries: 2,
+		},
+		CoalescingKey: "fair_transcript_budget", TriggerReason: "manual_refine",
+		IdempotencyKey: "fair-transcript-budget-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: requested.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "fair-transcript-budget-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.GetCurationRunInputs(ctx, p, started.Run.ID,
+		started.Run.FencingGeneration, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranges := map[string]int64{}
+	for _, input := range page.Inputs {
+		if input.Kind == MemoryCurationInputTranscript {
+			ranges[input.TranscriptID] = input.SequenceUntil - input.SequenceFrom + 1
+		}
+	}
+	if len(ranges) != 2 || ranges[noisy.ID] != 1 || ranges[quiet.ID] != 1 {
+		t.Fatalf("shared transcript ranges = %#v, want one entry from each stream", ranges)
+	}
+	planned := planHardeningCuration(ctx, t, st, p, started, nil,
+		"fair-transcript-budget-plan")
+	applied, err := st.ApplyCuration(ctx, p, started.Run.ID, ApplyMemoryCurationInput{
+		FencingGeneration: started.Run.FencingGeneration,
+		PlanRevision:      planned.Plan.PlanRevision,
+		PlanHash:          planned.Receipt.PlanHash,
+		IdempotencyKey:    "fair-transcript-budget-apply",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.FollowUpRequest == nil {
+		t.Fatal("remaining noisy transcript entry did not queue a follow-up")
+	}
+	followUp, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: applied.FollowUpRequest.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "fair-transcript-budget-follow-up-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	followPage, err := st.GetCurationRunInputs(ctx, p, followUp.Run.ID,
+		followUp.Run.FencingGeneration, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	followRanges := map[string]MemoryCurationRunInput{}
+	for _, input := range followPage.Inputs {
+		if input.Kind == MemoryCurationInputTranscript {
+			followRanges[input.TranscriptID] = input
+		}
+	}
+	remainingInput, ok := followRanges[noisy.ID]
+	if len(followRanges) != 1 || !ok || remainingInput.SequenceFrom != 2 ||
+		remainingInput.SequenceUntil != 2 {
+		t.Fatalf("follow-up transcript ranges = %#v, want noisy sequence 2 only", followRanges)
 	}
 }
 
@@ -500,6 +934,29 @@ func captureHardeningMemory(
 	t.Helper()
 	out, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
 		Content: content, Kind: "decision",
+		Evidence: []MemoryEvidenceInput{{
+			Type: "system", ResolutionState: MemoryEvidenceUnavailable,
+			TerminalReasonCode: "not_recorded",
+		}},
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func captureHardeningMemoryWithSalience(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	content, key string,
+	salience float64,
+) MemoryMutationResult {
+	t.Helper()
+	out, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+		Content: content, Kind: "decision", Salience: &salience,
 		Evidence: []MemoryEvidenceInput{{
 			Type: "system", ResolutionState: MemoryEvidenceUnavailable,
 			TerminalReasonCode: "not_recorded",

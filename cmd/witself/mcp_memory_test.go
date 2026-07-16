@@ -148,6 +148,25 @@ func TestWitselfMCPMemoryToolsPreserveGuardsAndEvidence(t *testing.T) {
 	}
 	defer func() { _ = clientSession.Close() }()
 
+	toolPage, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"witself.memory.capture", "witself.memory.adjust", "witself.memory.supersede"} {
+		var description string
+		for _, tool := range toolPage.Tools {
+			if tool.Name == name {
+				description = tool.Description
+				break
+			}
+		}
+		for _, want := range []string{"secret values", "private keys", "TOTP seeds", "sensitive=true is not a sealed-secret substitute"} {
+			if !strings.Contains(description, want) {
+				t.Errorf("%s description omitted secret boundary %q: %q", name, want, description)
+			}
+		}
+	}
+
 	calls := []struct {
 		name string
 		args map[string]any
@@ -231,8 +250,14 @@ func TestWitselfMCPMemoryToolsPreserveGuardsAndEvidence(t *testing.T) {
 	if backend.lastReadID != "mem_1" || backend.lastList.Limit != 12 || !backend.lastList.IncludeSensitive || backend.lastList.Cursor != "memory-cursor" {
 		t.Fatalf("read/list = %q / %#v", backend.lastReadID, backend.lastList)
 	}
-	if backend.lastRecall.Query != "database decision" || backend.lastRecall.Kind != "decision" || backend.lastRecall.Limit != 6 || backend.lastRecall.Cursor != "recall-cursor" {
+	if backend.lastRecall.Query != "database decision" || backend.lastRecall.Kind != "decision" || !backend.lastRecall.IncludeSensitive || backend.lastRecall.Limit != 6 || backend.lastRecall.Cursor != "recall-cursor" {
 		t.Fatalf("recall = %#v", backend.lastRecall)
+	}
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "witself.memory.recall", Arguments: map[string]any{
+		"query": "public-only", "include_sensitive": false,
+	}})
+	if err != nil || result.IsError || backend.lastRecall.IncludeSensitive {
+		t.Fatalf("explicit redacted recall = %#v / %#v / %v", backend.lastRecall, result, err)
 	}
 	if backend.lastHistoryID != "mem_1" || backend.lastHistory.Limit != 7 || backend.lastHistory.Cursor != "history-cursor" {
 		t.Fatalf("history = %q / %#v", backend.lastHistoryID, backend.lastHistory)

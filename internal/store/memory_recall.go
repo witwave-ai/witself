@@ -27,6 +27,10 @@ type MemoryRecallOptions struct {
 	Origin           string
 	CaptureReason    string
 	IncludeSensitive bool
+	// ExcludeSensitive removes sensitive candidates before ranking and limiting.
+	// It is distinct from IncludeSensitive=false, which preserves the broad-read
+	// contract by returning sensitive hits with their values redacted.
+	ExcludeSensitive bool
 	OccurredFrom     *time.Time
 	OccurredUntil    *time.Time
 	CapturedFrom     *time.Time
@@ -99,6 +103,7 @@ type memoryRecallCursorBinding struct {
 	Origin           string     `json:"origin,omitempty"`
 	CaptureReason    string     `json:"capture_reason,omitempty"`
 	IncludeSensitive bool       `json:"include_sensitive"`
+	ExcludeSensitive bool       `json:"exclude_sensitive,omitempty"`
 	OccurredFrom     *time.Time `json:"occurred_from,omitempty"`
 	OccurredUntil    *time.Time `json:"occurred_until,omitempty"`
 	CapturedFrom     *time.Time `json:"captured_from,omitempty"`
@@ -195,6 +200,9 @@ func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryReca
 		"h.state='active'",
 		"(q.query IS NULL OR h.search_document @@ q.query)",
 	}
+	if opts.ExcludeSensitive {
+		where = append(where, "NOT h.sensitive")
+	}
 	addArg := func(value any) string {
 		args = append(args, value)
 		return fmt.Sprintf("$%d", len(args))
@@ -244,7 +252,7 @@ func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryReca
 		  SELECT DISTINCT ON (v.memory_id)
 		    m.id AS memory_id, m.origin, m.capture_reason,
 		    m.created_at AS memory_created_at, v.version, v.change_seq,
-		    v.search_document, v.kind, v.tags, v.links, v.salience,
+		    v.search_document, v.kind, v.tags, v.links, v.salience, v.sensitive,
 		    v.occurred_from, v.occurred_until, v.state,
 		    v.created_at AS version_updated_at
 		  FROM memories m
@@ -391,6 +399,9 @@ func normalizeMemoryRecallOptions(opts MemoryRecallOptions) (MemoryRecallOptions
 	if (opts.VectorProfileID == "") != (len(opts.QueryVector) == 0) {
 		return MemoryRecallOptions{}, fmt.Errorf("%w: vector_profile_id and query_vector must be supplied together", ErrMemoryInputInvalid)
 	}
+	if opts.IncludeSensitive && opts.ExcludeSensitive {
+		return MemoryRecallOptions{}, fmt.Errorf("%w: include_sensitive and exclude_sensitive cannot both be true", ErrMemoryInputInvalid)
+	}
 	if len(opts.QueryVector) > maxMemoryVectorDimensions {
 		return MemoryRecallOptions{}, fmt.Errorf("%w: query vector exceeds %d dimensions", ErrMemoryInputInvalid, maxMemoryVectorDimensions)
 	}
@@ -485,8 +496,8 @@ func memoryRecallBindingHash(opts MemoryRecallOptions) (string, error) {
 	return memoryRequestHash(memoryRecallCursorBinding{
 		Query: opts.Query, Kind: opts.Kind, Tags: opts.Tags, Links: opts.Links,
 		Origin: opts.Origin, CaptureReason: opts.CaptureReason,
-		IncludeSensitive: opts.IncludeSensitive,
-		OccurredFrom:     opts.OccurredFrom, OccurredUntil: opts.OccurredUntil,
+		IncludeSensitive: opts.IncludeSensitive, ExcludeSensitive: opts.ExcludeSensitive,
+		OccurredFrom: opts.OccurredFrom, OccurredUntil: opts.OccurredUntil,
 		CapturedFrom: opts.CapturedFrom, CapturedUntil: opts.CapturedUntil,
 		VectorProfileID: opts.VectorProfileID, QueryVectorHash: queryVectorHash,
 	})

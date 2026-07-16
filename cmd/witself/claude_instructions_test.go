@@ -19,6 +19,7 @@ func TestClaudeMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 		"optional second destination",
 		"never write both unless explicitly requested",
 		"witself.memory.recall",
+		"Before history-dependent work",
 		"automatically call",
 		"do not wait for the user to search",
 		"For broad recall",

@@ -1,13 +1,14 @@
 # Agent Memory Routing
 
-Status: portable fact, direct narrative-memory, automatic-recall, and
-opportunistic-curation guidance is implemented for Codex, Claude Code, Grok
-Build, and Cursor. Provider aggregation remains an agent behavior contract, not
-a new Witself API. Witself narrative memory is the portable default; native
-memory is an optional explicitly selected second destination. Automatic client
-launch and curation scheduling are implemented through the opt-in
-`memory curate auto` worker and per-user launchd/systemd service in
-[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+Status: portable fact, direct narrative-memory, automatic-recall, and foreground
+checkpoint guidance is implemented for Codex, Claude Code, Grok Build, and
+Cursor. Provider aggregation remains an agent behavior contract, not a new
+Witself API. Witself narrative memory is the portable default; native memory is
+an optional explicitly selected second destination. PostgreSQL stores the due
+state, and the active agent performs synthesis. Runtime hooks never launch
+inference or a curator. The explicit `memory curate auto` worker and per-user
+launchd/systemd service are retained only as legacy/manual compatibility paths
+in [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Authority and delivery
 
@@ -56,6 +57,31 @@ Installation and removal use atomic file replacement and restore the previous
 routing state if a later integration step fails. After installation or upgrade,
 restart the runtime and start a new task so both file guidance and MCP
 initialization are refreshed.
+
+### Foreground checkpoint contract
+
+Source commits create or coalesce durable owner-scoped curation work in
+PostgreSQL. `GET /v1/self` and `witself.self.show` expose only an authenticated,
+value-free `memory_checkpoint` pointer to that lifecycle state. Codex and Claude
+Code prompt hooks inject a pending checkpoint through model-visible structured
+context when it is already durable at read time. Cursor's context delivery is
+not reliably model-visible and Grok ignores passive-hook output, so their
+always-on managed rules instruct the foreground agent to call `self.show`; that
+is a guided fallback, not automatic hook injection.
+
+Near the end of a non-trivial foreground turn, the active agent processes at
+most one pending fenced request. It may use only reversible narrative operations
+or fact proposals. If the frozen inputs contain nothing worth remembering, it
+submits and applies an empty actions plan so the exact reviewed cursors advance.
+No hook, MCP server, or backend worker starts, schedules, or delegates another
+model. Automatic delivery also does not guarantee model compliance: a guided
+runtime can ignore the rule or lose MCP access.
+
+Checkpoint timing is eventual. The prompt hook starts transcript flushing and
+then reads `/v1/self`, so the current prompt is not guaranteed to be in the
+returned request and the current assistant response cannot be. Those events may
+be reviewed on a later interaction. The checkpoint never authorizes permanent
+deletion or promotion of a canonical fact.
 
 ## Capture contract
 
@@ -200,10 +226,14 @@ recall. Results retain their provider and authority:
   addresses, are history rather than a conflict.
 - Open fact candidates are warnings, not canonical answers.
 
-Broad retrieval uses redacted fact inventory results and never enables
-`include_sensitive` automatically. An exact, intentional, authorized fact
-lookup may return a sensitive value. Selecting a provider never implies
-permission to reveal private data.
+Broad provider-aggregation and inventory output uses redacted fact results.
+Installed owner-authenticated hydration and focused task recall do enable
+`include_sensitive` automatically so private open-plane context can affect the
+agent's work without requiring a special user search; every record retains its
+classification and must not be gratuitously disclosed in a broad answer. An
+exact, intentional, authorized fact lookup may return a sensitive value.
+Selecting a provider never implies permission to reveal private data, and no
+memory route ever includes sealed secret or TOTP values.
 
 ## Future provider aggregation
 

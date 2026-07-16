@@ -43,6 +43,9 @@ func recallMemoriesHybrid(ctx context.Context, tx pgx.Tx, p Principal, opts Memo
 
 	args := []any{p.AccountID, p.RealmID, p.ID, opts.Query, *opts.AsOf, *opts.SnapshotChangeSeq, profile.ID}
 	where := []string{"h.state='active'"}
+	if opts.ExcludeSensitive {
+		where = append(where, "NOT h.sensitive")
+	}
 	addArg := func(value any) string {
 		args = append(args, value)
 		return fmt.Sprintf("$%d", len(args))
@@ -85,7 +88,7 @@ func recallMemoriesHybrid(ctx context.Context, tx pgx.Tx, p Principal, opts Memo
 		  SELECT DISTINCT ON (v.memory_id)
 		    m.id AS memory_id,m.origin,m.capture_reason,
 		    m.created_at AS memory_created_at,v.version,v.change_seq,
-		    v.content_hash,v.search_document,v.kind,v.tags,v.links,v.salience,
+		    v.content_hash,v.search_document,v.kind,v.tags,v.links,v.salience,v.sensitive,
 		    v.occurred_from,v.occurred_until,v.state,
 		    v.created_at AS version_updated_at
 		  FROM memories m JOIN memory_versions v ON v.memory_id=m.id

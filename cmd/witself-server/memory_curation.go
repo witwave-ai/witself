@@ -13,6 +13,10 @@ import (
 // The server performs no inference: plans and provenance come from the calling
 // client, while the store owns authorization, leases, fences, and transactions.
 func configureMemoryCuration(cfg *server.Config, st *store.Store) {
+	cfg.GetSelfMemoryCheckpoint = func(ctx context.Context, p server.DomainPrincipal) (*server.SelfMemoryCheckpoint, error) {
+		checkpoint, err := projectSelfMemoryCheckpoint(ctx, st, toStorePrincipal(p))
+		return checkpoint, mapMemoryCurationError(err)
+	}
 	cfg.RequestMemoryCuration = func(ctx context.Context, p server.DomainPrincipal, in server.RequestMemoryCurationRequest) (any, error) {
 		result, err := st.RequestCuration(ctx, toStorePrincipal(p), store.RequestMemoryCurationInput{
 			Scope: store.MemoryCurationScope{
@@ -27,6 +31,48 @@ func configureMemoryCuration(cfg *server.Config, st *store.Store) {
 		})
 		return result, mapMemoryCurationError(err)
 	}
+	// Remaining adapters are intentionally direct translations between the
+	// public HTTP contract and store inputs.
+	configureMemoryCurationMutations(cfg, st)
+}
+
+type selfMemoryCheckpointStore interface {
+	GetCurationStatus(context.Context, store.Principal, string) (store.MemoryCurationStatus, error)
+	ListCurationRequests(context.Context, store.Principal, store.MemoryCurationRequestListOptions) (store.MemoryCurationRequestPage, error)
+}
+
+func projectSelfMemoryCheckpoint(ctx context.Context, st selfMemoryCheckpointStore, principal store.Principal) (*server.SelfMemoryCheckpoint, error) {
+	status, err := st.GetCurationStatus(ctx, principal, "")
+	switch {
+	case err == nil && status.Run != nil &&
+		(status.Run.State == store.MemoryCurationRunOpen || status.Run.State == store.MemoryCurationRunPlanned):
+		return &server.SelfMemoryCheckpoint{
+			Pending: true, RequestID: status.Run.RequestID,
+			RequestGeneration: status.Run.RequestGeneration,
+			RunID:             status.Run.ID, RunState: status.Run.State,
+			FencingGeneration: status.Run.FencingGeneration,
+			LeaseExpiresAt:    status.Run.LeaseExpiresAt,
+		}, nil
+	case err != nil && !errors.Is(err, store.ErrMemoryCurationNotFound):
+		return nil, err
+	}
+
+	page, err := st.ListCurationRequests(ctx, principal, store.MemoryCurationRequestListOptions{Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Requests) == 0 {
+		return &server.SelfMemoryCheckpoint{Pending: false}, nil
+	}
+	request := page.Requests[0]
+	dueAt := request.DueAt
+	return &server.SelfMemoryCheckpoint{
+		Pending: true, RequestID: request.ID,
+		RequestGeneration: request.RequestGeneration, DueAt: &dueAt,
+	}, nil
+}
+
+func configureMemoryCurationMutations(cfg *server.Config, st *store.Store) {
 	cfg.ListMemoryCurationRequests = func(ctx context.Context, p server.DomainPrincipal, opts server.MemoryCurationRequestListOptions) (any, error) {
 		result, err := st.ListCurationRequests(ctx, toStorePrincipal(p), store.MemoryCurationRequestListOptions{
 			State: opts.State, Limit: opts.Limit, Cursor: opts.Cursor,

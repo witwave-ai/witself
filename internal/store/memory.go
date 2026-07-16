@@ -300,6 +300,12 @@ type MemoryListOptions struct {
 	Origin           string
 	CaptureReason    string
 	IncludeSensitive bool
+	// ExcludeSensitive omits sensitive heads from the result set instead of
+	// returning their redacted metadata. It is intended for bounded automatic
+	// hydration, where a redacted hit would consume a slot without contributing
+	// model-visible context. Public broad reads retain their existing redaction
+	// behavior unless they opt in explicitly.
+	ExcludeSensitive bool
 	OccurredFrom     *time.Time
 	OccurredUntil    *time.Time
 	CapturedFrom     *time.Time
@@ -473,6 +479,9 @@ func (s *Store) ListMemories(ctx context.Context, p Principal, opts MemoryListOp
 		return fmt.Sprintf("$%d", len(args))
 	}
 	where = append(where, "v.state="+addArg(opts.State))
+	if opts.ExcludeSensitive {
+		where = append(where, "NOT v.sensitive")
+	}
 	if opts.Kind != "" {
 		where = append(where, "v.kind="+addArg(opts.Kind))
 	}
@@ -595,6 +604,9 @@ func (s *Store) CountMemories(ctx context.Context, p Principal, opts MemoryListO
 		return fmt.Sprintf("$%d", len(args))
 	}
 	where = append(where, "v.state="+addArg(opts.State))
+	if opts.ExcludeSensitive {
+		where = append(where, "NOT v.sensitive")
+	}
 	if opts.Kind != "" {
 		where = append(where, "v.kind="+addArg(opts.Kind))
 	}
@@ -2079,6 +2091,9 @@ func normalizeMemoryListOptions(p Principal, opts MemoryListOptions) (MemoryList
 	}
 	if opts.OwnerAgentID != p.ID {
 		return MemoryListOptions{}, ErrMemoryForbidden
+	}
+	if opts.IncludeSensitive && opts.ExcludeSensitive {
+		return MemoryListOptions{}, fmt.Errorf("%w: include_sensitive and exclude_sensitive cannot both be true", ErrMemoryInputInvalid)
 	}
 	if opts.State == "" {
 		opts.State = MemoryStateActive

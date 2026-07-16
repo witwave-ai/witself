@@ -140,6 +140,14 @@ func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	}
 }
 
+func TestSelfHydrationFactListOptionsLoadsSensitiveValuesForHandlerPolicy(t *testing.T) {
+	opts := selfHydrationFactListOptions(17)
+	if opts.Subject != "self" || opts.Limit != 17 || !opts.IncludeSensitive || !opts.OrderByUsage ||
+		opts.RetrievalMode != store.FactRetrievalModeSelfHydration {
+		t.Fatalf("self hydration fact options = %#v", opts)
+	}
+}
+
 func TestPrincipalAdaptersPreserveCredentialAuthority(t *testing.T) {
 	expiresAt := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
 	stored := store.Principal{

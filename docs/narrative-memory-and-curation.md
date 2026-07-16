@@ -1,14 +1,16 @@
 # Narrative Memory And Client-Side Curation
 
-Status: accepted architecture with implemented manual and opt-in post-flush
-client curator paths (2026-07-14). Direct storage, atomic supersede, lexical
-recall, the fenced
-client-curation protocol, restricted curator credentials, authenticated
-preflight, a provider-neutral runner/CLI driver, and value-free terminal-flush
-automation are implemented in the current checkout. Persistent operating-system
-launchd/systemd user-service packaging, bounded automatic hydration, optional
-client-authored vectors, and the executable three-cloud account-move gate are
-also implemented. Live managed-provider certification remains operational work.
+Status: accepted architecture with implemented foreground automatic checkpoint
+handling (2026-07-15). Direct storage, atomic supersede, lexical recall, the
+fenced client-curation protocol, restricted curator credentials, authenticated
+preflight, a provider-neutral runner/CLI driver, PostgreSQL due state, and
+model-visible pending-checkpoint delivery for Codex/Claude are implemented in
+the current checkout. Cursor/Grok use an explicitly guided `self.show` fallback.
+The older `memory curate auto` and launchd/systemd surfaces remain explicit
+legacy/manual compatibility tooling and are never invoked by runtime hooks.
+Bounded automatic hydration, optional client-authored vectors, and the executable
+three-cloud account-move gate are also implemented. Live managed-provider
+certification remains operational work.
 Native-provider launch is capability-probed and fails closed when an installed
 CLI cannot prove the required isolation controls.
 This document is the canonical design for portable narrative memory and
@@ -89,21 +91,20 @@ shell, sends only the planner envelope on stdin, bounds output, removes every
 inherited `WITSELF_*` variable, and sets `WITSELF_CURATOR_SESSION=1`. The CLI
 driver performs authenticated preflight before launching that runner.
 
-The opt-in local automation engine stores only binding, policy, provider path,
-timing, wake, lock, and value-free health state under the agent-scoped Witself
-home. After selected terminal transcript events are durably flushed, it records
-a wake and detaches a supervised `memory curate auto run`. Debounce,
-minimum-interval, single-flight, bounded retry/drain, exact-marker
-acknowledgement, and failure-backoff state survive restart. A manual
+The legacy/manual local automation engine stores only binding, policy, provider
+path, timing, wake, lock, and value-free health state under the agent-scoped
+Witself home. Runtime hooks never record its wakes or launch it. An explicit
 `memory curate auto wake --runtime RUNTIME` records one value-free manual-poll
-marker and services a bounded pass under the same policy. Preview is the
+marker and services a bounded pass; `run --force` records a scheduled-poll marker.
+Debounce, minimum-interval, single-flight, bounded retry/drain, exact-marker
+acknowledgement, and failure-backoff state survive restart. Preview is the
 default; standing apply requires
 `--policy apply --yes`. Because raw transcripts are sensitive-by-default, setup
 also requires `--allow-transcript-content` and the installed full agent
 credential in the trusted parent. The inference child receives neither that
 credential nor its token-file path in argv, environment, or model input.
 
-The optional persistent launcher is packaged as a private per-user LaunchAgent
+The explicit legacy persistent launcher is packaged as a private per-user LaunchAgent
 on macOS or a systemd user service plus timer on Linux. Both run the bounded
 `memory curate auto run --runtime RUNTIME --force --supervise` target, recover
 after user-manager startup and failed attempts, and are managed with
@@ -125,10 +126,11 @@ evidence integrity, archive round trips, and no backend model call.
 The following remain target work rather than complete end-to-end behavior:
 model-visible per-prompt hook injection in runtimes that do not expose it,
 live managed cross-cloud certification, and performance/evaluation tuning.
-Automatic hydration is implemented against the real
-current contracts: Codex and Claude Code receive session and history-dependent
-task context, while Cursor and Grok Build use an explicitly labeled
-managed-instruction/MCP fallback for both session and task recall.
+Automatic hydration is implemented against the real current contracts: Codex
+and Claude Code receive session and history-dependent task context plus any
+pending checkpoint already durable at hook read time. Cursor and Grok Build use
+an explicitly labeled managed-instruction/MCP `self.show` fallback for session,
+task recall, and checkpoint control.
 Native Claude Code and Grok Build planners are
 conditionally usable only when their installed CLIs advertise every required
 safety control. Codex remains unsupported even when its read-only sandbox flags
@@ -150,10 +152,11 @@ isolation contract, so both native paths intentionally report unsupported.
   visible transcript evidence. An explicit narrative `remember` request writes
   a client-authored memory capsule in the same turn. A curator may improve it
   later.
-- MCP is request/response transport. It cannot wake an AI or initiate
-  inference. The implemented opt-in terminal-flush hook and local worker, a
-  user-owned scheduler, or the next active session mark and claim curation
-  work.
+- MCP is request/response transport. It cannot wake an AI or initiate inference.
+  Source commits mark work due in PostgreSQL. The next active foreground agent
+  normally claims at most one pending request; runtime hooks only preserve and
+  flush evidence. Explicit legacy/manual `memory curate auto` or user-owned
+  scheduling is a separate compatibility choice.
 - Curation submits an explicit, version-checked plan. The backend only
   authorizes, validates, stores, searches, applies, audits, exports, imports,
   and rolls back that plan deterministically.
@@ -240,13 +243,9 @@ as partial and relies on current-agent capture plus later available context.
 Curator child processes are marked with `WITSELF_CURATOR_SESSION=1`; the
 transcript hook returns before capture when that marker is present. This keeps
 the planner's orchestration conversation out of its own future inputs. A
-successful ordinary transcript flush makes durable curation work due. When
-local automation is explicitly enabled, a durably flushed `Stop`,
-`StopFailure`, `SessionEnd`, or `PreCompact` event also records a value-free wake
-and starts a detached local supervisor. It drains bounded `--max-runs` batches,
-uses persisted value-free backoff for eligible transient retries, and leaves
-remaining work durable when its execution bound is reached; no model call
-blocks the hook or transcript flush.
+successful ordinary transcript source commit makes durable curation work due in
+PostgreSQL. Runtime hooks do nothing else for curation: they do not record an
+automation wake, detach a supervisor, or launch inference.
 
 The integration policy is:
 
@@ -254,18 +253,23 @@ The integration policy is:
   milestone, correction, or reusable lesson;
 - stop, session-end, and pre-compaction hooks flush evidence and mark curation
   due when those hook events exist;
-- the next active agent opportunistically claims due work;
-- a configured local supervisor may curate while no interactive agent runs.
+- near a non-trivial foreground turn's end, the active agent processes at most
+  one pending fenced request;
+- an empty actions plan is applied when no input merits durable memory so the
+  reviewed cursors advance;
+- explicit legacy/manual `memory curate auto` operation is separate from runtime
+  hooks.
 
-Durable source marking, the optional terminal-flush launcher, and automatic
-hydration conformance are implemented. Codex and Claude Code synchronously
-inject bounded session self-digests and focused task recall. Cursor can accept
-and log session-start context without reliably delivering it to the model, and
-Grok ignores passive-hook stdout. Those missing paths use managed instructions
-and MCP and are reported as guided fallbacks, not automatic hook injection. The optional
-persistent launchd/systemd user service supplies a client process when no
-interactive runtime is active; it does not change the boundary that an MCP
-server cannot create inference by itself.
+Durable source marking and automatic hydration conformance are implemented.
+Codex and Claude Code synchronously inject bounded session self-digests, focused
+task recall, and any pending checkpoint already durable when the hook reads
+`/v1/self`. Cursor can accept and log session-start context without reliably
+delivering it to the model, and Grok ignores passive-hook stdout. Those runtimes
+use managed instructions and `self.show` and are reported as guided fallbacks,
+not automatic hook injection. The optional legacy launchd/systemd user service
+can supply a separately selected client process when no interactive runtime is
+active; it is never launched by hooks and does not change the boundary that an
+MCP server cannot create inference by itself.
 Runtime capabilities report
 `transcript_capture`, `automatic_capture`, `opportunistic_curation`,
 `scheduled_curation`, and `native_memory_write` independently so degraded
@@ -276,49 +280,72 @@ In the current server capabilities response, `memories`, `memory_recall`,
 `opportunistic_curation` report implemented server surfaces.
 `automatic_capture` and `scheduled_curation` remain unsupported because the
 backend does not synthesize memories, launch inference, or supervise a client
-process. This server capability result does not negate the implemented optional
-local `memory curate auto` worker: that worker is a client-owned process with an
-explicit provider and policy. Installed runtime guidance tells an active
-compatible client how to claim due work, but the backend never implies that
-such a client is currently running.
+process. Foreground checkpoint handling does not change those server flags. The
+optional legacy/manual `memory curate auto` worker is a client-owned process
+with an explicit provider and policy. Installed runtime guidance tells an active
+compatible client how to claim due work, but the backend never implies that such
+a client is currently running.
 
-### Why an ordinary session does not automatically create a memory
+### How an ordinary session creates memory eventually
 
-Several automatic mechanisms exist, but none of them alone authors a narrative
-memory:
+Ordinary memory refinement is low-touch but still uses the foreground model for
+semantic judgment:
 
-1. Session-start hydration and task recall are **reads** of existing facts and
-   memories. They never call the memory-capture write path.
-2. Runtime hooks append visible transcript evidence and mark curation work due.
-   A transcript answers what happened; it is intentionally not promoted to a
-   narrative memory without semantic selection and synthesis.
-3. MCP exposes the capture and curation operations, but it cannot call its own
-   tools or wake a model. Hooks also remain bounded and never wait for an LLM.
-4. The local automatic curator is client-owned and opt-in. Until it is
-   configured and enabled for a runtime, queued curation work remains queued.
-5. Preview is the unattended default. A preview plan does not write a memory;
-   standing mutation requires an explicitly configured apply policy and the
-   corresponding restricted credential.
-6. Managed runtime instructions ask the active agent to capture an explicit
-   narrative remember request and useful bounded checkpoints. That is
-   client/model behavior, not a deterministic hook guarantee.
+1. Runtime hooks append visible transcript evidence. The source commit creates
+   or coalesces durable curation work in PostgreSQL.
+2. At prompt submission, Codex and Claude read the bounded self digest and
+   automatically inject a value-free `memory_checkpoint` when work is already
+   pending. Cursor and Grok rely on an always-on managed rule that tells the
+   active agent to call `self.show`; this is guided behavior.
+3. Near turn end, the active agent processes at most one fenced request. It
+   submits only reversible narrative operations or fact proposals. If nothing
+   merits memory, it submits and applies an empty actions plan so the exact
+   reviewed cursor intervals advance.
+4. The backend deterministically validates and applies the plan. It never
+   performs selection, synthesis, or model inference.
 
-The expected no-worker chain is therefore:
+A transcript still answers what happened; it is not itself a narrative memory.
+A memory exists only after an explicit `memory.capture` or a client-authored
+curation plan is applied. Delivery is also not execution: a model may ignore its
+managed rule, MCP may be unavailable, or the session may end before another
+foreground turn. In those cases PostgreSQL keeps the request pending.
+
+Checkpoint timing is intentionally eventual. The prompt hook enqueues capture,
+starts an asynchronous flush, and then reads `/v1/self`. The current prompt is
+therefore not guaranteed to be inside the returned request, and the current
+assistant response cannot be because it does not yet exist. Both may be reviewed
+on a later interaction. A checkpoint delivered at prompt start represents the
+work durable at that instant, not guaranteed same-turn synthesis.
+
+MCP exposes the capture and curation operations, but it cannot call its own tools
+or wake a model. Runtime hooks likewise never wait for an LLM or launch another
+curator. The explicit legacy/manual `memory curate auto` path can still be
+configured when a deployment deliberately wants a separate client process; it
+is not required for the foreground design and is never invoked by hooks.
+
+This preserves the important semantic boundary:
+
+1. Session-start hydration and task recall are reads of existing facts and
+   memories.
+2. Runtime hooks preserve evidence and source commits mark due work.
+3. The foreground client selects and synthesizes.
+4. The backend stores and applies only the exact validated plan.
+
+The resulting normal chain is:
 
 ```text
-ordinary session
-  -> transcript persisted
-  -> curation request queued
-  -> no enabled client curator claims/applies it
-  -> no synthesized narrative memory is written
+ordinary interaction
+  -> transcript source committed
+  -> PostgreSQL curation request pending
+  -> next compatible foreground turn sees checkpoint
+  -> active agent applies one reversible plan, including empty when appropriate
+  -> request cursors advance; any newer work remains pending
 ```
 
-This is intentional, not transcript loss. Automatically turning conversation
-into memory requires client inference, and the architecture refuses to hide
-provider credentials, model cost, or semantic decisions in the backend. A
-deployment that wants unattended synthesis explicitly enables a compatible
-client runner; a user who says "remember what happened here" gets the immediate
-same-turn `memory.capture` path instead.
+If no compatible foreground turn occurs, no synthesized narrative is written;
+the due request remains durable rather than being lost. A user who says
+"remember what happened here" still gets the immediate same-turn
+`memory.capture` path instead of waiting for later curation.
 
 ### Explicit narrative remember
 
@@ -336,8 +363,9 @@ client must:
 
 This path does not wait for session end or deep curation. `memory.capture` is a
 convenience surface over the ordinary memory-create resource, not a second
-storage type. `session.end` composes the same path with `kind=session` and a
-client-authored progress capsule; the backend never writes the summary itself.
+storage type. The target, not-yet-implemented `session.end` helper would compose
+the same path with `kind=session` and a client-authored progress capsule; the
+backend would never write the summary itself.
 
 Evidence must not delay the capture. If hooks have not flushed the current turn,
 the client includes the stable external conversation/session/turn locator it
@@ -367,14 +395,16 @@ Runtime integrations may create client-written capsules at safe boundaries:
 - session stop/end;
 - a durable decision or milestone;
 - an evidence or token threshold;
-- a scheduled idle window.
+- an explicitly configured legacy scheduled idle window.
 
 Thresholds and budgets are client settings. Managed instructions ask the current
 agent to capture recognized durable decisions, milestones, corrections, and
-lessons, while hooks queue deeper work at available lifecycle boundaries. Only
-an actual client `memory.capture` call or an applied client-curation plan creates
-the memory; the server stores the result and its capture reason but never decides
-what the capsule should say.
+lessons, while transcript source commits queue deeper work in PostgreSQL. Hooks
+only preserve and flush evidence. On a later compatible foreground turn, a
+pending checkpoint asks the same active agent to review one bounded frozen
+interval. Only an actual client `memory.capture` call or an applied
+client-curation plan creates the memory; the server stores the result and its
+capture reason but never decides what the capsule should say.
 
 ## Curation: Low-Touch But Client-Run
 
@@ -384,15 +414,18 @@ modes share one protocol:
 | Mode | Trigger | Normal behavior |
 | --- | --- | --- |
 | Immediate | Explicit `remember` | Capture now; optionally queue refinement |
-| Opportunistic | Next active agent sees due work | Curate a bounded batch |
-| Scheduled | Supervisor or headless client | Curate within budget |
+| Foreground | Active agent sees a pending checkpoint | Curate at most one fenced request; apply an empty plan when appropriate |
+| Legacy scheduled | Explicit `memory curate auto` service | Curate within configured budget |
 | Manual | User asks to refine memories | Run now, normally preview first |
 
-The worker may be the parent agent, a native subagent, or a separate client.
-All supported runtimes must implement the parent/separate-process path; native
-subagent support is never a compatibility requirement.
+The normal curator is the current foreground agent. A native subagent or the
+explicit legacy separate client is an optimization or compatibility path, never
+a requirement. All supported runtimes must work in the main agent without a
+background runner.
 
-The default unattended posture is:
+The foreground path uses the active agent's authenticated MCP authority and
+applies only reversible plans. The explicit legacy separate-process/unattended
+posture is stricter:
 
 - bounded batches and token/action budgets;
 - sensitive memories excluded;
@@ -442,8 +475,9 @@ and an exact plan hash:
    order, rechecks memory versions, applies all actions, and compare-and-swaps
    every source cursor from the run's recorded lower bound to its upper bound.
    Any stale head, non-contiguous cursor, or expired fence returns a conflict
-   with no partial change. A zero-action plan may still advance the exact
-   contiguous intervals.
+   with no partial change. When no frozen input merits durable memory, a
+   zero-action plan is the correct result and is still applied to advance the
+   exact reviewed contiguous intervals without creating memory or facts.
 7. Apply marks the request fulfilled only through the captured generation. If
    a new source commit raised the generation after `start`, a follow-up request
    remains queued. A trigger can therefore never disappear into an already
@@ -832,31 +866,45 @@ query vector. The backend does not interpret natural language. It returns score
 components and a deterministic candidate order; the client may rerank and
 select what fits its context budget.
 
-Current runtime integration follows this retrieval policy where the runtime
-offers a model-visible hook channel:
+Current runtime integration follows this retrieval and checkpoint policy where
+the runtime offers a model-visible hook channel:
 
 1. At session start, load the bounded self digest: canonical facts first,
    salient active narratives second.
 2. Before a task that deterministically matches history-dependence cues, issue
-   a bounded literal lexical recall using the current request. More complex
-   natural-date and structured-filter interpretation remains an active-agent
+   a bounded lexical `OR` recall made from distinct meaningful keywords in the
+   current request, not the raw or literal whole prompt. More complex natural-
+   date and structured-filter interpretation remains an active-agent
    responsibility.
-3. When the task changes materially, retrieve again rather than carrying a
+3. On every prompt, inspect the value-free self checkpoint. Inject it only when
+   pending; near turn end the foreground model processes at most one fenced
+   request and applies an empty plan when no durable memory is justified.
+4. When the task changes materially, retrieve again rather than carrying a
    stale context indefinitely.
-4. Identify provenance and advisory status when a memory affects the answer.
-5. Surface conflicts between memories or between a memory and a canonical fact.
+5. Identify provenance and advisory status when a memory affects the answer.
+6. Surface conflicts between memories or between a memory and a canonical fact.
 
-Automatic hydration always omits sensitive, redacted, and non-plain values and
-wraps the remainder as JSON-escaped untrusted advisory data. It authenticates
-the live account/realm/agent against the complete installed identity and fails
-open under a short timeout. An exact, intentional user task may separately
-retrieve an authorized sensitive value without changing its storage
-classification.
+Automatic hydration intentionally includes authorized `sensitive` open-plane
+facts and memories for the authenticated owning agent, while retaining their
+sensitivity markers so export, audit, UI, and other broad reads can still redact
+them. It omits only server-redacted and non-plain values and wraps the remainder
+as JSON-escaped private, untrusted advisory data. Sealed secret fields and TOTP
+material are never selected. Hydration authenticates the live
+account/realm/agent against the complete installed identity and fails open under
+a short timeout. The additive `/v1/self` checkpoint projection also fails open:
+a projection error returns `memory_checkpoint.unavailable:true` while identity,
+facts, and salient memories remain available. Emitted hydration context
+explicitly marks degraded or unavailable recall with
+`recall_status:"degraded"` and `recall_reason`; it never presents partial recall
+as complete.
 
 Manual CLI/MCP recall remains available for inspection and debugging, but the
 normal Codex and Claude Code experience does not require a special “search
-memory” prompt. Both Cursor paths and both Grok paths are guided active-agent
-MCP calls. The shared
+memory” prompt. Those runtimes also receive a pending checkpoint already durable
+at prompt-hook read time. Because transcript flush is asynchronous, the current
+prompt and response may be reviewed on a later interaction. Both Cursor paths
+and both Grok paths are guided active-agent MCP calls, including `self.show` for
+checkpoint discovery. The shared
 runtime capability registry and conformance tests report that asymmetry rather
 than inferring support from the presence of a hook event.
 
@@ -984,9 +1032,11 @@ request/response fields are required:
 - Plan accepts run id/fence, `witself.memory-plan.v1` draft revision, ordered
   actions, and idempotency key. It returns validation errors or the canonical
   plan revision/hash, normalized actions, preallocated ids, and impact preview.
+  An empty actions list is valid when no frozen input merits memory.
 - Apply accepts run id/fence, canonical plan revision/hash, and idempotency key.
   It returns the apply receipt, exact before/after heads, fact-candidate ids,
-  advanced cursor intervals, and follow-up generation if work remains.
+  advanced cursor intervals, and follow-up generation if work remains. Applying
+  an empty plan advances only the reviewed intervals.
 - Cancel accepts run id/fence and idempotency key. Rollback accepts run id,
   apply receipt, every expected apply-produced head, reason, and idempotency key.
 - Status requires ordinary authorization but no active lease. It never returns
@@ -1265,10 +1315,11 @@ or source-of-truth compatibility. Local product development runs PostgreSQL
 Each runtime adapter implements the same logical operations:
 
 1. transcript capture/flush where hooks exist;
-2. automatic digest and task recall;
+2. capability-declared automatic or guided digest, task recall, and pending
+   checkpoint discovery;
 3. same-turn explicit capture;
-4. a main-agent curation path;
-5. optional native-subagent or headless-worker optimization;
+4. a main-agent path that processes at most one fenced checkpoint per turn;
+5. optional native-subagent or explicit legacy headless-worker optimization;
 6. explicit native-memory coexistence and dual-write reporting.
 
 The first four integration targets are Codex, Claude Code, Grok Build, and
@@ -1321,9 +1372,10 @@ backend.
 - Integrate automatic session-start and task-preflight retrieval.
 
 All four items are implemented to each runtime's real capability boundary.
-Codex and Claude Code inject session and focused task context automatically;
-Cursor and Grok Build use guided MCP recall because their current passive-hook
-paths are not reliably model-visible.
+Codex and Claude Code inject session and focused task context plus an
+already-durable pending checkpoint automatically; Cursor and Grok Build use
+guided MCP recall and `self.show` because their current passive-hook paths are
+not reliably model-visible.
 
 Exit: repeatable golden tests pass without an embedding provider, and a user
 does not need to invoke search manually in normal runtime use.
@@ -1348,20 +1400,25 @@ is attributable to an exact client plan.
 - Add short-lived server-enforced curator credential profiles and authenticated
   effective preflight. (implemented)
 - Make source commits mark due without blocking. (implemented)
+- Surface value-free pending state through `self.show`; inject it automatically
+  for Codex/Claude and teach Cursor/Grok the guided fallback. (implemented)
+- Instruct the active foreground agent to process at most one fenced request,
+  including applying an empty plan when no input merits memory. (implemented)
 - Add bounded budgets, sensitive exclusion, feedback-loop exclusion, value-free
   resume, and explicit preview-to-apply policy. (implemented)
 - Wire capability-probed native provider planners into the trusted CLI driver;
   headless operation works without requiring native subagents. (implemented)
-- Add value-free post-flush wakes, debounce/single-flight execution, explicit
-  provider and transcript consent, preview-by-default/apply-confirmed policy,
-  and a scheduler target without giving inference a Witself bearer token.
-  (implemented)
-- Package optional persistent operating-system supervisors for unattended
-  polling when no installed runtime hook fires. (implemented for per-user
-  launchd and systemd; other service managers remain packaging extensions)
+- Retain the older value-free wake, debounce/single-flight, provider/consent,
+  preview/apply, and scheduler implementation as explicit legacy/manual tooling;
+  runtime hooks no longer invoke it. (implemented compatibility path)
+- Package optional legacy persistent operating-system supervisors only for
+  deployments that deliberately select separate polling. (implemented for
+  per-user launchd and systemd; other service managers remain packaging
+  extensions)
 
-Exit: after one-time setup, ordinary sessions are captured and periodically
-curated without routine prompts, using only client inference.
+Exit: after one-time setup, ordinary sessions are captured and a later active
+foreground turn reviews durable pending work without routine user prompts, using
+only client inference. Work remains pending when no compatible turn occurs.
 
 ### Phase 5 — Runtime Expansion And Optional Vectors (current-runtime slice implemented)
 
@@ -1387,8 +1444,8 @@ all three cloud cell targets.
 - Evaluate duplicate growth, stale-plan rate, retrieval usefulness, recursive
   summarization drift, sensitive-data exposure, latency, token cost, and
   rollback success.
-- Roll out by capabilities: direct capture → lexical recall → curation preview
-  → opt-in apply → packaged persistent scheduling → optional vectors.
+- Roll out by capabilities: direct capture → lexical recall → curation protocol
+  → foreground checkpoint apply → optional legacy scheduling → optional vectors.
 
 Exit: a moved account recalls the same canonical facts and narrative graph after
 index rebuild, with complete provenance and no active lease crossing cells.
@@ -1424,19 +1481,21 @@ The current checkout implements:
    private resume state, explicit `memory curate run` CLI driver with either
    planner argv or `--provider`, self-capture exclusion, successful-preview
    requeue semantics, and fail-closed native provider capability probes; and
-10. the opt-in `memory curate auto` configuration/status/run surface,
-    value-free terminal-flush wake markers, restart-safe debounce/backoff,
-    single-flight execution, exact wake acknowledgement, explicit provider and
-    transcript consent, preview/apply standing policy, and credential-free
-    inference-child boundary; and
+10. the explicit legacy/manual `memory curate auto` configuration/status/run
+    surface, read-compatible value-free wake markers, restart-safe
+    debounce/backoff, single-flight execution, exact wake acknowledgement,
+    explicit provider and transcript consent, preview/apply standing policy, and
+    credential-free inference-child boundary, with no runtime-hook launcher; and
 11. idempotent per-user launchd and systemd service/timer lifecycle, private
     managed definitions, scheduled polling, user-manager restart recovery, and
     unsuccessful-run restart without credential or provider/model exposure;
     and
 12. the provider-neutral automatic-hydration executor, exact installed identity
-    verification, deterministic history-dependent query gate, open-plane
-    advisory envelope, hard timeout/byte/candidate ceilings, fail-open hook
-    delivery, and current-runtime conformance matrix; and
+    verification, deterministic history-dependent query gate, authenticated
+    value-free checkpoint envelope, foreground one-request policy, open-plane
+    advisory boundary, hard timeout/byte/candidate ceilings, fail-open Codex/
+    Claude hook delivery, guided Cursor/Grok fallback, and current-runtime
+    conformance matrix; and
 13. migration `0032`, immutable owner-scoped vector profiles, exact
     memory-version vector writes, deterministic hybrid recall, exact lexical
     zero-coverage fallback, coverage/degradation reporting, HTTP/client/CLI/MCP

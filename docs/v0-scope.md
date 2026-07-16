@@ -61,11 +61,12 @@ V0 should prove the end-to-end product boundary:
   Witself fact, narrative context goes to portable Witself memory, and a native
   write is added only when explicitly requested. Current self-management also
   includes the `self show` digest and direct narrative-memory lifecycle. Session
-  helpers and the file bridge remain explicit future work. Per-user launchd and
-  systemd scheduling is available through `memory curate auto service`. The
-  opportunistic request/run/plan/apply/
-  rollback curation protocol and opt-in client-owned terminal-flush launcher are
-  implemented.
+  helpers and the file bridge remain explicit future work. The opportunistic
+  request/run/plan/apply/rollback protocol and foreground pending-checkpoint
+  handling are implemented. PostgreSQL stores due state; Codex/Claude can inject
+  it when already durable at hook read time, while Cursor/Grok use guided
+  `self.show`. The older `memory curate auto service` path remains explicit
+  legacy/manual compatibility tooling and is never launched by runtime hooks.
 - `memory recall` performs deterministic PostgreSQL lexical/structured ranking
   over the caller's accessible memories. Optional vectors are supplied by the
   client under an immutable profile and may add bounded hybrid ranking; the
@@ -143,21 +144,23 @@ Core user-facing capabilities:
   content is never silently duplicated. A future unified `witself remember`
   command may compose the existing Witself operations, but it is not a backend
   inference router.
-- `self show` bounded session-start digest of primary facts, top-N salient
-  memories, and a one-line kinds/tags/counts index, hard-capped with an
-  `elided` signal instead of silent truncation, and never requiring a model or
-  embedding provider.
+- `self show` bounded digest of primary facts, top-N salient memories, an
+  authenticated value-free pending/idle curation checkpoint, and a one-line
+  kinds/tags/counts index, hard-capped with an `elided` signal instead of silent
+  truncation, and never requiring a model or embedding provider.
 - Target `session start`/`session end` helpers for multi-session bootstrap remain
   future; current clients capture bounded evidence-backed checkpoints directly.
 - Direct `memory supersede` applies one exact client-authored replacement set.
   Deeper client-run curation is implemented through deterministic due requests,
   lease/fence claims, immutable input pages, strict hashed plans, atomic apply,
   cancellation/abandonment, and guarded rollback. The backend never chooses a
-  semantic merge or split and never launches inference. An opt-in local
-  `memory curate auto` worker now records value-free terminal-flush wakes and
-  launches the trusted client driver with explicit provider, transcript consent,
-  and preview/apply policy; optional persistent per-user launchd/systemd
-  scheduling is implemented through the `auto service` lifecycle.
+  semantic merge or split and never launches inference. Near a non-trivial
+  foreground turn's end, the active agent processes at most one pending fenced
+  request and applies an empty plan when no input merits memory. Runtime hooks
+  only enqueue and flush evidence. The opt-in local `memory curate auto` and
+  per-user launchd/systemd `auto service` lifecycle remain explicit legacy/manual
+  compatibility paths with their own provider, transcript-consent, and apply
+  policy.
 - Target `digest emit`, `ingest`, and `bootstrap-instructions` file-bridge
   helpers remain future. Current `witself install` integrations install the
   managed routing guidance and MCP server directly.
@@ -367,6 +370,10 @@ V0 is credible when:
   in list/scan output across CLI, MCP, API, logs, errors, and audit records;
   an authorized read of a single record returns the value with no reveal
   ceremony.
+- Installed owner-authenticated hydration and MCP narrative recall include
+  authorized sensitive open-plane context automatically while retaining its
+  marker. This exception affects model context, not list/scan presentation;
+  sealed secret and TOTP values remain ineligible.
 - Agent integrations route an explicitly requested atomic assertion to a fact
   upsert and narrative context to portable Witself memory, adding a native write
   only when explicitly requested; `self show`
@@ -375,8 +382,11 @@ V0 is credible when:
   client-authored supersession round-trip through CLI/MCP/API; client-authored
   curation requests, leases/fences, frozen inputs, strict plans, atomic apply,
   cancel/abandon, and rollback round-trip through CLI/HTTP, with fourteen MCP
-  tools; the optional client-owned terminal-flush worker is configurable through
-  `memory curate auto` and keeps credentials out of inference;
+  tools; pending state is surfaced value-free through `self show`, Codex/Claude
+  inject it when already durable, and Cursor/Grok use guided MCP fallback; the
+  optional legacy/manual client worker is explicitly configurable through
+  `memory curate auto`, is never launched by hooks, and keeps credentials out of
+  inference;
   `opportunistic_curation` is supported while `automatic_capture` and
   `scheduled_curation` remain explicitly unsupported backend capabilities; and
   `--read-only` MCP mode excludes the mutating self-management and curation

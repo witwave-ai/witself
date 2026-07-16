@@ -219,27 +219,30 @@ func configureMemory(cfg *server.Config, st *store.Store) {
 		}, nil
 	}
 
-	cfg.GetSelfMemories = func(ctx context.Context, p server.DomainPrincipal, limit int) ([]server.SelfMemory, int, error) {
+	cfg.GetSelfMemories = func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount bool) ([]server.SelfMemory, int, error) {
 		principal := toStorePrincipal(p)
 		opts := store.MemoryListOptions{
 			OwnerAgentID: p.ID, State: store.MemoryStateActive,
-			OrderBySalience: true, Limit: limit,
+			OrderBySalience: true, IncludeSensitive: true, Limit: limit,
 		}
 		page, err := st.ListMemories(ctx, principal, opts)
 		if err != nil {
 			return nil, 0, mapMemoryError(err)
 		}
-		total, err := st.CountMemories(ctx, principal, opts)
-		if err != nil {
-			return nil, 0, mapMemoryError(err)
+		total := len(page.Memories)
+		if includeCount {
+			total, err = st.CountMemories(ctx, principal, opts)
+			if err != nil {
+				return nil, 0, mapMemoryError(err)
+			}
+		} else if page.NextCursor != "" {
+			// The exact total is intentionally skipped on prompt hooks; one
+			// larger-than-page hint is enough for the handler to set elided.
+			total++
 		}
 		out := make([]server.SelfMemory, len(page.Memories))
 		for i, memory := range page.Memories {
-			out[i] = server.SelfMemory{
-				ID: memory.ID, Snippet: memorySnippet(memory.Content), Kind: memory.Kind,
-				Tags: memory.Tags, Salience: memory.Salience, Sensitive: memory.Sensitive,
-				Redacted: memory.Redacted || memory.Sensitive, Source: memory.Origin,
-			}
+			out[i] = toServerSelfMemory(memory)
 		}
 		return out, total, nil
 	}
@@ -251,6 +254,21 @@ func configureMemory(cfg *server.Config, st *store.Store) {
 			return 0, mapMemoryError(err)
 		}
 		return count, nil
+	}
+}
+
+func toServerSelfMemory(memory store.Memory) server.SelfMemory {
+	snippet := ""
+	redacted := memory.Redacted
+	if memory.ContentEncoding == "" || memory.ContentEncoding == "plain" {
+		snippet = memorySnippet(memory.Content)
+	} else {
+		redacted = true
+	}
+	return server.SelfMemory{
+		ID: memory.ID, Snippet: snippet, ContentEncoding: memory.ContentEncoding, Kind: memory.Kind,
+		Tags: memory.Tags, Salience: memory.Salience, Sensitive: memory.Sensitive,
+		Redacted: redacted, Source: memory.Origin,
 	}
 }
 
