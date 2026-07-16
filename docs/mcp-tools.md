@@ -500,15 +500,15 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.policy.test` | yes | yes | Evaluates an access decision; never mutates. |
 | `witself.group.list` | yes | yes | Lists groups visible to the session. |
 | `witself.group.show` | yes | yes | Shows group metadata and membership where visible. |
-| `witself.message.send` | yes | no | Requires `message:send`; `from` is token-derived; exactly one same-realm agent, explicit 1–64-agent audience, or immutable realm snapshot. |
+| `witself.message.send` | yes | no | `from` is token-derived; exactly one same-realm agent, explicit 1–64-agent audience, or immutable realm snapshot. |
 | `witself.message.reply` | yes | no | Recipient-only; derives recipient, thread, and causal parent from the validated inbound message. |
-| `witself.message.listen` | yes | yes | Oldest-unacknowledged metadata-only long-poll; no body/read/ack side effects; requires `message:read`. |
-| `witself.message.list` | yes | yes | Lists the session's mailbox; requires `message:read`. |
-| `witself.message.read` | yes | no | Returns content and marks read without acknowledging; requires `message:read`. |
-| `witself.message.ack` | yes | no | Separately records that the recipient handled the message; requires `message:read`. |
+| `witself.message.listen` | yes | yes | Token-bound oldest-unacknowledged metadata-only long-poll; no body/read/ack side effects. |
+| `witself.message.list` | yes | yes | Lists the token-bound session's mailbox. |
+| `witself.message.read` | yes | no | Recipient-only content read that marks read without acknowledging. |
+| `witself.message.ack` | yes | no | Recipient-only durable handling acknowledgement, separate from read. |
 | `witself.message.claim` | yes | no | Acquire or idempotently replay a bounded direct-delivery processing lease; returns a claim id and monotonic generation without reading or acknowledging. |
 | `witself.message.renew` | yes | no | Extend one exact, unexpired claim id/generation using database time. |
-| `witself.message.release` | yes | no | Release one exact processing fence so another client may retry; does not acknowledge. |
+| `witself.message.release` | yes | no | Release one exact processing fence so another client may retry, optionally recording a deterministic message-specific failure; does not acknowledge. |
 | `witself.message.complete` | yes | no | Atomically create one server-routed result reply, link it, and complete one exact fence; does not acknowledge. |
 | `witself.message.request.open` | yes | no | Snapshot every other active realm agent as a candidate; `client_ranked` only; backend stores/fences but never performs inference. |
 | `witself.message.request.list` | yes | no | List visible request summaries by candidate or exact coordinator role; may lazily persist due lifecycle transitions. |
@@ -1700,8 +1700,9 @@ Cross-realm delivery remains a target tracked in
 Reply to one inbound parent message. The session's token-bound agent must be the
 parent recipient. The backend derives the recipient from the parent sender and
 derives the thread, `reply_to_message_id`, and parent-plus-one `causal_depth`;
-callers cannot supply routing, identity, or depth fields. Requires
-`message:send` and is unavailable in read-only mode.
+callers cannot supply routing, identity, or depth fields. It is unavailable in
+read-only mode; granular `message:send` scope gating remains follow-on platform
+integration.
 
 Input:
 
@@ -1728,12 +1729,13 @@ message metadata: block up to `wait_seconds`, then return available summaries
 or an empty set on timeout. The default wait is 20 seconds and the accepted
 range is 0 through 20. This is a stateless waitable query with no cursor and
 changes no read/ack state. Because an agent **runs no HTTP server** and exposes
-no inbound endpoint, an already-active client uses a zero-wait call to discover
-work; nothing is pushed into or wakes the model process. Available in read-only
-mode; requires `message:read`.
+no inbound endpoint, installed policy directs an already-active client to use a
+zero-wait call for discovery; nothing is pushed into or wakes the model process.
+It is available in read-only mode; granular `message:read` scope gating remains
+follow-on platform integration.
 
-The foreground client explicitly reads untrusted content and acknowledges only
-after handling. See
+Installed policy directs the foreground client to read untrusted content
+explicitly and acknowledge only after handling. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 Input:
@@ -1767,8 +1769,9 @@ Each message uses the metadata-only message-summary shape;
 metadata. A crash after read but before ack leaves the message eligible for a
 later listen. Bodies and payloads are returned only by explicit read and remain
 untrusted input. The summary's backend-derived `causal_depth` remains available
-for client turn enforcement. Local and later cross-realm messages may share the
-mailbox without changing this boundary.
+as durable causal metadata and a possible client-policy safety input; no fixed
+turn threshold is currently codified. Local and later cross-realm messages may
+share the mailbox without changing this boundary.
 
 ### `witself.message.list`
 
@@ -1850,8 +1853,9 @@ and acknowledge only after the corresponding protocol mutation is durable. The
 required idempotency key makes an exact retry return the same claim; an active
 different claimant receives a conflict. A new or expired acquisition advances
 the monotonic generation fence. Generation is only the stale-writer fence. The
-separate migration-0036 `failure_count` is the durable deterministic-message-
-failure bound used by foreground clients.
+separate migration-0036 `failure_count` is durable deterministic-message-failure
+accounting available to foreground-client policy; the backend imposes no
+fifth-attempt threshold.
 
 Input:
 
@@ -1903,10 +1907,11 @@ Output uses the same `processing` shape with the replacement
 
 Release one exact claim so another client may retry. Release makes processing
 `available`, preserves the monotonic generation value, invalidates the old
-claim immediately, and does not acknowledge. This MCP tool performs an ordinary
-release and does not increment `failure_count`; a trusted foreground client may
-use the internal HTTP field when it can classify a deterministic message
-failure.
+claim immediately, and does not acknowledge. By default it leaves
+`failure_count` unchanged. Set `deterministic_failure` only for a repeatable
+failure attributable to this message; never set it for a provider-wide or
+configuration failure, cancellation, timeout, or claim-lease maintenance
+failure. True atomically increments the backend-owned `failure_count`.
 
 Input:
 
@@ -1914,7 +1919,8 @@ Input:
 {
   "message_id": "msg_123",
   "claim_id": "mcl_123",
-  "generation": 1
+  "generation": 1,
+  "deterministic_failure": true
 }
 ```
 

@@ -815,8 +815,9 @@ Notes on specific actions and workflows:
   `Cache-Control: private, no-store`. Each server process bounds concurrent
   listen admission and returns HTTP 429 with `Retry-After` when saturated;
   retrying loses no durable mailbox state. Agents run no inbound HTTP server; an
-  already-active foreground client uses a zero-wait call at task startup and
-  then uses the explicit read/ack lifecycle. It is a `POST` because the bounded
+  installed policy instructs an already-active foreground client to use a
+  zero-wait call at task startup and then use the explicit read/ack lifecycle;
+  it cannot force the model to comply. It is a `POST` because the bounded
   wait/filter request is authenticated input rather than a public cacheable URL.
   Delivery semantics are tracked in
   [inter-agent-messaging.md](inter-agent-messaging.md); the no-wake foreground
@@ -836,16 +837,17 @@ Notes on specific actions and workflows:
   `Idempotency-Key` is hashed at rest and never returned. A different live
   claimant receives HTTP 409; an available or expired acquisition increments
   the monotonic generation fence. Generation is solely a stale-writer fence;
-  claim, expiry, and takeover do not consume a message's failure budget.
+  claim, expiry, and takeover do not increment `failure_count`.
 - `:renew` and `:release` require the exact `claim_id` and positive `generation`.
   Renewal replaces the database-time expiry; release makes processing
   available and invalidates the old fence without acknowledging. Release also
   accepts optional `deterministic_failure` (default false). Only an exact-fence
   release with that field true atomically increments the migration-0036
-  `failure_count`; provider-wide, configuration, cancellation, and
-  lease-maintenance releases leave it unchanged. Foreground clients use that
-  durable count and, under the default handling guidance, treat the fifth
-  deterministic attempt as an escalation.
+  `failure_count`; provider-wide, configuration, cancellation, timeout, and
+  lease-maintenance releases leave it unchanged. Installed foreground policy
+  directs clients to release and count the first four deterministic failures and
+  complete a durable escalation when `failure_count` is already 4 or greater;
+  the backend does not enforce that threshold or model compliance.
 - `:complete` requires the exact unexpired fence and an `Idempotency-Key`. In
   one transaction it derives recipient, thread, causal parent, causal depth,
   sender, account, and realm from the claimed message and token; inserts one

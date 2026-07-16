@@ -242,9 +242,10 @@ This automatic hydration path reads identity, facts, narrative memory,
 value-free curation lifecycle state, and the value-free message checkpoint. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
 include that checkpoint but never unread message metadata. Cursor and Grok Build
-use guided `self.show`. Every runtime uses non-blocking `message.listen` to
-retrieve unread metadata. Bodies remain behind explicit read and no hook marks
-read, acknowledges, starts inference, or wakes a client. See
+use guided `self.show`. Every runtime's installed policy directs it to use
+non-blocking `message.listen` to retrieve unread metadata; that model action is
+not forced. Bodies remain behind explicit read and no hook marks read,
+acknowledges, starts inference, or wakes a client. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 `GET /v1/self` keeps `include_sensitive=false` as its ordinary API default.

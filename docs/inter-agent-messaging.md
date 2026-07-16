@@ -1,10 +1,11 @@
 # Witself Inter-Agent Messaging
 
-Status: direct, fan-out, and foreground-processing slices. Last reviewed
-2026-07-16. This document is
-the authority for the durable messaging model, message shape, delivery and
-ordering semantics, the anti-spoofing trust boundary, rate limits, scopes,
-audit, and metering. It binds the message shapes pinned in
+Status: the agreed same-realm direct, fan-out, open-request, and foreground
+processing code is complete in `main`; release, rollout, integration refresh,
+and live multi-provider smoke testing remain. Last reviewed 2026-07-16. This
+document is the authority for the durable messaging model, message shape,
+delivery and ordering semantics, the anti-spoofing trust boundary, target rate
+limits/scopes, audit, and target metering. It binds the message shapes pinned in
 [json-contracts.md](json-contracts.md) and conforms to the master spec in
 [requirements.md](requirements.md).
 
@@ -61,20 +62,23 @@ coordination, and fenced foreground processing inside one realm:
   request graph. Active source-cell reservations/claims are interrupted during
   import so their old fences cannot complete in the destination cell.
 
-Group fan-out, cross-realm delivery, dry-run, operator metadata inspection,
-policy scopes,
-metering, and rate limits remain later slices of this v0 design. These
-implementation statements describe the current checkout, not a deployment or
-release.
+Named-group fan-out, cross-realm delivery, dry-run, operator metadata
+inspection, policy scopes, plan-backed metering, and send/delivery rate limits
+are follow-on platform features rather than blockers for the agreed realm-local
+core. These implementation statements describe the current checkout, not a
+deployment or release.
 
 ## Goal
 
 Let an agent send a durable message to another agent, a bounded explicit set of
-agents, the current realm, or a security group inside the same realm, and let
-each recipient list, read, and acknowledge that message — through the same
+agents, or the current realm, and let each recipient list, read, and acknowledge
+that message — through the same
 one-core, multi-adapter spine that backs every other Witself surface. Messaging
 is the channel through which agents coordinate; it is also a new attack surface,
 because a message can carry instructions and data into a receiving agent.
+
+Named security-group delivery is a documented follow-on, not part of the
+code-complete audience set above.
 
 The central security stance: **the sender is always derived from the
 authenticated token, never from input.** Sender forgery is structurally
@@ -145,9 +149,10 @@ Mailbox delivery and model execution are deliberately separate:
   message checkpoint and call non-blocking listen for unread metadata at the
   beginning of non-trivial work.
 - Supported Codex/Claude session/task hooks may inject the bounded checkpoint
-  automatically. Cursor and Grok use guided `self.show`. Every runtime uses
-  listen to retrieve unread message metadata; no hook injects it. No path
-  injects the body, marks it read, acknowledges it, or invokes a model.
+  automatically. Cursor and Grok use guided `self.show`. Every runtime's
+  installed policy directs it to use listen for unread message metadata, but
+  that model action is not forced; no hook injects the metadata. No path injects
+  the body, marks it read, acknowledges it, or invokes a model.
 - The implemented `message listen` operation is a stateless, waitable,
   metadata-only mailbox query. It returns the oldest unacknowledged inbound
   metadata so a crash after read but before ack remains recoverable. Timeout or
@@ -164,8 +169,9 @@ Mailbox delivery and model execution are deliberately separate:
   foreground client owns every mailbox call and inference turn.
 - For an open request, candidate clients use their current runtime
   instructions to send one bounded ordinary `kind=offer` message or decline.
-  The backend may validate, persist, filter, and rate-limit those messages, but
-  it performs no semantic ranking and generates no candidate response.
+  The backend currently validates and persists those messages but performs no
+  semantic ranking and generates no candidate response. A future plan-backed
+  layer may rate-limit them at the ordinary send boundary.
 - `client_ranked` is the only current open-request policy. If the ranking client
   disappears, the request remains durably `awaiting_selection`; there is no
   automatic first-claimant fallback. Selection resumes only when that immutable
@@ -265,8 +271,9 @@ Field rules:
   The reply request cannot supply routing or identity fields.
 - `causal_depth` — positive backend-derived depth in the reply graph. Direct
   sends start at one and replies advance exactly one from their validated
-  parent. Callers cannot set it. It is a portable client turn-limit input;
-  payload history and payload turn hints are advisory only.
+  parent. Callers cannot set it. It is durable causal metadata and a possible
+  client-policy safety input; no fixed turn threshold is currently codified.
+  Payload history and payload turn hints are advisory only.
 - `created_at` — server-assigned send timestamp.
 - `delivery` — per-recipient delivery state and timestamp. In a group fan-out,
   each recipient has its own delivery row; the shape above is the recipient's
@@ -355,8 +362,9 @@ Rules:
 - `message ack <id>` transitions to `acked` (idempotent). Ack is the recipient's
   durable signal that the message was handled, distinct from merely having read
   it.
-- Read and ack are recipient-only actions, gated by `message:read`. The sender
-  cannot read or ack on the recipient's behalf.
+- Read and ack are recipient-only actions. The sender cannot read or ack on the
+  recipient's behalf; granular `message:read` scope gating remains follow-on
+  platform integration.
 
 ### Processing claim and completion
 
@@ -370,7 +378,10 @@ Direct processing is a second, independent recipient lifecycle:
   generation. Renewal uses database time; release makes the delivery available
   and immediately invalidates the old fence. The HTTP release contract accepts
   optional `deterministic_failure`; only true atomically increments
-  `failure_count`. Ordinary CLI/MCP release leaves it false.
+  `failure_count`. CLI and MCP expose the same optional input and leave it false
+  by default. It is only for repeatable failures attributable to that message,
+  never provider-wide or configuration failures, cancellation, timeout, or
+  claim-lease maintenance failures.
 - `message complete` requires the exact unexpired fence and a completion
   idempotency key. In one PostgreSQL transaction it derives the recipient,
   thread, and causal parent from the claimed message, inserts one result reply,
@@ -381,14 +392,15 @@ Direct processing is a second, independent recipient lifecycle:
   generation. External model or tool effects remain at-least-once and need
   their own idempotency.
 - Processing generation is solely the stale-writer fence. Release/expiry
-  takeover advances it without consuming failure budget; exact live-claim retry
-  retains it. Clients count only deterministic, message-specific failures.
+  takeover advances it without incrementing `failure_count`; exact live-claim
+  retry retains it. The backend counts only deterministic, message-specific
+  failures that a client marks on an exact-fence release.
   Provider-wide errors, cancellation/timeouts, and claim-lease maintenance
-  failures release without incrementing `failure_count`. Under the current
-  default, the first four
-  deterministic failures are released and counted; the fifth deterministic
-  attempt is completed as a durable escalation. Payload and generation cannot
-  reset or substitute for this backend-owned count.
+  failures release without incrementing `failure_count`. Installed policy
+  directs clients to release and count the first four deterministic failures and
+  complete a durable escalation when `failure_count` is already 4 or greater;
+  neither the backend nor model compliance enforces that threshold. Payload and
+  generation cannot reset or substitute for the backend-owned count.
 
 ## Surfaces
 
@@ -496,46 +508,46 @@ All action subroutes use `POST`, never `GET`. Responses use the shared envelope
 Route style is pinned in [api-routes.md](api-routes.md) and the contract in
 [api-contract.md](api-contract.md).
 
-## Authorization
+## Target authorization integration
 
-- `message:send` — required to send. Constrainable by realm and by recipient
+- `message:send` — will be required to send and constrainable by realm/recipient
   agent/group where practical.
-- `message:read` — required to list, listen, read, ack, and coordinate
+- `message:read` — will be required to list, listen, read, ack, and coordinate
   claim/renew/release/complete processing on one's own mailbox.
-- Sending to a group requires `message:send`; it does **not** require group
+- Target group sending will require `message:send`; it will not require group
   membership unless an operator constrains the scope. Group-recipient resolution
-  follows [security-groups.md](security-groups.md).
+  is tracked in [security-groups.md](security-groups.md).
 - Messaging carries no implicit data-access authority. A message can reference
   identity data via `witself://` URIs, but resolving those references still runs
   the full policy check (see [access-policy.md](access-policy.md)); an
   unauthorized reference does not resolve just because it arrived in a message.
-- Operators may inspect realm-wide message metadata under realm admin
-  permissions (operator override), audited like any agent action.
+- Operator inspection of realm-wide message metadata under an audited realm
+  admin override remains follow-on work.
 
 The complete scope list lives in [requirements.md](requirements.md).
 
-## Limits and rate limits
+## Implemented limits and target rate limits
 
-v0 defaults (tunable per plan; final values pinned in
-[billing-and-limits.md](billing-and-limits.md)):
+The current core enforces:
 
 - Maximum `body` size: 64 KiB.
 - Maximum `payload` size: 16 KiB serialized.
 - Maximum `subject` length: 256 UTF-8 bytes.
-- Maximum group fan-out per send: capped (large groups are throttled, not
-  silently truncated).
+- Maximum resolved direct, explicit-list, or realm audience: 64 recipients;
+  oversized sends fail atomically rather than truncating.
 
-Rate limits apply to **both send and delivery** to bound abuse and
-memory-poisoning amplification:
+The following plan-backed rate controls remain target platform integration and
+must not be inferred from the size/fan-out limits above:
 
 - Per-agent send rate limit (messages per interval).
 - Per-realm aggregate send rate limit.
 - Per-recipient delivery/inbound rate limit, to protect a single recipient from
   flooding.
 
-Overage follows the plan's configured behavior — `warn`, `throttle`, or `block`
-— per the model in [billing-and-limits.md](billing-and-limits.md). A blocked or
-throttled send returns a deterministic error, never a silent drop.
+When implemented, overage follows the plan's configured behavior — `warn`,
+`throttle`, or `block` — per the model in
+[billing-and-limits.md](billing-and-limits.md). A blocked or throttled send must
+return a deterministic error, never a silent drop.
 
 ## Audit
 
@@ -563,17 +575,17 @@ contain `body`, `payload`, raw tokens, or any identity-content values. The same
 redaction rule applies to logs, metrics, and error messages. Retention follows
 [audit-retention.md](audit-retention.md).
 
-## Metered dimensions
+## Target metered dimensions
 
-Messaging contributes two metered dimensions (see
+Messaging is intended to contribute two metered dimensions (see
 [billing-and-limits.md](billing-and-limits.md)):
 
 - **Messages sent** — counted at send (one per send request).
-- **Messages delivered** — counted per recipient delivery (a group send of N
-  members counts as N deliveries).
+- **Messages delivered** — counted per recipient delivery (an N-recipient fanout
+  counts as N deliveries).
 
-Both are metered even when pricing remains plan-tiered, because each send and
-delivery is real service load and security-relevant use. Metrics expose
+These dimensions are the intended billing/operations contract but are not yet
+wired into plan-backed messaging metering. When implemented, metrics expose
 send/deliver/read counts with low-cardinality, route-template labels and never
 include message content (see
 [observability-and-operations.md](observability-and-operations.md)).

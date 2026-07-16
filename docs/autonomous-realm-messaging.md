@@ -1,13 +1,13 @@
 # Autonomous Realm Messaging
 
-Status: foreground-client design implemented in the current checkout
+Status: the agreed same-realm foreground feature is code-complete in `main`
 (2026-07-16), pending release and deployment. Migration 0037 adds immutable
 explicit-list and realm delivery snapshots. Migration 0038 adds message-backed
 open requests, bounded offers, client-ranked selection, multi-assignee
 reservations, and exact claim fences. Migration 0041 indexes the per-coordinator
-foreground checkpoint probe. Active clients perform all inference; the
-backend remains a model-free durable mailbox and coordination service. This
-status is not a deployment statement.
+foreground checkpoint probe. Active clients perform all inference; the backend
+remains a model-free durable mailbox and coordination service. This status is
+not a deployment statement.
 
 This document defines autonomous, same-realm agent communication on top of the
 durable mailbox in [inter-agent-messaging.md](inter-agent-messaging.md). It does
@@ -40,6 +40,33 @@ The same model supports:
 The initial request may later originate from a schedule, webhook, system event,
 or another agent. That changes the initiator, not the messaging or execution
 protocol.
+
+## Completion Boundary
+
+**Code-complete** means the agreed realm-local product path is implemented and
+tested across the PostgreSQL core, HTTP/Go client, CLI, full MCP profile,
+provider installation policy, account export/import, and legacy-runner upgrade:
+
+- direct, bounded explicit-list, and whole-realm delivery;
+- reply/list/listen/read/ack plus fenced claim/renew/release/complete;
+- realm-open requests, bounded offers, client-ranked selection,
+  multi-assignee reservations, claims, reassignment, and results; and
+- foreground discovery for all four supported runtimes, with automatic
+  checkpoint hydration where the provider supports it and guided `self.show`
+  elsewhere.
+
+**Operationally complete** additionally requires a tagged release, rollout of
+that release to the intended cells, reinstalling/upgrading each client
+integration so its managed policy is current, and a live cross-provider smoke
+test. Until then, released clients and cells may still expose the older
+behavior even though `main` is code-complete.
+
+Named security-group fan-out, cross-realm federation, stored
+responsibilities/directives, a backend wake/presence service, large
+attachments, and plan-backed rate/metering integration are separate follow-on
+features. They do not reopen the agreed same-realm foreground slice. The
+no-wake boundary and model compliance with installed instructions are product
+constraints, not missing adapter code.
 
 ## Terms
 
@@ -137,7 +164,8 @@ The implemented messaging slice has:
 - model-visible message-checkpoint injection for Codex and Claude Code at
   supported session/prompt boundaries, with guided `self.show` for Cursor and
   Grok Build where passive hook output cannot reliably reach the model; every
-  runtime uses non-blocking listen to retrieve unread metadata;
+  runtime's installed policy directs it to use non-blocking listen for unread
+  metadata, but cannot force model compliance;
 - one immutable PostgreSQL message plus a bounded send-time delivery snapshot
   for direct, explicit-agent-list, and whole-realm audiences;
 - realm-wide open requests with an immutable candidate snapshot, bounded offer
@@ -157,10 +185,10 @@ It deliberately does **not** have:
   offline.
 
 Binding Claude Code to Bob establishes **who Claude is**. It does not keep
-Claude running or wake an idle session. When Claude is active, supported hook
-hydration supplies the content-free checkpoint automatically; Claude then uses
-non-blocking listen to retrieve unread metadata. The durable mailbox remains
-waiting while Claude is closed.
+Claude running or wake an idle session. When Claude is active, supported hooks
+automatically attempt to supply the content-free checkpoint and fail open;
+installed policy then directs Claude to use non-blocking listen for unread
+metadata. The durable mailbox remains waiting while Claude is closed.
 
 ## System Boundary
 
@@ -178,10 +206,11 @@ active Scott client --send/reply--> Witself mailbox + processing state (Postgres
 The three client-facing mechanisms have different jobs:
 
 - **MCP/CLI/API** expose mailbox and claim operations.
-- **Runtime hooks** provide deterministic content-free checkpoint checks at supported
-  session/task boundaries while an interactive runtime is already receiving a
-  turn. Codex and Claude Code can receive that checkpoint automatically; Cursor
-  and Grok Build use managed guidance to make the same non-blocking MCP reads.
+- **Runtime hooks** automatically attempt content-free checkpoint injection at
+  supported session/task boundaries while an interactive runtime is already
+  receiving a turn, and fail open when hydration is unavailable. Codex and
+  Claude Code expose a model-visible output path; Cursor and Grok Build rely on
+  managed guidance for `self.show` and non-blocking listen.
 - **The foreground client** decides whether to claim/read/process pending work
   in the current turn. No Witself process remains active independently.
 
@@ -274,7 +303,9 @@ the sender's mailbox and offered on its next foreground turn.
 
 ## Direct Autonomous Delegation
 
-The Scott-to-Bob path is:
+The Scott-to-Bob path below is the intended client behavior when installed
+policy is followed. Witself persists and fences the exchange but cannot force
+these model actions:
 
 1. The user tells Scott to ask Bob to perform an objective.
 2. Scott sends one `request` message to Bob with the objective, relevant visible
@@ -282,11 +313,11 @@ The Scott-to-Bob path is:
 3. The server persists the direct message and recipient delivery state. The
    send does not wait for Claude. Dedicated request coordination state is not
    needed for one direct recipient.
-4. When Bob's runtime next receives a foreground turn, automatic Codex/Claude
-   hook hydration or the guided Cursor/Grok startup protocol exposes bounded
-   checkpoint state. Bob uses non-blocking `message.listen` to retrieve unread
-   metadata, deduplicates by `msg_` id, and atomically acquires the work lease
-   before reading content.
+4. When Bob's runtime next receives a foreground turn, supported Codex/Claude
+   hooks may expose bounded checkpoint state; Cursor/Grok policy directs
+   `self.show`. Installed policy directs Bob to use non-blocking
+   `message.listen` for unread metadata, deduplicate by `msg_` id, and atomically
+   acquire the work lease before reading content.
 5. Bob reads the body, treats it as untrusted input, reconstructs bounded thread
    and agent context, and handles the objective in the already-active client.
 6. Bob may reply with a question. When Scott's client is active, its checkpoint
@@ -322,7 +353,8 @@ The realm-shout path is:
    directive schema.
 3. An offer is advisory and reserves no capacity. Each candidate may send at
    most one current idempotent offer during the bounded offer window, using the
-   ordinary message body/payload ceilings and rate limits. The request enters
+   ordinary message body/payload ceilings. Future plan-backed rate limits apply
+   at this same send boundary. The request enters
    `awaiting_selection` when every candidate responds or the offer deadline
    passes; on Scott's next active turn, Scott uses client-side inference to rank
    the offers and select the best one or several candidates.
@@ -401,7 +433,7 @@ generation. Release clears the lease and invalidates the old fence immediately.
 
 Processing generation is solely the backend-owned stale-writer fence. Exact
 same-claim retries retain it; every takeover after release or expiry advances it
-without consuming a failure budget. Migration
+without incrementing `failure_count`. Migration
 `0036_add_message_failure_count.sql` adds the separate durable `failure_count`.
 Only release of the exact claim fence with `deterministic_failure=true`
 increments it atomically. Provider-wide or unavailable-provider failures,
@@ -473,9 +505,10 @@ host-local notification ledger, or second message store.
 
 The initial request is a bounded objective, not a transferable permission
 grant. Each agent may make ordinary reversible decisions within that objective
-using its own authenticated tools and policies. The sender agent answers routine
-recipient questions automatically when the existing request/context already
-contains the answer.
+using its own authenticated tools and policies. Installed policy directs the
+sender agent to answer routine recipient questions when the existing
+request/context already contains the answer; Witself cannot force that model
+action.
 
 Human escalation is reserved for genuinely new authority or an irreducible
 choice, including an otherwise unauthorized destructive action, expenditure,
@@ -484,15 +517,21 @@ material expansion of the objective. A message or foreground client may never
 set a "direct user authorized" flag merely because an earlier human initiated
 the thread.
 
-Every autonomous request is bounded by server-enforceable limits where the
-server has the necessary information:
+The implemented server-enforced workflow and size bounds are:
 
 - recipient/fan-out limit;
 - request expiry and lease duration;
 - maximum assignees and concurrent claims;
-- maximum message count/turns per thread;
-- per-agent and per-realm send/delivery rates; and
-- maximum open requests and autonomous replies.
+- message body/payload, candidate, offer, selection-history, and page limits;
+- bounded listen admission and wait duration.
+
+Backend-derived causal depth and durable deterministic `failure_count` are
+separately preserved as portable metadata and accounting inputs. They do not
+impose a per-thread turn or retry ceiling.
+
+Per-thread message/turn ceilings, per-agent and per-realm send/delivery rates,
+and plan-backed maximum-open-request/autonomous-reply quotas remain platform
+hardening work. They are not silently claimed by the current implementation.
 
 Token, model-call, and dollar budgets are client-side because a model-free
 backend cannot reliably observe them. A foreground client must stop with a
@@ -614,11 +653,12 @@ available for diagnosis without suppressing the next startup-wide pass.
    and competing-client race tests.
 3. **Foreground discovery and processing (complete in the current checkout)** —
    add a bounded message checkpoint, non-blocking startup listen, active-client
-   handling guidance, backend-owned causal-depth and deterministic failure-count
-   bounds, and provider-accurate hook delivery.
-4. **Provider conformance** — Codex and Claude Code receive automatic bounded
-   checkpoint injection; Cursor and Grok Build use guided `self.show`. Every
-   runtime uses MCP listen for unread metadata.
+   handling guidance, backend-owned causal-depth metadata, durable deterministic
+   failure accounting, and provider-accurate hook behavior.
+4. **Provider conformance** — supported Codex and Claude Code hooks automatically
+   attempt bounded checkpoint injection and fail open; Cursor and Grok Build use
+   guided `self.show`. Every runtime's installed policy directs it to use MCP
+   listen for unread metadata; that model action is not forced.
 5. **Recipient fan-out (complete in the current checkout)** — bounded explicit
    lists and realm snapshots with per-recipient delivery/read/ack and archive
    coverage.
@@ -628,27 +668,35 @@ available for diagnosis without suppressing the next startup-wide pass.
    renewal, expiry, release, completion, reassignment, and archive interruption.
    This slice consumes current runtime instructions and does not wait for a
    future responsibility/directive schema.
-7. **Guardrails and conformance** — add rate/budget enforcement,
-   disabled-agent-specific behavior, broader competing-client races, interruption
-   recovery, metrics, audit, and three-cloud/export-import tests.
+7. **Platform hardening (deferred; not a core completion blocker)** — add
+   plan-backed rate/meter enforcement, disabled-agent-specific policy,
+   additional metrics, and broader live three-cloud conformance. Core
+   competing-client races, interruption recovery, audit, and export/import are
+   already covered.
 
-An active client handles direct deliveries and open-request roles. It can offer
-or decline, rank durable offers as the immutable coordinator, claim selected
-work, renew its lease, and atomically complete a linked result. Direct
-question/reply continuation uses canonical thread messages while backend causal
-depth enforces the turn bound. If a client is not active, every pending step
-remains durable; no wake or immediate-processing claim is made.
+Installed policy directs an active client to handle direct deliveries and
+open-request roles: offer or decline, rank durable offers as the immutable
+coordinator, claim selected work, renew its lease, and atomically complete a
+linked result. It cannot force model compliance. Direct question/reply
+continuation uses canonical thread messages; backend causal depth records the
+chain but does not enforce a turn ceiling. If a client is not active, every
+pending step remains durable; no wake or immediate-processing claim is made.
 
 ## Acceptance Scenarios
 
-- A direct request sent while Bob is offline remains unacknowledged and is
-  processed on Bob's next foreground turn.
+These scenarios assume active clients follow installed policy. Backend
+guarantees concern durable state and fencing, not model action.
+
+- A direct request sent while Bob is offline remains unacknowledged and becomes
+  discoverable on Bob's next foreground turn; processing depends on client
+  compliance with installed policy.
 - Two active Bob clients racing the same request produce one current claim and
   no duplicate durable result.
-- Moving a conversation or retry between machines cannot reset the conversation
-  turn or failure bounds: Postgres causal depth and message `failure_count`
-  remain authoritative, while processing generation remains the stale-writer
-  fence.
+- Moving a conversation or retry between machines cannot reset durable causal
+  metadata or failure accounting: Postgres causal depth and message
+  `failure_count` remain authoritative values, while processing generation
+  remains the stale-writer fence. No fixed turn or retry threshold is
+  backend-enforced.
 - A terminal result remains a canonical unacknowledged delivery until Scott's
   active client reads, handles, and acknowledges it.
 - Bob asks Scott a question; Scott answers from the original visible context;
@@ -673,7 +721,7 @@ remains durable; no wake or immediate-processing claim is made.
 - The backend can pass every test without any provider credential or model
   network call.
 
-## Open Implementation Choices
+## Deferred Extensions And Tunables
 
 - Default short reply wait, offer window, request expiry, lease duration, and
   turn/message limits.

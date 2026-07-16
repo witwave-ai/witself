@@ -311,7 +311,7 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
   locked durable parent; callers cannot set or reset the value.
 - Migration `0036` adds the independent, durable `failure_count` to each direct
   delivery. Only release of the exact fence with `deterministic_failure=true`
-  increments it; provider-wide, configuration, cancellation, and
+  increments it; provider-wide, configuration, cancellation, timeout, and
   lease-maintenance release paths do not.
 - Migration `0037` lets one message target a direct agent, a bounded explicit
   agent set, or the authenticated realm. One immutable message header owns the
@@ -327,16 +327,16 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
   acknowledgement remains a later recovery boundary.
 - Processing generation is only the stale-writer fence. Exact live-claim replay
   keeps it; a takeover after release or expiry advances it without consuming
-  the deterministic failure budget. Foreground clients use `failure_count` for
-  bounded retry/escalation policy.
+  `failure_count`. Installed policy directs foreground clients to use that count
+  for retry/escalation; the backend does not impose a fifth-attempt threshold.
 - Delivery is at-least-once with per-recipient (and per-conversation) ordering
   and explicit read/acknowledgement state. Explicit-list and realm audiences
   are atomically resolved into per-member delivery rows. Group fanout remains a
   follow-on policy slice.
 - `from` is **always derived from the authenticated token, never from input**, so
-  sender forgery is structurally impossible through the API. `message:send` and
-  `message:read` scopes gate the surface, and send/deliver/read events are
-  audited.
+  sender forgery is structurally impossible through the API. Send/deliver/read
+  events are audited; granular `message:send` and `message:read` policy scopes
+  remain target platform integration.
 - Ordinary sends normalize omitted kind to actionable `request` on every
   frontend/core path. Explicit `note` is FYI-only and may be read and
   acknowledged without treating it as work. The separate open-request
@@ -346,16 +346,19 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
   message can carry data toward a memory or fact write, but it cannot itself
   authorize a cross-agent write — writes still require a matching policy through
   the [Authorization Boundary](#authorization-boundary).
-- Rate limits apply to send and delivery. Messages sent and delivered are metered
-  dimensions; see [billing-and-limits.md](billing-and-limits.md).
-- Foreground clients are the inference boundary. At active task startup they
-  inspect `self.show.message_checkpoint`, make a zero-wait `message.listen`, and
-  scan open-request roles. Candidates offer/decline, the exact coordinator
-  ranks durable offers, and selected agents execute fenced claims. Codex and
-  Claude Code may receive the content-free checkpoint automatically through
-  hooks; Cursor and Grok Build use guided MCP calls. Every runtime obtains
-  unread metadata through listen. No daemon, provider child, or captured
-  provider credential participates.
+- Plan-backed send/delivery rate limits and metered dimensions are target
+  platform integration; they are not implied by the current size, fan-out, or
+  listen-admission bounds. See [billing-and-limits.md](billing-and-limits.md).
+- Foreground clients are the inference boundary. At active task startup the
+  installed policy directs them to inspect `self.show.message_checkpoint`, make
+  a zero-wait `message.listen`, and scan open-request roles. It also directs
+  candidates to offer/decline, the exact coordinator to rank durable offers, and
+  selected agents to execute fenced claims. Supported Codex and Claude Code
+  hooks automatically attempt content-free checkpoint injection and fail open;
+  Cursor and Grok Build use guided MCP calls. Every runtime's policy
+  directs it to obtain unread metadata through listen, but cannot force model
+  compliance. No daemon, provider child, or captured provider credential
+  participates.
 - Surfaces: CLI `message send|reply|list|listen|read|ack|claim|renew|release|complete`,
   `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`.
   MCP mirrors those ordinary and request operations. HTTP uses `/v1/messages`,

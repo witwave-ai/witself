@@ -1011,9 +1011,11 @@ and exact fence. Complete inserts the server-derived result reply, links it, and
 marks processing completed in one PostgreSQL transaction; ack remains separate.
 Generation is solely the stale-writer fence. An exact-fence release increments
 `failure_count` only when its request carries `deterministic_failure=true`;
-provider-wide, configuration, cancellation, and lease-maintenance releases
-leave it unchanged. The current runner escalates the fifth deterministic attempt
-by default. Logical account import preserves completed links and `failure_count`,
+provider-wide, configuration, cancellation, timeout, and lease-maintenance releases
+leave it unchanged. The installed foreground policy directs the client to
+complete the fifth deterministic attempt as a durable escalation; the backend
+stores the count but cannot force model compliance. Logical account import
+preserves completed links and `failure_count`,
 but changes a claimed row to available, increments its generation, and clears
 claim/key/lease fields so an old source-cell fence cannot survive. Schema-35
 import validates message causal depth against the reply graph; older archives

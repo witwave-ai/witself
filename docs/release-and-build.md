@@ -1,7 +1,9 @@
 # Witself Release And Build Notes
 
-Status: draft. This document captures implementation, module, and distribution
-requirements before code exists.
+Status: implemented release path with additional hardening targets. The current
+automation is defined by `.github/workflows/release.yml`, `.goreleaser.yaml`,
+the Helm chart, and `install.sh`; those executable sources win if this document
+drifts.
 
 Narrative-memory decision (accepted 2026-07-14): release artifacts have no
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
@@ -11,13 +13,47 @@ vector rows, and deterministic hybrid ranking are implemented under the
 contract in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+## Current Automated Release And Rollout Boundary
+
+A stable release starts from a green commit on `main`. Tags include the `v`
+prefix, while artifact, container, chart, and GitOps versions omit it:
+
+```sh
+VERSION="${RELEASE_VERSION:?set RELEASE_VERSION without a v prefix}"
+git tag "v${VERSION}"
+git push origin "v${VERSION}"
+```
+
+The tag-triggered `release` workflow reruns the Go, PostgreSQL, lint, nested
+Pulumi-module, and vulnerability gates before publishing. GoReleaser then
+publishes the macOS/Linux archives, checksum signature and certificate,
+archive SBOMs, GitHub release, multi-architecture CLI and server images,
+signed image manifests, and the `witself`, `witself-infra`, and
+`witself-admin` Homebrew formulae. The workflow separately publishes and
+attests the version-matched OCI Helm chart and attaches build-provenance
+attestations. A manual `workflow_dispatch` is a non-publishing snapshot build.
+
+Publishing a tag does **not** deploy a cell. After every required release
+artifact exists, roll only the intended canary or wave with
+`scripts/roll-cell.sh`, review the resulting GitOps diff, and commit it to
+`main`. Argo CD reconciles that desired state only in cells where the bootstrap
+application is actually installed and healthy. See
+[Deployment Cells](deployment-cells.md) and [`.gitops/README.md`](../.gitops/README.md).
+
+The current Helm chart does not render a migration Job. With a database DSN,
+`witself-server serve` applies its embedded Goose migrations before opening the
+service; a migration failure prevents that process from serving. A rollout is
+therefore not complete until the replacement pods are Ready and report the
+expected build from `/v1/version`. This startup behavior must be considered
+before any future explicit migration Job is introduced.
+
 ## Goals
 
 - Build Witself as a Go project with one shared core, one public CLI/MCP
   binary, and one public backend API server binary.
-- Treat v0 as a usable cloud-shaped slice with CLI, MCP stdio, `witself-server
-  serve --dev`, PostgreSQL-backed deterministic lexical memory, images, a Helm
-  skeleton, a Terraform AWS skeleton, CI, and release automation.
+- Treat v0 as a usable cloud-shaped slice with CLI, MCP stdio, `witself-server`,
+  PostgreSQL-backed deterministic lexical memory, images, a Helm chart, the
+  Pulumi-based cell provisioner, CI, and release automation.
 - Start from the scaffold boundary in [docs/scaffold-readiness.md](scaffold-readiness.md).
 - Keep the project on the latest stable Go release that is practical at the time
   implementation or release work happens.
@@ -26,8 +62,7 @@ contract in
   backend implementation starts.
 - Support Homebrew and universal `curl | sh` installation from the beginning.
 - Make release artifacts verifiable with checksums.
-- Sign release archives, checksum manifests, and container images from the first
-  release.
+- Sign checksum manifests and container-image manifests.
 - Publish SBOMs and build provenance for release archives and container images
   from the first release.
 - Keep the source repository, release artifacts, and packages public.
@@ -36,12 +71,12 @@ contract in
   `witself-server` exists.
 - Treat Prometheus metrics, Kubernetes health probes, and chart-level
   observability support as release-gated server functionality.
-- Include public Terraform modules and example stacks for AWS, GCP, and Azure
-  under `infra/terraform`.
+- Ship the public Pulumi-based AWS, GCP, and Azure cell provisioner from the
+  nested `infra/pulumi` module.
 - Make managed and self-hosted backend deployment mechanics visible and
   reviewable from the public repo.
-- Add a release GitHub Action immediately, even before the first product
-  release, so release mechanics are visible and reviewable from day one.
+- Keep the tag-triggered release GitHub Action visible and reviewable with the
+  product source.
 
 ## Go Baseline
 
@@ -133,10 +168,7 @@ Required checks:
 - Helm template checks that API, health, and metrics use separate named
   container ports and that metrics resources are omitted when disabled.
 - Kubernetes manifest schema validation for rendered Helm templates.
-- Terraform formatting with `terraform fmt -check -recursive infra/terraform`.
-- Terraform validation for modules and example stacks where practical.
-- Terraform linting with `tflint`.
-- Terraform static security checks with `checkov` or an equivalent tool.
+- Nested `infra/pulumi` vet, build, tests, and golangci-lint.
 - GoReleaser release-config checks.
 - Release artifact signing checks.
 - SBOM generation checks.
@@ -155,66 +187,59 @@ Use concurrency cancellation so superseded pushes do not leave stale CI running.
 
 ## Release Action
 
-The repository should include a release workflow as soon as the repository is
-initialized, before the first product release.
+The repository's current release workflow is `.github/workflows/release.yml`.
 
 Workflow:
 
 - Path: `.github/workflows/release.yml`
-- Tag trigger: `v*.*.*`
+- Tag trigger: `v*`
 - Manual trigger: `workflow_dispatch`
 - Primary release tool: GoReleaser.
 
-The release action should own:
+The implemented release action owns:
 
 - Verifying the Go toolchain from `go.mod`.
-- Running the required Go, module, docs, shell, and release-config checks.
+- Running gofmt, vet, build, race tests, golangci-lint, the nested Pulumi module
+  gates, and govulncheck against PostgreSQL-backed store tests.
 - Building release archives for macOS and Linux.
-- Building both `ws` and `witself-server` release archives once the server
-  exists.
+- Building `witself`, `witself-server`, `witself-admin`, and `witself-infra`.
 - Generating SHA256 checksums.
-- Signing release archives and checksum manifests.
-- Generating SBOMs for release archives and container images.
-- Publishing build provenance or equivalent attestations.
+- Signing the checksum manifest with a keyless certificate.
+- Generating archive SBOMs and container SBOM attestations.
+- Publishing build-provenance attestations for archives and the chart.
 - Publishing public GitHub Release assets.
 - Publishing the public GHCR CLI/MCP image at
   `ghcr.io/witwave-ai/images/witself`.
 - Publishing the public GHCR backend image at
-  `ghcr.io/witwave-ai/images/witself-server` once the server exists.
-- Publishing the public Helm chart at `ghcr.io/witwave-ai/charts/witself-server` once
-  the server exists.
+  `ghcr.io/witwave-ai/images/witself-server`.
+- Publishing the public Helm chart at
+  `ghcr.io/witwave-ai/charts/witself-server`.
 - Signing the published GHCR images.
-- Signing or provenance-attesting the published Helm chart.
-- Updating the public Homebrew tap formula in `witwave-ai/homebrew-tap`.
-- Running Homebrew, curl installer, CLI/MCP image, backend image, and Helm chart
-  smoke tests.
+- Provenance-attesting the published Helm chart.
+- Updating the three public Homebrew formulae in `witwave-ai/homebrew-tap`.
+
+Broader published-artifact installation smoke tests remain release-hardening
+targets; they are not silently implied by the current workflow.
 
 Required workflow permissions:
 
 - `contents: write` for creating or updating GitHub Releases.
 - `packages: write` for publishing GHCR packages.
-- `id-token: write` for keyless signing and provenance, or an equivalent
-  explicitly managed signing credential if keyless signing is not used.
+- `id-token: write` for keyless signing and provenance.
+- `attestations: write` for GitHub build-provenance records.
 
-Homebrew tap handling:
+Homebrew publication requires an existing `witwave-ai/homebrew-tap` repository
+and the `HOMEBREW_TAP_TOKEN` organization secret. The built-in workflow token
+cannot push formula updates across repositories.
 
-- The workflow must verify that `github.com/witwave-ai/homebrew-tap` exists
-  before publishing the formula.
-- If the tap repository does not exist, the workflow should create it as a
-  public repository when configured with an org-level release token that has
-  permission to create public repositories.
-- If the workflow is not configured with that permission, it should fail with a
-  clear setup error that names `witwave-ai/homebrew-tap` and the missing token
-  requirement.
-
-Manual `workflow_dispatch` should support a dry-run or snapshot path that builds
-artifacts and runs smoke tests without publishing a stable release.
+Manual `workflow_dispatch` builds a snapshot and skips stable publication and
+signing.
 
 ## Release Artifacts
 
-The first primary release artifact is the `ws` binary. Once backend work
-starts, releases should also include the public, separate `witself-server`
-binary.
+Current releases include the tenant CLI/MCP binary `witself` (with `ws` as an
+installed alias), the separate `witself-server`, the fleet-admin CLI
+`witself-admin`, and the Pulumi-based cell provisioner `witself-infra`.
 
 The primary repository should be public:
 
@@ -239,21 +264,21 @@ Target platforms:
 - Linux ARM64.
 - Linux x86-64.
 
-Release artifacts should include:
+Current release artifacts include:
 
-- Compressed archives for each target platform.
-- Both `ws` and `witself-server` binaries once the server exists.
+- Separate compressed archives for `witself`, `witself-server`,
+  `witself-admin`, and `witself-infra` on each target platform.
 - SHA256 checksums.
-- Signatures for archives and checksum manifests.
-- SBOMs.
-- Build provenance or equivalent attestations.
-- Machine-readable release metadata where practical.
-- Shell completions where practical.
+- A keyless signature and certificate for the checksum manifest.
+- Per-archive SBOMs.
+- Build-provenance attestations for release archives.
+
+Machine-readable release metadata and shell completions remain hardening
+targets.
 
 ## Helm Chart
 
-Witself should publish a public Helm chart as the first self-hosting deployment
-artifact once `witself-server` exists.
+Witself publishes a public Helm chart for `witself-server` on every stable tag.
 
 Initial chart:
 
@@ -261,11 +286,12 @@ Initial chart:
 - OCI package: `ghcr.io/witwave-ai/charts/witself-server`
 - Primary workload: `witself-server`
 
-Expected install shape:
+Install shape, where `VERSION` omits the tag's `v` prefix:
 
 ```sh
+VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
 helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
-  --version 0.1.0 \
+  --version "$VERSION" \
   --namespace witself \
   --create-namespace \
   --values ./witself-values.yaml
@@ -282,13 +308,15 @@ Chart requirements:
   in default values.
 - Values should support existing Kubernetes Secret references and
   deployment-native identity such as service account annotations.
-- The chart should include Deployment, Service, ServiceAccount, ConfigMap,
-  optional Ingress, optional NetworkPolicy, and migration Job templates.
+- The chart includes Deployment, Service, ServiceAccount, ConfigMap, optional
+  Ingress, and optional NetworkPolicy templates. It does not currently render a
+  migration Job.
 - The chart should include liveness, readiness, startup, metrics,
   ServiceMonitor, PodMonitor, resource, autoscaling, disruption-budget,
   security-context, and network-policy support where practical.
-- Migration jobs should be explicit and opt-in for production upgrades, and
-  should cover canonical narrative-memory tables and lexical indexes.
+- When a database Secret is configured, `witself-server serve` applies embedded
+  Goose migrations before serving. Failed migrations keep the pod from becoming
+  Ready and must stop the rollout.
 - Chart releases should include rendered-template smoke tests, schema
   validation, signing or provenance attestation, and public publication.
 
@@ -332,68 +360,38 @@ Required release checks once the API exists:
   `witself://<realm-handle>/agent/<name>`, which parses but resolves only once
   cross-realm collaboration ships.
 
-## Terraform Infrastructure
+## Pulumi Infrastructure
 
-Witself should keep public Terraform in `infra/terraform` for AWS, GCP, and
-Azure self-hosted and managed-cloud substrate definitions.
+Current cell infrastructure lives in the nested Go module under `infra/pulumi`.
+The release verify job runs vet, build, tests, and golangci-lint inside that
+module, and GoReleaser packages its `witself-infra` command as separate macOS
+and Linux archives and a Homebrew formula. The command drives Pulumi through
+the Automation API and keeps its large provider graph outside the root CLI
+module.
 
-Initial layout:
-
-```text
-infra/terraform/
-  modules/
-    aws/
-    gcp/
-    azure/
-  stacks/
-    self-hosted/
-      aws/
-      gcp/
-      azure/
-    witself-cloud/
-      aws/
-      gcp/
-      azure/
-```
-
-Terraform modules are versioned with the repository release tags. Initial
-consumption can use Git sources pinned to a tag:
-
-```hcl
-module "witself_aws" {
-  source = "git::https://github.com/witwave-ai/witself.git//infra/terraform/modules/aws?ref=v0.1.0"
-}
-```
-
-Modules should provision PostgreSQL, object/blob storage, Kubernetes, workload
-identity, and networking where practical. KMS
-provisioning is optional and only required when field-level encryption of
-`sensitive` facts is enabled.
-
-Release checks should validate Terraform formatting, module validation, linting,
-static security checks, and secret scanning. Real state files, backend
-credentials, production `.tfvars`, customer identifiers, cloud credentials, and
-secrets must not be release artifacts.
+Release artifacts must never include Pulumi state, backend credentials, cloud
+credentials, customer identifiers, or secret configuration. A release makes
+the provisioner binary available; it does not run an infrastructure update or
+change a cell.
 
 ## Container Images
 
-Witself should publish public Docker images from Dockerfiles under `images/*`.
-The first CLI/MCP image should be:
+Witself publishes public Docker images from Dockerfiles under `images/*`. The
+CLI/MCP image is:
 
 - Dockerfile: `images/witself/Dockerfile`
 - Image package: `ghcr.io/witwave-ai/images/witself`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-The CLI/MCP image should run the same `ws` binary published in release
-archives. The default entrypoint should be `ws`, allowing both ordinary CLI
-usage and MCP usage:
+The CLI/MCP image runs the same `witself` binary published in release archives.
+Its entrypoint supports both ordinary CLI and MCP usage:
 
 ```sh
 docker run --rm ghcr.io/witwave-ai/images/witself:latest version
 docker run --rm -i ghcr.io/witwave-ai/images/witself:latest mcp serve
 ```
 
-Once the backend API server exists, the backend image should be:
+The backend image is:
 
 - Dockerfile: `images/witself-server/Dockerfile`
 - Image package: `ghcr.io/witwave-ai/images/witself-server`
@@ -408,27 +406,27 @@ docker run --rm -p 8080:8080 -p 8081:8081 -p 9090:9090 \
   ghcr.io/witwave-ai/images/witself-server:latest serve
 ```
 
-Image requirements:
+Implemented image behavior:
 
-- Build from public base images.
-- Run as a non-root user where practical.
+- Build from the public distroless static base image.
+- Run as the distroless non-root user.
 - Include version, commit, and build date metadata labels.
-- Publish immutable version tags such as `v0.1.0` and a moving `latest` tag.
+- Publish immutable version tags without the Git tag's `v` prefix, plus a
+  moving `latest` tag.
 - Support `linux/amd64` and `linux/arm64`.
 - Do not include tokens, passphrases, store files, identity exports,
   model/provider credentials, or test fixtures in an image.
-- Smoke test `witself version` in the CLI/MCP image before publishing.
-- Smoke test `witself-server version` and `witself-server healthcheck` in the
-  backend image before publishing.
 - Sign published images.
 - Publish image SBOMs.
-- Publish image build provenance or equivalent attestations.
+- Publish container SBOM attestations.
+
+Published-image execution smoke tests remain release-hardening targets.
 
 Container publishing should use GitHub Packages / GHCR with public visibility.
 Initial package paths should be:
 
 - `ghcr.io/witwave-ai/images/witself`
-- `ghcr.io/witwave-ai/images/witself-server` once the server exists
+- `ghcr.io/witwave-ai/images/witself-server`
 
 ## Homebrew
 
@@ -437,26 +435,24 @@ Homebrew distribution must use the Witwave-owned tap repository:
 - Repository: `github.com/witwave-ai/homebrew-tap`
 - Visibility: public
 - Tap name: `witwave-ai/tap`
-- Formula path: `Formula/ws.rb`
-- Optional infra formula path: `Formula/witself-infra.rb`
-- Install command: `brew install witwave-ai/tap/ws`
-- Optional infra install command: `brew install witwave-ai/tap/witself-infra`
+- Formula paths: `Formula/witself.rb`, `Formula/witself-infra.rb`, and
+  `Formula/witself-admin.rb`
+- Install commands: `brew install witwave-ai/tap/witself`,
+  `brew install witwave-ai/tap/witself-infra`, and
+  `brew install witwave-ai/tap/witself-admin`
 
-Before the first Homebrew release, release automation should check whether
-`witwave-ai/homebrew-tap` exists. If it does not exist, create it under the
-`witwave-ai` organization before publishing the formula.
-
-Early release automation may commit directly to the tap. Once branch protection
-or review policy exists, the release process should open a pull request to the
-tap instead.
+GoReleaser currently commits formula updates directly to the existing tap by
+using `HOMEBREW_TAP_TOKEN`.
 
 Homebrew release smoke tests should verify:
 
 - `brew tap witwave-ai/tap`
-- `brew install witwave-ai/tap/ws`
+- `brew install witwave-ai/tap/witself`
 - `witself version`
 - `brew install witwave-ai/tap/witself-infra`
 - `witself-infra help`
+- `brew install witwave-ai/tap/witself-admin`
+- `witself-admin version`
 
 The default CLI install should stay lean. Operators who provision cells install
 `witself-infra` explicitly; most `ws` users should not receive the infrastructure
@@ -484,42 +480,30 @@ Installer requirements:
 - Verify signatures when the required signing metadata is available.
 - Install to `/usr/local/bin` when writable.
 - Fall back to `$HOME/.local/bin` when a system install path is not writable.
-- Install `ws` by default.
-- Support selecting `ws`, `witself-infra`, or `witself-server` through the first
-  positional argument, such as `sh -s witself-infra`.
+- Install `witself` by default and create the `ws` alias beside it.
+- Support selecting `witself`, `witself-infra`, `witself-server`, or
+  `witself-admin` through the first positional argument, such as
+  `sh -s witself-infra`.
 - Keep `WITSELF_BINARY` as a compatibility alias for selecting the binary.
 - Support selecting a version through `WS_VERSION`, or through the second
   positional argument when a binary is also supplied.
 - Print the installed version and next-step PATH guidance.
 
-## First Release Flow
+## Release Readiness Checklist
 
-1. Confirm the Go baseline is still the latest stable release.
-2. Add or verify `.github/workflows/release.yml`.
-3. Run Go tests, vet, module checks, and docs checks.
-4. Run Dockerfile lint and image build smoke tests.
-5. Create or verify public `github.com/witwave-ai/homebrew-tap`.
-6. Build release artifacts for macOS and Linux.
-7. Generate checksums, signatures, SBOMs, and provenance.
-8. Publish public GitHub Release artifacts, checksums, signatures, SBOMs, and
-   provenance.
-9. Publish the public signed CLI/MCP GHCR image at
-   `ghcr.io/witwave-ai/images/witself`.
-10. Publish the public signed backend GHCR image at
-    `ghcr.io/witwave-ai/images/witself-server` once the server exists.
-11. Publish the public Helm chart at `ghcr.io/witwave-ai/charts/witself-server` once
-    the server exists.
-12. Publish or update the Homebrew formula in `witwave-ai/homebrew-tap`.
-13. Smoke test Homebrew installation.
-14. Smoke test the universal installer, including checksum and signature
-    verification where available.
-15. Smoke test the published CLI/MCP Docker image.
-16. Smoke test the published backend Docker image once the server exists.
-17. Smoke test the published Helm chart with `helm show chart`, `helm template`,
-    and a representative install or dry-run path.
-18. Smoke test health and metrics behavior for the backend image and Helm chart
-    when those artifacts exist.
-19. Verify Terraform modules and example stacks are formatted, validated,
-    linted, and secret-scanned.
-20. Verify `witself version` and `witself-server version` report the expected
-    version and build metadata.
+1. Start from a clean, green `main` commit and choose an unused semantic
+   version.
+2. Push `v${VERSION}` and wait for the tag-triggered `release` workflow to
+   succeed.
+3. Verify the GitHub release, CLI/server GHCR manifests, OCI Helm chart, and
+   Homebrew formula updates all carry `${VERSION}` and the tagged commit.
+4. Exercise the published CLI and server binaries before changing GitOps.
+5. Roll one intended canary cell by passing `${VERSION}` to
+   `scripts/roll-cell.sh`; review, commit, and push only the two application
+   version pins.
+6. Verify Argo health, replacement-pod readiness, `/v1/version`, and the
+   release-specific feature smoke in that provisioned cell.
+7. Repeat the GitOps change and verification for each intended rollout wave.
+8. Upgrade and, when managed client policy changed, reinstall the supported
+   client integrations before declaring an end-to-end client feature
+   operationally complete.

@@ -577,13 +577,16 @@ Verify the original message's backend-derived `causal_depth` and that the
 completion result is exactly parent depth plus one. Do not supply a depth field;
 the server rejects caller-owned routing/causality. Processing `generation` is
 only the durable claim fence. Migration-0036 `failure_count` is the separate
-cross-machine deterministic failure bound. The ordinary CLI release above does
-not increment it; a trusted foreground client uses the exact-fence HTTP field
-only for a message-specific deterministic failure.
+cross-machine deterministic failure accounting. Ordinary release does not
+increment it. After a repeatable message-specific deterministic failure, a foreground
+client may release the exact fence with `--deterministic-failure` (or MCP
+`deterministic_failure=true`); never use that marker for provider-wide,
+configuration, cancellation, timeout, or lease-maintenance failures.
 
-An installed runtime handles the same lifecycle only while it is active. At a
-foreground task boundary it inspects the bounded message checkpoint and makes a
-zero-wait metadata query:
+Installed policy directs a runtime to handle the same lifecycle only while it
+is active; model compliance is not forced. At a foreground task boundary the
+policy directs it to inspect the bounded message checkpoint and make a zero-wait
+metadata query:
 
 ```sh
 ws self show --json
@@ -597,17 +600,18 @@ ws message read msg_124 --json
 
 Codex and Claude Code may receive the value-free checkpoint automatically
 through supported hooks. Cursor and Grok Build use the installed guidance and
-MCP fallback to call `self.show`. Every active runtime calls
-`message.listen(wait_seconds=0)` to retrieve unread metadata. No hook exposes a
+MCP fallback to call `self.show`. The installed policy instructs every active
+runtime to call `message.listen(wait_seconds=0)` to retrieve unread metadata;
+model compliance is not forced by a hook or the backend. No hook exposes a
 message body, marks a delivery read, acknowledges it, starts inference, or wakes
 an idle runtime.
 
 There is no background message service, provider-credential capture, or
 host-local notification ledger. If the runtime closes, pending and terminal
 messages remain canonical and unacknowledged in PostgreSQL until the next
-foreground turn. Backend-derived `causal_depth` and `failure_count` preserve
-portable turn and retry safety; processing generation remains only the
-stale-writer fence.
+foreground turn. Backend-derived `causal_depth` and `failure_count` remain
+portable causal and failure-accounting inputs; neither imposes a workflow
+threshold. Processing generation remains only the stale-writer fence.
 
 The post-v0 cross-realm story (realm-qualified addressing, the signed realm card,
 blind relay, and federation) builds on this same mailbox. See
