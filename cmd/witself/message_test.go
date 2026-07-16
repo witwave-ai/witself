@@ -348,6 +348,7 @@ func TestMessageProcessingCommandsUseFencedActionContracts(t *testing.T) {
 		append([]string{"message", "claim", "msg_work", "--lease", "90s", "--idempotency-key", "claim-key"}, connection...),
 		append([]string{"message", "renew", "msg_work", "--claim", "mcl_1", "--generation", "3", "--lease", "2m"}, connection...),
 		append([]string{"message", "release", "msg_work", "--claim", "mcl_1", "--generation", "3"}, connection...),
+		append([]string{"message", "release", "msg_work", "--claim", "mcl_1", "--generation", "3", "--deterministic-failure"}, connection...),
 		append([]string{"message", "complete", "msg_work", "--claim", "mcl_1", "--generation", "3", "--subject", "Result", "--kind", "result", "--body", "done", "--payload-file", payloadFile, "--idempotency-key", "complete-key"}, connection...),
 	}
 	for _, args := range tests {
@@ -355,7 +356,7 @@ func TestMessageProcessingCommandsUseFencedActionContracts(t *testing.T) {
 			t.Fatalf("run(%q) code = %d", args, code)
 		}
 	}
-	if len(got) != 4 {
+	if len(got) != 5 {
 		t.Fatalf("requests = %#v", got)
 	}
 	if got[0].Action != "claim" || got[0].IdempotencyKey != "claim-key" || got[0].Body["lease_seconds"] != float64(90) {
@@ -367,19 +368,36 @@ func TestMessageProcessingCommandsUseFencedActionContracts(t *testing.T) {
 	if got[2].Action != "release" || got[2].Body["claim_id"] != "mcl_1" || got[2].Body["generation"] != float64(3) {
 		t.Fatalf("release request = %#v", got[2])
 	}
-	if got[3].Action != "complete" || got[3].IdempotencyKey != "complete-key" || got[3].Body["claim_id"] != "mcl_1" ||
-		got[3].Body["generation"] != float64(3) || got[3].Body["subject"] != "Result" || got[3].Body["kind"] != "result" ||
-		got[3].Body["body"] != "done" {
-		t.Fatalf("complete request = %#v", got[3])
+	if _, ok := got[2].Body["deterministic_failure"]; ok {
+		t.Fatalf("default release unexpectedly marked a deterministic failure: %#v", got[2])
 	}
-	payload, ok := got[3].Body["payload"].(map[string]any)
+	if got[3].Action != "release" || got[3].Body["deterministic_failure"] != true {
+		t.Fatalf("deterministic release request = %#v", got[3])
+	}
+	if got[4].Action != "complete" || got[4].IdempotencyKey != "complete-key" || got[4].Body["claim_id"] != "mcl_1" ||
+		got[4].Body["generation"] != float64(3) || got[4].Body["subject"] != "Result" || got[4].Body["kind"] != "result" ||
+		got[4].Body["body"] != "done" {
+		t.Fatalf("complete request = %#v", got[4])
+	}
+	payload, ok := got[4].Body["payload"].(map[string]any)
 	if !ok || payload["ok"] != true {
-		t.Fatalf("complete payload = %#v", got[3].Body["payload"])
+		t.Fatalf("complete payload = %#v", got[4].Body["payload"])
 	}
 	for _, forbidden := range []string{"to", "thread_id", "reply_to_message_id", "from", "sender", "actor", "account_id", "realm_id"} {
-		if _, ok := got[3].Body[forbidden]; ok {
-			t.Fatalf("complete request unexpectedly contains %q: %#v", forbidden, got[3])
+		if _, ok := got[4].Body[forbidden]; ok {
+			t.Fatalf("complete request unexpectedly contains %q: %#v", forbidden, got[4])
 		}
+	}
+}
+
+func TestPrintMessageProcessingHumanIncludesFailureCount(t *testing.T) {
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return printMessageProcessing("msg_work", client.MessageProcessing{
+			ClaimID: "mcl_1", Generation: 3, State: "available", FailureCount: 4,
+		}, false)
+	})
+	if code != 0 || stderr != "" || stdout != "msg_work\tmcl_1\t3\tavailable\t-\t4\n" {
+		t.Fatalf("processing output = code %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 
