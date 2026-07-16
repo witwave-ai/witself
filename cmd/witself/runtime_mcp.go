@@ -68,6 +68,14 @@ func unregisterCursorMCP() error {
 }
 
 func cursorMCPPath() (string, error) {
+	root, err := cursorConfigRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "mcp.json"), nil
+}
+
+func cursorConfigRoot() (string, error) {
 	root := strings.TrimSpace(os.Getenv("CURSOR_CONFIG_DIR"))
 	if root == "" {
 		home, err := os.UserHomeDir()
@@ -76,7 +84,7 @@ func cursorMCPPath() (string, error) {
 		}
 		root = filepath.Join(home, ".cursor")
 	}
-	return filepath.Join(root, "mcp.json"), nil
+	return root, nil
 }
 
 func readJSONObject(path string) (map[string]any, error) {
@@ -87,37 +95,25 @@ func readJSONObject(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	root := map[string]any{}
-	if err := json.Unmarshal(raw, &root); err != nil {
+	return parseJSONObject(path, raw)
+}
+
+func parseJSONObject(path string, raw []byte) (map[string]any, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	root, ok := value.(map[string]any)
+	if !ok || root == nil {
+		return nil, fmt.Errorf("parse %s: top-level value must be an object", path)
 	}
 	return root, nil
 }
 
 func writeJSONObjectAtomic(path string, root map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".witself-mcp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(append(raw, '\n')); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return writeFileAtomic(path, append(raw, '\n'), 0o600)
 }

@@ -1043,7 +1043,10 @@ Cursor's rule is
 frontmatter. The default managed rule is discovered from the workspace's ancestor
 chain; a custom `CURSOR_CONFIG_DIR` is effective for routing only when the
 selected Cursor installation also discovers its `rules` directory. Cursor MCP
-keeps the standard dotted tool names, while Cursor Memories remain
+keeps the standard dotted tool names. Installation idempotently merges the
+required `Mcp(witself:*)` allowlist permission into
+`$CURSOR_CONFIG_DIR/cli-config.json`; uninstall removes it only when the
+Witself integration record says the installer created it. Cursor Memories remain
 project-scoped; when a user explicitly includes native Cursor memory in broad
 recall, its coverage is reported as partial.
 

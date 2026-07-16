@@ -181,6 +181,94 @@ exit 0
 	return enabledPath
 }
 
+func TestCursorInstallAndUninstallManageRequiredMCPPermission(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "cursor-test-bot")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	setupCursorRollbackCLI(t, fixture, cursorHome)
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cliConfigPath := filepath.Join(cursorHome, "cli-config.json")
+	if err := os.WriteFile(cliConfigPath, []byte(`{"permissions":{"allow":["Shell(ls)"],"deny":[]},"other":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "cursor-test-bot",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}
+	if code := installCmd(args); code != 0 {
+		t.Fatalf("install code = %d", code)
+	}
+	installed := readTestJSONObject(t, cliConfigPath)
+	allow := installed["permissions"].(map[string]any)["allow"].([]any)
+	if len(allow) != 2 || allow[0] != "Shell(ls)" || allow[1] != cursorWitselfMCPPermission {
+		t.Fatalf("installed Cursor allow list = %#v", allow)
+	}
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cursorConfigManagesWitselfMCPPermission(cfg.ManagedPermissions) {
+		t.Fatalf("managed permissions = %#v", cfg.ManagedPermissions)
+	}
+	// A later user-owned duplicate is indistinguishable by value, so uninstall
+	// must decrement the count by exactly the one entry Witself owns.
+	permissions := installed["permissions"].(map[string]any)
+	permissions["allow"] = append(allow, cursorWitselfMCPPermission)
+	if err := writeJSONObjectAtomic(cliConfigPath, installed); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := uninstallCmd([]string{"cursor"}); code != 0 {
+		t.Fatalf("uninstall code = %d", code)
+	}
+	uninstalled := readTestJSONObject(t, cliConfigPath)
+	allow = uninstalled["permissions"].(map[string]any)["allow"].([]any)
+	if len(allow) != 2 || allow[0] != "Shell(ls)" || allow[1] != cursorWitselfMCPPermission || uninstalled["other"] != true {
+		t.Fatalf("uninstalled Cursor config = %#v", uninstalled)
+	}
+}
+
+func TestCursorInstallPreservesPreexistingUserOwnedMCPPermission(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "cursor-test-bot")
+	cursorHome := filepath.Join(fixture.home, ".cursor")
+	setupCursorRollbackCLI(t, fixture, cursorHome)
+	if err := os.MkdirAll(cursorHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cliConfigPath := filepath.Join(cursorHome, "cli-config.json")
+	original := []byte(`{"permissions":{"allow":["Shell(ls)","Mcp(witself:*)"]},"other":true}`)
+	if err := os.WriteFile(cliConfigPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"cursor", "--account", "default", "--realm", "default", "--agent", "cursor-test-bot",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 0 {
+		t.Fatalf("install code = %d", code)
+	}
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursorConfigManagesWitselfMCPPermission(cfg.ManagedPermissions) {
+		t.Fatalf("pre-existing permission became installer-owned: %#v", cfg.ManagedPermissions)
+	}
+
+	if code := uninstallCmd([]string{"cursor"}); code != 0 {
+		t.Fatalf("uninstall code = %d", code)
+	}
+	got := readTestJSONObject(t, cliConfigPath)
+	allow := got["permissions"].(map[string]any)["allow"].([]any)
+	if len(allow) != 2 || allow[0] != "Shell(ls)" || allow[1] != cursorWitselfMCPPermission || got["other"] != true {
+		t.Fatalf("user-owned Cursor permission changed on uninstall: %#v", got)
+	}
+}
+
 func rollbackTestExecutable(t *testing.T) string {
 	t.Helper()
 	executable, err := currentExecutablePath()
@@ -745,6 +833,7 @@ func TestCursorHookInstallFailureRollsBackMCPConfigAndRouting(t *testing.T) {
 
 	for name, path := range map[string]string{
 		"MCP configuration": filepath.Join(cursorHome, "mcp.json"),
+		"CLI permissions":   filepath.Join(cursorHome, "cli-config.json"),
 		"routing rule":      filepath.Join(cursorHome, "rules", cursorMemoryRoutingRuleFile),
 	} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -923,6 +1012,7 @@ func TestCursorFailedUninstallRestoresRuleHooksMCPAndBinding(t *testing.T) {
 		"routing": routingPath,
 		"hooks":   hooksPath,
 		"MCP":     mcpPath,
+		"CLI":     filepath.Join(cursorHome, "cli-config.json"),
 		"config":  configPath,
 	} {
 		raw, err := os.ReadFile(path)

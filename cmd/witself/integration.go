@@ -173,6 +173,17 @@ func installCmd(args []string) int {
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
+	var cursorPermissionSnapshot cursorCLIConfigSnapshot
+	if runtime == transcriptcapture.RuntimeCursor {
+		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: inspect Cursor CLI permissions: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil {
+			cfg.ManagedPermissions = append([]string(nil), previousConfig.ManagedPermissions...)
+		}
+	}
 	previousHooks, err := snapshotRuntimeHooks(runtime)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: inspect existing runtime hooks: %v\n", err)
@@ -213,9 +224,15 @@ func installCmd(args []string) int {
 		previous := previousConfig
 		previousBinding = &previous
 	}
+	cursorPermissionTouched := false
 	rollbackInstall := func(mcpTouched, hooksTouched bool) {
 		if rollbackErr := restoreConfig(); rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+		}
+		if cursorPermissionTouched {
+			if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
+			}
 		}
 		if hooksTouched {
 			hookBinding := previousBinding
@@ -237,6 +254,17 @@ func installCmd(args []string) int {
 		}
 		if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCursor {
+		cursorPermissionTouched, err = cursorPermissionSnapshot.ensureWitselfMCPPermission()
+		if err != nil {
+			rollbackInstall(false, false)
+			fmt.Fprintf(os.Stderr, "witself: configure Cursor CLI permissions: %v\n", err)
+			return 1
+		}
+		if cursorPermissionTouched {
+			cfg.ManagedPermissions = addManagedCursorMCPPermission(cfg.ManagedPermissions)
 		}
 	}
 	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
@@ -389,6 +417,16 @@ func uninstallCmd(args []string) int {
 		)
 		return 1
 	}
+	var cursorPermissionSnapshot cursorCLIConfigSnapshot
+	cursorPermissionManaged := runtime == transcriptcapture.RuntimeCursor &&
+		cursorConfigManagesWitselfMCPPermission(cfg.ManagedPermissions)
+	if cursorPermissionManaged {
+		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: inspect Cursor CLI permissions: %v\n", err)
+			return 1
+		}
+	}
 	// Reject malformed managed routing before invoking any runtime CLI. This is
 	// intentionally read-only: CLI availability is the second preflight, and no
 	// local integration state is changed unless both checks pass.
@@ -430,7 +468,13 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
+	cursorPermissionTouched := false
 	rollbackUninstall := func(hooksTouched, mcpTouched bool) {
+		if cursorPermissionTouched {
+			if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
+			}
+		}
 		if mcpTouched && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
 			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
@@ -474,6 +518,14 @@ func uninstallCmd(args []string) int {
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", runtimeCLIErr)
+	}
+	if cursorPermissionManaged {
+		cursorPermissionTouched, err = cursorPermissionSnapshot.removeWitselfMCPPermission()
+		if err != nil {
+			rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
+			fmt.Fprintf(os.Stderr, "witself: remove Cursor CLI permissions: %v\n", err)
+			return 1
+		}
 	}
 	if err := transcriptcapture.RemoveConfig(runtime); err != nil {
 		rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
