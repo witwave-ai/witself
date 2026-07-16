@@ -46,11 +46,12 @@ func agentPeers(args []string) int {
 		return printJSON(peers)
 	}
 
-	w, flush := tableWriter("agent\tlast active\truntime\tlocation\tevent")
+	w, flush := tableWriter("agent\tlast activity (UTC)\tage\truntime\tlocation\tevent")
 	now := time.Now().UTC()
 	for _, peer := range peers.Peers {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			tabSafe(peer.Name), peerActivityTime(peer.LastActivityAt, now),
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			tabSafe(peer.Name), peerActivityTimestamp(peer.LastActivityAt),
+			peerActivityAge(peer.LastActivityAt, now),
 			peerActivityField(peer.LastRuntime), peerActivityField(peer.LastLocation),
 			peerActivityField(peer.LastEvent))
 	}
@@ -76,7 +77,14 @@ func verifyAgentConnection(ctx context.Context, conn agentConnection) error {
 	return nil
 }
 
-func peerActivityTime(value *time.Time, now time.Time) string {
+func peerActivityTimestamp(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "-"
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func peerActivityAge(value *time.Time, now time.Time) string {
 	if value == nil || value.IsZero() {
 		return "never"
 	}
