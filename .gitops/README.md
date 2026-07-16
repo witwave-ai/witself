@@ -24,6 +24,12 @@ loads one cell-specific [`cells/<cell>/values.yaml`](cells) file.
       values.yaml
     azure-sandbox-use2-dev/
       values.yaml
+    azure-sandbox-usw2-dev/
+      values.yaml
+    gcp-sandbox-use1-dev/
+      values.yaml
+    gcp-sandbox-usw2-dev/
+      values.yaml
 ```
 
 ## How app-of-apps works here
@@ -39,10 +45,10 @@ Those child Applications then render their own Helm charts with the same
 are mostly a tidy way to template Argo `Application` YAML and pass the same
 per-cell values through each layer.
 
-The cell values file is the single Git-owned place to pin chart versions, target
-revisions, regions, stable DNS names, namespaces, and secret references for that
-cell. For the current sandbox cell, that file is
-[`cells/aws-sandbox-usw2-dev/values.yaml`](cells/aws-sandbox-usw2-dev/values.yaml).
+Each cell values file is the single Git-owned place to pin chart versions,
+target revisions, regions, stable DNS names, namespaces, and secret references
+for that configured cell. A directory here is desired-state configuration, not
+evidence that its cell is provisioned, reachable, or currently reconciled.
 
 Stable DNS intent lives in that values file too: `cell.domain`, `cell.apiHost`,
 and `platform.externalDNS` describe what ExternalDNS should manage. Pulumi keeps
@@ -56,6 +62,33 @@ fork (`-gitops-repo`) would adjust the root source, and the per-cell values file
 would set `gitops.repoURL` for child Applications. A central fleet controller
 can move this to ApplicationSet later; for one Argo CD per cell, app-of-apps is
 the simpler control plane.
+
+## Rolling A Released Application
+
+Publish and verify the release before changing GitOps. The helper accepts the
+released version without the Git tag's `v` prefix and changes exactly the
+Witself server chart and image pins for one configured cell:
+
+```sh
+VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
+CELL="${ROLLOUT_CELL:?set ROLLOUT_CELL}"
+scripts/roll-cell.sh "$CELL" "$VERSION"
+git diff -- ".gitops/cells/${CELL}/values.yaml"
+```
+
+Run the helper from the repository root. Review the resulting diff, group only
+the intended canary or wave in one commit, and push that commit to `main`.
+Provisioned cells whose bootstrap application is healthy watch `main`; their
+child applications use automated sync, pruning, and self-healing.
+
+Do not treat a committed pin as deployment proof. For every provisioned cell,
+verify Argo health/sync, replacement-pod readiness, and the public
+`/v1/version` response before advancing the wave. With a database DSN,
+`witself-server serve` applies its embedded migrations before serving, so a
+migration failure prevents the replacement pod from becoming Ready. Complete
+release-specific API and client smoke tests before calling a feature
+operational. The full procedure is in
+[`docs/deployment-cells.md`](../docs/deployment-cells.md).
 
 ## Notes
 

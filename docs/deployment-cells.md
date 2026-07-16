@@ -45,10 +45,9 @@ and depends on nothing in another cell to serve them. A cell outage affects only
 tenants homed on that cell — blast-radius containment. There is no shared data store
 spanning cells.
 
-Each cloud's cell is provisioned from the per-cloud Terraform modules already planned
-in [cloud-targets.md](cloud-targets.md) and
-[terraform-infrastructure.md](terraform-infrastructure.md); a cell is one instantiation
-of a stack.
+Each cloud's cell is provisioned by the executable Pulumi program under
+[`infra/pulumi`](../infra/pulumi), as tracked in
+[cloud-targets.md](cloud-targets.md); a cell is one instantiation of a stack.
 
 ## Control plane
 
@@ -104,10 +103,10 @@ in the audit-event registry alongside `tenant.migration_started` /
 
 The fleet spans AWS, GCP, and Azure, across multiple accounts per cloud. Each cell is
 one cloud account/region. An independent second AWS account is not a special case — it
-is simply another cell. The fleet reuses the per-cloud Terraform modules from
-[cloud-targets.md](cloud-targets.md) and
-[terraform-infrastructure.md](terraform-infrastructure.md); adding a cloud or account
-means standing up another stack and registering its cell with the control plane.
+is simply another cell. The fleet reuses the AWS, GCP, and Azure paths in the
+Pulumi cell program described by [cloud-targets.md](cloud-targets.md); adding a
+cloud account or project means standing up another stack and registering its
+cell with the control plane.
 
 ## Cells at different versions
 
@@ -122,6 +121,61 @@ cell model, not a problem:
   [agent-collaboration.md](agent-collaboration.md)) covers cell capability advertisement.
 
 Because cells are isolated, a bad release is contained to the cells it reached.
+
+## Current GitOps Release Rollout
+
+The directories under `.gitops/cells/` are configured desired-state targets;
+their presence does not prove that the cell is provisioned, reachable, or
+currently reconciled. Confirm the intended rollout set from live Argo and cloud
+state before changing a values file.
+
+Release publication and cell deployment are separate operations. First verify
+that the tag-triggered release completed and that its version-matched chart
+exists. `VERSION` omits the Git tag's `v` prefix:
+
+```sh
+VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
+gh release view "v${VERSION}"
+helm show chart oci://ghcr.io/witwave-ai/charts/witself-server \
+  --version "$VERSION"
+```
+
+Then roll one provisioned canary by its exact cell-directory name:
+
+```sh
+CELL="${CANARY_CELL:?set CANARY_CELL}"
+scripts/roll-cell.sh "$CELL" "$VERSION"
+git diff -- ".gitops/cells/${CELL}/values.yaml"
+```
+
+The helper changes only `apps.witselfServer.chartVersion` and
+`apps.witselfServer.imageTag`, keeping the chart and image on the same released
+version. Review and commit the desired canary or wave to `main`; do not edit
+unrelated platform chart versions as part of an application rollout. A
+bootstrapped cell's Argo applications use automated pruning and self-healing,
+so they reconcile the committed values without a separate deployment command.
+
+For each provisioned cell in the wave, verify all of the following before
+advancing:
+
+1. The bootstrap, apps, and `witself-server` Argo applications are Healthy and
+   Synced.
+2. Replacement pods become Ready without sacrificing the required available
+   replicas.
+3. `GET https://<cell-api-host>/v1/version` reports `${VERSION}` and the tagged
+   commit.
+4. Server startup logs confirm migration completion. The current server runs
+   embedded Goose migrations before serving when a database DSN is configured;
+   a migration error exits the process rather than serving the new build.
+5. The release-specific API, CLI/MCP, and multi-provider client smoke tests pass.
+
+Repeat the same narrow GitOps change and verification for later waves. A values
+pin, a Git commit, or an Argo sync alone is not proof that a feature is
+operational end to end. When a release changes installed hooks or managed
+instructions, upgrade the client binary and rerun `witself install` for each
+supported runtime before declaring the client behavior complete. See
+[Release And Build Notes](release-and-build.md) and
+[Autonomous Realm Messaging](autonomous-realm-messaging.md).
 
 ## Tenant migration
 
@@ -198,7 +252,7 @@ These are open; this document records them without resolving them.
 
 - [backend-architecture.md](backend-architecture.md) — backend code that runs in each cell
 - [cloud-targets.md](cloud-targets.md) — provider order and per-cloud targets
-- [terraform-infrastructure.md](terraform-infrastructure.md) — per-cloud modules a cell is built from
+- [`infra/pulumi`](../infra/pulumi) — executable per-cloud cell provisioner
 - [storage.md](storage.md) — open/sealed planes, export/import
 - [billing-and-limits.md](billing-and-limits.md) — account-level billing
 - [backup-and-recovery.md](backup-and-recovery.md) — per-cell backup and migration data movement

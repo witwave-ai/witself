@@ -269,8 +269,9 @@ In addition:
   2. **over-threshold spend** (the cost kill-switch), and
   3. **`auth_required`** in the task lifecycle.
 
-These caps compose with — and never replace — the realm-local send/delivery rate
-limits in [inter-agent-messaging.md](inter-agent-messaging.md) and
+These caps compose with — and never replace — future realm-local plan-backed
+send/delivery rate limits in
+[inter-agent-messaging.md](inter-agent-messaging.md) and
 [billing-and-limits.md](billing-and-limits.md). `loop.suspended` and
 `budget.exhausted` audit events land on the contract pass.
 
@@ -330,7 +331,8 @@ These are **decided** invariants for the collaboration substrate.
 - **`listen` / `recv` verb.** A long-poll-style verb is added to **both** CLI and
   MCP, next to `send` / `list` / `read`: it **blocks up to N seconds** and
   returns inbound metadata without changing read/ack state, then returns. An
-  active client uses a zero-wait call at a foreground task boundary.
+  installed policy instructs an active client to use a zero-wait call at a
+  foreground task boundary; it does not force model compliance.
 - **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**.
   The only HTTP server in the system is the backend (`witself-server` / the
   relay). An agent never needs to bind a port or accept inbound connections to
@@ -344,12 +346,14 @@ These are **decided** invariants for the collaboration substrate.
   to be online**: it persists into the recipient's durable mailbox (store-and-
   forward) and is visible on the recipient's next `listen`. This is the
   realm-local mailbox model extended across the relay.
-- **Foreground pull for v0.** An already-active client inspects its checkpoint
-  and uses a zero-wait `listen`; push/streaming is not required.
+- **Foreground pull for v0.** Installed policy instructs an already-active
+  client to inspect its checkpoint and use a zero-wait `listen`;
+  push/streaming is not required and model compliance is not forced.
 - **Agent directive and hook split.** Managed instructions tell every active
   client how to check its mailbox; supported Codex/Claude hooks can inject
   the content-free checkpoint, while Cursor/Grok use guided MCP calls. Every
-  runtime uses listen for unread metadata. Neither path wakes a provider. See
+  runtime's policy directs it to use listen for unread metadata. Neither path
+  forces that model action or wakes a provider. See
   [context-hydration.md](context-hydration.md) and
   [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 

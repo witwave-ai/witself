@@ -532,6 +532,7 @@ func messageRelease(args []string) int {
 	connFlags := addMessageConnectionFlags(fs)
 	claimID := fs.String("claim", "", "active processing claim id")
 	generation := fs.Int64("generation", 0, "active processing fence generation")
+	deterministicFailure := fs.Bool("deterministic-failure", false, "record a deterministic message-specific work failure")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -541,7 +542,7 @@ func messageRelease(args []string) int {
 	}
 	if messageID == "" || strings.TrimSpace(*claimID) == "" || *generation <= 0 ||
 		(hadLeadingMessageID && fs.NArg() != 0) || (!hadLeadingMessageID && fs.NArg() != 1) {
-		fmt.Fprintln(os.Stderr, "usage: witself message release MSG_ID --claim CLAIM_ID --generation N")
+		fmt.Fprintln(os.Stderr, "usage: witself message release MSG_ID --claim CLAIM_ID --generation N [--deterministic-failure]")
 		return 2
 	}
 	ctx := context.Background()
@@ -551,7 +552,7 @@ func messageRelease(args []string) int {
 		return 1
 	}
 	processing, err := client.ReleaseMessageClaim(ctx, conn.Endpoint, conn.Token, messageID, client.MessageClaimInput{
-		ClaimID: strings.TrimSpace(*claimID), Generation: *generation,
+		ClaimID: strings.TrimSpace(*claimID), Generation: *generation, DeterministicFailure: *deterministicFailure,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -635,7 +636,8 @@ func printMessageProcessing(messageID string, processing client.MessageProcessin
 	if processing.LeaseExpiresAt != nil {
 		expires = processing.LeaseExpiresAt.Format(time.RFC3339)
 	}
-	fmt.Printf("%s\t%s\t%d\t%s\t%s\n", messageID, processing.ClaimID, processing.Generation, processing.State, expires)
+	// Keep the original five fields stable and append the durable retry count.
+	fmt.Printf("%s\t%s\t%d\t%s\t%s\t%d\n", messageID, processing.ClaimID, processing.Generation, processing.State, expires, processing.FailureCount)
 	return 0
 }
 

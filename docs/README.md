@@ -69,11 +69,12 @@ plane.
   direct processing, migration-0035 server-derived causal depth, migration-0036
   deterministic failure counting, migration-0037 explicit-list/realm fanout,
   migration-0038 client-ranked open requests, atomic result completion,
-  foreground message checkpoints, and message threats.
+  foreground message checkpoints, message threats, and the explicit boundary
+  between code-complete core behavior and remaining release/rollout work.
 - [autonomous-realm-messaging.md](autonomous-realm-messaging.md): the working
   same-realm foreground-client design for direct and client-ranked open-request
-  work, with realm/explicit fanout, provider-accurate checkpoint hydration, and an
-  explicit no-wake boundary.
+  work, with realm/explicit fanout, provider-accurate checkpoint hydration, an
+  explicit no-wake boundary, and the canonical completion/follow-on split.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
   capture, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.

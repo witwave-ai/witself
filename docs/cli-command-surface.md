@@ -3154,8 +3154,9 @@ oldest unacknowledged inbound **message metadata** for the token-bound agent.
 This is a waitable mailbox query, not a consuming drain: a timeout or dropped
 poll loses no state, and listing or listening never marks read or acknowledged.
 A crash after read but before ack leaves the message eligible for a later
-listen. An active foreground client calls `listen`, then explicitly reads
-untrusted content and acknowledges only after handling it.
+listen. The installed foreground policy instructs an active client to call
+`listen`, then explicitly read untrusted content and acknowledge only after
+handling it; it does not force model compliance.
 The active-session teaching boundary lives in
 [context-hydration.md](context-hydration.md), and the foreground-only handling
 model is tracked in
@@ -3228,9 +3229,9 @@ Flags:
 | `--lease DURATION` | Processing lease from 30 seconds through 15 minutes in whole seconds; defaults to 5 minutes. |
 | `--idempotency-key KEY` | Required retry key for this one logical claim. |
 
-Human output includes message id, claim id, generation, state, and lease expiry.
-JSON output returns the value-free `processing` object, including
-`failure_count`.
+Human output includes message id, claim id, generation, state, lease expiry, and
+the appended `failure_count`. JSON output returns the value-free `processing`
+object, including `failure_count`.
 
 ### `witself message renew ID`
 
@@ -3256,14 +3257,24 @@ Flags:
 ### `witself message release ID`
 
 Release one exact claim so another client may retry. Release makes processing
-available and invalidates the old fence immediately; it does not ack. This
-manual CLI action does not mark a deterministic failure and therefore does not
-increment `failure_count`; a trusted foreground client may use the internal HTTP
-field only after a message-specific deterministic failure.
+available and invalidates the old fence immediately; it does not ack. By
+default it leaves `failure_count` unchanged. Use `--deterministic-failure` only
+for a repeatable failure attributable to this message; never use it for a
+provider-wide or configuration failure, cancellation, timeout, or claim-lease
+maintenance failure. The flag atomically increments the backend-owned
+`failure_count`.
 
 ```sh
 ws message release msg_01H... --claim mcl_01H... --generation 1
 ```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--claim ID` | Required active `mcl_` processing claim id. |
+| `--generation N` | Required positive processing fence generation. |
+| `--deterministic-failure` | Record one repeatable message-specific failure; false by default. |
 
 ### `witself message complete ID`
 
@@ -3350,7 +3361,7 @@ Subcommands:
 | `cancel ID` | Coordinator-only cancellation. Existing reservations/claims become unusable. |
 | `claim ID` | Convert this selected agent's reservation into a processing lease using `--lease 30s-15m` and a required idempotency key. |
 | `renew ID` | Extend the exact `--claim mrc_...` and positive `--generation` fence. |
-| `release ID` | Release the exact fence. `--deterministic-failure` is reserved for bounded foreground-client failure accounting. |
+| `release ID` | Release the exact fence. `--deterministic-failure` is reserved for durable foreground-client failure accounting. |
 | `complete ID` | Atomically validate the exact fence, create an ordinary result message back to the coordinator, and complete the claim. The request closes when that selected batch has no other live reservation or claim, even if `max_assignees` was larger. Requires a non-empty body and idempotency key. |
 
 Persisted request states are `open`, `completed`, `cancelled`, and `expired`;

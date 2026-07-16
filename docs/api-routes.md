@@ -579,9 +579,10 @@ audit events; read-only recall does neither:
   makes processing available and invalidates the old fence without acking.
   Release accepts optional `deterministic_failure` (default false); only true on
   an exact-fence release atomically increments migration-0036 `failure_count`.
-  A foreground client must not mark provider-wide, configuration, cancellation,
-  or lease-maintenance failures deterministic and treats the fifth
-  deterministic attempt as escalation under the default handling guidance.
+  Installed foreground policy directs a client not to mark provider-wide,
+  configuration, cancellation, timeout, or lease-maintenance failures
+  deterministic and to complete the fifth deterministic attempt as a durable
+  escalation. The backend stores the count but cannot force model compliance.
 - `POST /v1/messages/{message_id}:complete` validates the exact unexpired fence
   and required `Idempotency-Key`, then in one transaction creates a
   server-routed result reply at parent `causal_depth + 1`, links it to the

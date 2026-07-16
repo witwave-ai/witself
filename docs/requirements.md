@@ -843,8 +843,10 @@ Trust boundary and threats:
 - Threats: spoofing (mitigated by token-derived `from`), interception, injection,
   and memory-poisoning via message-driven writes. A message granting no policy
   cannot itself authorize a cross-agent write; writes still require policy.
-- Rate limits apply to send and delivery. `message:send` and `message:read`
-  scopes gate the surface. Send, deliver, and read events are audited.
+- The implemented core audits send, delivery, read, acknowledgement, and
+  processing transitions. Granular `message:send`/`message:read` policy gates
+  and plan-backed send/delivery rate limits are follow-on platform integration;
+  the current size, fan-out, and listen-admission bounds do not imply them.
 - Read, acknowledgement, direct-delivery processing claim, and work completion
   are distinct. Open-request claims use the separate migration-0038
   multi-assignee request model rather than overloading delivery processing.
@@ -865,26 +867,31 @@ Autonomous delegation:
   The backend stores bounded, untrusted offer content but neither defines nor
   filters responsibility, capability, availability, directive, or profile
   fields and performs no semantic routing or model ranking.
-- An already-active foreground client performs
-  checkpoint/listen/claim/read/complete/ack with bounded retries, concurrency,
-  turns, and elapsed time. Direct completion
+- Installed policy directs an already-active foreground client to perform
+  checkpoint/listen/claim/read/complete/ack for at most one messaging lane in
+  the current turn under backend leases and fences; it cannot force the model to
+  do so. Direct completion
   atomically persists the derived result reply and processing result link under
-  the current fence; acknowledgement remains a separate recovery boundary. It
-  may answer routine peer questions within the original objective and escalates
-  only when genuinely new authority is required.
-- Backend-owned safety state survives client and machine changes. The client
-  enforces its turn limit from message `causal_depth` and its repeated-failure
-  limit from processing `failure_count`; generation is only the stale-writer
-  fence. Only an exact-fence release explicitly marked as a deterministic
-  message failure increments the count. Provider-wide, configuration,
-  cancellation, and lease-maintenance failures do not. The current default
-  escalates the fifth deterministic attempt. Payload history and payload turn
-  fields are advisory only and cannot reset either bound.
-- Codex and Claude Code receive the bounded content-free message checkpoint at
-  supported foreground hook boundaries. Cursor and Grok Build use installed
-  guidance to call `self.show`. Every runtime uses non-blocking
-  `message.listen` to retrieve unread metadata. No provider receives a
-  Witself-managed headless child process or captured provider credential.
+  the current fence; acknowledgement remains a separate recovery boundary. The
+  policy permits routine peer answers within the original objective and directs
+  escalation only when genuinely new authority is required.
+- Backend-owned causal depth and `failure_count` survive client and machine
+  changes as portable safety inputs, not backend workflow limits; generation is
+  only the stale-writer fence. Only an exact-fence release explicitly marked as
+  a deterministic message failure increments the count. Provider-wide,
+  configuration, cancellation, timeout, and lease-maintenance failures do not.
+  Installed policy directs clients to release and count the first four
+  deterministic failures and to complete a durable escalation when
+  `failure_count` is already 4 or greater, but the backend cannot enforce that
+  threshold or model compliance. No fixed causal-depth turn ceiling is
+  currently codified, and payload fields cannot reset either persisted value.
+- Supported Codex and Claude Code hooks automatically attempt to inject the
+  bounded content-free message checkpoint at foreground hook boundaries and
+  fail open on hydration failure. Cursor and Grok Build use installed
+  guidance to call `self.show`. Every runtime's installed policy directs it to
+  use non-blocking `message.listen` to retrieve unread metadata; model compliance
+  is not forced. No provider receives a Witself-managed headless child process
+  or captured provider credential.
 - Every message kind remains a canonical unacknowledged delivery until an active
   recipient handles and acknowledges it. PostgreSQL is the only message and
   handoff store.
@@ -914,7 +921,8 @@ Surfaces:
   `/v1/message-requests` and request actions `:offer`, `:decline`, `:select`,
   `:cancel`, `:claim`, `:renew`, `:release`, and `:complete`.
 - A stable JSON Message shape shared by all frontends.
-- Messages sent and delivered are metered billing dimensions.
+- Messages sent and delivered are target metered billing dimensions; they are
+  not yet wired into plan-backed messaging usage accounting.
 
 The implemented listen contract is a stateless query for the oldest
 unacknowledged inbound metadata. It waits 20 seconds by default, accepts a wait

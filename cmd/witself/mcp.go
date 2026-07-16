@@ -853,10 +853,11 @@ type mcpMessageClaimInput struct {
 	IdempotencyKey string `json:"idempotency_key" jsonschema:"required retry key for one logical claim"`
 }
 
-type mcpMessageClaimCoordinateInput struct {
-	MessageID  string `json:"message_id" jsonschema:"claimed inbound Witself message id beginning with msg_"`
-	ClaimID    string `json:"claim_id" jsonschema:"active claim id returned by message.claim"`
-	Generation int64  `json:"generation" jsonschema:"positive active fence generation returned by message.claim or message.renew"`
+type mcpMessageReleaseInput struct {
+	MessageID            string `json:"message_id" jsonschema:"claimed inbound Witself message id beginning with msg_"`
+	ClaimID              string `json:"claim_id" jsonschema:"active claim id returned by message.claim"`
+	Generation           int64  `json:"generation" jsonschema:"positive active fence generation returned by message.claim or message.renew"`
+	DeterministicFailure bool   `json:"deterministic_failure,omitempty" jsonschema:"true only for a repeatable failure attributable to this message; never provider-wide, configuration, cancellation, timeout, or lease-maintenance failure"`
 }
 
 type mcpMessageRenewInput struct {
@@ -1729,14 +1730,14 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.message.release"),
-		Description: "Release an active message-processing claim with its exact claim_id and fence generation so another worker may retry. Releasing does not acknowledge or complete the message.",
+		Description: "Release an active message-processing claim with its exact claim_id and fence generation so another client may retry. Optional deterministic_failure records one repeatable failure attributable to this message; leave it false for provider-wide, configuration, cancellation, timeout, or lease-maintenance failures. Releasing does not acknowledge or complete the message.",
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMessageClaimCoordinateInput) (*mcp.CallToolResult, mcpMessageProcessingOutput, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMessageReleaseInput) (*mcp.CallToolResult, mcpMessageProcessingOutput, error) {
 		if strings.TrimSpace(in.MessageID) == "" || strings.TrimSpace(in.ClaimID) == "" || in.Generation <= 0 {
 			return nil, mcpMessageProcessingOutput{}, fmt.Errorf("message_id, claim_id, and a positive generation are required")
 		}
 		processing, err := backend.ReleaseMessageClaim(ctx, in.MessageID, client.MessageClaimInput{
-			ClaimID: in.ClaimID, Generation: in.Generation,
+			ClaimID: in.ClaimID, Generation: in.Generation, DeterministicFailure: in.DeterministicFailure,
 		})
 		return nil, mcpMessageProcessingOutput{Processing: processing}, err
 	})

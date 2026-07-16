@@ -6,7 +6,7 @@
 # metrics-server) are OFF-LIMITS to this script by design.
 #
 # Usage: scripts/roll-cell.sh <cell-name> <version>
-# Example: scripts/roll-cell.sh aws-sandbox-usw2-dev 0.0.84
+# Example shape: scripts/roll-cell.sh CELL_NAME RELEASED_VERSION
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -61,4 +61,5 @@ echo "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag)"
 echo "diff:"
 git -C "$REPO_ROOT" --no-pager diff "$VALUES"
 echo
-echo "next: git commit + push to trigger Argo reconciliation."
+echo "next: review this cell in the intended rollout wave; commit + push to main"
+echo "      triggers reconciliation only for provisioned cells watching this repo."

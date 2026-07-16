@@ -241,17 +241,24 @@ recipient-only: the server validates that the caller received the parent and
 derives the reply recipient, thread, and parent link. Read, acknowledgement,
 claim, and completion remain separate in the CLI, API, and MCP.
 
+**Messaging status:** the agreed same-realm foreground feature is code-complete
+in `main`: direct, explicit-list, whole-realm, and client-ranked open-request
+paths have CLI/API/MCP parity, fenced processing, and account export/import.
+That is not a deployment claim. A tagged release, GitOps rollout, refreshed
+runtime installations, and live multi-provider smoke test are still required
+before the feature is operationally complete.
+
 There is no background Witself messaging process. At the beginning of a
-non-trivial foreground turn, an installed client inspects the bounded
-`self.show.message_checkpoint` and calls
+non-trivial foreground turn, the installed policy instructs a client to inspect
+the bounded `self.show.message_checkpoint` and call
 `message.listen(wait_seconds=0)`. Codex and Claude Code can receive the
 content-free checkpoint automatically through supported hooks; Cursor and Grok
-Build use the installed guidance and MCP fallback. In every runtime, listen is
-the operation that retrieves unread message metadata. An active client may then
-claim,
-read, handle, complete or reply, and acknowledge the canonical message. If the
-client is closed, the message remains durable and unacknowledged until its next
-foreground turn. MCP, hooks, webhooks, and the backend never start or wake an AI.
+Build use the installed guidance and MCP fallback. The policy cannot force model
+compliance. In every runtime, listen is the operation that retrieves unread
+message metadata. An active client may then claim, read, handle, complete or
+reply, and acknowledge the canonical message. If the client is closed, the
+message remains durable and unacknowledged until its next foreground turn. MCP,
+hooks, webhooks, and the backend never start or wake an AI.
 
 The installed MCP server exposes matching `witself.message.send`, `reply`,
 `list`, `listen`, `read`, `ack`, `claim`, `renew`, `release`, and

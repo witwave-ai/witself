@@ -1486,9 +1486,9 @@ optional `deterministic_failure` (default false).
 }
 ```
 
-The ordinary CLI and MCP release surfaces omit the marker and therefore send
-false. A trusted foreground client may use true only after classifying a failure
-as message-specific and deterministic.
+The CLI exposes this as `--deterministic-failure`; MCP exposes the optional
+`deterministic_failure` input. Both default to false. A foreground client may
+set true only after classifying a failure as message-specific and deterministic.
 
 `complete` accepts the exact claim id/generation, result `subject`, `kind`,
 `body`, optional object `payload`, and an `Idempotency-Key` header. It cannot
@@ -1501,9 +1501,10 @@ parent delivery.
 Processing `generation` is solely the stale-writer fence. Replaying the exact
 live claim keeps it; acquisition after release or expiry increments it. Only an
 exact-fence release with `deterministic_failure=true` atomically increments
-backend-owned `failure_count`. Provider-wide, configuration, cancellation, and
-lease-maintenance failures release with false. Foreground clients use the count
-for bounded retry/escalation policy. Payload fields and generation cannot reset
+backend-owned `failure_count`. Provider-wide, configuration, cancellation,
+timeout, and lease-maintenance failures release with false. Installed foreground
+policy directs clients to use the count for retry/escalation; the backend does
+not impose a fifth-attempt threshold. Payload fields and generation cannot reset
 or substitute for that durable count.
 
 Logical account export preserves causal depth, public completion state, its

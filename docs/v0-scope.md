@@ -12,6 +12,14 @@ use.
 Conflicting native-only or server-embedding language later in this draft is
 superseded.
 
+Messaging amendment (accepted 2026-07-16): the agreed same-realm foreground
+core is code-complete in `main`; a tagged release, GitOps rollout, refreshed
+provider integrations, and live multi-provider smoke test remain operational
+activation work. Named-group fan-out, cross-realm delivery,
+responsibility/directive routing, wake/presence, and plan-backed messaging
+rate/meter integration are follow-ons, not blockers for that core. See
+[autonomous-realm-messaging.md](autonomous-realm-messaging.md#completion-boundary).
+
 ## Sequencing
 
 Decision: v0 ships in two sequenced slices on one platform. The **open-plane core

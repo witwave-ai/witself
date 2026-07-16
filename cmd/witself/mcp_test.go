@@ -326,6 +326,7 @@ type fakeMCPBackend struct {
 	lastMessageRenew    client.RenewMessageClaimInput
 	releaseMessageID    string
 	lastMessageRelease  client.MessageClaimInput
+	messageReleases     []client.MessageClaimInput
 	completeMessageID   string
 	lastMessageComplete client.CompleteMessageInput
 	lastRequestOpen     client.CreateMessageRequestInput
@@ -760,6 +761,7 @@ func (b *fakeMCPBackend) RenewMessageClaim(_ context.Context, messageID string, 
 
 func (b *fakeMCPBackend) ReleaseMessageClaim(_ context.Context, messageID string, in client.MessageClaimInput) (client.MessageProcessing, error) {
 	b.releaseMessageID, b.lastMessageRelease = messageID, in
+	b.messageReleases = append(b.messageReleases, in)
 	return client.MessageProcessing{State: "available", Generation: in.Generation}, nil
 }
 
@@ -1306,6 +1308,7 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		t.Fatalf("tools = %d, want 67", len(tools.Tools))
 	}
 	foundComplete := false
+	foundRelease := false
 	foundSelf := false
 	for _, tool := range tools.Tools {
 		if tool.Name == "witself.self.show" {
@@ -1317,6 +1320,29 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 			for _, field := range []string{`"include_facts"`, `"include_salient"`, `"include_sensitive"`, `"salient_limit"`, `"max_bytes"`} {
 				if !strings.Contains(string(raw), field) {
 					t.Errorf("self.show schema omitted %s: %s", field, raw)
+				}
+			}
+		}
+		if tool.Name == "witself.message.release" {
+			foundRelease = true
+			raw, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"deterministic_failure"`) ||
+				!strings.Contains(tool.Description, "provider-wide") ||
+				!strings.Contains(tool.Description, "does not acknowledge or complete") {
+				t.Fatalf("message.release schema or description omitted deterministic-failure boundaries: %s / %q", raw, tool.Description)
+			}
+			var schema struct {
+				Required []string `json:"required"`
+			}
+			if err := json.Unmarshal(raw, &schema); err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range schema.Required {
+				if required == "deterministic_failure" {
+					t.Fatal("message.release deterministic_failure unexpectedly required")
 				}
 			}
 		}
@@ -1339,6 +1365,9 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if !foundComplete {
 		t.Fatal("MCP did not advertise witself.message.complete")
+	}
+	if !foundRelease {
+		t.Fatal("MCP did not advertise witself.message.release")
 	}
 	if !foundSelf {
 		t.Fatal("MCP did not advertise witself.self.show")
@@ -1398,6 +1427,7 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		{name: "witself.message.claim", args: map[string]any{"message_id": "msg_work", "lease_seconds": 90, "idempotency_key": "claim-1"}},
 		{name: "witself.message.renew", args: map[string]any{"message_id": "msg_work", "claim_id": "mcl_1", "generation": 1, "lease_seconds": 120}},
 		{name: "witself.message.release", args: map[string]any{"message_id": "msg_work", "claim_id": "mcl_1", "generation": 1}},
+		{name: "witself.message.release", args: map[string]any{"message_id": "msg_work", "claim_id": "mcl_1", "generation": 1, "deterministic_failure": true}},
 		{name: "witself.message.complete", args: map[string]any{"message_id": "msg_work", "claim_id": "mcl_1", "generation": 1, "subject": "Result", "kind": "result", "body": "done", "payload": map[string]any{"ok": true}, "idempotency_key": "complete-1"}},
 	} {
 		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: tc.name, Arguments: tc.args})
@@ -1493,8 +1523,11 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if backend.renewMessageID != "msg_work" || backend.lastMessageRenew.ClaimID != "mcl_1" || backend.lastMessageRenew.Generation != 1 || backend.lastMessageRenew.LeaseSeconds != 120 {
 		t.Fatalf("renew call = %q / %#v", backend.renewMessageID, backend.lastMessageRenew)
 	}
-	if backend.releaseMessageID != "msg_work" || backend.lastMessageRelease.ClaimID != "mcl_1" || backend.lastMessageRelease.Generation != 1 {
+	if backend.releaseMessageID != "msg_work" || backend.lastMessageRelease.ClaimID != "mcl_1" || backend.lastMessageRelease.Generation != 1 || !backend.lastMessageRelease.DeterministicFailure {
 		t.Fatalf("release call = %q / %#v", backend.releaseMessageID, backend.lastMessageRelease)
+	}
+	if len(backend.messageReleases) != 2 || backend.messageReleases[0].DeterministicFailure || !backend.messageReleases[1].DeterministicFailure {
+		t.Fatalf("default/deterministic release calls = %#v", backend.messageReleases)
 	}
 	if backend.completeMessageID != "msg_work" || backend.lastMessageComplete.ClaimID != "mcl_1" ||
 		backend.lastMessageComplete.Generation != 1 || backend.lastMessageComplete.Body != "done" ||
