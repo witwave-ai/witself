@@ -76,10 +76,10 @@ func TestAgentPeersUsesDefaultAccountAndRealmWithNamedAgent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("text run = %d, stderr = %q", code, stderr)
 	}
-	if stderr != "agent\tlast active\truntime\tlocation\tevent\n" {
+	if stderr != "agent\tlast activity (UTC)\tage\truntime\tlocation\tevent\n" {
 		t.Fatalf("text header = %q", stderr)
 	}
-	wantRows := "bob\t5m ago\tclaude-code\thome\tprompt\nidle\tnever\t-\t-\t-\n"
+	wantRows := fmt.Sprintf("bob\t%s\t5m ago\tclaude-code\thome\tprompt\nidle\t-\tnever\t-\t-\t-\n", lastActive.Format(time.RFC3339))
 	if stdout != wantRows {
 		t.Fatalf("text rows = %q, want %q", stdout, wantRows)
 	}
@@ -91,15 +91,38 @@ func TestAgentPeersUsesDefaultAccountAndRealmWithNamedAgent(t *testing.T) {
 func TestPeerActivityFormattingDoesNotInferAvailability(t *testing.T) {
 	now := time.Date(2026, 7, 16, 3, 7, 3, 0, time.UTC)
 	at := time.Date(2026, 7, 15, 21, 2, 3, 0, time.FixedZone("MDT", -6*60*60))
-	if got := peerActivityTime(&at, now); got != "5m ago" {
+	if got := peerActivityTimestamp(&at); got != "2026-07-16T03:02:03Z" {
+		t.Fatalf("activity timestamp = %q", got)
+	}
+	if got := peerActivityAge(&at, now); got != "5m ago" {
 		t.Fatalf("activity time = %q", got)
 	}
-	if got := peerActivityTime(nil, now); got != "never" {
+	if got := peerActivityTimestamp(nil); got != "-" {
+		t.Fatalf("missing activity timestamp = %q", got)
+	}
+	if got := peerActivityAge(nil, now); got != "never" {
 		t.Fatalf("missing activity = %q", got)
 	}
-	future := now.Add(time.Minute)
-	if got := peerActivityTime(&future, now); got != "<1m ago" {
-		t.Fatalf("future-skewed activity = %q", got)
+	ages := []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{name: "under one minute", at: now.Add(-59 * time.Second), want: "<1m ago"},
+		{name: "one minute", at: now.Add(-time.Minute), want: "1m ago"},
+		{name: "minutes", at: now.Add(-59 * time.Minute), want: "59m ago"},
+		{name: "one hour", at: now.Add(-time.Hour), want: "1h ago"},
+		{name: "hours", at: now.Add(-23 * time.Hour), want: "23h ago"},
+		{name: "one day", at: now.Add(-24 * time.Hour), want: "1d ago"},
+		{name: "days", at: now.Add(-49 * time.Hour), want: "2d ago"},
+		{name: "future clock skew", at: now.Add(time.Minute), want: "<1m ago"},
+	}
+	for _, tt := range ages {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := peerActivityAge(&tt.at, now); got != tt.want {
+				t.Fatalf("activity age = %q, want %q", got, tt.want)
+			}
+		})
 	}
 	if got := peerActivityField(""); got != "-" {
 		t.Fatalf("missing field = %q", got)

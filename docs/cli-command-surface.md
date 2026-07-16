@@ -3667,8 +3667,8 @@ witself agent peers --account default --realm default --agent scott --json
 `--account` and `--realm` use the normal local defaults (`WITSELF_ACCOUNT` /
 `WITSELF_REALM`, then `default`) when omitted. `--agent` uses `WITSELF_AGENT`
 when present. The text view shows a compact age such as `2m ago`, `5h ago`, or
-`never`; JSON returns the exact optional `last_activity_at`, `last_runtime`,
-`last_location`, and `last_event` fields.
+`never` beside the UTC activity timestamp; JSON returns the exact optional
+`last_activity_at`, `last_runtime`, `last_location`, and `last_event` fields.
 
 ### `witself agent show NAME_OR_ID`
 
