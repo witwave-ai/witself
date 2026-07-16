@@ -160,7 +160,8 @@ func TestSessionHydrationIsBoundedOpenPlaneAndEscaped(t *testing.T) {
 		t.Fatalf("result/calls = %#v / %d / %d", result, source.selfCalls, source.recallCalls)
 	}
 	if !source.selfOptions.IncludeFacts || !source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
-		!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeSensitive ||
+		!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeMessageCheckpoint ||
+		!source.selfOptions.IncludeSensitive ||
 		source.selfOptions.MaximumByteSize != 2048 {
 		t.Fatalf("self options = %#v", source.selfOptions)
 	}
@@ -245,7 +246,8 @@ func TestOrdinaryPromptChecksCheckpointWithoutRecall(t *testing.T) {
 			}
 			if !result.Attempted || result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
 				source.selfOptions.IncludeFacts || source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
-				!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeSensitive {
+				!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeMessageCheckpoint ||
+				!source.selfOptions.IncludeSensitive {
 				t.Fatalf("idle checkpoint result/source = %#v / %#v", result, source)
 			}
 		})
@@ -268,6 +270,80 @@ func TestOrdinaryPromptChecksCheckpointWithoutRecall(t *testing.T) {
 				t.Fatalf("pending checkpoint result/source = %#v / %#v", result, source)
 			}
 		})
+	}
+}
+
+func TestOrdinaryPromptInjectsPendingMessageCheckpointWithoutRecall(t *testing.T) {
+	for _, runtime := range []string{transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeClaudeCode} {
+		t.Run(runtime, func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(),
+				MessageCheckpoint: &client.SelfMessageCheckpoint{
+					Pending: true, MailboxPending: true, CandidateAssignmentPending: true,
+				},
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Attempted || !result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
+				!strings.Contains(result.Context, `"message_checkpoint"`) ||
+				!strings.Contains(result.Context, `"mailbox_pending":true`) ||
+				!strings.Contains(result.Context, `"candidate_assignment_pending":true`) ||
+				!strings.Contains(result.Context, "Never launch, schedule, or delegate a background runner") {
+				t.Fatalf("pending message checkpoint result/source = %#v / %#v", result, source)
+			}
+		})
+	}
+}
+
+func TestUnavailableMessageCheckpointIsVisibleWithoutBlockingHydration(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity:          exactIdentity(),
+		MessageCheckpoint: &client.SelfMessageCheckpoint{Unavailable: true},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Attempted || !result.Injected || source.recallCalls != 0 ||
+		!strings.Contains(result.Context, `"message_checkpoint":{"pending":false,"unavailable":true}`) ||
+		strings.Contains(result.Context, foregroundMessageCheckpointPolicy) {
+		t.Fatalf("unavailable message checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestPendingMemoryAndMessageCheckpointsFitMinimumHydrationBudget(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(),
+		MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+			Pending: true, RequestID: "mcrq_abcdefghijklmnop", RequestGeneration: 42,
+		},
+		MessageCheckpoint: &client.SelfMessageCheckpoint{
+			Pending: true, MailboxPending: true, CandidateOfferPending: true,
+			CoordinatorSelectionPending: true, CandidateAssignmentPending: true,
+		},
+	}}
+	result, err := Execute(context.Background(), Config{MaximumBytes: 1024}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || len(result.Context) > 1024 ||
+		!strings.Contains(result.Context, `"memory_checkpoint"`) ||
+		!strings.Contains(result.Context, "mcrq_abcdefghijklmnop") ||
+		!strings.Contains(result.Context, `"message_checkpoint"`) ||
+		!strings.Contains(result.Context, `"mailbox_pending":true`) ||
+		!strings.Contains(result.Context, `"candidate_offer_pending":true`) ||
+		!strings.Contains(result.Context, `"coordinator_selection_pending":true`) ||
+		!strings.Contains(result.Context, `"candidate_assignment_pending":true`) ||
+		!strings.Contains(result.Context, advisoryBoundary) {
+		t.Fatalf("minimum-budget checkpoints = %#v", result)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -65,7 +66,7 @@ func TestMigration37MessageAudiencePostgres(t *testing.T) {
 	}
 }
 
-func TestMigration40Postgres(t *testing.T) {
+func TestMigration41Postgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
@@ -76,7 +77,12 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestIndexShape(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator",
+			[]string{"account_id", "realm_id", "coordinator_agent_id", "expires_at", "offer_deadline", "id"},
+			[]string{"state", "open"})
+		assertMigrationTestIndexShape(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request",
+			[]string{"request_id"}, []string{"response_state", "pending"})
 		assertMigrationTestIndex(t, st, "memory_curation_requests", "memory_curation_requests_due_by_owner", true)
 		assertMigrationTestTable(t, st, "agent_activity", true)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_kind", true)
@@ -113,6 +119,12 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
+		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", false)
+		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", false)
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
 		assertMigrationTestVersion(t, dsn, 39)
 		assertMigrationTestIndex(t, st, "memory_curation_requests", "memory_curation_requests_due_by_owner", false)
 		assertMigrationTestTable(t, st, "agent_activity", true)
@@ -136,7 +148,9 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", true)
+		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", true)
 		assertMigrationTestIndex(t, st, "memory_curation_requests", "memory_curation_requests_due_by_owner", true)
 		assertMigrationTestTable(t, st, "agent_activity", true)
 	})
@@ -170,7 +184,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		assertMigrationTestTableConstraint(t, st, "tokens", "tokens_access_profile_kind_check", true)
 		var total, full int
 		if err := st.pool.QueryRow(ctx, `
@@ -218,7 +232,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
 		var parent *string
 		if err := st.pool.QueryRow(ctx, `
@@ -253,7 +267,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		var state, claimHash, completeHash string
 		var generation int64
 		var claimID, lease, completedAt, resultID any
@@ -298,7 +312,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		for messageID, want := range map[string]int64{
 			"msg_depth_root": 1, "msg_depth_reply_1": 2,
 			"msg_depth_reply_2": 3, "msg_depth_forged_thread_root": 1,
@@ -336,7 +350,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		var failureCount int64
 		if err := st.pool.QueryRow(ctx, `
 			SELECT failure_count FROM agent_message_deliveries
@@ -485,7 +499,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 	})
 
 	t.Run("populated schema 26 cannot skip compatibility release", func(t *testing.T) {
@@ -522,7 +536,7 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 	})
 
@@ -581,6 +595,12 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", false)
+		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", false)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -647,9 +667,11 @@ func TestMigration40Postgres(t *testing.T) {
 		assertMigrationTestVersion(t, dsn, 28)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 		if err := st.Migrate(); err != nil {
-			t.Fatalf("re-upgrade schema 28 to 40: %v", err)
+			t.Fatalf("re-upgrade schema 28 to 41: %v", err)
 		}
-		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", true)
+		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", true)
 		assertMigrationTestIndex(t, st, "memory_curation_requests", "memory_curation_requests_due_by_owner", true)
 		assertMigrationTestTable(t, st, "agent_activity", true)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
@@ -661,6 +683,12 @@ func TestMigration40Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, 40)
+		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", false)
+		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", false)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -1027,6 +1055,42 @@ func assertMigrationTestIndex(t *testing.T, st *Store, table, index string, want
 	}
 	if got != want {
 		t.Fatalf("index %s.%s exists = %t, want %t", table, index, got, want)
+	}
+}
+
+func assertMigrationTestIndexShape(
+	t *testing.T,
+	st *Store,
+	table string,
+	index string,
+	wantColumns []string,
+	wantPredicateFragments []string,
+) {
+	t.Helper()
+	var columns []string
+	var predicate string
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT ARRAY(
+		         SELECT attribute.attname
+		           FROM unnest(index_row.indkey) WITH ORDINALITY AS key(attnum, position)
+		           JOIN pg_attribute attribute
+		             ON attribute.attrelid=index_row.indrelid
+		            AND attribute.attnum=key.attnum
+		          ORDER BY key.position
+		       ),
+		       COALESCE(pg_get_expr(index_row.indpred,index_row.indrelid),'')
+		  FROM pg_index index_row
+		 WHERE index_row.indrelid=to_regclass($1)
+		   AND index_row.indexrelid=to_regclass($2)`, table, index).Scan(&columns, &predicate); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(columns, wantColumns) {
+		t.Fatalf("index %s.%s columns = %v, want %v", table, index, columns, wantColumns)
+	}
+	for _, fragment := range wantPredicateFragments {
+		if !strings.Contains(predicate, fragment) {
+			t.Fatalf("index %s.%s predicate = %q, want fragment %q", table, index, predicate, fragment)
+		}
 	}
 }
 

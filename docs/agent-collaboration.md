@@ -13,7 +13,7 @@ Client-owned autonomous execution, direct clarification loops, same-realm
 audiences, and request claims are defined first in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md). This document
 adds cross-realm consent, discovery, transport, and trust; it does not redefine
-the local runner boundary.
+the local foreground-client boundary.
 
 Sequencing: collaboration is the **first post-v0 epic**, built **after** the
 realm-local core (memory + realm-local messaging). You cannot extend a substrate
@@ -113,7 +113,7 @@ A realm/agent card carries:
 - `endpoint` — where to reach the realm's home cell (resolution data).
 - `accepted_auth` — which auth the realm accepts at the boundary.
 - `signing` — the realm signing **public key** / JWKS used to verify envelopes.
-- `delivery_modes` — e.g. polling, store-and-forward, optional wake-webhook.
+- `delivery_modes` — e.g. foreground polling and store-and-forward.
 - `ttl` / `expires_at` — cards are time-bounded and re-fetched.
 
 Rules:
@@ -329,27 +329,27 @@ These are **decided** invariants for the collaboration substrate.
   mirror it (one core, multiple adapters).
 - **`listen` / `recv` verb.** A long-poll-style verb is added to **both** CLI and
   MCP, next to `send` / `list` / `read`: it **blocks up to N seconds** and
-  returns inbound metadata without changing read/ack state, then returns. This
-  is how a client-owned runner "hears" without running a server.
+  returns inbound metadata without changing read/ack state, then returns. An
+  active client uses a zero-wait call at a foreground task boundary.
 - **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**.
   The only HTTP server in the system is the backend (`witself-server` / the
   relay). An agent never needs to bind a port or accept inbound connections to
   participate.
-- **Optional wake-webhook**, only for already-hosted cloud **autonomous** agents,
-  is a latency optimization and is **never required**. A directed agent on a
-  laptop participates fully with polling alone.
+- **No wake promise.** A webhook, MCP server, or relay cannot start an idle AI.
+  Any future provider-native hosted-agent activation is an optional adapter, not
+  part of the mailbox contract.
 - **Durable mailbox is the source of truth.** Live streams are accelerators;
   state lives in the mailbox in the home cell.
 - **Offline recipients are the default.** A `send` **never requires the recipient
   to be online**: it persists into the recipient's durable mailbox (store-and-
   forward) and is visible on the recipient's next `listen`. This is the
   realm-local mailbox model extended across the relay.
-- **Polling-first transport for v0.** v0 collaboration is polling-first (`listen`
-  long-poll); push/streaming is an optimization layered on top, not a
-  requirement.
-- **Agent-directive and runner split.** Managed instructions tell an already
-  active agent how to check its mailbox; a client-owned runner, not a teaching
-  string, owns repeated long polls and provider wake. See
+- **Foreground pull for v0.** An already-active client inspects its checkpoint
+  and uses a zero-wait `listen`; push/streaming is not required.
+- **Agent directive and hook split.** Managed instructions tell every active
+  client how to check its mailbox; supported Codex/Claude hooks can inject
+  the content-free checkpoint, while Cursor/Grok use guided MCP calls. Every
+  runtime uses listen for unread metadata. Neither path wakes a provider. See
   [context-hydration.md](context-hydration.md) and
   [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 

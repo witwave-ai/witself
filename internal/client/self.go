@@ -67,15 +67,28 @@ type SelfMemoryCheckpoint struct {
 	LeaseExpiresAt    *time.Time `json:"lease_expires_at,omitempty"`
 }
 
+// SelfMessageCheckpoint is content-free, authenticated discovery state for
+// durable messaging work. It is not a claim fence, availability signal, or
+// authorization grant.
+type SelfMessageCheckpoint struct {
+	Pending                     bool `json:"pending"`
+	Unavailable                 bool `json:"unavailable,omitempty"`
+	MailboxPending              bool `json:"mailbox_pending,omitempty"`
+	CandidateOfferPending       bool `json:"candidate_offer_pending,omitempty"`
+	CoordinatorSelectionPending bool `json:"coordinator_selection_pending,omitempty"`
+	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
+}
+
 // SelfDigest is the bounded response from GET /v1/self.
 type SelfDigest struct {
-	SchemaVersion    string                `json:"schema_version"`
-	Identity         SelfIdentity          `json:"identity"`
-	PrimaryFacts     []SelfFact            `json:"primary_facts"`
-	SalientMemories  []SelfMemory          `json:"salient_memories"`
-	MemoryCheckpoint *SelfMemoryCheckpoint `json:"memory_checkpoint,omitempty"`
-	Index            SelfIndex             `json:"index"`
-	Elided           bool                  `json:"elided"`
+	SchemaVersion     string                 `json:"schema_version"`
+	Identity          SelfIdentity           `json:"identity"`
+	PrimaryFacts      []SelfFact             `json:"primary_facts"`
+	SalientMemories   []SelfMemory           `json:"salient_memories"`
+	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
+	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
+	Index             SelfIndex              `json:"index"`
+	Elided            bool                   `json:"elided"`
 }
 
 // SelfOptions controls bounded digest sections. The identity block is always
@@ -89,6 +102,10 @@ type SelfOptions struct {
 	// IncludeCheckpoint requests value-free narrative-curation lifecycle state.
 	// Identity-only callers should leave this false to avoid queue queries.
 	IncludeCheckpoint bool
+	// IncludeMessageCheckpoint requests a content-free projection of durable
+	// mailbox and open-request work. Identity-only callers should leave this
+	// false to avoid messaging queries.
+	IncludeMessageCheckpoint bool
 	// IncludeSensitive intentionally includes authorized private fact and memory
 	// values. Sealed secrets are a separate service and are never in this digest.
 	IncludeSensitive bool
@@ -126,6 +143,7 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params.Set("include_salient", strconv.FormatBool(opts.IncludeSalient))
 	params.Set("include_counts", strconv.FormatBool(opts.IncludeCounts))
 	params.Set("include_checkpoint", strconv.FormatBool(opts.IncludeCheckpoint))
+	params.Set("include_message_checkpoint", strconv.FormatBool(opts.IncludeMessageCheckpoint))
 	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
 	if opts.Observational {
 		params.Set("observational", "true")

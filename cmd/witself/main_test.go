@@ -371,7 +371,8 @@ func TestSelfShowUsesAgentToken(t *testing.T) {
 		}
 		q := r.URL.Query()
 		if q.Get("include_facts") != "true" || q.Get("include_salient") != "true" || q.Get("include_counts") != "true" ||
-			q.Get("include_checkpoint") != "true" || q.Get("include_sensitive") != "false" ||
+			q.Get("include_checkpoint") != "true" || q.Get("include_message_checkpoint") != "true" ||
+			q.Get("include_sensitive") != "false" ||
 			q.Get("salient_limit") != "10" || q.Get("max_bytes") != "8192" {
 			t.Errorf("query = %s", r.URL.RawQuery)
 		}
@@ -403,7 +404,7 @@ func TestSelfShowPlainOutputIncludesBoundedDigestWithoutSensitiveValues(t *testi
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agent_1","agent_name":"scott","realm_id":"realm_1","realm_name":"default"},"primary_facts":[{"id":"fact_1","name":"preferences/database","value":"Postgres","primary":true},{"id":"fact_private","name":"identity/private","value":"` + canary + `","primary":true,"sensitive":true}],"salient_memories":[{"id":"mem_1","snippet":"Use client-side inference","kind":"decision","tags":["architecture"],"salience":0.9},{"id":"mem_private","snippet":"` + canary + `","kind":"profile","salience":0.8,"sensitive":true}],"memory_checkpoint":{"pending":false,"request_id":"","request_generation":0},"index":{"kinds":["decision","profile"],"tags":["architecture"],"counts":{"facts":2,"memories":2}},"elided":false}`))
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agent_1","agent_name":"scott","realm_id":"realm_1","realm_name":"default"},"primary_facts":[{"id":"fact_1","name":"preferences/database","value":"Postgres","primary":true},{"id":"fact_private","name":"identity/private","value":"` + canary + `","primary":true,"sensitive":true}],"salient_memories":[{"id":"mem_1","snippet":"Use client-side inference","kind":"decision","tags":["architecture"],"salience":0.9},{"id":"mem_private","snippet":"` + canary + `","kind":"profile","salience":0.8,"sensitive":true}],"memory_checkpoint":{"pending":false,"request_id":"","request_generation":0},"message_checkpoint":{"pending":true,"mailbox_pending":true,"candidate_assignment_pending":true},"index":{"kinds":["decision","profile"],"tags":["architecture"],"counts":{"facts":2,"memories":2}},"elided":false}`))
 	}))
 	defer srv.Close()
 	tokenFile := filepath.Join(t.TempDir(), "scott.token")
@@ -421,6 +422,7 @@ func TestSelfShowPlainOutputIncludesBoundedDigestWithoutSensitiveValues(t *testi
 		"fact:\tpreferences/database\t\"Postgres\"", "fact:\tidentity/private\t<redacted>",
 		"memory:\tmem_1\tdecision\t0.900\tUse client-side inference", "memory:\tmem_private\tprofile\t0.800\t<redacted>",
 		"kinds:\tdecision,profile", "tags:\tarchitecture", "memory-checkpoint:\tidle",
+		"message-checkpoint:\tpending lanes=mailbox,candidate-assignment",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("plain self output omitted %q: %q", want, stdout)

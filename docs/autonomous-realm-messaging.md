@@ -1,11 +1,13 @@
 # Autonomous Realm Messaging
 
-Status: implemented in the current checkout (2026-07-15), pending release and
-deployment. Migration 0037 adds immutable explicit-list and realm delivery
-snapshots. Migration 0038 adds message-backed open requests, bounded offers,
-client-ranked selection, multi-assignee reservations, and exact claim fences.
-The client-owned runner participates without adding inference to the backend.
-This status is not a deployment statement.
+Status: foreground-client design implemented in the current checkout
+(2026-07-16), pending release and deployment. Migration 0037 adds immutable
+explicit-list and realm delivery snapshots. Migration 0038 adds message-backed
+open requests, bounded offers, client-ranked selection, multi-assignee
+reservations, and exact claim fences. Migration 0041 indexes the per-coordinator
+foreground checkpoint probe. Active clients perform all inference; the
+backend remains a model-free durable mailbox and coordination service. This
+status is not a deployment statement.
 
 This document defines autonomous, same-realm agent communication on top of the
 durable mailbox in [inter-agent-messaging.md](inter-agent-messaging.md). It does
@@ -52,8 +54,10 @@ protocol.
 - **Open request** — a realm-visible delegation for which snapshotted candidates
   may offer and coordinator-selected agents may claim work.
 - **Claim** — authoritative ownership of one work slot under a bounded lease.
-- **Runner** — a client-owned process that listens, claims, invokes the locally
-  configured AI, and sends messages as one installed Witself agent.
+- **Foreground client** — an already-active Codex, Claude Code, Grok Build,
+  Cursor, or later runtime operating as one installed Witself agent. It inspects
+  pending mailbox metadata, claims work, invokes inference in its current turn,
+  and sends replies. It is not a persistent Witself daemon.
 - **Runtime** — Codex, Claude Code, Grok Build, Cursor, or a later provider that
   hosts an agent. A runtime is not the durable agent identity.
 
@@ -71,12 +75,14 @@ inference, and an agent-to-agent exchange and is not the backend feature name.
    results are messages in the request thread.
 4. Read, acknowledgement, work claim, and work completion are separate states.
    Reading content must not imply that work succeeded.
-5. All reasoning and provider invocation happen in a client runner. The Witself
-   backend contains no model SDK, model credential, prompt engine, semantic
-   router, or reply generator.
+5. All reasoning and provider invocation happen in an already-active foreground
+   client. The Witself backend contains no model SDK, model credential, prompt
+   engine, semantic router, reply generator, or client-wakeup mechanism.
 6. A human normally supplies only the initial request and receives the final
-   result or a genuine escalation. Sender and recipient agents handle routine
-   clarification automatically.
+   result or a genuine escalation. While the participating clients are active,
+   sender and recipient agents handle routine clarification without the human
+   driving each reply. An idle runtime is not woken; its next foreground turn
+   resumes the durable exchange.
 7. An open realm request may select one or several agents. Capacity and leases
    are enforced transactionally; "the first model to reply" is not a safe work
    ownership protocol.
@@ -87,7 +93,8 @@ inference, and an agent-to-agent exchange and is not the backend feature name.
    fences, and lifecycle state. All of that state participates in account
    export/import; active leases do not move between cells.
 10. Offline recipients are normal. Sending is durable and asynchronous and does
-    not require a recipient runtime to be open.
+    not require a recipient runtime to be open. Pending work stays canonical and
+    unacknowledged until that recipient next becomes active.
 11. `client_ranked` is the only current open-request selection policy. Candidate
     clients use their current runtime instructions to send a bounded offer or
     decline; the immutable, token-derived coordinator client ranks offers. The
@@ -124,13 +131,13 @@ The implemented messaging slice has:
   exact-fence release marked as a deterministic message failure;
 - account archive/restore of completed processing state, with every imported
   active claim interrupted before the destination account resumes; and
-- a client-owned messaging runner with identity pinning, lease renewal, bounded
-  continuation context, provider isolation, retry/recovery, local singleton
-  locking, a private metadata-only notification ledger, content-free cycle
-  health, and per-user launchd/systemd supervision; and
-- full-profile MCP notification list/consume bridging that local ledger to a
-  canonical read, with list retained in read-only and both tools absent from
-  curator profiles;
+- a value-free `message_checkpoint` in the bounded self digest, plus non-blocking
+  `message.listen(wait_seconds=0)`, so an active client can discover pending work
+  without reading or acknowledging content;
+- model-visible message-checkpoint injection for Codex and Claude Code at
+  supported session/prompt boundaries, with guided `self.show` for Cursor and
+  Grok Build where passive hook output cannot reliably reach the model; every
+  runtime uses non-blocking listen to retrieve unread metadata;
 - one immutable PostgreSQL message plus a bounded send-time delivery snapshot
   for direct, explicit-agent-list, and whole-realm audiences;
 - realm-wide open requests with an immutable candidate snapshot, bounded offer
@@ -140,20 +147,20 @@ The implemented messaging slice has:
 - account archive/restore of request candidates, offers, selections, claims,
   and results, with active source-cell work interrupted on import.
 
-It does **not** yet have:
+It deliberately does **not** have:
 
-- deterministic mailbox checks in runtime lifecycle hooks;
-- tool-capable autonomous execution;
-- native autonomous execution through Codex or Cursor, whose current CLIs do
-  not pass the required text-only isolation probe; and
-- automatic injection of an asynchronous final result into a foreground sender
-  task when no task is open. The current runner invokes only `request`,
-  `question`, and `reply`; it durably indexes terminal
-  result/decline/escalation metadata before acknowledging the delivery. A
-  client or user can list those pointers and read the original message content.
+- a persistent background messaging process;
+- launchd/systemd message supervision or provider-credential capture;
+- a host-local notification ledger or a second message store;
+- a backend, MCP, hook, or webhook path that starts or wakes an idle AI; or
+- a promise of immediate autonomous handling while every addressed client is
+  offline.
 
 Binding Claude Code to Bob establishes **who Claude is**. It does not keep
-Claude running, wake an idle session, or make mailbox retrieval automatic.
+Claude running or wake an idle session. When Claude is active, supported hook
+hydration supplies the content-free checkpoint automatically; Claude then uses
+non-blocking listen to retrieve unread metadata. The durable mailbox remains
+waiting while Claude is closed.
 
 ## System Boundary
 
@@ -161,25 +168,27 @@ Claude running, wake an idle session, or make mailbox retrieval automatic.
 human or trigger
       |
       v
-Scott client/runner --send/reply--> Witself mailbox + processing state (Postgres)
+active Scott client --send/reply--> Witself mailbox + processing state (Postgres)
       ^                                      |
-      |                                      | listen/claim/read
+      |                                      | checkpoint/listen/claim/read
       |                                      v
-      +----------- Bob replies ------- Bob client/runner --> Claude Code
-                             Codex <-- Scott client/runner
+      +----------- Bob replies ------- active Bob client
 ```
 
 The three client-facing mechanisms have different jobs:
 
 - **MCP/CLI/API** expose mailbox and claim operations.
-- **Runtime hooks** provide deterministic checks at supported session/task
-  boundaries while an interactive runtime is already receiving a turn.
-- **The runner** remains active independently, long-polls for work, and starts a
-  bounded provider turn when a message arrives.
+- **Runtime hooks** provide deterministic content-free checkpoint checks at supported
+  session/task boundaries while an interactive runtime is already receiving a
+  turn. Codex and Claude Code can receive that checkpoint automatically; Cursor
+  and Grok Build use managed guidance to make the same non-blocking MCP reads.
+- **The foreground client** decides whether to claim/read/process pending work
+  in the current turn. No Witself process remains active independently.
 
 MCP is request/response transport. It cannot call its own tools, start a model,
-or wake an idle Codex or Claude session. A long-poll route also cannot wake a
-model by itself; an already-running runner must own the poll.
+or wake an idle runtime. A long-poll route also cannot wake a model by itself;
+the canonical foreground path uses a non-blocking listen from an already-active
+client.
 
 ## Recipient And Coordination Model
 
@@ -216,10 +225,11 @@ the sentence asks for work. "Have everyone collaborate" is `collaborate`.
 
 Realm `notify`, `each`, and `collaborate` map to ordinary snapshot fan-out; their
 different response expectations are client protocol, not stored backend modes.
-A conceptual `claim` maps to the separate open-request operation. Candidate
-runners discover it through the request list and may invoke one bounded
-client-side turn to offer or decline. The server itself invokes no model and
-records the immutable candidate snapshot for authorization, audit, and export.
+A conceptual `claim` maps to the separate open-request operation. Active
+candidate clients discover it through their message checkpoint/request list and
+may use the current turn to offer or decline. The server itself invokes no model
+and records the immutable candidate snapshot for authorization, audit, and
+export.
 
 Agents created after the snapshot do not retroactively receive or become
 eligible for the old request. Agent availability is runtime state and does not
@@ -231,11 +241,11 @@ change who was in the realm at send time.
 `request`, `question`, `reply`, `offer`, `result`, and `event`; unknown kinds do
 not fail storage.
 
-Omitting `kind` on an ordinary send normalizes to actionable `request`
-on the CLI, MCP, and backend. `note` must be explicit and means FYI-only to the
-implemented runner: it records the content-free notification pointer and acks
-without provider invocation. The runner's provider-invoking kinds are
-`request`, `question`, and `reply`; other labels use the notification path.
+Omitting `kind` on an ordinary send normalizes to actionable `request` on the
+CLI, MCP, and backend. `note` must be explicit and means FYI-only: the active
+recipient may read and acknowledge it without treating it as a work request.
+Every kind remains in the canonical mailbox until the recipient explicitly
+acknowledges it.
 
 For an open request, `selection_policy` and `max_assignees` are closed,
 validated controls. The conceptual coordination behavior remains client-side
@@ -260,7 +270,7 @@ contract adds a validated parent message reference:
 Sending returns immediately after durable persistence. A caller may
 opportunistically wait a short, bounded time for a reply, but that wait is a UI
 optimization, not a delivery guarantee. A later reply is still delivered to
-the sender's mailbox and processed by its runner.
+the sender's mailbox and offered on its next foreground turn.
 
 ## Direct Autonomous Delegation
 
@@ -272,33 +282,28 @@ The Scott-to-Bob path is:
 3. The server persists the direct message and recipient delivery state. The
    send does not wait for Claude. Dedicated request coordination state is not
    needed for one direct recipient.
-4. Bob's runner receives metadata through `listen`, deduplicates by `msg_` id,
-   and atomically acquires the work lease before invoking inference.
-5. The runner reads the body, treats it as untrusted input, reconstructs bounded
-   thread and agent context, and invokes Claude as Bob.
-6. Bob may reply with a question. Scott's runner receives it, invokes its
-   configured safe provider with the original objective and relevant bounded
-   continuation history, and answers without involving the user when the
-   answer is already within the original mandate. A native Codex runner is
-   currently fail-closed; this side requires an active Codex task or an
-   explicitly integrated safe command adapter until Codex exposes the required
-   headless isolation controls.
+4. When Bob's runtime next receives a foreground turn, automatic Codex/Claude
+   hook hydration or the guided Cursor/Grok startup protocol exposes bounded
+   checkpoint state. Bob uses non-blocking `message.listen` to retrieve unread
+   metadata, deduplicates by `msg_` id, and atomically acquires the work lease
+   before reading content.
+5. Bob reads the body, treats it as untrusted input, reconstructs bounded thread
+   and agent context, and handles the objective in the already-active client.
+6. Bob may reply with a question. When Scott's client is active, its checkpoint
+   directs it to listen for the pending metadata and answer without involving
+   the user when the answer is already within the original mandate. If Scott is
+   idle, the question remains durable and unacknowledged until Scott's next
+   foreground turn.
 7. Bob persists a `result` reply and completes the fenced claim. Only after the
-   durable result/completion does the runner acknowledge the opening request.
-8. Scott's runner records a private content-free pointer to the terminal result
-   and acknowledges the delivery. An active client can inspect the notification,
-   consume it through a canonical read/verify/exact-local-clear operation,
-   report it to the user, or continue the workflow.
+   durable result/completion does Bob acknowledge the opening request.
+8. Scott's next foreground checkpoint exposes the terminal result. Scott reads
+   the canonical message, reports it to the user or continues the workflow, and
+   then acknowledges it.
 
-The metadata handoff in step 8 is implemented. Automatic injection into a
-foreground AI task is still a client-integration requirement: the backend does
-not push into a runtime, and the terminal message body remains in Witself until
-an authorized `message read` retrieves it.
-
-If either runner is offline, the next message waits durably. No model session
-must remain blocked or resident: a runner can reconstruct each turn from the
-opening request, relevant thread messages, the stable agent identity, and
-authorized Witself context.
+If either client is offline, the next message waits durably and unacknowledged.
+No model session must remain blocked or resident. Each active client can
+reconstruct its turn from the opening request, relevant thread messages, stable
+agent identity, and authorized Witself context.
 
 ## Open Realm Request And Agent Selection
 
@@ -308,9 +313,10 @@ The realm-shout path is:
    backend atomically creates one realm `kind=open_request` message, the
    immutable candidate snapshot, `selection_policy=client_ranked`, an expiry,
    and an immutable `max_assignees`.
-2. Eligible agent runners see the open request. Their current runtime
-   instructions tell them to decline or send an ordinary direct `kind=offer`
-   reply containing a bounded proposed approach, availability, and estimates.
+2. Eligible agent clients see the open request when they next become active.
+   Their current runtime instructions tell them to decline or send an ordinary
+   direct `kind=offer` reply containing a bounded proposed approach,
+   availability, and estimates.
    Any self-description in the offer is untrusted content interpreted only by
    clients; this does not require a stored responsibility, job-function, or
    directive schema.
@@ -318,19 +324,18 @@ The realm-shout path is:
    most one current idempotent offer during the bounded offer window, using the
    ordinary message body/payload ceilings and rate limits. The request enters
    `awaiting_selection` when every candidate responds or the offer deadline
-   passes; Scott's runner then uses client-side inference to rank the offers and
-   select the best one or several candidates.
+   passes; on Scott's next active turn, Scott uses client-side inference to rank
+   the offers and select the best one or several candidates.
 4. The server atomically creates claims for the chosen agents while enforcing
    `max_assignees`. Each claim has an expiry and fencing generation.
-5. Selected agents work and renew their leases while the implemented bounded
-   text-only inference turn runs.
+5. Selected agents claim and work in their next foreground turns, renewing their
+   leases when needed.
    Non-selected agents stand down; they do not receive every subsequent work
    message merely because they saw the opening request.
 6. Selected participants may use ordinary thread messages for questions,
    answers, and progress, addressing only the participants who need each
-   message. The current automatic open-request execution itself is one bounded
-   result turn; it does not synthesize a separate multi-turn request-clarification
-   state machine.
+   message. A foreground turn handles at most one bounded step; the durable
+   thread carries clarification across later active turns.
 7. A result is persisted before claim completion. If a claimant fails, releases,
    or lets its lease expire, the request remains open and Scott may select the
    next offer or otherwise reassign available capacity.
@@ -373,10 +378,10 @@ The claim contract requires:
 - import interrupting every active lease and reserving a fresh destination
   fence.
 
-Delivery and work execution are at-least-once. A runner crash after an external
-side effect cannot be made exactly-once by the mailbox. Runners must use the
-message id, claim id/fence, and domain-specific idempotency keys when performing
-retryable work.
+Delivery and work execution are at-least-once. A client interruption after an
+external side effect cannot be made exactly-once by the mailbox. Clients must
+use the message id, claim id/fence, and domain-specific idempotency keys when
+performing retryable work.
 
 ### Implemented direct-delivery processing fence
 
@@ -401,21 +406,18 @@ without consuming a failure budget. Migration
 Only release of the exact claim fence with `deterministic_failure=true`
 increments it atomically. Provider-wide or unavailable-provider failures,
 configuration errors, cancellation/timeouts, and claim-lease maintenance errors
-release with false and do not count. The installed runner's current default
-releases and counts the first four deterministic message failures and completes
-the fifth deterministic attempt as a durable escalation. Payload fields,
-generation, and host-local health counters cannot reset or substitute for this
-backend-owned count.
+release with false and do not count. A foreground client may use this durable
+count to bound retry and escalation policy. Payload fields and processing
+generation cannot reset or substitute for this backend-owned count.
 
 Result persistence and processing completion are one transaction. The
 implemented `POST /v1/messages/{message_id}:complete` action validates the
 current live fence, creates a server-derived reply through the same causal
 reply path, links that result, and marks processing complete atomically. It
-does **not** ack. A
-runner that crashes after completion can recover the linked result and then
-ack without invoking the provider again. This closes duplicate durable results;
-external model/tool side effects remain at-least-once and require their own
-idempotency.
+does **not** ack. A client interrupted after completion can recover the linked
+result and then ack without executing the work again. This closes duplicate
+durable results; external model/tool side effects remain at-least-once and
+require their own idempotency.
 
 Account export preserves completed processing state and result links. Import
 interrupts active claims by incrementing the generation and clearing claim,
@@ -426,159 +428,46 @@ value-free generation and failure-count history. Import preserves
 realm-wide maximum-assignee coordination; they do not overload the direct
 delivery-processing fence.
 
-## Implemented Client Messaging Runner
+## Foreground Client Handling
 
-The runner follows the existing client-memory-curator separation: a trusted
-parent holds the Witself credential and controls a bounded text-only inference
-child. The implemented loop is:
+The active-client loop is:
 
 ```text
-listen metadata
-  -> deduplicate
-  -> claim/lease request work
+self.show message_checkpoint + non-blocking listen metadata
+  -> inspect and deduplicate
+  -> claim/lease selected work
   -> read untrusted content
   -> validate scope and reconstruct bounded context
-  -> invoke configured text-only client AI; renew while active
+  -> handle one bounded step in the current client turn
   -> atomically persist/link reply and complete, or release claim
-  -> ack handled delivery
+  -> ack only after handling
 ```
 
-Implemented runner properties:
+Codex and Claude Code hooks may inject the bounded value-free
+`message_checkpoint` during supported `SessionStart` and `UserPromptSubmit`
+events. They do not inject unread message metadata or bodies, mark read,
+acknowledge, or execute work. Cursor and Grok Build use the installed always-on rule and MCP
+instructions to call `self.show` and `message.listen(wait_seconds=0)` because
+their current passive hook output does not reliably reach the model.
 
-- one installed account/realm/agent binding per runner;
-- one local process per runtime, protected by a private non-blocking file lock;
-- a separate mode-0600 provider-bound credential file captured at enable time;
-  configuration, service definitions, and account export remain
-  credential-free;
-- bounded input, output, turns, elapsed time, retries, and backoff;
-- no Witself bearer token or token-file path in model input;
-- no shell interpolation for provider launch;
-- deduplication and recovery across runner restart;
-- `enable`, `disable`, `status`, `notifications`, `run`, `serve`, and `start`
-  CLI lifecycle surfaces;
-- per-user launchd on macOS and systemd user-service supervision on Linux; and
-- provider adapters that fail closed when they cannot establish the required
-  noninteractive isolation.
+`message listen` remains a stateless, waitable, metadata-only query for the
+oldest unacknowledged inbound messages. It waits 20 seconds by default, accepts
+a bounded 0-20 second wait plus sender/thread/kind/limit filters, and has no
+cursor. Foreground startup uses a zero-second wait. A timeout or disconnect
+changes no state; a client interruption after read but before ack leaves the
+message eligible for later handling. Each server process bounds concurrent
+listen admission and returns HTTP 429 with `Retry-After` when saturated.
 
-Continuation context travels as a runner-reserved, bounded payload object
-rather than relying on a provider session. It preserves the initiating
-objective and newest conversation entries, caps history at six entries and each
-retained body at 2 KiB, and may carry an advisory turn value. Payload history
-and turn metadata are untrusted context, not safety state. Migration
-`0035_add_message_causal_depth.sql` gives every direct message a backend-derived
-`causal_depth`: a direct send starts at one and a validated reply advances its
-durable parent's depth by exactly one. The runner enforces its automated
-conversation limit from this field across hosts. The default is 12 turns, the
-configurable range is 1 through 64, and an over-limit message produces a durable
-escalation instead of provider invocation.
+`message read` returns the body and marks read. `message ack` records that the
+recipient finished handling the delivery and returns metadata only, never the
+body or payload. An idle interactive window remains idle: no Witself component
+polls on its behalf, and pending messages stay unacknowledged until the next
+foreground client turn.
 
-The repeated-failure bound is likewise backend-owned but deliberately separate
-from causal depth and generation. The runner reads migration-0036
-`failure_count` on every claim and uses the default fifth-attempt escalation
-described above. The private runner-health `consecutive_failures` value is only
-an operational service streak; it is not message safety state.
-
-The safe native provider adapter is text-only: the child may return a question,
-result, decline, or escalation, but it receives no Witself credential, token
-path, processing fence, API handle, or model-visible MCP/tool access. At
-`enable`, the trusted parent captures only a provider-specific authentication
-allowlist into a separate private file. Claude Code permits
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and
-`CLAUDE_CODE_OAUTH_TOKEN`; Grok Build permits only `XAI_API_KEY`. The service
-loads only the file bound to its configured provider and passes those values to
-the sanitized provider child. Other `WITSELF_*` environment values are stripped
-apart from a reserved value-free runner-session marker, message content never
-enters argv, no shell is used, and one strict result JSON object is validated.
-Claude Code and Grok Build have implemented native adapters whose installed CLI
-must advertise every required isolation control before enablement. Grok receives
-the private prompt as a mode-0600 plain-text `turn.txt` inside the mode-0700
-per-call workspace because its strict sandbox reads only beneath `--cwd`; it
-runs with strict sandboxing, plan permission mode, tools/MCP, memory, web search,
-and subagents disabled, and the entire scratch root is removed on return. Claude
-receives the prompt on stdin with its corresponding no-tools, no-persistence,
-strict-empty-MCP controls. Codex and Cursor are recognized but deliberately fail
-closed because their current CLIs do not expose an equivalent provable contract.
-
-Local conformance verification for this checkout invoked the isolated
-`NativeTextProvider` against installed Claude Code 2.1.202 and Grok Build
-0.2.101 and passed fixed, content-free result assertions for both. This is a
-local implementation check, not a release, deployment, or general platform
-compatibility claim; enable still probes the installed CLI on each host.
-
-The runner core also provides a strict generic command-adapter protocol for a
-separately configured wrapper: one bounded JSON envelope on stdin and one
-content-only result on stdout, with the same token-free child boundary. The
-current persisted `message runner` CLI selects only capability-probed native
-providers; making an arbitrary wrapper user-configurable requires a separate
-configuration surface and security review. Tool-capable execution is a
-different adapter class and requires an explicit workspace/OS sandbox plus
-credential isolation. Gemini and GitHub Copilot remain deferred.
-
-For terminal and other non-provider message kinds, the trusted runner records a
-private content-free pointer before it acknowledges the delivery. `message
-runner status` reports the pending notification count, and `message runner
-notifications` lists the newest pointers first; the ordinary `message read`
-operation remains the content boundary. The ledger is bounded to 1,024 entries
-and fails closed at capacity: the runner does not silently evict a pointer or
-acknowledge a message it could not record. Explicit
-`notifications --clear MESSAGE_ID` removes inspected local pointers;
-`--clear-all` removes every pointer. Neither deletes the durable Witself
-messages.
-
-The full MCP profile adds `witself.message.notification.list` and
-`witself.message.notification.consume`. List exposes only bounded local pointers
-and is retained in read-only mode. Consume performs the canonical message read,
-verifies it and the runtime/account/realm/agent binding against the pointer,
-rechecks the binding, and removes only that exact local entry. A failure at any
-stage keeps the pointer for retry. Curator profiles expose neither bridge tool.
-Grok receives underscore-safe names:
-`witself_message_notification_list` and
-`witself_message_notification_consume`.
-
-Acknowledgement is canonical and global for the agent delivery, while the
-handoff pointer exists only in that runtime's local `WITSELF_HOME`. A different
-machine or runtime bound to the same agent therefore cannot see the pointer and
-will not rediscover the acknowledged delivery through unread mailbox state.
-This is an intentional MVP locality limitation, not cross-host wake delivery.
-The host-local ledger is excluded from account export; the canonical PostgreSQL
-message remains included.
-
-The same private state records content-free runner health for operational
-inspection: last cycle and last success timestamps, the last bounded status or
-error class, and consecutive failure count. It never retains raw error text,
-message ids/content, provider output, or credentials. `message runner status`
-returns that health alongside service state and notification count.
-
-## Active-Session Hooks And Long Polling
-
-The deterministic active-session experience and the autonomous experience are
-related but distinct:
-
-- The full and read-only MCP startup instructions tell an already-active agent
-  to call `message.listen(wait_seconds=0)` and
-  `message.notification.list` at the beginning of non-trivial work. These are
-  non-blocking, metadata-only checks for canonical unacknowledged work and
-  already-acknowledged local handoff pointers respectively; they do not wake a
-  model or expose content.
-- On supported runtimes, `SessionStart` and `UserPromptSubmit` hooks check
-  unread **metadata** and may inject a bounded notification such as "one unread
-  message from Scott." They do not inject bodies, mark read, acknowledge, or
-  execute work.
-- `message listen` is a stateless, waitable, metadata-only query for the oldest
-  unacknowledged inbound messages. It waits 20 seconds by default, accepts a
-  bounded 0–20 second wait plus sender/thread/kind/limit filters, and has no
-  cursor. A timeout returns normally with no state change. Disconnecting loses
-  no message, and a crash after read but before ack makes the message eligible
-  for listen again. Each server process bounds concurrent listen admission;
-  saturation returns HTTP 429 with `Retry-After` and the runner retries.
-- `message read` returns the body and marks read.
-- `message ack` records that the recipient finished handling the delivery and
-  returns metadata only, never the body or payload.
-- The autonomous runner owns repeated `listen` calls. An idle interactive
-  window without a runner remains idle.
-
-This preserves the untrusted-content boundary and prevents a passive hook from
-turning a delivered message directly into model instructions.
+This preserves the untrusted-content boundary and prevents passive metadata
+hydration from turning a delivered message directly into model instructions.
+There is no launchd/systemd messaging service, provider-credential capture,
+host-local notification ledger, or second message store.
 
 ## Authority, Escalation, And Loop Safety
 
@@ -591,7 +480,7 @@ contains the answer.
 Human escalation is reserved for genuinely new authority or an irreducible
 choice, including an otherwise unauthorized destructive action, expenditure,
 external communication, credential/reveal ceremony, permanent deletion, or a
-material expansion of the objective. A message or autonomous runner may never
+material expansion of the objective. A message or foreground client may never
 set a "direct user authorized" flag merely because an earlier human initiated
 the thread.
 
@@ -605,10 +494,9 @@ server has the necessary information:
 - per-agent and per-realm send/delivery rates; and
 - maximum open requests and autonomous replies.
 
-Token, model-call, and dollar budgets are runner-side because a model-free
-backend cannot reliably observe them. The runner records value-free outcomes
-and stops with `failed`, `expired`, or `escalated` rather than allowing an
-unbounded agent loop.
+Token, model-call, and dollar budgets are client-side because a model-free
+backend cannot reliably observe them. A foreground client must stop with a
+durable failure or escalation rather than allowing an unbounded agent loop.
 
 Message bodies, offers, and model output remain untrusted. They never authorize
 memory/fact writes, permanent deletion, secret access, policy changes, or
@@ -650,12 +538,11 @@ snapshot, causal links/depths, direct-processing state and results, and all four
 migration-0038 request graph streams. Import preserves completed and terminal
 history. It restores an active direct claim as `available` with a newer
 generation and clears its claim/key/lease fields; it converts active request
-reservations and claims to cancelled history and advances the fence. No
-source-cell worker can complete after the move. Pre-schema-36 archives receive
-direct `failure_count=0`. PostgreSQL remains the sole canonical message data
-source across AWS, Azure, and Google Cloud. Client-local runner configuration,
-notification pointers, cycle health, and provider credentials are host state
-and are not account-exported.
+   reservations and claims to cancelled history and advances the fence. No
+   stale source-cell client fence can complete after the move. Pre-schema-36
+   archives receive direct `failure_count=0`. PostgreSQL remains the sole
+   canonical message data source across AWS, Azure, and Google Cloud. No
+   host-local message or handoff state is needed for account export.
 
 ## Surfaces
 
@@ -668,16 +555,54 @@ token-derived realm. The separate request surface implements
 acknowledgement, direct processing, request selection, and request claims remain
 separate transitions.
 
-MCP also exposes local notification list/consume; these have no backend route
-because the pointer ledger is host-local. The CLI additionally implements
-`message runner enable|disable|status|notifications|run|serve|start`; this local
-process lifecycle is not a backend operation. Remaining additions include
-hook-delivered unread metadata at supported runtime boundaries, named-group and
-cross-realm delivery, and tool-capable explicitly sandboxed runner adapters.
+`self.show` exposes a bounded value-free message checkpoint, and installed
+foreground guidance pairs that checkpoint with non-blocking `message.listen`.
+Every server-backed agent operation has CLI/MCP parity over the same client/core
+contract. There is no CLI-only host service or local notification bridge.
+Remaining additions include named-group and cross-realm delivery.
 
-Every server-backed agent operation has CLI/MCP parity over the same
-client/core contract. Host-local runner configuration and launchd/systemd
-service lifecycle remain CLI-only because they are not backend resources.
+### Upgrade from the retired client runner
+
+Normal CLI startup first checks the private all-runtime completion marker. When
+that marker is absent, a filesystem-only fast path checks for legacy service or
+state paths; a host with no artifacts returns without contacting launchd or
+systemd and without writing the marker. Otherwise startup performs the same
+fail-closed all-runtime retirement as `disable --all`. Only a successful
+all-runtime cleanup records the marker; a targeted `--runtime` cleanup never
+does.
+
+All-runtime cleanup verifies ownership of every service definition before any
+mutation. It then disables each owned service, removes its definition, and stops
+the loaded unit before inspecting that runtime's state. This prevents a
+`KeepAlive` or `Restart=always` unit from repeatedly invoking a removed command
+even when local state must be preserved. A loaded unit without an owned
+definition is never stopped by ordinary cleanup. The exact retired
+`message runner serve --runtime RUNTIME` invocation is recognized only as a
+tombstone, allowing that already-running unit to disable and retire itself when
+its definition has already vanished; it does not restore a runner command.
+
+Without `--force`, valid notification pointers are preserved while other
+private files, including credentials, are scrubbed. A malformed or unreadable
+`state.json` is also preserved; other files are still scrubbed when its enclosing
+directory is private, while unsafe directory state is preserved without
+mutation. Either condition makes the cleanup fail without writing the completion
+marker, but the owned service has already been retired. `--force` is required to
+discard those pointers or malformed/non-private state. Canonical Postgres
+messages are never deleted. Inspect any recoverable message IDs before
+explicitly discarding local state:
+
+```sh
+witself message runner disable --all
+# If warned, inspect ~/.witself/message-runners/*/state.json and read needed IDs.
+witself message read msg_... --agent AGENT --json
+witself message runner disable --all --force
+```
+
+`message runner disable` is a temporary, hidden upgrade-cleanup surface, not a
+messaging execution mode. Normal CLI help does not advertise a runner. The
+marker represents a successful all-runtime cleanup; the no-artifact startup fast
+path and per-runtime cleanup do not write it. Per-runtime cleanup remains
+available for diagnosis without suppressing the next startup-wide pass.
 
 ## Implementation Slices
 
@@ -686,16 +611,14 @@ service lifecycle remain CLI-only because they are not backend resources.
    and contract tests.
 2. **Direct processing fence (complete)** — add delivery claim/renew/release and
    atomic result completion with a monotonic fence, archive interruption, audit,
-   and two-runner race tests.
-3. **Text-only autonomous runner (complete in the current checkout)** — add a
-   sibling `messagerunner` core with private value-free state, local
-   singleflight, identity pinning, bounded retries, launchd/systemd supervision,
-   fake-provider recovery tests, backend-owned causal-depth and deterministic
-   failure-count bounds, advisory bounded continuation context, and native
-   Claude Code/Grok Build text-only adapters.
-4. **Provider conformance (partially complete)** — Claude Code and Grok Build
-   are capability-probed and supported; Codex and Cursor stay unsupported until
-   they pass. Tool-capable execution remains a separately sandboxed contract.
+   and competing-client race tests.
+3. **Foreground discovery and processing (complete in the current checkout)** —
+   add a bounded message checkpoint, non-blocking startup listen, active-client
+   handling guidance, backend-owned causal-depth and deterministic failure-count
+   bounds, and provider-accurate hook delivery.
+4. **Provider conformance** — Codex and Claude Code receive automatic bounded
+   checkpoint injection; Cursor and Grok Build use guided `self.show`. Every
+   runtime uses MCP listen for unread metadata.
 5. **Recipient fan-out (complete in the current checkout)** — bounded explicit
    lists and realm snapshots with per-recipient delivery/read/ack and archive
    coverage.
@@ -706,37 +629,28 @@ service lifecycle remain CLI-only because they are not backend resources.
    This slice consumes current runtime instructions and does not wait for a
    future responsibility/directive schema.
 7. **Guardrails and conformance** — add rate/budget enforcement,
-   disabled-agent-specific behavior, broader multi-runner races, restart
+   disabled-agent-specific behavior, broader competing-client races, interruption
    recovery, metrics, audit, and three-cloud/export-import tests.
 
-The implemented runner handles both direct deliveries and open requests. Before
-ordinary mailbox work, it pages selected request work, pending candidate work,
-and coordinator work awaiting selection. It can invoke one bounded text-only
-turn to offer or decline, rank durable offers as the immutable coordinator,
-claim selected work, renew its lease, and atomically complete a linked result.
-Direct multi-turn question/reply continuation still uses bounded advisory
-payload context while backend causal depth enforces the turn limit. A fully
-native Codex-to-Claude unattended pair remains blocked specifically on the Codex
-native isolation contract. Automatic injection of the final asynchronous
-terminal result into a foreground task is also still a client-integration
-slice; the durable metadata handoff is implemented and the remaining work is
-not a mailbox or fence gap.
+An active client handles direct deliveries and open-request roles. It can offer
+or decline, rank durable offers as the immutable coordinator, claim selected
+work, renew its lease, and atomically complete a linked result. Direct
+question/reply continuation uses canonical thread messages while backend causal
+depth enforces the turn bound. If a client is not active, every pending step
+remains durable; no wake or immediate-processing claim is made.
 
 ## Acceptance Scenarios
 
-- A direct request sent while Bob is offline is processed after Bob's runner
-  starts.
-- Two Bob runners racing the same request produce one current claim and no
-  duplicate durable result.
-- Moving a conversation or retry between machines cannot reset the automated
+- A direct request sent while Bob is offline remains unacknowledged and is
+  processed on Bob's next foreground turn.
+- Two active Bob clients racing the same request produce one current claim and
+  no duplicate durable result.
+- Moving a conversation or retry between machines cannot reset the conversation
   turn or failure bounds: Postgres causal depth and message `failure_count`
   remain authoritative, while processing generation remains the stale-writer
   fence.
-- Scott's background runner records a terminal result pointer before ack; the
-  user can list the pointer and use MCP consume to read/verify the durable result
-  before clearing only that exact local notification.
-- A full 1,024-entry local notification ledger leaves the next non-provider
-  delivery unacknowledged instead of silently losing its pointer.
+- A terminal result remains a canonical unacknowledged delivery until Scott's
+  active client reads, handles, and acknowledges it.
 - Bob asks Scott a question; Scott answers from the original visible context;
   Bob resumes and completes without human intervention.
 - A question requiring genuinely new authority escalates instead of inventing
@@ -752,6 +666,8 @@ not a mailbox or fence gap.
   replacement without accepting a stale completion fence.
 - Realm fan-out is a send-time snapshot and never crosses a realm boundary.
 - `listen` never exposes a body or changes read/ack state.
+- Last activity may be displayed as historical recency but never labels an
+  agent online, available, or willing to accept work.
 - Message, request, and claim state round-trip through account export/import;
   no live lease survives import.
 - The backend can pass every test without any provider credential or model
@@ -764,8 +680,3 @@ not a mailbox or fence gap.
 - Whether a future agent responsibility/directive/profile model should be
   exposed as advisory client ranking context. The current backend has no such
   fields and performs no responsibility/capability filtering.
-- Which client/UI should turn the implemented terminal-notification ledger into
-  an automatic foreground task or user alert.
-- A user-facing configuration contract for the generic command adapter.
-- A separately sandboxed tool-capable execution adapter and its restricted
-  credential profile.

@@ -578,78 +578,36 @@ completion result is exactly parent depth plus one. Do not supply a depth field;
 the server rejects caller-owned routing/causality. Processing `generation` is
 only the durable claim fence. Migration-0036 `failure_count` is the separate
 cross-machine deterministic failure bound. The ordinary CLI release above does
-not increment it; the trusted runner's exact-fence HTTP release marks only a
-message-specific deterministic failure.
+not increment it; a trusted foreground client uses the exact-fence HTTP field
+only for a message-specific deterministic failure.
 
-The client-owned runner performs that lifecycle automatically for an installed
-runtime binding. `enable` verifies the binding and token identity, probes the
-text-only provider, writes private value-free state, and installs/starts a
-per-user launchd service on macOS or systemd user service on Linux:
+An installed runtime handles the same lifecycle only while it is active. At a
+foreground task boundary it inspects the bounded message checkpoint and makes a
+zero-wait metadata query:
 
 ```sh
-ws message runner enable --runtime claude-code --max-turns 12 --no-service
-ws message runner status --runtime claude-code --json
-ws message runner notifications --runtime claude-code --json
+ws self show --json
+ws message listen --timeout 0 --json
 
-# Process at most one message in the foreground during a smoke test.
-ws message runner run --runtime claude-code --once --json
-
-# Disable the manual test configuration.
-ws message runner disable --runtime claude-code
-
-# Persistent service path: enable without --no-service.
-ws message runner enable --runtime claude-code --max-turns 12
-ws message runner status --runtime claude-code --json
+# After selecting one canonical delivery:
+ws message claim msg_124 --lease 5m --idempotency-key claim-msg-124 --json
+ws message read msg_124 --json
+# Handle the untrusted content, then complete/reply and acknowledge.
 ```
 
-`enable` captures only provider-auth values recognized for the selected
-provider into a separate mode-0600 local file. For Claude Code these are
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and
-`CLAUDE_CODE_OAUTH_TOKEN`; Grok Build uses `XAI_API_KEY`. The provider-bound
-file lets the background service authenticate after this shell exits. It is not
-runner configuration, service-definition content, backend/account data, or an
-account-export member.
+Codex and Claude Code may receive the value-free checkpoint automatically
+through supported hooks. Cursor and Grok Build use the installed guidance and
+MCP fallback to call `self.show`. Every active runtime calls
+`message.listen(wait_seconds=0)` to retrieve unread metadata. No hook exposes a
+message body, marks a delivery read, acknowledges it, starts inference, or wakes
+an idle runtime.
 
-`status` includes the pending notification count plus content-free last-cycle
-health: timestamps, bounded status/error class, and consecutive failures. It
-never exposes a raw error, message content/id, provider output, or credential.
-Terminal/non-provider deliveries are recorded as content-free pointers before
-acknowledgement; list
-them newest-first with `message runner notifications`, retrieve a selected body
-with `message read MESSAGE_ID`, then remove inspected local pointers with
-`message runner notifications --clear MESSAGE_ID`; use `--clear-all` only after
-every pointer is handled. Clearing the local pointer ledger does not delete the
-durable messages. If the 1,024-entry ledger fills, the runner fails closed
-without evicting a pointer or acknowledging the unrecorded message.
-
-An active MCP agent uses the safer combined bridge instead: startup calls
-`witself.message.listen` with `wait_seconds=0` and
-`witself.message.notification.list`, then a selected
-`witself.message.notification.consume` performs the canonical read, verifies
-the message and identity/runtime binding, and clears only the exact local
-pointer. Any failure retains the pointer. Read-only MCP retains list but removes
-consume; curator profiles expose neither. Grok uses the underscore names
-`witself_message_notification_list` and
-`witself_message_notification_consume`.
-
-The runner acknowledgement is global for that agent delivery, but the pointer
-is local to one runtime's `WITSELF_HOME`. Another machine/runtime bound to the
-same agent does not see it through unread mailbox state. This intentional MVP
-locality is not cross-host wake delivery. The pointer ledger is not included in
-account export; the canonical PostgreSQL messages are.
-
-Claude Code and Grok Build are supported only when their installed CLI exposes
-every required native text-only isolation control. Native Codex and Cursor
-deliberately fail closed; the runner core has a strict token-free generic
-command-adapter contract for separately integrated wrappers. Provider children
-never receive the Witself token or token path. Continuation history is bounded;
-it is advisory context, not enforcement state. The runner enforces turns from
-backend-derived `causal_depth` and repeated deterministic failures from
-backend-owned `failure_count`. The current default escalates the fifth
-deterministic attempt. Provider-wide, configuration, cancellation, and
-lease-maintenance errors do not consume that per-message budget; generation is
-only the stale-writer fence. Automated conversations default to 12 turns and
-may be configured only through 64.
+There is no background message service, provider-credential capture, or
+host-local notification ledger. If the runtime closes, pending and terminal
+messages remain canonical and unacknowledged in PostgreSQL until the next
+foreground turn. Backend-derived `causal_depth` and `failure_count` preserve
+portable turn and retry safety; processing generation remains only the
+stale-writer fence.
 
 The post-v0 cross-realm story (realm-qualified addressing, the signed realm card,
 blind relay, and federation) builds on this same mailbox. See
@@ -664,9 +622,9 @@ Expected behavior:
 - A message grants no policy by itself; a message-driven cross-agent write still
   requires a policy.
 - Current send, deliver, read/ack, and processing claim/renew/release/complete
-  transitions are audited without content. The client runner owns repeated
-  listen calls, open-request offer/ranking/execution, and inference; the backend
-  remains model-free. Group/cross-realm routing, responsibility-aware
+  transitions are audited without content. An active foreground client owns
+  the startup listen, open-request offer/ranking/execution, and inference; the
+  backend remains model-free. Group/cross-realm routing, responsibility-aware
   eligibility, and target rate/scope/meter enforcement remain later slices.
 
 ## 10. Export And Import An Agent's Self

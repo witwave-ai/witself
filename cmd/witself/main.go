@@ -20,6 +20,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/legacyrunnercleanup"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/token"
@@ -32,7 +33,23 @@ var (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	args := os.Args[1:]
+	explicitCleanup := len(args) >= 3 && args[0] == "message" && args[1] == "runner" && args[2] == "disable"
+	if runtimeName, tombstone := legacyRunnerServeRuntime(args); tombstone {
+		if err := retireLegacyMessageRunnerServeTombstone(runtimeName); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: retire active legacy message runner: %v\n", err)
+		}
+	} else if !explicitCleanup {
+		if err := retireLegacyMessageRunnersOnStartup(); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: warning: retire legacy message runner: %v\n", err)
+			if errors.Is(err, legacyrunnercleanup.ErrUnownedService) {
+				fmt.Fprintln(os.Stderr, "witself: no unverified service definition was removed; follow the exact remediation above after checking the loaded command")
+			} else {
+				fmt.Fprintln(os.Stderr, "witself: run `witself message runner disable --all` (add --force only to discard preserved local state)")
+			}
+		}
+	}
+	os.Exit(run(args))
 }
 
 func run(args []string) int {
@@ -2521,12 +2538,13 @@ func selfShow(args []string) int {
 		return 1
 	}
 	digest, err := client.GetSelf(ctx, conn.Endpoint, conn.Token, client.SelfOptions{
-		IncludeFacts:      !*noFacts,
-		IncludeSalient:    !*noSalient,
-		IncludeCounts:     true,
-		IncludeCheckpoint: true,
-		SalientLimit:      *salientLimit,
-		MaximumByteSize:   *maxBytes,
+		IncludeFacts:             !*noFacts,
+		IncludeSalient:           !*noSalient,
+		IncludeCounts:            true,
+		IncludeCheckpoint:        true,
+		IncludeMessageCheckpoint: true,
+		SalientLimit:             *salientLimit,
+		MaximumByteSize:          *maxBytes,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -2593,6 +2611,28 @@ func selfShow(args []string) int {
 			fmt.Println()
 		} else {
 			fmt.Println("memory-checkpoint:\tidle")
+		}
+	}
+	if digest.MessageCheckpoint != nil {
+		if digest.MessageCheckpoint.Unavailable {
+			fmt.Println("message-checkpoint:\tunavailable")
+		} else if digest.MessageCheckpoint.Pending {
+			lanes := make([]string, 0, 4)
+			if digest.MessageCheckpoint.MailboxPending {
+				lanes = append(lanes, "mailbox")
+			}
+			if digest.MessageCheckpoint.CandidateOfferPending {
+				lanes = append(lanes, "candidate-offer")
+			}
+			if digest.MessageCheckpoint.CoordinatorSelectionPending {
+				lanes = append(lanes, "coordinator-selection")
+			}
+			if digest.MessageCheckpoint.CandidateAssignmentPending {
+				lanes = append(lanes, "candidate-assignment")
+			}
+			fmt.Printf("message-checkpoint:\tpending lanes=%s\n", safeText(strings.Join(lanes, ",")))
+		} else {
+			fmt.Println("message-checkpoint:\tidle")
 		}
 	}
 	if digest.Elided {
@@ -3855,7 +3895,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
 	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
-	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request|runner  Exchange and process durable realm-local agent messages")
+	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")
 	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")

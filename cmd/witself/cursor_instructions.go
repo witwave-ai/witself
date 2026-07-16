@@ -46,7 +46,8 @@ var cursorMemoryRoutingBlock = []byte(
 		"description: Route durable facts and narrative context to portable Witself memory\n" +
 		"alwaysApply: true\n" +
 		"---\n" +
-		cursorMemoryRoutingInstructions + "\n" +
+		cursorMemoryRoutingInstructions + "\n\n" +
+		foregroundMessagingRoutingInstructions + "\n" +
 		cursorMemoryRoutingEndMarker,
 )
 

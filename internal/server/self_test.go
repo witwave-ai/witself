@@ -127,6 +127,74 @@ func TestSelfDigestFailsOpenWhenMemoryCheckpointIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestSelfDigestIncludesContentFreeMessageCheckpoint(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfMessageCheckpoint: func(_ context.Context, p DomainPrincipal) (*SelfMessageCheckpoint, error) {
+			callbackPrincipal = p
+			return &SelfMessageCheckpoint{
+				Pending: true, MailboxPending: true, CoordinatorSelectionPending: true,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if callbackPrincipal.ID != "agent_1" || callbackPrincipal.AccountID != "acc_1" || callbackPrincipal.RealmID != "realm_1" {
+		t.Fatalf("message checkpoint callback principal = %+v", callbackPrincipal)
+	}
+	if digest.MessageCheckpoint == nil || !digest.MessageCheckpoint.Pending ||
+		!digest.MessageCheckpoint.MailboxPending || !digest.MessageCheckpoint.CoordinatorSelectionPending ||
+		digest.MessageCheckpoint.CandidateOfferPending || digest.MessageCheckpoint.CandidateAssignmentPending {
+		t.Fatalf("message checkpoint = %+v", digest.MessageCheckpoint)
+	}
+}
+
+func TestSelfDigestFailsOpenWhenMessageCheckpointIsUnavailable(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfMessageCheckpoint: func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error) {
+			return nil, errors.New("message checkpoint store unavailable")
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.Identity.AgentID != "agent_1" || digest.MessageCheckpoint == nil ||
+		!digest.MessageCheckpoint.Unavailable || digest.MessageCheckpoint.Pending {
+		t.Fatalf("fail-open digest = %+v", digest)
+	}
+}
+
 func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
 		switch token {
@@ -156,6 +224,7 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 		{name: "bad boolean", path: "/v1/self?include_facts=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad count boolean", path: "/v1/self?include_counts=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad checkpoint boolean", path: "/v1/self?include_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
+		{name: "bad message checkpoint boolean", path: "/v1/self?include_message_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad sensitive boolean", path: "/v1/self?include_sensitive=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad salient limit", path: "/v1/self?salient_limit=101", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad max bytes", path: "/v1/self?max_bytes=100", token: "agent-token", want: http.StatusBadRequest},
@@ -244,6 +313,37 @@ func TestSelfDigestCanSkipCheckpointForIdentityReads(t *testing.T) {
 	}
 }
 
+func TestSelfDigestCanSkipMessageCheckpointForIdentityReads(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	checkpointCalls := 0
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfMessageCheckpoint: func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error) {
+			checkpointCalls++
+			return &SelfMessageCheckpoint{Pending: true, MailboxPending: true}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_facts=false&include_salient=false&include_counts=false&include_checkpoint=false&include_message_checkpoint=false", "token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if checkpointCalls != 0 || digest.MessageCheckpoint != nil {
+		t.Fatalf("identity-only message checkpoint calls/digest = %d / %+v", checkpointCalls, digest.MessageCheckpoint)
+	}
+}
+
 func TestSelfDigestHydratesFacts(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
@@ -282,6 +382,9 @@ func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
 		GetSelfMemoryCheckpoint: func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error) {
 			return &SelfMemoryCheckpoint{Pending: true, RequestID: "mcrq_bounded", RequestGeneration: 2}, nil
 		},
+		GetSelfMessageCheckpoint: func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error) {
+			return &SelfMessageCheckpoint{Pending: true, MailboxPending: true}, nil
+		},
 	}))
 	defer srv.Close()
 
@@ -303,6 +406,9 @@ func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
 	}
 	if digest.MemoryCheckpoint == nil || digest.MemoryCheckpoint.RequestID != "mcrq_bounded" {
 		t.Fatalf("bounded digest dropped checkpoint = %+v", digest.MemoryCheckpoint)
+	}
+	if digest.MessageCheckpoint == nil || !digest.MessageCheckpoint.MailboxPending {
+		t.Fatalf("bounded digest dropped message checkpoint = %+v", digest.MessageCheckpoint)
 	}
 }
 

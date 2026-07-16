@@ -291,11 +291,12 @@ deterministic lexical/structured baseline. `memory_vector_profiles`,
 migration-0032 vector/hybrid surface independently; there is no hidden backend
 embedding provider or fallback call. The `self_digest` flag
 (`GET /v1/self`) is independent and uses deterministic salience/recency
-hydration plus an authenticated, value-free `memory_checkpoint`. That field is
-a point-in-time request/run/fence pointer, not source content or inference
-authority. Its projection is additive and fails open: if checkpoint state cannot
-be read, `/v1/self` still returns identity, facts, and salient memories with
-`memory_checkpoint.unavailable: true`.
+hydration plus authenticated, value-free `memory_checkpoint` and
+`message_checkpoint` objects. The memory field is a point-in-time
+request/run/fence pointer; the message field is content-free mailbox and
+open-request attention state. Neither is source content or inference authority.
+Both projections are additive and fail open with their own `unavailable:true`
+marker instead of hiding identity, facts, or salient memories.
 
 The `cross_realm_collaboration`, `federation`, and `agent_card` flags report
 whether this backend speaks the cross-realm collaboration substrate: whether it
@@ -526,7 +527,7 @@ Initial route groups:
 | `/healthz` | Alias probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
-| `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, a value-free pending/idle/unavailable memory checkpoint, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
+| `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, value-free memory and message checkpoints, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, `include_message_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
 | `/v1/self/peers` | Agent-token-scoped list of every other live agent in the same realm with optional last-observed activity; no caller-controlled realm or agent selector and no availability inference. |
 | `/v1/self/activity` | Agent-token-scoped runtime-hook ingestion for the latest-only activity projection; identity and public observation time are server-derived. |
 | `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
@@ -814,12 +815,12 @@ Notes on specific actions and workflows:
   `Cache-Control: private, no-store`. Each server process bounds concurrent
   listen admission and returns HTTP 429 with `Retry-After` when saturated;
   retrying loses no durable mailbox state. Agents run no inbound HTTP server; an
-  already-running client runner polls this route and then uses the explicit
-  read/ack lifecycle. It is a `POST` because the bounded wait/filter request is
-  authenticated input rather than a public cacheable URL. Delivery semantics
-  are tracked in
-  [inter-agent-messaging.md](inter-agent-messaging.md); client wake and inference
-  boundaries are tracked in
+  already-active foreground client uses a zero-wait call at task startup and
+  then uses the explicit read/ack lifecycle. It is a `POST` because the bounded
+  wait/filter request is authenticated input rather than a public cacheable URL.
+  Delivery semantics are tracked in
+  [inter-agent-messaging.md](inter-agent-messaging.md); the no-wake foreground
+  inference boundary is tracked in
   [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 - `POST /v1/messages/{message_id}:reply` accepts only reply content and a
   header idempotency key. The caller must be the parent recipient; the server
@@ -842,9 +843,9 @@ Notes on specific actions and workflows:
   accepts optional `deterministic_failure` (default false). Only an exact-fence
   release with that field true atomically increments the migration-0036
   `failure_count`; provider-wide, configuration, cancellation, and
-  lease-maintenance releases leave it unchanged. The current direct runner uses
-  that durable count and, by default, publishes an escalation on the fifth
-  deterministic attempt.
+  lease-maintenance releases leave it unchanged. Foreground clients use that
+  durable count and, under the default handling guidance, treat the fifth
+  deterministic attempt as an escalation.
 - `:complete` requires the exact unexpired fence and an `Idempotency-Key`. In
   one transaction it derives recipient, thread, causal parent, causal depth,
   sender, account, and realm from the claimed message and token; inserts one

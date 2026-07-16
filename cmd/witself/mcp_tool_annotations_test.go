@@ -28,8 +28,8 @@ func TestMCPFactAndTranscriptToolsAdvertiseAccurateAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Tools) != 69 {
-		t.Fatalf("full-profile tools = %d, want 69", len(page.Tools))
+	if len(page.Tools) != 67 {
+		t.Fatalf("full-profile tools = %d, want 67", len(page.Tools))
 	}
 	tools := make(map[string]*mcp.Tool, len(page.Tools))
 	for _, tool := range page.Tools {
@@ -64,7 +64,6 @@ func TestMCPFactAndTranscriptToolsAdvertiseAccurateAnnotations(t *testing.T) {
 		"witself.transcript.tail",
 		"witself.message.list",
 		"witself.message.listen",
-		"witself.message.notification.list",
 	} {
 		checked[name] = true
 		assertMCPToolAnnotations(t, tools[name], name, true, false, true)
@@ -85,7 +84,6 @@ func TestMCPFactAndTranscriptToolsAdvertiseAccurateAnnotations(t *testing.T) {
 		{name: "witself.fact.subject.alias", destructive: true, idempotent: true},
 		{name: "witself.message.send", destructive: true, idempotent: true},
 		{name: "witself.message.reply", destructive: true, idempotent: true},
-		{name: "witself.message.notification.consume", destructive: true, idempotent: true},
 		{name: "witself.message.read", destructive: true, idempotent: true},
 		{name: "witself.message.ack", destructive: true, idempotent: true},
 		{name: "witself.message.claim", destructive: true},

@@ -30,7 +30,8 @@ Explicit remember/save/store: ` + "`witself.fact.set`" + ` same turn=atomic dura
 
 var claudeMemoryRoutingBlock = []byte(
 	claudeMemoryRoutingBeginMarker + "\n" +
-		runtimeNeutralMemoryRoutingInstructions + "\n" +
+		runtimeNeutralMemoryRoutingInstructions + "\n\n" +
+		foregroundMessagingRoutingInstructions + "\n" +
 		claudeMemoryRoutingEndMarker,
 )
 

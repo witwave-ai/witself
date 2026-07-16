@@ -50,7 +50,6 @@ internal/core/                # Domain service and use cases
 internal/api/                 # HTTP handlers and request/response adapters
 internal/auth/                # Token validation and principal resolution
 internal/policy/              # Cross-agent policy engine and security groups
-internal/messagerunner/       # Client-local autonomous message/request handling
 internal/retrieval/           # Deterministic FTS, filters, and optional vector math
 internal/audit/               # Audit event generation and sinks
 internal/observability/       # Metrics, logs, request IDs, and health probes
@@ -76,9 +75,6 @@ Witself should have these public entrypoints:
 
 - `ws`: human and agent CLI.
 - `witself mcp serve`: local-first MCP adapter over the same core behavior.
-- `witself message runner serve`: client-owned, runtime-bound autonomous
-  mailbox process, normally supervised by per-user launchd or systemd;
-  `status` and `notifications` expose its content-free local handoff state.
 - `witself-server`: separate backend API server for managed and self-hosted
   deployments.
 
@@ -100,24 +96,20 @@ MCP-everywhere with full parity. Every agent-facing, server-backed operation
 reachable through the CLI is also reachable through MCP, and vice versa,
 because both adapters translate into the same core commands. The CLI is the
 primary, canonical surface; MCP is not a reduced subset of the backend domain.
-Host-local operations such as installing a launchd/systemd message runner are
-intentional CLI-only lifecycle controls, not backend resources. New
-server-backed verbs land on both surfaces together (for example `message
-complete` and `witself.message.complete` landed in the same pass). The MCP
-notification list/consume pair is the narrow local-data exception: it exposes no
-service-management operation and only bridges an identity-bound local pointer
-to the canonical server-backed read boundary.
+There is no host-local messaging service exception. New server-backed verbs
+land on both surfaces together (for example `message complete` and
+`witself.message.complete` landed in the same pass).
 
 Agents run no HTTP servers for normal I/O. Agents are outbound clients only:
 they reach a backend by calling out to it (local adapter, managed cell, or
 self-hosted cell) and they discover inbound work by polling/long-polling, never by
 hosting an inbound listener. The only HTTP server in the system is the backend —
-`witself-server`, including the collaboration relay it exposes. A wake-webhook is
-optional and applies only to already-hosted cloud autonomous agents; it is never
-required, and a normal directed agent (for example Claude Code or Codex driven
-over MCP) never needs an inbound endpoint. The durable mailbox is the source of
-truth, so offline recipients are the default: a send never requires the recipient
-to be online, and any live stream is only a latency accelerator over the mailbox.
+`witself-server`, including the collaboration relay it exposes. Witself does not
+provide a model-wake webhook, and a directed agent (for example Claude Code or
+Codex driven over MCP) never needs an inbound endpoint. The durable mailbox is
+the source of truth, so offline recipients are the default: a send never requires
+the recipient to be online, and pending work remains unacknowledged until the
+next foreground client turn.
 
 The CLI command is `ws`; the backend binary is `witself-server`. The `witself://`
 reference scheme, `WITSELF_` environment variables, and the `witself.*` MCP tool
@@ -301,8 +293,8 @@ spoofing. See [threat-model.md](threat-model.md).
 ## Messaging Boundary
 
 Inter-agent messaging is fully in scope for v0 and lives across the core
-`internal/store`, `internal/server`, and `internal/client` boundaries, with
-client-local autonomous handling in `internal/messagerunner`. The messaging model is tracked in
+`internal/store`, `internal/server`, and `internal/client` boundaries. Active
+runtime clients handle inference through hooks and MCP guidance. The messaging model is tracked in
 [inter-agent-messaging.md](inter-agent-messaging.md).
 
 - Durable mailbox/queue per recipient. Messages (`msg_…`) survive process and
@@ -335,8 +327,8 @@ client-local autonomous handling in `internal/messagerunner`. The messaging mode
   acknowledgement remains a later recovery boundary.
 - Processing generation is only the stale-writer fence. Exact live-claim replay
   keeps it; a takeover after release or expiry advances it without consuming
-  the deterministic failure budget. The current runner uses `failure_count` and
-  escalates the fifth deterministic attempt by default.
+  the deterministic failure budget. Foreground clients use `failure_count` for
+  bounded retry/escalation policy.
 - Delivery is at-least-once with per-recipient (and per-conversation) ordering
   and explicit read/acknowledgement state. Explicit-list and realm audiences
   are atomically resolved into per-member delivery rows. Group fanout remains a
@@ -346,8 +338,8 @@ client-local autonomous handling in `internal/messagerunner`. The messaging mode
   `message:read` scopes gate the surface, and send/deliver/read events are
   audited.
 - Ordinary sends normalize omitted kind to actionable `request` on every
-  frontend/core path. Explicit `note` is FYI-only to the runner and follows its
-  notification/ack path without provider inference. The separate open-request
+  frontend/core path. Explicit `note` is FYI-only and may be read and
+  acknowledged without treating it as work. The separate open-request
   state machine uses ordinary `open_request`, `offer`, and `result` messages for
   content while keeping coordination state authoritative and model-free.
 - Message bodies and payloads are **untrusted input** to the receiving agent. A
@@ -356,43 +348,22 @@ client-local autonomous handling in `internal/messagerunner`. The messaging mode
   the [Authorization Boundary](#authorization-boundary).
 - Rate limits apply to send and delivery. Messages sent and delivered are metered
   dimensions; see [billing-and-limits.md](billing-and-limits.md).
-- The autonomous runner is a client boundary, not a backend inference feature.
-  Its trusted parent retains the token and API access; text-only provider
-  children receive no token, token path, processing fence, or MCP/tool access.
-  Recognized provider-auth environment values are captured at enable into a
-  separate mode-0600 provider-bound local file and supplied only to that native
-  provider child. They never enter value-free runner config, service
-  definitions, backend state, logs/status, or account export.
-  Native Claude Code and Grok Build adapters are capability-probed; Codex and
-  Cursor native adapters fail closed. A strict generic command adapter exists
-  for separately integrated wrappers. Tool-capable execution remains a
-  different, sandboxed contract. Before polling the ordinary mailbox, the
-  runner scans open-request roles: candidates offer/decline, the exact
-  coordinator client ranks durable offers, and selected agents execute fenced
-  claims. Direct replies carry bounded advisory continuation history. The runner enforces its automated turn bound from
-  backend-derived causal depth, not payload metadata; the default is 12 turns
-  and the hard configurable maximum is 64.
+- Foreground clients are the inference boundary. At active task startup they
+  inspect `self.show.message_checkpoint`, make a zero-wait `message.listen`, and
+  scan open-request roles. Candidates offer/decline, the exact coordinator
+  ranks durable offers, and selected agents execute fenced claims. Codex and
+  Claude Code may receive the content-free checkpoint automatically through
+  hooks; Cursor and Grok Build use guided MCP calls. Every runtime obtains
+  unread metadata through listen. No daemon, provider child, or captured
+  provider credential participates.
 - Surfaces: CLI `message send|reply|list|listen|read|ack|claim|renew|release|complete`,
-  `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`,
-  and local `message runner enable|disable|status|notifications|run|serve|start`.
-  MCP mirrors those ordinary and request operations and adds local
-  `message.notification.list|consume` bridge tools. HTTP uses `/v1/messages`,
+  `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`.
+  MCP mirrors those ordinary and request operations. HTTP uses `/v1/messages`,
   `/v1/messages:listen`, the recipient actions through `:complete`, and
   `/v1/message-requests` with its eight action routes.
-- The runner records terminal and other non-provider deliveries in a private,
-  content-free, bounded notification ledger before ack. Status exposes the
-  count, while CLI and MCP list operations expose pointers; content remains
-  behind the ordinary server-backed message read boundary. MCP consume performs
-  that canonical read and exact verification before clearing one pointer, and
-  leaves the pointer intact on every failure. A full ledger fails closed.
-  The subsequent backend acknowledgement is global for that agent delivery,
-  but the pointer exists only in that runtime's local `WITSELF_HOME`; another
-  host/runtime bound to the same agent cannot rediscover it through unread
-  mailbox state. This is an intentional MVP locality limitation, not cross-host
-  wake delivery.
-- Status also exposes private content-free cycle health: last cycle/success
-  timestamps, bounded status/error class, and consecutive failures. It stores
-  no raw error, message identifier/content, provider output, or credential.
+- Terminal and non-actionable deliveries remain canonical and unacknowledged
+  until an active client reads and handles them. PostgreSQL is the sole message
+  and handoff store.
 - Account export preserves causal depth, fanout audience fingerprints and
   delivery snapshots, completed processing, result links, deterministic
   `failure_count`, and the full request candidate/selection/claim graph. Import
@@ -400,8 +371,8 @@ client-local autonomous handling in `internal/messagerunner`. The messaging mode
   interrupts an active direct claim by advancing its generation, and cancels
   and fences active request reservations/claims before the destination account
   resumes. Archives older than schema 36 upgrade direct `failure_count` to zero.
-  Canonical PostgreSQL messages are exported; the derived host-local
-  notification ledger is not.
+  Canonical PostgreSQL messages are exported; there is no derived host-local
+  message state.
 
 ## Audit Boundary
 

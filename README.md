@@ -229,84 +229,37 @@ witself message request select mrq_... --account default --agent scott \
 
 The sender and realm always come from the authenticated agent token. An
 ordinary send defaults to actionable `kind=request`; use explicit `--kind note`
-for an FYI that the background runner records and acknowledges without provider
-inference. Fanout uses one immutable send-time recipient snapshot with separate
+for an FYI that the recipient may read and acknowledge without treating it as
+work. Fanout uses one immutable send-time recipient snapshot with separate
 delivery/read/ack state per recipient; the authenticated sender is excluded
-from `--to-realm`. Inbox lists and `listen` contain metadata only; `listen`
-returns the oldest unacknowledged inbound work without changing state, `read`
-is the content boundary, and message content must be treated as untrusted input. Replies are
+from `--to-realm`.
+
+Inbox lists and `listen` contain metadata only. `listen` returns the oldest
+unacknowledged inbound work without changing state, `read` is the content
+boundary, and message content must be treated as untrusted input. Replies are
 recipient-only: the server validates that the caller received the parent and
-derives the reply recipient, thread, and parent link. Read and acknowledgement
-remain separate in the CLI, API, and MCP; acknowledgement returns metadata only,
-never the message body or payload. The installed MCP server exposes
-matching `witself.message.send`, `reply`, `list`, `listen`, `read`, `ack`,
-`claim`, `renew`, `release`, and `complete` tools plus
-`witself.message.request.open`, `list`, `show`, `offer`, `decline`, `select`,
-`cancel`, `claim`, `renew`, `release`, and `complete`, and the local
-`witself.message.notification.list` and `.consume` bridge. At the start of a
-non-trivial task, its instructions call for non-blocking
-`message.listen(wait_seconds=0)` and notification list: the first discovers
-canonical unacknowledged work, while the second discovers local pointers the
-background runner already acknowledged. Consume reads and verifies the
-canonical message before clearing exactly that pointer; any failure leaves it
-intact. Read-only MCP retains ordinary list/listen, request list/show, and
-notification list; it removes every message mutation and notification consume.
-Curator profiles expose no message tools. Grok receives underscore names, including
-`witself_message_notification_list` and
-`witself_message_notification_consume`. The processing operations use a
-recipient-only migration-0034 lease/fence; `complete` atomically creates and
-links one server-routed result reply, while acknowledgement remains separate.
-Migration 0035 adds server-derived `causal_depth`: direct sends start at one and
-each validated reply advances exactly one from its durable parent. Migration
-0036 adds a durable `failure_count` for deterministic, message-specific runner
-failures; processing generation remains only the stale-writer fence.
+derives the reply recipient, thread, and parent link. Read, acknowledgement,
+claim, and completion remain separate in the CLI, API, and MCP.
 
-The current source also includes a client-owned autonomous text-only runner:
+There is no background Witself messaging process. At the beginning of a
+non-trivial foreground turn, an installed client inspects the bounded
+`self.show.message_checkpoint` and calls
+`message.listen(wait_seconds=0)`. Codex and Claude Code can receive the
+content-free checkpoint automatically through supported hooks; Cursor and Grok
+Build use the installed guidance and MCP fallback. In every runtime, listen is
+the operation that retrieves unread message metadata. An active client may then
+claim,
+read, handle, complete or reply, and acknowledge the canonical message. If the
+client is closed, the message remains durable and unacknowledged until its next
+foreground turn. MCP, hooks, webhooks, and the backend never start or wake an AI.
 
-```sh
-witself message runner enable --runtime claude-code --max-turns 12 --no-service
-witself message runner run --runtime claude-code --once --json
-witself message runner disable --runtime claude-code
-
-# Persistent service path.
-witself message runner enable --runtime claude-code --max-turns 12
-witself message runner status --runtime claude-code
-witself message runner notifications --runtime claude-code
-witself message runner disable --runtime claude-code
-```
-
-`enable` installs a per-user launchd service on macOS or systemd user service
-on Linux unless `--no-service` is supplied. The trusted parent retains the
-Witself token; provider children receive no token, token path, MCP/tool access,
-or processing fence. At enable time, recognized provider-auth environment
-values are captured into a separate mode-0600, provider-bound local file so the
-OS service can authenticate after the shell exits. They never enter runner
-configuration, service definitions, or account export. Native Claude Code and
-Grok Build are capability-probed text-only providers. Native Codex and Cursor
-fail closed until their CLIs expose equivalent isolation; the runner core also
-defines a strict generic command-adapter protocol for separately integrated
-wrappers. The runner handles direct work and scans open-request roles before
-the mailbox: candidate clients offer or decline, the immutable coordinator
-client ranks durable offers, and selected clients claim and execute exact
-request fences. Direct continuation history is bounded, with 12 turns by default and
-a hard configurable maximum of 64. The runner enforces that limit from
-backend-owned `causal_depth`, not the advisory payload history. Its default
-repeated-failure policy escalates the fifth deterministic attempt from the
-backend-owned `failure_count`; provider-wide, configuration, cancellation, and
-lease-maintenance failures release without consuming that per-message budget.
-Processing generation is only the fencing token. Terminal and other
-non-provider messages are indexed in a private,
-content-free notification ledger before acknowledgement; inspect the metadata
-with `message runner notifications`, or use MCP notification consume for a
-canonical read/verify followed by exact local clear. The runner's
-acknowledgement is global for that agent delivery, but its pointer exists only
-in that runtime's local `WITSELF_HOME`; another machine/runtime cannot recover
-it as unread work. This is an intentional MVP locality limit, not cross-host
-wake delivery. Local pointers are excluded from account export while their
-canonical PostgreSQL messages are included. `message runner status` also
-reports content-free last-cycle health: timestamps, status/error class, and
-consecutive failure count, never an error string or message content.
-
+The installed MCP server exposes matching `witself.message.send`, `reply`,
+`list`, `listen`, `read`, `ack`, `claim`, `renew`, `release`, and
+`complete` tools plus the complete `witself.message.request.*` lifecycle.
+Migration 0035 supplies server-derived `causal_depth`; migration 0036 supplies
+durable deterministic `failure_count`; processing generation remains only the
+stale-writer fence. PostgreSQL is the sole message and handoff source, and all
+canonical message/request state participates in account export/import.
 See [Witself Inter-Agent Messaging](docs/inter-agent-messaging.md) and
 [Autonomous Realm Messaging](docs/autonomous-realm-messaging.md) for the
 implemented same-realm direct, fanout, and client-ranked open-request boundary.

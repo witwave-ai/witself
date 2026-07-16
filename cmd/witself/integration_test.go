@@ -1031,15 +1031,18 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 		wantCalls                  int
 		wantOutput                 string
 		pendingCheckpoint          bool
+		pendingMessage             bool
 	}{
 		{name: "Codex session", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
 		{name: "Codex prompt", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior database decision", wantCalls: 2, wantOutput: "hookSpecificOutput"},
 		{name: "Codex ordinary idle", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1},
 		{name: "Codex ordinary checkpoint", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingCheckpoint: true},
+		{name: "Codex ordinary message", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingMessage: true},
 		{name: "Claude session", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
 		{name: "Claude prompt", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "pick up where we left off", wantCalls: 2, wantOutput: "hookSpecificOutput"},
 		{name: "Claude ordinary idle", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1},
 		{name: "Claude ordinary checkpoint", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingCheckpoint: true},
+		{name: "Claude ordinary message", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingMessage: true},
 		{name: "Cursor session fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventSessionStart},
 		{name: "Cursor prompt fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior plan"},
 		{name: "Grok session fallback", runtime: transcriptcapture.RuntimeGrokBuild, event: memoryhydration.EventSessionStart},
@@ -1061,6 +1064,7 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 				switch r.URL.Path {
 				case "/v1/self":
 					if r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "true" ||
+						r.URL.Query().Get("include_message_checkpoint") != "true" ||
 						r.URL.Query().Get("include_sensitive") != "true" {
 						t.Errorf("unsafe automatic hydration query: %s", r.URL.RawQuery)
 					}
@@ -1074,6 +1078,11 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 					if test.pendingCheckpoint {
 						digest.MemoryCheckpoint = &client.SelfMemoryCheckpoint{
 							Pending: true, RequestID: "mcrq_hook", RequestGeneration: 3,
+						}
+					}
+					if test.pendingMessage {
+						digest.MessageCheckpoint = &client.SelfMessageCheckpoint{
+							Pending: true, MailboxPending: true,
 						}
 					}
 					_ = json.NewEncoder(w).Encode(digest)
@@ -1140,6 +1149,10 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 			if test.pendingCheckpoint && (!strings.Contains(string(output), "mcrq_hook") ||
 				!strings.Contains(string(output), "empty actions plan")) {
 				t.Fatalf("hook checkpoint output = %s", output)
+			}
+			if test.pendingMessage && (!strings.Contains(string(output), "message_checkpoint") ||
+				!strings.Contains(string(output), "mailbox_pending")) {
+				t.Fatalf("hook message checkpoint output = %s", output)
 			}
 		})
 	}
