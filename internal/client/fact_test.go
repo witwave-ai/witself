@@ -18,19 +18,31 @@ func TestFactRetrievalClients(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/v1/facts" && r.URL.Query().Get("predicate") != "":
-			seen["exact"]++
+			mode := "exact"
+			if r.URL.Query().Get("observational") == "true" {
+				mode += "-observational"
+			}
+			seen[mode]++
 			if r.URL.Query().Get("subject") != "self" || r.URL.Query().Get("predicate") != "identity/name" {
 				t.Errorf("exact query = %s", r.URL.RawQuery)
 			}
 			_, _ = w.Write([]byte(`{"fact":{"id":"fact_1","subject":"self","predicate":"identity/name","value":"Scott"}}`))
 		case r.URL.Path == "/v1/facts":
-			seen["search"]++
+			mode := "search"
+			if r.URL.Query().Get("observational") == "true" {
+				mode += "-observational"
+			}
+			seen[mode]++
 			if r.URL.Query().Get("predicate_prefix") != "identity/" || r.URL.Query().Get("sort") != "usage" || r.URL.Query().Get("unused") != "true" {
 				t.Errorf("search query = %s", r.URL.RawQuery)
 			}
 			_, _ = w.Write([]byte(`{"facts":[{"id":"fact_1","subject":"self","predicate":"identity/name","value":"Scott","usage_count":2}]}`))
 		case r.URL.Path == "/v1/fact-occurrences":
-			seen["temporal"]++
+			mode := "temporal"
+			if r.URL.Query().Get("observational") == "true" {
+				mode += "-observational"
+			}
+			seen[mode]++
 			if r.URL.Query().Get("timezone") != "America/Denver" || r.URL.Query().Get("include_sensitive") != "true" {
 				t.Errorf("temporal query = %s", r.URL.RawQuery)
 			}
@@ -46,11 +58,19 @@ func TestFactRetrievalClients(t *testing.T) {
 	if fact, err := GetFact(ctx, srv.URL, "agent-token", "self", "identity/name"); err != nil || fact.ID != "fact_1" {
 		t.Fatalf("exact fact = %#v / %v", fact, err)
 	}
+	if fact, err := GetFactObservational(ctx, srv.URL, "agent-token", "self", "identity/name"); err != nil || fact.ID != "fact_1" {
+		t.Fatalf("observational exact fact = %#v / %v", fact, err)
+	}
 	facts, err := ListFacts(ctx, srv.URL, "agent-token", FactListOptions{
 		PredicatePrefix: "identity/", OrderByUsage: true, UnusedOnly: true,
 	})
 	if err != nil || len(facts) != 1 || facts[0].UsageCount != 2 {
 		t.Fatalf("search facts = %#v / %v", facts, err)
+	}
+	if facts, err = ListFacts(ctx, srv.URL, "agent-token", FactListOptions{
+		PredicatePrefix: "identity/", OrderByUsage: true, UnusedOnly: true, Observational: true,
+	}); err != nil || len(facts) != 1 {
+		t.Fatalf("observational search facts = %#v / %v", facts, err)
 	}
 	from := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 	occurrences, err := UpcomingFactsWithOptions(ctx, srv.URL, "agent-token", FactUpcomingOptions{
@@ -59,7 +79,12 @@ func TestFactRetrievalClients(t *testing.T) {
 	if err != nil || len(occurrences) != 1 || occurrences[0].Fact.ID != "fact_2" {
 		t.Fatalf("temporal facts = %#v / %v", occurrences, err)
 	}
-	for _, mode := range []string{"exact", "search", "temporal"} {
+	if occurrences, err = UpcomingFactsWithOptions(ctx, srv.URL, "agent-token", FactUpcomingOptions{
+		From: from, Until: from.Add(48 * time.Hour), Timezone: "America/Denver", IncludeSensitive: true, Observational: true,
+	}); err != nil || len(occurrences) != 1 {
+		t.Fatalf("observational temporal facts = %#v / %v", occurrences, err)
+	}
+	for _, mode := range []string{"exact", "exact-observational", "search", "search-observational", "temporal", "temporal-observational"} {
 		if seen[mode] != 1 {
 			t.Errorf("%s calls = %d", mode, seen[mode])
 		}

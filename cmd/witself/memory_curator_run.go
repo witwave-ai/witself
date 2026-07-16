@@ -368,6 +368,9 @@ func validateCuratorRunPreflight(preflight *client.MemoryCurationPreflight, appl
 	if !p.ListRequests || !p.Start || !p.GetRun || !p.GetInputs || !p.Renew || !p.Plan || !p.Abandon {
 		return errors.New("credential lacks one or more required curator permissions")
 	}
+	if apply && !p.GetPlan {
+		return errors.New("credential lacks memory curation plan-review permission")
+	}
 	if apply && !p.Apply {
 		return errors.New("credential lacks memory curation apply permission")
 	}

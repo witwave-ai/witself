@@ -41,6 +41,7 @@ func TestConfigureMemoryCurationWiresCompleteSurface(t *testing.T) {
 	if cfg.RequestMemoryCuration == nil || cfg.ListMemoryCurationRequests == nil ||
 		cfg.GetMemoryCurationRequest == nil || cfg.StartMemoryCuration == nil ||
 		cfg.GetMemoryCurationRun == nil || cfg.GetMemoryCurationRunInputs == nil ||
+		cfg.GetMemoryCurationPlan == nil ||
 		cfg.RenewMemoryCuration == nil || cfg.PlanMemoryCuration == nil ||
 		cfg.ApplyMemoryCuration == nil || cfg.CancelMemoryCuration == nil ||
 		cfg.AbandonMemoryCuration == nil || cfg.RollbackMemoryCuration == nil ||

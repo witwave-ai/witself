@@ -39,7 +39,7 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 		switch route {
 		case "GET /v1/memory-curation-preflight":
 			w.Header().Set("Cache-Control", "private, no-store")
-			_, _ = io.WriteString(w, `{"principal":{"account_id":"acc_1","realm_id":"realm_1","agent_id":"agent_1","agent_name":"primary"},"credential":{"token_id":"tok_1","access_profile":"curator-preview","expires_at":"2026-07-15T00:00:00Z"},"protocol":{"plan_schema":"witself.memory-plan.v1","allowed_primitives":["create"],"backend_inference":false,"client_inference_required":true},"permissions":{"list_requests":true,"get_request":true,"start":true,"get_run":true,"get_inputs":true,"renew":true,"plan":true,"abandon":true},"limits":{"max_page_size":200,"max_memories":500,"max_evidence":1000,"max_transcript_entries":2000,"min_lease_seconds":30,"max_lease_seconds":1800,"max_plan_actions":128,"max_plan_bytes":33554432}}`)
+			_, _ = io.WriteString(w, `{"principal":{"account_id":"acc_1","realm_id":"realm_1","agent_id":"agent_1","agent_name":"primary"},"credential":{"token_id":"tok_1","access_profile":"curator-preview","expires_at":"2026-07-15T00:00:00Z"},"protocol":{"plan_schema":"witself.memory-plan.v1","allowed_primitives":["create"],"backend_inference":false,"client_inference_required":true},"permissions":{"list_requests":true,"get_request":true,"start":true,"get_run":true,"get_inputs":true,"get_plan":true,"renew":true,"plan":true,"abandon":true},"limits":{"max_page_size":200,"max_memories":500,"max_evidence":1000,"max_transcript_entries":2000,"min_lease_seconds":30,"max_lease_seconds":1800,"max_plan_actions":128,"max_plan_bytes":33554432}}`)
 		case "POST /v1/memory-curation-requests":
 			body := decodeMemoryCurationClientBody(t, r)
 			if body["trigger_reason"] != "manual" {
@@ -74,6 +74,11 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 				t.Fatalf("input query = %s", r.URL.RawQuery)
 			}
 			_, _ = io.WriteString(w, `{"run":{"id":"mrun_1"},"inputs":[],"next_cursor":"inputs-next"}`)
+		case "GET /v1/memory-curation-runs/mrun_1/plan":
+			if r.URL.Query().Get("fencing_generation") != "7" {
+				t.Fatalf("get plan query = %s", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `{"run":{"id":"mrun_1","fencing_generation":7},"plan":{"schema":"witself.memory-plan.v1","plan_revision":5,"plan_hash":"`+strings.Repeat("a", 64)+`","actions":[]},"preallocated_memory_ids":[],"preview":{"action_count":0}}`)
 		case "POST /v1/memory-curation-runs/mrun_1/renew":
 			body := decodeMemoryCurationClientBody(t, r)
 			if body["fencing_generation"] != float64(7) || body["extension_seconds"] != float64(45) {
@@ -142,7 +147,7 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 		preflight.Credential.ExpiresAt == nil ||
 		preflight.Protocol.PlanSchema != "witself.memory-plan.v1" ||
 		len(preflight.Protocol.AllowedPrimitives) != 1 ||
-		!preflight.Permissions.Plan || preflight.Permissions.Apply ||
+		!preflight.Permissions.GetPlan || !preflight.Permissions.Plan || preflight.Permissions.Apply ||
 		preflight.Limits.MaxPlanBytes != 32<<20 {
 		t.Fatalf("preflight = %#v", preflight)
 	}
@@ -170,6 +175,14 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 	}
 	if _, err := GetMemoryCurationRunInputs(ctx, srv.URL, "token", "mrun_1", 7, "input cursor", 23); err != nil {
 		t.Fatal(err)
+	}
+	accepted, err := GetMemoryCurationPlan(ctx, srv.URL, "token", "mrun_1", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Run.ID != "mrun_1" || !json.Valid(accepted.Plan) ||
+		!strings.Contains(string(accepted.Plan), `"plan_revision":5`) || accepted.PreallocatedMemoryIDs == nil {
+		t.Fatalf("accepted plan = %#v", accepted)
 	}
 	if _, err := RenewMemoryCuration(ctx, srv.URL, "token", RenewMemoryCurationInput{
 		RunID: "mrun_1", FencingGeneration: 7, Extension: 45*time.Second + time.Millisecond,
@@ -224,6 +237,7 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 		"GET /v1/memory-curation-preflight",
 		"GET /v1/memory-curation-requests", "GET /v1/memory-curation-requests/mcrq_1",
 		"GET /v1/memory-curation-runs/mrun_1", "GET /v1/memory-curation-runs/mrun_1/inputs",
+		"GET /v1/memory-curation-runs/mrun_1/plan",
 		"GET /v1/memory-curation-status",
 	} {
 		if seen[route] != 1 {

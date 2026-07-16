@@ -233,16 +233,44 @@ func TestMemoryCurationLanePostgres(t *testing.T) {
 	}
 	expiredStatus, err := st.GetCurationStatus(ctx, p, second.Run.ID)
 	if err != nil || expiredStatus.Run == nil || expiredStatus.Request == nil ||
+		expiredStatus.Run.State != MemoryCurationRunOpen ||
+		expiredStatus.Request.State != MemoryCurationRequestClaimed ||
+		expiredStatus.Lane.ActiveRunID != second.Run.ID ||
+		expiredStatus.Lane.FencingGeneration != second.Run.FencingGeneration {
+		t.Fatalf("expired status = %#v / %v", expiredStatus, err)
+	}
+	expiredRenew, err := st.RenewCuration(ctx, p, second.Run.ID, RenewMemoryCurationInput{
+		FencingGeneration: second.Run.FencingGeneration, Extension: time.Minute,
+		IdempotencyKey: "expire-run-renew",
+	})
+	if !errors.Is(err, ErrMemoryCurationLeaseExpired) {
+		t.Fatalf("expired renew error = %v", err)
+	}
+	if expiredRenew.Run.State != MemoryCurationRunInterrupted ||
+		expiredRenew.Receipt.ResultState != MemoryCurationRunInterrupted ||
+		expiredRenew.Receipt.IdempotencyKey != "expire-run-renew" || expiredRenew.Receipt.Replayed {
+		t.Fatalf("expired renew receipt = %#v", expiredRenew)
+	}
+	expiredRenewReplay, err := st.RenewCuration(ctx, p, second.Run.ID, RenewMemoryCurationInput{
+		FencingGeneration: second.Run.FencingGeneration, Extension: time.Minute,
+		IdempotencyKey: "expire-run-renew",
+	})
+	if !errors.Is(err, ErrMemoryCurationLeaseExpired) || !expiredRenewReplay.Receipt.Replayed ||
+		expiredRenewReplay.Receipt.CreatedAt != expiredRenew.Receipt.CreatedAt {
+		t.Fatalf("expired renew replay = %#v / %v", expiredRenewReplay, err)
+	}
+	if _, err := st.RenewCuration(ctx, p, second.Run.ID, RenewMemoryCurationInput{
+		FencingGeneration: second.Run.FencingGeneration, Extension: 2 * time.Minute,
+		IdempotencyKey: "expire-run-renew",
+	}); !errors.Is(err, ErrMemoryCurationIdempotencyConflict) {
+		t.Fatalf("expired renew changed-input replay error = %v", err)
+	}
+	expiredStatus, err = st.GetCurationStatus(ctx, p, second.Run.ID)
+	if err != nil || expiredStatus.Run == nil || expiredStatus.Request == nil ||
 		expiredStatus.Run.State != MemoryCurationRunInterrupted ||
 		expiredStatus.Request.State != MemoryCurationRequestRetryWait ||
 		expiredStatus.Lane.FencingGeneration <= second.Run.FencingGeneration {
-		t.Fatalf("expired status = %#v / %v", expiredStatus, err)
-	}
-	if _, err := st.RenewCuration(ctx, p, second.Run.ID, RenewMemoryCurationInput{
-		FencingGeneration: second.Run.FencingGeneration, Extension: time.Minute,
-		IdempotencyKey: "stale-renew",
-	}); !errors.Is(err, ErrMemoryCurationFenceMismatch) {
-		t.Fatalf("stale renew error = %v", err)
+		t.Fatalf("durably interrupted status = %#v / %v", expiredStatus, err)
 	}
 
 	abandonRequest, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{

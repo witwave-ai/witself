@@ -491,6 +491,16 @@ func (s *Store) GetTranscript(ctx context.Context, p Principal, transcriptID str
 
 // GetTranscriptPage returns a bounded page without loading the full transcript.
 func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error) {
+	return s.getTranscriptPage(ctx, p, transcriptID, opts, true)
+}
+
+// GetTranscriptPageObservational returns the same bounded page without
+// recording transcript-entry read usage.
+func (s *Store) GetTranscriptPageObservational(ctx context.Context, p Principal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error) {
+	return s.getTranscriptPage(ctx, p, transcriptID, opts, false)
+}
+
+func (s *Store) getTranscriptPage(ctx context.Context, p Principal, transcriptID string, opts TranscriptPageOptions, recordUsage bool) (TranscriptPage, error) {
 	if p.Kind != PrincipalAgent && p.Kind != PrincipalOperator {
 		return TranscriptPage{}, ErrTranscriptForbidden
 	}
@@ -559,8 +569,10 @@ func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID
 		for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
 			entries[left], entries[right] = entries[right], entries[left]
 		}
-		if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
-			return TranscriptPage{}, err
+		if recordUsage {
+			if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
+				return TranscriptPage{}, err
+			}
 		}
 		return TranscriptPage{Transcript: tr, Entries: entries}, nil
 	}
@@ -570,8 +582,10 @@ func (s *Store) GetTranscriptPage(ctx context.Context, p Principal, transcriptID
 		entries = entries[:opts.Limit]
 		next = entries[len(entries)-1].Sequence
 	}
-	if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
-		return TranscriptPage{}, err
+	if recordUsage {
+		if err := s.recordTranscriptRead(ctx, p, transcriptID, len(entries)); err != nil {
+			return TranscriptPage{}, err
+		}
 	}
 	return TranscriptPage{Transcript: tr, Entries: entries, NextAfterSequence: next}, nil
 }

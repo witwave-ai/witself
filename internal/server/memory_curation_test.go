@@ -65,6 +65,17 @@ func TestMemoryCurationHTTPContract(t *testing.T) {
 		}
 		return map[string]any{"run": map[string]any{"id": runID}, "inputs": []any{}}, nil
 	}
+	cfg.GetMemoryCurationPlan = func(_ context.Context, _ DomainPrincipal, runID string, fencingGeneration int64) (any, error) {
+		seen["get-plan"]++
+		if runID != "mrun_1" || fencingGeneration != 7 {
+			t.Errorf("accepted plan request = %q fence %d", runID, fencingGeneration)
+		}
+		return map[string]any{
+			"run":                     map[string]any{"id": runID, "fencing_generation": fencingGeneration},
+			"plan":                    json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":5,"actions":[]}`),
+			"preallocated_memory_ids": []any{}, "preview": map[string]any{"action_count": 0},
+		}, nil
+	}
 	cfg.RenewMemoryCuration = func(_ context.Context, _ DomainPrincipal, runID string, in RenewMemoryCurationRequest) (any, error) {
 		seen["renew"]++
 		if runID != "mrun_1" || in.FencingGeneration != 7 || in.Extension != 45*time.Second || in.IdempotencyKey != "renew-key" {
@@ -132,6 +143,7 @@ func TestMemoryCurationHTTPContract(t *testing.T) {
 		{"start", http.MethodPost, "/v1/memory-curation-requests/mcrq_1/start", `{"lease_seconds":90}`, "start-key", http.StatusCreated},
 		{"get run", http.MethodGet, "/v1/memory-curation-runs/mrun_1", "", "", http.StatusOK},
 		{"inputs", http.MethodGet, "/v1/memory-curation-runs/mrun_1/inputs?fencing_generation=7&cursor=input+cursor&limit=23", "", "", http.StatusOK},
+		{"get plan", http.MethodGet, "/v1/memory-curation-runs/mrun_1/plan?fencing_generation=7", "", "", http.StatusOK},
 		{"renew", http.MethodPost, "/v1/memory-curation-runs/mrun_1/renew", `{"fencing_generation":7,"extension_seconds":45}`, "renew-key", http.StatusOK},
 		{"plan", http.MethodPost, "/v1/memory-curation-runs/mrun_1/plan", `{"fencing_generation":7,"draft":{"schema":"witself.memory-plan.v1","draft_revision":4,"actions":[]}}`, "plan-key", http.StatusOK},
 		{"apply", http.MethodPost, "/v1/memory-curation-runs/mrun_1/apply", `{"fencing_generation":7,"plan_revision":5,"plan_hash":"` + strings.Repeat("a", 64) + `"}`, "apply-key", http.StatusOK},
@@ -161,7 +173,7 @@ func TestMemoryCurationHTTPContract(t *testing.T) {
 		})
 	}
 	for _, name := range []string{
-		"request", "list", "get-request", "start", "get-run", "inputs", "renew",
+		"request", "list", "get-request", "start", "get-run", "inputs", "get-plan", "renew",
 		"plan", "apply", "cancel", "abandon", "rollback", "status",
 	} {
 		if seen[name] != 1 {
@@ -174,6 +186,17 @@ func TestMemoryCurationHTTPContract(t *testing.T) {
 	defer func() { _ = invalidFilter.Body.Close() }()
 	if invalidFilter.StatusCode != http.StatusBadRequest || seen["list"] != 1 {
 		t.Fatalf("invalid exclude_sensitive response = %d, list calls = %d", invalidFilter.StatusCode, seen["list"])
+	}
+	for _, path := range []string{
+		"/v1/memory-curation-runs/mrun_1/plan",
+		"/v1/memory-curation-runs/mrun_1/plan?fencing_generation=0",
+		"/v1/memory-curation-runs/mrun_1/plan?fencing_generation=7&unexpected=true",
+	} {
+		response := memoryCurationHTTPResponse(t, srv.URL, "agent", http.MethodGet, path, "", "")
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest || seen["get-plan"] != 1 {
+			t.Fatalf("invalid get-plan %q response = %d, calls = %d", path, response.StatusCode, seen["get-plan"])
+		}
 	}
 
 	response := memoryCurationHTTPResponse(t, srv.URL, "operator", http.MethodGet,
@@ -259,6 +282,9 @@ func TestMemoryCurationCapabilityRequiresCompleteSurface(t *testing.T) {
 		GetMemoryCurationRunInputs: func(context.Context, DomainPrincipal, string, MemoryCurationRunInputOptions) (any, error) {
 			return map[string]any{}, nil
 		},
+		GetMemoryCurationPlan: func(context.Context, DomainPrincipal, string, int64) (any, error) {
+			return map[string]any{}, nil
+		},
 		RenewMemoryCuration: func(context.Context, DomainPrincipal, string, RenewMemoryCurationRequest) (any, error) {
 			return map[string]any{}, nil
 		},
@@ -296,6 +322,10 @@ func TestMemoryCurationCapabilityRequiresCompleteSurface(t *testing.T) {
 		}
 	}
 	assertCapability(t, cfg, true)
+	getPlan := cfg.GetMemoryCurationPlan
+	cfg.GetMemoryCurationPlan = nil
+	assertCapability(t, cfg, false)
+	cfg.GetMemoryCurationPlan = getPlan
 	cfg.RollbackMemoryCuration = nil
 	assertCapability(t, cfg, false)
 }
@@ -312,6 +342,7 @@ func TestMemoryCurationAccessProfilesEnforceExactRouteMatrix(t *testing.T) {
 		{name: "start", method: http.MethodPost, path: "/v1/memory-curation-requests/mcrq_1/start", body: `{"lease_seconds":90}`, key: "start-key", preview: true, apply: true},
 		{name: "get-run", method: http.MethodGet, path: "/v1/memory-curation-runs/mrun_1", preview: true, apply: true},
 		{name: "inputs", method: http.MethodGet, path: "/v1/memory-curation-runs/mrun_1/inputs?fencing_generation=7", preview: true, apply: true},
+		{name: "get-plan", method: http.MethodGet, path: "/v1/memory-curation-runs/mrun_1/plan?fencing_generation=7", preview: true, apply: true},
 		{name: "renew", method: http.MethodPost, path: "/v1/memory-curation-runs/mrun_1/renew", body: `{"fencing_generation":7,"extension_seconds":45}`, key: "renew-key", preview: true, apply: true},
 		{name: "plan", method: http.MethodPost, path: "/v1/memory-curation-runs/mrun_1/plan", body: `{"fencing_generation":7,"draft":{"schema":"witself.memory-plan.v1","draft_revision":1,"actions":[]}}`, key: "plan-key", preview: true, apply: true},
 		{name: "apply", method: http.MethodPost, path: "/v1/memory-curation-runs/mrun_1/apply", body: `{"fencing_generation":7,"plan_revision":1,"plan_hash":"` + strings.Repeat("a", 64) + `"}`, key: "apply-key", apply: true},
@@ -411,7 +442,7 @@ func TestMemoryCurationPreflightReportsEffectiveCredential(t *testing.T) {
 	}
 	permissions := out.Permissions
 	if !permissions.ListRequests || !permissions.GetRequest || !permissions.Start || !permissions.GetRun ||
-		!permissions.GetInputs || !permissions.Renew || !permissions.Plan || !permissions.Abandon ||
+		!permissions.GetInputs || !permissions.GetPlan || !permissions.Renew || !permissions.Plan || !permissions.Abandon ||
 		permissions.Apply || permissions.CreateRequest || permissions.Cancel || permissions.Rollback ||
 		permissions.IncludeSensitive || permissions.DirectMemoryWrite || permissions.CanonicalFactWrite ||
 		permissions.MessageWrite || permissions.PermanentDelete {
@@ -529,6 +560,10 @@ func completeMemoryCurationTestConfig(auth PrincipalAuthFunc, called map[string]
 		},
 		GetMemoryCurationRunInputs: func(context.Context, DomainPrincipal, string, MemoryCurationRunInputOptions) (any, error) {
 			mark("inputs")
+			return map[string]any{}, nil
+		},
+		GetMemoryCurationPlan: func(context.Context, DomainPrincipal, string, int64) (any, error) {
+			mark("get-plan")
 			return map[string]any{}, nil
 		},
 		RenewMemoryCuration: func(context.Context, DomainPrincipal, string, RenewMemoryCurationRequest) (any, error) {

@@ -1505,9 +1505,25 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 	if err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
-	if err != nil {
-		return RenewMemoryCurationResult{}, err
+	commitExpired := func(expiredLease *time.Time) (RenewMemoryCurationResult, error) {
+		run, err := loadMemoryCurationRun(ctx, tx, p, runID, false)
+		if err != nil {
+			return RenewMemoryCurationResult{}, err
+		}
+		receipt, err := insertMemoryCurationMutation(ctx, tx, p, MemoryCurationMutationReceipt{
+			Operation: "renew", ActorID: p.ID, IdempotencyKey: in.IdempotencyKey,
+			RequestHash: requestHash, RequestID: run.RequestID, RunID: run.ID,
+			RequestGeneration: run.RequestGeneration,
+			FencingGeneration: run.FencingGeneration, LeaseExpiresAt: expiredLease,
+			ResultState: run.State,
+		})
+		if err != nil {
+			return RenewMemoryCurationResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return RenewMemoryCurationResult{}, err
+		}
+		return RenewMemoryCurationResult{Run: run, Receipt: receipt}, ErrMemoryCurationLeaseExpired
 	}
 	if receipt, ok, err := loadMemoryCurationMutation(ctx, tx, p, "renew", in.IdempotencyKey, requestHash); err != nil || ok {
 		if err != nil {
@@ -1520,14 +1536,16 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 		if err := tx.Commit(ctx); err != nil {
 			return RenewMemoryCurationResult{}, err
 		}
-		return RenewMemoryCurationResult{Run: run, Receipt: receipt}, nil
-	}
-	if expired {
-		if err := tx.Commit(ctx); err != nil {
-			return RenewMemoryCurationResult{}, err
+		result := RenewMemoryCurationResult{Run: run, Receipt: receipt}
+		if receipt.ResultState == MemoryCurationRunInterrupted && run.TerminalReasonCode == "lease_expired" {
+			return result, ErrMemoryCurationLeaseExpired
 		}
-		return RenewMemoryCurationResult{}, ErrMemoryCurationLeaseExpired
+		return result, nil
 	}
+	// A fresh key may reconcile only the exact active run it names. Checking
+	// the lane before expiry handling prevents a stale worker for run A from
+	// interrupting an unrelated expired successor run B and then recording a
+	// receipt with A's provenance.
 	if lane.ActiveRunID != runID || lane.FencingGeneration != in.FencingGeneration {
 		return RenewMemoryCurationResult{}, ErrMemoryCurationFenceMismatch
 	}
@@ -1538,6 +1556,18 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 	if run.FencingGeneration != in.FencingGeneration ||
 		(run.State != MemoryCurationRunOpen && run.State != MemoryCurationRunPlanned) {
 		return RenewMemoryCurationResult{}, ErrMemoryCurationFenceMismatch
+	}
+	// Preserve the lease coordinate that this renew attempt observed. Expiry
+	// reconciliation clears the run's live lease, but renew receipts are
+	// constrained to carry a non-null lease and exact replays must return the
+	// same value-free coordinate.
+	expiredLease := run.LeaseExpiresAt
+	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	if err != nil {
+		return RenewMemoryCurationResult{}, err
+	}
+	if expired {
+		return commitExpired(expiredLease)
 	}
 	var dbNow time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
@@ -1568,10 +1598,7 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 		if !expired {
 			return RenewMemoryCurationResult{}, ErrMemoryCurationFenceMismatch
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return RenewMemoryCurationResult{}, err
-		}
-		return RenewMemoryCurationResult{}, ErrMemoryCurationLeaseExpired
+		return commitExpired(expiredLease)
 	}
 	run, err = loadMemoryCurationRun(ctx, tx, p, runID, false)
 	if err != nil {
@@ -1815,19 +1842,9 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 	if err := authorizeMemoryCurationRunID(ctx, tx, p, runID); err != nil {
 		return MemoryCurationRunInputPage{}, err
 	}
-	lane, err := loadMemoryCurationLaneTx(ctx, tx, p, true)
+	lane, err := loadMemoryCurationLaneTx(ctx, tx, p, false)
 	if err != nil {
 		return MemoryCurationRunInputPage{}, err
-	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
-	if err != nil {
-		return MemoryCurationRunInputPage{}, err
-	}
-	if expired {
-		if err := tx.Commit(ctx); err != nil {
-			return MemoryCurationRunInputPage{}, err
-		}
-		return MemoryCurationRunInputPage{}, ErrMemoryCurationLeaseExpired
 	}
 	if lane.ActiveRunID != runID || lane.FencingGeneration != fencingGeneration {
 		return MemoryCurationRunInputPage{}, ErrMemoryCurationFenceMismatch
@@ -1839,6 +1856,15 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 	if run.FencingGeneration != fencingGeneration ||
 		(run.State != MemoryCurationRunOpen && run.State != MemoryCurationRunPlanned) {
 		return MemoryCurationRunInputPage{}, ErrMemoryCurationFenceMismatch
+	}
+	var expired bool
+	if err := tx.QueryRow(ctx, `
+		SELECT lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()
+		FROM memory_curation_runs WHERE id=$1`, run.ID).Scan(&expired); err != nil {
+		return MemoryCurationRunInputPage{}, fmt.Errorf("check curation lease: %w", err)
+	}
+	if expired {
+		return MemoryCurationRunInputPage{}, ErrMemoryCurationLeaseExpired
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT run_id,ordinal,input_kind,COALESCE(memory_id,''),

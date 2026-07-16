@@ -1959,11 +1959,12 @@ Defaults:
   value-returning `witself.reference.resolve`) while leaving redacted/metadata
   tools available. `--no-value-tools` and `--read-only` are independent switches.
 
-The current full MCP profile exposes 68 tools. MCP exposes direct agent-useful
+The current full MCP profile exposes 69 tools. MCP exposes direct agent-useful
 memory capture/adjust/read/history/recall/list/
-supersede/lifecycle/evidence/delete tools, fourteen curation tools
+supersede/lifecycle/evidence/delete tools, fifteen curation tools
 (`preflight`, `requests`, `request.get`, `request`, `start`, `run.get`, `renew`,
-`get`, `plan`, `apply`, `cancel`, `abandon`, `rollback`, and `status`), plus the
+`get`, `plan`, `plan.get`, `apply`, `cancel`, `abandon`, `rollback`, and
+`status`), plus the
 implemented fact tools, the realm-safe peer-activity tool, ten server-backed direct-message tools, eleven
 server-backed realm-request tools, and the two client-local notification bridge
 tools. Read-only retains request list/show and notification list but not request
@@ -2251,8 +2252,10 @@ API contract requirements:
   `/v1/messages`, the coordination resource `/v1/message-requests`, the
   curation resources `/v1/memory-curation-requests` and
   `/v1/memory-curation-runs`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
-- Expose all 13 curation routes: request create/list/get/start; run get/inputs/
-  renew/plan/apply/cancel/abandon/rollback; and value-free status. Mutations
+- In addition to the curation preflight endpoint, expose all 14 curation
+  request/run/status routes: request create/list/get/start; run get/inputs/
+  renew/plan submit/plan review/apply/cancel/abandon/rollback; and value-free
+  status. Mutations
   require `Idempotency-Key`; lease-bound operations require the exact fencing
   generation; apply also requires the accepted plan revision/hash; rollback
   requires the apply receipt and complete expected produced-head set. All

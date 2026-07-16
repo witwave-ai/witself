@@ -684,6 +684,7 @@ GET  /v1/memory-curation-runs/{run_id}
 GET  /v1/memory-curation-runs/{run_id}/inputs
 POST /v1/memory-curation-runs/{run_id}/renew
 POST /v1/memory-curation-runs/{run_id}/plan
+GET  /v1/memory-curation-runs/{run_id}/plan # ?fencing_generation=N; verified accepted-plan review
 POST /v1/memory-curation-runs/{run_id}/apply
 POST /v1/memory-curation-runs/{run_id}/cancel
 POST /v1/memory-curation-runs/{run_id}/abandon
@@ -766,8 +767,9 @@ Notes on specific actions and workflows:
 - `/v1/memory-evidence/{evidence_id}/resolution` appends one terminal exact or
   explicitly unresolvable result to a pending evidence locator. It requires an
   idempotency key and never edits the pending row.
-- The 14 `/v1/memory-curation-*` routes form one implemented agent-self
-  protocol. A request carries deterministic source scope, coalescing, priority,
+- The 15 `/v1/memory-curation-*` endpoints, including preflight, form one
+  implemented agent-self protocol. A request carries deterministic source
+  scope, coalescing, priority,
   due time, and retry metadata. `start` claims due work, freezes bounded memory,
   evidence, transcript, and cursor inputs, and returns a lease plus fencing
   generation. `inputs` pages those immutable snapshots; all value-bearing input

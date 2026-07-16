@@ -184,6 +184,85 @@ func TestPlanMemoryCurationPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("accepted plan read is verified fenced and read only", func(t *testing.T) {
+		fixture := newMemoryCurationPlanFixture(ctx, t, st, "plan-read", false, 2)
+		draft := fullMemoryCurationPlanDraft(fixture)
+		planned, err := st.PlanCuration(ctx, fixture.Principal, fixture.Started.Run.ID,
+			PlanMemoryCurationInput{FencingGeneration: fixture.Started.Run.FencingGeneration,
+				Draft: marshalCurationPlanDraft(t, draft, false), IdempotencyKey: "plan-read-accept"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.GetCurationPlan(ctx, fixture.Principal, fixture.Started.Run.ID,
+			fixture.Started.Run.FencingGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The stored JSON round-trip may normalize omitted optional slices from
+		// empty to nil and JSONB may normalize RawMessage whitespace. Those shapes
+		// have identical canonical/wire JSON; compare the immutable accepted
+		// payload rather than Go allocation details.
+		if !bytes.Equal(canonicalCurationPlanForTest(t, got.Plan), canonicalCurationPlanForTest(t, planned.Plan)) ||
+			!reflect.DeepEqual(got.PreallocatedMemoryIDs, planned.PreallocatedMemoryIDs) ||
+			!reflect.DeepEqual(got.Preview, planned.Preview) ||
+			got.Run.PlanHash != planned.Run.PlanHash {
+			t.Fatalf("accepted plan read = %#v, want %#v", got, planned)
+		}
+		if _, err := st.GetCurationPlan(ctx, fixture.Other, fixture.Started.Run.ID,
+			fixture.Started.Run.FencingGeneration); !errors.Is(err, ErrMemoryCurationNotFound) {
+			t.Fatalf("cross-owner accepted plan read error = %v", err)
+		}
+		if _, err := st.GetCurationPlan(ctx, fixture.Principal, fixture.Started.Run.ID,
+			fixture.Started.Run.FencingGeneration+1); !errors.Is(err, ErrMemoryCurationFenceMismatch) {
+			t.Fatalf("wrong-fence accepted plan read error = %v", err)
+		}
+
+		openFixture := newMemoryCurationPlanFixture(ctx, t, st, "plan-read-open", false, 1)
+		if _, err := st.GetCurationPlan(ctx, openFixture.Principal, openFixture.Started.Run.ID,
+			openFixture.Started.Run.FencingGeneration); !errors.Is(err, ErrMemoryCurationConflict) {
+			t.Fatalf("open-run accepted plan read error = %v", err)
+		}
+
+		var mutationsBefore, eventsBefore int
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM memory_curation_mutations WHERE run_id=$1`,
+			fixture.Started.Run.ID).Scan(&mutationsBefore); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM account_events WHERE account_id=$1 AND metadata->>'run_id'=$2`,
+			fixture.Principal.AccountID, fixture.Started.Run.ID).Scan(&eventsBefore); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE memory_curation_runs
+			SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`,
+			fixture.Started.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.GetCurationPlan(ctx, fixture.Principal, fixture.Started.Run.ID,
+			fixture.Started.Run.FencingGeneration); !errors.Is(err, ErrMemoryCurationLeaseExpired) {
+			t.Fatalf("expired accepted plan read error = %v", err)
+		}
+		run, err := st.GetCurationRun(ctx, fixture.Principal, fixture.Started.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State != MemoryCurationRunPlanned {
+			t.Fatalf("expired accepted plan read mutated run = %#v", run)
+		}
+		var mutationsAfter, eventsAfter int
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM memory_curation_mutations WHERE run_id=$1`,
+			fixture.Started.Run.ID).Scan(&mutationsAfter); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM account_events WHERE account_id=$1 AND metadata->>'run_id'=$2`,
+			fixture.Principal.AccountID, fixture.Started.Run.ID).Scan(&eventsAfter); err != nil {
+			t.Fatal(err)
+		}
+		if mutationsAfter != mutationsBefore || eventsAfter != eventsBefore {
+			t.Fatalf("accepted plan read changed receipts/events: (%d,%d) -> (%d,%d)",
+				mutationsBefore, eventsBefore, mutationsAfter, eventsAfter)
+		}
+	})
+
 	t.Run("expired lease interrupts without accepting", func(t *testing.T) {
 		fixture := newMemoryCurationPlanFixture(ctx, t, st, "expired", false, 1)
 		if _, err := st.pool.Exec(ctx, `

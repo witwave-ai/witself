@@ -201,6 +201,162 @@ func TestMemoryCurationCuratorSensitiveScopePostgres(t *testing.T) {
 	})
 }
 
+func TestMemoryCurationRestrictedProfilesRejectSensitivePlanOutputsPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+
+	t.Run("restricted profiles cannot stage sensitive output", func(t *testing.T) {
+		ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
+		source := captureMemoryCurationAccessProfileSource(ctx, t, st, full, "restricted-stage")
+		requested, err := st.RequestCuration(ctx, full, RequestMemoryCurationInput{
+			Scope:          MemoryCurationScope{Sources: []string{MemoryCurationSourceMemory}},
+			CoalescingKey:  "restricted_sensitive_output",
+			TriggerReason:  "manual_refine",
+			IdempotencyKey: "restricted-sensitive-output-request",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started, err := st.StartCuration(ctx, full, StartMemoryCurationInput{
+			RequestID: requested.Request.ID, LeaseDuration: time.Minute,
+			IdempotencyKey: "restricted-sensitive-output-start",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE memory_curation_runs
+			SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`,
+			started.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+		draft := marshalSensitiveCreateCurationPlanForAccessProfile(t, source)
+		for _, profile := range []string{AccessProfileCuratorPreview, AccessProfileCuratorApply} {
+			restricted := full
+			restricted.AccessProfile = profile
+			if _, err := st.PlanCuration(ctx, restricted, started.Run.ID, PlanMemoryCurationInput{
+				FencingGeneration: started.Run.FencingGeneration,
+				Draft:             draft,
+				IdempotencyKey:    "restricted-sensitive-output-plan-" + profile,
+			}); !errors.Is(err, ErrMemoryCurationForbidden) {
+				t.Fatalf("%s sensitive plan error = %v", profile, err)
+			}
+		}
+		run, err := st.GetCurationRun(ctx, full, started.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var actions, receipts int
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM memory_curation_actions WHERE run_id=$1`,
+			started.Run.ID).Scan(&actions); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM memory_curation_mutations WHERE run_id=$1 AND operation='plan'`,
+			started.Run.ID).Scan(&receipts); err != nil {
+			t.Fatal(err)
+		}
+		if run.State != MemoryCurationRunOpen || actions != 0 || receipts != 0 {
+			t.Fatalf("restricted sensitive stage mutated state: run=%#v actions=%d receipts=%d", run, actions, receipts)
+		}
+	})
+
+	t.Run("full staged sensitive output cannot cross into restricted profiles", func(t *testing.T) {
+		ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
+		preview := full
+		preview.AccessProfile = AccessProfileCuratorPreview
+		apply := full
+		apply.AccessProfile = AccessProfileCuratorApply
+		source := captureMemoryCurationAccessProfileSource(ctx, t, st, full, "full-stage")
+		requested, err := st.RequestCuration(ctx, full, RequestMemoryCurationInput{
+			Scope:          MemoryCurationScope{Sources: []string{MemoryCurationSourceMemory}},
+			CoalescingKey:  "full_staged_sensitive_output",
+			TriggerReason:  "manual_refine",
+			IdempotencyKey: "full-staged-sensitive-request",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started, err := st.StartCuration(ctx, full, StartMemoryCurationInput{
+			RequestID: requested.Request.ID, LeaseDuration: time.Minute,
+			IdempotencyKey: "full-staged-sensitive-start",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		draft := marshalSensitiveCreateCurationPlanForAccessProfile(t, source)
+		planInput := PlanMemoryCurationInput{
+			FencingGeneration: started.Run.FencingGeneration,
+			Draft:             draft,
+			IdempotencyKey:    "full-staged-sensitive-plan",
+		}
+		planned, err := st.PlanCuration(ctx, full, started.Run.ID, planInput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, restricted := range []Principal{preview, apply} {
+			if _, err := st.GetCurationPlan(ctx, restricted, started.Run.ID,
+				started.Run.FencingGeneration); !errors.Is(err, ErrMemoryCurationForbidden) {
+				t.Fatalf("%s sensitive plan get error = %v", restricted.AccessProfile, err)
+			}
+			if _, err := st.PlanCuration(ctx, restricted, started.Run.ID,
+				planInput); !errors.Is(err, ErrMemoryCurationForbidden) {
+				t.Fatalf("%s sensitive plan replay error = %v", restricted.AccessProfile, err)
+			}
+		}
+
+		applyInput := ApplyMemoryCurationInput{
+			FencingGeneration: started.Run.FencingGeneration,
+			PlanRevision:      planned.Plan.PlanRevision,
+			PlanHash:          planned.Receipt.PlanHash,
+			IdempotencyKey:    "restricted-sensitive-apply",
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE memory_curation_runs
+			SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`,
+			started.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.GetCurationPlan(ctx, apply, started.Run.ID,
+			started.Run.FencingGeneration); !errors.Is(err, ErrMemoryCurationForbidden) {
+			t.Fatalf("restricted expired sensitive plan get error = %v", err)
+		}
+		if _, err := st.ApplyCuration(ctx, apply, started.Run.ID, applyInput); !errors.Is(err, ErrMemoryCurationForbidden) {
+			t.Fatalf("restricted fresh sensitive apply error = %v", err)
+		}
+		run, err := st.GetCurationRun(ctx, full, started.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State != MemoryCurationRunPlanned {
+			t.Fatalf("restricted sensitive apply changed run = %#v", run)
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE memory_curation_runs
+			SET lease_expires_at=clock_timestamp()+interval '1 minute' WHERE id=$1`,
+			started.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		applyInput.IdempotencyKey = "full-sensitive-apply"
+		applied, err := st.ApplyCuration(ctx, full, started.Run.ID, applyInput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied.Run.State != MemoryCurationRunApplied {
+			t.Fatalf("full sensitive apply = %#v", applied)
+		}
+		if _, err := st.ApplyCuration(ctx, apply, started.Run.ID, applyInput); !errors.Is(err, ErrMemoryCurationForbidden) {
+			t.Fatalf("restricted sensitive apply replay error = %v", err)
+		}
+		run, err = st.GetCurationRun(ctx, full, started.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State != MemoryCurationRunApplied || run.ApplyReceiptID != applied.Receipt.ID {
+			t.Fatalf("restricted replay changed applied run = %#v", run)
+		}
+	})
+}
+
 func TestMemoryCurationRestrictedProfilesCannotSeeOrOperateTranscriptScopePostgres(t *testing.T) {
 	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -435,6 +591,71 @@ func marshalEmptyCurationPlanForAccessProfile(t *testing.T) json.RawMessage {
 		Schema:        MemoryCurationPlanSchemaV1,
 		DraftRevision: 1,
 		Actions:       []MemoryCurationPlanAction{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func captureMemoryCurationAccessProfileSource(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	suffix string,
+) Memory {
+	t.Helper()
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "curator-profile-source-" + suffix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+		transcript.ID, AppendTranscriptEntryInput{
+			ExternalID: "curator-profile-entry-" + suffix,
+			Role:       TranscriptRoleUser,
+			Body:       "non-sensitive source for restricted curator boundary testing",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+		Content: "non-sensitive source for restricted curator boundary testing",
+		Kind:    "decision",
+		Evidence: []MemoryEvidenceInput{{
+			Type: "conversation", ResolutionState: MemoryEvidenceResolved,
+			ResolvedKind: MemoryCurationSourceTranscript, SourceTranscriptID: transcript.ID,
+			SourceSequenceFrom: entry.Sequence, SourceSequenceUntil: entry.Sequence,
+		}},
+		IdempotencyKey: "curator-profile-capture-" + suffix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return captured.Memory
+}
+
+func marshalSensitiveCreateCurationPlanForAccessProfile(t *testing.T, source Memory) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(MemoryCurationPlanDraft{
+		Schema: MemoryCurationPlanSchemaV1, DraftRevision: 1,
+		Actions: []MemoryCurationPlanAction{{
+			Ordinal: 1, Operation: MemoryCurationOperationCreate,
+			Create: &MemoryCurationCreateAction{
+				LocalRef: "private_summary",
+				Snapshot: MemoryCurationMemorySnapshot{
+					Content: "sensitive output visible only to full credentials",
+					Kind:    "decision", Sensitive: true,
+					Evidence: []MemoryCurationEvidence{{
+						Type: "memory", ResolutionState: MemoryEvidenceResolved,
+						ResolvedKind: "memory", SourceMemory: &MemoryCurationVersionReference{
+							MemoryID: source.ID, Version: source.Version,
+						},
+					}},
+				},
+			},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

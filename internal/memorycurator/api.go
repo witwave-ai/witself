@@ -16,6 +16,7 @@ type API interface {
 	ListRequests(context.Context, client.MemoryCurationRequestListOptions) (*client.MemoryCurationRequestPage, error)
 	Start(context.Context, client.StartMemoryCurationInput) (*client.StartMemoryCurationResult, error)
 	GetInputs(context.Context, string, int64, string, int) (*client.MemoryCurationRunInputPage, error)
+	GetPlan(context.Context, string, int64) (*client.GetMemoryCurationPlanResult, error)
 	Renew(context.Context, client.RenewMemoryCurationInput) (*client.RenewMemoryCurationResult, error)
 	Plan(context.Context, client.PlanMemoryCurationInput) (*client.PlanMemoryCurationResult, error)
 	Apply(context.Context, client.ApplyMemoryCurationInput) (*client.ApplyMemoryCurationResult, error)
@@ -44,6 +45,11 @@ func (a HTTPAPI) Start(ctx context.Context, in client.StartMemoryCurationInput) 
 // GetInputs returns one page of frozen inputs for a fenced curation run.
 func (a HTTPAPI) GetInputs(ctx context.Context, runID string, fence int64, cursor string, limit int) (*client.MemoryCurationRunInputPage, error) {
 	return client.GetMemoryCurationRunInputs(ctx, a.Endpoint, a.Token, runID, fence, cursor, limit)
+}
+
+// GetPlan returns the exact accepted plan for review before apply.
+func (a HTTPAPI) GetPlan(ctx context.Context, runID string, fence int64) (*client.GetMemoryCurationPlanResult, error) {
+	return client.GetMemoryCurationPlan(ctx, a.Endpoint, a.Token, runID, fence)
 }
 
 // Renew extends the lease for a fenced curation run.

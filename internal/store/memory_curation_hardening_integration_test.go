@@ -881,11 +881,31 @@ func TestMemoryCurationApplyRollbackHardeningPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		liveRenew, err := st.RenewCuration(ctx, p, started.Run.ID, RenewMemoryCurationInput{
+			FencingGeneration: started.Run.FencingGeneration,
+			Extension:         time.Minute, IdempotencyKey: "renew-before-expiry",
+		})
+		if err != nil || liveRenew.Receipt.Replayed {
+			t.Fatalf("live renew = %#v / %v", liveRenew, err)
+		}
 		if _, err := st.pool.Exec(ctx, `
 			UPDATE memory_curation_runs
 			SET lease_expires_at=clock_timestamp()-interval '1 second'
 			WHERE id=$1`, started.Run.ID); err != nil {
 			t.Fatal(err)
+		}
+		liveReplay, err := st.RenewCuration(ctx, p, started.Run.ID, RenewMemoryCurationInput{
+			FencingGeneration: started.Run.FencingGeneration,
+			Extension:         time.Minute, IdempotencyKey: "renew-before-expiry",
+		})
+		if err != nil || !liveReplay.Receipt.Replayed ||
+			liveReplay.Receipt.CreatedAt != liveRenew.Receipt.CreatedAt {
+			t.Fatalf("expired exact replay of live renew = %#v / %v", liveReplay, err)
+		}
+		status, err := st.GetCurationStatus(ctx, p, "")
+		if err != nil || status.Lane.ActiveRunID != started.Run.ID ||
+			status.Run == nil || status.Run.State != MemoryCurationRunOpen {
+			t.Fatalf("exact replay changed expired run = %#v / %v", status, err)
 		}
 		if _, err := st.RenewCuration(ctx, p, started.Run.ID, RenewMemoryCurationInput{
 			FencingGeneration: started.Run.FencingGeneration,
@@ -893,7 +913,7 @@ func TestMemoryCurationApplyRollbackHardeningPostgres(t *testing.T) {
 		}); !errors.Is(err, ErrMemoryCurationLeaseExpired) {
 			t.Fatalf("expired renew error = %v", err)
 		}
-		status, err := st.GetCurationStatus(ctx, p, "")
+		status, err = st.GetCurationStatus(ctx, p, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -907,6 +927,95 @@ func TestMemoryCurationApplyRollbackHardeningPostgres(t *testing.T) {
 		}
 		if run.State != MemoryCurationRunInterrupted || run.TerminalReasonCode != "lease_expired" {
 			t.Fatalf("expired renew run = %#v", run)
+		}
+	})
+
+	t.Run("stale renew cannot reconcile another expired active run", func(t *testing.T) {
+		ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
+		requestA, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+			CoalescingKey: "stale_renew_a", TriggerReason: "manual_refine",
+			IdempotencyKey: "stale-renew-request-a",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runA, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+			RequestID: requestA.Request.ID, LeaseDuration: time.Minute,
+			IdempotencyKey: "stale-renew-start-a",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		planA := planHardeningCuration(ctx, t, st, p, runA, nil, "stale-renew-plan-a")
+		if _, err := st.ApplyCuration(ctx, p, runA.Run.ID, ApplyMemoryCurationInput{
+			FencingGeneration: runA.Run.FencingGeneration,
+			PlanRevision:      planA.Plan.PlanRevision,
+			PlanHash:          planA.Receipt.PlanHash,
+			IdempotencyKey:    "stale-renew-apply-a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		requestB, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+			CoalescingKey: "stale_renew_b", TriggerReason: "manual_refine",
+			IdempotencyKey: "stale-renew-request-b",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runB, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+			RequestID: requestB.Request.ID, LeaseDuration: time.Minute,
+			IdempotencyKey: "stale-renew-start-b",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE memory_curation_runs
+			SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`,
+			runB.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := st.RenewCuration(ctx, p, runA.Run.ID, RenewMemoryCurationInput{
+			FencingGeneration: runA.Run.FencingGeneration,
+			Extension:         time.Minute,
+			IdempotencyKey:    "stale-renew-wrong-run",
+		}); !errors.Is(err, ErrMemoryCurationFenceMismatch) {
+			t.Fatalf("stale renew error = %v", err)
+		}
+		var staleReceipts int
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM memory_curation_mutations
+			WHERE account_id=$1 AND operation='renew' AND idempotency_key=$2`,
+			p.AccountID, "stale-renew-wrong-run").Scan(&staleReceipts); err != nil {
+			t.Fatal(err)
+		}
+		if staleReceipts != 0 {
+			t.Fatalf("stale renew receipts = %d", staleReceipts)
+		}
+		status, err := st.GetCurationStatus(ctx, p, runB.Run.ID)
+		if err != nil || status.Run == nil || status.Run.State != MemoryCurationRunOpen ||
+			status.Lane.ActiveRunID != runB.Run.ID ||
+			status.Lane.FencingGeneration != runB.Run.FencingGeneration {
+			t.Fatalf("stale renew mutated active run = %#v / %v", status, err)
+		}
+
+		expired, err := st.RenewCuration(ctx, p, runB.Run.ID, RenewMemoryCurationInput{
+			FencingGeneration: runB.Run.FencingGeneration,
+			Extension:         time.Minute,
+			IdempotencyKey:    "stale-renew-correct-run",
+		})
+		if !errors.Is(err, ErrMemoryCurationLeaseExpired) || expired.Receipt.Replayed ||
+			expired.Run.ID != runB.Run.ID {
+			t.Fatalf("correct expired renew = %#v / %v", expired, err)
+		}
+		replay, err := st.RenewCuration(ctx, p, runB.Run.ID, RenewMemoryCurationInput{
+			FencingGeneration: runB.Run.FencingGeneration,
+			Extension:         time.Minute,
+			IdempotencyKey:    "stale-renew-correct-run",
+		})
+		if !errors.Is(err, ErrMemoryCurationLeaseExpired) || !replay.Receipt.Replayed ||
+			replay.Receipt.CreatedAt != expired.Receipt.CreatedAt {
+			t.Fatalf("correct expired renew replay = %#v / %v", replay, err)
 		}
 	})
 }

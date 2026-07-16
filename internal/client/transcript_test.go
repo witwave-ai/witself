@@ -9,7 +9,7 @@ import (
 )
 
 func TestTranscriptBatchAndPageContracts(t *testing.T) {
-	var sawBatch, sawPage bool
+	var sawBatch, sawPage, sawObservationalPage bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
@@ -25,7 +25,11 @@ func TestTranscriptBatchAndPageContracts(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"entries":[{"id":"ent_2","transcript_id":"trn_1","sequence":2,"role":"assistant","artifacts":[]}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/transcripts/trn_1":
-			sawPage = true
+			if r.URL.Query().Get("observational") == "true" {
+				sawObservationalPage = true
+			} else {
+				sawPage = true
+			}
 			if r.URL.Query().Get("after_sequence") != "5" || r.URL.Query().Get("limit") != "25" || r.URL.Query().Get("tail") != "" {
 				t.Fatalf("page query = %s", r.URL.RawQuery)
 			}
@@ -51,5 +55,11 @@ func TestTranscriptBatchAndPageContracts(t *testing.T) {
 	}
 	if page.NextAfterSequence != 12 || !sawBatch || !sawPage {
 		t.Fatalf("page/requests = %#v / %v / %v", page, sawBatch, sawPage)
+	}
+	if _, err := GetTranscriptPage(context.Background(), srv.URL, "token", "trn_1", TranscriptPageOptions{AfterSequence: 5, Limit: 25, Observational: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawObservationalPage {
+		t.Fatal("observational transcript page query was not sent")
 	}
 }

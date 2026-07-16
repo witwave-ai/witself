@@ -574,7 +574,11 @@ The accepted plan schema is versioned independently as
 Validation errors leave the run `open` so the client may submit a corrected
 draft revision. The first accepted plan transitions the run to `planned` and is
 immutable. Changing an accepted plan requires a new run. `apply` always names
-both the server-returned revision and hash.
+both the server-returned revision and hash. Before applying a resumed planned
+run, the client retrieves the normalized accepted plan through the fenced,
+read-only plan-review surface, verifies its canonical hash again, and
+independently reviews every action and preview against all frozen inputs and
+current policy. Content-free run metadata is never sufficient apply authority.
 
 ## PostgreSQL Model
 
@@ -1033,6 +1037,10 @@ request/response fields are required:
   actions, and idempotency key. It returns validation errors or the canonical
   plan revision/hash, normalized actions, preallocated ids, and impact preview.
   An empty actions list is valid when no frozen input merits memory.
+- Plan get accepts a live planned run id/fence and read-only-reconstructs the
+  exact normalized accepted plan, preallocated ids, and preview without its
+  planner mutation receipt. The caller reviews that untrusted content against
+  every paged frozen input before apply.
 - Apply accepts run id/fence, canonical plan revision/hash, and idempotency key.
   It returns the apply receipt, exact before/after heads, fact-candidate ids,
   advanced cursor intervals, and follow-up generation if work remains. Applying
@@ -1070,6 +1078,7 @@ MCP and CLI expose schema-equivalent operations:
 - `witself.memory.curation.renew`
 - `witself.memory.curation.get`
 - `witself.memory.curation.plan`
+- `witself.memory.curation.plan.get`
 - `witself.memory.curation.apply`
 - `witself.memory.curation.cancel`
 - `witself.memory.curation.abandon`

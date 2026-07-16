@@ -91,6 +91,17 @@ type PlanMemoryCurationResult struct {
 	Receipt               MemoryCurationPlanReceipt            `json:"receipt"`
 }
 
+// GetMemoryCurationPlanResult is the verified accepted-plan view used to
+// review a staged plan before apply. It intentionally omits the original
+// mutation receipt and idempotency metadata: those identify the planner's
+// write but are not authority for a later client to apply the plan.
+type GetMemoryCurationPlanResult struct {
+	Run                   MemoryCurationRun                    `json:"run"`
+	Plan                  MemoryCurationPlan                   `json:"plan"`
+	PreallocatedMemoryIDs []MemoryCurationPreallocatedMemoryID `json:"preallocated_memory_ids,omitempty"`
+	Preview               MemoryCurationImpactPreview          `json:"preview"`
+}
+
 // memoryCurationStoredAction is the package-level handoff to apply. Apply must
 // use these persisted rows and reverify PlanHash; it must never accept another
 // caller-authored plan.
@@ -105,6 +116,29 @@ type memoryCurationStoredAction struct {
 type memoryCurationStoredPlan struct {
 	Acceptance MemoryCurationPlanAcceptance
 	Actions    []memoryCurationStoredAction
+}
+
+// authorizeMemoryCurationPlanProfile keeps the restricted curator profiles on
+// the non-sensitive plane even when a full credential accepted the plan first.
+// Request scope constrains frozen inputs, but it does not constrain a planner
+// from conservatively marking newly synthesized output sensitive, so every
+// content-bearing handoff must enforce both boundaries.
+func authorizeMemoryCurationPlanProfile(p Principal, plan MemoryCurationPlan) error {
+	if !isRestrictedMemoryCurator(p) {
+		return nil
+	}
+	for _, action := range plan.Actions {
+		if action.Create != nil && action.Create.Snapshot.Sensitive {
+			return ErrMemoryCurationForbidden
+		}
+		if action.Replace != nil && action.Replace.Snapshot.Sensitive {
+			return ErrMemoryCurationForbidden
+		}
+		if action.ProposeFact != nil && action.ProposeFact.Sensitive {
+			return ErrMemoryCurationForbidden
+		}
+	}
+	return nil
 }
 
 type memoryCurationPlanMemoryInput struct {
@@ -144,6 +178,82 @@ type memoryCurationAuthorizedAction struct {
 	InputRefs     []MemoryCurationActionInputRef
 	ExpectedHeads []MemoryCurationExpectedHead
 	ActionHash    string
+}
+
+// GetCurationPlan reconstructs and verifies the exact accepted plan for one
+// live, fenced planned run. The repeatable-read, read-only transaction keeps
+// the run, lane, and action rows on one snapshot. Lease expiry is reported but
+// never reconciled here; RenewCuration is the sole prescribed mutation path.
+func (s *Store) GetCurationPlan(
+	ctx context.Context,
+	p Principal,
+	runID string,
+	fencingGeneration int64,
+) (GetMemoryCurationPlanResult, error) {
+	if p.Kind != PrincipalAgent {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationForbidden
+	}
+	runID = strings.TrimSpace(runID)
+	if !validCurationID(runID, "mrun") || fencingGeneration < 1 {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationInputInvalid
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := verifyLiveAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	if err := authorizeMemoryCurationRunID(ctx, tx, p, runID); err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	run, err := loadMemoryCurationRun(ctx, tx, p, runID, false)
+	if err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	if run.FencingGeneration != fencingGeneration {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationFenceMismatch
+	}
+	lane, err := loadMemoryCurationLaneTx(ctx, tx, p, false)
+	if err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	if lane.ActiveRunID != runID || lane.FencingGeneration != fencingGeneration {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationFenceMismatch
+	}
+	if run.State != MemoryCurationRunPlanned || run.PlanRevision < 1 || run.PlanHash == "" {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationConflict
+	}
+	stored, err := loadMemoryCurationStoredPlan(ctx, tx, p, run)
+	if err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	if err := authorizeMemoryCurationPlanProfile(p, stored.Acceptance.Plan); err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	var expired bool
+	if err := tx.QueryRow(ctx, `
+		SELECT lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()
+		FROM memory_curation_runs WHERE id=$1`, run.ID).Scan(&expired); err != nil {
+		return GetMemoryCurationPlanResult{}, fmt.Errorf("check curation lease: %w", err)
+	}
+	if expired {
+		return GetMemoryCurationPlanResult{}, ErrMemoryCurationLeaseExpired
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
+	return GetMemoryCurationPlanResult{
+		Run:  run,
+		Plan: stored.Acceptance.Plan,
+		PreallocatedMemoryIDs: append([]MemoryCurationPreallocatedMemoryID(nil),
+			stored.Acceptance.PreallocatedMemoryIDs...),
+		Preview: stored.Acceptance.Preview,
+	}, nil
 }
 
 // PlanCuration validates and immutably accepts one client-authored plan. It
@@ -203,10 +313,16 @@ func (s *Store) PlanCuration(
 		if receipt.PlanHash != stored.Acceptance.PlanHash || receipt.PlanRevision != stored.Acceptance.Plan.PlanRevision {
 			return PlanMemoryCurationResult{}, ErrMemoryCurationConflict
 		}
+		if err := authorizeMemoryCurationPlanProfile(p, stored.Acceptance.Plan); err != nil {
+			return PlanMemoryCurationResult{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return PlanMemoryCurationResult{}, err
 		}
 		return planMemoryCurationResult(run, stored.Acceptance, receipt), nil
+	}
+	if err := authorizeMemoryCurationPlanProfile(p, MemoryCurationPlan{Actions: draft.Actions}); err != nil {
+		return PlanMemoryCurationResult{}, err
 	}
 
 	lane, err := loadMemoryCurationLaneTx(ctx, tx, p, true)
@@ -270,6 +386,9 @@ func (s *Store) PlanCuration(
 	})
 	if err != nil {
 		return PlanMemoryCurationResult{}, ErrMemoryCurationInputInvalid
+	}
+	if err := authorizeMemoryCurationPlanProfile(p, acceptance.Plan); err != nil {
+		return PlanMemoryCurationResult{}, err
 	}
 	authorization, err := loadMemoryCurationPlanAuthorization(ctx, tx, p, run.ID, request.Scope, acceptance)
 	if err != nil {

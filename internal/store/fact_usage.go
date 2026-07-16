@@ -34,7 +34,7 @@ const factUsageSelect = `
 		GROUP BY subject_id
 	) u ON u.fact_id = f.id`
 
-func (s *Store) listFactsWithUsage(ctx context.Context, p Principal, opts FactListOptions) ([]Fact, error) {
+func (s *Store) listFactsWithUsage(ctx context.Context, p Principal, opts FactListOptions, recordUsage bool) ([]Fact, error) {
 	opts, err := normalizeFactListOptions(opts)
 	if err != nil {
 		return nil, err
@@ -78,9 +78,11 @@ func (s *Store) listFactsWithUsage(ctx context.Context, p Principal, opts FactLi
 		return nil, err
 	}
 	rows.Close()
-	// Meter only a successfully completed result set. Usage is a companion
-	// projection, so a metering failure never makes fact retrieval unavailable.
-	_ = s.recordFactRetrievals(ctx, p, opts.RetrievalMode, out)
+	if recordUsage {
+		// Meter only a successfully completed result set. Usage is a companion
+		// projection, so a metering failure never makes fact retrieval unavailable.
+		_ = s.recordFactRetrievals(ctx, p, opts.RetrievalMode, out)
+	}
 	return out, nil
 }
 

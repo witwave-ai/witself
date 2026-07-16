@@ -112,6 +112,7 @@ type FactListOptions struct {
 	IncludeSensitive bool
 	OrderByUsage     bool
 	UnusedOnly       bool
+	Observational    bool
 }
 
 // FactCandidate is an unresolved agent observation awaiting review.
@@ -156,6 +157,7 @@ type FactUpcomingOptions struct {
 	Until            time.Time
 	Timezone         string
 	IncludeSensitive bool
+	Observational    bool
 }
 
 // FactOccurrence is a derived temporal fact view.
@@ -236,7 +238,20 @@ func DeleteFact(ctx context.Context, endpoint, token string, in DeleteFactInput)
 // GetFact retrieves one fact by exact subject and predicate. Successful
 // retrieval is audited as an exact, ranking-eligible fact delivery.
 func GetFact(ctx context.Context, endpoint, token, subject, predicate string) (*Fact, error) {
+	return getFact(ctx, endpoint, token, subject, predicate, false)
+}
+
+// GetFactObservational retrieves one exact fact without recording delivery
+// usage on servers that support observational reads.
+func GetFactObservational(ctx context.Context, endpoint, token, subject, predicate string) (*Fact, error) {
+	return getFact(ctx, endpoint, token, subject, predicate, true)
+}
+
+func getFact(ctx context.Context, endpoint, token, subject, predicate string, observational bool) (*Fact, error) {
 	query := url.Values{"subject": {subject}, "predicate": {predicate}}
+	if observational {
+		query.Set("observational", "true")
+	}
 	var out struct {
 		Fact Fact `json:"fact"`
 	}
@@ -267,6 +282,9 @@ func ListFacts(ctx context.Context, endpoint, token string, opts FactListOptions
 	}
 	if opts.UnusedOnly {
 		query.Set("unused", "true")
+	}
+	if opts.Observational {
+		query.Set("observational", "true")
 	}
 	requestURL := factsURL(endpoint)
 	if len(query) != 0 {
@@ -419,6 +437,9 @@ func UpcomingFactsWithOptions(ctx context.Context, endpoint, token string, opts 
 	}
 	if opts.IncludeSensitive {
 		q.Set("include_sensitive", "true")
+	}
+	if opts.Observational {
+		q.Set("observational", "true")
 	}
 	var out struct {
 		Occurrences []FactOccurrence `json:"occurrences"`

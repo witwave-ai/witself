@@ -87,7 +87,7 @@ V0 should prove the end-to-end product boundary:
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
 - `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
-  the self-management, fourteen curation, ordinary-message, message-request, and
+  the self-management, fifteen curation, ordinary-message, message-request, and
   local notification bridge tools. Its server `instructions` teach the always-loaded
   recall-before-act/write-after-learn protocol plus non-blocking message listen
   and notification-list startup checks.
@@ -218,7 +218,7 @@ Core backend capabilities:
   `/v1/message-requests`, and `/v1/audit` route groups.
 - Self-management routes including `/v1/self`, `/v1/memories`, bounded memory
   reads/history/list/recall, exact lifecycle actions, evidence resolution, and
-  guarded permanent deletion. The 13 curation routes under
+  guarded permanent deletion. The 14 curation routes under
   `/v1/memory-curation-requests`, `/v1/memory-curation-runs`, and
   `/v1/memory-curation-status` are implemented. Unified remember, session, and
   file-bridge routes remain future work.
@@ -381,7 +381,7 @@ V0 is credible when:
   capped and works without a model provider; direct lifecycle and exact
   client-authored supersession round-trip through CLI/MCP/API; client-authored
   curation requests, leases/fences, frozen inputs, strict plans, atomic apply,
-  cancel/abandon, and rollback round-trip through CLI/HTTP, with fourteen MCP
+  cancel/abandon, and rollback round-trip through CLI/HTTP, with fifteen MCP
   tools; pending state is surfaced value-free through `self show`, Codex/Claude
   inject it when already durable, and Cursor/Grok use guided MCP fallback; the
   optional legacy/manual client worker is explicitly configurable through

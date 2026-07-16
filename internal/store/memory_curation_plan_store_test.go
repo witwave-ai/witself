@@ -46,6 +46,49 @@ func TestHashMemoryCurationPlanRequestUsesCanonicalDecodedDraft(t *testing.T) {
 	}
 }
 
+func TestAuthorizeMemoryCurationPlanProfileRejectsSensitiveOutputs(t *testing.T) {
+	tests := map[string]MemoryCurationPlanAction{
+		"create": {
+			Ordinal: 1, Operation: MemoryCurationOperationCreate,
+			Create: &MemoryCurationCreateAction{Snapshot: MemoryCurationMemorySnapshot{Sensitive: true}},
+		},
+		"replace": {
+			Ordinal: 1, Operation: MemoryCurationOperationReplace,
+			Replace: &MemoryCurationReplaceAction{Snapshot: MemoryCurationMemorySnapshot{Sensitive: true}},
+		},
+		"propose fact": {
+			Ordinal: 1, Operation: MemoryCurationOperationProposeFact,
+			ProposeFact: &MemoryCurationProposeFactAction{Sensitive: true},
+		},
+	}
+	for name, action := range tests {
+		t.Run(name, func(t *testing.T) {
+			plan := MemoryCurationPlan{Actions: []MemoryCurationPlanAction{action}}
+			for _, profile := range []string{AccessProfileCuratorPreview, AccessProfileCuratorApply} {
+				p := Principal{Kind: PrincipalAgent, AccessProfile: profile}
+				if err := authorizeMemoryCurationPlanProfile(p, plan); !errors.Is(err, ErrMemoryCurationForbidden) {
+					t.Fatalf("%s sensitive plan error = %v", profile, err)
+				}
+			}
+			if err := authorizeMemoryCurationPlanProfile(
+				Principal{Kind: PrincipalAgent, AccessProfile: AccessProfileFull}, plan,
+			); err != nil {
+				t.Fatalf("full profile sensitive plan error = %v", err)
+			}
+		})
+	}
+
+	public := MemoryCurationPlan{Actions: []MemoryCurationPlanAction{{
+		Ordinal: 1, Operation: MemoryCurationOperationCreate,
+		Create: &MemoryCurationCreateAction{Snapshot: MemoryCurationMemorySnapshot{Sensitive: false}},
+	}}}
+	if err := authorizeMemoryCurationPlanProfile(
+		Principal{Kind: PrincipalAgent, AccessProfile: AccessProfileCuratorApply}, public,
+	); err != nil {
+		t.Fatalf("restricted non-sensitive plan error = %v", err)
+	}
+}
+
 func TestAuthorizeMemoryCurationPlanCoversAllPrimitives(t *testing.T) {
 	transcriptEvidence := func() MemoryCurationEvidence {
 		return MemoryCurationEvidence{

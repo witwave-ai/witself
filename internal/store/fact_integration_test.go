@@ -62,6 +62,24 @@ func TestFactPostgresRoundTrip(t *testing.T) {
 	if !third.Sensitive {
 		t.Fatalf("ordinary update declassified sensitive fact: %#v", third)
 	}
+	observed, err := st.GetFactObservational(ctx, p, "self", "preferences/editor")
+	if err != nil || observed.ID != third.ID {
+		t.Fatalf("observational exact fact = %#v / %v", observed, err)
+	}
+	observedList, err := st.ListFactsObservational(ctx, p, FactListOptions{})
+	if err != nil || len(observedList) != 1 {
+		t.Fatalf("observational fact list = %#v / %v", observedList, err)
+	}
+	var observationalUsageCount, observationalRollupCount int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE subject_type = 'fact' AND subject_id = $1`, third.ID).Scan(&observationalUsageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM usage_rollups WHERE account_id=$1 AND dimension=$2`, p.AccountID, UsageDimensionFactReturned).Scan(&observationalRollupCount); err != nil {
+		t.Fatal(err)
+	}
+	if observationalUsageCount != 0 || observationalRollupCount != 0 {
+		t.Fatalf("observational fact reads wrote %d usage events / %d rollups", observationalUsageCount, observationalRollupCount)
+	}
 	got, err := st.GetFact(ctx, p, "self", "preferences/editor")
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +205,12 @@ func TestFactPostgresRoundTrip(t *testing.T) {
 	}
 	if len(aliasList) != 1 || aliasList[0].Subject != "person_spouse" {
 		t.Fatalf("alias fact list = %#v", aliasList)
+	}
+	observedHydration, err := st.ListFactsObservational(ctx, p, FactListOptions{
+		Subject: "self", Limit: 50, RetrievalMode: FactRetrievalModeSelfHydration,
+	})
+	if err != nil || len(observedHydration) != 2 {
+		t.Fatalf("observational self hydration = %#v / %v", observedHydration, err)
 	}
 	hydrated, err := st.ListFacts(ctx, p, FactListOptions{
 		Subject: "self", Limit: 50, RetrievalMode: FactRetrievalModeSelfHydration,
@@ -344,10 +368,25 @@ func TestFactPostgresRoundTrip(t *testing.T) {
 	if birthday.Recurrence != FactRecurrenceAnnual {
 		t.Fatalf("birthday recurrence = %q", birthday.Recurrence)
 	}
-	occurrences, err := st.UpcomingFacts(ctx, p, UpcomingFactOptions{
+	window := UpcomingFactOptions{
 		From:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC),
-	})
+	}
+	observedOccurrences, err := st.UpcomingFactsObservational(ctx, p, window)
+	if err != nil || len(observedOccurrences) != 3 {
+		t.Fatalf("observational upcoming facts = %#v / %v", observedOccurrences, err)
+	}
+	var observedTemporalUsage int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM usage_events
+		WHERE subject_type='fact' AND subject_id=$1
+		  AND metadata->>'retrieval_mode'='temporal'`, birthday.ID).Scan(&observedTemporalUsage); err != nil {
+		t.Fatal(err)
+	}
+	if observedTemporalUsage != 0 {
+		t.Fatalf("observational temporal read wrote %d usage events", observedTemporalUsage)
+	}
+	occurrences, err := st.UpcomingFacts(ctx, p, window)
 	if err != nil {
 		t.Fatal(err)
 	}

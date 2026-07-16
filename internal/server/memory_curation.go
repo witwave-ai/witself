@@ -43,6 +43,7 @@ const (
 	memoryCurationPermissionGet      memoryCurationPermission = "get"
 	memoryCurationPermissionStart    memoryCurationPermission = "start"
 	memoryCurationPermissionInputs   memoryCurationPermission = "inputs"
+	memoryCurationPermissionGetPlan  memoryCurationPermission = "get_plan"
 	memoryCurationPermissionRenew    memoryCurationPermission = "renew"
 	memoryCurationPermissionPlan     memoryCurationPermission = "plan"
 	memoryCurationPermissionApply    memoryCurationPermission = "apply"
@@ -203,6 +204,7 @@ type MemoryCurationPreflightPermissions struct {
 	Start              bool `json:"start"`
 	GetRun             bool `json:"get_run"`
 	GetInputs          bool `json:"get_inputs"`
+	GetPlan            bool `json:"get_plan"`
 	Renew              bool `json:"renew"`
 	Plan               bool `json:"plan"`
 	Abandon            bool `json:"abandon"`
@@ -258,6 +260,7 @@ func getMemoryCurationPreflightHandler(auth PrincipalAuthFunc) http.HandlerFunc 
 				Start:            allowed(memoryCurationPermissionStart),
 				GetRun:           allowed(memoryCurationPermissionGet),
 				GetInputs:        allowed(memoryCurationPermissionInputs),
+				GetPlan:          allowed(memoryCurationPermissionGetPlan),
 				Renew:            allowed(memoryCurationPermissionRenew),
 				Plan:             allowed(memoryCurationPermissionPlan),
 				Abandon:          allowed(memoryCurationPermissionAbandon),
@@ -448,6 +451,33 @@ func getMemoryCurationRunInputsHandler(
 	})
 }
 
+func getMemoryCurationPlanHandler(
+	auth PrincipalAuthFunc,
+	get func(context.Context, DomainPrincipal, string, int64) (any, error),
+) http.HandlerFunc {
+	return requireMemoryCurationAgent(auth, memoryCurationPermissionGetPlan, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if err := requireMemoryCurationQuery(r.URL.Query(), "fencing_generation"); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		fence, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("fencing_generation")), 10, 64)
+		if err != nil || fence < 1 {
+			writeJSONError(w, http.StatusBadRequest, "fencing_generation must be positive")
+			return
+		}
+		runID := strings.TrimSpace(r.PathValue("run"))
+		if runID == "" {
+			writeJSONError(w, http.StatusBadRequest, "memory curation run id is required")
+			return
+		}
+		result, err := get(r.Context(), p, runID, fence)
+		if writeMemoryCurationError(w, err) {
+			return
+		}
+		writeMemoryCurationResult(w, http.StatusOK, result)
+	})
+}
+
 func renewMemoryCurationHandler(
 	auth PrincipalAuthFunc,
 	renew func(context.Context, DomainPrincipal, string, RenewMemoryCurationRequest) (any, error),
@@ -597,6 +627,7 @@ func memoryCurationProfileAllows(profile string, permission memoryCurationPermis
 		permission == memoryCurationPermissionGet ||
 		permission == memoryCurationPermissionStart ||
 		permission == memoryCurationPermissionInputs ||
+		permission == memoryCurationPermissionGetPlan ||
 		permission == memoryCurationPermissionRenew ||
 		permission == memoryCurationPermissionPlan ||
 		permission == memoryCurationPermissionAbandon ||

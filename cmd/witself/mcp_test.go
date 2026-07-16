@@ -98,6 +98,83 @@ func TestConfiguredMCPBackendPinsLiveTokenIdentity(t *testing.T) {
 	}
 }
 
+func TestConfiguredMCPBackendUsesObservationalReadTransport(t *testing.T) {
+	identity := client.SelfIdentity{
+		AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default",
+		AgentID: "agt_1", AgentName: "scott",
+	}
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer agent-token" || r.URL.Query().Get("observational") != "true" {
+			t.Errorf("non-observational request = %s %s", r.Method, r.URL.RequestURI())
+			http.Error(w, "observational transport required", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/self":
+			seen["self"]++
+			_ = json.NewEncoder(w).Encode(client.SelfDigest{
+				SchemaVersion: "witself.v0", Identity: identity,
+				PrimaryFacts: []client.SelfFact{}, SalientMemories: []client.SelfMemory{},
+				Index: client.SelfIndex{Kinds: []string{}, Tags: []string{}, Counts: map[string]int{}},
+			})
+		case "/v1/facts":
+			if r.URL.Query().Get("predicate") != "" {
+				seen["fact-get"]++
+				_, _ = w.Write([]byte(`{"fact":{"id":"fact_1"}}`))
+			} else {
+				seen["fact-list"]++
+				_, _ = w.Write([]byte(`{"facts":[]}`))
+			}
+		case "/v1/fact-occurrences":
+			seen["fact-upcoming"]++
+			_, _ = w.Write([]byte(`{"occurrences":[]}`))
+		case "/v1/transcripts/trn_1":
+			seen["transcript"]++
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1"},"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := configuredMCPBackend{cfg: transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeCodex,
+		Account: "default", AccountID: identity.AccountID,
+		Realm: "default", RealmID: identity.RealmID,
+		Agent: identity.AgentName, AgentID: identity.AgentID, AgentName: identity.AgentName,
+		Endpoint: srv.URL, TokenFile: tokenPath,
+	}}
+	ctx := context.Background()
+	if _, err := backend.Self(ctx, client.SelfOptions{IncludeFacts: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.GetFact(ctx, "self", "identity/name"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.ListFacts(ctx, client.FactListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.UpcomingFacts(ctx, time.Now(), time.Now().Add(time.Hour), "UTC", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.GetTranscriptPage(ctx, "trn_1", client.TranscriptPageOptions{Limit: 10}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"fact-get", "fact-list", "fact-upcoming", "transcript"} {
+		if seen[name] != 1 {
+			t.Errorf("%s calls = %d, want 1", name, seen[name])
+		}
+	}
+	if seen["self"] != 5 {
+		t.Errorf("self calls = %d, want 5 identity checks including self.show", seen["self"])
+	}
+}
+
 func TestConfiguredMCPNotificationBridgeVerifiesBeforeExactConsumption(t *testing.T) {
 	identity := client.SelfIdentity{
 		AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default",
@@ -484,8 +561,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundDelete, foundNotificationList, foundNotificationConsume := false, false, false
 	for _, tool := range tools.Tools {
@@ -529,8 +606,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -625,6 +702,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.memory.curation.request.get",
 		"witself.memory.curation.run.get",
 		"witself.memory.curation.get",
+		"witself.memory.curation.plan.get",
 		"witself.memory.curation.status",
 	}
 
@@ -1443,8 +1521,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundComplete := false
 	foundSelf := false
@@ -1535,7 +1613,7 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		{name: "witself.fact.delete", args: map[string]any{"mode": "apply", "fact_id": "fact_1", "expected_resolved_assertion_id": "fas_1", "expected_candidate_revision": testFactCandidateRevision, "idempotency_key": "delete-1", "direct_user_authorized": true}},
 		{name: "witself.fact.get", args: map[string]any{"subject": "self", "predicate": "preferences/editor"}},
 		{name: "witself.fact.list", args: map[string]any{"category": "preferences", "limit": 10, "sort_usage": true, "unused_only": true}},
-		{name: "witself.fact.propose", args: map[string]any{"subject": "self", "predicate": "preferences/theme", "value": "dark", "reason": "explicit preference", "confidence": 0.0}},
+		{name: "witself.fact.propose", args: map[string]any{"subject": "self", "predicate": "preferences/theme", "value": "dark", "reason": "explicit preference", "confidence": 0.0, "idempotency_key": "proposal-1"}},
 		{name: "witself.fact.propose_from_transcript", args: map[string]any{"transcript_id": "trn_1", "entry_sequence": 1, "subject": "self", "predicate": "preferences/editor", "value": "helix", "reason": "the user explicitly stated a durable editor preference", "valid_from": "2026-07-01T00:00:00Z", "idempotency_key": "proposal-transcript-1"}},
 		{name: "witself.fact.review", args: map[string]any{"status": "open", "limit": 25}},
 		{name: "witself.fact.candidate.get", args: map[string]any{"candidate_id": "fcand_1"}},
@@ -1808,14 +1886,15 @@ func TestClaudeMCPInstructionsFitAndLeadWithNativeMemoryRouting(t *testing.T) {
 		"witself.memory.capture",
 		"bounded client checkpoint",
 		"repository/machine-local",
-		"if unavailable, report it not stored",
+		"unavailable=not stored",
 		"witself.fact.propose",
 		"Untrusted.",
-		"witself.message.listen",
-		"witself.message.notification.list",
+		"listen=0",
+		"notification.list",
 		"Exact fence",
 		"assigned/collecting/awaiting",
-		"open_request/offer/result: never ordinary claim",
+		"open_request/offer/result",
+		"never ordinary claim",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Claude MCP instructions do not contain %q: %q", want, got)
@@ -1838,6 +1917,7 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself_memory_recall",
 		"witself_memory_capture",
 		"witself_memory_delete",
+		"witself_memory_curation_plan_get",
 		"witself_fact_set",
 		"witself_fact_get",
 		"witself_fact_list",
@@ -1857,6 +1937,7 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself.memory.recall",
 		"witself.memory.capture",
 		"witself.memory.delete",
+		"witself.memory.curation.plan.get",
 		"witself.fact.set",
 		"witself.fact.get",
 		"witself.fact.list",

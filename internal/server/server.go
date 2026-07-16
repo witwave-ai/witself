@@ -284,34 +284,39 @@ type Config struct {
 	// Transcript ledger: append-only visible interaction capture. Agent tokens
 	// create/append their own transcripts. Agents read their own; operators read
 	// the whole account. Bodies and payloads are never copied into audit events.
-	CreateTranscript        func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
-	AppendTranscriptEntry   func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
-	AppendTranscriptEntries func(ctx context.Context, p DomainPrincipal, transcriptID string, in []AppendTranscriptEntryRequest) ([]TranscriptEntry, error)
-	ListTranscripts         func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
-	GetTranscript           func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
-	GetTranscriptPage       func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
-	GetUsage                func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
-	SetFact                 func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
-	DeleteFact              func(ctx context.Context, p DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error)
-	GetFact                 func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
-	ListFacts               func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
-	GetFactHistory          func(ctx context.Context, p DomainPrincipal, factID string) ([]FactAssertion, error)
-	ProposeFact             func(ctx context.Context, p DomainPrincipal, in ProposeFactRequest) (FactCandidate, error)
-	GetFactCandidate        func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
-	ListFactCandidates      func(ctx context.Context, p DomainPrincipal, opts FactCandidateListOptions) ([]FactCandidate, error)
-	ConfirmFactCandidate    func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (Fact, error)
-	RejectFactCandidate     func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (FactCandidate, error)
-	GetSelfFacts            func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfFact, int, error)
-	CountSelfFacts          func(ctx context.Context, p DomainPrincipal) (int, error)
-	GetSelfMemories         func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfMemory, int, error)
-	CountSelfMemories       func(ctx context.Context, p DomainPrincipal) (int, error)
-	GetSelfMemoryCheckpoint func(ctx context.Context, p DomainPrincipal) (*SelfMemoryCheckpoint, error)
-	ListSelfPeers           func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
-	TouchAgentActivity      func(ctx context.Context, p DomainPrincipal, in AgentActivityRequest) (AgentActivity, error)
-	UpcomingFacts           func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
-	UpsertFactSubject       func(ctx context.Context, p DomainPrincipal, canonicalKey string, in UpsertFactSubjectRequest) (FactSubject, error)
-	AddFactSubjectAlias     func(ctx context.Context, p DomainPrincipal, canonicalKey, alias string) (FactSubject, error)
-	ListFactSubjects        func(ctx context.Context, p DomainPrincipal) ([]FactSubject, error)
+	CreateTranscript               func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
+	AppendTranscriptEntry          func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
+	AppendTranscriptEntries        func(ctx context.Context, p DomainPrincipal, transcriptID string, in []AppendTranscriptEntryRequest) ([]TranscriptEntry, error)
+	ListTranscripts                func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
+	GetTranscript                  func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
+	GetTranscriptPage              func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
+	GetTranscriptPageObservational func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
+	GetUsage                       func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
+	SetFact                        func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
+	DeleteFact                     func(ctx context.Context, p DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error)
+	GetFact                        func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
+	GetFactObservational           func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
+	ListFacts                      func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
+	ListFactsObservational         func(ctx context.Context, p DomainPrincipal, opts FactListOptions) ([]Fact, error)
+	GetFactHistory                 func(ctx context.Context, p DomainPrincipal, factID string) ([]FactAssertion, error)
+	ProposeFact                    func(ctx context.Context, p DomainPrincipal, in ProposeFactRequest) (FactCandidate, error)
+	GetFactCandidate               func(ctx context.Context, p DomainPrincipal, candidateID string) (FactCandidate, error)
+	ListFactCandidates             func(ctx context.Context, p DomainPrincipal, opts FactCandidateListOptions) ([]FactCandidate, error)
+	ConfirmFactCandidate           func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (Fact, error)
+	RejectFactCandidate            func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (FactCandidate, error)
+	GetSelfFacts                   func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfFact, int, error)
+	GetSelfFactsObservational      func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfFact, int, error)
+	CountSelfFacts                 func(ctx context.Context, p DomainPrincipal) (int, error)
+	GetSelfMemories                func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfMemory, int, error)
+	CountSelfMemories              func(ctx context.Context, p DomainPrincipal) (int, error)
+	GetSelfMemoryCheckpoint        func(ctx context.Context, p DomainPrincipal) (*SelfMemoryCheckpoint, error)
+	ListSelfPeers                  func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
+	TouchAgentActivity             func(ctx context.Context, p DomainPrincipal, in AgentActivityRequest) (AgentActivity, error)
+	UpcomingFacts                  func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
+	UpcomingFactsObservational     func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
+	UpsertFactSubject              func(ctx context.Context, p DomainPrincipal, canonicalKey string, in UpsertFactSubjectRequest) (FactSubject, error)
+	AddFactSubjectAlias            func(ctx context.Context, p DomainPrincipal, canonicalKey, alias string) (FactSubject, error)
+	ListFactSubjects               func(ctx context.Context, p DomainPrincipal) ([]FactSubject, error)
 
 	// Narrative memory is agent-owned in the first vertical slice. The server
 	// authenticates the principal and validates the HTTP contract; callbacks
@@ -341,6 +346,7 @@ type Config struct {
 	StartMemoryCuration        func(ctx context.Context, p DomainPrincipal, in StartMemoryCurationRequest) (any, error)
 	GetMemoryCurationRun       func(ctx context.Context, p DomainPrincipal, runID string) (any, error)
 	GetMemoryCurationRunInputs func(ctx context.Context, p DomainPrincipal, runID string, opts MemoryCurationRunInputOptions) (any, error)
+	GetMemoryCurationPlan      func(ctx context.Context, p DomainPrincipal, runID string, fencingGeneration int64) (any, error)
 	RenewMemoryCuration        func(ctx context.Context, p DomainPrincipal, runID string, in RenewMemoryCurationRequest) (any, error)
 	PlanMemoryCuration         func(ctx context.Context, p DomainPrincipal, runID string, in PlanMemoryCurationRequest) (any, error)
 	ApplyMemoryCuration        func(ctx context.Context, p DomainPrincipal, runID string, in ApplyMemoryCurationRequest) (any, error)
@@ -1446,6 +1452,7 @@ func apiMux(cfg Config) http.Handler {
 		cfg.RequestMemoryCuration != nil && cfg.ListMemoryCurationRequests != nil &&
 		cfg.GetMemoryCurationRequest != nil && cfg.StartMemoryCuration != nil &&
 		cfg.GetMemoryCurationRun != nil && cfg.GetMemoryCurationRunInputs != nil &&
+		cfg.GetMemoryCurationPlan != nil &&
 		cfg.RenewMemoryCuration != nil && cfg.PlanMemoryCuration != nil &&
 		cfg.ApplyMemoryCuration != nil && cfg.CancelMemoryCuration != nil &&
 		cfg.AbandonMemoryCuration != nil && cfg.RollbackMemoryCuration != nil &&
@@ -1558,6 +1565,7 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("GET /v1/self", selfHandler(
 			cfg.AuthenticatePrincipal,
 			cfg.GetSelfFacts,
+			cfg.GetSelfFactsObservational,
 			cfg.CountSelfFacts,
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
@@ -1630,6 +1638,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.GetMemoryCurationRunInputs != nil {
 			mux.HandleFunc("GET /v1/memory-curation-runs/{run}/inputs", getMemoryCurationRunInputsHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationRunInputs))
 		}
+		if cfg.GetMemoryCurationPlan != nil {
+			mux.HandleFunc("GET /v1/memory-curation-runs/{run}/plan", getMemoryCurationPlanHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryCurationPlan))
+		}
 		if cfg.RenewMemoryCuration != nil {
 			mux.HandleFunc("POST /v1/memory-curation-runs/{run}/renew", renewMemoryCurationHandler(cfg.AuthenticatePrincipal, cfg.RenewMemoryCuration))
 		}
@@ -1659,13 +1670,23 @@ func apiMux(cfg Config) http.Handler {
 			mux.HandleFunc("DELETE /v1/facts/{fact}", deleteFactHandler(cfg.AuthenticatePrincipal, cfg.DeleteFact))
 		}
 		if cfg.GetFact != nil && cfg.ListFacts != nil {
-			mux.HandleFunc("GET /v1/facts", factsReadHandler(cfg.AuthenticatePrincipal, cfg.GetFact, cfg.ListFacts))
+			mux.HandleFunc("GET /v1/facts", factsReadHandler(
+				cfg.AuthenticatePrincipal,
+				cfg.GetFact,
+				cfg.GetFactObservational,
+				cfg.ListFacts,
+				cfg.ListFactsObservational,
+			))
 		}
 		if cfg.GetFactHistory != nil {
 			mux.HandleFunc("GET /v1/facts/{fact}/history", factHistoryHandler(cfg.AuthenticatePrincipal, cfg.GetFactHistory))
 		}
 		if cfg.UpcomingFacts != nil {
-			mux.HandleFunc("GET /v1/fact-occurrences", upcomingFactsHandler(cfg.AuthenticatePrincipal, cfg.UpcomingFacts))
+			mux.HandleFunc("GET /v1/fact-occurrences", upcomingFactsHandler(
+				cfg.AuthenticatePrincipal,
+				cfg.UpcomingFacts,
+				cfg.UpcomingFactsObservational,
+			))
 		}
 		if cfg.ProposeFact != nil {
 			mux.HandleFunc("POST /v1/fact-candidates", proposeFactHandler(cfg.AuthenticatePrincipal, cfg.ProposeFact))
@@ -1698,7 +1719,11 @@ func apiMux(cfg Config) http.Handler {
 			mux.HandleFunc("GET /v1/transcripts", listTranscriptsHandler(cfg.AuthenticatePrincipal, cfg.ListTranscripts))
 		}
 		if cfg.GetTranscriptPage != nil {
-			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptPageHandler(cfg.AuthenticatePrincipal, cfg.GetTranscriptPage))
+			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptPageHandler(
+				cfg.AuthenticatePrincipal,
+				cfg.GetTranscriptPage,
+				cfg.GetTranscriptPageObservational,
+			))
 		} else if cfg.GetTranscript != nil {
 			mux.HandleFunc("GET /v1/transcripts/{transcript}", getTranscriptHandler(cfg.AuthenticatePrincipal, cfg.GetTranscript))
 		}
@@ -2028,6 +2053,7 @@ func effectiveAccessProfile(p DomainPrincipal) string {
 func selfHandler(
 	auth PrincipalAuthFunc,
 	getFacts func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error),
+	getFactsObservational func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error),
 	countFacts func(context.Context, DomainPrincipal) (int, error),
 	getMemories func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error),
 	countMemories func(context.Context, DomainPrincipal) (int, error),
@@ -2042,7 +2068,7 @@ func selfHandler(
 			return
 		}
 		q := r.URL.Query()
-		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_sensitive"} {
+		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_sensitive", "observational"} {
 			if value := q.Get(name); value != "" {
 				if _, err := strconv.ParseBool(value); err != nil {
 					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
@@ -2082,6 +2108,10 @@ func selfHandler(
 		if raw := q.Get("include_sensitive"); raw != "" {
 			includeSensitive, _ = strconv.ParseBool(raw)
 		}
+		observational := false
+		if raw := q.Get("observational"); raw != "" {
+			observational, _ = strconv.ParseBool(raw)
+		}
 		var memoryCheckpoint *SelfMemoryCheckpoint
 		if includeCheckpoint && getMemoryCheckpoint != nil {
 			var err error
@@ -2101,8 +2131,16 @@ func selfHandler(
 		if raw := q.Get("include_facts"); raw != "" {
 			includeFacts, _ = strconv.ParseBool(raw)
 		}
-		if includeFacts && getFacts != nil {
-			hydratedFacts, total, err := getFacts(r.Context(), p, 50, includeCounts)
+		getFactsForRead := getFacts
+		if observational {
+			getFactsForRead = getFactsObservational
+		}
+		if includeFacts && observational && getFactsForRead == nil {
+			writeJSONError(w, http.StatusNotImplemented, "observational fact hydration is unavailable")
+			return
+		}
+		if includeFacts && getFactsForRead != nil {
+			hydratedFacts, total, err := getFactsForRead(r.Context(), p, 50, includeCounts)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not hydrate facts")
 				return
@@ -2127,10 +2165,10 @@ func selfHandler(
 				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
 				return
 			}
-		} else if includeCounts && getFacts != nil {
+		} else if includeCounts && getFactsForRead != nil {
 			// Compatibility fallback for embedders that have not yet supplied the
 			// count-only hook. The production adapter avoids loading fact values.
-			_, total, err := getFacts(r.Context(), p, 50, true)
+			_, total, err := getFactsForRead(r.Context(), p, 50, true)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "could not count facts")
 				return
@@ -2488,14 +2526,31 @@ func getTranscriptHandler(auth PrincipalAuthFunc, get func(context.Context, Doma
 	})
 }
 
-func getTranscriptPageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string, TranscriptPageOptions) (TranscriptPage, error)) http.HandlerFunc {
+func getTranscriptPageHandler(
+	auth PrincipalAuthFunc,
+	get func(context.Context, DomainPrincipal, string, TranscriptPageOptions) (TranscriptPage, error),
+	getObservational func(context.Context, DomainPrincipal, string, TranscriptPageOptions) (TranscriptPage, error),
+) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		opts, err := transcriptPageOptions(r)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		page, err := get(r.Context(), p, r.PathValue("transcript"), opts)
+		observational, err := parseObservationalRead(r.URL.Query().Get("observational"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		getForRead := get
+		if observational {
+			getForRead = getObservational
+		}
+		if getForRead == nil {
+			writeJSONError(w, http.StatusNotImplemented, "observational transcript reads are unavailable")
+			return
+		}
+		page, err := getForRead(r.Context(), p, r.PathValue("transcript"), opts)
 		switch {
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())

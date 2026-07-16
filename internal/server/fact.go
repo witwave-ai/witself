@@ -181,6 +181,17 @@ type FactOccurrence struct {
 	OccursAt *time.Time `json:"occurs_at,omitempty"`
 }
 
+func parseObservationalRead(raw string) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, errors.New("observational must be true or false")
+	}
+	return value, nil
+}
+
 func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrincipal, SetFactRequest) (Fact, error)) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
@@ -222,16 +233,35 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 	})
 }
 
-func factsReadHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string, string) (Fact, error), list func(context.Context, DomainPrincipal, FactListOptions) ([]Fact, error)) http.HandlerFunc {
+func factsReadHandler(
+	auth PrincipalAuthFunc,
+	get func(context.Context, DomainPrincipal, string, string) (Fact, error),
+	getObservational func(context.Context, DomainPrincipal, string, string) (Fact, error),
+	list func(context.Context, DomainPrincipal, FactListOptions) ([]Fact, error),
+	listObservational func(context.Context, DomainPrincipal, FactListOptions) ([]Fact, error),
+) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may read facts")
 			return
 		}
 		q := r.URL.Query()
+		observational, err := parseObservationalRead(q.Get("observational"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		predicate := strings.TrimSpace(q.Get("predicate"))
 		if predicate != "" {
-			fact, err := get(r.Context(), p, q.Get("subject"), predicate)
+			getForRead := get
+			if observational {
+				getForRead = getObservational
+			}
+			if getForRead == nil {
+				writeJSONError(w, http.StatusNotImplemented, "observational fact reads are unavailable")
+				return
+			}
+			fact, err := getForRead(r.Context(), p, q.Get("subject"), predicate)
 			if writeFactError(w, err) {
 				return
 			}
@@ -269,7 +299,15 @@ func factsReadHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPr
 			}
 			opts.IncludeSensitive = include
 		}
-		facts, err := list(r.Context(), p, opts)
+		listForRead := list
+		if observational {
+			listForRead = listObservational
+		}
+		if listForRead == nil {
+			writeJSONError(w, http.StatusNotImplemented, "observational fact reads are unavailable")
+			return
+		}
+		facts, err := listForRead(r.Context(), p, opts)
 		if writeFactError(w, err) {
 			return
 		}
@@ -506,15 +544,23 @@ func factCandidateActionHandler(auth PrincipalAuthFunc, confirm func(context.Con
 	})
 }
 
-func upcomingFactsHandler(auth PrincipalAuthFunc, upcoming func(context.Context, DomainPrincipal, UpcomingFactOptions) ([]FactOccurrence, error)) http.HandlerFunc {
+func upcomingFactsHandler(
+	auth PrincipalAuthFunc,
+	upcoming func(context.Context, DomainPrincipal, UpcomingFactOptions) ([]FactOccurrence, error),
+	upcomingObservational func(context.Context, DomainPrincipal, UpcomingFactOptions) ([]FactOccurrence, error),
+) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may review upcoming facts")
 			return
 		}
 		q := r.URL.Query()
+		observational, err := parseObservationalRead(q.Get("observational"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		opts := UpcomingFactOptions{Timezone: q.Get("timezone"), Subject: q.Get("subject"), PredicatePrefix: q.Get("predicate_prefix")}
-		var err error
 		if raw := q.Get("include_sensitive"); raw != "" {
 			opts.IncludeSensitive, err = strconv.ParseBool(raw)
 			if err != nil {
@@ -543,7 +589,15 @@ func upcomingFactsHandler(auth PrincipalAuthFunc, upcoming func(context.Context,
 				return
 			}
 		}
-		rows, err := upcoming(r.Context(), p, opts)
+		upcomingForRead := upcoming
+		if observational {
+			upcomingForRead = upcomingObservational
+		}
+		if upcomingForRead == nil {
+			writeJSONError(w, http.StatusNotImplemented, "observational upcoming-fact reads are unavailable")
+			return
+		}
+		rows, err := upcomingForRead(r.Context(), p, opts)
 		if writeFactError(w, err) {
 			return
 		}

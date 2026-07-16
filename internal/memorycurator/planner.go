@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 	"unicode/utf8"
 
@@ -122,6 +123,95 @@ func validatePlanDraftForLimit(raw []byte, maximumActions int) error {
 		}
 	}
 	return nil
+}
+
+// validateAcceptedPlanForLimit validates the normalized server-authored plan
+// envelope returned by plan and plan.get. Nested semantic authorization stays
+// server-owned, but the runner refuses malformed coordinates or tagged-union
+// shapes before apply.
+func validateAcceptedPlanForLimit(raw []byte, maximumActions int, planRevision int64) error {
+	if len(raw) == 0 || len(raw) > DefaultMaxPlannerOutputBytes || !utf8.Valid(raw) {
+		return fmt.Errorf("%w: accepted plan must be nonempty valid UTF-8 JSON within %d bytes", ErrProtocolResponse, DefaultMaxPlannerOutputBytes)
+	}
+	if maximumActions < 0 || maximumActions > 128 || planRevision < 1 {
+		return fmt.Errorf("%w: invalid accepted-plan coordinates", ErrProtocolResponse)
+	}
+	if err := rejectDuplicateJSONNames(raw); err != nil {
+		return fmt.Errorf("%w: accepted plan: %v", ErrProtocolResponse, err)
+	}
+	type actionEnvelope struct {
+		Ordinal     int64           `json:"ordinal"`
+		Operation   string          `json:"operation"`
+		Create      json.RawMessage `json:"create,omitempty"`
+		Replace     json.RawMessage `json:"replace,omitempty"`
+		Supersede   json.RawMessage `json:"supersede,omitempty"`
+		Relate      json.RawMessage `json:"relate,omitempty"`
+		ProposeFact json.RawMessage `json:"propose_fact,omitempty"`
+	}
+	type planEnvelope struct {
+		Schema       string           `json:"schema"`
+		PlanRevision int64            `json:"plan_revision"`
+		Actions      []actionEnvelope `json:"actions"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var plan planEnvelope
+	if err := decoder.Decode(&plan); err != nil {
+		return fmt.Errorf("%w: accepted plan: %v", ErrProtocolResponse, err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return fmt.Errorf("%w: accepted plan: %v", ErrProtocolResponse, err)
+	}
+	if plan.Schema != MemoryPlanSchemaV1 || plan.PlanRevision != planRevision || plan.Actions == nil || len(plan.Actions) > maximumActions {
+		return fmt.Errorf("%w: accepted plan has invalid schema, revision, or action count", ErrProtocolResponse)
+	}
+	for index, action := range plan.Actions {
+		if action.Ordinal != int64(index+1) {
+			return fmt.Errorf("%w: accepted-plan action ordinals must be contiguous from one", ErrProtocolResponse)
+		}
+		payloads := map[string]json.RawMessage{
+			"create": action.Create, "replace": action.Replace,
+			"supersede": action.Supersede, "relate": action.Relate,
+			"propose_fact": action.ProposeFact,
+		}
+		payloadCount := 0
+		for _, payload := range payloads {
+			if len(payload) != 0 && string(payload) != "null" {
+				payloadCount++
+			}
+		}
+		if _, allowed := payloads[action.Operation]; !allowed || payloadCount != 1 || len(payloads[action.Operation]) == 0 || string(payloads[action.Operation]) == "null" {
+			return fmt.Errorf("%w: accepted-plan action %d has an invalid tagged-union payload", ErrProtocolResponse, index+1)
+		}
+	}
+	return nil
+}
+
+// semanticallyEqualJSON compares decoded JSON values so harmless object-key
+// order and whitespace differences cannot make a fresh plan review fail.
+func semanticallyEqualJSON(a, b []byte) bool {
+	decode := func(raw []byte) (any, error) {
+		if err := rejectDuplicateJSONNames(raw); err != nil {
+			return nil, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if err := requireJSONEOF(decoder); err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
+	aValue, err := decode(a)
+	if err != nil {
+		return false
+	}
+	bValue, err := decode(b)
+	return err == nil && reflect.DeepEqual(aValue, bValue)
 }
 
 func rejectDuplicateJSONNames(raw []byte) error {

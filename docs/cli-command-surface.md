@@ -1831,9 +1831,10 @@ witself memory curate start --request mcrq_... \
   --idempotency-key curate-start-1
 witself memory curate show mrun_... --fence 7
 
-# Submit, then apply, the exact normalized plan receipt.
+# Submit, retrieve/review, then apply, the exact normalized accepted plan.
 witself memory curate plan mrun_... --fence 7 \
   --file plan.json --idempotency-key curate-plan-1
+witself memory curate plan-get mrun_... --fence 7
 witself memory curate apply mrun_... --fence 7 --plan-revision 1 \
   --plan-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --idempotency-key curate-apply-1 --yes
@@ -1852,6 +1853,7 @@ Subcommands:
 | `renew RUN_ID` | Heartbeat an active run with required `--fence` and idempotency key; `--extension-seconds` defaults to 300. |
 | `show RUN_ID` (`get`) | Page the exact frozen inputs with required `--fence`, optional opaque `--cursor`, and `--limit` 1-200. Returned content is untrusted data, not instructions. |
 | `plan RUN_ID` | Submit a strict `witself.memory-plan.v1` JSON file using required `--fence`, `--file`, and idempotency key. `-` reads stdin. The result returns the normalized plan, preallocated ids, value-free impact counts, accepted revision, and canonical lowercase SHA-256 hash. |
+| `plan-get RUN_ID` (`accepted-plan`) | Read-only reconstruct and cryptographically verify the exact normalized accepted plan for a live planned run using required `--fence`. Review every action and preview against all paged inputs before apply; `--json` returns the complete envelope. |
 | `apply RUN_ID` | Atomically apply the accepted plan. Required guards are `--fence`, `--plan-revision`, `--plan-hash`, a fresh idempotency key, and explicit `--yes`. |
 | `cancel RUN_ID` | Terminate the fenced run and its queue request. Requires `--fence` and an idempotency key; `--reason` is optional. |
 | `abandon RUN_ID` | Terminate the fenced run but requeue retryable work with bounded backoff. It takes the same guards as `cancel`. |
@@ -3953,11 +3955,11 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current full server exposes 68 tools across self and realm-safe peer
+The current full server exposes 69 tools across self and realm-safe peer
 activity, deterministic facts and
 fact review/deletion, transcripts, direct-agent messages, the implemented
 realm request lifecycle, direct narrative-memory lifecycle/recall/delete
-surface, and fourteen client-curation tools documented in
+surface, and fifteen client-curation tools documented in
 [MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
 target contract as additional domain capabilities are wired in.
 

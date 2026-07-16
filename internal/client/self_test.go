@@ -16,7 +16,7 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 		}
 		if r.URL.Query().Get("include_facts") != "false" || r.URL.Query().Get("include_salient") != "false" ||
 			r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "false" ||
-			r.URL.Query().Get("include_sensitive") != "false" {
+			r.URL.Query().Get("include_sensitive") != "false" || r.URL.Query().Get("observational") != "" {
 			t.Fatalf("self query = %s", r.URL.RawQuery)
 		}
 		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"memory_checkpoint":{"pending":true,"request_id":"mcrq_1","request_generation":5,"due_at":"2026-07-15T21:02:03Z"},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
@@ -31,6 +31,20 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 		got.MemoryCheckpoint.RequestID != "mcrq_1" || got.MemoryCheckpoint.RequestGeneration != 5 ||
 		got.MemoryCheckpoint.DueAt == nil || !got.MemoryCheckpoint.DueAt.Equal(dueAt) {
 		t.Fatalf("memory checkpoint = %#v", got.MemoryCheckpoint)
+	}
+}
+
+func TestGetSelfCanRequestObservationalHydration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include_facts") != "true" || r.URL.Query().Get("observational") != "true" {
+			t.Fatalf("self query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	if _, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludeFacts: true, Observational: true}); err != nil {
+		t.Fatal(err)
 	}
 }
 

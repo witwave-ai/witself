@@ -71,6 +71,7 @@ type TranscriptPageOptions struct {
 	AfterSequence int64
 	Limit         int
 	Tail          bool
+	Observational bool
 }
 
 // CreateTranscript creates a transcript using an agent bearer token.
@@ -163,6 +164,9 @@ func GetTranscriptPage(ctx context.Context, endpoint, token, transcriptID string
 	}
 	if opts.Tail {
 		params.Set("tail", "true")
+	}
+	if opts.Observational {
+		params.Set("observational", "true")
 	}
 	url := transcriptsURL(endpoint) + "/" + neturl.PathEscape(transcriptID)
 	if encoded := params.Encode(); encoded != "" {
