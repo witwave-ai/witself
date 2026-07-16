@@ -1,12 +1,13 @@
 # Client Memory Curator Recipe
 
-Status: implemented manual and opt-in post-flush client-curator contract
-(2026-07-14). The fenced server protocol, migration `0031` restricted
+Status: implemented foreground and explicit legacy/manual client-curator
+contract (2026-07-15). The fenced server protocol, migration `0031` restricted
 credentials, authenticated
 preflight, provider-neutral `Runner`, shell-free `CommandPlanner`, value-free
 resume/automation state, `witself memory curate run` driver, and
-`witself memory curate auto` wake worker and per-user launchd/systemd service
-lifecycle are present in the current checkout.
+legacy `witself memory curate auto` wake worker and per-user launchd/systemd
+service lifecycle are present in the current checkout. Runtime hooks never
+launch inference or invoke the legacy worker.
 
 This recipe turns due Witself memory work into a bounded, reviewable curation
 plan. The model runs in the client process. Witself's server performs no model
@@ -27,7 +28,9 @@ cannot authorize them. In particular, it can never authorize permanent
 deletion, canonical `fact.set`, secrets access, messaging, policy changes,
 exports, billing changes, or a wider sensitive-data scope.
 
-Default unattended policy is:
+The current foreground agent normally processes at most one pending fenced
+request per non-trivial turn and applies an empty plan when no input merits
+memory. The explicit legacy separate-process/unattended policy is:
 
 - exclude sensitive inputs unless the user explicitly enables the
   transcript-bearing local worker with `--allow-transcript-content`;
@@ -66,7 +69,7 @@ transcript-bearing request is sensitive-by-default regardless of its
 `include_sensitive` bit. Restricted credentials cannot list, read, claim,
 renew, plan, apply, abandon, or inspect status for that request. Use a full
 agent credential for an explicitly authorized transcript flow, or give a
-restricted worker a memory/evidence-only scope. The automatic post-flush worker
+restricted worker a memory/evidence-only scope. The explicit legacy worker
 therefore requires an installed full agent credential and a separate explicit
 `--allow-transcript-content` consent; a short-lived restricted token cannot be
 silently widened or treated as a long-running automation credential.
@@ -117,10 +120,12 @@ protocol field, primitive, or bound fails the launch closed.
    references, preallocates ids, checks every provenance reference against the
    frozen input set, canonicalizes the accepted plan, and returns its immutable
    revision, SHA-256 hash, and count-only impact preview.
-8. Inspect the preview and local policy. In preview mode, abandon the accepted
-   planned run with reason `preview_complete`. This requeues it after a 24-hour
-   cooldown without incrementing its failure-attempt count; a new source
-   generation makes it due sooner. In apply mode, call
+8. Inspect the preview and local policy. The active foreground checkpoint path
+   applies its accepted reversible plan, including an empty plan. In an explicit
+   legacy/manual preview run, abandon the accepted planned run with reason
+   `preview_complete`. This requeues it after a 24-hour cooldown without
+   incrementing its failure-attempt count; a new source generation makes it due
+   sooner. In apply mode, call
    `witself.memory.curation.apply` with the exact returned fence, revision, hash,
    and a fresh idempotency key.
 9. Persist only the value-free launch/apply receipt locally for exact retry and
@@ -241,17 +246,21 @@ pointing to the same created output. Split is multiple `create` actions followed
 by one `supersede` whose replacement set contains every output. A plan may not
 permanently delete anything.
 
-## Automatic launch
+## Foreground checkpoint and explicit legacy launch
 
 Transcript, memory, and evidence source commits atomically coalesce a due
 request in PostgreSQL. PostgreSQL remains the canonical memory and curation
-store; local automation files contain only binding, policy, timing, wake, lock,
-and value-free health fields. MCP remains request/response transport and cannot
-wake a model.
+store. `self.show` exposes an authenticated, value-free pending pointer. Codex
+and Claude inject it when already durable at prompt-hook read time; Cursor and
+Grok use guided `self.show`. Near turn end, the active foreground agent processes
+at most one fenced request. Runtime hooks only enqueue and flush evidence; MCP,
+hooks, and the backend cannot wake or launch a model.
 
-Enable the optional local worker for an installed runtime binding. Provider
-selection is explicit and is capability-probed before the configuration is
-accepted. Preview is the default standing policy:
+The remaining commands enable the explicit legacy/manual local worker for an
+installed runtime binding. Local files contain only binding, policy, timing,
+wake, lock, and value-free health fields. Provider selection is explicit and is
+capability-probed before configuration is accepted. Preview is the default
+standing policy:
 
 ```text
 witself memory curate auto enable --runtime claude-code \
@@ -273,27 +282,23 @@ witself memory curate auto disable --runtime claude-code
 witself memory curate auto service uninstall --runtime claude-code
 ```
 
-After a `Stop`, `StopFailure`, `SessionEnd`, or `PreCompact` event is durably
-flushed, the transcript hook records a value-free wake and starts a detached
-`witself memory curate auto run --runtime RUNTIME --supervise`; `--supervise` is
-an internal detached retry/drain switch, not a backend scheduler. The child
-invocation carries no token, token-file path, provider, model, memory text,
-transcript text, prompt, or plan in its operating-system argv. It reloads the
-pinned local binding and policy, then the trusted parent performs exact
-identity/preflight checks and sends the inference child only the bounded planner
-envelope. The inference child receives no Witself credential through argv,
-environment, or model input.
+Runtime transcript hooks never record legacy wake markers or start this worker.
+An explicit `wake` records a manual-poll marker; `run --force` and the separately
+installed service record scheduled-poll markers. The supervisor is an internal
+retry/drain switch, not a backend scheduler. Its child invocation carries no
+token, token-file path, provider, model, memory text, transcript text, prompt, or
+plan in operating-system argv. It reloads the pinned local binding and policy,
+then the trusted parent performs exact identity/preflight checks and sends the
+inference child only the bounded planner envelope. The child receives no Witself
+credential through argv, environment, or model input.
 
-The local worker debounces terminal wakes, enforces a minimum interval and
-single-flight PID lock, persists value-free backoff/status across restarts, and
-acknowledges only the exact wake-marker snapshot it serviced. A wake written
-during a run remains pending. The detached post-flush supervisor performs a
-bounded retry/drain loop: it can continue across configured `--max-runs`
+The legacy worker enforces debounce, a minimum interval, and a single-flight PID
+lock, persists value-free backoff/status across restarts, and acknowledges only
+the exact marker snapshot it serviced. A marker written during a run remains
+pending. Its bounded retry/drain loop can continue across configured `--max-runs`
 batches, waits on the persisted backoff deadline for eligible transient
-failures, and leaves or re-detaches durable work when its local bound is
-reached. It fails closed instead of retrying credential, identity, or worker-
-contract errors. Use `--debounce`, `--minimum-interval`, and `--max-runs` at
-enable time to tune the bounded policy.
+failures, and leaves durable work pending when its local bound is reached. It
+fails closed instead of retrying credential, identity, or worker-contract errors.
 
 `witself memory curate auto wake --runtime RUNTIME` is the value-free manual
 wake: it records a manual-poll marker and services one bounded pass under the
@@ -303,18 +308,20 @@ It does not create a server-side scheduler or bypass any gate.
 A complete installation can launch the same client driver through one of these
 client-side mechanisms:
 
-- the next active agent opportunistically checks and claims due work;
-- a runtime stop/session hook invokes the local launcher after flushing its
-  transcript outbox; or
-- the Witself-managed per-user launchd or systemd timer runs
+- the next active foreground agent sees `memory_checkpoint` and claims at most
+  one due request;
+- a user explicitly invokes `memory curate run`, `auto wake`, or `auto run
+  --force`; or
+- the explicitly installed legacy per-user launchd or systemd timer runs
   `witself memory curate auto run --runtime RUNTIME --force --supervise`.
 
 If no launcher runs, the request remains durable and the next compatible client
 can claim it from another machine or AI product. This is the portability gain:
 the state and concurrency protocol live in Witself, while inference remains in
-the user's chosen client. Terminal-flush wake, debounce, single-flight launch,
-bounded persisted-backoff retry/drain, manual wake, and the scheduler target are
-implemented. `auto service install|status|start|uninstall` manages a private
+the user's chosen client. Foreground pending-checkpoint delivery, manual and
+scheduled markers, debounce, single-flight launch, bounded persisted-backoff
+retry/drain, and the explicit legacy scheduler target are implemented. `auto
+service install|status|start|uninstall` manages a private
 LaunchAgent on macOS or a systemd user service plus timer on Linux. Installation
 is idempotent and refuses to overwrite or remove an unowned file at its exact
 unit path. launchd runs at load, every five minutes, and again after an

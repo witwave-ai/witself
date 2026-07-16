@@ -275,8 +275,9 @@ func installCmd(args []string) int {
 	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
 	fmt.Println("mcp: witself")
 	hydrationCapability := memoryhydration.CapabilityFor(runtime)
-	fmt.Printf("automatic hydration: session=%s task=%s\n",
-		hydrationCapability.SessionHydration.Delivery, hydrationCapability.TaskRecall.Delivery)
+	fmt.Printf("memory hydration: session=%s automatic=%t task=%s automatic=%t\n",
+		hydrationCapability.SessionHydration.Delivery, hydrationCapability.SessionHydration.Automatic,
+		hydrationCapability.TaskRecall.Delivery, hydrationCapability.TaskRecall.Automatic)
 	if memoryRouting.managed {
 		fmt.Printf("memory routing: %s (managed)\n", memoryRouting.path)
 	}
@@ -653,11 +654,6 @@ func transcriptFlush(args []string) int {
 				return 1
 			}
 		}
-		if cfg, cfgErr := transcriptcapture.LoadConfig(runtimeName); cfgErr == nil {
-			if err := startBackgroundAutomaticCuratorIfPending(runtimeName, cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "witself: automatic curator wake remains pending: %v\n", err)
-			}
-		}
 		return 0
 	}
 	cfg, err := transcriptcapture.LoadConfig(runtimeName)
@@ -717,14 +713,6 @@ func transcriptFlush(args []string) int {
 					return 1
 				}
 			}
-			if event.TriggersMemoryCurationWake() {
-				if _, err := recordAutomaticCurationWake(cfg, memorycurator.AutoWakeTerminalFlush); err != nil {
-					// Transcript durability wins over optional local automation. The
-					// server-side due request remains canonical and can be picked up by
-					// a later active client or scheduler.
-					fmt.Fprintf(os.Stderr, "witself: record automatic curator wake: %v\n", err)
-				}
-			}
 			if activityErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: record agent activity: %v\n", activityErr)
 				activityRetryPending = true
@@ -760,9 +748,6 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 			return 1
 		}
-	}
-	if err := startBackgroundAutomaticCuratorIfPending(runtimeName, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "witself: automatic curator wake remains pending: %v\n", err)
 	}
 	fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)\n", flushed, runtimeName)
 	return 0
@@ -840,31 +825,9 @@ func startBackgroundFlush(runtime string) error {
 	return cmd.Process.Release()
 }
 
-func recordAutomaticCurationWake(cfg transcriptcapture.Config, reason memorycurator.AutoWakeReason) (bool, error) {
-	if strings.TrimSpace(cfg.AgentID) == "" {
-		return false, nil
-	}
-	store, err := memorycurator.DefaultAutoStore(cfg.AgentID)
-	if err != nil {
-		return false, err
-	}
-	inspection, err := store.Inspect()
-	if err != nil {
-		return false, err
-	}
-	if !inspection.Configured || !inspection.Config.Enabled {
-		return false, nil
-	}
-	if inspection.Config.AccountID != cfg.AccountID || inspection.Config.RealmID != cfg.RealmID ||
-		inspection.Config.AgentID != cfg.AgentID {
-		return false, errors.New("automatic curator configuration does not match the transcript integration binding")
-	}
-	if _, err := store.RecordWake(reason); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
+// startBackgroundAutomaticCuratorIfPending remains only for the explicitly
+// invoked legacy `memory curate auto` command. Runtime transcript hooks never
+// call it; normal curation is performed by an active foreground agent.
 func startBackgroundAutomaticCuratorIfPending(runtimeName string, cfg transcriptcapture.Config) error {
 	if strings.TrimSpace(cfg.AgentID) == "" {
 		return nil

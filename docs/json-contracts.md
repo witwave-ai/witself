@@ -32,7 +32,9 @@ Witself spans two planes. The **open plane** (memories + facts) protects the
 *integrity and authenticity* of identity data: there is no reveal ceremony, an
 authorized read of a single record returns its value directly, and the only
 `sensitive` facts and value-bearing fields of `sensitive` memories are redacted
-in list/scan/recall output as a PII/display posture, not an encryption boundary.
+in ordinary list/scan/recall output as a PII/display posture, not an encryption
+boundary. Installed owner-authenticated hydration and MCP recall explicitly opt
+in while retaining the marker.
 Memory redaction includes content/hash, tags, links, reasons, occurrence bounds,
 client provenance, and evidence. The **sealed plane** (secrets + TOTP) protects
 the *confidentiality* of secret
@@ -697,9 +699,11 @@ Rules:
 - Omitting vector fields preserves the full lexical contract. Supplying vectors
   requires both `vector_profile_id` and a finite `query_vector` matching the
   immutable profile; the server never generates either vector.
-- Sensitive hits follow the [Memory Summary](#memory-summary) redaction posture:
-  `preview` is omitted and `redacted: true` is set, but the hit and its score
-  are still returned.
+- Sensitive hits follow the [Memory Summary](#memory-summary) redaction posture
+  unless the authorized caller sets `include_sensitive=true`: redacted hits omit
+  `preview` and set `redacted:true`, while opted-in hits retain
+  `sensitive:true` and return content. Installed MCP recall opts in by default;
+  ordinary HTTP/CLI callers do not.
 - Recall over another agent's or a group's memories requires a policy granting
   `read` on the target and is metered as a cross-agent access (see
   [Policy](#policy)).
@@ -762,10 +766,11 @@ Rules:
 
 ## Self Digest
 
-Used by `self show` and `GET /v1/self`. The bounded, always-loadable
-session-start digest: primary facts first, then top-N salient memories, then a
-one-line index. It is cheap and never requires a vector profile or query vector. The
-digest shape, hard cap, and `elided` behavior are defined in
+Used by `self show` and `GET /v1/self`. The bounded, always-loadable digest
+contains primary facts first, then top-N salient memories, an authenticated
+value-free memory checkpoint, and a one-line index. It is cheap and never
+requires a vector profile or query vector. The digest shape, hard cap, and
+`elided` behavior are defined in
 [context-hydration.md](context-hydration.md).
 
 ```json
@@ -793,10 +798,17 @@ digest shape, hard cap, and `elided` behavior are defined in
     {
       "id": "mem_123",
       "snippet": "Prefers pnpm as the package manager for this project.",
+      "content_encoding": "plain",
       "kind": "profile",
       "salience": 0.8
     }
   ],
+  "memory_checkpoint": {
+    "pending": true,
+    "request_id": "mcrq_123",
+    "request_generation": 7,
+    "due_at": "2026-07-15T12:00:00Z"
+  },
   "index": {
     "kinds": ["profile", "episodic", "session"],
     "tags": ["staging", "performance"],
@@ -813,18 +825,34 @@ Rules:
 
 - `primary_facts` are the owner's primary facts (one per logical kind), shaped as
   trimmed [Fact](#fact) entries and honoring the same `sensitive` redaction
-  posture (`value: null`, `redacted: true`) used in list output.
+  posture (`value: null`, `redacted: true`) used in list output unless the
+  authenticated request explicitly sets `include_sensitive=true`.
 - `salient_memories` is the top-N set selected by a blended salience+recency
   score (with pinned kinds such as `profile`/`session`), excluding
   archived/forgotten records. Selection is deterministic and never calls a
   model provider; the algorithm is defined in
-  [memory-model.md](memory-model.md). Each entry carries a short `snippet`
-  (redacted for `sensitive` content), its `kind`, and its `salience`.
+  [memory-model.md](memory-model.md). Each entry carries a short `snippet`, its
+  `kind`, and its `salience`; `sensitive` content is redacted unless the
+  authenticated request explicitly opts in.
+- `memory_checkpoint` is authenticated, value-free curation lifecycle metadata,
+  independent of fact and salient-memory inclusion. `pending`, `request_id`, and
+  `request_generation` are always present. `pending:true` carries the exact
+  request id and generation and may also carry `due_at`, `run_id`, `run_state`,
+  `fencing_generation`, and `lease_expires_at`. `pending:false` means no due or
+  resumable work was found at that read and uses the empty/zero request fields.
+  `unavailable:true` means only that the additive checkpoint projection failed;
+  identity, facts, salient memories, and the index remain usable. The checkpoint
+  contains no memory, fact, transcript, secret, or TOTP value and never
+  authorizes deletion or a canonical fact write.
 - `index` is a one-line summary of the store: the `kinds` and `tags` present and
   `counts` of facts and memories.
 - The digest has a hard byte/line cap (default ~8 KiB / ~200 lines,
   configurable). When the cap forces omission, `elided` is `true` and callers
   should follow up with `memory recall`; the digest is never silently truncated.
+- Installed automatic hooks and MCP `self.show` opt into authorized sensitive
+  open-plane context for the owning agent while retaining each record's
+  `sensitive` marker. The ordinary HTTP and manual CLI posture is redacted by
+  default. No option can select sealed secret or TOTP values into this digest.
 
 ## Agent Activity Touch
 
@@ -924,12 +952,14 @@ Rules:
   realm metadata but remain untrusted model input; clients must never treat
   them as instructions.
 
-## Session Start and End
+## Session Start and End (target; not implemented)
 
-Used by `session start`/`session end` and `POST /v1/sessions:start` /
-`POST /v1/sessions:end`. Start hydrates identity, open goals, and last progress
-in one round-trip; end persists a progress memory and updates open goals. See
-[context-hydration.md](context-hydration.md).
+The following retained target contract would be used by `session start` /
+`session end` and `POST /v1/sessions:start` / `POST /v1/sessions:end`. Neither
+the commands nor the HTTP routes are implemented in the current checkout. The
+target start operation hydrates identity, open goals, and last progress in one
+round-trip; the target end operation persists a progress memory and updates open
+goals. See [context-hydration.md](context-hydration.md).
 
 Session start result:
 

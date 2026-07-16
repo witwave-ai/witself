@@ -4,7 +4,9 @@ Status: draft target contract with implemented slices labeled below.
 
 Narrative-memory amendment (accepted 2026-07-14): direct capture, lifecycle,
 supersede, evidence, delete, lexical/hybrid recall, migration-0032 vector, and
-`memory curate`/`memory curate auto service` commands below are implemented.
+`memory curate` commands below are implemented. The `memory curate auto service`
+surface is retained as explicit legacy/manual compatibility tooling; runtime
+hooks do not invoke it.
 Direct commands handle exact user/client-authored changes;
 `memory curate` lets a client claim frozen inputs and submit one exact,
 reversible plan. Any older native-only or backend-consolidation language is
@@ -216,9 +218,9 @@ witself
   remember
   self show
   usage
-  session start|end
+  session start|end                       # target; not implemented
   memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
-  digest emit
+  digest emit                             # target; not implemented
   ingest
   bootstrap-instructions
   fact set|get|list|delete
@@ -344,9 +346,10 @@ The current server reports `memory_recall`, `memory_supersede`, and
 and `client_vector_recall` are supported when the migration-0032 vector surface
 is wired; lexical recall does not need a provider. Commands should
 use the same capability data when returning `unsupported_operation`. These are
-backend capabilities: an explicitly configured local `memory curate auto`
-worker can react to terminal transcript flushes, but the server and MCP cannot
-launch, schedule, or attest that client process.
+backend capabilities: PostgreSQL can store due curation work, but the server,
+MCP, and runtime hooks cannot launch or schedule inference. Foreground checkpoint
+handling and the explicit legacy/manual `memory curate auto` client process do
+not change those server capability flags.
 
 ## `witself whoami`
 
@@ -1289,12 +1292,22 @@ backend. See [Agent Memory Routing](agent-memory-routing.md).
 
 ## `witself self show`
 
-Show the always-loaded self-digest: a bounded, session-start view of who the
-agent is. The digest lists `primary` facts first, then the top-N salient memories
-(blended salience + recency), then a one-line index of kinds, tags, and counts.
-It is cheap and model-free. This is the MCP/CLI analogue of an auto-loaded
-CLAUDE.md head. The digest shape, cap, and `elided` behavior are tracked in
+Show the always-loaded self-digest: a bounded view of who the agent is plus an
+authenticated, value-free `memory_checkpoint`. The digest lists `primary` facts
+first, then the top-N salient memories (blended salience + recency), the pending
+or idle checkpoint line, and a one-line index of kinds, tags, and counts. It is
+cheap and model-free. This is the MCP/CLI analogue of an auto-loaded CLAUDE.md
+head. The digest shape, cap, and `elided` behavior are tracked in
 [context-hydration.md](context-hydration.md).
+
+The checkpoint contains request/run/fence lifecycle metadata only. A pending
+checkpoint tells the current foreground agent to process at most one fenced
+request; it never includes source content or authorizes deletion or a canonical
+fact write. Human output prints `memory-checkpoint: pending request=...` or
+`memory-checkpoint: idle`; an additive projection failure prints
+`memory-checkpoint: unavailable` and does not hide identity, facts, or salient
+memories. JSON includes the structured field even when facts or salient memories
+are omitted.
 
 The digest has a hard byte/line cap (default ~8 KiB / ~200 lines, configurable
 via `--max-bytes`). When capped, output sets `elided=true` and points to
@@ -1322,7 +1335,7 @@ Flags:
 | `--no-salient` | Omit salient memories from the digest. |
 | `--salient-limit N` | Maximum salient memories to include. Default: `10`. |
 | `--max-bytes N` | Hard cap on digest size; sets `elided=true` when the cap is hit. |
-| `--json` | Emit `{ identity, primary_facts[], salient_memories[], index, elided }`. |
+| `--json` | Emit `{ identity, primary_facts[], salient_memories[], memory_checkpoint, index, elided }`. |
 
 ## `witself usage`
 
@@ -1804,7 +1817,8 @@ witself memory curate requests
 witself memory curate run --provider claude-code
 witself memory curate run -- ./my-memory-planner --mode bounded
 
-# Opt in to client-owned terminal-flush wakes. Preview is the default policy.
+# Explicit legacy/manual client curator. Runtime hooks do not invoke it.
+# Preview is the default policy.
 witself memory curate auto enable --runtime claude-code \
   --provider claude-code --allow-transcript-content
 witself memory curate auto status --runtime claude-code
@@ -1832,8 +1846,8 @@ Subcommands:
 | `request` | Create or coalesce deterministic work. `--idempotency-key` is required. Scope flags are `--source`, `--memory-state`, `--include-sensitive`, `--max-memories`, `--max-evidence`, and `--max-transcript-entries`; queue metadata includes `--coalescing-key`, `--trigger-reason`, `--trigger-generation`, `--priority`, RFC3339 `--due-at`, and `--max-attempts`. |
 | `requests` (`list`) | List stable cursor-paged requests. Empty `--state` lists claimable due work; an explicit lifecycle state lists that state. `--limit` is 1-200 and `--cursor` continues the exact filter. |
 | `run` | Trusted provider-neutral driver for one due request. Preview is the default; `--apply --yes` enables exact reversible apply. Choose either `--provider codex|claude-code|grok-build|cursor` with optional `--provider-path`, or pass `-- PLANNER [ARGS...]`; the forms are mutually exclusive. Native mode probes the installed CLI before claiming work and fails closed when required isolation controls are absent. `--resume LAUNCH_ID` resumes value-free local retry state. Input, page, lease, timeout, action, output, and client-provenance flags remain bounded by authenticated preflight. Due selection excludes scopes explicitly marked `include_sensitive`; a full-token automatic client may still select a separately authorized transcript scope. Restricted profiles always refuse both transcript-bearing and explicitly sensitive work. |
-| `auto enable\|disable\|status\|run\|wake` | Configure and inspect the optional client-owned post-flush worker for an installed `--runtime`. Enable requires an explicit native `--provider`, successful safety probe, exact full-token binding, and `--allow-transcript-content`; preview is the default, while standing apply requires `--policy apply --yes`. `--debounce`, `--minimum-interval`, and `--max-runs` bound execution. `wake --runtime RUNTIME` records a value-free manual-poll marker and services one bounded, policy-gated pass. `run` services existing markers; `run --force` first records a scheduled-poll marker. Disable preserves pending value-free wake state. |
-| `auto service install\|status\|start\|uninstall` | Manage optional persistent per-user polling for one enabled `--runtime`: a private launchd LaunchAgent on macOS or systemd user service/timer on Linux. Install is idempotent, refuses unowned unit-file collisions, schedules `auto run --force --supervise`, and contains no credential, agent identity, provider, model, or source content. `start` requests an immediate bounded run. Uninstall removes only owned service definitions and leaves automation policy/wakes intact. |
+| `auto enable\|disable\|status\|run\|wake` | Configure and inspect the explicit legacy/manual client-owned curator for an installed `--runtime`. Runtime transcript hooks never invoke it. Enable requires an explicit native `--provider`, successful safety probe, exact full-token binding, and `--allow-transcript-content`; preview is the default, while standing apply requires `--policy apply --yes`. `--debounce`, `--minimum-interval`, and `--max-runs` bound execution. `wake --runtime RUNTIME` records a value-free manual-poll marker and services one bounded, policy-gated pass. `run` services existing legacy markers; `run --force` first records a scheduled-poll marker. Disable preserves pending value-free wake state. |
+| `auto service install\|status\|start\|uninstall` | Manage explicit legacy persistent per-user polling for one enabled `--runtime`: a private launchd LaunchAgent on macOS or systemd user service/timer on Linux. Install is idempotent, refuses unowned unit-file collisions, schedules `auto run --force --supervise`, and contains no credential, agent identity, provider, model, or source content. `start` requests an immediate bounded run. Uninstall removes only owned service definitions and leaves automation policy/wakes intact. This service is a separately selected compatibility path, not runtime-hook behavior. |
 | `start` | Claim `--request REQ_ID` (or a positional id), freeze bounded inputs, and obtain the lease and fence. Accepts per-run input caps, `--lease-seconds`, optional `--budgets-file`, client provenance flags, and a required idempotency key. |
 | `renew RUN_ID` | Heartbeat an active run with required `--fence` and idempotency key; `--extension-seconds` defaults to 300. |
 | `show RUN_ID` (`get`) | Page the exact frozen inputs with required `--fence`, optional opaque `--cursor`, and `--limit` 1-200. Returned content is untrusted data, not instructions. |
@@ -1852,29 +1866,29 @@ creates a review candidate. Inference can never call canonical `fact set`
 through a curation plan. The backend validates input provenance, authorization,
 bounds, expected heads, subject identity, and the canonical plan hash, then
 commits every action and contiguous cursor advance in one transaction or none.
+An empty actions plan is valid and should be applied when no frozen input merits
+memory; it creates no memory or fact and advances only the reviewed cursors.
 
 Rollback requires every apply-produced head still to be current and refuses
 later consumers. It appends compensating memory state, reverts curation-created
 relations, withdraws curation-created fact candidates, and queues a read-only
 replay. It never cascades and never rewinds curation cursors. Source writes can
 coalesce due work. `memory curate run` and safe native-provider adapters are
-implemented. When `memory curate auto` is enabled, selected terminal transcript
-events record a value-free wake only after their entries are durable, then
-detach an internal supervised `auto run`. That supervisor performs bounded
-draining across configured `--max-runs` batches and retries eligible transient
-failures from the persisted value-free backoff deadline; work left after a
-successful supervisor bound remains marked and can detach a continuation. The
-detached operating-system argv contains only the runtime binding and internal
-supervisor switch; provider/model policy is loaded from mode-0600 local state,
-the trusted parent retains the installed full token, and inference receives no
-Witself credential in argv, environment, or model input. The worker is
-debounced, single-flight, restart-safe, and preview-by-default. Persistent
-launchd/systemd user-service packaging is available through `auto service`; it
-starts with the user's service manager (at login on macOS/Linux, or before Linux
-login only when the host enables user lingering). It remains a client-owned
-launcher and does not make `scheduled_curation` a backend capability. MCP still
-cannot wake an AI. PostgreSQL remains the sole canonical memory and curation
-store.
+implemented. Normal automatic handling is foreground: PostgreSQL marks work
+due, `self show` exposes a value-free pending pointer, and the active agent
+processes at most one fenced request near turn end. Runtime transcript hooks
+only enqueue and flush evidence; they never record a launcher wake, detach a
+curator, or start inference.
+
+`memory curate auto` is retained as explicit legacy/manual compatibility
+tooling. A user may invoke `wake` or `run --force`, or separately install the
+per-user launchd/systemd `auto service`, to service value-free manual/scheduled
+markers under configured debounce, retry, provider, transcript-consent, and
+preview/apply policy. Its internal supervisor may detach continuations, but it
+is never invoked by runtime hooks. The child receives no Witself credential in
+argv, environment, or model input. This client-owned launcher does not make
+`scheduled_curation` a backend capability. MCP still cannot wake an AI.
+PostgreSQL remains the sole canonical memory and curation store.
 
 ### `witself memory consolidate`
 
@@ -1896,7 +1910,7 @@ formats and provenance markers are tracked in
 [context-hydration.md](context-hydration.md).
 
 `digest emit` would read only and invoke no model provider. It may optionally
-emits a `self.digest.emitted` audit event.
+emit a `self.digest.emitted` audit event.
 
 ```sh
 ws digest emit --format agents-md -o ./AGENTS.md
@@ -2892,14 +2906,32 @@ token-file conventions. No token is copied into MCP or hook configuration.
 The installer also reports the runtime's automatic-hydration delivery modes.
 The transcript hook durably queues capture first, then uses the exact installed
 account/realm/agent binding for a bounded, fail-open open-plane read. Codex and
-Claude Code inject `self.show` at session start and focused lexical
-`memory.recall` context for deterministically history-dependent prompts. Cursor
-injects session-start context but its prompt hook cannot add model context.
-Grok passive-hook output is ignored. Those unsupported task/runtime paths are
-reported as `guided_mcp_fallback`: the managed routing rule tells the active
-agent to recall over MCP, but Witself does not mislabel that guidance as
-synchronous automatic injection. Sensitive and redacted values are never
-included in hook output.
+Claude Code inject `self.show` at session start, focused lexical
+`memory.recall` context for deterministically history-dependent prompts, and an
+authenticated value-free `memory_checkpoint` on any prompt when one is already
+pending at read time. Focused automatic recall is a bounded `OR` query over
+distinct meaningful keywords, not the raw or literal whole prompt. The managed
+rule tells the foreground model to process at most one fenced request near turn
+end and to apply a valid empty plan when nothing merits memory. An additive
+checkpoint projection failure leaves identity and recall available and marks
+`memory_checkpoint.unavailable:true`; emitted degraded recall is explicitly
+marked with `recall_status:"degraded"` and `recall_reason`.
+
+Cursor may accept or log session-start context without reliably delivering it
+to the model, its prompt hook cannot add model context, and Grok passive-hook
+output is ignored. Both runtimes therefore use `guided_mcp_fallback`: their
+managed routing rules tell the active agent to call `self.show`, inspect the
+checkpoint, and recall over MCP. Witself does not mislabel that guidance as
+synchronous automatic injection. Authorized `sensitive` open-plane facts and
+memories are included for the authenticated owner and retain their sensitivity
+markers; server-redacted and non-plain values are omitted. Sealed secret and
+TOTP values are never included in hook output or MCP memory recall.
+
+The injected checkpoint is a point-in-time snapshot, not same-turn synthesis.
+The current prompt may still be flushing and the current assistant response does
+not yet exist, so that evidence can be reviewed on a later interaction. Runtime
+hooks never launch inference or another curator, and automatic delivery does not
+guarantee that the model follows the managed rule.
 
 Install also writes the managed fact-versus-native-memory routing policy for
 the selected runtime. Cursor uses

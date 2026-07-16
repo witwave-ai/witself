@@ -106,7 +106,9 @@ not the production model.
 - Let agents add, adjust, read, recall, list, forget, and restore their own
   memories.
 - Let clients opportunistically curate an agent's memories through exact frozen
-  inputs and reversible plans without requiring backend inference.
+  inputs and reversible plans without requiring backend inference. Normal
+  automatic handling is foreground and low-touch: PostgreSQL exposes pending
+  work, and one active agent processes at most one fenced request per turn.
 - Let agents set, get, list, and delete their own facts, and promote a fact to
   primary.
 - Let agents recall memories **semantically by default** through embedding-backed
@@ -164,9 +166,9 @@ MCP stdio, the backend API boundary, a local development adapter, the agent toke
 lifecycle, the memory model with PostgreSQL lexical/structured recall, the facts
 model with primary promotion, agent self-managed memory and context hydration
 (the self-digest, provider-aware capture, managed teaching layer, and fenced
-client-curation protocol plus opt-in terminal-flush local launcher, with
-session/file-bridge extensions tracked as future work and persistent per-user
-launchd/systemd scheduling implemented), the cross-agent access
+client-curation protocol plus foreground pending-checkpoint delivery, with
+session/file-bridge extensions tracked as future work and an explicit legacy
+per-user launcher retained for compatibility), the cross-agent access
 policy engine, security groups, full
 inter-agent messaging, identity export/import, audit events, Prometheus metrics,
 Kubernetes health probes, the Postgres storage path, public images,
@@ -393,9 +395,11 @@ database migrations.
 The implemented shape has one stable `mem_...` head and complete immutable
 versions containing content/encoding, kind, tags, links, salience, sensitivity,
 occurrence bounds, capture reason, lifecycle state, token-derived provenance,
-client diagnostics, and append-only evidence. Broad list and recall redact
-sensitive content by default; exact authorized reads may return it. Memories are
-addressed by id, never by a unique name.
+client diagnostics, and append-only evidence. Ordinary HTTP/CLI broad list and
+recall redact sensitive content by default; exact authorized reads may return
+it. Installed owner hydration and MCP recall automatically opt into authorized
+sensitive open-plane context and retain its marker. Memories are addressed by
+id, never by a unique name.
 
 The implemented agent-owned lifecycle is `capture`, `show`, `list`, `history`,
 `recall`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, evidence
@@ -449,19 +453,27 @@ share the existing memory/fact validation, limits, scopes, and audit boundary:
   the same content is never silently duplicated. See
   [Agent Memory Routing](agent-memory-routing.md).
 - `self show` — the always-loaded self-digest: primary facts first, then top-N
-  salient memories, then a one-line index of kinds/tags/counts. It is the MCP
-  analogue of an auto-loaded `CLAUDE.md` head: model-free and hard-capped. When
-  capped it sets `elided=true` rather than silently truncating.
+  salient memories, an authenticated value-free pending/idle checkpoint, then a
+  one-line index of kinds/tags/counts. It is the MCP analogue of an auto-loaded
+  `CLAUDE.md` head: model-free and hard-capped. When capped it sets `elided=true`
+  rather than silently truncating.
+- Authenticated automatic hydration includes the owning agent's authorized
+  `sensitive` open-plane facts and memories while preserving their sensitivity
+  classification. HTTP and manual broad reads remain redacted by default.
+  Sealed secret fields, TOTP seeds, and generated codes never enter self digest
+  or memory recall, regardless of any `include_sensitive` option.
 - Direct narrative-memory capture, read/list/history/recall, adjust, atomic
   supersede, reversible lifecycle, evidence resolution, and guarded permanent
   deletion are implemented. The client authors every capsule and replacement;
   the backend performs no semantic classification or synthesis.
 - Client-run curation requests, leases/fences, frozen input pages, strict plans,
   atomic apply, cancellation/abandonment, and rollback are implemented. Source
-  writes can queue or coalesce due work, and the opt-in client-owned
-  `memory curate auto` layer can launch after terminal transcript flushes.
-  Optional persistent per-user launchd/systemd scheduling is managed through
-  `memory curate auto service`. The
+  writes queue or coalesce due work in PostgreSQL. Codex/Claude inject pending
+  state already durable at hook read time; Cursor/Grok use guided `self.show`.
+  One foreground agent processes at most one fenced request and applies an empty
+  plan when no memory is justified. Runtime hooks never launch inference. The
+  optional `memory curate auto` and per-user launchd/systemd `auto service`
+  surfaces remain explicit legacy/manual compatibility tooling. The
   retired `memory consolidate` design must not let the backend choose a merge,
   split, or supersession.
 - `session start` / `session end`, `digest emit` / `ingest`, and
@@ -560,19 +572,24 @@ backend AI dependency. The backend must:
   graph and curation attribution, while interrupting active leases and reserving
   a fresh fence at the destination.
 
-Clients may run inference in the foreground, a subagent, or a separate local
-worker, but they use the same CLI/MCP/HTTP protocol. The backend and MCP do not
-launch or schedule that process. The opt-in local `memory curate auto` layer may
-record value-free wakes after terminal transcript flushes and detach a bounded
-supervisor that drains configured batches and retries eligible failures from
-persisted value-free backoff; it requires an explicit provider,
-transcript-content consent, and preview/apply standing policy. A value-free
-manual wake is available through `memory curate auto wake --runtime RUNTIME`.
-The installed full agent token stays in the trusted parent and is never passed
-to inference in argv, environment, or model input. Optional persistent
-launchd/systemd user-service packaging is implemented through `memory curate
-auto service`; normal startup follows user login, while pre-login Linux startup
-requires host-enabled user lingering. This remains a client-owned launcher.
+Normal curation runs in the foreground agent through the same CLI/MCP/HTTP
+protocol. PostgreSQL stores due work; `self.show` exposes an authenticated,
+value-free pending checkpoint. Codex and Claude inject already-durable pending
+state through a model-visible hook channel, while Cursor and Grok use guided
+`self.show` because their hook output is not reliably model-visible. The active
+agent processes at most one fenced request and applies an empty actions plan when
+nothing merits memory so reviewed cursors advance. Runtime hooks, the backend,
+and MCP never launch or schedule inference. Because hook capture flushes
+asynchronously, current-turn prompt/response evidence may be reviewed on a later
+interaction.
+
+The opt-in local `memory curate auto` and `auto service` surfaces remain explicit
+legacy/manual client-owned compatibility paths. They require an explicit
+provider, transcript-content consent, and preview/apply standing policy; runtime
+hooks never invoke them. A value-free manual wake is available through `memory
+curate auto wake --runtime RUNTIME`. The installed full agent token stays in the
+trusted parent and is never passed to inference in argv, environment, or model
+input.
 Capability discovery therefore still reports the backend surface:
 `opportunistic_curation` as supported and `automatic_capture` plus
 `scheduled_curation` as unsupported.
@@ -1867,7 +1884,8 @@ The MCP tool catalog spans both planes:
 - `witself.memory.capture/read/list/history/recall/adjust/supersede/forget/restore/reactivate/evidence.resolve/delete`.
 - `witself.fact.set/get/list/delete`.
 - `witself.remember` (deferred; if exposed, explicitly Witself-scoped).
-- `witself.self.show` (the always-loaded self-digest; never includes secrets).
+- `witself.self.show` (the always-loaded self-digest plus authenticated value-free
+  pending/idle memory checkpoint; never includes secrets).
 - Target `witself.session.start/end` and `witself.digest.emit` helpers remain
   unexposed; their behavior is documented for future hydration/file-bridge work.
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
@@ -2223,10 +2241,11 @@ API contract requirements:
 - Expose `/v1/capabilities` for backend feature discovery, including direct
   memory/recall support, optional vector-profile support, supported
   `opportunistic_curation`, unsupported `automatic_capture` and
-  `scheduled_curation` (the optional post-flush worker is client-owned and does
-  not change this server response), and, when the sealed plane is enabled, the
-  KMS provider and the decrypt-custody capability flags `client_side_decrypt` /
-  `server_side_decrypt` (see [Encryption (Two-Tier)](#encryption-two-tier)).
+  `scheduled_curation` (foreground checkpoint handling and the explicit legacy
+  client-owned auto tooling do not change this server response), and, when the
+  sealed plane is enabled, the KMS provider and the decrypt-custody capability
+  flags `client_side_decrypt` / `server_side_decrypt` (see
+  [Encryption (Two-Tier)](#encryption-two-tier)).
 - Use resource-oriented `/v1` REST-ish routes with plural resources, including
   the open-plane `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and
   `/v1/messages`, the coordination resource `/v1/message-requests`, the
@@ -2260,12 +2279,13 @@ API contract requirements:
   `/v1/secrets/{secret_id}:revoke`, `/v1/totp/{totp_id}:code` (returns a current
   code), and `/v1/password:generate` (password/passphrase generation). All use
   `POST`, never `GET`.
-- Expose the self-management and hydration routes: the deferred explicit
-  Witself-only `POST /v1/remember` convenience action, `GET /v1/self` (the
-  self-digest; `?format=` renders the `digest emit` fragment), and
-  `POST /v1/sessions:start` / `POST /v1/sessions:end`. `ingest` composes the
-  existing `POST /v1/facts` and `POST /v1/memories` create paths (with dedup) rather
-  than introducing a new resource.
+- Expose implemented `GET /v1/self` as the JSON self-digest plus value-free
+  memory checkpoint. Keep the explicit Witself-only `POST /v1/remember`
+  convenience action, the `GET /v1/self?format=` digest-emit renderer, and
+  `POST /v1/sessions:start` / `POST /v1/sessions:end` as target routes that are
+  not implemented in the current checkout. Target `ingest` composes the existing
+  `POST /v1/facts` and `POST /v1/memories` create paths (with dedup) rather than
+  introducing a new resource.
 - Use `POST`, never `GET`, for sensitive/action routes.
 - Support idempotency keys for retryable mutating operations.
 - Support `dry_run` on mutating operations where practical.

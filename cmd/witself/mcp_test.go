@@ -407,6 +407,7 @@ func TestMCPServerInFlightEOFIsCleanShutdown(t *testing.T) {
 }
 
 type fakeMCPBackend struct {
+	lastSelfOptions     client.SelfOptions
 	lastTranscriptID    string
 	lastOptions         client.TranscriptPageOptions
 	lastMessageSend     client.SendMessageInput
@@ -1374,7 +1375,8 @@ func (b *fakeMCPBackend) ListFactSubjects(context.Context) ([]client.FactSubject
 	return []client.FactSubject{{ID: "sub_1", CanonicalKey: "person_spouse", Aliases: []string{"my wife"}}}, nil
 }
 
-func (b *fakeMCPBackend) Self(context.Context) (client.SelfDigest, error) {
+func (b *fakeMCPBackend) Self(_ context.Context, opts client.SelfOptions) (client.SelfDigest, error) {
+	b.lastSelfOptions = opts
 	return client.SelfDigest{
 		Identity:        client.SelfIdentity{AgentID: "agent_1", AgentName: "scott"},
 		PrimaryFacts:    []client.SelfFact{},
@@ -1433,7 +1435,7 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = clientSession.Close() }()
-	if got := clientSession.InitializeResult().Instructions; got != witselfMCPInstructions {
+	if got := clientSession.InitializeResult().Instructions; got != mcpInstructions("", "witself.self.show", "witself.message.list") {
 		t.Fatalf("instructions = %q", got)
 	}
 
@@ -1445,7 +1447,20 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundComplete := false
+	foundSelf := false
 	for _, tool := range tools.Tools {
+		if tool.Name == "witself.self.show" {
+			foundSelf = true
+			raw, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{`"include_facts"`, `"include_salient"`, `"include_sensitive"`, `"salient_limit"`, `"max_bytes"`} {
+				if !strings.Contains(string(raw), field) {
+					t.Errorf("self.show schema omitted %s: %s", field, raw)
+				}
+			}
+		}
 		if tool.Name != "witself.message.complete" {
 			continue
 		}
@@ -1465,6 +1480,9 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if !foundComplete {
 		t.Fatal("MCP did not advertise witself.message.complete")
+	}
+	if !foundSelf {
+		t.Fatal("MCP did not advertise witself.self.show")
 	}
 	for _, tc := range []struct {
 		name string
@@ -1555,6 +1573,29 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		}
 		if tc.name == "witself.agent.peers" {
 			peersResult = result
+		}
+	}
+	if got := backend.lastSelfOptions; !got.IncludeFacts || !got.IncludeSalient || !got.IncludeCounts ||
+		!got.IncludeCheckpoint || !got.IncludeSensitive || got.SalientLimit != 10 || got.MaximumByteSize != 8192 {
+		t.Fatalf("default self.show options = %#v", got)
+	}
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "witself.self.show", Arguments: map[string]any{
+		"include_facts": false, "include_salient": false, "include_sensitive": false, "salient_limit": 3, "max_bytes": 4096,
+	}})
+	if err != nil || result.IsError {
+		t.Fatalf("custom self.show = %#v / %v", result, err)
+	}
+	if got := backend.lastSelfOptions; got.IncludeFacts || got.IncludeSalient || !got.IncludeCounts ||
+		!got.IncludeCheckpoint || got.IncludeSensitive || got.SalientLimit != 3 || got.MaximumByteSize != 4096 {
+		t.Fatalf("custom self.show options = %#v", got)
+	}
+	for _, args := range []map[string]any{{"salient_limit": 101}, {"max_bytes": 100}} {
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "witself.self.show", Arguments: args})
+		if err != nil {
+			t.Fatalf("invalid self.show call: %v", err)
+		}
+		if !result.IsError {
+			t.Fatalf("self.show accepted invalid input: %#v", args)
 		}
 	}
 	if peersResult == nil {
@@ -1669,7 +1710,7 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		t.Fatalf("transcript proposal valid_from = %#v", backend.lastFactProposal.ValidFrom)
 	}
 
-	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+	result, err = clientSession.CallTool(ctx, &mcp.CallToolParams{
 		Name: "witself.fact.propose_from_transcript",
 		Arguments: map[string]any{
 			"transcript_id": "trn_1", "entry_sequence": 2,
@@ -1722,7 +1763,7 @@ func TestCodexMCPInstructionsLeadWithCanonicalMemoryRouting(t *testing.T) {
 			t.Errorf("first 512 Codex instruction bytes do not contain %q: %q", want, first)
 		}
 	}
-	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions {
+	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions {
 		t.Fatal("provider-specific Codex routing leaked into generic MCP instructions")
 	}
 }

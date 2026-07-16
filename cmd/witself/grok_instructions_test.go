@@ -104,13 +104,18 @@ func TestGrokPortableMCPInstructionsRewritesMemoryReadTool(t *testing.T) {
 
 func TestGrokPortableMCPInstructionsRewritesEveryCurationTool(t *testing.T) {
 	for _, dotted := range []string{
+		"witself.memory.curation.preflight",
+		"witself.memory.curation.requests",
 		"witself.memory.curation.request",
+		"witself.memory.curation.request.get",
 		"witself.memory.curation.start",
+		"witself.memory.curation.run.get",
 		"witself.memory.curation.renew",
 		"witself.memory.curation.get",
 		"witself.memory.curation.plan",
 		"witself.memory.curation.apply",
 		"witself.memory.curation.cancel",
+		"witself.memory.curation.abandon",
 		"witself.memory.curation.rollback",
 		"witself.memory.curation.status",
 	} {

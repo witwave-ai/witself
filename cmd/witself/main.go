@@ -2521,10 +2521,12 @@ func selfShow(args []string) int {
 		return 1
 	}
 	digest, err := client.GetSelf(ctx, conn.Endpoint, conn.Token, client.SelfOptions{
-		IncludeFacts:    !*noFacts,
-		IncludeSalient:  !*noSalient,
-		SalientLimit:    *salientLimit,
-		MaximumByteSize: *maxBytes,
+		IncludeFacts:      !*noFacts,
+		IncludeSalient:    !*noSalient,
+		IncludeCounts:     true,
+		IncludeCheckpoint: true,
+		SalientLimit:      *salientLimit,
+		MaximumByteSize:   *maxBytes,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -2551,6 +2553,48 @@ func selfShow(args []string) int {
 	fmt.Printf("account:\t%s\n", digest.Identity.AccountID)
 	fmt.Printf("facts:\t%d\n", digest.Index.Counts["facts"])
 	fmt.Printf("memories:\t%d\n", digest.Index.Counts["memories"])
+	for _, fact := range digest.PrimaryFacts {
+		value := "<redacted>"
+		if !fact.Sensitive && !fact.Redacted {
+			if raw, marshalErr := json.Marshal(fact.Value); marshalErr == nil {
+				value = string(raw)
+			} else {
+				value = "<unavailable>"
+			}
+		}
+		fmt.Printf("fact:\t%s\t%s\n", safeText(fact.Name), safeText(value))
+	}
+	for _, memory := range digest.SalientMemories {
+		snippet := "<redacted>"
+		if !memory.Sensitive && !memory.Redacted {
+			snippet = memory.Snippet
+		}
+		fmt.Printf("memory:\t%s\t%s\t%.3f\t%s\n",
+			memory.ID, safeText(memory.Kind), memory.Salience, safeText(snippet))
+	}
+	kinds := "-"
+	if len(digest.Index.Kinds) > 0 {
+		kinds = strings.Join(digest.Index.Kinds, ",")
+	}
+	tags := "-"
+	if len(digest.Index.Tags) > 0 {
+		tags = strings.Join(digest.Index.Tags, ",")
+	}
+	fmt.Printf("kinds:\t%s\n", safeText(kinds))
+	fmt.Printf("tags:\t%s\n", safeText(tags))
+	if digest.MemoryCheckpoint != nil {
+		if digest.MemoryCheckpoint.Unavailable {
+			fmt.Println("memory-checkpoint:\tunavailable")
+		} else if digest.MemoryCheckpoint.Pending {
+			fmt.Printf("memory-checkpoint:\tpending request=%s generation=%d", digest.MemoryCheckpoint.RequestID, digest.MemoryCheckpoint.RequestGeneration)
+			if digest.MemoryCheckpoint.RunID != "" {
+				fmt.Printf(" run=%s state=%s", digest.MemoryCheckpoint.RunID, digest.MemoryCheckpoint.RunState)
+			}
+			fmt.Println()
+		} else {
+			fmt.Println("memory-checkpoint:\tidle")
+		}
+	}
 	if digest.Elided {
 		fmt.Println("elided:\ttrue")
 	}

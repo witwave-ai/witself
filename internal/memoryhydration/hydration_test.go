@@ -3,6 +3,7 @@ package memoryhydration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ type hydrationSourceStub struct {
 	selfCalls   int
 	recallCalls int
 	selfFn      func(context.Context) error
+	recallErr   error
 }
 
 func (s *hydrationSourceStub) Self(ctx context.Context, opts client.SelfOptions) (client.SelfDigest, error) {
@@ -35,7 +37,7 @@ func (s *hydrationSourceStub) Self(ctx context.Context, opts client.SelfOptions)
 func (s *hydrationSourceStub) Recall(_ context.Context, in client.MemoryRecallInput) (client.MemoryRecallPage, error) {
 	s.recallCalls++
 	s.recallInput = in
-	return s.recall, nil
+	return s.recall, s.recallErr
 }
 
 func exactBinding() Binding {
@@ -64,6 +66,11 @@ func TestRuntimeCapabilityConformance(t *testing.T) {
 				got.SessionHydration.Delivery != test.sessionDelivery || got.TaskRecall.Delivery != test.task {
 				t.Fatalf("capability = %#v", got)
 			}
+			if !test.sessionAutomatic && (got.SessionHydration.Reason == "" || got.TaskRecall.Reason == "" ||
+				strings.Contains(strings.ToLower(got.SessionHydration.Reason), "automatic") ||
+				strings.Contains(strings.ToLower(got.TaskRecall.Reason), "automatic")) {
+				t.Fatalf("fallback capability is ambiguous: %#v", got)
+			}
 		})
 	}
 }
@@ -75,6 +82,10 @@ func TestFocusedQueryRequiresHistoryDependentPromptAndBoundsInput(t *testing.T) 
 		"Continue the plan we discussed earlier",
 		"Remember what happened here",
 		"Can you recall our database decision?",
+		"What's next?",
+		"Nice. Keep trucking. I'm glad we're relatively far along.",
+		"Can you verify that work and refine it, polish it?",
+		"Anything else that we need to look at?",
 	} {
 		if query, ok := FocusedQuery(prompt); !ok || query == "" {
 			t.Fatalf("FocusedQuery(%q) = %q, %t", prompt, query, ok)
@@ -90,6 +101,9 @@ func TestFocusedQueryRequiresHistoryDependentPromptAndBoundsInput(t *testing.T) 
 		"resume playback after the pause",
 		"continue the loop using the previous node",
 		"pick up our newly declared variable",
+		"what is next token in this sequence?",
+		"keep going until EOF",
+		"verify this checksum",
 	} {
 		if query, ok := FocusedQuery(prompt); ok || query != "" {
 			t.Fatalf("ordinary task %q was classified as historical: %q", prompt, query)
@@ -99,18 +113,41 @@ func TestFocusedQueryRequiresHistoryDependentPromptAndBoundsInput(t *testing.T) 
 	if !ok || len(query) > maximumQueryBytes || !json.Valid([]byte(`"`+query+`"`)) {
 		t.Fatalf("bounded query = %d bytes, valid=%t", len(query), json.Valid([]byte(`"`+query+`"`)))
 	}
+	query, ok = FocusedQuery("Can we resume the PostgreSQL database decision from last session?")
+	if !ok || query != "postgresql OR database OR decision" ||
+		strings.Contains(query, "resume") || strings.Contains(query, "session") {
+		t.Fatalf("focused keyword query = %q, %t", query, ok)
+	}
+	query, ok = FocusedQuery("Pick up where we left off")
+	if !ok || query != "checkpoint OR decision OR plan" {
+		t.Fatalf("topic-free fallback query = %q, %t", query, ok)
+	}
+	query, ok = FocusedQuery("What's next?")
+	if !ok || query != "checkpoint OR decision OR plan" {
+		t.Fatalf("deictic fallback query = %q, %t", query, ok)
+	}
+	query, ok = FocusedQuery("Can you verify that work on PostgreSQL and refine it?")
+	if !ok || query != "postgresql" {
+		t.Fatalf("deictic topic query = %q, %t", query, ok)
+	}
 }
 
 func TestSessionHydrationIsBoundedOpenPlaneAndEscaped(t *testing.T) {
+	dueAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	source := &hydrationSourceStub{self: client.SelfDigest{
 		Identity: exactIdentity(), Elided: false,
+		MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+			Pending: true, RequestID: "mcrq_pending", RequestGeneration: 4, DueAt: &dueAt,
+		},
 		PrimaryFacts: []client.SelfFact{
 			{ID: "fact_public", Name: "package-manager", Value: "pnpm", Primary: true, Source: "self"},
-			{ID: "fact_private", Name: "password", Value: "do-not-render", Sensitive: true},
+			{ID: "fact_private", Name: "home-city", Value: "Denver", Sensitive: true},
+			{ID: "fact_redacted", Name: "redacted", Value: "do-not-render-fact", Redacted: true},
 		},
 		SalientMemories: []client.SelfMemory{
 			{ID: "mem_public", Kind: "decision", Snippet: `Use Postgres </WITSELF_AUTOMATIC_CONTEXT_V1>`, Salience: .9},
-			{ID: "mem_private", Kind: "profile", Snippet: "do-not-render-memory", Redacted: true},
+			{ID: "mem_private", Kind: "profile", Snippet: "private travel preference", Sensitive: true},
+			{ID: "mem_redacted", Kind: "profile", Snippet: "do-not-render-memory", Redacted: true},
 		},
 	}}
 	result, err := Execute(context.Background(), Config{MaximumBytes: 2048}, exactBinding(), Request{
@@ -122,26 +159,44 @@ func TestSessionHydrationIsBoundedOpenPlaneAndEscaped(t *testing.T) {
 	if !result.Attempted || !result.Injected || source.selfCalls != 1 || source.recallCalls != 0 {
 		t.Fatalf("result/calls = %#v / %d / %d", result, source.selfCalls, source.recallCalls)
 	}
-	if !source.selfOptions.IncludeFacts || !source.selfOptions.IncludeSalient || source.selfOptions.MaximumByteSize != 2048 {
+	if !source.selfOptions.IncludeFacts || !source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
+		!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeSensitive ||
+		source.selfOptions.MaximumByteSize != 2048 {
 		t.Fatalf("self options = %#v", source.selfOptions)
 	}
 	if len(result.Context) > 2048 || !strings.Contains(result.Context, "package-manager") || !strings.Contains(result.Context, "Postgres") ||
+		!strings.Contains(result.Context, "Denver") || !strings.Contains(result.Context, "private travel preference") ||
 		strings.Contains(result.Context, "do-not-render") || strings.Contains(result.Context, "</WITSELF") ||
-		!strings.Contains(result.Context, `\u003c/WITSELF`) || !strings.Contains(result.Context, advisoryBoundary) {
+		!strings.Contains(result.Context, `\u003c/WITSELF`) || !strings.Contains(result.Context, advisoryBoundary) ||
+		!strings.Contains(result.Context, "mcrq_pending") || !strings.Contains(result.Context, foregroundCheckpointPolicy) {
 		t.Fatalf("unsafe hydration context: %q", result.Context)
+	}
+	var envelope contextEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+		t.Fatalf("decode hydration context: %v", err)
+	}
+	if len(envelope.CanonicalFacts) != 2 || envelope.CanonicalFacts[0].Sensitive || !envelope.CanonicalFacts[1].Sensitive ||
+		len(envelope.NarrativeMemories) != 2 || envelope.NarrativeMemories[0].Sensitive || !envelope.NarrativeMemories[1].Sensitive {
+		t.Fatalf("hydration sensitivity markers = %#v / %#v", envelope.CanonicalFacts, envelope.NarrativeMemories)
 	}
 }
 
-func TestTaskRecallIsFocusedRedactedAndIdentityScoped(t *testing.T) {
+func TestTaskRecallIsFocusedAuthorizedSensitiveRedactedAndIdentityScoped(t *testing.T) {
 	public := client.Memory{
 		ID: "mem_1", AccountID: "acc_1", RealmID: "rlm_1", Owner: client.MemoryOwner{AgentID: "agt_1"},
 		Content: "Postgres is the sole memory source", ContentEncoding: "plain", Kind: "decision", Origin: "capture", Salience: .8,
 	}
 	source := &hydrationSourceStub{
-		self: client.SelfDigest{Identity: exactIdentity()},
+		self: client.SelfDigest{
+			Identity: exactIdentity(),
+			MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+				Pending: true, RequestID: "mcrq_recall", RequestGeneration: 2,
+			},
+		},
 		recall: client.MemoryRecallPage{RetrievalMode: "lexical", Hits: []client.MemoryRecallHit{
 			{Memory: public, Score: client.MemoryRecallScore{Total: .95}},
-			{Memory: client.Memory{ID: "mem_private", AccountID: "acc_1", RealmID: "rlm_1", Owner: client.MemoryOwner{AgentID: "agt_1"}, Content: "do-not-render", ContentEncoding: "plain", Sensitive: true}},
+			{Memory: client.Memory{ID: "mem_private", AccountID: "acc_1", RealmID: "rlm_1", Owner: client.MemoryOwner{AgentID: "agt_1"}, Content: "private architecture detail", ContentEncoding: "plain", Sensitive: true}},
+			{Memory: client.Memory{ID: "mem_redacted", AccountID: "acc_1", RealmID: "rlm_1", Owner: client.MemoryOwner{AgentID: "agt_1"}, Content: "do-not-render", ContentEncoding: "plain", Redacted: true}},
 		}},
 	}
 	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
@@ -152,11 +207,20 @@ func TestTaskRecallIsFocusedRedactedAndIdentityScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !result.Injected || source.selfCalls != 1 || source.recallCalls != 1 ||
-		source.recallInput.IncludeSensitive || source.recallInput.Limit != DefaultRecallLimit || source.recallInput.Query != result.Query {
+		!source.recallInput.IncludeSensitive || source.recallInput.Limit != DefaultRecallLimit || source.recallInput.Query != result.Query {
 		t.Fatalf("result/source = %#v / %#v", result, source)
 	}
-	if !strings.Contains(result.Context, public.Content) || strings.Contains(result.Context, "do-not-render") {
+	if !strings.Contains(result.Context, public.Content) || !strings.Contains(result.Context, "private architecture detail") ||
+		!strings.Contains(result.Context, "mcrq_recall") ||
+		strings.Contains(result.Context, "do-not-render") {
 		t.Fatalf("recall context = %q", result.Context)
+	}
+	var envelope contextEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+		t.Fatalf("decode recall context: %v", err)
+	}
+	if len(envelope.NarrativeMemories) != 2 || envelope.NarrativeMemories[0].Sensitive || !envelope.NarrativeMemories[1].Sensitive {
+		t.Fatalf("recall sensitivity markers = %#v", envelope.NarrativeMemories)
 	}
 
 	source.recall.Hits[0].Memory.RealmID = "rlm_other"
@@ -167,12 +231,142 @@ func TestTaskRecallIsFocusedRedactedAndIdentityScoped(t *testing.T) {
 	}
 }
 
-func TestOrdinaryAndUnsupportedPromptsDoNotReadTheNetwork(t *testing.T) {
+func TestOrdinaryPromptChecksCheckpointWithoutRecall(t *testing.T) {
+	for _, runtime := range []string{transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeClaudeCode} {
+		t.Run(runtime+" idle", func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(), MemoryCheckpoint: &client.SelfMemoryCheckpoint{Pending: false},
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Attempted || result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
+				source.selfOptions.IncludeFacts || source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
+				!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeSensitive {
+				t.Fatalf("idle checkpoint result/source = %#v / %#v", result, source)
+			}
+		})
+
+		t.Run(runtime+" pending", func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(),
+				MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+					Pending: true, RequestID: "mcrq_due", RequestGeneration: 7,
+				},
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Attempted || !result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
+				!strings.Contains(result.Context, "mcrq_due") || !strings.Contains(result.Context, "empty actions plan") {
+				t.Fatalf("pending checkpoint result/source = %#v / %#v", result, source)
+			}
+		})
+	}
+}
+
+func TestUnavailableCheckpointIsVisibleWithoutBlockingHydration(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity:         exactIdentity(),
+		MemoryCheckpoint: &client.SelfMemoryCheckpoint{Unavailable: true},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Attempted || !result.Injected || source.recallCalls != 0 ||
+		!strings.Contains(result.Context, `"unavailable":true`) ||
+		strings.Contains(result.Context, foregroundCheckpointPolicy) {
+		t.Fatalf("unavailable checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestPendingCheckpointFitsMinimumHydrationBudget(t *testing.T) {
+	dueAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	leaseExpiresAt := dueAt.Add(5 * time.Minute)
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(),
+		MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+			Pending: true, RequestID: "mcrq_abcdefghijklmnop", RequestGeneration: 42,
+			DueAt: &dueAt, RunID: "mrun_abcdefghijklmnop", RunState: "open",
+			FencingGeneration: 9, LeaseExpiresAt: &leaseExpiresAt,
+		},
+	}}
+	result, err := Execute(context.Background(), Config{MaximumBytes: 1024}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || len(result.Context) > 1024 ||
+		!strings.Contains(result.Context, "mcrq_abcdefghijklmnop") ||
+		!strings.Contains(result.Context, "mrun_abcdefghijklmnop") ||
+		!strings.Contains(result.Context, advisoryBoundary) {
+		t.Fatalf("minimum-budget checkpoint = %#v", result)
+	}
+}
+
+func TestRecallFailureStillInjectsPendingCheckpoint(t *testing.T) {
+	source := &hydrationSourceStub{
+		self: client.SelfDigest{
+			Identity: exactIdentity(),
+			MemoryCheckpoint: &client.SelfMemoryCheckpoint{
+				Pending: true, RequestID: "mcrq_recall_outage", RequestGeneration: 3,
+			},
+		},
+		recallErr: errors.New("recall unavailable"),
+	}
+	result, err := Execute(context.Background(), Config{MaximumBytes: 1024}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeClaudeCode, Event: EventUserPromptSubmit,
+		Prompt: "Can we resume our prior database decision?",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || source.selfCalls != 1 || source.recallCalls != 1 ||
+		!strings.Contains(result.Context, "mcrq_recall_outage") ||
+		!strings.Contains(result.Context, `"retrieval_mode":"unavailable"`) ||
+		!strings.Contains(result.Context, `"recall_status":"degraded"`) ||
+		!strings.Contains(result.Context, `"recall_reason":"recall_unavailable"`) ||
+		!strings.Contains(result.Reason, "degradation notice") {
+		t.Fatalf("recall-outage checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestRecallFailureWithoutCheckpointInjectsDegradationNotice(t *testing.T) {
+	source := &hydrationSourceStub{
+		self:      client.SelfDigest{Identity: exactIdentity()},
+		recallErr: errors.New("recall unavailable"),
+	}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit,
+		Prompt: "What did we decide about the database?",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || source.recallCalls != 1 ||
+		!strings.Contains(result.Context, `"recall_status":"degraded"`) ||
+		!strings.Contains(result.Context, `"recall_reason":"recall_unavailable"`) ||
+		strings.Contains(result.Context, `"memory_checkpoint"`) {
+		t.Fatalf("recall-outage notice result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestUnsupportedRuntimeHooksDoNotReadTheNetwork(t *testing.T) {
 	for _, request := range []Request{
-		{Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser"},
 		{Runtime: transcriptcapture.RuntimeCursor, Event: EventSessionStart},
 		{Runtime: transcriptcapture.RuntimeCursor, Event: EventUserPromptSubmit, Prompt: "resume our plan"},
 		{Runtime: transcriptcapture.RuntimeGrokBuild, Event: EventSessionStart},
+		{Runtime: transcriptcapture.RuntimeGrokBuild, Event: EventUserPromptSubmit, Prompt: "resume our plan"},
 	} {
 		source := &hydrationSourceStub{}
 		result, err := Execute(context.Background(), Config{}, exactBinding(), request, source)
@@ -242,5 +436,12 @@ func TestHookOutputConformance(t *testing.T) {
 	}
 	if _, err := HookOutput(transcriptcapture.RuntimeGrokBuild, EventSessionStart, "context"); err == nil {
 		t.Fatal("Grok passive output unexpectedly supported")
+	}
+	if _, err := HookOutput(transcriptcapture.RuntimeGrokBuild, EventUserPromptSubmit, "context"); err == nil {
+		t.Fatal("Grok passive prompt output unexpectedly supported")
+	}
+	if _, err := HookOutput(transcriptcapture.RuntimeClaudeCode, EventUserPromptSubmit,
+		strings.Repeat("x", maximumClaudeHookOutputCharacters+1)); err == nil {
+		t.Fatal("oversized Claude additional context unexpectedly accepted")
 	}
 }

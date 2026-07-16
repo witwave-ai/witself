@@ -1030,14 +1030,20 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 		name, runtime, event, body string
 		wantCalls                  int
 		wantOutput                 string
+		pendingCheckpoint          bool
 	}{
 		{name: "Codex session", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
 		{name: "Codex prompt", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior database decision", wantCalls: 2, wantOutput: "hookSpecificOutput"},
+		{name: "Codex ordinary idle", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1},
+		{name: "Codex ordinary checkpoint", runtime: transcriptcapture.RuntimeCodex, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingCheckpoint: true},
 		{name: "Claude session", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventSessionStart, wantCalls: 1, wantOutput: "hookSpecificOutput"},
 		{name: "Claude prompt", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "pick up where we left off", wantCalls: 2, wantOutput: "hookSpecificOutput"},
+		{name: "Claude ordinary idle", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1},
+		{name: "Claude ordinary checkpoint", runtime: transcriptcapture.RuntimeClaudeCode, event: memoryhydration.EventUserPromptSubmit, body: "write a parser", wantCalls: 1, wantOutput: "hookSpecificOutput", pendingCheckpoint: true},
 		{name: "Cursor session fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventSessionStart},
 		{name: "Cursor prompt fallback", runtime: transcriptcapture.RuntimeCursor, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior plan"},
 		{name: "Grok session fallback", runtime: transcriptcapture.RuntimeGrokBuild, event: memoryhydration.EventSessionStart},
+		{name: "Grok prompt fallback", runtime: transcriptcapture.RuntimeGrokBuild, event: memoryhydration.EventUserPromptSubmit, body: "resume our prior plan"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1054,19 +1060,29 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/v1/self":
-					_ = json.NewEncoder(w).Encode(client.SelfDigest{
+					if r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "true" ||
+						r.URL.Query().Get("include_sensitive") != "true" {
+						t.Errorf("unsafe automatic hydration query: %s", r.URL.RawQuery)
+					}
+					digest := client.SelfDigest{
 						SchemaVersion:   "witself.v0",
 						Identity:        client.SelfIdentity{AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default", AgentID: "agt_1", AgentName: "atlas"},
 						PrimaryFacts:    []client.SelfFact{{ID: "fact_1", Name: "database", Value: "Postgres", Primary: true}},
 						SalientMemories: []client.SelfMemory{{ID: "mem_self", Kind: "decision", Snippet: "Use portable narrative memory", Salience: .8}},
 						Index:           client.SelfIndex{Kinds: []string{"decision"}, Tags: []string{}, Counts: map[string]int{"facts": 1, "memories": 1}},
-					})
+					}
+					if test.pendingCheckpoint {
+						digest.MemoryCheckpoint = &client.SelfMemoryCheckpoint{
+							Pending: true, RequestID: "mcrq_hook", RequestGeneration: 3,
+						}
+					}
+					_ = json.NewEncoder(w).Encode(digest)
 				case "/v1/memories:recall":
 					var input client.MemoryRecallInput
 					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 						t.Errorf("decode recall: %v", err)
 					}
-					if input.IncludeSensitive || input.Query == "" || input.Limit != memoryhydration.DefaultRecallLimit {
+					if !input.IncludeSensitive || input.Query == "" || input.Limit != memoryhydration.DefaultRecallLimit {
 						t.Errorf("unsafe recall input = %#v", input)
 					}
 					_ = json.NewEncoder(w).Encode(client.MemoryRecallPage{
@@ -1120,6 +1136,10 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 				!strings.Contains(string(output), "WITSELF_AUTOMATIC_CONTEXT_V1") ||
 				strings.Contains(string(output), "hydration-token-canary") {
 				t.Fatalf("hook output = %s", output)
+			}
+			if test.pendingCheckpoint && (!strings.Contains(string(output), "mcrq_hook") ||
+				!strings.Contains(string(output), "empty actions plan")) {
+				t.Fatalf("hook checkpoint output = %s", output)
 			}
 		})
 	}
@@ -1185,48 +1205,7 @@ func TestTranscriptHookHydrationFailsOpenOnIdentityMismatch(t *testing.T) {
 	}
 }
 
-func TestAutomaticCurationWakeIsOptInAndBindingScoped(t *testing.T) {
-	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
-	binding := transcriptcapture.Config{
-		Runtime:   transcriptcapture.RuntimeClaudeCode,
-		AccountID: "acc_1", RealmID: "rlm_1", AgentID: "agt_1",
-	}
-	store, err := memorycurator.DefaultAutoStore(binding.AgentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || recorded {
-		t.Fatalf("unconfigured wake = %v / %v", recorded, err)
-	}
-	if _, err := store.Enable(memorycurator.AutoSettings{
-		AccountID: binding.AccountID, RealmID: binding.RealmID, AgentID: binding.AgentID,
-		Provider: memorycurator.ProviderClaudeCode, ProviderPath: filepath.Join(t.TempDir(), "claude"),
-		ApplyPolicy: memorycurator.ApplyPolicyPreview, AllowTranscriptContent: true,
-		Debounce: time.Second, MinimumInterval: 0, MaxRuns: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || !recorded {
-		t.Fatalf("configured wake = %v / %v", recorded, err)
-	}
-	markers, err := store.PendingWakes()
-	if err != nil || len(markers) != 1 || markers[0].Reason != "terminal_flush" {
-		t.Fatalf("markers = %#v / %v", markers, err)
-	}
-	mismatched := binding
-	mismatched.RealmID = "rlm_other"
-	if _, err := recordAutomaticCurationWake(mismatched, memorycurator.AutoWakeTerminalFlush); err == nil || !strings.Contains(err.Error(), "does not match") {
-		t.Fatalf("mismatched binding error = %v", err)
-	}
-	if err := store.Disable(); err != nil {
-		t.Fatal(err)
-	}
-	if recorded, err := recordAutomaticCurationWake(binding, memorycurator.AutoWakeTerminalFlush); err != nil || recorded {
-		t.Fatalf("disabled wake = %v / %v", recorded, err)
-	}
-}
-
-func TestBackgroundAutomaticCuratorLaunchExposesNoCredential(t *testing.T) {
+func TestLegacyAutomaticCuratorContinuationExposesNoCredential(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".witself")
 	t.Setenv("WITSELF_HOME", home)
 	binding := transcriptcapture.Config{
@@ -1246,7 +1225,7 @@ func TestBackgroundAutomaticCuratorLaunchExposesNoCredential(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordWake(memorycurator.AutoWakeTerminalFlush); err != nil {
+	if _, err := store.RecordWake(memorycurator.AutoWakeScheduledPoll); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(t.TempDir(), "auto-args.log")

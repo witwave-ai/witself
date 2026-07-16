@@ -117,6 +117,23 @@ func TestMemoryPostgresRoundTrip(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("active count = %d / %v", count, err)
 	}
+	excluded, err := st.ListMemories(ctx, p, MemoryListOptions{
+		State: MemoryStateActive, ExcludeSensitive: true,
+	})
+	if err != nil || len(excluded.Memories) != 0 {
+		t.Fatalf("sensitive-excluded inventory = %#v / %v", excluded.Memories, err)
+	}
+	excludedCount, err := st.CountMemories(ctx, p, MemoryListOptions{
+		State: MemoryStateActive, ExcludeSensitive: true,
+	})
+	if err != nil || excludedCount != 0 {
+		t.Fatalf("sensitive-excluded count = %d / %v", excludedCount, err)
+	}
+	if _, err := st.ListMemories(ctx, p, MemoryListOptions{
+		IncludeSensitive: true, ExcludeSensitive: true,
+	}); !errors.Is(err, ErrMemoryInputInvalid) {
+		t.Fatalf("contradictory sensitive list options error = %v", err)
+	}
 
 	adjustedContent := "PostgreSQL is the sole live authority; indexes are derived."
 	adjusted, err := st.AdjustMemory(ctx, p, created.Memory.ID, AdjustMemoryInput{

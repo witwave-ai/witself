@@ -181,3 +181,20 @@ func TestMemoryAdapterErrorsAndSnippet(t *testing.T) {
 		t.Fatalf("snippet rune bound failed: runes=%d suffix=%q", len([]rune(snippet)), snippet[len(snippet)-3:])
 	}
 }
+
+func TestSelfMemoryAdapterOmitsNonPlainContent(t *testing.T) {
+	plain := toServerSelfMemory(store.Memory{
+		ID: "mem_plain", Content: "private preference", ContentEncoding: "plain",
+		Kind: "profile", Sensitive: true,
+	})
+	if plain.Snippet != "private preference" || plain.Redacted || plain.ContentEncoding != "plain" || !plain.Sensitive {
+		t.Fatalf("plain self memory = %#v", plain)
+	}
+
+	nonPlain := toServerSelfMemory(store.Memory{
+		ID: "mem_base64", Content: "c2VjcmV0", ContentEncoding: "base64", Kind: "profile",
+	})
+	if nonPlain.Snippet != "" || !nonPlain.Redacted || nonPlain.ContentEncoding != "base64" {
+		t.Fatalf("non-plain self memory = %#v", nonPlain)
+	}
+}

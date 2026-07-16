@@ -83,9 +83,10 @@ vectors and their profiles must round-trip.
 ### Additional Summarization And Consolidation Policies
 
 Client-side curation, including plan actions for merge/split/supersede/relate,
-post-flush wakes, and persistent per-user scheduling, is implemented. Learned or
-server-owned summarization, autonomous decay, and policy families beyond the
-current bounded client-authored plan remain post-v0.
+foreground pending-checkpoint handling, and explicit legacy/manual per-user
+scheduling, is implemented. Runtime hooks do not launch inference or curators.
+Learned or server-owned summarization, autonomous decay, and policy families
+beyond the current bounded client-authored plan remain post-v0.
 
 Consolidation is an integrity-sensitive write path: it edits or forgets memories
 the agent did not explicitly touch. It needs a written threat-model update for

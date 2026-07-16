@@ -141,7 +141,7 @@ witself memory vector set mem_... --profile mvp_... --memory-version 1 \
 witself memory recall "PostgreSQL decision" --vector-profile mvp_... \
   --query-vector-file query-vector.json
 
-# Optional client-side post-flush curation (preview is the default).
+# Explicit legacy/manual client curator (preview is the default).
 witself memory curate auto enable --runtime claude-code \
   --provider claude-code --allow-transcript-content
 witself memory curate auto status --runtime claude-code
@@ -160,24 +160,25 @@ curation workflow and require an exactly matching restricted credential.
 
 Client-run curation requests, leased/fenced snapshots, strict plans, apply, and
 rollback are implemented. Source commits durably mark work due, and an active
-compatible client can claim it opportunistically. `witself memory curate run`
-can drive an explicit planner executable or a fail-closed native provider CLI.
-The opt-in `witself memory curate auto` worker adds value-free terminal-flush
-wakes, debounce/single-flight state, preview-by-default policy, and a detached
-client-side supervisor with bounded persisted-backoff retry/drain. Its trusted
-parent retains the installed full agent
-credential; no bearer token is placed in the inference child's argv, environment,
-or model input. MCP and the backend still cannot wake or schedule an AI, and
-the optional per-user `auto service` lifecycle packages restart-safe launchd
-(macOS) and systemd timer/service (Linux) polling. Those private service
-definitions contain only the executable, runtime, and value-free state root;
-provider/model policy and credentials remain in mode-0600 local state.
-Installed Codex and Claude hooks automatically hydrate session identity and
-focused history-dependent recall; Cursor and Grok use the explicitly reported
-managed-instruction/MCP fallback because their current hook contracts do not
-provide a reliable model-visible context channel. All runtimes retain bounded
-checkpoints and the provider-neutral
-curation recipe. See the
+compatible foreground client can claim it opportunistically. Installed Codex
+and Claude hooks inject an authenticated, value-free `memory_checkpoint` when
+work is already pending at the hook's `/v1/self` read, including on an otherwise
+ordinary prompt. The active model is instructed to process at most one fenced
+request near the end of that foreground turn and to apply an empty actions plan
+when nothing merits memory so the reviewed cursors still advance. Cursor and
+Grok hooks cannot reliably deliver model-visible control, so their always-on
+managed rules use `self.show` as an explicitly guided fallback. Hook injection
+is automatic delivery, not a guarantee that a model follows the rule.
+
+The checkpoint is a point-in-time view: the current prompt may still be flushing,
+and the current assistant response cannot yet be part of it, so current-turn
+evidence can be curated on a later interaction. Runtime transcript hooks only
+enqueue and flush evidence; they never launch inference or a curator. The
+explicit `witself memory curate run` remains a planner/native-provider driver.
+The older `memory curate auto` and per-user `auto service` surfaces remain explicit
+legacy/manual compatibility tooling for deployments that deliberately configure
+a separate client process; they are not invoked by runtime hooks. MCP and the
+backend cannot wake or schedule an AI. See the
 [canonical design and delivery plan](docs/narrative-memory-and-curation.md).
 
 ## Agent Messaging

@@ -340,27 +340,30 @@ func serve() int {
 			}
 			return out, nil
 		}
-		cfg.GetSelfFacts = func(ctx context.Context, p server.DomainPrincipal, limit int) ([]server.SelfFact, int, error) {
+		cfg.GetSelfFacts = func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount bool) ([]server.SelfFact, int, error) {
 			principal := toStorePrincipal(p)
-			opts := store.FactListOptions{
-				Subject:       "self",
-				Limit:         limit,
-				OrderByUsage:  true,
-				RetrievalMode: store.FactRetrievalModeSelfHydration,
-			}
+			opts := selfHydrationFactListOptions(limit)
 			facts, err := st.ListFacts(ctx, principal, opts)
 			if err != nil {
 				return nil, 0, mapFactError(err)
 			}
-			total, err := st.CountFacts(ctx, principal, opts)
-			if err != nil {
-				return nil, 0, mapFactError(err)
+			total := len(facts)
+			if includeCount {
+				total, err = st.CountFacts(ctx, principal, opts)
+				if err != nil {
+					return nil, 0, mapFactError(err)
+				}
+			} else if len(facts) == limit {
+				// Without an inventory count, conservatively signal that a full
+				// bounded page may have more records. The hook avoids a COUNT query
+				// without ever presenting a possibly incomplete digest as complete.
+				total++
 			}
 			out := make([]server.SelfFact, len(facts))
 			for i, f := range facts {
 				var value any
 				_ = json.Unmarshal(f.Value, &value)
-				out[i] = server.SelfFact{ID: f.ID, Name: f.Predicate, Value: value, Primary: true, Sensitive: f.Sensitive, Redacted: f.Sensitive, Source: f.SourceKind}
+				out[i] = server.SelfFact{ID: f.ID, Name: f.Predicate, Value: value, Primary: true, Sensitive: f.Sensitive, Source: f.SourceKind}
 			}
 			return out, total, nil
 		}
@@ -1331,6 +1334,16 @@ func validateFactDeletionFeature(enabled bool, schemaVersion int) error {
 		)
 	}
 	return nil
+}
+
+func selfHydrationFactListOptions(limit int) store.FactListOptions {
+	return store.FactListOptions{
+		Subject:          "self",
+		Limit:            limit,
+		IncludeSensitive: true,
+		OrderByUsage:     true,
+		RetrievalMode:    store.FactRetrievalModeSelfHydration,
+	}
 }
 
 func configureFactMutations(cfg *server.Config, st *store.Store, deletionEnabled bool) {

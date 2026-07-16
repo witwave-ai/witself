@@ -57,7 +57,7 @@ func (s *Store) ListCurationRequests(
 	if opts.Limit < 1 || opts.Limit > maxMemoryCurationPageSize {
 		return MemoryCurationRequestPage{}, ErrMemoryCurationInputInvalid
 	}
-	asOf := time.Now().UTC()
+	var asOf time.Time
 	restricted := isRestrictedMemoryCurator(p)
 	var afterDue, afterCreated time.Time
 	var afterPriority int
@@ -68,6 +68,8 @@ func (s *Store) ListCurationRequests(
 			return MemoryCurationRequestPage{}, err
 		}
 		asOf, afterPriority, afterDue, afterCreated, afterID = cursor.AsOf, cursor.Priority, cursor.DueAt, cursor.CreatedAt, cursor.RequestID
+	} else if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+		return MemoryCurationRequestPage{}, fmt.Errorf("read memory curation queue clock: %w", err)
 	}
 
 	query := memoryCurationRequestSelectSQL + `

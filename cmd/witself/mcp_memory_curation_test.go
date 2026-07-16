@@ -218,6 +218,166 @@ func TestMCPMemoryCurationWorkflowMapsProviderNeutralInputs(t *testing.T) {
 	}
 }
 
+func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeCurationMCPBackend{}
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	clientSession, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planTool *mcp.Tool
+	for _, tool := range tools.Tools {
+		if tool.Name == "witself.memory.curation.plan" {
+			planTool = tool
+			break
+		}
+	}
+	if planTool == nil {
+		t.Fatal("MCP omitted witself.memory.curation.plan")
+	}
+	const emptyPlan = `draft={"schema":"witself.memory-plan.v1","draft_revision":1,"actions":[]}`
+	if !strings.Contains(planTool.Description, emptyPlan) {
+		t.Fatalf("plan description omitted exact empty plan %s: %q", emptyPlan, planTool.Description)
+	}
+	for _, want := range []string{"Never place credentials", "private keys", "TOTP seeds", "sensitive=true is not a sealed-secret substitute", "Use an empty plan"} {
+		if !strings.Contains(planTool.Description, want) {
+			t.Errorf("plan description omitted secret-boundary rule %q: %q", want, planTool.Description)
+		}
+	}
+
+	rawSchema, err := json.Marshal(planTool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(rawSchema, &root); err != nil {
+		t.Fatalf("decode plan input schema: %v", err)
+	}
+	draft := requireMCPObjectProperty(t, root, root, "draft")
+	for _, field := range []string{"schema", "draft_revision", "actions"} {
+		requireMCPObjectProperty(t, root, draft, field)
+	}
+	action := requireMCPArrayItem(t, root, requireMCPObjectProperty(t, root, draft, "actions"))
+	for _, field := range []string{"ordinal", "operation", "create", "replace", "supersede", "relate", "propose_fact"} {
+		requireMCPObjectProperty(t, root, action, field)
+	}
+	create := requireMCPObjectProperty(t, root, action, "create")
+	snapshot := requireMCPObjectProperty(t, root, create, "snapshot")
+	for _, field := range []string{"content", "evidence"} {
+		requireMCPObjectProperty(t, root, snapshot, field)
+	}
+	replace := requireMCPObjectProperty(t, root, action, "replace")
+	for _, field := range []string{"target", "snapshot"} {
+		requireMCPObjectProperty(t, root, replace, field)
+	}
+	supersede := requireMCPObjectProperty(t, root, action, "supersede")
+	for _, field := range []string{"target", "replacements"} {
+		requireMCPObjectProperty(t, root, supersede, field)
+	}
+	relate := requireMCPObjectProperty(t, root, action, "relate")
+	for _, field := range []string{"relation_type", "from", "to"} {
+		requireMCPObjectProperty(t, root, relate, field)
+	}
+	proposal := requireMCPObjectProperty(t, root, action, "propose_fact")
+	for _, field := range []string{"predicate", "value", "evidence"} {
+		requireMCPObjectProperty(t, root, proposal, field)
+	}
+	evidence := requireMCPArrayItem(t, root, requireMCPObjectProperty(t, root, proposal, "evidence"))
+	for _, field := range []string{"input_evidence_id", "source_transcript_id", "source_memory"} {
+		requireMCPObjectProperty(t, root, evidence, field)
+	}
+
+	callCurationTool(ctx, t, clientSession, "witself.memory.curation.plan", map[string]any{
+		"run_id": "mrun_1", "fencing_generation": 4, "idempotency_key": "complete-plan-key",
+		"draft": map[string]any{
+			"schema": "witself.memory-plan.v1", "draft_revision": 1,
+			"actions": []map[string]any{
+				{
+					"ordinal": 1, "operation": "create",
+					"create": map[string]any{"local_ref": "new_decision", "snapshot": map[string]any{
+						"content": "Use PostgreSQL", "kind": "decision",
+						"evidence": []map[string]any{{
+							"type": "transcript", "resolution_state": "resolved",
+							"source_transcript_id": "trn_1", "source_sequence_from": 2, "source_sequence_until": 4,
+						}},
+					}},
+				},
+				{
+					"ordinal": 2, "operation": "replace",
+					"replace": map[string]any{
+						"target":   map[string]any{"memory_id": "mem_old", "expected_version": 2},
+						"snapshot": map[string]any{"content": "Use PostgreSQL for portable memory"},
+					},
+				},
+				{
+					"ordinal": 3, "operation": "supersede",
+					"supersede": map[string]any{
+						"target":       map[string]any{"memory_id": "mem_split", "expected_version": 1},
+						"replacements": []map[string]any{{"local_ref": "new_decision", "version": 1}},
+					},
+				},
+				{
+					"ordinal": 4, "operation": "relate",
+					"relate": map[string]any{
+						"relation_type": "derived_from",
+						"from":          map[string]any{"local_ref": "new_decision", "version": 1},
+						"to":            map[string]any{"memory_id": "mem_old", "version": 2},
+					},
+				},
+				{
+					"ordinal": 5, "operation": "propose_fact",
+					"propose_fact": map[string]any{
+						"subject": "self", "predicate": "preferences/database", "value": "postgresql",
+						"evidence": []map[string]any{{
+							"type": "transcript", "resolution_state": "resolved",
+							"source_transcript_id": "trn_1", "source_sequence_from": 2, "source_sequence_until": 4,
+						}},
+					},
+				},
+			},
+		},
+	})
+	var mapped struct {
+		Actions []struct {
+			Operation   string `json:"operation"`
+			ProposeFact *struct {
+				Evidence []struct {
+					SourceTranscriptID string `json:"source_transcript_id"`
+				} `json:"evidence"`
+			} `json:"propose_fact,omitempty"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(backend.plan.Draft, &mapped); err != nil {
+		t.Fatalf("decode mapped plan: %v", err)
+	}
+	wantOperations := []string{"create", "replace", "supersede", "relate", "propose_fact"}
+	if len(mapped.Actions) != len(wantOperations) {
+		t.Fatalf("mapped actions = %#v", mapped.Actions)
+	}
+	for i, want := range wantOperations {
+		if mapped.Actions[i].Operation != want {
+			t.Errorf("mapped action %d = %q, want %q", i+1, mapped.Actions[i].Operation, want)
+		}
+	}
+	if mapped.Actions[4].ProposeFact == nil || len(mapped.Actions[4].ProposeFact.Evidence) != 1 ||
+		mapped.Actions[4].ProposeFact.Evidence[0].SourceTranscriptID != "trn_1" {
+		t.Fatalf("mapped fact proposal evidence = %#v", mapped.Actions[4].ProposeFact)
+	}
+}
+
 func TestMCPCuratorProfilesAdvertiseOnlyEffectiveWorkflow(t *testing.T) {
 	base := []string{
 		"witself.memory.curation.preflight",
@@ -296,6 +456,85 @@ func TestMCPCuratorProfilesAdvertiseOnlyEffectiveWorkflow(t *testing.T) {
 			}
 		})
 	}
+}
+
+func requireMCPObjectProperty(t *testing.T, root, schema map[string]any, field string) map[string]any {
+	t.Helper()
+	schema = resolveMCPObjectSchema(t, root, schema)
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema containing %q has no object properties: %#v", field, schema)
+	}
+	property, ok := properties[field].(map[string]any)
+	if !ok {
+		t.Fatalf("schema omitted property %q: %#v", field, schema)
+	}
+	return resolveMCPObjectSchema(t, root, property)
+}
+
+func requireMCPArrayItem(t *testing.T, root, schema map[string]any) map[string]any {
+	t.Helper()
+	schema = resolveMCPObjectSchema(t, root, schema)
+	item, ok := schema["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema has no discoverable array item: %#v", schema)
+	}
+	return resolveMCPObjectSchema(t, root, item)
+}
+
+func resolveMCPObjectSchema(t *testing.T, root, schema map[string]any) map[string]any {
+	t.Helper()
+	for depth := 0; depth < 32; depth++ {
+		if ref, ok := schema["$ref"].(string); ok {
+			const prefix = "#/"
+			if !strings.HasPrefix(ref, prefix) {
+				t.Fatalf("unsupported plan schema reference %q", ref)
+			}
+			var current any = root
+			for _, segment := range strings.Split(strings.TrimPrefix(ref, prefix), "/") {
+				segment = strings.ReplaceAll(strings.ReplaceAll(segment, "~1", "/"), "~0", "~")
+				object, ok := current.(map[string]any)
+				if !ok {
+					t.Fatalf("plan schema reference %q traversed a non-object", ref)
+				}
+				current, ok = object[segment]
+				if !ok {
+					t.Fatalf("plan schema reference %q omitted segment %q", ref, segment)
+				}
+			}
+			resolved, ok := current.(map[string]any)
+			if !ok {
+				t.Fatalf("plan schema reference %q did not resolve to an object", ref)
+			}
+			schema = resolved
+			continue
+		}
+		resolvedUnion := false
+		for _, keyword := range []string{"anyOf", "oneOf", "allOf"} {
+			alternatives, ok := schema[keyword].([]any)
+			if !ok {
+				continue
+			}
+			for _, alternative := range alternatives {
+				candidate, ok := alternative.(map[string]any)
+				if !ok || candidate["type"] == "null" {
+					continue
+				}
+				schema = candidate
+				resolvedUnion = true
+				break
+			}
+			if resolvedUnion {
+				break
+			}
+		}
+		if resolvedUnion {
+			continue
+		}
+		return schema
+	}
+	t.Fatal("plan schema reference depth exceeded")
+	return nil
 }
 
 func callCurationTool(ctx context.Context, t *testing.T, session *mcp.ClientSession, name string, args map[string]any) {

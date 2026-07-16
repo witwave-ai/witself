@@ -30,9 +30,10 @@ plane.
   plan. It controls wherever an older draft still describes server inference
   or native-only narrative memory.
 - [client-memory-curator-recipe.md](client-memory-curator-recipe.md): the
-  provider-neutral, client-inference workflow for claiming due work, paging a
-  frozen snapshot, planning, previewing, applying, retrying, rolling back, and
-  optionally launching from a value-free terminal-flush wake.
+  provider-neutral, client-inference workflow for foreground pending-checkpoint
+  handling, claiming due work, paging a frozen snapshot, planning, applying an
+  empty or non-empty reversible plan, retrying, rolling back, and operating the
+  explicit legacy/manual launcher when deliberately configured.
 - [facts-model.md](facts-model.md): planned fact capabilities and the transition
   from the original name/value identity-card draft.
 - [fact-service.md](fact-service.md): the implemented subject/predicate core,
@@ -51,8 +52,9 @@ plane.
 - [secret-size-and-attachments.md](secret-size-and-attachments.md): secret field
   size limits and attachment handling for the sealed plane.
 - [context-hydration.md](context-hydration.md): the always-loaded self-digest,
-  the agent teaching layer, the two-way CLAUDE.md/AGENTS.md file bridge, and the
-  session bootstrap protocol.
+  bounded meaningful-keyword `OR` recall, fail-open additive checkpoint state,
+  explicit degraded-recall markers, the agent teaching layer, the two-way
+  CLAUDE.md/AGENTS.md file bridge, and the session bootstrap protocol.
 - [access-policy.md](access-policy.md): the default-deny cross-agent policy
   engine, permission verbs, guardrails, and `policy test` evaluation.
 - [authorization-and-roles.md](authorization-and-roles.md): the role/scope model,

@@ -64,7 +64,12 @@ func TestMemoryCurationDueQueuePriorityAndAgeOrderPostgres(t *testing.T) {
 
 	want := []string{ids["priority-oldest"], ids["priority-newer"], ids["ordinary-old"]}
 	var got []string
+	var databaseBefore time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseBefore); err != nil {
+		t.Fatal(err)
+	}
 	cursor := ""
+	firstCursor := ""
 	for {
 		page, err := st.ListCurationRequests(ctx, p, MemoryCurationRequestListOptions{Limit: 1, Cursor: cursor})
 		if err != nil {
@@ -77,7 +82,19 @@ func TestMemoryCurationDueQueuePriorityAndAgeOrderPostgres(t *testing.T) {
 		if page.NextCursor == "" {
 			break
 		}
+		if firstCursor == "" {
+			firstCursor = page.NextCursor
+		}
 		cursor = page.NextCursor
+	}
+	var databaseAfter time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseAfter); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeMemoryCurationRequestCursor(firstCursor, "", false, false)
+	if err != nil || decoded.AsOf.Before(databaseBefore) || decoded.AsOf.After(databaseAfter) {
+		t.Fatalf("queue cursor database clock = %#v / %v, want between %s and %s",
+			decoded, err, databaseBefore, databaseAfter)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("queue length = %d, want %d: %v", len(got), len(want), got)

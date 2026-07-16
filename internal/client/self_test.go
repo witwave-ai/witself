@@ -8,6 +8,32 @@ import (
 	"time"
 )
 
+func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
+	dueAt := time.Date(2026, 7, 15, 21, 2, 3, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/self" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("include_facts") != "false" || r.URL.Query().Get("include_salient") != "false" ||
+			r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "false" ||
+			r.URL.Query().Get("include_sensitive") != "false" {
+			t.Fatalf("self query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"memory_checkpoint":{"pending":true,"request_id":"mcrq_1","request_generation":5,"due_at":"2026-07-15T21:02:03Z"},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemoryCheckpoint == nil || !got.MemoryCheckpoint.Pending ||
+		got.MemoryCheckpoint.RequestID != "mcrq_1" || got.MemoryCheckpoint.RequestGeneration != 5 ||
+		got.MemoryCheckpoint.DueAt == nil || !got.MemoryCheckpoint.DueAt.Equal(dueAt) {
+		t.Fatalf("memory checkpoint = %#v", got.MemoryCheckpoint)
+	}
+}
+
 func TestGetSelfPeersUsesTokenDerivedEndpointAndDecodesActivity(t *testing.T) {
 	lastActive := time.Date(2026, 7, 15, 21, 2, 3, 0, time.UTC)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

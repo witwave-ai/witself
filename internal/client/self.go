@@ -33,14 +33,15 @@ type SelfFact struct {
 
 // SelfMemory is the bounded salient-memory shape carried by a self digest.
 type SelfMemory struct {
-	ID        string   `json:"id"`
-	Snippet   string   `json:"snippet"`
-	Kind      string   `json:"kind"`
-	Tags      []string `json:"tags,omitempty"`
-	Salience  float64  `json:"salience"`
-	Sensitive bool     `json:"sensitive,omitempty"`
-	Redacted  bool     `json:"redacted,omitempty"`
-	Source    string   `json:"source,omitempty"`
+	ID              string   `json:"id"`
+	Snippet         string   `json:"snippet"`
+	ContentEncoding string   `json:"content_encoding,omitempty"`
+	Kind            string   `json:"kind"`
+	Tags            []string `json:"tags,omitempty"`
+	Salience        float64  `json:"salience"`
+	Sensitive       bool     `json:"sensitive,omitempty"`
+	Redacted        bool     `json:"redacted,omitempty"`
+	Source          string   `json:"source,omitempty"`
 }
 
 // SelfIndex summarizes discoverable open-plane identity state.
@@ -50,23 +51,49 @@ type SelfIndex struct {
 	Counts map[string]int `json:"counts"`
 }
 
+// SelfMemoryCheckpoint is value-free lifecycle metadata for pending
+// client-side narrative-memory curation. Its presence never includes memory,
+// transcript, or fact content; the active client must use the fenced curation
+// tools to inspect any authorized inputs.
+type SelfMemoryCheckpoint struct {
+	Pending           bool       `json:"pending"`
+	Unavailable       bool       `json:"unavailable,omitempty"`
+	RequestID         string     `json:"request_id"`
+	RequestGeneration int64      `json:"request_generation"`
+	DueAt             *time.Time `json:"due_at,omitempty"`
+	RunID             string     `json:"run_id,omitempty"`
+	RunState          string     `json:"run_state,omitempty"`
+	FencingGeneration int64      `json:"fencing_generation,omitempty"`
+	LeaseExpiresAt    *time.Time `json:"lease_expires_at,omitempty"`
+}
+
 // SelfDigest is the bounded response from GET /v1/self.
 type SelfDigest struct {
-	SchemaVersion   string       `json:"schema_version"`
-	Identity        SelfIdentity `json:"identity"`
-	PrimaryFacts    []SelfFact   `json:"primary_facts"`
-	SalientMemories []SelfMemory `json:"salient_memories"`
-	Index           SelfIndex    `json:"index"`
-	Elided          bool         `json:"elided"`
+	SchemaVersion    string                `json:"schema_version"`
+	Identity         SelfIdentity          `json:"identity"`
+	PrimaryFacts     []SelfFact            `json:"primary_facts"`
+	SalientMemories  []SelfMemory          `json:"salient_memories"`
+	MemoryCheckpoint *SelfMemoryCheckpoint `json:"memory_checkpoint,omitempty"`
+	Index            SelfIndex             `json:"index"`
+	Elided           bool                  `json:"elided"`
 }
 
 // SelfOptions controls bounded digest sections. The identity block is always
 // returned and always comes from the authenticated agent token.
 type SelfOptions struct {
-	IncludeFacts    bool
-	IncludeSalient  bool
-	SalientLimit    int
-	MaximumByteSize int
+	IncludeFacts   bool
+	IncludeSalient bool
+	// IncludeCounts requests inventory totals in the self index. Identity and
+	// checkpoint-only callers should leave this false to avoid count queries.
+	IncludeCounts bool
+	// IncludeCheckpoint requests value-free narrative-curation lifecycle state.
+	// Identity-only callers should leave this false to avoid queue queries.
+	IncludeCheckpoint bool
+	// IncludeSensitive intentionally includes authorized private fact and memory
+	// values. Sealed secrets are a separate service and are never in this digest.
+	IncludeSensitive bool
+	SalientLimit     int
+	MaximumByteSize  int
 }
 
 // PeerAgent is one other principal in the authenticated agent's realm.
@@ -94,6 +121,9 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params := neturl.Values{}
 	params.Set("include_facts", strconv.FormatBool(opts.IncludeFacts))
 	params.Set("include_salient", strconv.FormatBool(opts.IncludeSalient))
+	params.Set("include_counts", strconv.FormatBool(opts.IncludeCounts))
+	params.Set("include_checkpoint", strconv.FormatBool(opts.IncludeCheckpoint))
+	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
 	if opts.SalientLimit > 0 {
 		params.Set("salient_limit", strconv.Itoa(opts.SalientLimit))
 	}

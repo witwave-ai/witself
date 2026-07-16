@@ -280,14 +280,22 @@ request/run/plan/apply/rollback protocol. It does not mean the server can launch
 an AI runtime. `automatic_capture` and `scheduled_curation` remain explicitly
 unsupported with reason `not_implemented`; clients must not infer either from
 basic memory or curation support. Those flags describe the backend, not the
-optional client-owned `memory curate auto` process that can react to a terminal
-transcript flush or user-owned scheduler. `memory_recall` includes the
+foreground integration: PostgreSQL stores due work, Codex and Claude can inject
+an already-durable pending checkpoint into model-visible hook context, and
+Cursor/Grok use guided `self.show`. Runtime hooks never launch inference or a
+curator. The optional client-owned `memory curate auto` process is retained only
+as explicit legacy/manual or user-scheduled compatibility tooling.
+`memory_recall` includes the
 deterministic lexical/structured baseline. `memory_vector_profiles`,
 `client_vector_recall`, and `semantic_recall` report the optional implemented
 migration-0032 vector/hybrid surface independently; there is no hidden backend
 embedding provider or fallback call. The `self_digest` flag
 (`GET /v1/self`) is independent and uses deterministic salience/recency
-hydration.
+hydration plus an authenticated, value-free `memory_checkpoint`. That field is
+a point-in-time request/run/fence pointer, not source content or inference
+authority. Its projection is additive and fails open: if checkpoint state cannot
+be read, `/v1/self` still returns identity, facts, and salient memories with
+`memory_checkpoint.unavailable: true`.
 
 The `cross_realm_collaboration`, `federation`, and `agent_card` flags report
 whether this backend speaks the cross-realm collaboration substrate: whether it
@@ -518,11 +526,11 @@ Initial route groups:
 | `/healthz` | Alias probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
-| `/v1/self` | Always-loaded self-digest: primary facts, salient memories, and a kinds/tags/counts index; `?format=` renders an emit fragment. |
+| `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, a value-free pending/idle/unavailable memory checkpoint, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
 | `/v1/self/peers` | Agent-token-scoped list of every other live agent in the same realm with optional last-observed activity; no caller-controlled realm or agent selector and no availability inference. |
 | `/v1/self/activity` | Agent-token-scoped runtime-hook ingestion for the latest-only activity projection; identity and public observation time are server-derived. |
 | `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
-| `/v1/sessions` | Multi-session bootstrap: hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
+| `/v1/sessions` | Target, not implemented: multi-session bootstrap would hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
 | `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
 | `/v1/bootstrap` | One-time self-hosted first-operator bootstrap. |
 | `/v1/account` | Customer account and human operator/admin management. |
@@ -682,8 +690,8 @@ POST /v1/memory-curation-runs/{run_id}/abandon
 POST /v1/memory-curation-runs/{run_id}/rollback
 GET  /v1/memory-curation-status
 POST /v1/facts/{fact_id}:primary
-POST /v1/sessions:start
-POST /v1/sessions:end
+POST /v1/sessions:start # target; not implemented
+POST /v1/sessions:end   # target; not implemented
 POST /v1/policies:test
 POST /v1/messages:listen
 POST /v1/messages/{message_id}:reply
@@ -744,10 +752,12 @@ Notes on specific actions and workflows:
   decisions require an exact caller-authored curation plan; direct one-to-many
   supersede uses the caller-authored route above. The backend may not choose any
   of those semantic changes autonomously.
-- `:start` and `:end` are the multi-session bootstrap pair. `:start` hydrates
-  identity, open goals, and last progress in one round-trip and mutates no state;
-  `:end` persists a progress memory (kind `session`) and updates open goals, so
-  it is `POST` with a body and is audited as `session.started` / `session.ended`.
+- Target `:start` and `:end` routes would form the multi-session bootstrap pair;
+  neither is implemented. `:start` would hydrate identity, open goals, and last
+  progress in one round-trip without mutating state. `:end` would persist a
+  progress memory (kind `session`) and update open goals, so it remains designed
+  as `POST` with a body and would be audited as `session.started` /
+  `session.ended`.
 - `:forget` is the default destructive path: a reversible versioned lifecycle
   state. `:restore` reverses it, and `:reactivate` explicitly restores a
   reverted or otherwise invalidly-restorable head. Permanent deletion is the
@@ -767,14 +777,16 @@ Notes on specific actions and workflows:
   a review candidate and never sets a canonical fact. The server normalizes and
   hashes the plan but performs no synthesis. `apply` binds the fence, accepted
   revision, and SHA-256 plan hash and either commits the complete plan plus
-  contiguous cursors or makes no semantic change. `cancel` terminates work;
+  contiguous cursors or makes no semantic change. A zero-action plan is valid:
+  applying it advances the exact reviewed cursor intervals without creating a
+  memory or fact. `cancel` terminates work;
   `abandon` requeues retryable work. `rollback` requires the original apply
   receipt and the complete exact set of apply-produced current heads, refuses
   live downstream dependencies, performs append-only compensation, never
   rewinds cursors, and creates read-only replay work. Status reads are
   value-free. Every curation response uses `Cache-Control: private, no-store`.
-  There is no server-side scheduler or inference launcher; clients claim this
-  work opportunistically.
+  There is no server-side scheduler or inference launcher; an active foreground
+  client normally claims and processes at most one pending request per turn.
 - Curator credentials are immutable, expiring token profiles rather than an MCP
   display filter. `curator-preview` admits only list/get/start/inputs/renew/
   plan/abandon/status; `curator-apply` adds only apply. Both are rejected by
