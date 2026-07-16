@@ -133,6 +133,22 @@ func (s *Store) ApplyCuration(
 	if err := authorizeMemoryCurationRunID(ctx, tx, p, runID); err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
+	// Check the immutable stored plan before either the idempotent replay or
+	// fresh mutation path. In particular, a restricted apply attempt must not
+	// reconcile an expired run or replay a full credential's sensitive apply.
+	if isRestrictedMemoryCurator(p) {
+		profileRun, err := loadMemoryCurationRun(ctx, tx, p, runID, false)
+		if err != nil {
+			return ApplyMemoryCurationResult{}, err
+		}
+		profilePlan, err := loadMemoryCurationStoredPlan(ctx, tx, p, profileRun)
+		if err != nil {
+			return ApplyMemoryCurationResult{}, err
+		}
+		if err := authorizeMemoryCurationPlanProfile(p, profilePlan.Acceptance.Plan); err != nil {
+			return ApplyMemoryCurationResult{}, err
+		}
+	}
 	if mutation, replayed, err := loadMemoryCurationMutation(
 		ctx, tx, p, "apply", in.IdempotencyKey, requestHash,
 	); err != nil || replayed {
@@ -210,6 +226,9 @@ func (s *Store) ApplyCuration(
 	if stored.Acceptance.Plan.PlanRevision != in.PlanRevision ||
 		stored.Acceptance.PlanHash != in.PlanHash {
 		return ApplyMemoryCurationResult{}, ErrMemoryCurationConflict
+	}
+	if err := authorizeMemoryCurationPlanProfile(p, stored.Acceptance.Plan); err != nil {
+		return ApplyMemoryCurationResult{}, err
 	}
 
 	// This lock is deliberately acquired before all memory heads, matching

@@ -13,7 +13,7 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 )
 
-const memoryCurateUsage = "usage: witself memory curate request|requests|run|auto|start|renew|show|plan|apply|cancel|abandon|rollback|status ..."
+const memoryCurateUsage = "usage: witself memory curate request|requests|run|auto|start|renew|show|plan|plan-get|apply|cancel|abandon|rollback|status ..."
 
 func memoryCurate(args []string) int {
 	if len(args) == 0 {
@@ -37,6 +37,8 @@ func memoryCurate(args []string) int {
 		return memoryCurateShow(args[1:])
 	case "plan":
 		return memoryCuratePlan(args[1:])
+	case "plan-get", "accepted-plan":
+		return memoryCuratePlanGet(args[1:])
 	case "apply":
 		return memoryCurateApply(args[1:])
 	case "cancel", "abandon":
@@ -358,6 +360,51 @@ func memoryCuratePlan(args []string) int {
 		result.Run.ID, result.Receipt.PlanRevision, result.Receipt.PlanHash,
 		result.Preview.ActionCount, result.Preview.NewMemories,
 		result.Preview.MemoryVersionWrites, result.Receipt.Replayed)
+	for _, allocated := range result.PreallocatedMemoryIDs {
+		fmt.Printf("allocated\tlocal-ref=%s\tmemory=%s\n", allocated.LocalRef, allocated.MemoryID)
+	}
+	return 0
+}
+
+func memoryCuratePlanGet(args []string) int {
+	runID, args := memoryLeadingID(args)
+	fs := flag.NewFlagSet("memory curate plan-get", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	fence := fs.Int64("fence", 0, "current fencing generation")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if runID == "" && fs.NArg() == 1 {
+		runID = strings.TrimSpace(fs.Arg(0))
+	} else if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself memory curate plan-get RUN_ID --fence N")
+		return 2
+	}
+	if runID == "" || *fence < 1 {
+		fmt.Fprintln(os.Stderr, "usage: witself memory curate plan-get RUN_ID --fence N")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	result, err := client.GetMemoryCurationPlan(ctx, conn.Endpoint, conn.Token, runID, *fence)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: get accepted memory curation plan: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(result)
+	}
+	fmt.Printf("accepted-plan\trun=%s\tfence=%d\trevision=%d\thash=%s\tactions=%d\tcreates=%d\twrites=%d\n",
+		result.Run.ID, result.Run.FencingGeneration, result.Run.PlanRevision,
+		result.Run.PlanHash, result.Preview.ActionCount, result.Preview.NewMemories,
+		result.Preview.MemoryVersionWrites)
+	fmt.Println(string(result.Plan))
 	for _, allocated := range result.PreallocatedMemoryIDs {
 		fmt.Printf("allocated\tlocal-ref=%s\tmemory=%s\n", allocated.LocalRef, allocated.MemoryID)
 	}

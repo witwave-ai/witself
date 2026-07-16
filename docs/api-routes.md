@@ -7,7 +7,7 @@ operations.
 Narrative-memory amendment (accepted 2026-07-14): direct capture, history,
 lexical and optional client-vector hybrid recall, atomic supersede, lifecycle,
 evidence resolution, permanent deletion, migration-0032 vector profiles/rows,
-and the 14-route client-curation protocol (including authenticated effective
+and the 15-endpoint client-curation protocol (including authenticated effective
 preflight) are implemented below. The
 curation routes manage a deterministic queue, fenced snapshots, exact
 client-authored plans, transactional apply, and guarded compensation; they do
@@ -226,6 +226,7 @@ GET  /v1/memory-curation-runs/{run_id}
 GET  /v1/memory-curation-runs/{run_id}/inputs
 POST /v1/memory-curation-runs/{run_id}/renew
 POST /v1/memory-curation-runs/{run_id}/plan
+GET  /v1/memory-curation-runs/{run_id}/plan # ?fencing_generation=N; verified accepted-plan review
 POST /v1/memory-curation-runs/{run_id}/apply
 POST /v1/memory-curation-runs/{run_id}/cancel
 POST /v1/memory-curation-runs/{run_id}/abandon
@@ -470,7 +471,8 @@ audit events; read-only recall does neither:
   caller-authored plan submitted through the implemented curation run; direct
   one-to-many supersede already uses the exact caller-authored route above. See
   [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
-- The 14 curation routes are deliberately resource/action slash routes because
+- The 15 curation endpoints, including preflight, are deliberately
+  resource/action slash routes because
   they operate on durable queue requests and fenced run resources. Request
   creation coalesces equivalent open work. Request listing uses stable,
   filter-bound cursor pagination; an empty state filter lists claimable due
@@ -492,7 +494,7 @@ audit events; read-only recall does neither:
   name is mandatory, and its TTL must be greater than zero and no more than
   24 hours. Existing and ordinary tokens have profile `full`. Curator profiles
   fail closed on every ordinary domain route. Preview may list/get/start/page/
-  renew/plan/abandon/status curation; apply adds only apply. Neither profile may
+  renew/plan/get-plan/abandon/status curation; apply adds only apply. Neither profile may
   create/cancel/rollback work, include sensitive inputs, write facts/messages/
   direct memories, or permanently delete anything. The credential response is
   `private, no-store`, and normal token revocation applies.

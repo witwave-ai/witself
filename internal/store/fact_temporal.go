@@ -56,6 +56,16 @@ type projectedFactOccurrence struct {
 // An assertion may explicitly opt a date into annual recurrence; February 29
 // occurrences are skipped in non-leap years rather than moved to another date.
 func (s *Store) UpcomingFacts(ctx context.Context, p Principal, opts UpcomingFactOptions) ([]FactOccurrence, error) {
+	return s.upcomingFacts(ctx, p, opts, true)
+}
+
+// UpcomingFactsObservational returns the same temporal projection without
+// writing retrieval usage.
+func (s *Store) UpcomingFactsObservational(ctx context.Context, p Principal, opts UpcomingFactOptions) ([]FactOccurrence, error) {
+	return s.upcomingFacts(ctx, p, opts, false)
+}
+
+func (s *Store) upcomingFacts(ctx context.Context, p Principal, opts UpcomingFactOptions, recordUsage bool) ([]FactOccurrence, error) {
 	if p.Kind != PrincipalAgent {
 		return nil, ErrFactForbidden
 	}
@@ -128,7 +138,9 @@ func (s *Store) UpcomingFacts(ctx context.Context, p Principal, opts UpcomingFac
 			facts = append(facts, fact)
 		}
 	}
-	_ = s.recordFactRetrievals(ctx, p, FactRetrievalModeTemporal, facts)
+	if recordUsage {
+		_ = s.recordFactRetrievals(ctx, p, FactRetrievalModeTemporal, facts)
+	}
 	return out, nil
 }
 

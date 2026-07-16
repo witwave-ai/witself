@@ -131,6 +131,93 @@ func (b *fakeMemoryMCPBackend) DeleteMemory(_ context.Context, in client.DeleteM
 	return receipt, nil
 }
 
+func TestWitselfMCPMemoryAndSelfToolAnnotations(t *testing.T) {
+	ctx := context.Background()
+	server := newWitselfMCPServer(newFakeMemoryVectorMCPBackend())
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	clientSession, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	page, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := make(map[string]*mcp.Tool, len(page.Tools))
+	for _, tool := range page.Tools {
+		tools[tool.Name] = tool
+	}
+	assertClosedWorld := func(name string, wantReadOnly, wantDestructive, wantIdempotent bool) {
+		t.Helper()
+		tool := tools[name]
+		if tool == nil {
+			t.Fatalf("missing tool %s", name)
+		}
+		annotations := tool.Annotations
+		if annotations == nil {
+			t.Fatalf("%s annotations are nil", name)
+		}
+		if annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
+			t.Errorf("%s openWorldHint = %v, want explicit false", name, annotations.OpenWorldHint)
+		}
+		if annotations.ReadOnlyHint != wantReadOnly {
+			t.Errorf("%s readOnlyHint = %v, want %v", name, annotations.ReadOnlyHint, wantReadOnly)
+		}
+		if wantReadOnly {
+			if annotations.DestructiveHint == nil || *annotations.DestructiveHint {
+				t.Errorf("%s destructiveHint = %v, want explicit false", name, annotations.DestructiveHint)
+			}
+			if !annotations.IdempotentHint {
+				t.Errorf("%s idempotentHint = false, want explicit true", name)
+			}
+			return
+		}
+		if annotations.DestructiveHint == nil || *annotations.DestructiveHint != wantDestructive {
+			t.Errorf("%s destructiveHint = %v, want explicit %v", name, annotations.DestructiveHint, wantDestructive)
+		}
+		if annotations.IdempotentHint != wantIdempotent {
+			t.Errorf("%s idempotentHint = %v, want %v", name, annotations.IdempotentHint, wantIdempotent)
+		}
+	}
+
+	for _, name := range []string{
+		"witself.self.show",
+		"witself.agent.peers",
+		"witself.memory.vector.profile.list",
+		"witself.memory.read",
+		"witself.memory.list",
+		"witself.memory.recall",
+		"witself.memory.history",
+	} {
+		assertClosedWorld(name, true, false, true)
+	}
+	for _, name := range []string{
+		"witself.memory.vector.profile.create",
+		"witself.memory.vector.set",
+		"witself.memory.capture",
+		"witself.memory.evidence.resolve",
+	} {
+		assertClosedWorld(name, false, false, true)
+	}
+	for _, name := range []string{
+		"witself.memory.adjust",
+		"witself.memory.supersede",
+		"witself.memory.forget",
+		"witself.memory.restore",
+		"witself.memory.reactivate",
+		"witself.memory.delete",
+	} {
+		assertClosedWorld(name, false, true, true)
+	}
+}
+
 func TestWitselfMCPMemoryToolsPreserveGuardsAndEvidence(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeMemoryMCPBackend()
@@ -459,7 +546,7 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 			found[tool.Name] = tool.Description
 		}
 	}
-	if len(found) != 26 {
+	if len(found) != 27 {
 		t.Fatalf("memory tools = %#v", found)
 	}
 	for _, name := range []string{"witself.memory.read", "witself.memory.list", "witself.memory.recall", "witself.memory.history"} {
@@ -485,7 +572,8 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 		"witself.memory.curation.request.get", "witself.memory.curation.request",
 		"witself.memory.curation.start", "witself.memory.curation.run.get",
 		"witself.memory.curation.renew", "witself.memory.curation.get",
-		"witself.memory.curation.plan", "witself.memory.curation.apply",
+		"witself.memory.curation.plan", "witself.memory.curation.plan.get",
+		"witself.memory.curation.apply",
 		"witself.memory.curation.cancel", "witself.memory.curation.abandon",
 		"witself.memory.curation.rollback",
 		"witself.memory.curation.status",
@@ -496,6 +584,7 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 	}
 	if !strings.Contains(found["witself.memory.curation.get"], "untrusted") ||
 		!strings.Contains(found["witself.memory.curation.plan"], "no synthesis") ||
+		!strings.Contains(found["witself.memory.curation.plan.get"], "Review every action") ||
 		!strings.Contains(found["witself.memory.curation.apply"], "no model inference") ||
 		!strings.Contains(found["witself.memory.curation.rollback"], "never cascaded") {
 		t.Errorf("curation descriptions do not preserve trust/inference/rollback boundaries")

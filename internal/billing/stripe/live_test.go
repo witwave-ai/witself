@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
 )
@@ -47,7 +49,12 @@ func TestStripeLive(t *testing.T) {
 	// A throwaway customer. Cleanup lists by email rather than holding the
 	// one id, so a failure between create and return cannot leak — and any
 	// litter from prior failed runs gets swept too.
-	const email = "live-test@witself.example"
+	// Isolate every invocation. Reusing one account id eventually exhausts the
+	// deterministic idempotency generations because cleanup deliberately
+	// deletes each prior customer while Stripe retains its response for 24h.
+	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	accountID := "acct_live_test_" + suffix
+	email := "live-test+" + suffix + "@witself.example"
 	t.Cleanup(func() {
 		cctx := context.Background()
 		var list struct {
@@ -64,7 +71,7 @@ func TestStripeLive(t *testing.T) {
 			_ = p.call(cctx, "DELETE", "/v1/customers/"+c.ID, nil, "", nil)
 		}
 	})
-	custID, err := p.EnsureCustomer(ctx, "acct_live_test", email)
+	custID, err := p.EnsureCustomer(ctx, accountID, email)
 	if err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
@@ -74,7 +81,7 @@ func TestStripeLive(t *testing.T) {
 
 	// Idempotency: same account id -> same customer (Stripe replays the
 	// original response for the same Idempotency-Key).
-	again, err := p.EnsureCustomer(ctx, "acct_live_test", email)
+	again, err := p.EnsureCustomer(ctx, accountID, email)
 	if err != nil || again != custID {
 		t.Fatalf("EnsureCustomer retry = %q, %v; want %q", again, err, custID)
 	}

@@ -340,6 +340,17 @@ func factAddressHasUnrecreatedTombstone(ctx context.Context, q factQuerier, p Pr
 
 // GetFact resolves an exact subject/predicate pair and records delivery usage.
 func (s *Store) GetFact(ctx context.Context, p Principal, subject, predicate string) (Fact, error) {
+	return s.getFact(ctx, p, subject, predicate, true)
+}
+
+// GetFactObservational resolves an exact subject/predicate pair without
+// writing retrieval usage. It is intended for transports that advertise a
+// strictly read-only operation; ordinary reads should use GetFact.
+func (s *Store) GetFactObservational(ctx context.Context, p Principal, subject, predicate string) (Fact, error) {
+	return s.getFact(ctx, p, subject, predicate, false)
+}
+
+func (s *Store) getFact(ctx context.Context, p Principal, subject, predicate string, recordUsage bool) (Fact, error) {
 	if p.Kind != PrincipalAgent {
 		return Fact{}, ErrFactForbidden
 	}
@@ -351,19 +362,31 @@ func (s *Store) GetFact(ctx context.Context, p Principal, subject, predicate str
 	if err != nil {
 		return Fact{}, err
 	}
-	// Usage is a companion projection: a failed meter must not turn a valid
-	// fact read into an unavailable fact service.
-	_ = s.recordFactRetrievals(ctx, p, FactRetrievalModeExact, []Fact{out})
+	if recordUsage {
+		// Usage is a companion projection: a failed meter must not turn a valid
+		// fact read into an unavailable fact service.
+		_ = s.recordFactRetrievals(ctx, p, FactRetrievalModeExact, []Fact{out})
+	}
 	return out, nil
 }
 
 // ListFacts returns a stable inventory. Sensitive values are JSON null unless
 // the caller explicitly requests them; exact GetFact remains an authorized read.
 func (s *Store) ListFacts(ctx context.Context, p Principal, opts FactListOptions) ([]Fact, error) {
+	return s.listFacts(ctx, p, opts, true)
+}
+
+// ListFactsObservational returns the same deterministic inventory as
+// ListFacts without writing retrieval usage.
+func (s *Store) ListFactsObservational(ctx context.Context, p Principal, opts FactListOptions) ([]Fact, error) {
+	return s.listFacts(ctx, p, opts, false)
+}
+
+func (s *Store) listFacts(ctx context.Context, p Principal, opts FactListOptions, recordUsage bool) ([]Fact, error) {
 	if p.Kind != PrincipalAgent {
 		return nil, ErrFactForbidden
 	}
-	return s.listFactsWithUsage(ctx, p, opts)
+	return s.listFactsWithUsage(ctx, p, opts, recordUsage)
 }
 
 // FactHistory returns source assertions newest first without changing usage.

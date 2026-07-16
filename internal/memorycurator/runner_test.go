@@ -16,6 +16,7 @@ import (
 )
 
 var emptyPlan = json.RawMessage(`{"schema":"witself.memory-plan.v1","draft_revision":1,"actions":[]}`)
+var emptyAcceptedPlan = json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`)
 
 type plannerFunc func(context.Context, PlannerEnvelope) (json.RawMessage, error)
 
@@ -43,15 +44,18 @@ type fakeCurationAPI struct {
 	applyErr         error
 	abandonErr       error
 	getRunErr        error
+	getPlanErr       error
 	statusErr        error
 	applyBeforeError bool
 	planBeforeError  bool
 	renewed          chan struct{}
 	renewedOnce      sync.Once
+	renewSignalAfter int
 	listCalls        int
 	lastList         client.MemoryCurationRequestListOptions
 	startCalls       int
 	inputCalls       int
+	getPlanCalls     int
 	renewCalls       int
 	planCalls        int
 	applyCalls       int
@@ -62,6 +66,9 @@ type fakeCurationAPI struct {
 	lastPlan         client.PlanMemoryCurationInput
 	lastApply        client.ApplyMemoryCurationInput
 	lastAbandon      client.FinishMemoryCurationInput
+	acceptedPlan     json.RawMessage
+	getPlanOverride  json.RawMessage
+	callOrder        []string
 }
 
 func newFakeCurationAPI() *fakeCurationAPI {
@@ -75,9 +82,10 @@ func newFakeCurationAPI() *fakeCurationAPI {
 		FencingGeneration: 1, State: "open", LeaseExpiresAt: &expires,
 	}
 	return &fakeCurationAPI{
-		request: request,
-		run:     run,
-		pages:   map[string]inputPage{"": {}},
+		request:      request,
+		run:          run,
+		pages:        map[string]inputPage{"": {}},
+		acceptedPlan: append(json.RawMessage(nil), emptyAcceptedPlan...),
 	}
 }
 
@@ -110,12 +118,34 @@ func (f *fakeCurationAPI) GetInputs(_ context.Context, _ string, _ int64, cursor
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inputCalls++
+	f.callOrder = append(f.callOrder, "inputs")
 	page, ok := f.pages[cursor]
 	if !ok {
 		return nil, fmt.Errorf("unexpected cursor %q", cursor)
 	}
 	inputs := append([]client.MemoryCurationRunInput(nil), page.inputs...)
 	return &client.MemoryCurationRunInputPage{Run: f.run, Inputs: inputs, NextCursor: page.next}, nil
+}
+
+func (f *fakeCurationAPI) GetPlan(_ context.Context, runID string, fence int64) (*client.GetMemoryCurationPlanResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getPlanCalls++
+	f.callOrder = append(f.callOrder, "get-plan")
+	if f.getPlanErr != nil {
+		return nil, f.getPlanErr
+	}
+	if runID != f.run.ID || fence != f.run.FencingGeneration {
+		return nil, errors.New("unexpected plan review coordinates")
+	}
+	plan := f.acceptedPlan
+	if f.getPlanOverride != nil {
+		plan = f.getPlanOverride
+	}
+	return &client.GetMemoryCurationPlanResult{
+		Run:  f.run,
+		Plan: append(json.RawMessage(nil), plan...),
+	}, nil
 }
 
 func (f *fakeCurationAPI) Renew(_ context.Context, in client.RenewMemoryCurationInput) (*client.RenewMemoryCurationResult, error) {
@@ -127,7 +157,7 @@ func (f *fakeCurationAPI) Renew(_ context.Context, in client.RenewMemoryCuration
 	}
 	expires := time.Now().UTC().Add(in.Extension)
 	f.run.LeaseExpiresAt = &expires
-	if f.renewed != nil {
+	if f.renewed != nil && (f.renewSignalAfter == 0 || f.renewCalls >= f.renewSignalAfter) {
 		f.renewedOnce.Do(func() { close(f.renewed) })
 	}
 	return &client.RenewMemoryCurationResult{Run: f.run}, nil
@@ -137,20 +167,36 @@ func (f *fakeCurationAPI) Plan(_ context.Context, in client.PlanMemoryCurationIn
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.planCalls++
+	f.callOrder = append(f.callOrder, "plan")
 	f.lastPlan = in
 	if f.planErr != nil && !f.planBeforeError {
 		return nil, f.planErr
 	}
 	hash := strings.Repeat("a", 64)
 	f.run.State = "planned"
+	f.run.PlanSchema = MemoryPlanSchemaV1
 	f.run.PlanRevision = 1
 	f.run.PlanHash = hash
+	var draft struct {
+		Schema  string          `json:"schema"`
+		Actions json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(in.Draft, &draft); err != nil {
+		return nil, err
+	}
+	f.acceptedPlan, _ = json.Marshal(struct {
+		Schema       string          `json:"schema"`
+		PlanRevision int64           `json:"plan_revision"`
+		Actions      json.RawMessage `json:"actions"`
+	}{Schema: draft.Schema, PlanRevision: 1, Actions: draft.Actions})
 	result := &client.PlanMemoryCurationResult{
 		Run:  f.run,
-		Plan: append(json.RawMessage(nil), in.Draft...),
+		Plan: append(json.RawMessage(nil), f.acceptedPlan...),
 		Receipt: client.MemoryCurationPlanReceipt{
-			ID: "mplan_test", RunID: f.run.ID, FencingGeneration: f.run.FencingGeneration,
-			PlanRevision: 1, PlanHash: hash,
+			ID: "mplan_test", Operation: "plan", RequestID: f.run.RequestID,
+			RunID: f.run.ID, RequestGeneration: f.run.RequestGeneration,
+			FencingGeneration: f.run.FencingGeneration, PlanSchema: MemoryPlanSchemaV1,
+			PlanRevision: 1, PlanHash: hash, ResultState: "planned",
 		},
 	}
 	if f.planErr != nil {
@@ -163,6 +209,7 @@ func (f *fakeCurationAPI) Apply(_ context.Context, in client.ApplyMemoryCuration
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.applyCalls++
+	f.callOrder = append(f.callOrder, "apply")
 	f.lastApply = in
 	if f.applyErr != nil && !f.applyBeforeError {
 		return nil, f.applyErr
@@ -372,6 +419,7 @@ func TestRunnerPreviewPagesAllInputsAndRequeues(t *testing.T) {
 
 func TestRunnerAppliesOnlyWithExplicitApproval(t *testing.T) {
 	api := newFakeCurationAPI()
+	api.getPlanOverride = json.RawMessage(`{"actions":[],"plan_revision":1,"schema":"witself.memory-plan.v1"}`)
 	state := newMemoryStateStore()
 	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
 		return emptyPlan, nil
@@ -381,8 +429,11 @@ func TestRunnerAppliesOnlyWithExplicitApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if result.Apply == nil || result.Abandon != nil || api.applyCalls != 1 || api.abandonCalls != 0 {
+	if result.Apply == nil || result.Abandon != nil || api.getPlanCalls != 1 || api.applyCalls != 1 || api.abandonCalls != 0 {
 		t.Fatalf("unexpected apply result: %#v calls apply=%d abandon=%d", result, api.applyCalls, api.abandonCalls)
+	}
+	if got := strings.Join(api.callOrder, ","); got != "inputs,plan,get-plan,apply" {
+		t.Fatalf("apply call order = %q", got)
 	}
 	if api.lastApply.PlanRevision != 1 || api.lastApply.PlanHash != strings.Repeat("a", 64) {
 		t.Fatalf("apply did not use accepted plan coordinates: %#v", api.lastApply)
@@ -398,11 +449,23 @@ func TestRunnerAppliesOnlyWithExplicitApproval(t *testing.T) {
 	}
 }
 
+func TestRunnerNeverAppliesWhenAcceptedPlanReviewDiffers(t *testing.T) {
+	api := newFakeCurationAPI()
+	api.getPlanOverride = json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[{"ordinal":1,"operation":"relate","relate":{}}]}`)
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		return emptyPlan, nil
+	}), newMemoryStateStore())
+
+	result, err := runner.Run(context.Background(), Options{ApplyPolicy: ApplyPolicyApply, ApproveApply: true})
+	if !errors.Is(err, ErrProtocolResponse) || result.Abandon == nil || api.getPlanCalls != 1 || api.applyCalls != 0 || api.abandonCalls != 1 {
+		t.Fatalf("mismatched review result=%#v err=%v get-plan=%d apply=%d abandon=%d", result, err, api.getPlanCalls, api.applyCalls, api.abandonCalls)
+	}
+}
+
 func TestRunnerRenewsLeaseWhilePlannerRuns(t *testing.T) {
 	api := newFakeCurationAPI()
-	expires := time.Now().UTC().Add(1200 * time.Millisecond)
-	api.run.LeaseExpiresAt = &expires
 	api.renewed = make(chan struct{})
+	api.renewSignalAfter = 2 // the first renewal precedes input paging
 	runner := testRunner(api, plannerFunc(func(ctx context.Context, _ PlannerEnvelope) (json.RawMessage, error) {
 		select {
 		case <-api.renewed:
@@ -413,13 +476,40 @@ func TestRunnerRenewsLeaseWhilePlannerRuns(t *testing.T) {
 	}), newMemoryStateStore())
 
 	result, err := runner.Run(context.Background(), Options{
-		LeaseDuration: 3 * time.Second, RenewBefore: time.Second, PlannerTimeout: 2 * time.Second,
+		LeaseDuration: 2 * time.Second, RenewBefore: time.Second, PlannerTimeout: 3 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if result.Abandon == nil || api.renewCalls < 1 {
 		t.Fatalf("lease was not renewed: result=%#v renew calls=%d", result, api.renewCalls)
+	}
+}
+
+func TestRunnerLeaseRenewalIgnoresClientWallClockSkew(t *testing.T) {
+	api := newFakeCurationAPI()
+	state := newMemoryStateStore()
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		return emptyPlan, nil
+	}), state)
+	runner.Now = func() time.Time { return time.Now().UTC().Add(48 * time.Hour) }
+
+	result, err := runner.Run(context.Background(), Options{})
+	if err != nil || result.Abandon == nil || api.renewCalls < 1 {
+		t.Fatalf("skewed client clock affected backend-authoritative renewal: result=%#v err=%v renew=%d", result, err, api.renewCalls)
+	}
+}
+
+func TestRunnerRejectsEmptyInputPageWithAdvancingCursor(t *testing.T) {
+	api := newFakeCurationAPI()
+	api.pages = map[string]inputPage{"": {next: "unbounded-empty-page"}}
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		return emptyPlan, nil
+	}), newMemoryStateStore())
+
+	result, err := runner.Run(context.Background(), Options{})
+	if !errors.Is(err, ErrProtocolResponse) || result.Abandon == nil || api.inputCalls != 1 || api.planCalls != 0 {
+		t.Fatalf("empty cursor page result=%#v err=%v inputs=%d plan=%d", result, err, api.inputCalls, api.planCalls)
 	}
 }
 
@@ -502,6 +592,78 @@ func TestRunnerRecoversAcceptedPlanWithoutReplanning(t *testing.T) {
 	}
 	if !result.Recovered || result.Abandon == nil || plannerCalls.Load() != 0 || api.planCalls != 0 || api.abandonCalls != 1 {
 		t.Fatalf("unexpected recovery: %#v planner=%d plan=%d abandon=%d", result, plannerCalls.Load(), api.planCalls, api.abandonCalls)
+	}
+}
+
+func TestRunnerResumedPlannedApplyPagesInputsReviewsAndNeverReplans(t *testing.T) {
+	api := newFakeCurationAPI()
+	api.run.State = "planned"
+	api.run.PlanSchema = MemoryPlanSchemaV1
+	api.run.PlanRevision = 1
+	api.run.PlanHash = strings.Repeat("a", 64)
+	api.run.InputCount = 2
+	api.pages = map[string]inputPage{
+		"": {
+			inputs: []client.MemoryCurationRunInput{{RunID: api.run.ID, Ordinal: 1, Kind: "cursor"}},
+			next:   "page-2",
+		},
+		"page-2": {
+			inputs: []client.MemoryCurationRunInput{{RunID: api.run.ID, Ordinal: 2, Kind: "cursor"}},
+		},
+	}
+	state := newMemoryStateStore()
+	launch := validLaunchState(PhasePlanned)
+	launch.ApplyPolicy = ApplyPolicyApply
+	launch.InputCount = 2
+	launch.PlanRevision = 1
+	launch.PlanHash = api.run.PlanHash
+	launch.PlanReceiptID = "mplan_same_launch"
+	if err := state.Save(launch); err != nil {
+		t.Fatal(err)
+	}
+	var plannerCalls atomic.Int32
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		plannerCalls.Add(1)
+		return emptyPlan, nil
+	}), state)
+
+	result, err := runner.Resume(context.Background(), launch.LaunchID, Options{ApproveApply: true})
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if result.Apply == nil || result.InputCount != 2 || plannerCalls.Load() != 0 || api.planCalls != 0 ||
+		api.inputCalls != 2 || api.getPlanCalls != 1 || api.applyCalls != 1 {
+		t.Fatalf("resumed apply=%#v planner=%d plan=%d inputs=%d get-plan=%d apply=%d",
+			result, plannerCalls.Load(), api.planCalls, api.inputCalls, api.getPlanCalls, api.applyCalls)
+	}
+	if got := strings.Join(api.callOrder, ","); got != "inputs,inputs,get-plan,apply" {
+		t.Fatalf("resumed apply call order = %q", got)
+	}
+}
+
+func TestRunnerNeverAppliesForeignPlannedRunWithoutSameLaunchReceipt(t *testing.T) {
+	api := newFakeCurationAPI()
+	api.run.State = "planned"
+	api.run.PlanSchema = MemoryPlanSchemaV1
+	api.run.PlanRevision = 1
+	api.run.PlanHash = strings.Repeat("b", 64)
+	state := newMemoryStateStore()
+	launch := validLaunchState(PhasePlanning)
+	launch.ApplyPolicy = ApplyPolicyApply
+	if err := state.Save(launch); err != nil {
+		t.Fatal(err)
+	}
+	var plannerCalls atomic.Int32
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		plannerCalls.Add(1)
+		return emptyPlan, nil
+	}), state)
+
+	result, err := runner.Resume(context.Background(), launch.LaunchID, Options{ApproveApply: true})
+	if !errors.Is(err, ErrProtocolResponse) || result.Abandon == nil || plannerCalls.Load() != 0 ||
+		api.inputCalls != 0 || api.getPlanCalls != 0 || api.planCalls != 0 || api.applyCalls != 0 {
+		t.Fatalf("foreign plan result=%#v err=%v planner=%d inputs=%d get-plan=%d plan=%d apply=%d",
+			result, err, plannerCalls.Load(), api.inputCalls, api.getPlanCalls, api.planCalls, api.applyCalls)
 	}
 }
 

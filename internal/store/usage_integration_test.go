@@ -71,6 +71,26 @@ func TestUsagePostgresRoundTrip(t *testing.T) {
 	if _, err := st.AppendTranscriptEntries(ctx, p.AccountID, p.RealmID, p.ID, tr.ID, inputs); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.GetTranscriptPageObservational(ctx, p, tr.ID, TranscriptPageOptions{Limit: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetTranscriptPageObservational(ctx, p, tr.ID, TranscriptPageOptions{Limit: 1, Tail: true}); err != nil {
+		t.Fatal(err)
+	}
+	var observationalReads, observationalReadRollups int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM usage_events
+		WHERE account_id=$1 AND dimension=$2`, p.AccountID, UsageDimensionTranscriptEntryRead).Scan(&observationalReads); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM usage_rollups
+		WHERE account_id=$1 AND dimension=$2`, p.AccountID, UsageDimensionTranscriptEntryRead).Scan(&observationalReadRollups); err != nil {
+		t.Fatal(err)
+	}
+	if observationalReads != 0 || observationalReadRollups != 0 {
+		t.Fatalf("observational transcript reads wrote %d usage events / %d rollups", observationalReads, observationalReadRollups)
+	}
 	if _, err := st.GetTranscriptPage(ctx, p, tr.ID, TranscriptPageOptions{Limit: 10}); err != nil {
 		t.Fatal(err)
 	}

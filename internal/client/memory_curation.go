@@ -95,6 +95,7 @@ type MemoryCurationPreflightPermissions struct {
 	Start              bool `json:"start"`
 	GetRun             bool `json:"get_run"`
 	GetInputs          bool `json:"get_inputs"`
+	GetPlan            bool `json:"get_plan"`
 	Renew              bool `json:"renew"`
 	Plan               bool `json:"plan"`
 	Abandon            bool `json:"abandon"`
@@ -409,6 +410,15 @@ type PlanMemoryCurationResult struct {
 	Receipt               MemoryCurationPlanReceipt            `json:"receipt"`
 }
 
+// GetMemoryCurationPlanResult returns an accepted plan for review without a
+// mutation receipt. Retrieving it does not change the run or its lease.
+type GetMemoryCurationPlanResult struct {
+	Run                   MemoryCurationRun                    `json:"run"`
+	Plan                  json.RawMessage                      `json:"plan"`
+	PreallocatedMemoryIDs []MemoryCurationPreallocatedMemoryID `json:"preallocated_memory_ids,omitempty"`
+	Preview               MemoryCurationImpactPreview          `json:"preview"`
+}
+
 // MemoryCurationCursorInterval records one frozen source interval advanced by
 // a successful apply.
 type MemoryCurationCursorInterval struct {
@@ -611,6 +621,17 @@ func GetMemoryCurationRunInputs(ctx context.Context, endpoint, token, runID stri
 	}
 	if out.Inputs == nil {
 		out.Inputs = []MemoryCurationRunInput{}
+	}
+	return &out, nil
+}
+
+// GetMemoryCurationPlan retrieves the exact accepted plan for one fenced run.
+func GetMemoryCurationPlan(ctx context.Context, endpoint, token, runID string, fencingGeneration int64) (*GetMemoryCurationPlanResult, error) {
+	q := url.Values{"fencing_generation": {strconv.FormatInt(fencingGeneration, 10)}}
+	var out GetMemoryCurationPlanResult
+	requestURL := memoryCurationRunURL(endpoint, runID) + "/plan?" + q.Encode()
+	if err := doJSON(ctx, http.MethodGet, requestURL, token, nil, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

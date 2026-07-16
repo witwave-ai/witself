@@ -218,6 +218,25 @@ func serve() int {
 				NextAfterSequence: page.NextAfterSequence,
 			}, nil
 		}
+		cfg.GetTranscriptPageObservational = func(ctx context.Context, p server.DomainPrincipal, transcriptID string, opts server.TranscriptPageOptions) (server.TranscriptPage, error) {
+			page, err := st.GetTranscriptPageObservational(ctx, toStorePrincipal(p), transcriptID, store.TranscriptPageOptions{
+				AfterSequence: opts.AfterSequence,
+				Limit:         opts.Limit,
+				Tail:          opts.Tail,
+			})
+			if err != nil {
+				return server.TranscriptPage{}, mapTranscriptError(err)
+			}
+			entries := make([]server.TranscriptEntry, len(page.Entries))
+			for i, entry := range page.Entries {
+				entries[i] = toServerTranscriptEntry(entry)
+			}
+			return server.TranscriptPage{
+				Transcript:        toServerTranscript(page.Transcript),
+				Entries:           entries,
+				NextAfterSequence: page.NextAfterSequence,
+			}, nil
+		}
 		cfg.GetUsage = func(ctx context.Context, p server.DomainPrincipal, query server.UsageQuery) (server.UsageReport, error) {
 			report, err := st.GetAgentUsage(ctx, toStorePrincipal(p), store.UsageQuery{
 				Since: query.Since, Until: query.Until, Bucket: query.Bucket, Dimensions: query.Dimensions,
@@ -242,12 +261,39 @@ func serve() int {
 			}
 			return toServerFact(fact), nil
 		}
+		cfg.GetFactObservational = func(ctx context.Context, p server.DomainPrincipal, subject, predicate string) (server.Fact, error) {
+			fact, err := st.GetFactObservational(ctx, toStorePrincipal(p), subject, predicate)
+			if err != nil {
+				return server.Fact{}, mapFactError(err)
+			}
+			return toServerFact(fact), nil
+		}
 		cfg.ListFacts = func(ctx context.Context, p server.DomainPrincipal, opts server.FactListOptions) ([]server.Fact, error) {
 			retrievalMode := store.FactRetrievalModeSearch
 			if opts.RetrievalMode != "" {
 				retrievalMode = store.FactRetrievalMode(opts.RetrievalMode)
 			}
 			facts, err := st.ListFacts(ctx, toStorePrincipal(p), store.FactListOptions{
+				Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix,
+				Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive,
+				OrderByUsage: opts.OrderByUsage, UnusedOnly: opts.UnusedOnly,
+				RetrievalMode: retrievalMode,
+			})
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.Fact, len(facts))
+			for i, fact := range facts {
+				out[i] = toServerFact(fact)
+			}
+			return out, nil
+		}
+		cfg.ListFactsObservational = func(ctx context.Context, p server.DomainPrincipal, opts server.FactListOptions) ([]server.Fact, error) {
+			retrievalMode := store.FactRetrievalModeSearch
+			if opts.RetrievalMode != "" {
+				retrievalMode = store.FactRetrievalMode(opts.RetrievalMode)
+			}
+			facts, err := st.ListFactsObservational(ctx, toStorePrincipal(p), store.FactListOptions{
 				Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix,
 				Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive,
 				OrderByUsage: opts.OrderByUsage, UnusedOnly: opts.UnusedOnly,
@@ -340,10 +386,16 @@ func serve() int {
 			}
 			return out, nil
 		}
-		cfg.GetSelfFacts = func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount bool) ([]server.SelfFact, int, error) {
+		getSelfFacts := func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount, observational bool) ([]server.SelfFact, int, error) {
 			principal := toStorePrincipal(p)
 			opts := selfHydrationFactListOptions(limit)
-			facts, err := st.ListFacts(ctx, principal, opts)
+			var facts []store.Fact
+			var err error
+			if observational {
+				facts, err = st.ListFactsObservational(ctx, principal, opts)
+			} else {
+				facts, err = st.ListFacts(ctx, principal, opts)
+			}
 			if err != nil {
 				return nil, 0, mapFactError(err)
 			}
@@ -367,6 +419,12 @@ func serve() int {
 			}
 			return out, total, nil
 		}
+		cfg.GetSelfFacts = func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount bool) ([]server.SelfFact, int, error) {
+			return getSelfFacts(ctx, p, limit, includeCount, false)
+		}
+		cfg.GetSelfFactsObservational = func(ctx context.Context, p server.DomainPrincipal, limit int, includeCount bool) ([]server.SelfFact, int, error) {
+			return getSelfFacts(ctx, p, limit, includeCount, true)
+		}
 		cfg.CountSelfFacts = func(ctx context.Context, p server.DomainPrincipal) (int, error) {
 			count, err := st.CountFacts(ctx, toStorePrincipal(p), store.FactListOptions{Subject: "self"})
 			if err != nil {
@@ -384,6 +442,25 @@ func serve() int {
 				}
 			}
 			rows, err := st.UpcomingFacts(ctx, toStorePrincipal(p), store.UpcomingFactOptions{From: opts.From, Until: opts.Until, Location: loc, Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix, Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive})
+			if err != nil {
+				return nil, mapFactError(err)
+			}
+			out := make([]server.FactOccurrence, len(rows))
+			for i, row := range rows {
+				out[i] = server.FactOccurrence{Fact: toServerFact(row.Fact), OccursOn: row.OccursOn, OccursAt: row.OccursAt}
+			}
+			return out, nil
+		}
+		cfg.UpcomingFactsObservational = func(ctx context.Context, p server.DomainPrincipal, opts server.UpcomingFactOptions) ([]server.FactOccurrence, error) {
+			loc := time.UTC
+			var err error
+			if opts.Timezone != "" {
+				loc, err = time.LoadLocation(opts.Timezone)
+				if err != nil {
+					return nil, fmt.Errorf("%w: invalid timezone", server.ErrBadInput)
+				}
+			}
+			rows, err := st.UpcomingFactsObservational(ctx, toStorePrincipal(p), store.UpcomingFactOptions{From: opts.From, Until: opts.Until, Location: loc, Subject: opts.Subject, PredicatePrefix: opts.PredicatePrefix, Limit: opts.Limit, IncludeSensitive: opts.IncludeSensitive})
 			if err != nil {
 				return nil, mapFactError(err)
 			}

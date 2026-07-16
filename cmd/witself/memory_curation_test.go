@@ -83,6 +83,16 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 			plannedRun := run
 			plannedRun.State, plannedRun.PlanRevision, plannedRun.PlanHash = "planned", 1, planHash
 			_ = json.NewEncoder(w).Encode(client.PlanMemoryCurationResult{Run: plannedRun, Plan: json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`), Preview: client.MemoryCurationImpactPreview{}, Receipt: client.MemoryCurationPlanReceipt{PlanRevision: 1, PlanHash: planHash}})
+		case "GET /v1/memory-curation-runs/" + run.ID + "/plan":
+			if r.URL.Query().Get("fencing_generation") != "4" || r.Header.Get("Idempotency-Key") != "" {
+				t.Errorf("accepted plan query/headers = %s / %#v", r.URL.RawQuery, r.Header)
+			}
+			plannedRun := run
+			plannedRun.State, plannedRun.PlanRevision, plannedRun.PlanHash = "planned", 1, planHash
+			_ = json.NewEncoder(w).Encode(client.GetMemoryCurationPlanResult{
+				Run: plannedRun, Plan: json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`),
+				Preview: client.MemoryCurationImpactPreview{},
+			})
 		case "POST /v1/memory-curation-runs/" + run.ID + "/apply":
 			assertCurationKey(t, r, "apply-key")
 			body := decodeCurationCLIRequest(t, r)
@@ -131,6 +141,7 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		append([]string{"show", run.ID, "--fence", "4", "--limit", "1"}, conn...),
 		append([]string{"renew", run.ID, "--fence", "4", "--extension-seconds", "120", "--idempotency-key", "renew-key"}, conn...),
 		append([]string{"plan", run.ID, "--fence", "4", "--file", planFile, "--idempotency-key", "plan-key"}, conn...),
+		append([]string{"plan-get", run.ID, "--fence", "4"}, conn...),
 		append([]string{"apply", run.ID, "--fence", "4", "--plan-revision", "1", "--plan-hash", planHash, "--idempotency-key", "apply-key", "--yes"}, conn...),
 		append([]string{"cancel", run.ID, "--fence", "4", "--idempotency-key", "cancel-key"}, conn...),
 		append([]string{"abandon", run.ID, "--fence", "4", "--idempotency-key", "abandon-key"}, conn...),
@@ -149,6 +160,7 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		"GET /v1/memory-curation-runs/" + run.ID + "/inputs",
 		"POST /v1/memory-curation-runs/" + run.ID + "/renew",
 		"POST /v1/memory-curation-runs/" + run.ID + "/plan",
+		"GET /v1/memory-curation-runs/" + run.ID + "/plan",
 		"POST /v1/memory-curation-runs/" + run.ID + "/apply",
 		"POST /v1/memory-curation-runs/" + run.ID + "/cancel",
 		"POST /v1/memory-curation-runs/" + run.ID + "/abandon",

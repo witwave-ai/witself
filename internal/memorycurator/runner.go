@@ -225,8 +225,27 @@ func (r Runner) Resume(ctx context.Context, launchID string, options Options) (R
 		if run.PlanRevision < 1 || !planHashPattern.MatchString(run.PlanHash) {
 			return r.failAndAbandon(ctx, &state, result, fmt.Errorf("%w: recovered planned run lacks revision and hash", ErrProtocolResponse), "plan_response_invalid")
 		}
-		state.PlanRevision, state.PlanHash = run.PlanRevision, run.PlanHash
+		if state.ApplyPolicy == ApplyPolicyApply {
+			if (persistedPhase != PhasePlanned && persistedPhase != PhaseApplying) || strings.TrimSpace(state.PlanReceiptID) == "" ||
+				state.PlanRevision != run.PlanRevision || state.PlanHash != run.PlanHash {
+				return r.failAndAbandon(ctx, &state, result,
+					fmt.Errorf("%w: planned run lacks persisted same-launch acceptance coordinates", ErrProtocolResponse),
+					"plan_provenance_missing")
+			}
+			persistedInputCount := state.InputCount
+			inputs, err := r.collectInputs(ctx, &state, options, run, "planned")
+			if err != nil {
+				return r.failAndAbandon(ctx, &state, result, fmt.Errorf("page planned curation inputs: %w", err), "input_read_failed")
+			}
+			if persistedInputCount != len(inputs) {
+				return r.failAndAbandon(ctx, &state, result,
+					fmt.Errorf("%w: planned input count differs from persisted launch", ErrProtocolResponse),
+					"input_read_failed")
+			}
+			result.InputCount = len(inputs)
+		}
 		state.Phase = PhasePlanned
+		state.LeaseExpiresAt = run.LeaseExpiresAt
 		if err := r.save(&state); err != nil {
 			return result, err
 		}
@@ -292,7 +311,7 @@ func (r Runner) startAndExecute(ctx context.Context, state *LaunchState, options
 }
 
 func (r Runner) executeOpen(ctx context.Context, state *LaunchState, options Options, result Result, run *client.MemoryCurationRun) (Result, error) {
-	inputs, err := r.collectInputs(ctx, state, options, run)
+	inputs, err := r.collectInputs(ctx, state, options, run, "open")
 	if err != nil {
 		return r.failAndAbandon(ctx, state, result, fmt.Errorf("page curation inputs: %w", err), "input_read_failed")
 	}
@@ -329,8 +348,14 @@ func (r Runner) executeOpen(ctx context.Context, state *LaunchState, options Opt
 	if planned == nil || planned.Run.ID != run.ID || planned.Run.FencingGeneration != run.FencingGeneration || planned.Run.State != "planned" ||
 		planned.Receipt.ID == "" || planned.Receipt.RunID != run.ID || planned.Receipt.FencingGeneration != run.FencingGeneration ||
 		planned.Receipt.PlanRevision < 1 || !planHashPattern.MatchString(planned.Receipt.PlanHash) ||
+		planned.Receipt.Operation != "plan" || planned.Receipt.RequestID != run.RequestID ||
+		planned.Receipt.RequestGeneration != run.RequestGeneration || planned.Receipt.PlanSchema != MemoryPlanSchemaV1 ||
+		planned.Receipt.ResultState != "planned" || planned.Run.PlanSchema != MemoryPlanSchemaV1 ||
 		planned.Run.PlanRevision != planned.Receipt.PlanRevision || planned.Run.PlanHash != planned.Receipt.PlanHash {
 		return r.failAndAbandon(ctx, state, result, fmt.Errorf("%w: plan returned incomplete acceptance", ErrProtocolResponse), "plan_response_invalid")
+	}
+	if err := validateAcceptedPlanForLimit(planned.Plan, options.MaximumActions, planned.Receipt.PlanRevision); err != nil {
+		return r.failAndAbandon(ctx, state, result, err, "plan_response_invalid")
 	}
 	state.PlanRevision, state.PlanHash = planned.Receipt.PlanRevision, planned.Receipt.PlanHash
 	state.PlanReceiptID, state.Phase = planned.Receipt.ID, PhasePlanned
@@ -366,6 +391,15 @@ func (r Runner) finishPlanned(ctx context.Context, state *LaunchState, options O
 	if state.PlanRevision < 1 || !planHashPattern.MatchString(state.PlanHash) {
 		return r.failAndAbandon(ctx, state, result, fmt.Errorf("%w: planned run lacks revision and hash", ErrProtocolResponse), "plan_response_invalid")
 	}
+	reviewed, err := r.API.GetPlan(ctx, run.ID, run.FencingGeneration)
+	if err != nil {
+		return r.failAndAbandon(ctx, state, result, fmt.Errorf("review accepted curation plan: %w", err), "plan_review_failed")
+	}
+	if err := validateReviewedPlan(state, options, run, planned, reviewed); err != nil {
+		return r.failAndAbandon(ctx, state, result, err, "plan_review_invalid")
+	}
+	*run = reviewed.Run
+	state.LeaseExpiresAt = run.LeaseExpiresAt
 	state.Phase = PhaseApplying
 	if err := r.save(state); err != nil {
 		return result, err
@@ -388,8 +422,48 @@ func (r Runner) finishPlanned(ctx context.Context, state *LaunchState, options O
 	if err := r.save(state); err != nil {
 		return result, err
 	}
-	_ = planned
 	return result, nil
+}
+
+func validateReviewedPlan(
+	state *LaunchState,
+	options Options,
+	run *client.MemoryCurationRun,
+	planned *client.PlanMemoryCurationResult,
+	reviewed *client.GetMemoryCurationPlanResult,
+) error {
+	if reviewed == nil || strings.TrimSpace(state.PlanReceiptID) == "" ||
+		reviewed.Run.ID != state.RunID || reviewed.Run.ID != run.ID ||
+		reviewed.Run.RequestID != state.RequestID || reviewed.Run.RequestID != run.RequestID ||
+		reviewed.Run.RequestGeneration != state.RequestGeneration || reviewed.Run.RequestGeneration != run.RequestGeneration ||
+		reviewed.Run.FencingGeneration != state.FencingGeneration || reviewed.Run.FencingGeneration != run.FencingGeneration ||
+		reviewed.Run.State != "planned" || reviewed.Run.PlanSchema != MemoryPlanSchemaV1 ||
+		reviewed.Run.PlanRevision != state.PlanRevision || reviewed.Run.PlanRevision != run.PlanRevision ||
+		reviewed.Run.PlanHash != state.PlanHash || reviewed.Run.PlanHash != run.PlanHash ||
+		reviewed.Run.InputCount != run.InputCount || reviewed.Run.LeaseExpiresAt == nil {
+		return fmt.Errorf("%w: plan review does not match the persisted run and fence", ErrProtocolResponse)
+	}
+	if err := validateAcceptedPlanForLimit(reviewed.Plan, options.MaximumActions, state.PlanRevision); err != nil {
+		return err
+	}
+	if planned != nil && (!semanticallyEqualJSON(planned.Plan, reviewed.Plan) ||
+		!samePreallocatedMemoryIDs(planned.PreallocatedMemoryIDs, reviewed.PreallocatedMemoryIDs) ||
+		planned.Preview != reviewed.Preview) {
+		return fmt.Errorf("%w: plan review differs from the freshly accepted plan", ErrProtocolResponse)
+	}
+	return nil
+}
+
+func samePreallocatedMemoryIDs(a, b []client.MemoryCurationPreallocatedMemoryID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r Runner) recoverApplyFailure(ctx context.Context, state *LaunchState, _ Options, result Result, applyErr error) (Result, error) {
@@ -422,19 +496,25 @@ func (r Runner) recoverApplyFailure(ctx context.Context, state *LaunchState, _ O
 	}
 }
 
-func (r Runner) collectInputs(ctx context.Context, state *LaunchState, options Options, run *client.MemoryCurationRun) ([]client.MemoryCurationRunInput, error) {
+func (r Runner) collectInputs(ctx context.Context, state *LaunchState, options Options, run *client.MemoryCurationRun, expectedState string) ([]client.MemoryCurationRunInput, error) {
+	if expectedState != "open" && expectedState != "planned" {
+		return nil, fmt.Errorf("%w: invalid expected input-page run state", ErrProtocolResponse)
+	}
 	inputs := make([]client.MemoryCurationRunInput, 0)
 	cursor := ""
 	seen := make(map[string]struct{})
 	for {
-		if err := r.renewIfDue(ctx, state, options, run); err != nil {
+		// Renew before every bounded page. This asks the backend database clock
+		// to decide whether the lease is still live and gives each successful
+		// page a fresh server-owned window without comparing wall clocks.
+		if err := r.renew(ctx, state, options, run); err != nil {
 			return nil, err
 		}
 		page, err := r.API.GetInputs(ctx, run.ID, run.FencingGeneration, cursor, options.PageSize)
 		if err != nil {
 			return nil, err
 		}
-		if page == nil || page.Run.ID != run.ID || page.Run.FencingGeneration != run.FencingGeneration || page.Run.State != "open" || page.Run.LeaseExpiresAt == nil {
+		if page == nil || page.Run.ID != run.ID || page.Run.FencingGeneration != run.FencingGeneration || page.Run.State != expectedState || page.Run.LeaseExpiresAt == nil {
 			return nil, fmt.Errorf("%w: input page does not match run fence", ErrProtocolResponse)
 		}
 		*run = page.Run
@@ -455,6 +535,9 @@ func (r Runner) collectInputs(ctx context.Context, state *LaunchState, options O
 				return nil, fmt.Errorf("%w: paged %d inputs but the frozen run declares %d", ErrProtocolResponse, len(inputs), run.InputCount)
 			}
 			break
+		}
+		if len(page.Inputs) == 0 {
+			return nil, fmt.Errorf("%w: empty input page cannot advance a cursor", ErrProtocolResponse)
 		}
 		if _, duplicate := seen[next]; duplicate || next == cursor {
 			return nil, fmt.Errorf("%w: repeated input cursor", ErrProtocolResponse)
@@ -479,11 +562,10 @@ func (r Runner) planWithRenewal(ctx context.Context, state *LaunchState, options
 		result <- plannerResult{draft: draft, err: err}
 	}()
 	for {
-		delay, err := r.renewalDelay(run.LeaseExpiresAt, options.RenewBefore)
-		if err != nil {
-			return nil, err
-		}
-		timer := time.NewTimer(delay)
+		// Start the renewal interval when the last backend-confirmed renewal
+		// response was received. Duration timers are monotonic within this
+		// process and therefore independent of client/server wall-clock skew.
+		timer := time.NewTimer(options.LeaseDuration - options.RenewBefore)
 		select {
 		case planned := <-result:
 			if !timer.Stop() {
@@ -510,18 +592,11 @@ func (r Runner) planWithRenewal(ctx context.Context, state *LaunchState, options
 	}
 }
 
-func (r Runner) renewIfDue(ctx context.Context, state *LaunchState, options Options, run *client.MemoryCurationRun) error {
-	delay, err := r.renewalDelay(run.LeaseExpiresAt, options.RenewBefore)
-	if err != nil {
-		return err
-	}
-	if delay > 0 {
-		return nil
-	}
-	return r.renew(ctx, state, options, run)
-}
-
 func (r Runner) renew(ctx context.Context, state *LaunchState, options Options, run *client.MemoryCurationRun) error {
+	expectedState := run.State
+	if expectedState != "open" && expectedState != "planned" {
+		return fmt.Errorf("%w: cannot renew run in state %s", ErrProtocolResponse, expectedState)
+	}
 	state.RenewalCount++
 	state.LastRenewKey = fmt.Sprintf("%s:renew:%d", state.LaunchID, state.RenewalCount)
 	if err := r.save(state); err != nil {
@@ -534,24 +609,13 @@ func (r Runner) renew(ctx context.Context, state *LaunchState, options Options, 
 	if err != nil {
 		return fmt.Errorf("renew curation lease: %w", err)
 	}
-	if renewed == nil || renewed.Run.ID != run.ID || renewed.Run.FencingGeneration != run.FencingGeneration || renewed.Run.State != "open" ||
-		renewed.Run.LeaseExpiresAt == nil || !renewed.Run.LeaseExpiresAt.After(r.now()) {
+	if renewed == nil || renewed.Run.ID != run.ID || renewed.Run.FencingGeneration != run.FencingGeneration || renewed.Run.State != expectedState ||
+		renewed.Run.LeaseExpiresAt == nil {
 		return fmt.Errorf("%w: renewal returned invalid lease", ErrProtocolResponse)
 	}
 	*run = renewed.Run
 	state.LeaseExpiresAt = run.LeaseExpiresAt
 	return r.save(state)
-}
-
-func (r Runner) renewalDelay(expiresAt *time.Time, lead time.Duration) (time.Duration, error) {
-	if expiresAt == nil {
-		return 0, fmt.Errorf("%w: run has no lease expiry", ErrProtocolResponse)
-	}
-	delay := expiresAt.Sub(r.now()) - lead
-	if delay < 0 {
-		return 0, nil
-	}
-	return delay, nil
 }
 
 func (r Runner) failAndAbandon(ctx context.Context, state *LaunchState, result Result, cause error, reason string) (Result, error) {

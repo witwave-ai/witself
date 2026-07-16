@@ -294,7 +294,7 @@ func TestMemoryCuratorRunApplyRequiresConfirmationAndPermission(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary.Status != "applied" || summary.ApplyReceiptID != "mrec_apply" || fixture.count("apply") != 1 || fixture.count("abandon") != 0 {
+	if summary.Status != "applied" || summary.ApplyReceiptID != "mrec_apply" || fixture.count("get-plan") != 1 || fixture.count("apply") != 1 || fixture.count("abandon") != 0 {
 		t.Fatalf("summary=%#v calls=%#v", summary, fixture.calls)
 	}
 }
@@ -306,6 +306,7 @@ func TestMemoryCuratorRunPreflightRejectsPermissionAndProtocolMismatches(t *test
 		apply  bool
 	}{
 		{name: "missing list", mutate: func(f *curatorDriverFixture) { f.allowList = false }},
+		{name: "missing plan review", apply: true, mutate: func(f *curatorDriverFixture) { f.allowGetPlan = false }},
 		{name: "missing apply", apply: true, mutate: func(f *curatorDriverFixture) { f.allowApply = false }},
 		{name: "wrong schema", mutate: func(f *curatorDriverFixture) { f.planSchema = "witself.memory-plan.v2" }},
 		{name: "backend inference", mutate: func(f *curatorDriverFixture) { f.backendInference = true }},
@@ -520,6 +521,7 @@ type curatorDriverFixture struct {
 	inputContent            string
 	noWork                  bool
 	allowList               bool
+	allowGetPlan            bool
 	allowApply              bool
 	accessProfile           string
 	planSchema              string
@@ -545,7 +547,7 @@ func newCuratorDriverFixture(t *testing.T) *curatorDriverFixture {
 			FencingGeneration: 1, State: "open", LeaseExpiresAt: &expires, InputCount: 1,
 		},
 		inputContent: "nonsensitive-input-content-that-must-not-enter-state-or-output",
-		allowList:    true, planSchema: "witself.memory-plan.v1",
+		allowList:    true, allowGetPlan: true, planSchema: "witself.memory-plan.v1",
 		accessProfile:           "curator-apply",
 		primitives:              []string{"create", "replace", "supersede", "relate", "propose_fact"},
 		clientInferenceRequired: true,
@@ -582,7 +584,7 @@ func (f *curatorDriverFixture) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			},
 			"permissions": map[string]any{
 				"list_requests": f.allowList, "get_request": true, "start": true, "get_run": true,
-				"get_inputs": true, "renew": true, "plan": true, "abandon": true, "apply": f.allowApply,
+				"get_inputs": true, "get_plan": f.allowGetPlan, "renew": true, "plan": true, "abandon": true, "apply": f.allowApply,
 			},
 			"limits": map[string]any{
 				"max_page_size": 200, "max_memories": 500, "max_evidence": 1000,
@@ -612,6 +614,40 @@ func (f *curatorDriverFixture) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			f.t.Errorf("start client model = %q, want %q", body.Client.Model, f.wantClientModel)
 		}
 		_ = json.NewEncoder(w).Encode(client.StartMemoryCurationResult{Run: f.run, Request: f.request})
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/memory-curation-runs/"+f.run.ID+"/renew":
+		f.hit("renew")
+		if got := r.Header.Get("Idempotency-Key"); got == "" {
+			f.t.Error("renew idempotency key is empty")
+		}
+		var body struct {
+			FencingGeneration int64 `json:"fencing_generation"`
+			ExtensionSeconds  int64 `json:"extension_seconds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			f.t.Errorf("decode renew request: %v", err)
+		}
+		if body.FencingGeneration != f.run.FencingGeneration {
+			f.t.Errorf("renew fencing_generation = %d, want %d", body.FencingGeneration, f.run.FencingGeneration)
+		}
+		if body.ExtensionSeconds <= 0 {
+			f.t.Errorf("renew extension_seconds = %d, want positive", body.ExtensionSeconds)
+		}
+		expires := time.Now().UTC().Add(time.Duration(body.ExtensionSeconds) * time.Second)
+		f.run.LeaseExpiresAt = &expires
+		_ = json.NewEncoder(w).Encode(client.RenewMemoryCurationResult{
+			Run: f.run,
+			Receipt: client.MemoryCurationMutationReceipt{
+				Operation:         "renew",
+				ActorID:           f.agentID,
+				IdempotencyKey:    r.Header.Get("Idempotency-Key"),
+				RequestID:         f.run.RequestID,
+				RunID:             f.run.ID,
+				RequestGeneration: f.run.RequestGeneration,
+				FencingGeneration: f.run.FencingGeneration,
+				LeaseExpiresAt:    &expires,
+				ResultState:       f.run.State,
+			},
+		})
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/memory-curation-runs/"+f.run.ID+"/inputs":
 		f.hit("inputs")
 		_ = json.NewEncoder(w).Encode(client.MemoryCurationRunInputPage{
@@ -624,14 +660,29 @@ func (f *curatorDriverFixture) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/memory-curation-runs/"+f.run.ID+"/plan":
 		f.hit("plan")
 		planned := f.run
-		planned.State, planned.PlanRevision, planned.PlanHash = "planned", 1, planHash
+		planned.State, planned.PlanSchema, planned.PlanRevision, planned.PlanHash = "planned", "witself.memory-plan.v1", 1, planHash
 		f.run = planned
 		_ = json.NewEncoder(w).Encode(client.PlanMemoryCurationResult{
-			Run: planned,
+			Run:  planned,
+			Plan: json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`),
 			Receipt: client.MemoryCurationPlanReceipt{
-				ID: "mrec_plan", RunID: planned.ID, FencingGeneration: planned.FencingGeneration,
-				PlanRevision: 1, PlanHash: planHash,
+				ID: "mrec_plan", Operation: "plan", RequestID: planned.RequestID,
+				RunID: planned.ID, RequestGeneration: planned.RequestGeneration,
+				FencingGeneration: planned.FencingGeneration, PlanSchema: "witself.memory-plan.v1",
+				PlanRevision: 1, PlanHash: planHash, ResultState: "planned",
 			},
+		})
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/memory-curation-runs/"+f.run.ID+"/plan":
+		f.hit("get-plan")
+		if got := r.URL.Query().Get("fencing_generation"); got != "1" {
+			f.t.Errorf("get plan fencing_generation = %q", got)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != "" {
+			f.t.Errorf("get plan idempotency key = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(client.GetMemoryCurationPlanResult{
+			Run:  f.run,
+			Plan: json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`),
 		})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/memory-curation-runs/"+f.run.ID+"/abandon":
 		f.hit("abandon")

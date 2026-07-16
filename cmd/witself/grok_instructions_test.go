@@ -70,7 +70,8 @@ func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
 		"witself.fact.set", "witself.fact.get", "witself.fact.list",
 		"witself.memory.recall", "witself.memory.capture", "witself.memory.delete",
 		"witself.memory.curation.renew", "witself.memory.curation.get",
-		"witself.memory.curation.plan", "witself.memory.curation.apply",
+		"witself.memory.curation.plan", "witself.memory.curation.plan.get",
+		"witself.memory.curation.apply",
 		"witself.memory.curation.start", "witself.memory.curation.status",
 	} {
 		if bytes.Contains(grokMemoryRoutingBlock, []byte(dotted)) {
@@ -81,7 +82,8 @@ func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
 		"witself_fact_set", "witself_fact_get", "witself_fact_list",
 		"witself_memory_recall", "witself_memory_capture", "witself_memory_delete",
 		"witself_memory_curation_renew", "witself_memory_curation_get",
-		"witself_memory_curation_plan", "witself_memory_curation_apply",
+		"witself_memory_curation_plan", "witself_memory_curation_plan_get",
+		"witself_memory_curation_apply",
 		"witself_memory_curation_start", "witself_memory_curation_status",
 	} {
 		if !bytes.Contains(grokMemoryRoutingBlock, []byte(portable)) {
@@ -113,6 +115,7 @@ func TestGrokPortableMCPInstructionsRewritesEveryCurationTool(t *testing.T) {
 		"witself.memory.curation.renew",
 		"witself.memory.curation.get",
 		"witself.memory.curation.plan",
+		"witself.memory.curation.plan.get",
 		"witself.memory.curation.apply",
 		"witself.memory.curation.cancel",
 		"witself.memory.curation.abandon",

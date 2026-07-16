@@ -92,8 +92,11 @@ type SelfOptions struct {
 	// IncludeSensitive intentionally includes authorized private fact and memory
 	// values. Sealed secrets are a separate service and are never in this digest.
 	IncludeSensitive bool
-	SalientLimit     int
-	MaximumByteSize  int
+	// Observational requests fact hydration without retrieval-usage writes.
+	// It is used by strictly read-only MCP tools; ordinary clients leave it false.
+	Observational   bool
+	SalientLimit    int
+	MaximumByteSize int
 }
 
 // PeerAgent is one other principal in the authenticated agent's realm.
@@ -124,6 +127,9 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params.Set("include_counts", strconv.FormatBool(opts.IncludeCounts))
 	params.Set("include_checkpoint", strconv.FormatBool(opts.IncludeCheckpoint))
 	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
+	if opts.Observational {
+		params.Set("observational", "true")
+	}
 	if opts.SalientLimit > 0 {
 		params.Set("salient_limit", strconv.Itoa(opts.SalientLimit))
 	}
