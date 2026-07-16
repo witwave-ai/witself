@@ -310,6 +310,7 @@ type Config struct {
 	GetSelfMemories                func(ctx context.Context, p DomainPrincipal, limit int, includeCount bool) ([]SelfMemory, int, error)
 	CountSelfMemories              func(ctx context.Context, p DomainPrincipal) (int, error)
 	GetSelfMemoryCheckpoint        func(ctx context.Context, p DomainPrincipal) (*SelfMemoryCheckpoint, error)
+	GetSelfMessageCheckpoint       func(ctx context.Context, p DomainPrincipal) (*SelfMessageCheckpoint, error)
 	ListSelfPeers                  func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
 	TouchAgentActivity             func(ctx context.Context, p DomainPrincipal, in AgentActivityRequest) (AgentActivity, error)
 	UpcomingFacts                  func(ctx context.Context, p DomainPrincipal, opts UpcomingFactOptions) ([]FactOccurrence, error)
@@ -605,13 +606,14 @@ type PrincipalAuthFunc func(ctx context.Context, token string) (DomainPrincipal,
 // session-start view returned by GET /v1/self. Facts and memories are empty in
 // the identity-only slice and can be populated without changing this envelope.
 type SelfDigest struct {
-	SchemaVersion    string                `json:"schema_version"`
-	Identity         SelfIdentity          `json:"identity"`
-	PrimaryFacts     []SelfFact            `json:"primary_facts"`
-	SalientMemories  []SelfMemory          `json:"salient_memories"`
-	MemoryCheckpoint *SelfMemoryCheckpoint `json:"memory_checkpoint,omitempty"`
-	Index            SelfIndex             `json:"index"`
-	Elided           bool                  `json:"elided"`
+	SchemaVersion     string                 `json:"schema_version"`
+	Identity          SelfIdentity           `json:"identity"`
+	PrimaryFacts      []SelfFact             `json:"primary_facts"`
+	SalientMemories   []SelfMemory           `json:"salient_memories"`
+	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
+	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
+	Index             SelfIndex              `json:"index"`
+	Elided            bool                   `json:"elided"`
 }
 
 // SelfMemoryCheckpoint is an authenticated, value-free pointer to unfinished
@@ -627,6 +629,18 @@ type SelfMemoryCheckpoint struct {
 	RunState          string     `json:"run_state,omitempty"`
 	FencingGeneration int64      `json:"fencing_generation,omitempty"`
 	LeaseExpiresAt    *time.Time `json:"lease_expires_at,omitempty"`
+}
+
+// SelfMessageCheckpoint is an authenticated, content-free projection of
+// durable messaging work that may need the foreground agent's attention. It is
+// advisory discovery state, never a processing fence or authority grant.
+type SelfMessageCheckpoint struct {
+	Pending                     bool `json:"pending"`
+	Unavailable                 bool `json:"unavailable,omitempty"`
+	MailboxPending              bool `json:"mailbox_pending,omitempty"`
+	CandidateOfferPending       bool `json:"candidate_offer_pending,omitempty"`
+	CoordinatorSelectionPending bool `json:"coordinator_selection_pending,omitempty"`
+	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
 }
 
 // SelfIdentity is the account, realm, and agent identity derived from the
@@ -1570,6 +1584,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
 			cfg.GetSelfMemoryCheckpoint,
+			cfg.GetSelfMessageCheckpoint,
 		))
 		if cfg.ListSelfPeers != nil {
 			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
@@ -2058,6 +2073,7 @@ func selfHandler(
 	getMemories func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error),
 	countMemories func(context.Context, DomainPrincipal) (int, error),
 	getMemoryCheckpoint func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error),
+	getMessageCheckpoint func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		// Self digests can contain durable personal context and must never be
@@ -2068,7 +2084,7 @@ func selfHandler(
 			return
 		}
 		q := r.URL.Query()
-		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_sensitive", "observational"} {
+		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_sensitive", "observational"} {
 			if value := q.Get(name); value != "" {
 				if _, err := strconv.ParseBool(value); err != nil {
 					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
@@ -2122,6 +2138,21 @@ func selfHandler(
 				// projection is temporarily unhealthy, while making the partial
 				// state explicit to clients.
 				memoryCheckpoint = &SelfMemoryCheckpoint{Unavailable: true}
+			}
+		}
+		includeMessageCheckpoint := true
+		if raw := q.Get("include_message_checkpoint"); raw != "" {
+			includeMessageCheckpoint, _ = strconv.ParseBool(raw)
+		}
+		var messageCheckpoint *SelfMessageCheckpoint
+		if includeMessageCheckpoint && getMessageCheckpoint != nil {
+			var err error
+			messageCheckpoint, err = getMessageCheckpoint(r.Context(), p)
+			if err != nil {
+				// Like narrative curation state, messaging attention is an
+				// additive projection. Never hide the authenticated self digest or
+				// misreport an unhealthy projection as an idle mailbox.
+				messageCheckpoint = &SelfMessageCheckpoint{Unavailable: true}
 			}
 		}
 
@@ -2246,9 +2277,10 @@ func selfHandler(
 				RealmID:   p.RealmID,
 				RealmName: p.RealmName,
 			},
-			PrimaryFacts:     facts,
-			SalientMemories:  memories,
-			MemoryCheckpoint: memoryCheckpoint,
+			PrimaryFacts:      facts,
+			SalientMemories:   memories,
+			MemoryCheckpoint:  memoryCheckpoint,
+			MessageCheckpoint: messageCheckpoint,
 			Index: SelfIndex{Kinds: kinds, Tags: tags, Counts: func() map[string]int {
 				if !includeCounts {
 					return map[string]int{}

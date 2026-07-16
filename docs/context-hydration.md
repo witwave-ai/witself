@@ -49,9 +49,10 @@ a runtime should make before a non-trivial task. It is **model-free by design**:
 selection uses stored metadata and never invokes an LLM or embedding provider.
 
 The digest is **open-plane only.** Its content-bearing sections are built from
-primary facts and salient memories. It may also carry an authenticated,
-value-free `memory_checkpoint` describing pending client curation; that field
-contains no fact, memory, transcript, secret, or TOTP value. See
+primary facts and salient memories. It may also carry authenticated,
+value-free `memory_checkpoint` and `message_checkpoint` objects describing
+pending client curation and messaging attention. Neither field contains a fact,
+memory, transcript, message body, secret, or TOTP value. See
 [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
@@ -82,6 +83,10 @@ contains no fact, memory, transcript, secret, or TOTP value. See
     "request_generation": 7,
     "due_at": "2026-07-15T12:00:00Z"
   },
+  "message_checkpoint": {
+    "pending": true,
+    "mailbox_pending": true
+  },
   "index": {
     "kinds": ["profile", "session", "semantic", "note"],
     "tags": ["preferences", "project:witself"],
@@ -109,6 +114,12 @@ Field rules:
   and salient memories remain available. A pending field is a pointer into the
   fenced curation workflow, never source content or deletion/canonical-fact
   authority. It is independent of the fact and salient-memory inclusion flags.
+- `message_checkpoint` — authenticated, content-free mailbox/open-request
+  discovery state. Its four optional lane booleans identify pending mailbox,
+  offer, coordinator-selection, or selected-assignment attention; false lanes
+  are omitted. It is not a message body, processing fence, availability claim,
+  authority grant, or acknowledgement. `unavailable:true` fails open without
+  pretending the mailbox is idle.
 - `index` — a one-line summary of available kinds, tags, and counts so the agent
   knows what else exists and can `recall`/`list` for it.
 - `elided` — see the hard cap below.
@@ -152,12 +163,12 @@ model-visible output contract:
 
 1. `SessionStart` reads one bounded `self.show` digest.
 2. Every supported Codex/Claude `UserPromptSubmit` reads bounded `/v1/self` state
-   so an ordinary prompt can discover a pending checkpoint. A deterministic
-   local history-dependence check decides whether to add a bounded lexical
-   `memory.recall` query. That query is a deduplicated `OR` expression made from
-   meaningful prompt keywords after conversational glue is removed; it is not
-   the raw or literal whole prompt. An ordinary idle prompt makes the self read
-   but emits no hook context.
+   so an ordinary prompt can discover pending memory-curation or messaging
+   attention. A deterministic local history-dependence check decides whether to
+   add a bounded lexical `memory.recall` query. That query is a deduplicated `OR`
+   expression made from meaningful prompt keywords after conversational glue is
+   removed; it is not the raw or literal whole prompt. An ordinary idle prompt
+   makes the self read but emits no hook context.
 3. The live `self.show` identity must exactly match every installed account,
    realm, and agent id and name. A missing legacy id requires reinstall rather
    than permitting an ambiguous read.
@@ -170,11 +181,13 @@ model-visible output contract:
    keep sensitive values within the authenticated user's current task. The
    separately rendered `memory_checkpoint` is authenticated value-free lifecycle
    state, and its static checkpoint policy authorizes only reversible curation
-   and fact proposals. Sealed secret fields and TOTP material are a separate
+   and fact proposals. The separately rendered `message_checkpoint` is
+   content-free attention metadata; it neither authorizes nor acknowledges
+   message processing. Sealed secret fields and TOTP material are a separate
    plane and are never selected.
-5. The checkpoint projection is additive. If only that projection is unhealthy,
+5. Both checkpoint projections are additive. If one projection is unhealthy,
    `/v1/self` still returns the identity and requested recall content with
-   `memory_checkpoint.unavailable:true` rather than failing the digest.
+   that checkpoint's `unavailable:true` marker rather than failing the digest.
 6. Any configuration, credential, identity, network, timeout, or rendering
    failure returns success to the runtime with no context. Transcript capture
    remains queued and the user's prompt proceeds.
@@ -187,7 +200,7 @@ digest, memory value, or token is persisted in local hydration state.
 
 Current conformance is deliberately asymmetric:
 
-| Runtime | Session-start self digest | History-dependent task recall | Pending checkpoint | Delivery/fallback |
+| Runtime | Session-start self digest | History-dependent task recall | Pending memory/message checkpoints | Delivery/fallback |
 | --- | --- | --- | --- | --- |
 | Codex | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
 | Claude Code | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
@@ -196,10 +209,10 @@ Current conformance is deliberately asymmetric:
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
-`self.show`, inspect its `memory_checkpoint`, and use focused `memory.recall`
-without waiting for the user to ask. If that agent ignores the guidance or MCP
-is unavailable, Witself reports only the partial integration guarantee. The
-matrix is pinned in code and shared
+`self.show`, inspect both checkpoints, use non-blocking `message.listen`, and use
+focused `memory.recall` without waiting for the user to ask. If that agent
+ignores the guidance or MCP is unavailable, Witself reports only the partial
+integration guarantee. The matrix is pinned in code and shared
 conformance tests, so adding a runtime requires declaring its real output
 contract rather than copying another provider's hook fields.
 
@@ -225,18 +238,20 @@ whose focused recall degraded or became unavailable carries
 hook may inject that explicitly marked checkpoint-only envelope; otherwise the
 hook fails open with no context and the foreground prompt continues.
 
-This automatic hydration path currently reads identity, facts, narrative memory,
-and value-free curation lifecycle state. It does not inspect the mailbox. The
-target same-realm messaging extension adds bounded unread **metadata** to
-supported `SessionStart` and
-`UserPromptSubmit` hook output; bodies remain behind explicit read and no hook
-marks read, acknowledges, or starts inference. See
+This automatic hydration path reads identity, facts, narrative memory,
+value-free curation lifecycle state, and the value-free message checkpoint. On
+Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
+include that checkpoint but never unread message metadata. Cursor and Grok Build
+use guided `self.show`. Every runtime uses non-blocking `message.listen` to
+retrieve unread metadata. Bodies remain behind explicit read and no hook marks
+read, acknowledges, starts inference, or wakes a client. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 `GET /v1/self` keeps `include_sensitive=false` as its ordinary API default.
 Installed automatic hooks request `include_sensitive=true` for the authenticated
 owner, `include_counts=false` to avoid inventory scans, and
-`include_checkpoint=true`. MCP `witself.self.show` also defaults
+`include_checkpoint=true` plus `include_message_checkpoint=true`. MCP
+`witself.self.show` also defaults
 `include_sensitive` to true because its result is model context for that same
 authenticated agent; callers may explicitly disable it. The manual CLI remains
 redacted by default. These controls do not and cannot opt into sealed-plane
@@ -250,9 +265,9 @@ mechanisms in this doc. Concretely:
 
 - **Not in the self-digest.** `self show` (and `witself.self.show` / `GET /v1/self`)
   draws content only from primary facts and salient memories, plus value-free
-  curation lifecycle metadata. No secret value, secret field, reference target,
-  or TOTP seed is ever selected into the digest, the `index` summary, the
-  `memory_checkpoint`, or the value-free `elided` signal.
+  curation lifecycle and message-attention metadata. No secret value, secret
+  field, reference target, or TOTP seed is ever selected into the digest, the
+  `index` summary, either checkpoint, or the value-free `elided` signal.
 - **Not in `digest emit`.** The outbound file bridge renders the same open-plane
   selection to Markdown. It **never** writes a secret or seed into CLAUDE.md /
   AGENTS.md / GEMINI.md. You do not put secrets in the files the harness
@@ -281,8 +296,8 @@ assume-interruption, and listen-before-reply. Redundancy is the point — the ag
 should be taught whether it connects over MCP or only ever reads project files.
 
 Collaboration rides this same teaching layer. The current implementation teaches
-an active agent to call unread `message.list`; target autonomous runners use
-metadata-only `message.listen` before `message.read` and explicit `message.ack`.
+an active agent to inspect `self.show.message_checkpoint` and use metadata-only
+`message.listen` before `message.read` and explicit `message.ack`.
 Teaching is guidance for an active model, not a wake mechanism. The same three
 surfaces carry the protocol rather than creating a separate Chat channel.
 Same-realm autonomy is pinned in
@@ -360,9 +375,8 @@ tools (or the `witself` CLI). Use it:
 
 - **Recall before acting.** At the start of a non-trivial task, call
   `witself.self.show`, non-blocking `witself.message.listen` with
-  `wait_seconds=0`, and `witself.message.notification.list`. The mailbox check
-  finds canonical unacknowledged metadata; notification list finds local
-  pointers already acknowledged by this runtime's background runner. Then call
+  `wait_seconds=0`, and inspect the returned message checkpoint. The mailbox
+  check finds canonical unacknowledged metadata. Then call
   `witself.memory.recall <topic>` for anything you may have learned before.
   Resuming work? Use `witself.self.show` plus focused recall today. The target
   `witself.session.start` one-call helper is not implemented.
@@ -382,22 +396,18 @@ tools (or the `witself` CLI). Use it:
   delegate another curator. Explicit legacy `memory curate auto` or `auto
   service` operation is a separately configured compatibility choice, not
   runtime-hook behavior.
-- **Hear before you reply.** To hear from other agents, inspect both
-  non-blocking `witself.message.listen` and
-  `witself.message.notification.list`. Consume a selected runner handoff only
-  with `witself.message.notification.consume`, which reads and verifies the
-  canonical message before clearing the exact local pointer and retains it on
-  failure. Reply with `witself.message.send`. This
+- **Hear before you reply.** To hear from other agents, inspect
+  `self.show.message_checkpoint` and non-blocking `witself.message.listen`.
+  Claim and read a selected canonical delivery, handle it in the current
+  foreground turn, and acknowledge only after handling. Reply with
+  `witself.message.send`. This
   is how you collaborate — in your own realm and, when allowed, with agents in
   other realms (cross-realm sends are realm-qualified, e.g.
   `witself.message.send --to witself://<realm-handle>/agent/<name>`).
 
-The notification ledger is local to one runtime's `WITSELF_HOME`. Its runner
-has already acknowledged those canonical deliveries globally, so another host
-or runtime bound to the same agent cannot see the pointers or recover them as
-unread. This is an intentional MVP locality limitation, not cross-host wake
-delivery. Read-only MCP can list pointers but cannot consume them; curator
-profiles expose neither notification bridge tool.
+There is no background messaging daemon or host-local notification ledger.
+Offline messages remain canonical and unacknowledged until an active client
+handles them. Neither MCP nor a hook can start or wake an idle model.
 
 Memory work is not a substitute for doing the task.
 ```

@@ -767,9 +767,9 @@ Rules:
 ## Self Digest
 
 Used by `self show` and `GET /v1/self`. The bounded, always-loadable digest
-contains primary facts first, then top-N salient memories, an authenticated
-value-free memory checkpoint, and a one-line index. It is cheap and never
-requires a vector profile or query vector. The digest shape, hard cap, and
+contains primary facts first, then top-N salient memories, authenticated
+value-free memory and message checkpoints, and a one-line index. It is cheap and
+never requires a vector profile or query vector. The digest shape, hard cap, and
 `elided` behavior are defined in
 [context-hydration.md](context-hydration.md).
 
@@ -809,6 +809,10 @@ requires a vector profile or query vector. The digest shape, hard cap, and
     "request_generation": 7,
     "due_at": "2026-07-15T12:00:00Z"
   },
+  "message_checkpoint": {
+    "pending": true,
+    "mailbox_pending": true
+  },
   "index": {
     "kinds": ["profile", "episodic", "session"],
     "tags": ["staging", "performance"],
@@ -844,6 +848,14 @@ Rules:
   identity, facts, salient memories, and the index remain usable. The checkpoint
   contains no memory, fact, transcript, secret, or TOTP value and never
   authorizes deletion or a canonical fact write.
+- `message_checkpoint` is authenticated, content-free discovery state for the
+  canonical mailbox and open-request lanes. `pending` is true when any of
+  `mailbox_pending`, `candidate_offer_pending`,
+  `coordinator_selection_pending`, or `candidate_assignment_pending` is true.
+  Only true lane fields are emitted; false lanes are omitted. It is advisory and
+  never a processing fence, availability signal, authority grant, message body,
+  or acknowledgement. `unavailable:true` means only that this additive
+  projection failed; it must not be reported as an idle mailbox.
 - `index` is a one-line summary of the store: the `kinds` and `tags` present and
   `counts` of facts and memories.
 - The digest has a hard byte/line cap (default ~8 KiB / ~200 lines,
@@ -1413,8 +1425,8 @@ Rules:
   write (writes still require policy).
 - `subject`/`kind` are short classifications safe for list views. Omitted kind
   on an ordinary send normalizes to actionable `request` across CLI,
-  MCP, and API/store writes. Explicit `note` is FYI-only to the runner and uses
-  its content-free notification/ack path without provider inference.
+  MCP, and API/store writes. Explicit `note` is FYI-only and may be read and
+  acknowledged without treating it as work.
 - `thread_id` drives per-conversation ordering. A future cross-realm
   `conversation_id` may reuse the `thr_` id space (see
   [Conversation](#conversation)). A raw
@@ -1428,7 +1440,7 @@ Rules:
   migration `0035`. Direct sends start at one; a validated reply or atomic
   completion result advances exactly one from its durable parent. Callers
   cannot supply it. Client payload history and any payload turn field are
-  advisory only; the runner uses this field for cross-machine turn limits.
+  advisory only; clients use this field for portable turn limits.
 - **Target cross-realm extension:** `to.realm` and `from.realm` are optional
   realm handles that make a recipient or sender cross-realm. When `realm` is
   absent the participant is local
@@ -1475,8 +1487,8 @@ optional `deterministic_failure` (default false).
 ```
 
 The ordinary CLI and MCP release surfaces omit the marker and therefore send
-false. The client-owned runner uses true only after classifying a failure as
-message-specific and deterministic.
+false. A trusted foreground client may use true only after classifying a failure
+as message-specific and deterministic.
 
 `complete` accepts the exact claim id/generation, result `subject`, `kind`,
 `body`, optional object `payload`, and an `Idempotency-Key` header. It cannot
@@ -1490,9 +1502,9 @@ Processing `generation` is solely the stale-writer fence. Replaying the exact
 live claim keeps it; acquisition after release or expiry increments it. Only an
 exact-fence release with `deterministic_failure=true` atomically increments
 backend-owned `failure_count`. Provider-wide, configuration, cancellation, and
-lease-maintenance failures release with false. The current runner escalates the
-fifth deterministic attempt by default. Payload fields, generation, and
-host-local counters cannot reset or substitute for that durable count.
+lease-maintenance failures release with false. Foreground clients use the count
+for bounded retry/escalation policy. Payload fields and generation cannot reset
+or substitute for that durable count.
 
 Logical account export preserves causal depth, public completion state, its
 result link, and `failure_count`. Migration `0034` also stores private retry-key
@@ -1570,86 +1582,6 @@ Rules:
   selections, claims, and the ordinary opening/offer/result messages. Import
   preserves terminal history and interrupts every active source-cell
   reservation or claim so an old fence cannot complete in the destination.
-
-### Local message runner notifications
-
-`witself message runner notifications --runtime RUNTIME --json` and MCP
-`witself.message.notification.list` return a newest-first, content-free local
-handoff ledger. The CLI response also carries its clear count:
-
-```json
-{
-  "notifications": [
-    {
-      "message_id": "msg_124",
-      "thread_id": "thr_123",
-      "kind": "result",
-      "from_agent_id": "agent_bob",
-      "from_agent_name": "Bob",
-      "created_at": "2026-07-14T18:02:04Z",
-      "recorded_at": "2026-07-14T18:02:05Z"
-    }
-  ],
-  "cleared": 0
-}
-```
-
-The trusted runner writes the pointer before acknowledging a terminal or other
-non-provider delivery. The object deliberately omits subject, body, payload,
-credentials, and processing fences. Retrieve content through `message read
-MESSAGE_ID`. Repeatable or comma-separated `--clear MESSAGE_ID` removes exact
-local pointers, while `--clear-all` removes every local pointer; neither deletes
-the durable server message. The private ledger holds at most 1,024 entries and
-fails closed rather than evicting a pointer or acknowledging an unrecorded
-message. `message runner status --json` exposes the same ledger only as
-`notification_count`.
-
-MCP list accepts `limit` 1–100 (default 50) and returns only the
-`notifications` member. It neither reads canonical content nor clears a local
-pointer and remains available in read-only mode. MCP
-`witself.message.notification.consume` accepts one exact `message_id`, reads the
-canonical message, verifies its identity/routing metadata and current runner
-binding against the pointer, and then clears only that exact locked entry. Its
-output is the ordinary message-detail response with an untrusted-content
-warning. Any read, verification, binding, concurrency, or local-state failure
-leaves the pointer intact. Consume is absent from read-only; curator profiles
-expose neither notification bridge tool. Grok translates the names to
-`witself_message_notification_list` and
-`witself_message_notification_consume`.
-
-Each pointer is local to one runtime's `WITSELF_HOME`, while the runner's
-acknowledgement is canonical for the agent delivery. Another machine/runtime
-bound to the same agent therefore sees neither this pointer nor that delivery
-as unread. This is an intentional MVP locality limitation rather than
-cross-host wake delivery. The local ledger is not account-exported; the
-referenced canonical PostgreSQL message is.
-
-Its content-free health member is:
-
-```json
-{
-  "health": {
-    "last_cycle_at": "2026-07-14T18:02:05Z",
-    "last_success_at": "2026-07-14T18:01:45Z",
-    "last_status": "error",
-    "last_error_class": "provider",
-    "consecutive_failures": 1
-  }
-}
-```
-
-`last_status` is empty before the first cycle or one of `ok`, `error`, `idle`,
-`notified`, `completed`, and `recovered`. `last_error_class` is empty after
-success or one of `configuration`, `identity`, `provider`, `cancelled`, and
-`cycle`. The health record never contains raw error text, message ids/content,
-provider output, or credentials. `consecutive_failures` is a local service-health
-streak and is not the backend message-processing `failure_count`.
-
-Provider authentication is intentionally not part of either JSON response.
-Enable stores only the selected provider's recognized environment values in a
-separate mode-0600, provider-bound local file. Its values are never serialized
-into runner config, status, notifications, service definitions, backend state,
-or account export.
 
 ## Conversation
 

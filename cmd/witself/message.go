@@ -13,7 +13,7 @@ import (
 
 func messageCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request|runner ...")
+		fmt.Fprintln(os.Stderr, "usage: witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request ...")
 		return 2
 	}
 	switch args[0] {

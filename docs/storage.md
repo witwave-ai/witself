@@ -135,7 +135,7 @@ source of truth.
   carry the resolved agent; fanout responses carry the audience kind and
   delivery count. Group audiences remain a future addition.
   Current write surfaces normalize omitted kind to actionable `request`;
-  explicit `note` is FYI-only to the runner.
+  explicit `note` is FYI-only to the active recipient.
 - `agent_message_deliveries` — one row per message/recipient with
   delivery/read/ack state plus migration-0034 independent
   `available`/`claimed`/`completed` processing state, monotonic generation,
@@ -160,20 +160,10 @@ source of truth.
   `reserved`/`claimed`/`released`/`completed`/`cancelled` processing fences,
   lease, generation, failure count, and ordinary result-message link. Import
   cancels active reservations/claims and advances their fence.
-- A runner's private content-free notification ledger is derived client-local
-  operational state, not a second message store. It carries message/thread/
-  sender pointers only; PostgreSQL remains authoritative for content and
-  delivery state. The ledger is excluded from account export even though its
-  canonical messages are included. Because the runner globally acknowledges a
-  delivery after recording its local pointer, another host/runtime for the same
-  agent cannot see that pointer or rediscover the delivery as unread; this is an
-  intentional MVP locality limitation.
-- Runner cycle health in the same private state is also derived and
-  content-free: timestamps, bounded status/error class, and consecutive failure
-  count only.
-- A runner's provider-auth capture is a separate mode-0600 client-local file
-  bound to one configured native provider. It is not PostgreSQL, runner config,
-  service-definition content, or account-export data.
+- PostgreSQL is the sole message and handoff store. Foreground clients discover
+  unacknowledged deliveries through the bounded message checkpoint and
+  metadata-only listen; no host-local notification or provider state is part of
+  messaging.
 - `transcript_conversations` — `trn_…` id, account/realm, owning recorder agent,
   optional external conversation id/title/metadata, and sequence allocator.
 - `transcript_entries` — `ent_…` id, transcript, monotonically ordered role,

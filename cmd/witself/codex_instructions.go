@@ -54,7 +54,8 @@ For retrieval, use the same two-source model:
 
 var codexMemoryRoutingBlock = []byte(
 	codexMemoryRoutingBeginMarker + "\n" +
-		codexMemoryRoutingInstructions + "\n" +
+		codexMemoryRoutingInstructions + "\n\n" +
+		foregroundMessagingRoutingInstructions + "\n" +
 		codexMemoryRoutingEndMarker,
 )
 

@@ -16,6 +16,7 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 		}
 		if r.URL.Query().Get("include_facts") != "false" || r.URL.Query().Get("include_salient") != "false" ||
 			r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "false" ||
+			r.URL.Query().Get("include_message_checkpoint") != "false" ||
 			r.URL.Query().Get("include_sensitive") != "false" || r.URL.Query().Get("observational") != "" {
 			t.Fatalf("self query = %s", r.URL.RawQuery)
 		}
@@ -31,6 +32,26 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 		got.MemoryCheckpoint.RequestID != "mcrq_1" || got.MemoryCheckpoint.RequestGeneration != 5 ||
 		got.MemoryCheckpoint.DueAt == nil || !got.MemoryCheckpoint.DueAt.Equal(dueAt) {
 		t.Fatalf("memory checkpoint = %#v", got.MemoryCheckpoint)
+	}
+}
+
+func TestGetSelfDecodesAndRequestsMessageCheckpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include_message_checkpoint") != "true" {
+			t.Fatalf("self query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"message_checkpoint":{"pending":true,"mailbox_pending":true,"coordinator_selection_pending":true},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludeMessageCheckpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MessageCheckpoint == nil || !got.MessageCheckpoint.Pending ||
+		!got.MessageCheckpoint.MailboxPending || !got.MessageCheckpoint.CoordinatorSelectionPending ||
+		got.MessageCheckpoint.CandidateOfferPending || got.MessageCheckpoint.CandidateAssignmentPending {
+		t.Fatalf("message checkpoint = %#v", got.MessageCheckpoint)
 	}
 }
 

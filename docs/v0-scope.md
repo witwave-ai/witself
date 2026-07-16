@@ -81,16 +81,16 @@ V0 should prove the end-to-end product boundary:
 - The CLI can send to one agent, a bounded explicit agent set, or the current
   realm; reply, list, listen, read, acknowledge, and coordinate fenced delivery
   processing; and operate the realm-wide open-request lifecycle. Sender and the
-  immutable request coordinator are derived from the token. Its client-owned
-  runner also handles request offers, selection, and selected work while keeping
-  a bounded content-free local notification handoff.
+  immutable request coordinator are derived from the token. Already-active
+  clients handle offers, selection, and selected work through the canonical
+  mailbox and fenced request state.
 - The CLI can export an agent's self as structured plaintext and import it back
   round-trippably.
 - `witself mcp serve` can expose the safe v0 MCP stdio tool surface, including
-  the self-management, fifteen curation, ordinary-message, message-request, and
-  local notification bridge tools. Its server `instructions` teach the always-loaded
-  recall-before-act/write-after-learn protocol plus non-blocking message listen
-  and notification-list startup checks.
+  the self-management, fifteen curation, ordinary-message, and message-request
+  tools. Its server `instructions` teach the always-loaded
+  recall-before-act/write-after-learn protocol plus message-checkpoint inspection
+  and non-blocking listen.
 - `witself-server serve --dev` can exercise the same core through HTTP.
 - `witself-server` exposes Prometheus metrics, structured logs, and Kubernetes
   health probes.
@@ -169,10 +169,10 @@ Core user-facing capabilities:
   group-scoped shared memories and facts.
 - Message send to one agent, a bounded explicit set, or the current realm;
   reply/list/listen/read/ack and fenced processing over a durable mailbox with
-  per-recipient ordering and acknowledgement; the realm-wide open-request
-  offer/select/claim lifecycle; and local MCP notification list/consume bridging
-  for background-runner handoff. The client-owned runner handles candidate,
-  coordinator, and selected-worker request phases without backend inference.
+  per-recipient ordering and acknowledgement; and the realm-wide open-request
+  offer/select/claim lifecycle. Active clients handle candidate, coordinator,
+  and selected-worker request phases without backend inference; offline work
+  remains canonical and unacknowledged.
 - Identity reference parsing and resolution.
 - `witself export` and `witself import` for round-trippable structured
   identity data, including the portable curation graph and value-free receipts.

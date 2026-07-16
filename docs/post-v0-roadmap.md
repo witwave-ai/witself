@@ -189,8 +189,8 @@ The go-forward design holds these as non-negotiable for the epic:
   on both the CLI `message` group and MCP, so a polling agent can drain inbound
   cross-realm traffic each loop.
 - No agent-run HTTP servers for normal I/O — agents are outbound clients; the
-  only HTTP server is the backend relay. An optional wake-webhook exists solely
-  for already-hosted cloud autonomous agents and is never required.
+  only HTTP server is the backend relay. The collaboration contract makes no
+  provider-activation promise.
 - The durable mailbox is the source of truth; offline recipients are the default,
   and any live stream is only a latency accelerator.
 

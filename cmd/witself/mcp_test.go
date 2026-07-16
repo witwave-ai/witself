@@ -18,7 +18,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/witwave-ai/witself/internal/client"
-	"github.com/witwave-ai/witself/internal/messagerunner"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -173,179 +172,6 @@ func TestConfiguredMCPBackendUsesObservationalReadTransport(t *testing.T) {
 	if seen["self"] != 5 {
 		t.Errorf("self calls = %d, want 5 identity checks including self.show", seen["self"])
 	}
-}
-
-func TestConfiguredMCPNotificationBridgeVerifiesBeforeExactConsumption(t *testing.T) {
-	identity := client.SelfIdentity{
-		AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default",
-		AgentID: "agent_scott", AgentName: "scott",
-	}
-	created := time.Date(2026, 7, 14, 18, 0, 0, 0, time.UTC)
-	canonical := client.Message{
-		ID: "msg_result", AccountID: identity.AccountID, RealmID: identity.RealmID,
-		ThreadID: "thr_work", Kind: "result", Body: "untrusted result", CreatedAt: created,
-		From: client.MessageAgent{Kind: "agent", AgentID: "agent_bob", AgentName: "bob"},
-		To: client.MessageRecipient{
-			Kind: "agent", AgentID: identity.AgentID, AgentName: identity.AgentName,
-		},
-		Delivery:  client.MessageDelivery{State: "delivered"},
-		ReadState: client.MessageReadState{State: "acked"},
-	}
-
-	type fixture struct {
-		backend   configuredMCPBackend
-		store     messagerunner.ConfigStore
-		readCalls *int
-	}
-	setup := func(t *testing.T, runnerAgentID string, readStatus int, mutateCanonical, mutateRead func(*client.Message)) fixture {
-		t.Helper()
-		t.Setenv("WITSELF_HOME", t.TempDir())
-		canonicalMessage := canonical
-		if mutateCanonical != nil {
-			mutateCanonical(&canonicalMessage)
-		}
-		readCalls := 0
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != "Bearer agent-token" {
-				http.NotFound(w, r)
-				return
-			}
-			switch r.URL.Path {
-			case "/v1/self":
-				_ = json.NewEncoder(w).Encode(client.SelfDigest{
-					SchemaVersion: "witself.v0", Identity: identity,
-					PrimaryFacts: []client.SelfFact{}, SalientMemories: []client.SelfMemory{},
-					Index: client.SelfIndex{Kinds: []string{}, Tags: []string{}, Counts: map[string]int{}},
-				})
-			case "/v1/messages/msg_result:read":
-				readCalls++
-				if readStatus != 0 && readStatus != http.StatusOK {
-					w.WriteHeader(readStatus)
-					_, _ = w.Write([]byte(`{"error":"read failed"}`))
-					return
-				}
-				message := canonicalMessage
-				if mutateRead != nil {
-					mutateRead(&message)
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"message": message})
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		t.Cleanup(server.Close)
-		tokenPath := filepath.Join(t.TempDir(), "agent.token")
-		if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cfg := transcriptcapture.Config{
-			Runtime: transcriptcapture.RuntimeCodex,
-			Account: "default", AccountID: identity.AccountID,
-			Realm: "default", RealmID: identity.RealmID,
-			Agent: identity.AgentName, AgentID: identity.AgentID, AgentName: identity.AgentName,
-			Endpoint: server.URL, TokenFile: tokenPath,
-		}
-		store, err := messagerunner.DefaultConfigStore(cfg.Runtime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if runnerAgentID == "" {
-			runnerAgentID = identity.AgentID
-		}
-		if _, err := store.Enable(messagerunner.Settings{
-			Runtime: cfg.Runtime, AccountID: identity.AccountID, RealmID: identity.RealmID,
-			AgentID: runnerAgentID, AgentName: identity.AgentName,
-			Provider: "claude-code", MaximumTurns: 12,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.RecordNotification(context.Background(), canonicalMessage); err != nil {
-			t.Fatal(err)
-		}
-		return fixture{
-			backend: configuredMCPBackend{cfg: cfg}, store: store, readCalls: &readCalls,
-		}
-	}
-
-	t.Run("success reads then consumes once", func(t *testing.T) {
-		f := setup(t, "", http.StatusOK, nil, nil)
-		items, err := f.backend.ListMessageNotifications(context.Background())
-		if err != nil || len(items) != 1 || items[0].MessageID != canonical.ID {
-			t.Fatalf("list = %#v / %v", items, err)
-		}
-		message, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID)
-		if err != nil || message.Body != canonical.Body || *f.readCalls != 1 {
-			t.Fatalf("consume = %#v / %v, reads=%d", message, err, *f.readCalls)
-		}
-		if items, err := f.store.Notifications(context.Background()); err != nil || len(items) != 0 {
-			t.Fatalf("remaining = %#v / %v", items, err)
-		}
-		if _, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID); err == nil || *f.readCalls != 1 {
-			t.Fatalf("second consume error = %v, reads=%d", err, *f.readCalls)
-		}
-	})
-
-	t.Run("long UTF-8 sender name reads then consumes", func(t *testing.T) {
-		longName := strings.Repeat("界", 100)
-		f := setup(t, "", http.StatusOK, func(message *client.Message) {
-			message.From.AgentName = longName
-		}, nil)
-		message, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID)
-		if err != nil || message.From.AgentName != longName || *f.readCalls != 1 {
-			t.Fatalf("consume = %#v / %v, reads=%d", message, err, *f.readCalls)
-		}
-		if items, err := f.store.Notifications(context.Background()); err != nil || len(items) != 0 {
-			t.Fatalf("remaining = %#v / %v", items, err)
-		}
-	})
-
-	t.Run("long UTF-8 sender name mismatch retains pointer", func(t *testing.T) {
-		longName := strings.Repeat("界", 100)
-		f := setup(t, "", http.StatusOK, func(message *client.Message) {
-			message.From.AgentName = longName
-		}, func(message *client.Message) {
-			message.From.AgentName = "other-" + longName
-		})
-		if _, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID); err == nil ||
-			!strings.Contains(err.Error(), "does not match") {
-			t.Fatalf("mismatch error = %v", err)
-		}
-		if items, err := f.store.Notifications(context.Background()); err != nil || len(items) != 1 {
-			t.Fatalf("mismatch removed pointer: %#v / %v", items, err)
-		}
-	})
-
-	t.Run("canonical read failure retains pointer", func(t *testing.T) {
-		f := setup(t, "", http.StatusInternalServerError, nil, nil)
-		if _, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID); err == nil {
-			t.Fatal("consume unexpectedly succeeded")
-		}
-		if items, err := f.store.Notifications(context.Background()); err != nil || len(items) != 1 {
-			t.Fatalf("failure removed pointer: %#v / %v", items, err)
-		}
-	})
-
-	t.Run("canonical mismatch retains pointer", func(t *testing.T) {
-		f := setup(t, "", http.StatusOK, nil, func(message *client.Message) { message.ThreadID = "thr_other" })
-		if _, err := f.backend.ConsumeMessageNotification(context.Background(), canonical.ID); err == nil ||
-			!strings.Contains(err.Error(), "does not match") {
-			t.Fatalf("mismatch error = %v", err)
-		}
-		if items, err := f.store.Notifications(context.Background()); err != nil || len(items) != 1 {
-			t.Fatalf("mismatch removed pointer: %#v / %v", items, err)
-		}
-	})
-
-	t.Run("runner binding mismatch leaks no pointer", func(t *testing.T) {
-		f := setup(t, "agent_other", http.StatusOK, nil, nil)
-		if items, err := f.backend.ListMessageNotifications(context.Background()); err == nil || items != nil ||
-			!strings.Contains(err.Error(), "does not match") {
-			t.Fatalf("mismatched list = %#v / %v", items, err)
-		}
-		if *f.readCalls != 0 {
-			t.Fatalf("mismatched binding read canonical message %d times", *f.readCalls)
-		}
-	})
 }
 
 func TestConfiguredCuratorMCPBackendPinsProfileAndPreflightIdentity(t *testing.T) {
@@ -538,8 +364,6 @@ type fakeMCPBackend struct {
 	lastSubjectAlias    client.AddFactSubjectAliasInput
 	zeroConfidence      bool
 	annualRecurrence    bool
-	notificationList    []messagerunner.Notification
-	consumedMessageID   string
 }
 
 func TestGrokMCPUsesPortableToolNames(t *testing.T) {
@@ -561,27 +385,23 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 69 {
-		t.Fatalf("tools = %d, want 69", len(tools.Tools))
+	if len(tools.Tools) != 67 {
+		t.Fatalf("tools = %d, want 67", len(tools.Tools))
 	}
-	foundDelete, foundNotificationList, foundNotificationConsume := false, false, false
+	foundDelete := false
 	for _, tool := range tools.Tools {
 		if strings.Contains(tool.Name, ".") || !strings.HasPrefix(tool.Name, "witself_") {
 			t.Errorf("non-portable Grok tool name %q", tool.Name)
 		}
 		foundDelete = foundDelete || tool.Name == "witself_fact_delete"
-		foundNotificationList = foundNotificationList || tool.Name == "witself_message_notification_list"
-		foundNotificationConsume = foundNotificationConsume || tool.Name == "witself_message_notification_consume"
 	}
-	if !foundDelete || !foundNotificationList || !foundNotificationConsume {
-		t.Fatalf("Grok MCP missing portable tools: delete=%t notification_list=%t notification_consume=%t",
-			foundDelete, foundNotificationList, foundNotificationConsume)
+	if !foundDelete {
+		t.Fatal("Grok MCP did not advertise witself_fact_delete")
 	}
 	instructions := clientSession.InitializeResult().Instructions
 	if !strings.Contains(instructions, "witself_self_show") ||
 		!strings.Contains(instructions, "witself_message_listen") ||
-		!strings.Contains(instructions, "witself_message_notification_list") ||
-		!strings.Contains(instructions, "witself_message_notification_consume") ||
+		!strings.Contains(instructions, "message_checkpoint") ||
 		strings.Contains(instructions, "witself.self.show") || strings.Contains(instructions, "witself.message.") {
 		t.Fatalf("instructions = %q", instructions)
 	}
@@ -606,8 +426,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 69 {
-		t.Fatalf("tools = %d, want 69", len(tools.Tools))
+	if len(tools.Tools) != 67 {
+		t.Fatalf("tools = %d, want 67", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -622,8 +442,7 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	instructions := clientSession.InitializeResult().Instructions
 	if !strings.Contains(instructions, "witself.fact.set") ||
 		!strings.Contains(instructions, "witself.message.listen") ||
-		!strings.Contains(instructions, "witself.message.notification.list") ||
-		!strings.Contains(instructions, "witself.message.notification.consume") ||
+		!strings.Contains(instructions, "message_checkpoint") ||
 		strings.Contains(instructions, "witself_fact_set") {
 		t.Fatalf("instructions = %q", instructions)
 	}
@@ -647,7 +466,6 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.message.renew",
 		"witself.message.release",
 		"witself.message.complete",
-		"witself.message.notification.consume",
 		"witself.message.request.open",
 		"witself.message.request.list",
 		"witself.message.request.show",
@@ -692,7 +510,6 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.transcript.tail",
 		"witself.message.list",
 		"witself.message.listen",
-		"witself.message.notification.list",
 		"witself.memory.read",
 		"witself.memory.list",
 		"witself.memory.history",
@@ -782,7 +599,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 			}
 			for _, dotted := range []string{
 				"witself.self.show", "witself.message.listen",
-				"witself.message.notification.list", "witself.memory.recall",
+				"witself.memory.recall",
 			} {
 				if !strings.Contains(instructions, portable(dotted)) {
 					t.Errorf("read-only instructions omitted retrieval tool %q", portable(dotted))
@@ -815,18 +632,6 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 			if backend.readMessageID != "" || backend.ackedMessageID != "" {
 				t.Fatalf("removed message.read reached backend: read=%q ack=%q",
 					backend.readMessageID, backend.ackedMessageID)
-			}
-			result, callErr = clientSession.CallTool(ctx, &mcp.CallToolParams{
-				Name: portable("witself.message.notification.consume"),
-				Arguments: map[string]any{
-					"message_id": "msg_result",
-				},
-			})
-			if callErr == nil && result != nil && !result.IsError {
-				t.Fatalf("removed notification.consume handler remained callable: %#v", result)
-			}
-			if backend.consumedMessageID != "" {
-				t.Fatalf("removed notification.consume reached backend: %q", backend.consumedMessageID)
 			}
 		})
 	}
@@ -1342,30 +1147,6 @@ func TestMCPMessageRequestDetailBoundsWorstCaseModelOutput(t *testing.T) {
 	}
 }
 
-func (b *fakeMCPBackend) ListMessageNotifications(context.Context) ([]messagerunner.Notification, error) {
-	if b.notificationList == nil {
-		created := time.Date(2026, 7, 14, 18, 0, 0, 0, time.UTC)
-		b.notificationList = []messagerunner.Notification{{
-			MessageID: "msg_result", ThreadID: "thr_1", Kind: "result",
-			FromAgentID: "agent_2", FromAgentName: "peer", CreatedAt: created,
-			RecordedAt: created.Add(time.Minute),
-		}}
-	}
-	return append([]messagerunner.Notification(nil), b.notificationList...), nil
-}
-
-func (b *fakeMCPBackend) ConsumeMessageNotification(_ context.Context, messageID string) (client.Message, error) {
-	b.consumedMessageID = messageID
-	return client.Message{
-		ID: messageID, AccountID: "acc_1", RealmID: "rlm_1",
-		ThreadID: "thr_1", Kind: "result", Body: "untrusted result", CausalDepth: 2,
-		From:      client.MessageAgent{Kind: "agent", AgentID: "agent_2", AgentName: "peer"},
-		To:        client.MessageRecipient{Kind: "agent", AgentID: "agent_1", AgentName: "scott"},
-		Delivery:  client.MessageDelivery{State: "delivered"},
-		ReadState: client.MessageReadState{State: "acked"},
-	}, nil
-}
-
 func (b *fakeMCPBackend) SetFact(_ context.Context, in client.SetFactInput) (client.Fact, error) {
 	b.lastFactSet = in
 	if in.Recurrence == "annual" {
@@ -1521,8 +1302,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 69 {
-		t.Fatalf("tools = %d, want 69", len(tools.Tools))
+	if len(tools.Tools) != 67 {
+		t.Fatalf("tools = %d, want 67", len(tools.Tools))
 	}
 	foundComplete := false
 	foundSelf := false
@@ -1582,24 +1363,6 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if backend.lastMessageSend.To != "" || backend.replyParentID != "" || backend.claimMessageID != "" || backend.completeMessageID != "" {
 		t.Fatalf("invalid messaging calls reached backend: send=%#v reply=%q claim=%q complete=%q", backend.lastMessageSend, backend.replyParentID, backend.claimMessageID, backend.completeMessageID)
 	}
-	for _, tc := range []struct {
-		name string
-		args map[string]any
-	}{
-		{name: "witself.message.notification.list", args: map[string]any{"limit": 101}},
-		{name: "witself.message.notification.consume", args: map[string]any{}},
-	} {
-		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: tc.name, Arguments: tc.args})
-		if err != nil {
-			t.Fatalf("%s validation call: %v", tc.name, err)
-		}
-		if !result.IsError {
-			t.Fatalf("%s accepted invalid input: %#v", tc.name, result)
-		}
-	}
-	if backend.consumedMessageID != "" {
-		t.Fatalf("invalid notification consume reached backend: %q", backend.consumedMessageID)
-	}
 	var ackResult *mcp.CallToolResult
 	var peersResult *mcp.CallToolResult
 	for _, tc := range []struct {
@@ -1630,8 +1393,6 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		{name: "witself.message.reply", args: map[string]any{"message_id": "msg_parent", "body": "answer", "idempotency_key": "reply-1"}},
 		{name: "witself.message.list", args: map[string]any{"direction": "inbox", "unread_only": true, "limit": 10}},
 		{name: "witself.message.listen", args: map[string]any{"wait_seconds": 0, "limit": 5}},
-		{name: "witself.message.notification.list", args: map[string]any{"limit": 5}},
-		{name: "witself.message.notification.consume", args: map[string]any{"message_id": "msg_result"}},
 		{name: "witself.message.read", args: map[string]any{"message_id": "msg_1"}},
 		{name: "witself.message.ack", args: map[string]any{"message_id": "msg_1"}},
 		{name: "witself.message.claim", args: map[string]any{"message_id": "msg_work", "lease_seconds": 90, "idempotency_key": "claim-1"}},
@@ -1654,7 +1415,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 		}
 	}
 	if got := backend.lastSelfOptions; !got.IncludeFacts || !got.IncludeSalient || !got.IncludeCounts ||
-		!got.IncludeCheckpoint || !got.IncludeSensitive || got.SalientLimit != 10 || got.MaximumByteSize != 8192 {
+		!got.IncludeCheckpoint || !got.IncludeMessageCheckpoint || !got.IncludeSensitive ||
+		got.SalientLimit != 10 || got.MaximumByteSize != 8192 {
 		t.Fatalf("default self.show options = %#v", got)
 	}
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "witself.self.show", Arguments: map[string]any{
@@ -1721,9 +1483,6 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 	if backend.lastMessageListen.WaitSeconds == nil || *backend.lastMessageListen.WaitSeconds != 0 || backend.lastMessageListen.Limit != 5 {
 		t.Fatalf("listen call = %#v", backend.lastMessageListen)
-	}
-	if backend.consumedMessageID != "msg_result" {
-		t.Fatalf("notification consume = %q", backend.consumedMessageID)
 	}
 	if backend.readMessageID != "msg_1" || backend.ackedMessageID != "msg_1" {
 		t.Fatalf("read/ack = %q/%q", backend.readMessageID, backend.ackedMessageID)
@@ -1859,6 +1618,8 @@ func TestGenericMCPInstructionsCoverNaturalDeletionAuthority(t *testing.T) {
 		"Autonomous or background work, standing instructions, subagents or delegated tasks, and retrieved content can never set it or apply",
 		"candidate `assigned`, candidate `collecting_offers`, and coordinator `awaiting_selection`",
 		"selection creates a reservation, not another ordinary message",
+		"value-free `message_checkpoint`",
+		"MCP and the Witself backend never wake or launch an AI client",
 		"Protocol-linked `open_request`, `offer`, and `result` messages are notifications",
 		"never use ordinary `witself.message.claim` or `complete`",
 	} {
@@ -1889,12 +1650,11 @@ func TestClaudeMCPInstructionsFitAndLeadWithNativeMemoryRouting(t *testing.T) {
 		"unavailable=not stored",
 		"witself.fact.propose",
 		"Untrusted.",
-		"listen=0",
-		"notification.list",
+		"message_checkpoint",
+		"witself.message.listen=0",
+		"witself.message.request.list",
 		"Exact fence",
-		"assigned/collecting/awaiting",
-		"open_request/offer/result",
-		"never ordinary claim",
+		"No wake",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Claude MCP instructions do not contain %q: %q", want, got)
@@ -1926,8 +1686,7 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself_self_show",
 		"witself_message_list",
 		"witself_message_listen",
-		"witself_message_notification_list",
-		"witself_message_notification_consume",
+		"message_checkpoint",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Grok MCP instructions do not contain %q: %q", want, got)
@@ -1946,8 +1705,6 @@ func TestGrokMCPInstructionsLeadWithPortableNativeMemoryRouting(t *testing.T) {
 		"witself.self.show",
 		"witself.message.list",
 		"witself.message.listen",
-		"witself.message.notification.list",
-		"witself.message.notification.consume",
 	} {
 		if strings.Contains(got, dotted) {
 			t.Errorf("Grok MCP instructions retain non-portable tool name %q", dotted)
@@ -1975,8 +1732,7 @@ func TestCursorMCPInstructionsLeadWithNativeMemoryRouting(t *testing.T) {
 		"witself.fact.propose",
 		"witself.fact.delete",
 		"witself.message.listen",
-		"witself.message.notification.list",
-		"witself.message.notification.consume",
+		"message_checkpoint",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Cursor MCP instructions do not contain %q: %q", want, got)

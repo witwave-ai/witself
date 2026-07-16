@@ -48,18 +48,11 @@ peer activity survives a cross-cell move. The client-local runtime-hook outbox
 that delivers those observations is host retry state, not server or account
 archive data. Restored observations remain historical metadata only and do not
 assert availability or presence.
-The client-local runner notification ledger and content-free cycle health are
-not account data and are not exported. Notification pointers contain no message
-content; the referenced PostgreSQL messages remain in the archive and can be
-rediscovered through mailbox reads. The source runner already acknowledged
-those deliveries globally, however, so a destination or second host does not
-rediscover the local pointers through unread mailbox state. MCP notification
-consume canonically reads/verifies and clears one exact pointer on its source
-runtime; this intentional MVP handoff is local, not cross-host wake delivery.
-The separate runner `provider-credentials.json` is host authentication state,
-not account data, and is also excluded. A destination host must enable its
-runner under the intended provider-auth environment rather than importing that
-file through the account archive.
+Messaging has no client-local canonical or handoff state. PostgreSQL messages,
+delivery/read/ack state, audience snapshots, and request/claim graphs are all
+included in account export/import. Offline and terminal deliveries remain
+unacknowledged until an active destination client handles them, so there is no
+host-local notification ledger or provider-credential file to move.
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -410,7 +403,7 @@ Import rules:
   boundary. Import validates the delivery's processing shape and result-message
   scope. It preserves `completed` rows and their unique result links, but
   normalizes `claimed` rows to `available`, increments the generation, and
-  clears `claim_id`, claim-key hash, and lease expiry. The source runner's fence
+  clears `claim_id`, claim-key hash, and lease expiry. The source client's fence
   is therefore stale on the destination.
 - Direct-message `causal_depth` is portable safety state, not a client hint.
   Schema-35 imports must match every reply's depth to parent plus one; legacy

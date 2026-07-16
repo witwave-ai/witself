@@ -499,11 +499,9 @@ service the agent forgets to call is worthless):
    suffix to stay within its 2 KiB limit; Grok uses that suffix with
    underscore-safe tool names; Cursor uses the suffix with standard dotted tool
    names and project-scoped Memories semantics. At non-trivial task startup,
-   full and read-only profiles teach `self.show`, non-blocking
-   `message.listen(wait_seconds=0)`, and `message.notification.list`. The two
-   mailbox checks cover canonical unacknowledged work and already-acknowledged
-   runtime-local runner pointers without exposing content or waking an idle
-   model. Direct permanent Witself fact
+   full and read-only profiles teach `self.show` message-checkpoint inspection
+   and non-blocking `message.listen(wait_seconds=0)`. The canonical mailbox check
+   exposes no content and cannot wake an idle model. Direct permanent Witself fact
    deletion uses a value-free preview/apply contract, while plain "forget" is
    clarified against the provider-native memory lifecycle and untrusted content
    is never deletion authority. The remaining standing protocol covers
@@ -798,8 +796,9 @@ Model:
 - Delivery with at-least-once semantics, per-recipient (and per-conversation)
   ordering, and explicit read/acknowledgement state.
 - Mailbox delivery means durable availability, not model invocation. An idle
-  runtime is woken only by a client-owned runner or already-hosted supervisor;
-  MCP and the backend never initiate inference.
+  runtime is never woken by Witself; MCP, hooks, and the backend never initiate
+  inference. Pending work remains unacknowledged until the client next becomes
+  active.
 - A bounded explicit-list or realm send uses a send-time membership snapshot.
   The realm is the built-in team/room and the sender is excluded by default.
 - A message addressed to a group is fanned out to current group members, with
@@ -818,8 +817,7 @@ A message has:
   precedence.
 - `subject`/`kind`: a short classification. Omitted ordinary-send kind normalizes
   to actionable `request` across CLI, MCP, and backend writes. Explicit `note`
-  is FYI-only to the runner and uses the notification/ack path without
-  inference.
+  is FYI-only and may be read and acknowledged without treating it as work.
 - `body`: free-form text.
 - `payload`: an optional structured payload.
 - `thread_id`: optional correlation for ordered conversations. Knowing a thread
@@ -867,50 +865,29 @@ Autonomous delegation:
   The backend stores bounded, untrusted offer content but neither defines nor
   filters responsibility, capability, availability, directive, or profile
   fields and performs no semantic routing or model ranking.
-- A client-owned runner performs listen/claim/read/invoke/complete/ack with
-  bounded retries, concurrency, turns, and elapsed time. Direct completion
+- An already-active foreground client performs
+  checkpoint/listen/claim/read/complete/ack with bounded retries, concurrency,
+  turns, and elapsed time. Direct completion
   atomically persists the derived result reply and processing result link under
   the current fence; acknowledgement remains a separate recovery boundary. It
   may answer routine peer questions within the original objective and escalates
   only when genuinely new authority is required.
-- Backend-owned safety state survives runner and machine changes. The runner
+- Backend-owned safety state survives client and machine changes. The client
   enforces its turn limit from message `causal_depth` and its repeated-failure
   limit from processing `failure_count`; generation is only the stale-writer
   fence. Only an exact-fence release explicitly marked as a deterministic
   message failure increments the count. Provider-wide, configuration,
   cancellation, and lease-maintenance failures do not. The current default
-  escalates the fifth deterministic attempt. Payload history, payload turn
-  fields, and host-local counters are advisory only and cannot reset either
-  bound.
-- The implemented runner retains the Witself credential only in its
-  trusted parent. Text-only provider children receive no token, token path,
-  processing fence, API handle, or MCP/tools. Native Claude Code and Grok Build
-  are capability-probed; native Codex and Cursor fail closed. Enable captures
-  provider auth separately in a mode-0600 provider-bound local file, never in
-  config, service definitions, backend state, or account export. The Claude
-  allowlist is `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-  `ANTHROPIC_BASE_URL`, and `CLAUDE_CODE_OAUTH_TOKEN`; Grok permits
-  `XAI_API_KEY`. A strict generic command-adapter protocol supports separately
-  integrated wrappers. Bounded advisory continuation history carries the
-  objective and newest turns; the backend-derived turn limit defaults to 12 and
-  has a configurable maximum of 64.
-- The current provider-invoking kinds are `request`, `question`, and `reply`.
-  Terminal and other non-provider kinds enter a private content-free runner
-  notification ledger before acknowledgement and the ledger fails closed when
-  full. Full MCP lists pointers and consumes one only by canonical
-  read/verification followed by exact local clear; every failure retains it.
-  Read-only keeps list but not consume, and curator profiles expose neither.
-  The acknowledgement is canonical for the agent delivery, but the pointer
-  exists only in that runtime's `WITSELF_HOME` and is not account-exported;
-  another host/runtime cannot see it or recover the acknowledged delivery as
-  unread. This is an intentional MVP locality limitation, not cross-host wake
-  delivery. Automatic foreground injection remains client-integration work;
-  the backend does not push into a runtime.
-- Runner status includes content-free last-cycle and last-success timestamps,
-  bounded status/error class, and consecutive failure count. Raw error text,
-  message identifiers/content, provider output, and credentials are excluded.
-  This client-local health streak is distinct from backend message
-  `failure_count`.
+  escalates the fifth deterministic attempt. Payload history and payload turn
+  fields are advisory only and cannot reset either bound.
+- Codex and Claude Code receive the bounded content-free message checkpoint at
+  supported foreground hook boundaries. Cursor and Grok Build use installed
+  guidance to call `self.show`. Every runtime uses non-blocking
+  `message.listen` to retrieve unread metadata. No provider receives a
+  Witself-managed headless child process or captured provider credential.
+- Every message kind remains a canonical unacknowledged delivery until an active
+  recipient handles and acknowledges it. PostgreSQL is the only message and
+  handoff store.
 - A message carries no authority and can never forward direct-user
   authorization for permanent deletion, secret reveal, or another protected
   operation.
@@ -923,17 +900,14 @@ Autonomous delegation:
 Surfaces:
 
 - CLI: the `message` group with implemented `send`/`reply`/`list`/`listen`/
-  `read`/`ack`/`claim`/`renew`/`release`/`complete`; the implemented
+  `read`/`ack`/`claim`/`renew`/`release`/`complete`; and the implemented
   `message request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`
-  lifecycle; and the client-local
-  `message runner enable|disable|status|notifications|run|serve|start` lifecycle.
+  lifecycle.
 - MCP: `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
-  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`
-  and local bridge tools `witself.message.notification.list/consume`. Message
-  list/listen and notification list are read-only; request list/show are
-  full-profile because lazy lifecycle reconciliation may persist state;
-  read, notification consume, ack, claim, and completion are separate state
-  transitions.
+  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`.
+  Message list/listen are read-only; request list/show are full-profile because
+  lazy lifecycle reconciliation may persist state; read, ack, claim, and
+  completion are separate state transitions.
 - API: `/v1/messages`, `POST /v1/messages:listen`, and recipient-only colon
   actions `:reply`, `:read`, `:ack`, `:claim`, `:renew`, `:release`, and
   `:complete` on a message id; plus create/list/detail under
@@ -1859,9 +1833,7 @@ Open plane:
 - `policy` (`create`/`list`/`show`/`delete`/`test`).
 - `group` (`create`/`list`/`show`/`add-member`/`remove-member`/`delete`).
 - `message` (`send`/`reply`/`list`/`listen`/`read`/`ack`/`claim`/`renew`/
-  `release`/`complete`; `request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`;
-  plus client-local
-  `runner enable|disable|status|notifications|run|serve|start`).
+  `release`/`complete`; `request open|list|show|offer|decline|select|cancel|claim|renew|release|complete`).
 
 Sealed plane:
 
@@ -1891,8 +1863,7 @@ The MCP tool catalog spans both planes:
 - `witself.policy.test` (plus operator `policy.list`/`policy.show`).
 - `witself.group.list/show`.
 - `witself.message.send/reply/list/listen/read/ack/claim/renew/release/complete`
-  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`
-  and local `witself.message.notification.list/consume` bridge tools.
+  plus `witself.message.request.open/list/show/offer/decline/select/cancel/claim/renew/release/complete`.
 - `witself.secret.create/list/show/reveal/update` (sealed plane).
 - `witself.totp.enroll/code/show` (sealed plane).
 - `witself.password.generate` (sealed plane).
@@ -1959,16 +1930,16 @@ Defaults:
   value-returning `witself.reference.resolve`) while leaving redacted/metadata
   tools available. `--no-value-tools` and `--read-only` are independent switches.
 
-The current full MCP profile exposes 69 tools. MCP exposes direct agent-useful
+The current full MCP profile exposes 67 tools. MCP exposes direct agent-useful
 memory capture/adjust/read/history/recall/list/
 supersede/lifecycle/evidence/delete tools, fifteen curation tools
 (`preflight`, `requests`, `request.get`, `request`, `start`, `run.get`, `renew`,
 `get`, `plan`, `plan.get`, `apply`, `cancel`, `abandon`, `rollback`, and
 `status`), plus the
-implemented fact tools, the realm-safe peer-activity tool, ten server-backed direct-message tools, eleven
-server-backed realm-request tools, and the two client-local notification bridge
-tools. Read-only retains request list/show and notification list but not request
-mutations or notification consume; curator profiles expose neither. The broader target also includes
+implemented fact tools, the realm-safe peer-activity tool, ten server-backed
+direct-message tools, and eleven server-backed realm-request tools. Read-only
+omits request list/show because their lifecycle reconciliation may persist state.
+The broader target also includes
 remaining policy, group, reference, secret, TOTP, and password operations as
 their product slices land. High-risk admin actions such as
 realm deletion, broad agent lifecycle operations, policy mutation, secret grant,
@@ -2641,23 +2612,20 @@ collaboration, cells, and the realm-local core all present the same shape.
 - **MCP everywhere, full parity.** Every agent-facing, server-backed capability
   works via MCP with full parity, not just via CLI. CLI and MCP share
   request/response contracts so they cannot drift (see
-  [CLI, MCP, And JSON Contracts](#cli-mcp-and-json-contracts)). Host-local
-  service controls such as installing or starting a launchd/systemd message
-  runner are deliberate CLI-only lifecycle operations, not backend resources.
+  [CLI, MCP, And JSON Contracts](#cli-mcp-and-json-contracts)). There is no
+  host-local messaging service exception.
 - **CLI is primary/canonical.** The CLI is the canonical control plane and the
   reference behavior; MCP mirrors it.
-- **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**. The
-  only HTTP server is the backend (`witself-server` / relay). An optional
-  wake-webhook exists **only** for already-hosted cloud autonomous agents and is never
-  required.
+- **No agent-run HTTP servers for normal I/O.** Agents are **outbound clients**.
+  The only HTTP server is the backend (`witself-server` / relay). Witself does
+  not promise a wake webhook or model activation.
 - **The `listen` verb.** CLI `message listen`, MCP `witself.message.listen`, and
   `POST /v1/messages:listen` implement a stateless long poll for oldest
   unacknowledged inbound metadata. The durable mailbox is the source of truth;
   **offline recipients are the default** (send never needs the recipient
-  online; the next poll finds unacknowledged work), and v0 transport is
-  **polling-first**. Agents are told to listen in the agent directive (the
-  context-hydration teaching stanza: "to hear, call the ws listen tool each
-  loop"; see [context-hydration.md](context-hydration.md)).
+  online; the next foreground check finds unacknowledged work). Agents are told
+  to inspect the message checkpoint and use a zero-wait listen at active-turn
+  startup; see [context-hydration.md](context-hydration.md).
 - **Any live stream is a latency accelerator only**, never the system of record.
 
 These invariants apply to the realm-local messaging core today and extend unchanged

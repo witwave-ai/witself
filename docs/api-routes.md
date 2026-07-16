@@ -551,9 +551,10 @@ audit events; read-only recall does neither:
   same-text name; ordinary selectors use exact ID-or-name matching with ID
   precedence.
 - `POST /v1/messages` normalizes an omitted `kind` to actionable `request`.
-  Clients use explicit `kind=note` for FYI-only delivery that a runner records
-  and acknowledges without provider inference. `to.kind` is `agent`, `agents`,
-  or `realm`. Direct input uses one `id`; explicit-list input uses 1-64 `ids`;
+  Clients use explicit `kind=note` for FYI-only delivery with no implied reply
+  or provider-inference requirement; an active client acknowledges it only after
+  handling it. `to.kind` is `agent`, `agents`, or `realm`. Direct input uses one
+  `id`; explicit-list input uses 1-64 `ids`;
   realm input supplies neither. Every selector resolves exactly and
   case-sensitively inside the token-derived realm, the whole operation is
   all-or-none, and a realm snapshot excludes the sender. A selector beginning
@@ -578,9 +579,9 @@ audit events; read-only recall does neither:
   makes processing available and invalidates the old fence without acking.
   Release accepts optional `deterministic_failure` (default false); only true on
   an exact-fence release atomically increments migration-0036 `failure_count`.
-  The direct runner does not mark provider-wide, configuration, cancellation,
-  or lease-maintenance failures deterministic and escalates the fifth
-  deterministic attempt under its current default policy.
+  A foreground client must not mark provider-wide, configuration, cancellation,
+  or lease-maintenance failures deterministic and treats the fifth
+  deterministic attempt as escalation under the default handling guidance.
 - `POST /v1/messages/{message_id}:complete` validates the exact unexpired fence
   and required `Idempotency-Key`, then in one transaction creates a
   server-routed result reply at parent `causal_depth + 1`, links it to the
@@ -624,11 +625,6 @@ audit events; read-only recall does neither:
   claim. Deleting a candidate declines a pending response and cancels that
   agent's live claims while preserving historical offers. Stored deadlines make
   expiry and phase recoverable without a backend inference or scheduling worker.
-- `witself.message.notification.list/consume` have no HTTP product routes. They
-  are MCP bridges over one runtime's private local pointer ledger; consume uses
-  the canonical `:read` route and clears its exact pointer only after
-  verification. Canonical messages remain PostgreSQL/account-export data, while
-  the local ledger does not.
 - `POST /v1/tokens/{token_id}:rotate` issues a replacement token. The raw token
   value is returned once.
 - `POST /v1/tokens/{token_id}:revoke` immediately invalidates a live operator
@@ -773,12 +769,16 @@ POST /v1/memories:consolidate # superseded target; not implemented
 ```
 
 - `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
-  facts first, then top-N salient memories, then a one-line index of
-  kinds/tags/counts. It is cheap, never requires a vector profile or query
-  vector, and is
+  facts first, then top-N salient memories, authenticated value-free memory and
+  message checkpoints, then a one-line index of kinds/tags/counts. It is cheap,
+  never requires a vector profile or query vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
   `:recall` rather than silently truncating. Implemented query parameters select
-  what to include (facts, salient memories, salient limit, byte cap). The target
+  what to include (`include_facts`, `include_salient`, `salient_limit`,
+  `max_bytes`, `include_counts`, `include_checkpoint`,
+  `include_message_checkpoint`, and `include_sensitive`). Each checkpoint is
+  additive and independently fails open with `unavailable:true`; neither is
+  source content or authority. The target
   `?format=claude-md|agents-md|markdown` renderer would be the HTTP surface for
   `witself digest emit`, but neither that rendering behavior nor the command is
   implemented in the current checkout. Passing `?format=` does not currently

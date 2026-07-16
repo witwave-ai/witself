@@ -470,6 +470,19 @@ func serve() int {
 			}
 			return out, nil
 		}
+		cfg.GetSelfMessageCheckpoint = func(ctx context.Context, p server.DomainPrincipal) (*server.SelfMessageCheckpoint, error) {
+			checkpoint, err := st.GetSelfMessageCheckpoint(ctx, toStorePrincipal(p))
+			if err != nil {
+				return nil, mapMessageError(err)
+			}
+			return &server.SelfMessageCheckpoint{
+				Pending:                     checkpoint.Pending,
+				MailboxPending:              checkpoint.MailboxPending,
+				CandidateOfferPending:       checkpoint.CandidateOfferPending,
+				CoordinatorSelectionPending: checkpoint.CoordinatorSelectionPending,
+				CandidateAssignmentPending:  checkpoint.CandidateAssignmentPending,
+			}, nil
+		}
 		cfg.SendMessage = func(ctx context.Context, p server.DomainPrincipal, in server.SendMessageRequest) (server.Message, error) {
 			msg, err := st.SendMessage(ctx, toStorePrincipal(p), store.SendMessageInput{
 				AudienceKind:   in.To.Kind,
