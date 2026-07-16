@@ -26,9 +26,9 @@ plane.
 - [narrative-memory-and-curation.md](narrative-memory-and-curation.md): the
   accepted portable narrative-memory architecture, implemented same-turn
   capture and client-side curation protocol, deterministic backend, retrieval,
-  PostgreSQL graph, runtime adapters, export/import, and remaining delivery
-  plan. It controls wherever an older draft still describes server inference
-  or native-only narrative memory.
+  PostgreSQL graph, runtime adapters, export/import, production-readiness
+  checklist, and tracked certification gates. It controls wherever an older
+  draft still describes server inference or native-only narrative memory.
 - [client-memory-curator-recipe.md](client-memory-curator-recipe.md): the
   provider-neutral, client-inference workflow for foreground pending-checkpoint
   handling, claiming due work, paging a frozen snapshot, planning, applying an

@@ -8,6 +8,11 @@ client-supplied vector profiles replace backend re-embedding/provider work.
 The roadmap below follows the canonical contract in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Managed-cloud certification, live four-runtime acceptance, and production
+load/quality tuning are pre-production gates in the canonical
+[narrative-memory production-readiness checklist](narrative-memory-and-curation.md#production-readiness-checklist),
+not post-v0 features. This roadmap begins after that closeout boundary.
+
 ## Decision
 
 V0 should stay focused on the core agent self/identity store:
