@@ -121,3 +121,10 @@ This is the backend and account-move gate. Runtime capture/recall conformance is
 separate and currently covers Codex, Claude Code, Grok Build, and Cursor with
 capability-accurate fallbacks. Gemini and GitHub Copilot are intentionally not
 part of the current release gate.
+
+The managed-cloud certification is tracked by
+[issue #44](https://github.com/witwave-ai/witself/issues/44) under the canonical
+[narrative-memory production-readiness checklist](narrative-memory-and-curation.md#production-readiness-checklist).
+Related infrastructure issues #35 and #36 provide endpoint and network
+prerequisites; this gate consumes reachable managed PostgreSQL endpoints and
+does not provision or certify the broader cloud infrastructure.

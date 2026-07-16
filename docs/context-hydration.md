@@ -203,6 +203,12 @@ matrix is pinned in code and shared
 conformance tests, so adding a runtime requires declaring its real output
 contract rather than copying another provider's hook fields.
 
+Repeatable live acceptance of this matrix is tracked by
+[issue #45](https://github.com/witwave-ai/witself/issues/45) under the canonical
+[narrative-memory production-readiness checklist](narrative-memory-and-curation.md#production-readiness-checklist).
+That gate tests each runtime against this capability-accurate contract rather
+than requiring synthetic hook parity.
+
 For Codex and Claude, automatic means model-visible delivery, not guaranteed
 model execution. A prompt hook injects the checkpoint already durable when its
 bounded `/v1/self` read occurs. Because transcript flushing is asynchronous, the

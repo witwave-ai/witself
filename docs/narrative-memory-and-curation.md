@@ -1525,19 +1525,73 @@ the Codex and Cursor native curator paths are unsupported rather than weakened.
 Those gaps are deliberately visible; the backend does not substitute autonomous
 classification, consolidation, or embedding inference for them.
 
-## Remaining Tuning Decisions
+## Production Readiness Checklist
 
-These do not change the architecture and can be measured during implementation:
+The four-runtime narrative-memory contract is feature-complete, but it is not
+production-certified until the three evidence-producing gates below are
+complete. [Issue #47](https://github.com/witwave-ai/witself/issues/47) is the
+umbrella tracker. These are pre-production gates for the implemented system,
+not optional post-v0 product features.
 
-- default checkpoint/evidence thresholds and curation budgets;
-- transcript pin duration and the identity-only export policy for materialized
-  evidence excerpts; evidence is never allowed to dangle;
-- the first recommended client embedding profile (the profile contract itself
-  is implemented and provider-neutral);
-- production debounce/minimum-interval/backoff and service-poll defaults;
-  provider selection remains explicit;
-- ranking weights, result budgets, and which memory kinds are pinned in the
-  self digest.
+### Gate 1 — Managed-Cloud Portability
+
+- [ ] Complete [issue #44](https://github.com/witwave-ai/witself/issues/44):
+  run the protected, release-specific AWS/GCP/Azure 3-by-3 managed-PostgreSQL
+  certification described in
+  [memory-cloud-conformance.md](memory-cloud-conformance.md).
+- [ ] Retain the workflow URL, release tag and commit SHA, provider
+  attestations, salted endpoint fingerprints, database versions, and all nine
+  successful directed cases without exposing endpoint credentials.
+
+### Gate 2 — Live Four-Runtime Acceptance
+
+- [ ] Complete [issue #45](https://github.com/witwave-ai/witself/issues/45):
+  exercise Codex, Claude Code, Cursor, and Grok Build with their real
+  authenticated clients and isolated synthetic test agents.
+- [ ] Verify explicit capture, history-dependent recall without a user search
+  instruction, one pending foreground curation checkpoint, sensitive recall and
+  broad-result redaction, same-agent continuity, and cross-agent isolation.
+- [ ] Retain sanitized evidence identifying each client version, Witself release
+  and commit, delivery mode, test identity, timestamp, and outcome.
+
+The accepted delivery contract remains capability-accurate: Codex and Claude
+Code receive automatic model-visible hook hydration, while Cursor and Grok Build
+use the managed always-on instruction plus MCP `self.show` and `memory.recall`
+fallback. The guided fallback is not a backend blocker and must not be reported
+as automatic injection. A future runtime contract can upgrade that row only
+after a live, version-gated conformance test passes.
+
+### Gate 3 — Production Load, Quality, And Defaults
+
+- [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
+  load-test queue claims and fencing, bounded curation plans, lexical/vector
+  indexes, archive rebuild, high-cardinality accounts, and concurrent agents.
+- [ ] Establish documented baselines and operating thresholds for latency,
+  throughput, queue age, stale-plan/conflict rates, duplicate growth, recall
+  usefulness, summarization drift, sensitive exposure, client-side inference
+  cost, rebuild duration, degraded lexical-only behavior, and rollback success.
+- [ ] Measure and set the remaining production defaults:
+
+  - checkpoint/evidence thresholds and curation budgets;
+  - transcript pin duration and the identity-only export policy for
+    materialized evidence excerpts; evidence is never allowed to dangle;
+  - the first recommended client embedding profile; the profile contract is
+    already implemented and provider-neutral;
+  - debounce, minimum-interval, backoff, and service-poll defaults; provider
+    selection remains explicit; and
+  - ranking weights, result budgets, and which memory kinds are pinned in the
+    self digest.
+
+### Exit And Scope Boundary
+
+Production readiness is complete only when issues
+[#44](https://github.com/witwave-ai/witself/issues/44),
+[#45](https://github.com/witwave-ai/witself/issues/45), and
+[#46](https://github.com/witwave-ai/witself/issues/46) are closed with retained
+evidence, the certified release and commit are identified, and this checklist
+links the results. Optional conveniences and intelligence work remain in
+[post-v0-roadmap.md](post-v0-roadmap.md); Gemini and GitHub Copilot remain
+intentionally deferred and are not part of this closeout.
 
 ## Related Documents
 
