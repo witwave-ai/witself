@@ -45,22 +45,23 @@ type Location struct {
 
 // Config is the non-secret integration binding for one runtime.
 type Config struct {
-	SchemaVersion  string    `json:"schema_version"`
-	Runtime        string    `json:"runtime"`
-	RuntimeVersion string    `json:"runtime_version,omitempty"`
-	CaptureMode    string    `json:"capture_mode"`
-	HookMode       string    `json:"hook_mode"`
-	Account        string    `json:"account"`
-	AccountID      string    `json:"account_id,omitempty"`
-	Realm          string    `json:"realm"`
-	RealmID        string    `json:"realm_id,omitempty"`
-	Agent          string    `json:"agent"`
-	AgentID        string    `json:"agent_id"`
-	AgentName      string    `json:"agent_name"`
-	Endpoint       string    `json:"endpoint,omitempty"`
-	TokenFile      string    `json:"token_file,omitempty"`
-	Location       Location  `json:"location"`
-	InstalledAt    time.Time `json:"installed_at"`
+	SchemaVersion      string    `json:"schema_version"`
+	Runtime            string    `json:"runtime"`
+	RuntimeVersion     string    `json:"runtime_version,omitempty"`
+	CaptureMode        string    `json:"capture_mode"`
+	HookMode           string    `json:"hook_mode"`
+	Account            string    `json:"account"`
+	AccountID          string    `json:"account_id,omitempty"`
+	Realm              string    `json:"realm"`
+	RealmID            string    `json:"realm_id,omitempty"`
+	Agent              string    `json:"agent"`
+	AgentID            string    `json:"agent_id"`
+	AgentName          string    `json:"agent_name"`
+	Endpoint           string    `json:"endpoint,omitempty"`
+	TokenFile          string    `json:"token_file,omitempty"`
+	ManagedPermissions []string  `json:"managed_permissions,omitempty"`
+	Location           Location  `json:"location"`
+	InstalledAt        time.Time `json:"installed_at"`
 }
 
 // NormalizeRuntime returns the stable runtime namespace used in transcript ids.

@@ -45,6 +45,12 @@ when explicitly requested. See the
 - Cursor: `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
   `~/.cursor/rules/witself-memory-routing.mdc`)
 
+Cursor installation also merges `Mcp(witself:*)` into
+`$CURSOR_CONFIG_DIR/cli-config.json` so the approved server's tools can run in
+normal allowlist mode. Witself records whether it added that permission:
+reinstall is idempotent, uninstall removes only a Witself-owned entry, and a
+pre-existing user-owned entry is preserved.
+
 ```sh
 witself install codex
 witself install claude
