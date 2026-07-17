@@ -25,42 +25,61 @@ const (
 	maxRawPayloadBytes           = 8 * 1024
 	maxStructuredBytes           = 4 * 1024
 	maxNativeTranscriptTailBytes = 16 * 1024 * 1024
+	maxNativeTranscriptLineBytes = 2 * 1024 * 1024
+	maxNativeTranscriptRecords   = 10_000
 	entryBodyChunkSize           = 60 * 1024
 	staleFlushLockAge            = 5 * time.Minute
 )
 
 // Event is one durable, provider-neutral hook event in the local outbox.
 type Event struct {
-	SchemaVersion        string          `json:"schema_version"`
-	ID                   string          `json:"id"`
-	Runtime              string          `json:"runtime"`
-	RuntimeVersion       string          `json:"runtime_version,omitempty"`
-	RuntimeVersionSource string          `json:"runtime_version_source,omitempty"`
-	CaptureMode          string          `json:"capture_mode"`
-	Account              string          `json:"account"`
-	Realm                string          `json:"realm"`
-	Agent                string          `json:"agent"`
-	AgentID              string          `json:"agent_id"`
-	AgentName            string          `json:"agent_name"`
-	Location             Location        `json:"location"`
-	SessionID            string          `json:"session_id"`
-	RunID                string          `json:"run_id"`
-	TurnID               string          `json:"turn_id,omitempty"`
-	HookEvent            string          `json:"hook_event"`
-	NativeHookEvent      string          `json:"native_hook_event"`
-	Kind                 string          `json:"kind"`
-	Role                 string          `json:"role"`
-	Body                 string          `json:"body,omitempty"`
-	Data                 json.RawMessage `json:"data,omitempty"`
-	Model                string          `json:"model,omitempty"`
-	ModelSource          string          `json:"model_source,omitempty"`
-	ModelProvider        string          `json:"model_provider,omitempty"`
-	ModelProviderSource  string          `json:"model_provider_source,omitempty"`
-	CWD                  string          `json:"cwd,omitempty"`
-	SourceTranscriptPath string          `json:"source_transcript_path,omitempty"`
-	ReplyToEventID       string          `json:"reply_to_event_id,omitempty"`
-	OccurredAt           time.Time       `json:"occurred_at"`
-	Raw                  json.RawMessage `json:"raw,omitempty"`
+	SchemaVersion        string             `json:"schema_version"`
+	ID                   string             `json:"id"`
+	Runtime              string             `json:"runtime"`
+	RuntimeVersion       string             `json:"runtime_version,omitempty"`
+	RuntimeVersionSource string             `json:"runtime_version_source,omitempty"`
+	CaptureMode          string             `json:"capture_mode"`
+	Account              string             `json:"account"`
+	Realm                string             `json:"realm"`
+	Agent                string             `json:"agent"`
+	AgentID              string             `json:"agent_id"`
+	AgentName            string             `json:"agent_name"`
+	Location             Location           `json:"location"`
+	SessionID            string             `json:"session_id"`
+	RunID                string             `json:"run_id"`
+	TurnID               string             `json:"turn_id,omitempty"`
+	HookEvent            string             `json:"hook_event"`
+	NativeHookEvent      string             `json:"native_hook_event"`
+	Kind                 string             `json:"kind"`
+	Role                 string             `json:"role"`
+	Body                 string             `json:"body,omitempty"`
+	Data                 json.RawMessage    `json:"data,omitempty"`
+	Model                string             `json:"model,omitempty"`
+	ModelSource          string             `json:"model_source,omitempty"`
+	ModelProvider        string             `json:"model_provider,omitempty"`
+	ModelProviderSource  string             `json:"model_provider_source,omitempty"`
+	CWD                  string             `json:"cwd,omitempty"`
+	SourceTranscriptPath string             `json:"source_transcript_path,omitempty"`
+	ReplyToEventID       string             `json:"reply_to_event_id,omitempty"`
+	OccurredAt           time.Time          `json:"occurred_at"`
+	Raw                  json.RawMessage    `json:"raw,omitempty"`
+	RecoveredMessages    []RecoveredMessage `json:"recovered_messages,omitempty"`
+}
+
+// RecoveredMessage is a visible user or assistant message atomically attached
+// to one terminal provider hook when that provider omitted its message hooks.
+// Its ids are content-derived so retrying the same terminal hook remains
+// idempotent in the provider session's transcript.
+type RecoveredMessage struct {
+	ID              string          `json:"id"`
+	TurnID          string          `json:"turn_id"`
+	HookEvent       string          `json:"hook_event"`
+	NativeHookEvent string          `json:"native_hook_event"`
+	Kind            string          `json:"kind"`
+	Role            string          `json:"role"`
+	Body            string          `json:"body"`
+	Data            json.RawMessage `json:"data,omitempty"`
+	ReplyToEventID  string          `json:"reply_to_event_id,omitempty"`
 }
 
 // ActivityObservation is the deliberately narrow hook projection sent to the
@@ -159,6 +178,8 @@ type sessionState struct {
 	RuntimeVersionSource string `json:"runtime_version_source,omitempty"`
 	TurnID               string `json:"turn_id,omitempty"`
 	PromptEventID        string `json:"prompt_event_id,omitempty"`
+	PromptCaptured       bool   `json:"prompt_captured,omitempty"`
+	ResponseCaptured     bool   `json:"response_captured,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -224,6 +245,8 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		}
 		state.TurnID = ""
 		state.PromptEventID = ""
+		state.PromptCaptured = false
+		state.ResponseCaptured = false
 		state.RuntimeVersion = ""
 		state.RuntimeVersionSource = ""
 	}
@@ -240,9 +263,19 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		}
 		state.TurnID = turnID
 		state.PromptEventID = eventID
-	case "AgentResponse", "AgentThought", "Stop", "StopFailure":
+		state.PromptCaptured = strings.TrimSpace(input.Prompt) != ""
+		state.ResponseCaptured = false
+	case "AgentResponse":
 		if turnID == "" {
 			turnID = state.TurnID
+		}
+		state.ResponseCaptured = strings.TrimSpace(input.LastAssistantMessage) != ""
+	case "AgentThought", "Stop", "StopFailure":
+		if turnID == "" {
+			turnID = state.TurnID
+		}
+		if (input.HookEventName == "Stop" || input.HookEventName == "StopFailure") && input.LastAssistantMessage != "" {
+			state.ResponseCaptured = true
 		}
 	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact":
 		if turnID == "" {
@@ -289,6 +322,13 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		OccurredAt:           time.Now().UTC(),
 	}
 	setEventContent(&event, input, raw)
+	if cfg.Runtime == RuntimeCursor && cfg.CaptureMode == ModeRaw && input.HookEventName == "SessionEnd" &&
+		!state.PromptCaptured && !state.ResponseCaptured && input.TranscriptPath != "" {
+		fallback, fallbackErr := cursorNativeTranscriptMessages(event, input.TranscriptPath)
+		if fallbackErr == nil {
+			event.RecoveredMessages = fallback
+		}
+	}
 	if input.HookEventName == "AgentResponse" {
 		event.ReplyToEventID = state.PromptEventID
 	}
@@ -324,7 +364,14 @@ func validateNativeHookInput(runtime string, input hookInput) error {
 }
 
 func normalizeHookInput(runtime string, input *hookInput) error {
-	input.SessionID = strings.TrimSpace(firstNonempty(input.SessionID, input.SessionIDCamel, input.ConversationID))
+	if runtime == RuntimeCursor {
+		// conversation_id is the native Cursor session identity and is also
+		// the directory name in its trusted transcript store. Never allow a
+		// conflicting generic session_id field to redirect fallback recovery.
+		input.SessionID = strings.TrimSpace(input.ConversationID)
+	} else {
+		input.SessionID = strings.TrimSpace(firstNonempty(input.SessionID, input.SessionIDCamel))
+	}
 	input.TranscriptPath = firstNonempty(input.TranscriptPath, input.TranscriptPathCamel)
 	input.CWD = firstNonempty(input.CWD, input.WorkspaceRoot)
 	input.NativeHookEvent = strings.TrimSpace(firstNonempty(input.HookEventName, input.HookEventNameCamel))
@@ -450,6 +497,217 @@ func unwrapGrokPrompt(prompt string) string {
 		return strings.TrimSuffix(strings.TrimPrefix(prompt, prefix), suffix)
 	}
 	return prompt
+}
+
+type cursorTranscriptRecord struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Role    string `json:"role"`
+	Message struct {
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+type cursorTranscriptContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func cursorNativeTranscriptMessages(base Event, path string) ([]RecoveredMessage, error) {
+	promptBody, assistantBody, err := readCursorVisibleMessages(path, base.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	turnID := cursorRecoveredID("turn", base.SessionID, "prompt", promptBody)
+	promptID := cursorRecoveredID("evt", base.SessionID, "prompt", promptBody)
+	responseID := cursorRecoveredID("evt", base.SessionID, "response", promptBody, assistantBody)
+	data, _ := json.Marshal(map[string]any{
+		"source":   "cursor_native_transcript",
+		"fallback": true,
+	})
+	return []RecoveredMessage{
+		{
+			ID: promptID, TurnID: turnID,
+			HookEvent: "UserPromptSubmit", NativeHookEvent: "nativeTranscriptUser",
+			Kind: "message.user", Role: "user", Body: promptBody, Data: data,
+		},
+		{
+			ID: responseID, TurnID: turnID,
+			HookEvent: "AgentResponse", NativeHookEvent: "nativeTranscriptAssistant",
+			Kind: "message.assistant", Role: "assistant", Body: assistantBody, Data: data,
+			ReplyToEventID: promptID,
+		},
+	}, nil
+}
+
+func cursorRecoveredID(prefix, sessionID string, parts ...string) string {
+	value := "cursor\x00" + sessionID + "\x00" + strings.Join(parts, "\x00")
+	sum := sha256.Sum256([]byte(value))
+	return prefix + "_" + hex.EncodeToString(sum[:16])
+}
+
+func readCursorVisibleMessages(path, expectedSessionID string) (string, string, error) {
+	home := strings.TrimSpace(os.Getenv("CURSOR_DATA_DIR"))
+	if home == "" {
+		home = strings.TrimSpace(os.Getenv("CURSOR_CONFIG_DIR"))
+	}
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", err
+		}
+		home = filepath.Join(userHome, ".cursor")
+	}
+	projectsRoot, err := filepath.EvalSymlinks(filepath.Join(home, "projects"))
+	if err != nil {
+		return "", "", err
+	}
+	linkInfo, err := os.Lstat(path)
+	if err != nil {
+		return "", "", err
+	}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("cursor transcript path must not be a symlink")
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", "", err
+	}
+	rel, err := filepath.Rel(projectsRoot, resolvedPath)
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		filepath.Ext(resolvedPath) != ".jsonl" || len(parts) != 4 ||
+		parts[len(parts)-3] != "agent-transcripts" ||
+		strings.TrimSuffix(parts[len(parts)-1], ".jsonl") != parts[len(parts)-2] ||
+		strings.TrimSpace(expectedSessionID) == "" || parts[len(parts)-2] != expectedSessionID {
+		return "", "", errors.New("cursor transcript path is outside the agent transcript store")
+	}
+
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return "", "", err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
+		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
+		info.Size() > maxNativeTranscriptTailBytes || !trustedCursorDirectoryChain(projectsRoot, resolvedPath) {
+		return "", "", errors.New("cursor transcript is not a bounded trusted regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxNativeTranscriptTailBytes+1))
+	if err != nil {
+		return "", "", err
+	}
+	if len(raw) > maxNativeTranscriptTailBytes {
+		return "", "", errors.New("cursor transcript exceeds the bounded read limit")
+	}
+
+	userCount := 0
+	prompt := ""
+	assistant := ""
+	recordCount := 0
+	terminalCount := 0
+	lastRecordKind := ""
+	terminalSuccess := false
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		recordCount++
+		if recordCount > maxNativeTranscriptRecords || len(line) > maxNativeTranscriptLineBytes {
+			return "", "", errors.New("cursor transcript exceeds the bounded record limit")
+		}
+		var record cursorTranscriptRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return "", "", fmt.Errorf("parse cursor transcript: %w", err)
+		}
+		if strings.TrimSpace(record.Role) == "" {
+			if record.Type != "turn_ended" {
+				return "", "", errors.New("cursor transcript contains an unsupported record")
+			}
+			terminalCount++
+			terminalSuccess = record.Status == "success"
+			lastRecordKind = "terminal"
+			continue
+		}
+		if record.Type != "" {
+			return "", "", errors.New("cursor transcript message record has an unexpected type")
+		}
+		lastRecordKind = "message"
+		body, err := cursorVisibleText(record.Message.Content)
+		if err != nil {
+			return "", "", err
+		}
+		switch strings.ToLower(strings.TrimSpace(record.Role)) {
+		case "user":
+			if strings.TrimSpace(body) == "" {
+				continue
+			}
+			userCount++
+			prompt = body
+		case "assistant":
+			if userCount == 1 && strings.TrimSpace(body) != "" {
+				// Cursor records tool-turn status text and the final answer as
+				// separate assistant messages. Retain only the last visible text
+				// message so the fallback never promotes intermediate reasoning.
+				assistant = body
+			}
+		default:
+			return "", "", errors.New("cursor transcript contains an unsupported message role")
+		}
+	}
+	if userCount != 1 || strings.TrimSpace(prompt) == "" || strings.TrimSpace(assistant) == "" ||
+		terminalCount != 1 || lastRecordKind != "terminal" || !terminalSuccess {
+		return "", "", errors.New("cursor headless transcript requires exactly one visible user prompt and one assistant response")
+	}
+	return prompt, assistant, nil
+}
+
+func trustedCursorDirectoryChain(projectsRoot, transcriptPath string) bool {
+	dir := filepath.Dir(transcriptPath)
+	for {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) {
+			return false
+		}
+		if dir == projectsRoot {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
+func ownedByCurrentUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
+func cursorVisibleText(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+	var blocks []cursorTranscriptContentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", errors.New("cursor transcript message content has an unsupported shape")
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == "text" && block.Text != "" {
+			texts = append(texts, block.Text)
+		}
+	}
+	return strings.Join(texts, "\n\n"), nil
 }
 
 type grokSessionUpdate struct {
@@ -871,6 +1129,40 @@ func (e Event) TranscriptMetadata() json.RawMessage {
 // a visible body. Raw hook JSON is embedded only while it fits the bounded
 // payload; larger raw envelopes retain a digest and byte count.
 func (e Event) Entries() []Entry {
+	if len(e.RecoveredMessages) == 0 {
+		return e.entriesWithoutRecovered()
+	}
+
+	// Recovery is persisted atomically with the terminal event in one outbox
+	// file. Expand it only at flush time, preserving visible turn order while
+	// keeping the provider's SessionEnd entry last.
+	recovered := append([]RecoveredMessage(nil), e.RecoveredMessages...)
+	e.RecoveredMessages = nil
+	entries := make([]Entry, 0, len(recovered)+1)
+	for _, message := range recovered {
+		child := e
+		child.ID = message.ID
+		child.TurnID = message.TurnID
+		child.HookEvent = message.HookEvent
+		child.NativeHookEvent = message.NativeHookEvent
+		child.Kind = message.Kind
+		child.Role = message.Role
+		child.Body = message.Body
+		child.Data = message.Data
+		child.ReplyToEventID = message.ReplyToEventID
+		child.Raw = nil
+		// The native transcript has no trustworthy per-message timestamp or
+		// Witself run id. Omitting the terminal hook's changing values keeps a
+		// duplicate SessionEnd retry byte-identical at the server idempotency
+		// boundary. Transcript sequence still preserves prompt/response order.
+		child.RunID = ""
+		child.OccurredAt = time.Time{}
+		entries = append(entries, child.entriesWithoutRecovered()...)
+	}
+	return append(entries, e.entriesWithoutRecovered()...)
+}
+
+func (e Event) entriesWithoutRecovered() []Entry {
 	chunks := splitUTF8(e.Body, entryBodyChunkSize)
 	if len(chunks) == 0 {
 		chunks = []string{""}
@@ -887,11 +1179,15 @@ func (e Event) Entries() []Entry {
 			"capture_mode":   e.CaptureMode,
 			"location":       e.Location,
 			"session_id":     e.SessionID,
-			"run_id":         e.RunID,
-			"occurred_at":    e.OccurredAt,
 			"chunk_index":    i,
 			"chunk_count":    len(chunks),
 			"provenance":     e.provenancePayload(),
+		}
+		if e.RunID != "" {
+			payload["run_id"] = e.RunID
+		}
+		if !e.OccurredAt.IsZero() {
+			payload["occurred_at"] = e.OccurredAt
 		}
 		if e.TurnID != "" {
 			payload["turn_id"] = e.TurnID

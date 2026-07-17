@@ -668,17 +668,18 @@ func TestCurrentExecutablePathRejectsGoRunBinary(t *testing.T) {
 
 func TestDetectRuntimeVersion(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		output string
-		stderr string
-		want   string
+		name    string
+		runtime string
+		output  string
+		stderr  string
+		want    string
 	}{
-		{"codex", "codex-cli 0.30.0", "", "0.30.0"},
-		{"claude", "2.1.197 (Claude Code)", "", "2.1.197"},
-		{"grok", "grok 0.2.93 (f00f96316d4b) [stable]", "", "0.2.93"},
-		{"cursor", "3.11.13\ncommit\narm64", "", "3.11.13"},
-		{"cursor diagnostic", "3.12.10\ncommit\narm64", "[0716/234658.202288:ERROR:electron] failure", "3.12.10"},
-		{"fallback", "development-build", "", "development-build"},
+		{"codex", transcriptcapture.RuntimeCodex, "codex-cli 0.30.0", "", "0.30.0"},
+		{"claude", transcriptcapture.RuntimeClaudeCode, "2.1.197 (Claude Code)", "", "2.1.197"},
+		{"grok", transcriptcapture.RuntimeGrokBuild, "grok 0.2.93 (f00f96316d4b) [stable]", "", "0.2.93"},
+		{"cursor", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "", "2026.07.16-899851b"},
+		{"cursor diagnostic", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "[0716/234658.202288:ERROR:electron] failure", "2026.07.16-899851b"},
+		{"fallback", transcriptcapture.RuntimeCodex, "development-build", "", "development-build"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "runtime")
@@ -690,10 +691,23 @@ func TestDetectRuntimeVersion(t *testing.T) {
 			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if got := detectRuntimeVersion(path); got != tc.want {
+			if got := detectRuntimeVersion(tc.runtime, path); got != tc.want {
 				t.Fatalf("version = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDetectRuntimeVersionUsesCursorAgentBuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cursor")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" != agent ] || [ \"$2\" != --version ]; then exit 2; fi\n" +
+		"printf '%s\\n' '2026.07.16-899851b'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectRuntimeVersion(transcriptcapture.RuntimeCursor, path); got != "2026.07.16-899851b" {
+		t.Fatalf("Cursor Agent version = %q", got)
 	}
 }
 

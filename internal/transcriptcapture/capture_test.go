@@ -1,6 +1,7 @@
 package transcriptcapture
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -405,9 +406,10 @@ func TestCursorCaptureNormalizesConversationAndStructuredResponse(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	prompt := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","cwd":"/src/witself","prompt":"hello"}`)
+	prompt := enqueueTestHook(t, RuntimeCursor, `{"session_id":"untrusted-session","conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","cwd":"/src/witself","prompt":"hello"}`)
 	response := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"afterAgentResponse","cwd":"/src/witself","text":"hi there","input_tokens":12,"output_tokens":4}`)
-	if prompt.HookEvent != "UserPromptSubmit" || prompt.NativeHookEvent != "beforeSubmitPrompt" || prompt.TurnID != "generation-1" {
+	if prompt.HookEvent != "UserPromptSubmit" || prompt.NativeHookEvent != "beforeSubmitPrompt" ||
+		prompt.TurnID != "generation-1" || prompt.SessionID != "conversation-1" {
 		t.Fatalf("prompt = %#v", prompt)
 	}
 	if response.Kind != "message.assistant" || response.Body != "hi there" || response.ReplyToEventID != prompt.ID {
@@ -416,6 +418,333 @@ func TestCursorCaptureNormalizesConversationAndStructuredResponse(t *testing.T) 
 	entries := response.Entries()
 	if len(entries) != 1 || !strings.Contains(string(entries[0].Payload), `"input_tokens":12`) || !strings.Contains(string(entries[0].Payload), `"native_event":"afterAgentResponse"`) {
 		t.Fatalf("payload = %s", entries[0].Payload)
+	}
+}
+
+func TestCursorHeadlessSessionEndBackfillsVisibleNativeMessages(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_DATA_DIR", cursorHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCursor, RuntimeVersion: "3.12.10", CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionDir := filepath.Join(cursorHome, "projects", "workspace", "agent-transcripts", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "session-1.jsonl")
+	transcript := strings.Join([]string{
+		`{"role":"user","message":{"content":[{"type":"text","text":"headless prompt"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"working"},{"type":"tool_use","name":"CallMcpTool","input":{}}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"tool_use","name":"CallMcpTool","input":{}}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"finished"}]}}`,
+		`{"type":"turn_ended","status":"success"}`,
+	}, "\n") + "\n"
+	// Cursor currently creates its native transcripts as 0644. They remain
+	// trusted because both the file and directory chain are owned by this user
+	// and none is writable by another user.
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-1","generation_id":"generation-1","hook_event_name":"sessionStart","cursor_version":"3.12.10"}`)
+	endRaw, _ := json.Marshal(map[string]any{
+		"conversation_id": "session-1", "generation_id": "generation-1",
+		"hook_event_name": "sessionEnd", "cursor_version": "3.12.10",
+		"model": "cursor-grok-4.5-high", "transcript_path": transcriptPath,
+	})
+	end := enqueueTestHook(t, RuntimeCursor, string(endRaw))
+	pending, err := Pending(RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending events = %d, want one atomic session start and session end bundle", len(pending))
+	}
+	if pending[1].Event.ID != end.ID {
+		t.Fatalf("persisted terminal event = %#v, want id %s", pending[1].Event, end.ID)
+	}
+	end = pending[1].Event
+	if len(end.RecoveredMessages) != 2 {
+		t.Fatalf("recovered messages = %#v", end.RecoveredMessages)
+	}
+	prompt := end.RecoveredMessages[0]
+	response := end.RecoveredMessages[1]
+	if prompt.HookEvent != "UserPromptSubmit" || prompt.NativeHookEvent != "nativeTranscriptUser" ||
+		prompt.Kind != "message.user" || prompt.Role != "user" || prompt.Body != "headless prompt" {
+		t.Fatalf("fallback prompt = %#v", prompt)
+	}
+	if response.HookEvent != "AgentResponse" || response.NativeHookEvent != "nativeTranscriptAssistant" ||
+		response.Kind != "message.assistant" || response.Role != "assistant" || response.Body != "finished" ||
+		response.ReplyToEventID != prompt.ID {
+		t.Fatalf("fallback response = %#v", response)
+	}
+	if end.RunID != start.RunID || end.RuntimeVersion != "3.12.10" ||
+		prompt.TurnID == "" || response.TurnID != prompt.TurnID {
+		t.Fatalf("fallback provenance/order mismatch: start=%#v prompt=%#v response=%#v end=%#v", start, prompt, response, end)
+	}
+	var fallbackData map[string]any
+	if err := json.Unmarshal(prompt.Data, &fallbackData); err != nil {
+		t.Fatal(err)
+	}
+	if fallbackData["source"] != "cursor_native_transcript" || fallbackData["fallback"] != true {
+		t.Fatalf("fallback data = prompt=%s response=%s", prompt.Data, response.Data)
+	}
+	entries := end.Entries()
+	if len(entries) != 3 {
+		t.Fatalf("expanded entries = %#v", entries)
+	}
+	if entries[0].Role != "user" || entries[0].Body != "headless prompt" ||
+		entries[1].Role != "assistant" || entries[1].Body != "finished" ||
+		entries[1].ReplyToExternalID != entries[0].ExternalID ||
+		entries[2].ExternalID != entryExternalID(end.ID, 0) || entries[0].Model != "cursor-grok-4.5-high" {
+		t.Fatalf("expanded message order/linkage = %#v", entries)
+	}
+	var promptPayload, responsePayload, endPayload map[string]any
+	for raw, target := range map[string]*map[string]any{
+		string(entries[0].Payload): &promptPayload,
+		string(entries[1].Payload): &responsePayload,
+		string(entries[2].Payload): &endPayload,
+	} {
+		if err := json.Unmarshal([]byte(raw), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	promptProvenance, _ := promptPayload["provenance"].(map[string]any)
+	promptData, _ := promptPayload["data"].(map[string]any)
+	if promptPayload["event_id"] != prompt.ID || responsePayload["event_id"] != response.ID ||
+		promptPayload["source_transcript_path"] != transcriptPath || promptProvenance["runtime"] != RuntimeCursor ||
+		promptProvenance["runtime_version"] != "3.12.10" || promptData["source"] != "cursor_native_transcript" ||
+		promptData["fallback"] != true || promptPayload["raw"] != nil || responsePayload["raw"] != nil ||
+		promptPayload["run_id"] != nil || promptPayload["occurred_at"] != nil ||
+		endPayload["run_id"] == nil || endPayload["occurred_at"] == nil || endPayload["raw"] == nil {
+		t.Fatalf("expanded payloads = prompt=%s response=%s end=%s", entries[0].Payload, entries[1].Payload, entries[2].Payload)
+	}
+
+	retry := enqueueTestHook(t, RuntimeCursor, string(endRaw))
+	retryEntries := retry.Entries()
+	if len(retry.RecoveredMessages) != 2 || retry.RecoveredMessages[0].ID != prompt.ID ||
+		retry.RecoveredMessages[1].ID != response.ID || retryEntries[0].ExternalID != entries[0].ExternalID ||
+		retryEntries[1].ExternalID != entries[1].ExternalID {
+		t.Fatalf("recovered ids are not stable across SessionEnd retry: first=%#v retry=%#v", end.RecoveredMessages, retry.RecoveredMessages)
+	}
+	for i := 0; i < 2; i++ {
+		if retryEntries[i].Role != entries[i].Role || retryEntries[i].Body != entries[i].Body ||
+			retryEntries[i].Model != entries[i].Model || retryEntries[i].ReplyToExternalID != entries[i].ReplyToExternalID ||
+			!bytes.Equal(retryEntries[i].Payload, entries[i].Payload) {
+			t.Fatalf("recovered entry %d changed across SessionEnd retry:\nfirst=%#v\nretry=%#v", i, entries[i], retryEntries[i])
+		}
+	}
+}
+
+func TestCursorNativeHooksDoNotDuplicateTranscriptFallback(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCursor, RuntimeVersion: "3.12.10", CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(cursorHome, "projects", "workspace", "agent-transcripts", "session-2")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "session-2.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"role":"user","message":{"content":[{"type":"text","text":"native prompt"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"native response"}]}}`,
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-2","generation_id":"generation-2","hook_event_name":"sessionStart","cursor_version":"3.12.10"}`)
+	enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-2","generation_id":"generation-2","hook_event_name":"beforeSubmitPrompt","cursor_version":"3.12.10","prompt":"native prompt"}`)
+	enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-2","generation_id":"generation-2","hook_event_name":"afterAgentResponse","cursor_version":"3.12.10","text":"native response"}`)
+	endRaw, _ := json.Marshal(map[string]any{
+		"conversation_id": "session-2", "generation_id": "generation-2",
+		"hook_event_name": "sessionEnd", "cursor_version": "3.12.10", "transcript_path": transcriptPath,
+	})
+	enqueueTestHook(t, RuntimeCursor, string(endRaw))
+	pending, err := Pending(RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 4 {
+		t.Fatalf("pending events = %d, want only the four native hook events", len(pending))
+	}
+	for _, item := range pending {
+		if strings.HasPrefix(item.Event.NativeHookEvent, "nativeTranscript") || len(item.Event.RecoveredMessages) != 0 {
+			t.Fatalf("unexpected fallback event: %#v", item.Event)
+		}
+	}
+}
+
+func TestCursorMessagesModeDoesNotUseNativeTranscriptFallback(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_DATA_DIR", cursorHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCursor, RuntimeVersion: "3.12.10", CaptureMode: ModeMessages,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(cursorHome, "projects", "workspace", "agent-transcripts", "session-3")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "session-3.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"role":"user","message":{"content":"prompt"}}`,
+		`{"role":"assistant","message":{"content":"response"}}`,
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-3","hook_event_name":"sessionStart","cursor_version":"3.12.10"}`)
+	endRaw, _ := json.Marshal(map[string]any{
+		"conversation_id": "session-3", "hook_event_name": "sessionEnd",
+		"cursor_version": "3.12.10", "transcript_path": transcriptPath,
+	})
+	end := enqueueTestHook(t, RuntimeCursor, string(endRaw))
+	pending, err := Pending(RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("messages-mode events = %d, want only session start/end", len(pending))
+	}
+	if len(end.RecoveredMessages) != 0 {
+		t.Fatalf("messages mode unexpectedly recovered raw transcript messages: %#v", end.RecoveredMessages)
+	}
+}
+
+func TestCursorVisibleMessagesRejectsUntrustedOrAmbiguousTranscript(t *testing.T) {
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", cursorHome)
+	projectsRoot := filepath.Join(cursorHome, "projects")
+	if err := os.MkdirAll(projectsRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	outside := filepath.Join(home, "outside.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"role":"user","message":{"content":"prompt"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCursorVisibleMessages(outside, "outside"); err == nil {
+		t.Fatal("accepted a Cursor transcript outside the trusted project store")
+	}
+
+	sessionDir := filepath.Join(projectsRoot, "workspace", "agent-transcripts", "session-3")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ambiguous := filepath.Join(sessionDir, "session-3.jsonl")
+	if err := os.WriteFile(ambiguous, []byte(strings.Join([]string{
+		`{"role":"user","message":{"content":"first"}}`,
+		`{"role":"assistant","message":{"content":"answer"}}`,
+		`{"role":"user","message":{"content":"second"}}`,
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCursorVisibleMessages(ambiguous, "session-3"); err == nil {
+		t.Fatal("accepted an ambiguous multi-prompt Cursor headless transcript")
+	}
+	if _, _, err := readCursorVisibleMessages(ambiguous, "another-session"); err == nil {
+		t.Fatal("accepted a Cursor transcript for a different conversation id")
+	}
+
+	symlinkDir := filepath.Join(projectsRoot, "workspace", "agent-transcripts", "session-4")
+	if err := os.MkdirAll(symlinkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(symlinkDir, "session-4.jsonl")
+	if err := os.Symlink(outside, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCursorVisibleMessages(symlinkPath, "session-4"); err == nil {
+		t.Fatal("accepted a symlinked Cursor transcript")
+	}
+
+	writableDir := filepath.Join(projectsRoot, "workspace", "agent-transcripts", "writable")
+	if err := os.MkdirAll(writableDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writablePath := filepath.Join(writableDir, "writable.jsonl")
+	valid := strings.Join([]string{
+		`{"role":"user","message":{"content":"prompt"}}`,
+		`{"role":"assistant","message":{"content":"response"}}`,
+		`{"type":"turn_ended","status":"success"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(writablePath, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(writablePath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCursorVisibleMessages(writablePath, "writable"); err == nil {
+		t.Fatal("accepted a group/world-writable Cursor transcript")
+	}
+	if err := os.Chmod(writablePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(writableDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCursorVisibleMessages(writablePath, "writable"); err == nil {
+		t.Fatal("accepted a Cursor transcript through a group/world-writable directory")
+	}
+
+	for name, terminal := range map[string]string{
+		"missing-terminal": "",
+		"failed-terminal":  `{"type":"turn_ended","status":"error"}`,
+	} {
+		dir := filepath.Join(projectsRoot, "workspace", "agent-transcripts", name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lines := []string{
+			`{"role":"user","message":{"content":"prompt"}}`,
+			`{"role":"assistant","message":{"content":"response"}}`,
+		}
+		if terminal != "" {
+			lines = append(lines, terminal)
+		}
+		path := filepath.Join(dir, name+".jsonl")
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readCursorVisibleMessages(path, name); err == nil {
+			t.Fatalf("accepted %s Cursor transcript", name)
+		}
 	}
 }
 
