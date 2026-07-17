@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.174
-    imageTag: 0.0.174
+    chartVersion: 0.0.175
+    imageTag: 0.0.175
     factDeletionEnabled: true
     backendKind: managed
     replicaCount: 2
