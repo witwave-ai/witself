@@ -1,0 +1,57 @@
+{
+  "schema": "witself.memory-load-quality-corpus.v1",
+  "memories": [
+    {
+      "label": "quasar_authority",
+      "content": "Project Quasar stores durable narrative memory in PostgreSQL; generated lexical indexes are rebuildable projections.",
+      "kind": "decision",
+      "tags": ["load-quality", "quasar", "postgresql"],
+      "salience": 0.9,
+      "sensitive": false
+    },
+    {
+      "label": "cedar_rollback",
+      "content": "The Cedar rollback drill restores lexical-only recall before optional client vectors are repopulated.",
+      "kind": "runbook",
+      "tags": ["load-quality", "cedar", "rollback"],
+      "salience": 0.8,
+      "sensitive": false
+    },
+    {
+      "label": "ember_sensitive",
+      "content": "The synthetic Ember vault marker is opal 739 and must remain redacted in broad recall.",
+      "kind": "note",
+      "tags": ["load-quality", "ember", "sensitive"],
+      "salience": 0.95,
+      "sensitive": true
+    },
+    {
+      "label": "maple_distractor",
+      "content": "The Maple cache exercise records ordinary service observations without discussing Quasar or Cedar procedures.",
+      "kind": "note",
+      "tags": ["load-quality", "maple"],
+      "salience": 1.0,
+      "sensitive": false
+    }
+  ],
+  "relevance_queries": [
+    {
+      "name": "quasar_postgresql_authority",
+      "query": "quasar postgresql durable",
+      "expected_label": "quasar_authority",
+      "maximum_rank": 1
+    },
+    {
+      "name": "cedar_lexical_rollback",
+      "query": "cedar rollback lexical-only",
+      "expected_label": "cedar_rollback",
+      "maximum_rank": 1
+    }
+  ],
+  "sensitive_probe": {
+    "name": "ember_sensitive_redaction",
+    "query": "ember vault marker",
+    "expected_label": "ember_sensitive",
+    "maximum_rank": 1
+  }
+}

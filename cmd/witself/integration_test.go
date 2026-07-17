@@ -240,8 +240,12 @@ func TestCommaSeparatedInstallConfiguresEveryRuntime(t *testing.T) {
 		"CURSOR_CLI_PATH": "cursor",
 	} {
 		fakeCLI := filepath.Join(home, cliName)
-		if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			t.Fatal(err)
+		if cliName == "grok" {
+			writeFakeGrokInstallCLI(t, fakeCLI)
+		} else {
+			if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 		}
 		t.Setenv(envName, fakeCLI)
 	}
@@ -532,8 +536,12 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 			logPath := filepath.Join(home, tc.name+"-args.log")
 			t.Setenv("FAKE_CLI_LOG", logPath)
 			fakeCLI := filepath.Join(home, tc.name)
-			if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"), 0o700); err != nil {
-				t.Fatal(err)
+			if tc.runtime == transcriptcapture.RuntimeGrokBuild {
+				writeFakeGrokInstallCLI(t, fakeCLI)
+			} else {
+				if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			t.Setenv(tc.cliEnv, fakeCLI)
 

@@ -351,6 +351,10 @@ if [ "$1" = "--version" ]; then
   printf '%s\n' 'grok 0.2.99 (test) [stable]'
   exit 0
 fi
+if [ "$1 $2" = "inspect --json" ]; then
+  printf '%s\n' '{"grokVersion":"test","hooks":[],"mcpServers":[]}'
+  exit 0
+fi
 if [ "$1 $2 $3 $4 $5" = "mcp remove --scope user witself" ]; then
   rm -f "$FAKE_MCP_STATE"
   exit 0
@@ -367,6 +371,24 @@ if [ "$1 $2 $3 $4 $5" = "mcp add --scope user witself" ]; then
     done
   fi
   printf '%s\n' "$*" > "$FAKE_MCP_STATE"
+  exit 0
+fi
+if [ "$1 $2 $3" = "mcp list --json" ]; then
+  if [ ! -f "$FAKE_MCP_STATE" ]; then
+    printf '%s\n' '[]'
+    exit 0
+  fi
+  set -- $(cat "$FAKE_MCP_STATE")
+  shift 6
+  command="$1"
+  shift
+  printf '[{"command":"%s","args":[' "$command"
+  separator=''
+  for argument in "$@"; do
+    printf '%s"%s"' "$separator" "$argument"
+    separator=','
+  done
+  printf '%s\n' '],"enabled":true,"name":"witself","scope":"user"}]'
   exit 0
 fi
 exit 0
@@ -467,6 +489,116 @@ exit 0
 		!strings.Contains(string(log), "--agent new-agent") ||
 		!strings.Contains(string(log), "--agent prior-agent") {
 		t.Fatalf("unexpected Grok reinstall rollback sequence: %s", log)
+	}
+}
+
+func TestGrokInstallFailsClosedOnEmptyInspectionBeforeMutation(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "grok-test-bot")
+	grokHome := filepath.Join(fixture.home, ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("GROK_CLI_PATH", fixture.runtimeCLI)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MCP_LOG"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'grok 0.2.101 (test) [stable]'
+fi
+exit 0
+`
+	if err := os.WriteFile(fixture.runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"grok", "--account", "default", "--realm", "default", "--agent", "grok-test-bot",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		configPath,
+		filepath.Join(grokHome, "AGENTS.md"),
+		filepath.Join(grokHome, "hooks", "witself.json"),
+		fixture.mcpStatePath,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("empty inspection mutated %s: %v", path, err)
+		}
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "inspect --json") || strings.Contains(string(log), "mcp add --scope user witself") {
+		t.Fatalf("empty inspection command sequence = %s", log)
+	}
+}
+
+func TestGrokInstallRollsBackOnEmptyMCPList(t *testing.T) {
+	fixture := setupRollbackIntegrationFixture(t, "grok-test-bot")
+	grokHome := filepath.Join(fixture.home, ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("GROK_CLI_PATH", fixture.runtimeCLI)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MCP_LOG"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'grok 0.2.101 (test) [stable]'
+  exit 0
+fi
+if [ "$1 $2" = "inspect --json" ]; then
+  printf '%s\n' '{"grokVersion":"test","hooks":[],"mcpServers":[]}'
+  exit 0
+fi
+if [ "$1 $2 $3 $4 $5" = "mcp remove --scope user witself" ]; then
+  rm -f "$FAKE_MCP_STATE"
+  exit 0
+fi
+if [ "$1 $2 $3 $4 $5" = "mcp add --scope user witself" ]; then
+  printf '%s\n' "$*" > "$FAKE_MCP_STATE"
+  exit 0
+fi
+if [ "$1 $2 $3" = "mcp list --json" ]; then
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fixture.runtimeCLI, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := installCmd([]string{
+		"grok", "--account", "default", "--realm", "default", "--agent", "grok-test-bot",
+		"--location", "home", "--capture", "raw", "--endpoint", fixture.serverURL,
+		"--token-file", fixture.tokenPath,
+	}); code != 1 {
+		t.Fatalf("install code = %d, want 1", code)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		configPath,
+		filepath.Join(grokHome, "AGENTS.md"),
+		filepath.Join(grokHome, "hooks", "witself.json"),
+		fixture.mcpStatePath,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("empty MCP verification left mutation at %s: %v", path, err)
+		}
+	}
+	log, err := os.ReadFile(fixture.mcpLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "mcp list --json") ||
+		strings.Count(string(log), "mcp remove --scope user witself") != 2 ||
+		strings.Count(string(log), "mcp add --scope user witself") != 1 {
+		t.Fatalf("empty MCP verification rollback sequence = %s", log)
 	}
 }
 

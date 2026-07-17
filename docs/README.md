@@ -120,6 +120,12 @@ plane.
 - [memory-cloud-conformance.md](memory-cloud-conformance.md): the executable
   AWS/GCP/Azure managed-PostgreSQL and directed account-move certification
   matrix, protected-runner contract, and evidence requirements.
+- [memory-runtime-acceptance.md](memory-runtime-acceptance.md): the executable
+  six-session acceptance protocol for Codex, Claude Code, Cursor, and Grok
+  Build, including delivery-mode and sanitized-evidence boundaries.
+- [memory-load-quality.md](memory-load-quality.md): the deterministic
+  PostgreSQL load/quality harness, current exploratory baseline, evidence
+  schema, and remaining production workload/SLO work.
 - [deployment-cells.md](deployment-cells.md): the multi-cloud deployment
   topology — a fleet of independent cells, each authoritative for its own
   tenants, under a thin global control plane that does placement and routing

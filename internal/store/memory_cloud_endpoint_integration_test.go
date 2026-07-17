@@ -30,6 +30,12 @@ type preparedManagedMemoryCloudEndpoint struct {
 	configuredServer string
 }
 
+type managedMemoryCloudEndpointEvidence struct {
+	Provider          string `json:"provider"`
+	Fingerprint       string `json:"fingerprint"`
+	PostgreSQLVersion string `json:"postgresql_version"`
+}
+
 // managedMemoryCloudArchiveReporter is the certification log boundary for the
 // destructive archive round-trip. A pgx/pool error can include a configured
 // user, database, host, and port even when it never includes the password. The
@@ -105,18 +111,21 @@ func safeManagedMemoryCloudProvider(provider string) string {
 // are operator attestations; configured and live server identities are checked
 // independently. Only per-run salted fingerprints and PostgreSQL versions are
 // logged, never DSNs, users, passwords, hosts, database names, or resource ids.
-func assertManagedMemoryCloudEndpointsDistinct(t *testing.T, specs []managedMemoryCloudEndpoint) {
+func assertManagedMemoryCloudEndpointsDistinct(t *testing.T, specs []managedMemoryCloudEndpoint) []managedMemoryCloudEndpointEvidence {
 	t.Helper()
 	prepared, err := prepareManagedMemoryCloudEndpoints(specs)
 	if err != nil {
 		t.Fatal(err)
+		return nil
 	}
 	salt := make([]byte, 32)
 	if _, err := rand.Read(salt); err != nil {
 		t.Fatal("generate cloud certification fingerprint salt")
+		return nil
 	}
 	liveServers := make(map[string]string, len(prepared))
 	systemIdentifiers := make(map[string]string, len(prepared))
+	evidence := make([]managedMemoryCloudEndpointEvidence, 0, len(prepared))
 	for _, endpoint := range prepared {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		conn, err := pgx.ConnectConfig(ctx, endpoint.config.Copy())
@@ -124,13 +133,14 @@ func assertManagedMemoryCloudEndpointsDistinct(t *testing.T, specs []managedMemo
 			cancel()
 			t.Fatalf("%s managed PostgreSQL endpoint connection failed; verify the protected DSN and network path", endpoint.spec.Provider)
 		}
-		var address, database, version string
+		var address, database, version, versionNumber string
 		var port int
 		err = conn.QueryRow(ctx, `
 			SELECT COALESCE(inet_server_addr()::text,''),
 			       COALESCE(inet_server_port(),0),
-			       current_database(),current_setting('server_version')`).Scan(
-			&address, &port, &database, &version,
+			       current_database(),current_setting('server_version'),
+			       current_setting('server_version_num')`).Scan(
+			&address, &port, &database, &version, &versionNumber,
 		)
 		systemIdentifier := ""
 		if err == nil {
@@ -174,7 +184,11 @@ func assertManagedMemoryCloudEndpointsDistinct(t *testing.T, specs []managedMemo
 		)
 		t.Logf("%s managed PostgreSQL endpoint fingerprint %s; PostgreSQL %s",
 			endpoint.spec.Provider, fingerprint, version)
+		evidence = append(evidence, managedMemoryCloudEndpointEvidence{
+			Provider: endpoint.spec.Provider, Fingerprint: fingerprint, PostgreSQLVersion: versionNumber,
+		})
 	}
+	return evidence
 }
 
 func prepareManagedMemoryCloudEndpoints(specs []managedMemoryCloudEndpoint) ([]preparedManagedMemoryCloudEndpoint, error) {

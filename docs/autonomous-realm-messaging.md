@@ -1,13 +1,13 @@
 # Autonomous Realm Messaging
 
-Status: the agreed same-realm foreground feature is code-complete in `main`
-(2026-07-16), pending release and deployment. Migration 0037 adds immutable
+Status: the agreed same-realm foreground feature is operationally complete in
+release `v0.0.172` (2026-07-16); the sanitized activation record is retained in
+the [completion boundary](#completion-boundary). Migration 0037 adds immutable
 explicit-list and realm delivery snapshots. Migration 0038 adds message-backed
 open requests, bounded offers, client-ranked selection, multi-assignee
 reservations, and exact claim fences. Migration 0041 indexes the per-coordinator
 foreground checkpoint probe. Active clients perform all inference; the backend
-remains a model-free durable mailbox and coordination service. This status is
-not a deployment statement.
+remains a model-free durable mailbox and coordination service.
 
 This document defines autonomous, same-realm agent communication on top of the
 durable mailbox in [inter-agent-messaging.md](inter-agent-messaging.md). It does
@@ -58,8 +58,27 @@ provider installation policy, account export/import, and legacy-runner upgrade:
 **Operationally complete** additionally requires a tagged release, rollout of
 that release to the intended cells, reinstalling/upgrading each client
 integration so its managed policy is current, and a live cross-provider smoke
-test. Until then, released clients and cells may still expose the older
-behavior even though `main` is code-complete.
+test.
+
+That boundary was satisfied for the agreed foreground messaging slice on
+2026-07-16 with this sanitized evidence:
+
+- tag `v0.0.172` resolves to release commit
+  `67ec81d3f5485f1865f87e265ae9f33fa15c6988`;
+- GitOps commit `f984008` rolled `gcp-sandbox-use1-dev` to `0.0.172`, while
+  `2e99290` synchronized the other dormant cell definitions to the same desired
+  version without representing those cells as deployed;
+- the Codex, Claude Code, Grok Build, and Cursor integrations were refreshed;
+- direct foreground message handling passed with Claude, Cursor, and Grok, and
+  a reverse Claude-to-Codex flow verified Codex receive and completion; and
+- all four provider inboxes were clean after the smoke flows.
+
+This is messaging activation evidence, not full narrative-memory production
+certification. The managed-cloud portability, four-runtime narrative-memory
+acceptance, and load/quality/defaults gates remain open in
+[#44](https://github.com/witwave-ai/witself/issues/44),
+[#45](https://github.com/witwave-ai/witself/issues/45), and
+[#46](https://github.com/witwave-ai/witself/issues/46), respectively.
 
 Named security-group fan-out, cross-realm federation, stored
 responsibilities/directives, a backend wake/presence service, large

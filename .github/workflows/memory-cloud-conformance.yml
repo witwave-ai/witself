@@ -11,17 +11,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require an exact semantic-version tag
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          pre='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          build='[0-9A-Za-z-]+'
+          semver_tag="^refs/tags/v${core}(-${pre}(\.${pre})*)?(\+${build}(\.${build})*)?$"
+          if [[ ! "$RELEASE_REF" =~ $semver_tag ]]; then
+            echo "::error::memory cloud certification must be dispatched from an exact semantic-version tag"
+            exit 1
+          fi
+
   certify:
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: validate-release
     # Managed databases are private. This label intentionally keeps their
     # credentials and network paths off a general GitHub-hosted runner.
-    runs-on: [self-hosted, linux, witself-memory-conformance]
+    runs-on:
+      group: witself-memory-conformance
+      labels: [self-hosted, linux, witself-memory-conformance-ephemeral]
     environment: memory-cloud-conformance
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - name: Recheck the protected release ref before using endpoint secrets
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          pre='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          build='[0-9A-Za-z-]+'
+          semver_tag="^refs/tags/v${core}(-${pre}(\.${pre})*)?(\+${build}(\.${build})*)?$"
+          if [[ ! "$RELEASE_REF" =~ $semver_tag ]]; then
+            echo "::error::ref is not an exact semantic-version tag"
+            exit 1
+          fi
 
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -59,7 +93,22 @@ jobs:
           WITSELF_MEMORY_AWS_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AWS_RESOURCE_ID }}
           WITSELF_MEMORY_GCP_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_GCP_RESOURCE_ID }}
           WITSELF_MEMORY_AZURE_RESOURCE_ID: ${{ secrets.WITSELF_MEMORY_AZURE_RESOURCE_ID }}
+          WITSELF_MEMORY_CLOUD_EVIDENCE_PATH: evidence/memory-cloud-conformance.json
+          WITSELF_MEMORY_CLOUD_RELEASE: ${{ github.ref_name }}
+          WITSELF_MEMORY_CLOUD_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_CLOUD_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          mkdir -p evidence
+          set -o pipefail
           go test ./internal/store \
             -run '^TestNarrativeMemoryManagedCloudConformance$' \
-            -count=1 -v -timeout 80m
+            -count=1 -v -timeout 80m 2>&1 | tee evidence/test.log
+
+      - name: Retain sanitized certification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: memory-cloud-conformance-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90

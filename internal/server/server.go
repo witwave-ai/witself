@@ -1,8 +1,5 @@
-// Package server runs the witself-server backend listeners. This first slice
-// serves a minimal version endpoint on the API listener, Kubernetes-compatible
-// health probes on the health listener, and a single Prometheus "up" metric on
-// the metrics listener. Domain behavior is specified under docs/ and lands in
-// later slices.
+// Package server runs the witself-server backend listeners, including the API,
+// Kubernetes-compatible health probes, and privacy-bounded Prometheus metrics.
 package server
 
 import (
@@ -1371,13 +1368,15 @@ func envOr(key, def string) string {
 // Run binds the three listeners, serves until ctx is cancelled (or a listener
 // fails), then shuts them down gracefully.
 func Run(ctx context.Context, cfg Config) error {
+	metrics := newRuntimeMetrics()
+	instrumentedConfig := metrics.instrumentConfig(cfg)
 	defs := []struct {
 		name, addr string
 		handler    http.Handler
 	}{
-		{"api", cfg.APIAddr, apiMux(cfg)},
+		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
-		{"metrics", cfg.MetricsAddr, metricsMux()},
+		{"metrics", cfg.MetricsAddr, metricsMuxFor(metrics)},
 	}
 
 	type running struct {
@@ -4443,13 +4442,14 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
+	return metricsMuxFor(newRuntimeMetrics())
+}
+
+func metricsMuxFor(metrics *runtimeMetrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = fmt.Fprint(w,
-			"# HELP witself_up 1 if the witself-server process is up.\n"+
-				"# TYPE witself_up gauge\n"+
-				"witself_up 1\n")
+		metrics.writePrometheus(w)
 	})
 	return mux
 }

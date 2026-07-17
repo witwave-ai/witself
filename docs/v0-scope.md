@@ -13,12 +13,17 @@ Conflicting native-only or server-embedding language later in this draft is
 superseded.
 
 Messaging amendment (accepted 2026-07-16): the agreed same-realm foreground
-core is code-complete in `main`; a tagged release, GitOps rollout, refreshed
-provider integrations, and live multi-provider smoke test remain operational
-activation work. Named-group fan-out, cross-realm delivery,
-responsibility/directive routing, wake/presence, and plan-backed messaging
-rate/meter integration are follow-ons, not blockers for that core. See
+core is operationally complete in release `v0.0.172`. Its tagged-release, GCP
+rollout, dormant-cell desired-state sync, four-provider integration refresh,
+live direct-message smoke, and clean-inbox evidence is retained in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md#completion-boundary).
+Named-group fan-out, cross-realm delivery, responsibility/directive routing,
+wake/presence, and plan-backed messaging rate/meter integration are follow-ons,
+not blockers for that core. This amendment does not close the narrative-memory
+production gates in issues
+[#44](https://github.com/witwave-ai/witself/issues/44),
+[#45](https://github.com/witwave-ai/witself/issues/45), and
+[#46](https://github.com/witwave-ai/witself/issues/46).
 
 ## Sequencing
 

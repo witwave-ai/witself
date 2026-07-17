@@ -979,6 +979,15 @@ hooks. Run the command normally; Witself performs narrow privilege elevation
 only where needed. Use `--user-hooks` for Codex or Claude where the system
 policy layer is unavailable.
 
+Grok's default Claude/Cursor compatibility can discover those runtimes' Witself
+hooks and MCP servers. The Grok installer inspects the effective configuration,
+fences imported hooks from writing through a non-Grok binding, rejects unsafe
+foreign MCP aliases, and verifies the exact native Grok MCP command after
+registration. It does not change Grok compatibility settings. If an operator
+chooses to disable all imported hooks or MCPs from a vendor, set
+`hooks = false` and/or `mcps = false` under `[compat.claude]` or
+`[compat.cursor]` in `$GROK_HOME/config.toml` before rerunning the install.
+
 ```sh
 witself uninstall codex
 witself uninstall claude

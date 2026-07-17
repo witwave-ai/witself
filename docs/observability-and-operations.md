@@ -3,6 +3,19 @@
 Status: draft. This document defines the observability and Kubernetes
 operations requirements for `witself-server`.
 
+Implementation status (2026-07-16): the server now exports `witself_up`,
+bounded route-template HTTP request/in-flight/latency metrics, narrative-memory
+domain-operation and recall counters/histograms, vector coverage/fallback
+counters, and curation domain-call counters. The curation counter records
+completed API-backed calls, including successful idempotent replays; it does
+not claim that every call caused a state transition or lease event. Durable run
+transitions, lease claim/renew/release/fence/expiry events, queue-age gauges,
+and the other families in the larger table remain pending. Labels are restricted to server-controlled enums,
+principal kinds, and route templates. Tenant identifiers, concrete URL paths,
+memory or message content, vector/profile values, database metadata, and error
+text are never collected. Families not named in this implementation note are
+still pending rather than silently implied by the document.
+
 Narrative-memory contract (accepted 2026-07-14): memory observability covers
 deterministic search, client-supplied vectors, curation queues/leases/conflicts,
 and archive rebuilds. `witself-server` never calls a model, so there are no
@@ -150,12 +163,12 @@ Initial metric families should include:
 | `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
 | `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
 | `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
-| `witself_memory_operations_total` | Memory operations by operation (`add`, `adjust`, `read`, `list`, `forget`, `restore`, `delete`), owner kind, and result. |
-| `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), owner kind, and result. |
-| `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and owner kind. |
+| `witself_memory_operations_total` | Memory domain operations by operation (`add`, `read`, `list`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, `evidence_resolve`, `delete`), authenticated principal kind, and result. Authentication or request-decoding failures remain visible in the HTTP family rather than being misreported as completed domain calls. |
+| `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), authenticated principal kind, and result. |
+| `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and authenticated principal kind. |
 | `witself_memory_recall_hits` | Histogram of result counts returned per recall, by mode. |
 | `witself_memory_vector_validations_total` | Optional client-vector submissions by operation (`memory`, `query`), validation result, and bounded reason class. |
-| `witself_memory_vector_searches_total` | Optional bounded hybrid searches by coverage class (`full`, `partial`, `none`) and result. No profile id, model name, or vector value is a label. |
+| `witself_memory_vector_searches_total` | Optional bounded hybrid searches by coverage class (`full`, `partial`, `none`, or `unknown` when the domain call fails before coverage is known) and result. No profile id, model name, or vector value is a label. |
 | `witself_memory_vector_search_duration_seconds` | Deterministic JSONB-vector comparison latency by coverage class. |
 | `witself_memory_vector_fallbacks_total` | Hybrid requests that used lexical-only ranking because vectors were missing, stale, or incompatible. This is coverage, not provider health. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
@@ -163,10 +176,11 @@ Initial metric families should include:
 | `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
 | `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path performs no model call. |
 | `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
+| `witself_memory_curation_operations_total` | Completed curation domain calls by operation (`start`, `renew`, `plan`, `apply`, `cancel`, `abandon`, `rollback`) and result. Successful idempotent replays count as calls, not as proven state transitions. |
 | `witself_memory_curation_requests` | Due curation requests by bounded state/priority class. No transcript or memory content is exposed. |
 | `witself_memory_curation_runs_total` | Client-run curation transitions by state (`started`, `planned`, `applied`, `conflict`, `abandoned`, `interrupted`, `rolled_back`) and result. |
 | `witself_memory_curation_actions_total` | Caller-authored plan actions by primitive (`create`, `replace`, `supersede`, `relate`, `propose_fact`), mode (`preview`, `apply`, `rollback`), and result. |
-| `witself_memory_curation_lease_events_total` | Lease claim, renew, fence, expire, and release events by result. |
+| `witself_memory_curation_lease_events_total` | Durable lease claim, renew, fence, expire, and release events by result. Pending store/audit-point instrumentation; API-call success is not treated as proof that a new lease event occurred. |
 | `witself_session_operations_total` | Session lifecycle operations by `phase` (`start`, `end`), owner kind, and result. |
 | `witself_ingest_operations_total` | Ingest runs (CLAUDE.md/AGENTS.md/GEMINI.md import) by `mode` (`dry_run`, `apply`) and result. Source labels are never raw file paths. |
 | `witself_ingest_records_total` | Records produced by ingest by `outcome` (`fact_added`, `memory_added`, `duplicate_skipped`). |

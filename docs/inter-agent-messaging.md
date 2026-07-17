@@ -1,11 +1,13 @@
 # Witself Inter-Agent Messaging
 
 Status: the agreed same-realm direct, fan-out, open-request, and foreground
-processing code is complete in `main`; release, rollout, integration refresh,
-and live multi-provider smoke testing remain. Last reviewed 2026-07-16. This
-document is the authority for the durable messaging model, message shape,
-delivery and ordering semantics, the anti-spoofing trust boundary, target rate
-limits/scopes, audit, and target metering. It binds the message shapes pinned in
+processing feature is operationally complete in release `v0.0.172`. Sanitized
+release, rollout, provider-refresh, and live-smoke evidence is retained in the
+[autonomous messaging completion boundary](autonomous-realm-messaging.md#completion-boundary).
+Last reviewed 2026-07-16. This document is the authority for the durable
+messaging model, message shape, delivery and ordering semantics, the
+anti-spoofing trust boundary, target rate limits/scopes, audit, and target
+metering. It binds the message shapes pinned in
 [json-contracts.md](json-contracts.md) and conforms to the master spec in
 [requirements.md](requirements.md).
 
@@ -65,8 +67,9 @@ coordination, and fenced foreground processing inside one realm:
 Named-group fan-out, cross-realm delivery, dry-run, operator metadata
 inspection, policy scopes, plan-backed metering, and send/delivery rate limits
 are follow-on platform features rather than blockers for the agreed realm-local
-core. These implementation statements describe the current checkout, not a
-deployment or release.
+core. The tagged and deployed activation record for that core is separate from
+the implementation inventory below and makes no claim about dormant cells or
+narrative-memory production certification.
 
 ## Goal
 

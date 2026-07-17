@@ -70,8 +70,16 @@ system identifiers. Live private address/port collisions are recorded but are
 not a hard failure because isolated cloud networks can reuse RFC1918 addresses.
 The gate logs only per-run salted endpoint fingerprints and PostgreSQL versions;
 it never logs DSNs, users, passwords, hosts, database names, provider options,
-or resource ids. Resource ids are operator attestations retained with the
-release record, not cryptographic proof inferred from a hostname.
+or resource ids. Resource ids are runtime-only operator attestations used to
+reject an aliased matrix; they are not retained in the downloadable artifact.
+The fingerprint salt is intentionally discarded, so fingerprints are only
+opaque run-local correlators for provider entries that already passed the
+preflight's endpoint, resource-attestation, and system-identifier alias guards;
+they are not independent proof of distinct resources and cannot correlate
+resources across runs. If durable resource-identity audit is required, retain a separate
+protected immutable mapping from workflow run URL and commit SHA to the three
+resource ids; the current public artifact is deliberately insufficient for
+that purpose.
 
 In certification mode, any failure inside a directed archive round-trip is
 reported only as the fixed provider pair and `archive round-trip failed; details
@@ -101,19 +109,70 @@ After exporting all three DSNs into the trusted parent environment:
 make test-memory-cloud-conformance
 ```
 
-The manual `memory cloud conformance` workflow runs the same command on a
-self-hosted Linux runner labeled `witself-memory-conformance`. The runner needs
-private network reachability to all three databases. Configure the three DSNs
+The manual `memory cloud conformance` workflow runs the same command in the
+dedicated `witself-memory-conformance` runner group on a self-hosted Linux
+runner labeled `witself-memory-conformance-ephemeral`. The runner needs private
+network reachability to all three databases. Register it for one job only and
+reimage or destroy it after completion; never allow this group or label to run
+pull-request, fork, or other untrusted workflows. Restrict the runner group to
+this workflow in repository/organization settings. Configure the three DSNs
 and three resource attestations as protected environment secrets. The workflow
-sets certification mode and retains the workflow URL, commit SHA, released
-server version, attested resource ids, salted endpoint fingerprints, provider
-database versions, and successful 3-by-3 subtest log as the certification
-record.
+sets certification mode and retains the workflow URL, release tag, source
+commit SHA, salted endpoint fingerprints, provider database versions, and
+successful 3-by-3 subtest log as the sanitized certification record. This
+database harness tests source code from the release tag; it does not exercise a
+deployed `witself-server` binary or attest its runtime version.
+
+The `memory-cloud-conformance` environment is a security boundary, not merely a
+secret namespace. Require an environment reviewer and deployment-tag rule that
+allows only exact semantic-version tags. Protect matching `v*` tags with a
+repository ruleset that limits tag creation, update, and deletion to the trusted
+release path; an ordinary repository writer must not be able to mint a tag that
+can consume these credentials. The workflow validates the exact tag shape in a
+credential-free job and again before any endpoint secret is referenced, but
+those checks do not replace protected immutable tags and human/environment
+approval of the release tag and commit SHA.
+
+Every third-party action in the secret-bearing job is pinned to a reviewed full
+commit SHA, with its major release retained only as a comment for automated
+update review. Do not replace those pins with mutable major tags.
+
+The workflow also uploads a 90-day `memory-cloud-conformance-<run-id>` artifact.
+Its versioned JSON manifest contains only the release tag, commit, workflow URL,
+timestamp, pass/fail outcome, per-provider salted fingerprint/PostgreSQL
+`server_version_num`, and the nine directed outcomes. The companion
+certification-mode test
+log uses the same redacted reporter. Neither file contains a DSN, host, port,
+database/user name, password, raw resource attestation, account/realm/agent id,
+or memory/fact value. The manifest is written with mode `0600` on the trusted
+runner before upload. GitHub artifact packaging and extraction do not preserve
+that local Unix mode, so downloaded-artifact permissions are not a security
+boundary. An incomplete or failed matrix can produce only a failed artifact,
+never a passing one.
 
 For a harmless harness rehearsal, all three DSN variables may point at one or
 more disposable local PostgreSQL databases; leave certification mode unset.
 Such a run validates matrix mechanics but must be labeled `local rehearsal`,
 never `AWS/GCP/Azure certified`.
+
+## Recorded Individual-Cloud Rehearsals
+
+On 2026-07-17, temporary TTL-scoped Kubernetes Jobs in each live sandbox ran
+`TestNarrativeMemoryArchiveCellMovePostgres` from exact release `v0.0.172`,
+commit `67ec81d3f5485f1865f87e265ae9f33fa15c6988`, against that cell's managed
+PostgreSQL service:
+
+| Cell | Managed PostgreSQL | Result | Test duration |
+|---|---:|---:|---:|
+| AWS RDS | 18.3 | pass | 2.24 s |
+| GCP Cloud SQL | 18.4 | pass | 5.25 s |
+| Azure Flexible Server | 18.4 | pass | 3.43 s |
+
+Each rehearsal applied the migrations and proved an isolated archive/import/
+recall round trip within one provider. No secret value was logged. These three
+passes establish individual-provider compatibility only: they do not exercise
+any directed cross-cloud pair, do not produce the protected nine-case evidence
+artifact, and do not close the 3-by-3 certification gate.
 
 ## Runtime Boundary
 

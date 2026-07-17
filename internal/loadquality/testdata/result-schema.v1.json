@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://witself.witwave.ai/schemas/memory-load-quality-result.v1.schema.json",
+  "title": "Witself narrative-memory load and quality result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "harness_version",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "postgresql_version",
+    "environment",
+    "workload",
+    "measurements",
+    "quality"
+  ],
+  "properties": {
+    "schema": { "const": "witself.memory-load-quality-result.v1" },
+    "harness_version": { "const": "1" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "outcome": { "const": "pass" },
+    "postgresql_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "commit", "provider", "hardware_tier", "go_version", "goos", "goarch", "logical_cpus"],
+      "properties": {
+        "release": { "$ref": "#/$defs/safe_metadata" },
+        "commit": { "$ref": "#/$defs/safe_metadata" },
+        "provider": { "$ref": "#/$defs/safe_metadata" },
+        "hardware_tier": { "$ref": "#/$defs/safe_metadata" },
+        "go_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "goos": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "goarch": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "logical_cpus": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed", "corpus_sha256", "synthetic_accounts", "synthetic_agents", "corpus_memories", "noise_memories", "query_iterations", "concurrency"],
+      "properties": {
+        "seed": { "type": "integer" },
+        "corpus_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "synthetic_accounts": { "const": 2 },
+        "synthetic_agents": { "const": 3 },
+        "corpus_memories": { "type": "integer", "minimum": 3, "maximum": 100 },
+        "noise_memories": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "query_iterations": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture", "recall"],
+      "properties": {
+        "capture": { "$ref": "#/$defs/operation_stats" },
+        "recall": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relevance_cases", "relevance_pass_rate", "sensitive_broad_redacted", "sensitive_exact_owner_visible", "cross_agent_isolated", "cross_tenant_isolated"],
+      "properties": {
+        "relevance_cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/relevance_case" }
+        },
+        "relevance_pass_rate": { "const": 1 },
+        "sensitive_broad_redacted": { "const": true },
+        "sensitive_exact_owner_visible": { "const": true },
+        "cross_agent_isolated": { "const": true },
+        "cross_tenant_isolated": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "safe_metadata": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "operation_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "wall_duration_ms", "throughput_per_second", "minimum_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "wall_duration_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "throughput_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "minimum_ms": { "type": "number", "minimum": 0 },
+        "p50_ms": { "type": "number", "minimum": 0 },
+        "p95_ms": { "type": "number", "minimum": 0 },
+        "p99_ms": { "type": "number", "minimum": 0 },
+        "maximum_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "relevance_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "passed", "observed_rank", "maximum_rank"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "passed": { "const": true },
+        "observed_rank": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "maximum_rank": { "type": "integer", "minimum": 1, "maximum": 20 }
+      }
+    }
+  }
+}
