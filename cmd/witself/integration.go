@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,7 +21,15 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
-const maxHookInputBytes = 16 * 1024 * 1024
+const (
+	maxHookInputBytes             = 16 * 1024 * 1024
+	captureDetachedFlushEnv       = "WITSELF_CAPTURE_DETACHED_FLUSH"
+	detachedFlushMaxDuration      = 2 * time.Minute
+	foregroundFlushLockMaxWait    = detachedFlushMaxDuration + 30*time.Second
+	foregroundFlushLockPollPeriod = 50 * time.Millisecond
+	maxCaptureAppendRequestBytes  = 7 * 1024 * 1024
+	maxCaptureAppendBatchEntries  = 100
+)
 
 // GUI-backed runtime CLIs can take several seconds to cold-start before their
 // MCP subcommand is available. Cursor has exceeded ten seconds on a healthy
@@ -691,13 +700,27 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
-	release, acquired, err := transcriptcapture.AcquireFlushLock(runtimeName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: acquire capture lock: %v\n", err)
-		return 1
-	}
-	if !acquired {
-		return 0
+	detached := strings.TrimSpace(os.Getenv(captureDetachedFlushEnv)) != ""
+	lockDeadline := time.Now().Add(foregroundFlushLockMaxWait)
+	var release func()
+	for {
+		var acquired bool
+		release, acquired, err = transcriptcapture.AcquireFlushLock(runtimeName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: acquire capture lock: %v\n", err)
+			return 1
+		}
+		if acquired {
+			break
+		}
+		if detached {
+			return 0
+		}
+		if !time.Now().Before(lockDeadline) {
+			fmt.Fprintln(os.Stderr, "witself: timed out waiting for the active transcript flush")
+			return 1
+		}
+		time.Sleep(foregroundFlushLockPollPeriod)
 	}
 	lockHeld := true
 	defer func() {
@@ -731,17 +754,30 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	conn, err := connectAgent(ctx, cfg.Account, cfg.Realm, cfg.Agent, cfg.Endpoint, cfg.TokenFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: connect capture agent: %v\n", err)
-		return 1
+	blockedTranscripts := map[string]error{}
+	seenPaths := map[string]struct{}{}
+	rememberCapturePaths(pending, seenPaths)
+	ready, prepareErr := prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts)
+	var deferredErr error
+	if prepareErr != nil {
+		deferredErr = prepareErr
 	}
+	ctx, cancel := transcriptFlushContext(detached)
+	defer cancel()
+	var conn agentConnection
+	connected := false
 	flushed := 0
-	for len(pending) > 0 {
+	for len(ready) > 0 {
+		if !connected {
+			conn, err = connectAgent(ctx, cfg.Account, cfg.Realm, cfg.Agent, cfg.Endpoint, cfg.TokenFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: connect capture agent: %v\n", err)
+				return 1
+			}
+			connected = true
+		}
 		activityRetryPending := false
-		for _, pendingEvent := range pending {
+		for _, pendingEvent := range ready {
 			event := pendingEvent.Event
 			observation := event.ActivityObservation()
 			_, activityErr := client.TouchAgentActivity(ctx, conn.Endpoint, conn.Token, client.AgentActivityInput{
@@ -768,16 +804,12 @@ func transcriptFlush(args []string) int {
 				return 1
 			}
 			captureEntries := event.Entries()
-			for start := 0; start < len(captureEntries); start += 100 {
-				end := min(start+100, len(captureEntries))
-				inputs := make([]client.AppendTranscriptEntryInput, end-start)
-				for i, entry := range captureEntries[start:end] {
-					inputs[i] = client.AppendTranscriptEntryInput{
-						ExternalID: entry.ExternalID, Role: entry.Role, Body: entry.Body,
-						Payload: entry.Payload, Model: entry.Model,
-						ReplyToExternalID: entry.ReplyToExternalID,
-					}
-				}
+			inputBatches, err := captureAppendBatches(captureEntries)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: prepare capture event: %v\n", err)
+				return 1
+			}
+			for _, inputs := range inputBatches {
 				if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, inputs); err != nil {
 					fmt.Fprintf(os.Stderr, "witself: append capture event: %v\n", err)
 					return 1
@@ -802,10 +834,16 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
 			return 1
 		}
+		reopenRetryableBlockedTranscripts(pending, blockedTranscripts, seenPaths)
+		ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts)
+		if deferredErr == nil && prepareErr != nil {
+			deferredErr = prepareErr
+		}
 	}
 
 	// Close the enqueue-vs-unlock race: an event whose competing flusher saw
-	// this lock is visible after release and gets a fresh flusher.
+	// this lock is visible after release and gets a fresh flusher. Deliberately
+	// deferred Grok turns do not respawn themselves in a tight process loop.
 	release()
 	lockHeld = false
 	remaining, err := transcriptcapture.Pending(runtimeName)
@@ -813,14 +851,181 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: recheck capture outbox: %v\n", err)
 		return 1
 	}
-	if len(remaining) > 0 {
+	reopenRetryableBlockedTranscripts(remaining, blockedTranscripts, seenPaths)
+	if hasUnblockedCaptureEvent(remaining, blockedTranscripts) {
 		if err := startBackgroundFlush(runtimeName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 			return 1
 		}
 	}
+	deferred := countBlockedCaptureEvents(remaining, blockedTranscripts)
+	if deferred > 0 {
+		if deferredErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
+		}
+		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)\n", flushed, runtimeName, deferred)
+		return 1
+	}
 	fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)\n", flushed, runtimeName)
 	return 0
+}
+
+func transcriptFlushContext(detached bool) (context.Context, context.CancelFunc) {
+	if detached {
+		return context.WithTimeout(context.Background(), detachedFlushMaxDuration)
+	}
+	// An explicit foreground flush is the deterministic delivery fence. Each
+	// HTTP request remains bounded by the client timeout, but a valid large
+	// backlog must not fail merely because the full drain takes two minutes.
+	return context.WithCancel(context.Background())
+}
+
+func prepareTranscriptFlushEvents(
+	pending []transcriptcapture.PendingEvent,
+	cfg transcriptcapture.Config,
+	blocked map[string]error,
+) ([]transcriptcapture.PendingEvent, error) {
+	ready := make([]transcriptcapture.PendingEvent, 0, len(pending))
+	var firstErr error
+	for _, pendingEvent := range pending {
+		transcriptID := pendingEvent.Event.TranscriptExternalID()
+		if _, exists := blocked[transcriptID]; exists {
+			continue
+		}
+		if err := captureEventBindingError(pendingEvent.Event, cfg); err != nil {
+			blocked[transcriptID] = err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		finalized, uploadReady, err := transcriptcapture.FinalizePending(pendingEvent)
+		if err != nil {
+			blocked[transcriptID] = err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !uploadReady {
+			blocked[transcriptID] = nil
+			continue
+		}
+		ready = append(ready, finalized)
+	}
+	return ready, firstErr
+}
+
+func captureEventBindingError(event transcriptcapture.Event, cfg transcriptcapture.Config) error {
+	legacyEventContext := event.AccountID == "" && event.RealmID == "" &&
+		event.AgentID != "" && event.AgentID == cfg.AgentID &&
+		event.Location.ID != "" && event.Location.ID == cfg.Location.ID
+	accountMatches := stableCaptureIdentityMatches(event.AccountID, cfg.AccountID, event.Account, cfg.Account, legacyEventContext)
+	realmMatches := stableCaptureIdentityMatches(event.RealmID, cfg.RealmID, event.Realm, cfg.Realm, legacyEventContext)
+	agentMatches := stableCaptureIdentityMatches(event.AgentID, cfg.AgentID,
+		event.Agent+"\x00"+event.AgentName, cfg.Agent+"\x00"+cfg.AgentName, false)
+	if event.Runtime != cfg.Runtime || !accountMatches || !realmMatches || !agentMatches ||
+		event.Location.ID != cfg.Location.ID {
+		return errors.New("queued transcript identity does not match the installed runtime binding")
+	}
+	return nil
+}
+
+func stableCaptureIdentityMatches(eventID, configID, eventName, configName string, allowLegacyEvent bool) bool {
+	if eventID != "" && configID != "" {
+		return eventID == configID
+	}
+	if eventID == "" && configID == "" {
+		return eventName == configName
+	}
+	if eventID == "" && configID != "" && allowLegacyEvent {
+		return eventName == configName
+	}
+	return false
+}
+
+func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked map[string]error) bool {
+	for _, pendingEvent := range pending {
+		if _, exists := blocked[pendingEvent.Event.TranscriptExternalID()]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
+func countBlockedCaptureEvents(pending []transcriptcapture.PendingEvent, blocked map[string]error) int {
+	count := 0
+	for _, pendingEvent := range pending {
+		if _, exists := blocked[pendingEvent.Event.TranscriptExternalID()]; exists {
+			count++
+		}
+	}
+	return count
+}
+
+func captureAppendBatches(entries []transcriptcapture.Entry) ([][]client.AppendTranscriptEntryInput, error) {
+	const envelopeBytes = len(`{"entries":[]}`)
+	batches := make([][]client.AppendTranscriptEntryInput, 0, len(entries)/maxCaptureAppendBatchEntries+1)
+	current := make([]client.AppendTranscriptEntryInput, 0, min(len(entries), maxCaptureAppendBatchEntries))
+	currentBytes := envelopeBytes
+	flushCurrent := func() {
+		if len(current) == 0 {
+			return
+		}
+		batches = append(batches, current)
+		current = make([]client.AppendTranscriptEntryInput, 0, min(len(entries), maxCaptureAppendBatchEntries))
+		currentBytes = envelopeBytes
+	}
+	for _, entry := range entries {
+		input := client.AppendTranscriptEntryInput{
+			ExternalID: entry.ExternalID, Role: entry.Role, Body: entry.Body,
+			Payload: entry.Payload, Model: entry.Model,
+			ReplyToExternalID: entry.ReplyToExternalID,
+		}
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		separatorBytes := 0
+		if len(current) > 0 {
+			separatorBytes = 1
+		}
+		if len(current) == maxCaptureAppendBatchEntries ||
+			currentBytes+separatorBytes+len(raw) > maxCaptureAppendRequestBytes {
+			flushCurrent()
+			separatorBytes = 0
+		}
+		if currentBytes+separatorBytes+len(raw) > maxCaptureAppendRequestBytes {
+			return nil, errors.New("one capture entry exceeds the safe append request size")
+		}
+		current = append(current, input)
+		currentBytes += separatorBytes + len(raw)
+	}
+	flushCurrent()
+	return batches, nil
+}
+
+func rememberCapturePaths(pending []transcriptcapture.PendingEvent, seen map[string]struct{}) {
+	for _, pendingEvent := range pending {
+		seen[pendingEvent.Path] = struct{}{}
+	}
+}
+
+func reopenRetryableBlockedTranscripts(
+	pending []transcriptcapture.PendingEvent,
+	blocked map[string]error,
+	seen map[string]struct{},
+) {
+	for _, pendingEvent := range pending {
+		if _, alreadySeen := seen[pendingEvent.Path]; alreadySeen {
+			continue
+		}
+		transcriptID := pendingEvent.Event.TranscriptExternalID()
+		if reason, exists := blocked[transcriptID]; exists && reason == nil {
+			delete(blocked, transcriptID)
+		}
+	}
+	rememberCapturePaths(pending, seen)
 }
 
 func transcriptTail(args []string) int {
@@ -889,6 +1094,7 @@ func startBackgroundFlush(runtime string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
+	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=1")
 	if err := cmd.Start(); err != nil {
 		return err
 	}

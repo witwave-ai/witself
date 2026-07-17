@@ -8,8 +8,9 @@ this gate.
 This is a live-client test, not a backend simulation. `witself` prepares
 isolated synthetic fixtures and exact prompts, the operator gives each prompt
 to the real authenticated AI client, and `witself` verifies the resulting
-transcripts and backend state. No background runner, provider launcher, or
-backend inference participates.
+transcripts and backend state. Witself never launches or wakes a provider; the
+operator may invoke the real client directly or through a foreground test
+helper. No persistent runner or backend inference participates.
 
 ## Contract
 
@@ -130,6 +131,8 @@ conversation buffer.
 After all six stages complete, verify and retain sanitized evidence:
 
 ```text
+witself transcript flush --runtime grok-build  # Grok Build only
+
 witself memory acceptance verify \
   --state ~/.witself/acceptance/mra_example.json \
   --out evidence/runtime-memory-codex.json \
@@ -139,6 +142,13 @@ witself memory acceptance verify \
 `--wait` only polls for normal asynchronous transcript flushing and foreground
 work already performed by the active client. It never wakes a client or starts
 a background process. Use `--wait 0` for one immediate check.
+
+The explicit Grok flush is a deterministic post-client transcript fence. Grok
+persists its final assistant chunk after its synchronous Stop hook returns, so
+the command finalizes any last local Stop event from the already-closed native
+session before verification. It launches neither Grok nor inference. Normal
+interactive use also retries automatically through the Stop-triggered one-shot
+flusher and every later Grok hook.
 
 Repeat with fresh provider-bound subject agents for `claude-code`, `cursor`,
 and `grok-build`. A #45 certification set consists of four `status: "pass"`

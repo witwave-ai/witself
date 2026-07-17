@@ -200,6 +200,29 @@ witself transcript flush --runtime grok-build
 witself transcript flush --runtime cursor
 ```
 
+An explicit foreground flush is a full delivery fence: it keeps draining every
+currently uploadable event until the outbox is empty or a concrete delivery
+error occurs. Individual network requests remain time-bounded. Detached
+hook-triggered flushers are deliberately short-lived; if one reaches its work
+window, the next hook retries the durable remainder.
+
+Grok Build has one provider-specific ordering rule. Its synchronous `Stop` hook
+finishes before the native session file receives the final assistant response.
+Witself therefore leaves an unresolved Grok Stop event in the local outbox and
+the detached one-shot flusher finalizes it only after the trusted native file
+contains the exact matching Stop execution, assistant chunks, and subsequent
+`turn_completed` fence. Finalization atomically rewrites the original event
+before upload, preserving its event, turn, reply, and retry identities. An
+incomplete or unsafe native file remains pending and blocks only later events
+for that same transcript; other Grok sessions can continue to flush.
+
+Normal use is automatic: the Stop-triggered one-shot flusher usually observes
+the post-hook append, and every later Grok hook retries any prior pending turn.
+For a deterministic final-session fence after the Grok process exits, run
+`witself transcript flush --runtime grok-build`. This command reads no model,
+launches no client or inference, and is not a daemon, wrapper, or background
+curator.
+
 Capture modes are cumulative:
 
 - `messages` records session, prompt, response, subagent, and compaction
@@ -210,7 +233,9 @@ Capture modes are cumulative:
   runtime-exposed fields. It still cannot expose hidden chain-of-thought.
 
 Visible bodies larger than one entry are split into ordered 60 KiB chunks and
-are never silently truncated. A bounded raw hook envelope is stored in the
+are never silently truncated. Append batches are also split by both entry
+count and encoded JSON size so escaping cannot push a valid large event beyond
+the server request limit. A bounded raw hook envelope is stored in the
 entry payload; oversized raw envelopes keep a digest and byte count in Postgres
 while the complete pending event remains in the local outbox. There are no
 per-token or streaming writes. Flushes use batches of at most 100 entries, and

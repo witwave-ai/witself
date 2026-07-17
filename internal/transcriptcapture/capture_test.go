@@ -749,7 +749,7 @@ func TestCursorVisibleMessagesRejectsUntrustedOrAmbiguousTranscript(t *testing.T
 	}
 }
 
-func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
+func TestGrokCaptureNormalizesPayloadAndDefersNativeResponse(t *testing.T) {
 	home := t.TempDir()
 	grokHome := filepath.Join(home, ".grok")
 	t.Setenv("HOME", home)
@@ -777,9 +777,11 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	}
 	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
 	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-other"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"wrong-model"},"content":{"type":"text","text":"unrelated"}}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(updates), 0o644); err != nil {
 		t.Fatal(err)
@@ -800,12 +802,242 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	if prompt.Body != "hello" || prompt.TurnID != "prompt-1" {
 		t.Fatalf("prompt = %#v", prompt)
 	}
-	if stop.Body != "first\n\nsecond" || stop.Kind != "message.assistant" || stop.ReplyToEventID != prompt.ID || stop.Model != "grok-4.5" || stop.ModelSource != "native_transcript" {
+	if stop.Kind != "turn.completed" || stop.Role != "system" || stop.ReplyToEventID != prompt.ID || stop.Model != "" || stop.ModelSource != "" {
 		t.Fatalf("stop = %#v", stop)
+	}
+	body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete || body != "first\n\nsecond" || model != "grok-4.5" {
+		t.Fatalf("native response = %t / %q / %q", complete, body, model)
 	}
 }
 
-func TestStableGrokAssistantMessageWaitsForDelayedChunks(t *testing.T) {
+func TestFinalizePendingGrokStopAfterHookReturns(t *testing.T) {
+	home := t.TempDir()
+	grokHome := filepath.Join(home, ".grok")
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeGrokBuild, RuntimeVersion: "0.2.101", CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	promptRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "user_prompt_submit", "promptId": "prompt-1",
+		"prompt": "hello", "transcriptPath": transcriptPath,
+	})
+	prompt := enqueueTestHook(t, RuntimeGrokBuild, string(promptRaw))
+	stopRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "stop", "promptId": "prompt-1",
+		"reason": "end_turn", "transcriptPath": transcriptPath,
+	})
+	started := time.Now()
+	stop := enqueueTestHook(t, RuntimeGrokBuild, string(stopRaw))
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Stop hook waited for provider transcript: %s", elapsed)
+	}
+	if stop.Kind != "turn.completed" || stop.Role != "system" {
+		t.Fatalf("unresolved Stop = %#v", stop)
+	}
+	pending, err := Pending(RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pendingStop PendingEvent
+	for _, item := range pending {
+		if item.Event.ID == stop.ID {
+			pendingStop = item
+		}
+	}
+	if pendingStop.Path == "" {
+		t.Fatalf("Stop event not found in outbox: %#v", pending)
+	}
+	original, err := os.ReadFile(pendingStop.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-other"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"wrong-model"},"content":{"text":"wrong"}}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"text":"final answer"}}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	finalized, ready, err := finalizePendingWithin(pendingStop, 100*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready || finalized.Event.ID != stop.ID || finalized.Event.Kind != "message.assistant" ||
+		finalized.Event.Role != "assistant" || finalized.Event.Body != "final answer" ||
+		finalized.Event.Model != "grok-4.5" || finalized.Event.ModelSource != "native_transcript" ||
+		finalized.Event.ReplyToEventID != prompt.ID || !finalized.Event.OccurredAt.Equal(stop.OccurredAt) {
+		t.Fatalf("finalized Stop = %#v", finalized.Event)
+	}
+	persisted, err := os.ReadFile(pendingStop.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(original, persisted) {
+		t.Fatal("finalized Stop was not persisted before upload")
+	}
+	retry, ready, err := finalizePendingWithin(finalized, 100*time.Millisecond, 5*time.Millisecond)
+	if err != nil || !ready {
+		t.Fatalf("finalized retry = %t / %v", ready, err)
+	}
+	retryPersisted, err := os.ReadFile(pendingStop.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Event.ID != finalized.Event.ID || !bytes.Equal(persisted, retryPersisted) ||
+		fmt.Sprintf("%#v", retry.Event.Entries()) != fmt.Sprintf("%#v", finalized.Event.Entries()) {
+		t.Fatalf("finalized retry changed durable content:\nfirst=%#v\nretry=%#v", finalized.Event, retry.Event)
+	}
+}
+
+func TestFinalizePendingGrokStopDefersWithoutTerminalFence(t *testing.T) {
+	home := t.TempDir()
+	grokHome := filepath.Join(home, ".grok")
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeGrokBuild, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"not yet fenced"}}}}`,
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "user_prompt_submit", "promptId": "prompt-1", "prompt": "hello",
+	})
+	enqueueTestHook(t, RuntimeGrokBuild, string(promptRaw))
+	stopRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "stop", "promptId": "prompt-1",
+		"reason": "end_turn", "transcriptPath": transcriptPath,
+	})
+	stop := enqueueTestHook(t, RuntimeGrokBuild, string(stopRaw))
+	pending, err := Pending(RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pendingStop PendingEvent
+	for _, item := range pending {
+		if item.Event.ID == stop.ID {
+			pendingStop = item
+		}
+	}
+	before, err := os.ReadFile(pendingStop.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, ready, err := finalizePendingWithin(pendingStop, 50*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(pendingStop.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready || unchanged.Event.Kind != "turn.completed" || !bytes.Equal(before, after) {
+		t.Fatalf("unfenced Stop was changed or released: ready=%t event=%#v", ready, unchanged.Event)
+	}
+}
+
+func TestFinalizePendingContentFreeGrokTurnPersistsRetryFence(t *testing.T) {
+	home := t.TempDir()
+	grokHome := filepath.Join(home, ".grok")
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"prompt_id": "prompt-1", "reason": "end_turn"})
+	event := Event{
+		SchemaVersion: SchemaVersion, ID: "evt_content_free", Runtime: RuntimeGrokBuild,
+		CaptureMode: ModeRaw, SessionID: "session-1", TurnID: "prompt-1",
+		HookEvent: "Stop", NativeHookEvent: "stop", Kind: "turn.completed", Role: "system", Body: "end_turn",
+		SourceTranscriptPath: transcriptPath, Data: data, OccurredAt: time.Now().UTC(),
+	}
+	if err := writeOutboxEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(RuntimeGrokBuild)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %#v / %v", pending, err)
+	}
+	finalized, ready, err := finalizePendingWithin(pending[0], 100*time.Millisecond, 5*time.Millisecond)
+	if err != nil || !ready || !finalized.Event.NativeTurnFinalized || finalized.Event.Kind != "turn.completed" {
+		t.Fatalf("content-free finalization = ready %t / event %#v / err %v", ready, finalized.Event, err)
+	}
+	persisted, err := os.ReadFile(finalized.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(transcriptPath); err != nil {
+		t.Fatal(err)
+	}
+	retry, ready, err := finalizePendingWithin(finalized, 100*time.Millisecond, 5*time.Millisecond)
+	if err != nil || !ready {
+		t.Fatalf("content-free retry = ready %t / err %v", ready, err)
+	}
+	retryPersisted, err := os.ReadFile(retry.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(persisted, retryPersisted) ||
+		fmt.Sprintf("%#v", retry.Event.Entries()) != fmt.Sprintf("%#v", finalized.Event.Entries()) {
+		t.Fatalf("content-free retry changed durable event:\nfirst=%#v\nretry=%#v", finalized.Event, retry.Event)
+	}
+}
+
+func TestCompleteGrokAssistantTurnWaitsForDelayedTerminalFence(t *testing.T) {
 	grokHome := filepath.Join(t.TempDir(), ".grok")
 	t.Setenv("GROK_HOME", grokHome)
 	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
@@ -826,30 +1058,36 @@ func TestStableGrokAssistantMessageWaitsForDelayedChunks(t *testing.T) {
 			return
 		}
 		defer func() { _ = file.Close() }()
-		first := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}` + "\n"
+		first := strings.Join([]string{
+			`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+			`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
+		}, "\n") + "\n"
 		if _, err := file.WriteString(first); err != nil {
 			writeErr <- err
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
-		second := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}` + "\n"
+		second := strings.Join([]string{
+			`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
+			`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+		}, "\n") + "\n"
 		_, err = file.WriteString(second)
 		writeErr <- err
 	}()
 
-	body, model, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1")
+	body, model, complete, err := readCompleteGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatal(err)
 	}
-	if body != "first\n\nsecond" || model != "grok-4.5" {
-		t.Fatalf("stable Grok response = %q / %q", body, model)
+	if !complete || body != "first\n\nsecond" || model != "grok-4.5" {
+		t.Fatalf("complete Grok response = %t / %q / %q", complete, body, model)
 	}
 }
 
-func TestStableGrokAssistantMessageWaitsForIncompleteTrailingLine(t *testing.T) {
+func TestCompleteGrokAssistantTurnWaitsForIncompleteTrailingLine(t *testing.T) {
 	grokHome := filepath.Join(t.TempDir(), ".grok")
 	t.Setenv("GROK_HOME", grokHome)
 	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
@@ -857,7 +1095,10 @@ func TestStableGrokAssistantMessageWaitsForIncompleteTrailingLine(t *testing.T) 
 		t.Fatal(err)
 	}
 	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
-	first := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}` + "\n"
+	first := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
+	}, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(first), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -878,23 +1119,24 @@ func TestStableGrokAssistantMessageWaitsForIncompleteTrailingLine(t *testing.T) 
 			return
 		}
 		time.Sleep(300 * time.Millisecond)
-		_, err = file.WriteString(second[midpoint:])
+		terminal := `{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}` + "\n"
+		_, err = file.WriteString(second[midpoint:] + terminal)
 		writeErr <- err
 	}()
 
-	body, model, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1")
+	body, model, complete, err := readCompleteGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatal(err)
 	}
-	if body != "first\n\nsecond" || model != "grok-4.5" {
-		t.Fatalf("stable Grok response = %q / %q", body, model)
+	if !complete || body != "first\n\nsecond" || model != "grok-4.5" {
+		t.Fatalf("complete Grok response = %t / %q / %q", complete, body, model)
 	}
 }
 
-func TestStableGrokAssistantMessageFailsClosedWithoutQuietWindow(t *testing.T) {
+func TestCompleteGrokAssistantTurnFailsClosedWithoutTerminalFence(t *testing.T) {
 	grokHome := filepath.Join(t.TempDir(), ".grok")
 	t.Setenv("GROK_HOME", grokHome)
 	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
@@ -902,24 +1144,99 @@ func TestStableGrokAssistantMessageFailsClosedWithoutQuietWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
-	line := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"possibly partial"}}}}` + "\n"
+	line := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"possibly partial"}}}}`,
+	}, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	body, model, err := readStableGrokAssistantMessageWithin(
+	body, model, complete, err := readCompleteGrokAssistantTurnWithin(
 		transcriptPath, "prompt-1", "session-1",
-		75*time.Millisecond, 200*time.Millisecond, 10*time.Millisecond,
+		75*time.Millisecond, 10*time.Millisecond,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body != "" || model != "grok-4.5" {
-		t.Fatalf("non-quiet Grok response = %q / %q", body, model)
+	if complete || body != "possibly partial" || model != "grok-4.5" {
+		t.Fatalf("unfenced Grok response = %t / %q / %q", complete, body, model)
 	}
 }
 
-func TestStableGrokAssistantMessageRejectsUntrustedPathWithoutPolling(t *testing.T) {
+func TestGrokAssistantTurnRejectsMalformedCompletedRecordAfterStop(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"first"}}}}`,
+		`{"malformed":`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1"); err == nil ||
+		!strings.Contains(err.Error(), "malformed record") {
+		t.Fatalf("malformed post-Stop record error = %v", err)
+	}
+}
+
+func TestGrokAssistantTurnBoundsOnlyTheSelectedTailTurn(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var updates strings.Builder
+	for range maxNativeTranscriptRecords + 100 {
+		updates.WriteString("{}\n")
+	}
+	updates.WriteString(strings.Join([]string{
+		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"answer after long history"}}}}`,
+		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n")
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(updates.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+	if err != nil || !complete || body != "answer after long history" || model != "" {
+		t.Fatalf("long-session tail turn = %t / %q / %q / %v", complete, body, model, err)
+	}
+}
+
+func TestGrokTranscriptTailStartPreservesExactRecordBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "updates.jsonl")
+	raw := []byte("old\nstop\nassistant\nterminal\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	exactWindow := len(raw) - len("old\n")
+	start, err := grokTranscriptTailStart(file, int64(len(raw)), exactWindow)
+	if err != nil || start != int64(len("old\n")) {
+		t.Fatalf("exact-boundary tail start = %d / %v", start, err)
+	}
+	partialWindow := len(raw) - (len("old\n") - 1)
+	start, err = grokTranscriptTailStart(file, int64(len(raw)), partialWindow)
+	if err != nil || start != int64(len("old\n")) {
+		t.Fatalf("partial-record tail start = %d / %v", start, err)
+	}
+}
+
+func TestCompleteGrokAssistantTurnRejectsUntrustedPathWithoutPolling(t *testing.T) {
 	root := t.TempDir()
 	grokHome := filepath.Join(root, ".grok")
 	t.Setenv("GROK_HOME", grokHome)
@@ -930,7 +1247,7 @@ func TestStableGrokAssistantMessageRejectsUntrustedPathWithoutPolling(t *testing
 	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1"); err == nil || !strings.Contains(err.Error(), "outside the session store") {
+	if _, _, _, err := readCompleteGrokAssistantTurn(transcriptPath, "prompt-1", "session-1"); err == nil || !strings.Contains(err.Error(), "outside the session store") {
 		t.Fatalf("untrusted Grok transcript error = %v", err)
 	}
 }
@@ -981,7 +1298,7 @@ func TestGrokAssistantMessageRejectsUntrustedNativeTranscript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, _, err := readGrokAssistantMessage(transcriptPath, tc.promptID, tc.sessionID); err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+			if _, _, _, err := readGrokAssistantTurn(transcriptPath, tc.promptID, tc.sessionID); err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
 				t.Fatalf("untrusted Grok transcript error = %v", err)
 			}
 		})

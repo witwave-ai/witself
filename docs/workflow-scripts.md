@@ -1035,6 +1035,11 @@ Expected behavior:
   responses, and optionally runtime-exposed tool activity.
 - Failed delivery remains in the owner-only local outbox and can be retried with
   `witself transcript flush --runtime codex|claude-code|grok-build|cursor`.
+- Grok's passive Stop hook precedes its durable final response. The existing
+  one-shot outbox flusher holds that Stop locally until the exact native turn is
+  complete, while a foreground `witself transcript flush --runtime grok-build`
+  provides a deterministic fence after the final Grok process exits. No
+  persistent runner or provider wrapper is involved.
 - The broader open-plane and sealed-plane MCP catalog remains the target
   contract in [mcp-tools.md](mcp-tools.md).
 
