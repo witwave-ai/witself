@@ -33,6 +33,7 @@ const (
 	staleFlushLockAge            = 5 * time.Minute
 	grokTranscriptPollInterval   = 50 * time.Millisecond
 	grokTranscriptMaxWait        = 2 * time.Second
+	codexAutoReviewModel         = "codex-auto-review"
 )
 
 // Event is one durable, provider-neutral hook event in the local outbox.
@@ -407,6 +408,14 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 	}
 	if input.HookEventName == "AgentResponse" || input.HookEventName == "AgentThought" {
 		input.LastAssistantMessage = firstNonempty(input.LastAssistantMessage, input.Text)
+	}
+	if runtime == RuntimeCodex && input.HookEventName == "UserPromptSubmit" && input.Model == codexAutoReviewModel {
+		// Codex runs its automatic approval reviewer as a nested model turn in
+		// the parent session and emits a UserPromptSubmit hook for the review
+		// envelope. It is neither user-authored content nor a new parent turn.
+		// Normalize it before session state and hydration consume the event.
+		input.HookEventName = HookEventCodexPermissionReview
+		input.Prompt = ""
 	}
 	if input.HookEventName == "UserPromptSubmit" {
 		switch runtime {
@@ -1232,6 +1241,8 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 		event.Kind, event.Role, event.Body = "compaction.completed", "system", "conversation compaction completed"
 	case "PermissionRequest":
 		event.Kind, event.Role, event.Body = "permission.requested", "system", firstNonempty(input.ToolName, "permission requested")
+	case HookEventCodexPermissionReview:
+		event.Kind, event.Role, event.Body = "permission.review.started", "system", "automatic permission review started"
 	case "PermissionDenied":
 		event.Kind, event.Role, event.Body = "permission.denied", "system", firstNonempty(input.Reason, input.ToolName, "permission denied")
 	case "Notification":
@@ -1248,6 +1259,12 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 			firstNonempty(errorText(input.Error), input.Reason, "tool failed"))
 	default:
 		event.Kind, event.Role, event.Body = "runtime.event", "system", input.HookEventName
+	}
+	// The internal review envelope may serialize parent context and tool input.
+	// Its normalized audit metadata is sufficient; never persist the envelope
+	// or make it available to later transcript curation in any capture mode.
+	if input.HookEventName == HookEventCodexPermissionReview {
+		return
 	}
 	event.Data = structuredEventData(input)
 	if event.CaptureMode == ModeRaw {

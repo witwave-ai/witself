@@ -61,6 +61,93 @@ func TestClaudeCaptureCorrelatesSessionTurnAndLocation(t *testing.T) {
 	}
 }
 
+func TestCodexAutoReviewRemainsInternalAndPreservesParentTurn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCodex, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"SessionStart","model":"gpt-5.6-sol"}`)
+	prompt := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"parent-turn","model":"gpt-5.6-sol","prompt":"real user prompt"}`)
+	permission := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"PermissionRequest","turn_id":"parent-turn","model":"gpt-5.6-sol","tool_name":"mcp__witself__write"}`)
+	review := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"review-turn","model":"codex-auto-review","prompt":"internal-review-canary","tool_input":{"secret":"internal-tool-canary"},"reason":"internal-reason-canary"}`)
+	stop := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"Stop","model":"gpt-5.6-sol","last_assistant_message":"done"}`)
+
+	if start.RunID == "" || prompt.RunID != start.RunID || permission.RunID != start.RunID ||
+		review.RunID != start.RunID || stop.RunID != start.RunID {
+		t.Fatal("nested review changed the parent run")
+	}
+	if review.HookEvent != HookEventCodexPermissionReview || review.NativeHookEvent != "UserPromptSubmit" ||
+		review.Kind != "permission.review.started" || review.Role != "system" ||
+		review.Body != "automatic permission review started" || review.TurnID != "review-turn" ||
+		review.Model != codexAutoReviewModel || review.ModelSource != "hook" {
+		t.Fatalf("normalized review metadata = %#v", review)
+	}
+	if len(review.Raw) != 0 || len(review.Data) != 0 || strings.Contains(review.Body, "internal-review-canary") {
+		t.Fatal("internal approval envelope was retained as transcript content")
+	}
+	reviewEntries := review.Entries()
+	if len(reviewEntries) != 1 || reviewEntries[0].Role != "system" {
+		t.Fatalf("normalized review entry retained internal prompt material: %#v", reviewEntries)
+	}
+	for _, canary := range []string{"internal-review-canary", "internal-tool-canary", "internal-reason-canary"} {
+		if bytes.Contains(reviewEntries[0].Payload, []byte(canary)) || strings.Contains(reviewEntries[0].Body, canary) {
+			t.Fatalf("normalized review entry retained %q: %#v", canary, reviewEntries)
+		}
+	}
+	if stop.TurnID != prompt.TurnID || stop.ReplyToEventID != prompt.ID ||
+		stop.Entries()[0].ReplyToExternalID != prompt.ID+":0" {
+		t.Fatalf("parent reply linkage changed: prompt=%#v stop=%#v", prompt, stop)
+	}
+
+	pending, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEntries := 0
+	for _, item := range pending {
+		for _, entry := range item.Event.Entries() {
+			if entry.Role == "user" {
+				userEntries++
+			}
+		}
+	}
+	if len(pending) != 5 || userEntries != 1 {
+		t.Fatalf("pending/user entries = %d/%d, want 5/1", len(pending), userEntries)
+	}
+}
+
+func TestCodexAutoReviewNormalizationRequiresExactRuntimeAndModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, runtimeName, model, wantEvent string
+		wantPrompt                          string
+	}{
+		{"exact Codex internal model", RuntimeCodex, codexAutoReviewModel, HookEventCodexPermissionReview, ""},
+		{"different Codex model", RuntimeCodex, "codex-auto-review-preview", "UserPromptSubmit", "prompt-canary"},
+		{"other runtime", RuntimeClaudeCode, codexAutoReviewModel, "UserPromptSubmit", "prompt-canary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := hookInput{HookEventName: "UserPromptSubmit", Model: tc.model, Prompt: "prompt-canary"}
+			if err := normalizeHookInput(tc.runtimeName, &input); err != nil {
+				t.Fatal(err)
+			}
+			if input.HookEventName != tc.wantEvent || input.Prompt != tc.wantPrompt ||
+				input.NativeHookEvent != "UserPromptSubmit" {
+				t.Fatalf("normalized input = %#v", input)
+			}
+		})
+	}
+}
+
 func TestLocationLabelIsOptionalAndPreserved(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))

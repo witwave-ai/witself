@@ -209,6 +209,44 @@ func TestEvaluateRequiresExactPromptAndPinnedVersionInEveryStage(t *testing.T) {
 	}
 }
 
+func TestEvaluateKeepsARealUserTurnBoundaryWhileAllowingInternalEvents(t *testing.T) {
+	state := testState(t, transcriptcapture.RuntimeCodex, true)
+	state.Phase = PhaseReady
+	state.Fixtures = FixtureState{
+		BaselineMemoryID: "mem_baseline", SensitiveFactID: "fact_private",
+		PeerMemoryID: "mem_peer", CurationRequestID: "mcrq_test",
+	}
+
+	for _, tc := range []struct {
+		name, role, wantStatus string
+	}{
+		{"internal system event", "system", "pass"},
+		{"later user turn", "user", "fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := passingInput(state)
+			assistant := input.Transcripts[0].Entries[1]
+			assistant.Sequence = 3
+			input.Transcripts[0].Entries = []TranscriptEntry{
+				input.Transcripts[0].Entries[0],
+				{
+					Sequence: 2, Role: tc.role, Body: "non-user runtime event",
+					Runtime: state.Runtime, RuntimeVersion: state.RuntimeVersion,
+					CreatedAt: state.PreparedAt.Add(30 * time.Second),
+				},
+				assistant,
+			}
+			evidence, err := Evaluate(state, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evidence.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", evidence.Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestEvaluateRecognizesStrictLegacyCursorPromptEnvelope(t *testing.T) {
 	state := testState(t, transcriptcapture.RuntimeCursor, true)
 	state.Phase = PhaseReady
