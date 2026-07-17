@@ -130,7 +130,7 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	runtimeVersion := detectRuntimeVersion(runtimeCLI)
+	runtimeVersion := detectRuntimeVersion(runtime, runtimeCLI)
 	if runtimeVersion == "" && previousConfigErr == nil {
 		runtimeVersion = previousConfig.RuntimeVersion
 	}
@@ -955,13 +955,20 @@ func supportsManagedHooks(runtime string) bool {
 
 var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-+][0-9a-z][0-9a-z.-]*)?)\b`)
 
-func detectRuntimeVersion(runtimeCLI string) string {
+func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// Version output is part of the executable's stdout contract. Keep stderr
 	// separate: GUI-backed CLIs such as Cursor can emit unrelated diagnostics
 	// there before printing their real semantic version on stdout.
-	output, err := exec.CommandContext(ctx, runtimeCLI, "--version").Output()
+	args := []string{"--version"}
+	if runtimeName == transcriptcapture.RuntimeCursor {
+		// Cursor's MCP-capable Agent is shipped and versioned separately from
+		// the desktop launcher. Native hook payloads identify this Agent build,
+		// so bind and verify that same executable surface.
+		args = []string{"agent", "--version"}
+	}
+	output, err := exec.CommandContext(ctx, runtimeCLI, args...).Output()
 	if err != nil {
 		return ""
 	}

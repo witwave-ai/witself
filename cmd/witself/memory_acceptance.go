@@ -611,7 +611,7 @@ func acceptanceIntegrationPreflight(runtimeName string) (transcriptcapture.Confi
 	if err != nil {
 		return transcriptcapture.Config{}, "", false, false, err
 	}
-	currentVersion := detectRuntimeVersion(runtimeCLI)
+	currentVersion := detectRuntimeVersion(runtimeName, runtimeCLI)
 	if currentVersion == "" {
 		return transcriptcapture.Config{}, "", false, false, fmt.Errorf("%s client version could not be detected", runtimeName)
 	}
