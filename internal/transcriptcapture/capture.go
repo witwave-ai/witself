@@ -1,6 +1,7 @@
 package transcriptcapture
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,12 +26,12 @@ const (
 	maxRawPayloadBytes           = 8 * 1024
 	maxStructuredBytes           = 4 * 1024
 	maxNativeTranscriptTailBytes = 16 * 1024 * 1024
+	maxNativeTranscriptScanBytes = 64 * 1024 * 1024
 	maxNativeTranscriptLineBytes = 2 * 1024 * 1024
 	maxNativeTranscriptRecords   = 10_000
 	entryBodyChunkSize           = 60 * 1024
 	staleFlushLockAge            = 5 * time.Minute
 	grokTranscriptPollInterval   = 50 * time.Millisecond
-	grokTranscriptQuietPeriod    = 200 * time.Millisecond
 	grokTranscriptMaxWait        = 2 * time.Second
 )
 
@@ -43,7 +44,9 @@ type Event struct {
 	RuntimeVersionSource string             `json:"runtime_version_source,omitempty"`
 	CaptureMode          string             `json:"capture_mode"`
 	Account              string             `json:"account"`
+	AccountID            string             `json:"account_id,omitempty"`
 	Realm                string             `json:"realm"`
+	RealmID              string             `json:"realm_id,omitempty"`
 	Agent                string             `json:"agent"`
 	AgentID              string             `json:"agent_id"`
 	AgentName            string             `json:"agent_name"`
@@ -67,6 +70,7 @@ type Event struct {
 	OccurredAt           time.Time          `json:"occurred_at"`
 	Raw                  json.RawMessage    `json:"raw,omitempty"`
 	RecoveredMessages    []RecoveredMessage `json:"recovered_messages,omitempty"`
+	NativeTurnFinalized  bool               `json:"native_turn_finalized,omitempty"`
 }
 
 // RecoveredMessage is a visible user or assistant message atomically attached
@@ -306,7 +310,9 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		RuntimeVersionSource: state.RuntimeVersionSource,
 		CaptureMode:          cfg.CaptureMode,
 		Account:              cfg.Account,
+		AccountID:            cfg.AccountID,
 		Realm:                cfg.Realm,
+		RealmID:              cfg.RealmID,
 		Agent:                cfg.Agent,
 		AgentID:              cfg.AgentID,
 		AgentName:            cfg.AgentName,
@@ -406,18 +412,6 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		if input.HookEventName == "UserPromptSubmit" {
 			input.Prompt = unwrapGrokPrompt(input.Prompt)
 		}
-		if input.HookEventName == "Stop" && input.TranscriptPath != "" {
-			body, model, err := readStableGrokAssistantMessage(input.TranscriptPath, input.PromptID, input.SessionID)
-			if err == nil {
-				if input.LastAssistantMessage == "" {
-					input.LastAssistantMessage = body
-				}
-				if input.Model == "" && model != "" {
-					input.Model = model
-					input.ModelSource = "native_transcript"
-				}
-			}
-		}
 	}
 	if runtime == RuntimeClaudeCode && input.HookEventName == "Stop" && input.Model == "" && input.TranscriptPath != "" {
 		model, err := readClaudeModel(input.TranscriptPath)
@@ -429,74 +423,67 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 	return nil
 }
 
-// readStableGrokAssistantMessage accounts for a Grok Stop-hook ordering race:
-// the hook can run just before the final agent_message_chunk is durable in the
-// native updates.jsonl file. Poll only a trusted, successfully readable path,
-// and require a short quiet period so a partially appended response is not
-// promoted into the portable transcript. The provider hook timeout is 10s;
-// this foreground wait is deliberately bounded well below it.
-func readStableGrokAssistantMessage(path, promptID, expectedSessionID string) (string, string, error) {
-	return readStableGrokAssistantMessageWithin(path, promptID, expectedSessionID,
-		grokTranscriptMaxWait, grokTranscriptQuietPeriod, grokTranscriptPollInterval)
+// readCompleteGrokAssistantTurn accounts for Grok's Stop-hook ordering: the
+// provider persists the final assistant chunk only after the synchronous Stop
+// hook returns. A one-shot transcript flusher may already be waiting outside
+// that hook, so poll the trusted native file for the provider's exact
+// turn_completed fence. Quiet time alone is not proof that a response is
+// complete.
+func readCompleteGrokAssistantTurn(path, promptID, expectedSessionID string) (string, string, bool, error) {
+	return readCompleteGrokAssistantTurnWithin(path, promptID, expectedSessionID,
+		grokTranscriptMaxWait, grokTranscriptPollInterval)
 }
 
-func readStableGrokAssistantMessageWithin(
+func readCompleteGrokAssistantTurnWithin(
 	path, promptID, expectedSessionID string,
-	maxWait, quietPeriod, pollInterval time.Duration,
-) (string, string, error) {
+	maxWait, pollInterval time.Duration,
+) (string, string, bool, error) {
 	deadline := time.Now().Add(maxWait)
-	body, model, err := readGrokAssistantMessage(path, promptID, expectedSessionID)
+	body, model, complete, err := readGrokAssistantTurn(path, promptID, expectedSessionID)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
+	}
+	if complete {
+		return body, model, true, nil
 	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
-	lastSize, lastModTime, completeLine, err := grokTranscriptFileState(resolvedPath)
-	if err != nil {
-		return "", "", err
-	}
+	// Force one re-read after establishing the polling loop. This closes the
+	// window where the provider appends between the initial parse and the first
+	// file stat, which would otherwise make the new size look like the baseline.
+	lastSize := int64(-1)
+	lastModTime := time.Time{}
+	completeLine := false
 	lastBody := body
 	lastModel := model
-	quietSince := time.Now()
 
 	for {
 		remaining := time.Until(deadline)
-		if remaining > 0 {
-			time.Sleep(min(pollInterval, remaining))
+		if remaining <= 0 {
+			return lastBody, lastModel, false, nil
 		}
+		time.Sleep(min(pollInterval, remaining))
 
 		size, modTime, complete, err := grokTranscriptFileState(resolvedPath)
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		if size != lastSize || !modTime.Equal(lastModTime) || complete != completeLine {
 			lastSize, lastModTime, completeLine = size, modTime, complete
-			quietSince = time.Now()
 
-			body, model, err = readGrokAssistantMessage(resolvedPath, promptID, expectedSessionID)
+			body, model, complete, err = readGrokAssistantTurn(resolvedPath, promptID, expectedSessionID)
 			if err != nil {
-				return "", "", err
+				return "", "", false, err
 			}
-			if body != lastBody {
-				lastBody = body
-				quietSince = time.Now()
-			}
+			lastBody = body
 			if model != "" {
 				lastModel = model
 			}
-		}
-
-		now := time.Now()
-		if completeLine && strings.TrimSpace(lastBody) != "" && now.Sub(quietSince) >= quietPeriod {
-			return lastBody, lastModel, nil
-		}
-		if !now.Before(deadline) {
-			// A late complete chunk can still be followed by more chunks. If
-			// it did not become quiet within the bound, fail closed instead of
-			// promoting a potentially partial assistant response.
-			return "", lastModel, nil
+			if complete {
+				return lastBody, lastModel, true, nil
+			}
 		}
 	}
 }
@@ -815,6 +802,8 @@ type grokSessionUpdate struct {
 		} `json:"_meta"`
 		Update struct {
 			SessionUpdate string `json:"sessionUpdate"`
+			PromptID      string `json:"prompt_id"`
+			EventName     string `json:"event_name"`
 			Meta          struct {
 				ModelID string `json:"modelId"`
 			} `json:"_meta"`
@@ -825,87 +814,196 @@ type grokSessionUpdate struct {
 	} `json:"params"`
 }
 
-func readGrokAssistantMessage(path, promptID, expectedSessionID string) (string, string, error) {
+func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, string, bool, error) {
 	if strings.TrimSpace(promptID) == "" || strings.TrimSpace(expectedSessionID) == "" {
-		return "", "", errors.New("grok transcript lookup requires prompt and session ids")
+		return "", "", false, errors.New("grok transcript lookup requires prompt and session ids")
 	}
 	home := strings.TrimSpace(os.Getenv("GROK_HOME"))
 	if home == "" {
 		userHome, err := os.UserHomeDir()
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		home = filepath.Join(userHome, ".grok")
 	}
 	sessionsRoot, err := filepath.EvalSymlinks(filepath.Join(home, "sessions"))
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	linkInfo, err := os.Lstat(path)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if linkInfo.Mode()&os.ModeSymlink != 0 {
-		return "", "", errors.New("grok transcript path must not be a symlink")
+		return "", "", false, errors.New("grok transcript path must not be a symlink")
 	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	rel, err := filepath.Rel(sessionsRoot, resolvedPath)
 	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
 		len(parts) != 3 || parts[2] != "updates.jsonl" || parts[1] != expectedSessionID {
-		return "", "", errors.New("grok transcript path is outside the session store")
+		return "", "", false, errors.New("grok transcript path is outside the session store")
 	}
 
 	file, err := os.Open(resolvedPath)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
 		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
 		!trustedNativeDirectoryChain(sessionsRoot, resolvedPath) {
-		return "", "", errors.New("grok transcript is not a trusted regular file")
+		return "", "", false, errors.New("grok transcript is not a trusted regular file")
 	}
-	start := max(info.Size()-maxNativeTranscriptTailBytes, 0)
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return "", "", err
+	if info.Size() == 0 {
+		return "", "", false, nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxNativeTranscriptTailBytes))
+	last := []byte{0}
+	if _, err := file.ReadAt(last, info.Size()-1); err != nil {
+		return "", "", false, err
+	}
+	scanStart, err := grokTranscriptTailStart(file, info.Size(), maxNativeTranscriptScanBytes)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
-	if start > 0 {
-		if newline := bytes.IndexByte(raw, '\n'); newline >= 0 {
-			raw = raw[newline+1:]
-		}
+	if scanStart >= info.Size() {
+		return "", "", false, nil
 	}
 
 	var chunks []string
 	model := ""
-	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+	stopSeen := false
+	complete := false
+	lineIndex := 0
+	recordsAfterStop := 0
+	bodyBytes := 0
+	malformedAfterStopAt := 0
+	// Scan exactly the same append-only prefix whose final byte was inspected
+	// above. Bytes appended concurrently belong to the next poll; mixing them
+	// into this scan would misclassify a normal partial append as corruption.
+	scanner := bufio.NewScanner(io.NewSectionReader(file, scanStart, info.Size()-scanStart))
+	scanner.Buffer(make([]byte, 64*1024), maxNativeTranscriptLineBytes)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		lineIndex++
+		if stopSeen {
+			recordsAfterStop++
+		}
+		if recordsAfterStop > maxNativeTranscriptRecords {
+			return "", "", false, errors.New("grok transcript exceeds recovery bounds")
+		}
 		var update grokSessionUpdate
-		if len(line) == 0 || json.Unmarshal(line, &update) != nil {
+		if len(line) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(line, &update); err != nil {
+			if stopSeen && malformedAfterStopAt == 0 {
+				malformedAfterStopAt = lineIndex
+			}
 			continue
 		}
 		kind := update.Params.Update.SessionUpdate
+		if kind == "hook_execution" && update.Params.Update.EventName == "stop" &&
+			update.Params.Update.PromptID == promptID {
+			stopSeen = true
+			complete = false
+			chunks = nil
+			model = ""
+			bodyBytes = 0
+			recordsAfterStop = 1
+			continue
+		}
+		if !stopSeen {
+			continue
+		}
+		if kind == "turn_completed" && update.Params.Update.PromptID == promptID {
+			complete = true
+			continue
+		}
 		if kind != "agent_message_chunk" || update.Params.Meta.PromptID != promptID {
 			continue
 		}
+		// Any exact-prompt assistant chunk after an apparent terminal fence
+		// means the earlier fence was not the end of this turn.
+		complete = false
 		if value := strings.TrimSpace(update.Params.Update.Meta.ModelID); value != "" {
 			model = truncateUTF8(value, 256)
 		}
 		if text := update.Params.Update.Content.Text; text != "" {
+			bodyBytes += len(text)
+			if bodyBytes > maxNativeTranscriptTailBytes {
+				return "", "", false, errors.New("grok assistant response exceeds recovery bounds")
+			}
 			chunks = append(chunks, text)
 		}
 	}
-	return strings.Join(chunks, "\n\n"), model, nil
+	if err := scanner.Err(); err != nil {
+		return "", "", false, fmt.Errorf("scan grok transcript: %w", err)
+	}
+	// A parseable final line without a newline can still be in the middle of
+	// an append. Never promote it into the portable transcript.
+	if last[0] != '\n' {
+		complete = false
+		if malformedAfterStopAt == lineIndex {
+			malformedAfterStopAt = 0
+		}
+	}
+	if malformedAfterStopAt != 0 {
+		return "", "", false, errors.New("grok transcript contains a malformed record after the Stop fence")
+	}
+	return strings.Join(chunks, "\n\n"), model, complete, nil
+}
+
+func grokTranscriptTailStart(file *os.File, size int64, window int) (int64, error) {
+	scanStart := max(size-int64(window), 0)
+	if scanStart == 0 {
+		return 0, nil
+	}
+	previous := []byte{0}
+	if _, err := file.ReadAt(previous, scanStart-1); err != nil {
+		return 0, err
+	}
+	if previous[0] == '\n' {
+		return scanStart, nil
+	}
+
+	// Drop only a partial record at the bounded-tail boundary. Recovery is
+	// complete only when the exact Stop anchor is present after it, so no part
+	// of the selected turn can be silently omitted.
+	boundaryStart := scanStart
+	probe := make([]byte, 64*1024)
+	for scanStart < size {
+		remaining := size - scanStart
+		chunk := probe
+		if remaining < int64(len(chunk)) {
+			chunk = chunk[:remaining]
+		}
+		n, readErr := file.ReadAt(chunk, scanStart)
+		if n > 0 {
+			if newline := bytes.IndexByte(chunk[:n], '\n'); newline >= 0 {
+				aligned := scanStart + int64(newline+1)
+				if aligned-boundaryStart-1 > maxNativeTranscriptLineBytes {
+					return 0, errors.New("grok transcript boundary record exceeds recovery bounds")
+				}
+				return aligned, nil
+			}
+			scanStart += int64(n)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return 0, readErr
+		}
+		if scanStart-boundaryStart > maxNativeTranscriptLineBytes {
+			return 0, errors.New("grok transcript boundary record exceeds recovery bounds")
+		}
+	}
+	return scanStart, nil
 }
 
 type claudeTranscriptRecord struct {
@@ -1418,6 +1516,111 @@ func Pending(runtime string) ([]PendingEvent, error) {
 		out = append(out, PendingEvent{Path: path, Event: event})
 	}
 	return out, nil
+}
+
+// FinalizePending prepares one locally durable event for upload. Grok writes
+// its final response only after the synchronous Stop hook returns, so an
+// unresolved Stop remains in the outbox until the trusted native transcript
+// contains the matching completed turn. The original event is rewritten
+// atomically before any network operation, preserving byte-identical retry
+// behavior at the server idempotency boundary.
+//
+// The caller must hold the runtime flush lock. ready=false is a normal,
+// retryable state; a later hook or an explicit transcript flush will try again.
+func FinalizePending(pending PendingEvent) (finalized PendingEvent, ready bool, err error) {
+	return finalizePendingWithin(pending, grokTranscriptMaxWait, grokTranscriptPollInterval)
+}
+
+func finalizePendingWithin(
+	pending PendingEvent,
+	maxWait, pollInterval time.Duration,
+) (finalized PendingEvent, ready bool, err error) {
+	event := pending.Event
+	if event.Runtime != RuntimeGrokBuild || event.HookEvent != "Stop" ||
+		event.Kind != "turn.completed" || event.Role != "system" {
+		return pending, true, nil
+	}
+	if event.NativeTurnFinalized {
+		return pending, true, nil
+	}
+	if strings.TrimSpace(event.SourceTranscriptPath) == "" {
+		return pending, false, errors.New("unresolved grok Stop event has no native transcript path")
+	}
+	var data struct {
+		PromptID string `json:"prompt_id"`
+	}
+	if len(event.Data) == 0 || json.Unmarshal(event.Data, &data) != nil || strings.TrimSpace(data.PromptID) == "" {
+		return pending, false, errors.New("unresolved grok Stop event has no durable prompt id")
+	}
+
+	body, model, complete, err := readCompleteGrokAssistantTurnWithin(
+		event.SourceTranscriptPath, strings.TrimSpace(data.PromptID), event.SessionID,
+		maxWait, pollInterval,
+	)
+	if err != nil {
+		return pending, false, err
+	}
+	if !complete {
+		return pending, false, nil
+	}
+	event.NativeTurnFinalized = true
+	if body == "" {
+		// A provider-fenced turn with no assistant body is a legitimate
+		// content-free completion, not a partially captured message. Persist
+		// the finalization marker before upload so a retry never depends on
+		// mutable or pruned native session storage.
+		if err := validatePendingRewritePath(pending.Path, event); err != nil {
+			return pending, false, err
+		}
+		if err := writeJSONAtomic(pending.Path, event); err != nil {
+			return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
+		}
+		return PendingEvent{Path: pending.Path, Event: event}, true, nil
+	}
+
+	event.Kind = "message.assistant"
+	event.Role = "assistant"
+	event.Body = body
+	if event.Model == "" && model != "" {
+		event.Model = model
+		event.ModelSource = "native_transcript"
+	}
+	if err := validatePendingRewritePath(pending.Path, event); err != nil {
+		return pending, false, err
+	}
+	if err := writeJSONAtomic(pending.Path, event); err != nil {
+		return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
+	}
+	return PendingEvent{Path: pending.Path, Event: event}, true, nil
+}
+
+func validatePendingRewritePath(path string, event Event) error {
+	dir, err := outboxDir(event.Runtime)
+	if err != nil {
+		return err
+	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || filepath.Dir(rel) != "." || filepath.Ext(rel) != ".json" ||
+		!strings.HasSuffix(filepath.Base(rel), "-"+event.ID+".json") {
+		return errors.New("pending event path does not match its outbox identity")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) {
+		return errors.New("pending event is not a trusted regular file")
+	}
+	return nil
 }
 
 // RemovePending acknowledges one uploaded event.

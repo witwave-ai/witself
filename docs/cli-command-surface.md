@@ -2881,7 +2881,20 @@ The interactive commands accept `--endpoint`,
 
 `tail` performs a bounded newest-entry read. `flush` retries the durable local
 hook outbox for an installed `codex`, `claude-code`, `grok-build`, or `cursor`
-integration.
+integration. The foreground command drains all currently uploadable events or
+returns a concrete delivery error; it does not stop merely because a large
+valid backlog takes longer than the detached hook flusher's bounded work
+window.
+
+For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
+native session file. Grok writes the final assistant response only after its
+synchronous Stop hook returns, so Witself requires the exact matching native
+Stop execution and later `turn_completed` fence, then atomically persists the
+assistant form before upload. An incomplete or unsafe turn remains local and
+causes a nonzero flush result; later events for other transcripts are not
+blocked. A later Grok hook retries automatically, while an explicit foreground
+flush after the client exits closes the final session without launching a
+client, inference, wrapper, or persistent runner.
 
 Only finalized visible output should be appended. Raw hidden chain-of-thought
 and streaming chunks are out of contract. Small structured objects belong in

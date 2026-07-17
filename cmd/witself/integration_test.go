@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -766,6 +767,84 @@ func TestRegisterMCPClaudeUsesUserScopedStdio(t *testing.T) {
 	}
 }
 
+func TestCaptureAppendBatchesStayUnderServerJSONLimit(t *testing.T) {
+	event := transcriptcapture.Event{
+		ID:          "event-large",
+		Runtime:     transcriptcapture.RuntimeCodex,
+		HookEvent:   "PostToolUse",
+		Kind:        "tool.result",
+		Role:        "tool",
+		CaptureMode: transcriptcapture.ModeRaw,
+		SessionID:   "session-large",
+		// Quotes and backslashes reproduce the important live failure mode:
+		// a body that fits locally but grows past the server's 8 MiB decoder
+		// limit after JSON escaping.
+		Body: strings.Repeat("\"\\", 2*1024*1024),
+	}
+	entries := event.Entries()
+	oldRequest, err := json.Marshal(map[string]any{"entries": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldRequest) <= 8*1024*1024 {
+		t.Fatalf("regression fixture bytes = %d, want more than the server's 8 MiB limit", len(oldRequest))
+	}
+	batches, err := captureAppendBatches(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) < 2 {
+		t.Fatalf("batches = %d, want size-based split", len(batches))
+	}
+
+	flattened := make([]client.AppendTranscriptEntryInput, 0, len(entries))
+	for i, batch := range batches {
+		if len(batch) == 0 || len(batch) > maxCaptureAppendBatchEntries {
+			t.Fatalf("batch %d entries = %d", i, len(batch))
+		}
+		raw, err := json.Marshal(map[string]any{"entries": batch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) > maxCaptureAppendRequestBytes {
+			t.Fatalf("batch %d bytes = %d, limit = %d", i, len(raw), maxCaptureAppendRequestBytes)
+		}
+		flattened = append(flattened, batch...)
+	}
+	if len(flattened) != len(entries) {
+		t.Fatalf("flattened entries = %d, want %d", len(flattened), len(entries))
+	}
+	for i, input := range flattened {
+		if input.ExternalID != entries[i].ExternalID || input.Body != entries[i].Body ||
+			string(input.Payload) != string(entries[i].Payload) {
+			t.Fatalf("entry %d changed or reordered", i)
+		}
+	}
+}
+
+func TestCaptureAppendBatchesRetainCountLimitAndOrder(t *testing.T) {
+	entries := make([]transcriptcapture.Entry, maxCaptureAppendBatchEntries+1)
+	for i := range entries {
+		entries[i] = transcriptcapture.Entry{
+			ExternalID: fmt.Sprintf("event:%03d", i),
+			Role:       "system",
+			Body:       "small",
+		}
+	}
+	batches, err := captureAppendBatches(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 2 || len(batches[0]) != maxCaptureAppendBatchEntries || len(batches[1]) != 1 {
+		t.Fatalf("batch sizes = %d/%d", len(batches[0]), len(batches[1]))
+	}
+	for i, input := range append(batches[0], batches[1]...) {
+		if input.ExternalID != entries[i].ExternalID {
+			t.Fatalf("entry %d external id = %q, want %q", i, input.ExternalID, entries[i].ExternalID)
+		}
+	}
+}
+
 func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".witself")
 	t.Setenv("WITSELF_HOME", home)
@@ -846,6 +925,295 @@ func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	}
 	if appended[2]["reply_to_external_id"] != appended[1]["external_id"] {
 		t.Fatalf("reply link = %#v", appended[2])
+	}
+}
+
+func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", filepath.Join(home, ".grok"))
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	var mu sync.Mutex
+	var appended []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-07-17T10:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_grok","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_grok/entries:batch":
+			var body struct {
+				Entries []map[string]any `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode batch: %v", err)
+				http.Error(w, "bad batch", http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			appended = append(appended, body.Entries...)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeGrokBuild, RuntimeVersion: "0.2.101", CaptureMode: transcriptcapture.ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: location,
+		Endpoint: srv.URL, TokenFile: tokenPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(home, ".grok", "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "user_prompt_submit", "promptId": "prompt-1",
+		"prompt": "delayed response prompt", "transcriptPath": transcriptPath,
+	})
+	prompt, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeGrokBuild, promptRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-1", "hookEventName": "stop", "promptId": "prompt-1",
+		"reason": "end_turn", "transcriptPath": transcriptPath,
+	})
+	stop, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeGrokBuild, stopRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stop.Kind != "turn.completed" {
+		t.Fatalf("Stop was finalized inside the synchronous hook: %#v", stop)
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	updates := strings.Join([]string{
+		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"delayed final response"}}}}`,
+		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("flush code = %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Grok flush did not observe the post-hook terminal fence")
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v", pending)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(appended) != 2 || appended[0]["body"] != "delayed response prompt" ||
+		appended[1]["body"] != "delayed final response" || appended[1]["role"] != "assistant" ||
+		appended[1]["reply_to_external_id"] != appended[0]["external_id"] ||
+		appended[0]["external_id"] != prompt.ID+":0" || appended[1]["external_id"] != stop.ID+":0" {
+		t.Fatalf("post-hook Grok entries = %#v", appended)
+	}
+	if model, exists := appended[1]["model"]; exists && model != "" {
+		t.Fatalf("unscoped native model was attributed to the assistant entry: %#v", appended[1])
+	}
+}
+
+func TestPrepareTranscriptFlushRejectsBindingChanges(t *testing.T) {
+	event := transcriptcapture.Event{
+		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", Realm: "default",
+		Agent: "old-agent", AgentID: "agent_old", AgentName: "old-agent",
+		Location:  transcriptcapture.Location{ID: "loc_1", Name: "home"},
+		SessionID: "session-1", HookEvent: "UserPromptSubmit", Kind: "message.user", Role: "user",
+	}
+	pending := []transcriptcapture.PendingEvent{{Path: "/unused/event.json", Event: event}}
+	blocked := map[string]error{}
+	ready, err := prepareTranscriptFlushEvents(pending, transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", Realm: "default",
+		Agent: "new-agent", AgentID: "agent_new", AgentName: "new-agent",
+		Location: transcriptcapture.Location{ID: "loc_1", Name: "home"},
+	}, blocked)
+	if err == nil || !strings.Contains(err.Error(), "does not match") || len(ready) != 0 || len(blocked) != 1 {
+		t.Fatalf("binding-change preparation = ready %#v / blocked %#v / err %v", ready, blocked, err)
+	}
+}
+
+func TestCaptureEventBindingUsesStableLocationID(t *testing.T) {
+	event := transcriptcapture.Event{
+		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", AccountID: "acc_1",
+		Realm: "old-realm", RealmID: "realm_1",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott",
+		Location: transcriptcapture.Location{ID: "loc_1", Name: "old-label"},
+	}
+	cfg := transcriptcapture.Config{
+		Runtime: event.Runtime, Account: "renamed-account", AccountID: "acc_1",
+		Realm: "new-realm", RealmID: "realm_1",
+		Agent: event.Agent, AgentID: event.AgentID, AgentName: event.AgentName,
+		Location: transcriptcapture.Location{ID: "loc_1", Name: "new-label"},
+	}
+	if err := captureEventBindingError(event, cfg); err != nil {
+		t.Fatalf("mutable account, realm, or location label stranded a pending event: %v", err)
+	}
+	cfg.Realm = event.Realm
+	cfg.RealmID = ""
+	if err := captureEventBindingError(event, cfg); err == nil {
+		t.Fatal("asymmetric stable realm identity fell back to a mutable name")
+	}
+	cfg.RealmID = "realm_other"
+	if err := captureEventBindingError(event, cfg); err == nil {
+		t.Fatal("stable realm identity mismatch was accepted because labels matched")
+	}
+	event.AccountID, event.RealmID = "", ""
+	cfg.Account, cfg.Realm = event.Account, event.Realm
+	cfg.AccountID, cfg.RealmID = "acc_1", "realm_1"
+	if err := captureEventBindingError(event, cfg); err != nil {
+		t.Fatalf("legacy event with matching stable agent and location could not migrate: %v", err)
+	}
+	event.AccountID = "acc_1"
+	if err := captureEventBindingError(event, cfg); err == nil {
+		t.Fatal("event missing only stable realm identity fell back to a mutable name")
+	}
+	event.AccountID, event.RealmID = "", "realm_1"
+	if err := captureEventBindingError(event, cfg); err == nil {
+		t.Fatal("event missing only stable account identity fell back to a mutable name")
+	}
+	event.AccountID, event.RealmID = "", ""
+	cfg.AgentID = "agent_other"
+	if err := captureEventBindingError(event, cfg); err == nil {
+		t.Fatal("legacy event migrated without a matching stable agent identity")
+	}
+}
+
+func TestPrepareTranscriptFlushBlocksOnlyTheDeferredTranscript(t *testing.T) {
+	cfg := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", Realm: "default",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott",
+		Location: transcriptcapture.Location{ID: "loc_1", Name: "home"},
+	}
+	base := transcriptcapture.Event{
+		Runtime: cfg.Runtime, Account: cfg.Account, Realm: cfg.Realm,
+		Agent: cfg.Agent, AgentID: cfg.AgentID, AgentName: cfg.AgentName, Location: cfg.Location,
+		HookEvent: "UserPromptSubmit", Kind: "message.user", Role: "user",
+	}
+	deferred := base
+	deferred.SessionID = "session-a"
+	deferred.ID = "evt_a_later"
+	readyEvent := base
+	readyEvent.SessionID = "session-b"
+	readyEvent.ID = "evt_b"
+	blocked := map[string]error{deferred.TranscriptExternalID(): nil}
+	pending := []transcriptcapture.PendingEvent{
+		{Path: "/unused/a.json", Event: deferred},
+		{Path: "/unused/b.json", Event: readyEvent},
+	}
+	ready, err := prepareTranscriptFlushEvents(pending, cfg, blocked)
+	if err != nil || len(ready) != 1 || ready[0].Event.ID != readyEvent.ID {
+		t.Fatalf("per-transcript preparation = ready %#v / blocked %#v / err %v", ready, blocked, err)
+	}
+
+	seen := map[string]struct{}{pending[0].Path: {}}
+	reopenRetryableBlockedTranscripts(pending[:1], blocked, seen)
+	if hasUnblockedCaptureEvent(pending[:1], blocked) {
+		t.Fatal("deferred-only outbox became uploadable without a new hook")
+	}
+	newSameTranscript := transcriptcapture.PendingEvent{Path: "/unused/a-new.json", Event: deferred}
+	newSameTranscript.Event.ID = "evt_a_new"
+	reopenRetryableBlockedTranscripts([]transcriptcapture.PendingEvent{pending[0], newSameTranscript}, blocked, seen)
+	if !hasUnblockedCaptureEvent([]transcriptcapture.PendingEvent{pending[0], newSameTranscript}, blocked) {
+		t.Fatal("a new same-transcript hook did not reopen retryable finalization")
+	}
+}
+
+func TestForegroundTranscriptFlushWaitsForActiveDetachedFlush(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv(captureDetachedFlushEnv, "")
+	release, acquired, err := transcriptcapture.AcquireFlushLock(transcriptcapture.RuntimeGrokBuild)
+	if err != nil || !acquired {
+		t.Fatalf("acquire test lock = %t / %v", acquired, err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild})
+	}()
+	select {
+	case code := <-done:
+		release()
+		t.Fatalf("foreground flush returned %d while another flusher held the lock", code)
+	case <-time.After(150 * time.Millisecond):
+	}
+	release()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("foreground flush code after lock release = %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground flush did not acquire the released lock")
+	}
+}
+
+func TestDetachedTranscriptFlushDoesNotWaitForActiveFlush(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv(captureDetachedFlushEnv, "1")
+	release, acquired, err := transcriptcapture.AcquireFlushLock(transcriptcapture.RuntimeGrokBuild)
+	if err != nil || !acquired {
+		t.Fatalf("acquire test lock = %t / %v", acquired, err)
+	}
+	defer release()
+	started := time.Now()
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild}); code != 0 {
+		t.Fatalf("detached flush code = %d", code)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("detached flush waited for active owner: %s", elapsed)
+	}
+}
+
+func TestTranscriptFlushContextBoundsOnlyDetachedWork(t *testing.T) {
+	if foregroundFlushLockMaxWait <= detachedFlushMaxDuration {
+		t.Fatalf("foreground lock wait %s does not cover detached work window %s", foregroundFlushLockMaxWait, detachedFlushMaxDuration)
+	}
+	foreground, cancelForeground := transcriptFlushContext(false)
+	defer cancelForeground()
+	if _, bounded := foreground.Deadline(); bounded {
+		t.Fatal("foreground transcript delivery fence has a global deadline")
+	}
+
+	detached, cancelDetached := transcriptFlushContext(true)
+	defer cancelDetached()
+	deadline, bounded := detached.Deadline()
+	if !bounded {
+		t.Fatal("detached transcript flush has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > detachedFlushMaxDuration {
+		t.Fatalf("detached deadline remaining = %s", remaining)
 	}
 }
 
