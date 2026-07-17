@@ -84,6 +84,44 @@ func TestCursorMemoryRoutingCanonicalizesSpouseNameAsOneFact(t *testing.T) {
 	}
 }
 
+func TestCursorExactSensitiveLookupClosesWithValueInLastVisibleAnswer(t *testing.T) {
+	for _, want := range []string{
+		"Final-answer closure for an exact sensitive lookup",
+		"after the authorized fact tool returns the requested value",
+		"last user-visible assistant message must itself include that exact requested value",
+		"earlier tool/status response and then a later summary",
+		"repeat the value in that later final response",
+		"Never apply this to broad recall; keep broad sensitive values redacted",
+	} {
+		if !strings.Contains(cursorMemoryRoutingInstructions, want) {
+			t.Errorf("Cursor exact-sensitive final-answer contract does not contain %q", want)
+		}
+		if !strings.Contains(
+			mcpInstructions(transcriptcapture.RuntimeCursor, "witself.fact.get", "witself.fact.list"),
+			want,
+		) {
+			t.Errorf("Cursor MCP exact-sensitive final-answer contract does not contain %q", want)
+		}
+	}
+	remember := strings.Index(cursorMemoryRoutingInstructions, "On an explicit remember/save/store request")
+	closure := strings.Index(cursorMemoryRoutingInstructions, "Final-answer closure for an exact sensitive lookup")
+	if closure < 0 || remember < 0 || closure >= remember {
+		t.Fatal("Cursor exact-sensitive final-answer closure must be high-salience guidance before general routing")
+	}
+	prefix := cursorMemoryRoutingInstructions
+	if len(prefix) > 512 {
+		prefix = prefix[:512]
+	}
+	for _, want := range []string{
+		"last user-visible assistant message must itself include that exact requested value",
+		"Never apply this to broad recall; keep broad sensitive values redacted",
+	} {
+		if !strings.Contains(prefix, want) {
+			t.Errorf("Cursor first 512 instruction bytes do not contain %q", want)
+		}
+	}
+}
+
 func TestCursorMCPInstructionsUseDottedToolNames(t *testing.T) {
 	got := mcpInstructions(
 		transcriptcapture.RuntimeCursor,

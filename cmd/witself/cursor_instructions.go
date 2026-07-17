@@ -17,6 +17,8 @@ const (
 
 	cursorMemoryRoutingInstructions = `## Witself facts and Cursor Memories
 
+Final-answer closure for an exact sensitive lookup: after the authorized fact tool returns the requested value, the last user-visible assistant message must itself include that exact requested value. If Cursor emits an earlier tool/status response and then a later summary, repeat the value in that later final response. Never apply this to broad recall; keep broad sensitive values redacted.
+
 On an explicit remember/save/store request, call ` + "`witself.fact.set`" + ` in the same turn for one atomic durable assertion and ` + "`witself.memory.capture`" + ` for narrative context. Cursor Memories are an optional second destination and may be used only when surfaced, enabled, and available. Split a clearly mixed request. A specifically named destination wins. Use both providers only when explicitly requested.
 
 - Atomic facts include names or relationships, dates, addresses or locations, URLs, identifiers, stable statuses, and compact durable preferences. Resolve one stable Witself subject for another person, place, or project. Keep subject keys, display names, and aliases non-sensitive; store private personal values only as sensitive facts. Claim success only after the fact tool confirms the write. If the tool is unavailable or fails, say the fact was not stored.

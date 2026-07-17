@@ -864,6 +864,14 @@ func cursorVisibleText(raw json.RawMessage) (string, error) {
 	return strings.Join(texts, "\n\n"), nil
 }
 
+type grokSessionUpdateEnvelope struct {
+	Params struct {
+		Update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+		} `json:"update"`
+	} `json:"params"`
+}
+
 type grokSessionUpdate struct {
 	Params struct {
 		Meta struct {
@@ -876,11 +884,32 @@ type grokSessionUpdate struct {
 			Meta          struct {
 				ModelID string `json:"modelId"`
 			} `json:"_meta"`
-			Content struct {
-				Text string `json:"text"`
-			} `json:"content"`
+			Content json.RawMessage `json:"content"`
 		} `json:"update"`
 	} `json:"params"`
+}
+
+func grokAssistantChunkText(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", errors.New("grok agent message chunk content must contain a string text field")
+	}
+	var content map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &content); err != nil || content == nil {
+		return "", errors.New("grok agent message chunk content must contain a string text field")
+	}
+	rawText, ok := content["text"]
+	if !ok {
+		return "", errors.New("grok agent message chunk content must contain a string text field")
+	}
+	var value any
+	if err := json.Unmarshal(rawText, &value); err != nil {
+		return "", errors.New("grok agent message chunk content must contain a string text field")
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", errors.New("grok agent message chunk content must contain a string text field")
+	}
+	return text, nil
 }
 
 func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, string, bool, error) {
@@ -954,6 +983,7 @@ func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, st
 	recordsAfterStop := 0
 	bodyBytes := 0
 	malformedAfterStopAt := 0
+	unsupportedAfterStopAt := 0
 	// Scan exactly the same append-only prefix whose final byte was inspected
 	// above. Bytes appended concurrently belong to the next poll; mixing them
 	// into this scan would misclassify a normal partial append as corruption.
@@ -968,17 +998,35 @@ func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, st
 		if recordsAfterStop > maxNativeTranscriptRecords {
 			return "", "", false, errors.New("grok transcript exceeds recovery bounds")
 		}
-		var update grokSessionUpdate
 		if len(line) == 0 {
 			continue
 		}
-		if err := json.Unmarshal(line, &update); err != nil {
+		if !json.Valid(line) {
 			if stopSeen && malformedAfterStopAt == 0 {
 				malformedAfterStopAt = lineIndex
 			}
 			continue
 		}
-		kind := update.Params.Update.SessionUpdate
+		var envelope grokSessionUpdateEnvelope
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			if stopSeen && unsupportedAfterStopAt == 0 {
+				unsupportedAfterStopAt = lineIndex
+			}
+			continue
+		}
+		kind := envelope.Params.Update.SessionUpdate
+		switch kind {
+		case "hook_execution", "turn_completed", "agent_message_chunk":
+		default:
+			continue
+		}
+		var update grokSessionUpdate
+		if err := json.Unmarshal(line, &update); err != nil {
+			if stopSeen && unsupportedAfterStopAt == 0 {
+				unsupportedAfterStopAt = lineIndex
+			}
+			continue
+		}
 		if kind == "hook_execution" && update.Params.Update.EventName == "stop" &&
 			update.Params.Update.PromptID == promptID {
 			stopSeen = true
@@ -1005,7 +1053,14 @@ func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, st
 		if value := strings.TrimSpace(update.Params.Update.Meta.ModelID); value != "" {
 			model = truncateUTF8(value, 256)
 		}
-		if text := update.Params.Update.Content.Text; text != "" {
+		text, err := grokAssistantChunkText(update.Params.Update.Content)
+		if err != nil {
+			if unsupportedAfterStopAt == 0 {
+				unsupportedAfterStopAt = lineIndex
+			}
+			continue
+		}
+		if text != "" {
 			bodyBytes += len(text)
 			if bodyBytes > maxNativeTranscriptTailBytes {
 				return "", "", false, errors.New("grok assistant response exceeds recovery bounds")
@@ -1023,9 +1078,15 @@ func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, st
 		if malformedAfterStopAt == lineIndex {
 			malformedAfterStopAt = 0
 		}
+		if unsupportedAfterStopAt == lineIndex {
+			unsupportedAfterStopAt = 0
+		}
 	}
 	if malformedAfterStopAt != 0 {
 		return "", "", false, errors.New("grok transcript contains a malformed record after the Stop fence")
+	}
+	if unsupportedAfterStopAt != 0 {
+		return "", "", false, errors.New("grok transcript contains an unsupported relevant record after the Stop fence")
 	}
 	return strings.Join(chunks, "\n\n"), model, complete, nil
 }
