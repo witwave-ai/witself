@@ -30,7 +30,10 @@ Preparation also creates one pending synthetic curation checkpoint. Backend
 evidence proves that exact request reached a canonical applied zero-action plan
 by verification. Because transcript delivery is asynchronous, the v1 evidence
 does not attribute that apply to the identity stage—or to any specific session.
-It therefore makes a lifecycle claim, not a stage-causality claim.
+It therefore makes a lifecycle claim, not a stage-causality claim. Foreground
+curation remains subordinate to each stage: the client must complete the stage's
+requested work and deliver its user-facing answer even when it also processes
+the pending checkpoint.
 
 The delivery claim remains capability-accurate:
 
@@ -252,8 +255,9 @@ Common failures are intentionally specific:
 - `applied_empty_curation_checkpoint` — the pending fixture request was ignored,
   left active, applied a nonempty plan, or lacked a canonical applied run and
   apply-receipt ID; this case does not identify which session performed it;
-- `sensitive_exact_and_broad_redaction` — exact retrieval failed or a broad
-  answer exposed the synthetic private marker;
+- `sensitive_exact_and_broad_redaction` — exact retrieval failed, the assistant
+  did not put the requested value in its final answer, or a broad answer exposed
+  the synthetic private marker;
 - `same_agent_cross_session_continuity` — capture and recall occurred in one
   provider session rather than two; and
 - `cross_agent_isolation` — the peer could not retrieve its fixture or the

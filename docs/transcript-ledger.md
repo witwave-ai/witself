@@ -26,9 +26,10 @@ sequence number. Explicit `system` and `tool` entries may be recorded when an
 integration needs an execution trace. Streaming token chunks are not entries;
 the integration records the finalized visible result.
 
-Codex and Claude Code integrations normalize their different hook envelopes
-into this same model. Runtime-specific fields are retained as metadata, but do
-not leak into the durable identity or ordering contract.
+Codex, Claude Code, Grok Build, and Cursor integrations normalize their
+different hook envelopes into this same model. Runtime-specific fields are
+retained as metadata, but do not leak into the durable identity or ordering
+contract.
 
 ## Boundary From Messaging And Memory
 
@@ -205,6 +206,17 @@ currently uploadable event until the outbox is empty or a concrete delivery
 error occurs. Individual network requests remain time-bounded. Detached
 hook-triggered flushers are deliberately short-lived; if one reaches its work
 window, the next hook retries the durable remainder.
+
+Cursor's `beforeSubmitPrompt` hook wraps the visible prompt in one provider
+timestamp and `user_query` envelope. Witself removes that transport-only
+wrapper before writing the canonical user body, but only when the entire value
+matches the exact native grammar with one non-empty single-line timestamp, one
+query pair, no extra bytes, and at most 256 UTF-8 bytes in the timestamp.
+Malformed, nested, repeated, or otherwise ambiguous wrappers are retained
+unchanged. The same strict compatibility rule lets acceptance verification
+recognize transcripts captured before this normalization without weakening
+duplicate-prompt detection. Other runtimes and ordinary prompt markup are
+unaffected.
 
 Grok Build has one provider-specific ordering rule. Its synchronous `Stop` hook
 finishes before the native session file receives the final assistant response.

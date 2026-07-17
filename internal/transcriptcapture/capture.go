@@ -408,9 +408,12 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 	if input.HookEventName == "AgentResponse" || input.HookEventName == "AgentThought" {
 		input.LastAssistantMessage = firstNonempty(input.LastAssistantMessage, input.Text)
 	}
-	if runtime == RuntimeGrokBuild {
-		if input.HookEventName == "UserPromptSubmit" {
+	if input.HookEventName == "UserPromptSubmit" {
+		switch runtime {
+		case RuntimeGrokBuild:
 			input.Prompt = unwrapGrokPrompt(input.Prompt)
+		case RuntimeCursor:
+			input.Prompt = NormalizeUserPromptBody(runtime, input.Prompt)
 		}
 	}
 	if runtime == RuntimeClaudeCode && input.HookEventName == "Stop" && input.Model == "" && input.TranscriptPath != "" {
@@ -584,6 +587,72 @@ func unwrapGrokPrompt(prompt string) string {
 	return prompt
 }
 
+// NormalizeUserPromptBody removes only a provider-generated wrapper whose
+// exact grammar is known for the selected runtime. Unknown, malformed, or
+// ambiguous input is preserved byte-for-byte so capture never guesses at the
+// user's text.
+func NormalizeUserPromptBody(runtime, prompt string) string {
+	if runtime != RuntimeCursor {
+		return prompt
+	}
+	if body, ok := unwrapCursorPrompt(prompt); ok {
+		return body
+	}
+	return prompt
+}
+
+func unwrapCursorPrompt(prompt string) (string, bool) {
+	const (
+		timestampOpen     = "<timestamp>"
+		timestampClose    = "</timestamp>"
+		queryOpen         = "<user_query>"
+		queryClose        = "</user_query>"
+		queryPrefix       = "\n" + queryOpen + "\n"
+		querySuffix       = "\n" + queryClose
+		maxTimestampBytes = 256
+	)
+	for _, tag := range []string{timestampOpen, timestampClose, queryOpen, queryClose} {
+		if strings.Count(prompt, tag) != 1 {
+			return "", false
+		}
+	}
+	if !strings.HasPrefix(prompt, timestampOpen) {
+		return "", false
+	}
+	timestampEnd := strings.Index(prompt, timestampClose)
+	if timestampEnd < len(timestampOpen) {
+		return "", false
+	}
+	timestamp := prompt[len(timestampOpen):timestampEnd]
+	if len(timestamp) > maxTimestampBytes || strings.TrimSpace(timestamp) == "" || cursorTimestampHasForbiddenRune(timestamp) {
+		return "", false
+	}
+	remainder := prompt[timestampEnd+len(timestampClose):]
+	if !strings.HasPrefix(remainder, queryPrefix) || !strings.HasSuffix(remainder, querySuffix) {
+		return "", false
+	}
+	body := remainder[len(queryPrefix) : len(remainder)-len(querySuffix)]
+	// Wrapper-like markup inside the candidate body is ambiguous. Preserve the
+	// original envelope even when the outer bytes happen to be well formed.
+	lowerBody := strings.ToLower(body)
+	for _, marker := range []string{"<timestamp", "</timestamp", "<user_query", "</user_query"} {
+		if strings.Contains(lowerBody, marker) {
+			return "", false
+		}
+	}
+	return body, true
+}
+
+func cursorTimestampHasForbiddenRune(timestamp string) bool {
+	for _, r := range timestamp {
+		switch r {
+		case '<', '>', '\r', '\n', '\u0085', '\u2028', '\u2029':
+			return true
+		}
+	}
+	return false
+}
+
 type cursorTranscriptRecord struct {
 	Type    string `json:"type"`
 	Status  string `json:"status"`
@@ -732,7 +801,7 @@ func readCursorVisibleMessages(path, expectedSessionID string) (string, string, 
 				continue
 			}
 			userCount++
-			prompt = body
+			prompt = NormalizeUserPromptBody(RuntimeCursor, body)
 		case "assistant":
 			if userCount == 1 && strings.TrimSpace(body) != "" {
 				// Cursor records tool-turn status text and the final answer as

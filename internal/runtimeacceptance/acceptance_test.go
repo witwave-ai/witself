@@ -209,6 +209,56 @@ func TestEvaluateRequiresExactPromptAndPinnedVersionInEveryStage(t *testing.T) {
 	}
 }
 
+func TestEvaluateRecognizesStrictLegacyCursorPromptEnvelope(t *testing.T) {
+	state := testState(t, transcriptcapture.RuntimeCursor, true)
+	state.Phase = PhaseReady
+	state.Fixtures = FixtureState{
+		BaselineMemoryID: "mem_baseline", SensitiveFactID: "fact_private",
+		PeerMemoryID: "mem_peer", CurationRequestID: "mcrq_test",
+	}
+	input := passingInput(state)
+	for index := range input.Transcripts {
+		body := input.Transcripts[index].Entries[0].Body
+		input.Transcripts[index].Entries[0].Body = "<timestamp>2026-07-17T07:08:09.123456-06:00</timestamp>\n<user_query>\n" + body + "\n</user_query>"
+	}
+	evidence, err := Evaluate(state, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Status != "pass" {
+		t.Fatalf("strict legacy Cursor envelopes caused false failure: %#v", evidence.Cases)
+	}
+}
+
+func TestEvaluateCountsCanonicalAndWrappedCursorPromptAsDuplicates(t *testing.T) {
+	state := testState(t, transcriptcapture.RuntimeCursor, true)
+	state.Phase = PhaseReady
+	state.Fixtures = FixtureState{
+		BaselineMemoryID: "mem_baseline", SensitiveFactID: "fact_private",
+		PeerMemoryID: "mem_peer", CurationRequestID: "mcrq_test",
+	}
+	input := passingInput(state)
+	duplicate := input.Transcripts[0]
+	duplicate.ID = "trn_duplicate"
+	duplicate.Entries = append([]TranscriptEntry(nil), duplicate.Entries...)
+	duplicate.Entries[0].Body = "<timestamp>2026-07-17T07:08:09.123456-06:00</timestamp>\n<user_query>\n" + duplicate.Entries[0].Body + "\n</user_query>"
+	input.Transcripts = append(input.Transcripts, duplicate)
+
+	evidence, err := Evaluate(state, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range evidence.Cases {
+		if item.Name == "identity_binding" {
+			if item.Passed {
+				t.Fatal("identity binding passed after one prompt matched twice post-normalization")
+			}
+			return
+		}
+	}
+	t.Fatal("missing identity_binding case")
+}
+
 func TestEvaluateRequiresSixDistinctTranscripts(t *testing.T) {
 	state := testState(t, transcriptcapture.RuntimeCursor, true)
 	state.Phase = PhaseReady
@@ -229,6 +279,35 @@ func TestEvaluateRequiresSixDistinctTranscripts(t *testing.T) {
 			}
 			return
 		}
+	}
+	t.Fatal("missing identity_binding case")
+}
+
+func TestEvaluateIdentityFailureDetailDoesNotClaimSuccess(t *testing.T) {
+	state := testState(t, transcriptcapture.RuntimeClaudeCode, true)
+	state.Phase = PhaseReady
+	state.Fixtures = FixtureState{
+		BaselineMemoryID: "mem_baseline", SensitiveFactID: "fact_private",
+		PeerMemoryID: "mem_peer", CurationRequestID: "mcrq_test",
+	}
+	input := passingInput(state)
+	input.Backend.InstructionsCurrent = false
+	evidence, err := Evaluate(state, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range evidence.Cases {
+		if item.Name != "identity_binding" {
+			continue
+		}
+		if item.Passed {
+			t.Fatal("identity binding passed with stale managed instructions")
+		}
+		lower := strings.ToLower(item.Detail)
+		if !strings.Contains(lower, "evaluates") || strings.Contains(lower, "matched") || strings.Contains(lower, "succeeded") {
+			t.Fatalf("identity failure retained a success-sounding detail: %q", item.Detail)
+		}
+		return
 	}
 	t.Fatal("missing identity_binding case")
 }

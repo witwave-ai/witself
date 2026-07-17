@@ -71,6 +71,70 @@ func TestProviderRoutingContractsCoverPortableNarrativeMemory(t *testing.T) {
 	}
 }
 
+func TestManagedRoutingContractsKeepForegroundCurationSubordinate(t *testing.T) {
+	contracts := map[string]string{
+		"runtime-neutral": runtimeNeutralMemoryRoutingInstructions,
+		"codex":           codexMemoryRoutingInstructions,
+		"cursor":          cursorMemoryRoutingInstructions,
+		"grok":            grokMemoryRoutingInstructions,
+	}
+	for name, contract := range contracts {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(contract, foregroundCurationUserPriorityInstruction) {
+				t.Fatalf("routing contract does not preserve the canonical user-first curation boundary:\n%s", contract)
+			}
+			for _, want := range []string{
+				"Complete the user's current request before foreground curation",
+				"must never replace the final answer",
+				"after curation or failure, still answer the user",
+			} {
+				if !strings.Contains(contract, want) {
+					t.Errorf("routing contract does not contain %q", want)
+				}
+			}
+		})
+	}
+
+	managedBlocks := map[string][]byte{
+		"codex":  codexMemoryRoutingBlock,
+		"claude": claudeMemoryRoutingBlock,
+		"cursor": cursorMemoryRoutingBlock,
+		"grok":   grokMemoryRoutingBlock,
+	}
+	for name, block := range managedBlocks {
+		if !strings.Contains(string(block), foregroundCurationUserPriorityInstruction) {
+			t.Errorf("%s installed managed block omits the user-first curation boundary", name)
+		}
+	}
+}
+
+func TestManagedRoutingContractsPutAuthorizedSensitiveValuesInFinalAnswer(t *testing.T) {
+	const want = "put the requested value in the final answer, not only in tool output or hook context"
+	contracts := map[string]string{
+		"runtime-neutral": runtimeNeutralMemoryRoutingInstructions,
+		"codex":           codexMemoryRoutingInstructions,
+		"cursor":          cursorMemoryRoutingInstructions,
+		"grok":            grokMemoryRoutingInstructions,
+	}
+	for name, contract := range contracts {
+		if !strings.Contains(contract, want) {
+			t.Errorf("%s routing contract does not require an authorized sensitive value in the final answer", name)
+		}
+	}
+
+	managedBlocks := map[string][]byte{
+		"codex":  codexMemoryRoutingBlock,
+		"claude": claudeMemoryRoutingBlock,
+		"cursor": cursorMemoryRoutingBlock,
+		"grok":   grokMemoryRoutingBlock,
+	}
+	for name, block := range managedBlocks {
+		if !strings.Contains(string(block), want) {
+			t.Errorf("%s installed managed block omits the sensitive-value final-answer boundary", name)
+		}
+	}
+}
+
 func TestProviderRoutingContractsDescribeCheckpointDeliveryHonestly(t *testing.T) {
 	tests := []struct {
 		name, contract string
