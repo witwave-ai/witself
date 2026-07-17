@@ -22,6 +22,12 @@ import (
 
 const maxHookInputBytes = 16 * 1024 * 1024
 
+// GUI-backed runtime CLIs can take several seconds to cold-start before their
+// MCP subcommand is available. Cursor has exceeded ten seconds on a healthy
+// workstation, so keep this capability probe distinct from the fast version
+// probe.
+const runtimeCLICapabilityProbeTimeout = 30 * time.Second
+
 const witselfExecutableTestEnv = "WITSELF_TEST_EXECUTABLE_PATH"
 
 func installCmd(args []string) int {
@@ -952,7 +958,10 @@ var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-
 func detectRuntimeVersion(runtimeCLI string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, runtimeCLI, "--version").CombinedOutput()
+	// Version output is part of the executable's stdout contract. Keep stderr
+	// separate: GUI-backed CLIs such as Cursor can emit unrelated diagnostics
+	// there before printing their real semantic version on stdout.
+	output, err := exec.CommandContext(ctx, runtimeCLI, "--version").Output()
 	if err != nil {
 		return ""
 	}
@@ -1008,7 +1017,7 @@ func findRuntimeCLI(runtime string) (string, error) {
 			continue
 		}
 		seen[candidate] = true
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), runtimeCLICapabilityProbeTimeout)
 		err := exec.CommandContext(ctx, candidate, probeArgs...).Run()
 		cancel()
 		if err == nil {
