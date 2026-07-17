@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeCaptureCorrelatesSessionTurnAndLocation(t *testing.T) {
@@ -766,15 +767,24 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Join(grokHome, "sessions"), filepath.Join(grokHome, "sessions", "workspace"), sessionDir} {
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
 	updates := strings.Join([]string{
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-other"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"wrong-model"},"content":{"type":"text","text":"unrelated"}}}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(transcriptPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	promptRaw, _ := json.Marshal(map[string]any{
@@ -792,6 +802,189 @@ func TestGrokCaptureNormalizesPayloadAndReadsAssistantChunks(t *testing.T) {
 	}
 	if stop.Body != "first\n\nsecond" || stop.Kind != "message.assistant" || stop.ReplyToEventID != prompt.ID || stop.Model != "grok-4.5" || stop.ModelSource != "native_transcript" {
 		t.Fatalf("stop = %#v", stop)
+	}
+}
+
+func TestStableGrokAssistantMessageWaitsForDelayedChunks(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	writeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		file, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			writeErr <- err
+			return
+		}
+		defer func() { _ = file.Close() }()
+		first := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}` + "\n"
+		if _, err := file.WriteString(first); err != nil {
+			writeErr <- err
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		second := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}` + "\n"
+		_, err = file.WriteString(second)
+		writeErr <- err
+	}()
+
+	body, model, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatal(err)
+	}
+	if body != "first\n\nsecond" || model != "grok-4.5" {
+		t.Fatalf("stable Grok response = %q / %q", body, model)
+	}
+}
+
+func TestStableGrokAssistantMessageWaitsForIncompleteTrailingLine(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	first := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	writeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		file, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			writeErr <- err
+			return
+		}
+		defer func() { _ = file.Close() }()
+		second := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}` + "\n"
+		midpoint := len(second) / 2
+		if _, err := file.WriteString(second[:midpoint]); err != nil {
+			writeErr <- err
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+		_, err = file.WriteString(second[midpoint:])
+		writeErr <- err
+	}()
+
+	body, model, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatal(err)
+	}
+	if body != "first\n\nsecond" || model != "grok-4.5" {
+		t.Fatalf("stable Grok response = %q / %q", body, model)
+	}
+}
+
+func TestStableGrokAssistantMessageFailsClosedWithoutQuietWindow(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	line := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"possibly partial"}}}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body, model, err := readStableGrokAssistantMessageWithin(
+		transcriptPath, "prompt-1", "session-1",
+		75*time.Millisecond, 200*time.Millisecond, 10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" || model != "grok-4.5" {
+		t.Fatalf("non-quiet Grok response = %q / %q", body, model)
+	}
+}
+
+func TestStableGrokAssistantMessageRejectsUntrustedPathWithoutPolling(t *testing.T) {
+	root := t.TempDir()
+	grokHome := filepath.Join(root, ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	if err := os.MkdirAll(filepath.Join(grokHome, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(root, "updates.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readStableGrokAssistantMessage(transcriptPath, "prompt-1", "session-1"); err == nil || !strings.Contains(err.Error(), "outside the session store") {
+		t.Fatalf("untrusted Grok transcript error = %v", err)
+	}
+}
+
+func TestGrokAssistantMessageRejectsUntrustedNativeTranscript(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		promptID      string
+		sessionID     string
+		mutate        func(string, string) error
+		wantErrSubstr string
+	}{
+		{name: "session mismatch", promptID: "prompt-1", sessionID: "session-other", wantErrSubstr: "outside the session store"},
+		{name: "empty prompt id", sessionID: "session-1", wantErrSubstr: "requires prompt and session ids"},
+		{
+			name: "symlink file", promptID: "prompt-1", sessionID: "session-1", wantErrSubstr: "must not be a symlink",
+			mutate: func(_ string, path string) error {
+				target := path + ".target"
+				if err := os.Rename(path, target); err != nil {
+					return err
+				}
+				return os.Symlink(target, path)
+			},
+		},
+		{
+			name: "writable file", promptID: "prompt-1", sessionID: "session-1", wantErrSubstr: "not a trusted regular file",
+			mutate: func(_ string, path string) error { return os.Chmod(path, 0o666) },
+		},
+		{
+			name: "writable directory", promptID: "prompt-1", sessionID: "session-1", wantErrSubstr: "not a trusted regular file",
+			mutate: func(dir, _ string) error { return os.Chmod(dir, 0o777) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			grokHome := filepath.Join(t.TempDir(), ".grok")
+			t.Setenv("GROK_HOME", grokHome)
+			sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+			if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+			line := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}}}` + "\n"
+			if err := os.WriteFile(transcriptPath, []byte(line), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mutate != nil {
+				if err := tc.mutate(sessionDir, transcriptPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := readGrokAssistantMessage(transcriptPath, tc.promptID, tc.sessionID); err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Fatalf("untrusted Grok transcript error = %v", err)
+			}
+		})
 	}
 }
 

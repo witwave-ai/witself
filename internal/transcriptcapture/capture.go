@@ -29,6 +29,9 @@ const (
 	maxNativeTranscriptRecords   = 10_000
 	entryBodyChunkSize           = 60 * 1024
 	staleFlushLockAge            = 5 * time.Minute
+	grokTranscriptPollInterval   = 50 * time.Millisecond
+	grokTranscriptQuietPeriod    = 200 * time.Millisecond
+	grokTranscriptMaxWait        = 2 * time.Second
 )
 
 // Event is one durable, provider-neutral hook event in the local outbox.
@@ -404,7 +407,7 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 			input.Prompt = unwrapGrokPrompt(input.Prompt)
 		}
 		if input.HookEventName == "Stop" && input.TranscriptPath != "" {
-			body, model, err := readGrokAssistantMessage(input.TranscriptPath, input.PromptID)
+			body, model, err := readStableGrokAssistantMessage(input.TranscriptPath, input.PromptID, input.SessionID)
 			if err == nil {
 				if input.LastAssistantMessage == "" {
 					input.LastAssistantMessage = body
@@ -424,6 +427,101 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		}
 	}
 	return nil
+}
+
+// readStableGrokAssistantMessage accounts for a Grok Stop-hook ordering race:
+// the hook can run just before the final agent_message_chunk is durable in the
+// native updates.jsonl file. Poll only a trusted, successfully readable path,
+// and require a short quiet period so a partially appended response is not
+// promoted into the portable transcript. The provider hook timeout is 10s;
+// this foreground wait is deliberately bounded well below it.
+func readStableGrokAssistantMessage(path, promptID, expectedSessionID string) (string, string, error) {
+	return readStableGrokAssistantMessageWithin(path, promptID, expectedSessionID,
+		grokTranscriptMaxWait, grokTranscriptQuietPeriod, grokTranscriptPollInterval)
+}
+
+func readStableGrokAssistantMessageWithin(
+	path, promptID, expectedSessionID string,
+	maxWait, quietPeriod, pollInterval time.Duration,
+) (string, string, error) {
+	deadline := time.Now().Add(maxWait)
+	body, model, err := readGrokAssistantMessage(path, promptID, expectedSessionID)
+	if err != nil {
+		return "", "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", "", err
+	}
+	lastSize, lastModTime, completeLine, err := grokTranscriptFileState(resolvedPath)
+	if err != nil {
+		return "", "", err
+	}
+	lastBody := body
+	lastModel := model
+	quietSince := time.Now()
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			time.Sleep(min(pollInterval, remaining))
+		}
+
+		size, modTime, complete, err := grokTranscriptFileState(resolvedPath)
+		if err != nil {
+			return "", "", err
+		}
+		if size != lastSize || !modTime.Equal(lastModTime) || complete != completeLine {
+			lastSize, lastModTime, completeLine = size, modTime, complete
+			quietSince = time.Now()
+
+			body, model, err = readGrokAssistantMessage(resolvedPath, promptID, expectedSessionID)
+			if err != nil {
+				return "", "", err
+			}
+			if body != lastBody {
+				lastBody = body
+				quietSince = time.Now()
+			}
+			if model != "" {
+				lastModel = model
+			}
+		}
+
+		now := time.Now()
+		if completeLine && strings.TrimSpace(lastBody) != "" && now.Sub(quietSince) >= quietPeriod {
+			return lastBody, lastModel, nil
+		}
+		if !now.Before(deadline) {
+			// A late complete chunk can still be followed by more chunks. If
+			// it did not become quiet within the bound, fail closed instead of
+			// promoting a potentially partial assistant response.
+			return "", lastModel, nil
+		}
+	}
+}
+
+func grokTranscriptFileState(path string) (int64, time.Time, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, time.Time{}, false, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, time.Time{}, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, time.Time{}, false, errors.New("grok transcript is not a regular file")
+	}
+	if info.Size() == 0 {
+		return 0, info.ModTime(), false, nil
+	}
+	last := []byte{0}
+	if _, err := file.ReadAt(last, info.Size()-1); err != nil {
+		return 0, time.Time{}, false, err
+	}
+	return info.Size(), info.ModTime(), last[0] == '\n', nil
 }
 
 func pinRunRuntimeVersion(state *sessionState, nativeVersion, configuredVersion string) {
@@ -594,7 +692,7 @@ func readCursorVisibleMessages(path, expectedSessionID string) (string, string, 
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
 		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
-		info.Size() > maxNativeTranscriptTailBytes || !trustedCursorDirectoryChain(projectsRoot, resolvedPath) {
+		info.Size() > maxNativeTranscriptTailBytes || !trustedNativeDirectoryChain(projectsRoot, resolvedPath) {
 		return "", "", errors.New("cursor transcript is not a bounded trusted regular file")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxNativeTranscriptTailBytes+1))
@@ -666,7 +764,7 @@ func readCursorVisibleMessages(path, expectedSessionID string) (string, string, 
 	return prompt, assistant, nil
 }
 
-func trustedCursorDirectoryChain(projectsRoot, transcriptPath string) bool {
+func trustedNativeDirectoryChain(projectsRoot, transcriptPath string) bool {
 	dir := filepath.Dir(transcriptPath)
 	for {
 		info, err := os.Stat(dir)
@@ -727,7 +825,10 @@ type grokSessionUpdate struct {
 	} `json:"params"`
 }
 
-func readGrokAssistantMessage(path, promptID string) (string, string, error) {
+func readGrokAssistantMessage(path, promptID, expectedSessionID string) (string, string, error) {
+	if strings.TrimSpace(promptID) == "" || strings.TrimSpace(expectedSessionID) == "" {
+		return "", "", errors.New("grok transcript lookup requires prompt and session ids")
+	}
 	home := strings.TrimSpace(os.Getenv("GROK_HOME"))
 	if home == "" {
 		userHome, err := os.UserHomeDir()
@@ -740,12 +841,21 @@ func readGrokAssistantMessage(path, promptID string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	linkInfo, err := os.Lstat(path)
+	if err != nil {
+		return "", "", err
+	}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("grok transcript path must not be a symlink")
+	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", "", err
 	}
 	rel, err := filepath.Rel(sessionsRoot, resolvedPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Base(resolvedPath) != "updates.jsonl" {
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		len(parts) != 3 || parts[2] != "updates.jsonl" || parts[1] != expectedSessionID {
 		return "", "", errors.New("grok transcript path is outside the session store")
 	}
 
@@ -757,6 +867,11 @@ func readGrokAssistantMessage(path, promptID string) (string, string, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return "", "", err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
+		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
+		!trustedNativeDirectoryChain(sessionsRoot, resolvedPath) {
+		return "", "", errors.New("grok transcript is not a trusted regular file")
 	}
 	start := max(info.Size()-maxNativeTranscriptTailBytes, 0)
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
@@ -779,16 +894,12 @@ func readGrokAssistantMessage(path, promptID string) (string, string, error) {
 		if len(line) == 0 || json.Unmarshal(line, &update) != nil {
 			continue
 		}
+		kind := update.Params.Update.SessionUpdate
+		if kind != "agent_message_chunk" || update.Params.Meta.PromptID != promptID {
+			continue
+		}
 		if value := strings.TrimSpace(update.Params.Update.Meta.ModelID); value != "" {
 			model = truncateUTF8(value, 256)
-		}
-		kind := update.Params.Update.SessionUpdate
-		if promptID == "" && kind == "user_message_chunk" {
-			chunks = nil
-			continue
-		}
-		if kind != "agent_message_chunk" || (promptID != "" && update.Params.Meta.PromptID != promptID) {
-			continue
 		}
 		if text := update.Params.Update.Content.Text; text != "" {
 			chunks = append(chunks, text)
