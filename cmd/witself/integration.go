@@ -128,6 +128,23 @@ func installCmd(args []string) int {
 	if runtimeVersion == "" && previousConfigErr == nil {
 		runtimeVersion = previousConfig.RuntimeVersion
 	}
+	witselfExecutable, err := currentExecutablePath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: locate current executable: %v\n", err)
+		return 1
+	}
+	if runtime == transcriptcapture.RuntimeGrokBuild {
+		report, inspectErr := inspectGrokCompatibility(runtimeCLI)
+		if inspectErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: Grok compatibility preflight failed: %v\n", inspectErr)
+			return 1
+		}
+		if err := validateGrokCompatibilityReport(report, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		writeGrokCompatibilityWarnings(os.Stderr, report)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -202,14 +219,6 @@ func installCmd(args []string) int {
 			return transcriptcapture.SaveConfig(previousConfig)
 		}
 		return transcriptcapture.RemoveConfig(runtime)
-	}
-	witselfExecutable, err := currentExecutablePath()
-	if err != nil {
-		if rollbackErr := restoreConfig(); rollbackErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
-		}
-		fmt.Fprintf(os.Stderr, "witself: locate current executable: %v\n", err)
-		return 1
 	}
 	memoryRouting, err := installRuntimeMemoryRoutingInstructions(runtime)
 	if err != nil {
@@ -573,6 +582,9 @@ func transcriptHook(args []string) int {
 	agent := fs.String("agent", "", "installed agent name")
 	location := fs.String("location", "", "optional installation location label")
 	if err := fs.Parse(args); err != nil {
+		return 0
+	}
+	if foreignGrokCompatibilityHook(*runtime, os.Getenv(grokHookEventEnv)) {
 		return 0
 	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
@@ -1047,6 +1059,12 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	output, err := exec.CommandContext(ctx, runtimeCLI, addArgs...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if runtime == transcriptcapture.RuntimeGrokBuild {
+		_, err := verifyGrokNativeMCPBinding(runtimeCLI, serveArgs)
+		if err != nil {
+			return fmt.Errorf("verify native Grok MCP registration: %w", err)
+		}
 	}
 	return nil
 }

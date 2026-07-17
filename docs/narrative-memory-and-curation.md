@@ -1535,16 +1535,24 @@ not optional post-v0 product features.
 
 ### Gate 1 — Managed-Cloud Portability
 
+- [x] Run exact-release individual-cloud archive/import/recall rehearsals on
+  AWS RDS, GCP Cloud SQL, and Azure Flexible Server. All three `v0.0.172`
+  rehearsals passed; these are explicitly not the directed cross-cloud matrix.
 - [ ] Complete [issue #44](https://github.com/witwave-ai/witself/issues/44):
   run the protected, release-specific AWS/GCP/Azure 3-by-3 managed-PostgreSQL
   certification described in
   [memory-cloud-conformance.md](memory-cloud-conformance.md).
-- [ ] Retain the workflow URL, release tag and commit SHA, provider
-  attestations, salted endpoint fingerprints, database versions, and all nine
-  successful directed cases without exposing endpoint credentials.
+- [ ] Retain the sanitized workflow artifact with URL, release tag, source
+  commit SHA, per-run salted endpoint fingerprints, database versions, and all
+  nine successful directed cases without exposing endpoint credentials. When
+  durable resource-identity audit is required, retain the separate protected
+  run/SHA/resource-id mapping described by the conformance runbook.
 
 ### Gate 2 — Live Four-Runtime Acceptance
 
+- [x] Implement the private, resumable `witself memory acceptance
+  prepare|prompts|verify` harness and sanitized evidence contract described in
+  [memory-runtime-acceptance.md](memory-runtime-acceptance.md).
 - [ ] Complete [issue #45](https://github.com/witwave-ai/witself/issues/45):
   exercise Codex, Claude Code, Cursor, and Grok Build with their real
   authenticated clients and isolated synthetic test agents.
@@ -1563,6 +1571,10 @@ after a live, version-gated conformance test passes.
 
 ### Gate 3 — Production Load, Quality, And Defaults
 
+- [x] Implement the deterministic PostgreSQL corpus, relevance, sensitive
+  redaction, isolation, latency, throughput, and sanitized evidence slice in
+  [memory-load-quality.md](memory-load-quality.md); the first local PostgreSQL
+  result is exploratory, not a production SLO.
 - [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
   load-test queue claims and fencing, bounded curation plans, lexical/vector
   indexes, archive rebuild, high-cardinality accounts, and concurrent agents.

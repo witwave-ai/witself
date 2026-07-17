@@ -13,7 +13,7 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 )
 
-const memoryCommandUsage = "usage: witself memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence|vector|curate ..."
+const memoryCommandUsage = "usage: witself memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence|vector|curate|acceptance ..."
 
 func memoryCmd(args []string) int {
 	if len(args) == 0 {
@@ -45,6 +45,8 @@ func memoryCmd(args []string) int {
 		return memoryVector(args[1:])
 	case "curate", "curation":
 		return memoryCurate(args[1:])
+	case "acceptance":
+		return memoryAcceptance(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself memory: unknown subcommand %q\n", args[0])
 		return 2

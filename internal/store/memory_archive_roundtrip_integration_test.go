@@ -77,15 +77,18 @@ func TestNarrativeMemoryManagedCloudConformance(t *testing.T) {
 			})
 		}
 	}
+	var evidence *managedMemoryCloudCertificationEvidence
 	if certificationMode {
-		assertManagedMemoryCloudEndpointsDistinct(t, endpoints)
+		evidence = newManagedMemoryCloudCertificationEvidence()
+		defer evidence.write(t)
+		evidence.Endpoints = assertManagedMemoryCloudEndpointsDistinct(t, endpoints)
 	}
 
 	for _, source := range targets {
 		for _, destination := range targets {
 			source := source
 			destination := destination
-			t.Run(source.name+"_to_"+destination.name, func(t *testing.T) {
+			passed := t.Run(source.name+"_to_"+destination.name, func(t *testing.T) {
 				reporter := memoryArchiveTestReporter(t)
 				if certificationMode {
 					reporter = newManagedMemoryCloudArchiveReporter(t, source.name, destination.name)
@@ -95,6 +98,9 @@ func TestNarrativeMemoryManagedCloudConformance(t *testing.T) {
 					source.name+"-managed-postgres", destination.name+"-managed-postgres",
 				)
 			})
+			if evidence != nil {
+				evidence.recordCase(source.name, destination.name, passed)
+			}
 		}
 	}
 }

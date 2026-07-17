@@ -148,6 +148,27 @@ an ancestor rule for workspaces beneath the user's home. A custom
 installation must also discover that custom `rules` directory; Witself does not
 write a routing rule into each project.
 
+Grok Build also discovers Claude and Cursor hooks and MCP servers through its
+compatibility layer. That discovery can otherwise run a Claude- or
+Cursor-pinned Witself hook inside a Grok session and attribute the event to the
+wrong agent. `witself install grok` therefore runs `grok inspect --json` as a
+read-only preflight. It reports imported Witself hooks, rejects a foreign hook
+that points at a different Witself executable, and rejects foreign Witself MCP
+aliases that would remain callable beside Grok's native `witself` server. The
+hook command itself also uses Grok's documented `GROK_HOOK_EVENT` environment
+marker to ignore a Grok-originated invocation unless its installed runtime is
+`grok-build`. Finally, `grok mcp list --json` must show the exact enabled native
+user command that the installer requested; a project-scoped or foreign binding
+cannot shadow it.
+
+The installer deliberately does not write `[compat.claude]` or
+`[compat.cursor]`: those switches affect unrelated user configuration. An
+operator who wants to prevent the foreign processes from being launched at all
+can explicitly set `hooks = false` and/or `mcps = false` for the applicable
+vendor in `$GROK_HOME/config.toml`. See Grok Build's official
+[hook contract](https://docs.x.ai/build/features/hooks) and
+[MCP compatibility controls](https://docs.x.ai/build/features/mcp-servers).
+
 The installer does not set Codex `allow_managed_hooks_only` or Claude Code
 `allowManagedHooksOnly`, so unrelated user, project, and plugin hooks remain
 available. If Claude Code is already governed by a higher-precedence server or

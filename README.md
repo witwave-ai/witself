@@ -87,6 +87,20 @@ would shadow its managed file. After installing, restart the runtime and start a
 new task so the file guidance and MCP initialization are refreshed. See
 [Agent Memory Routing](docs/agent-memory-routing.md).
 
+Grok Build enables Claude and Cursor compatibility by default, including their
+hooks and MCP servers. During `witself install grok`, Witself inspects Grok's
+effective configuration before making changes. Imported Witself hooks are
+reported and may proceed only when they invoke the same Witself executable;
+that executable rejects every Grok-originated hook whose pinned runtime is not
+`grok-build`. A foreign Witself MCP under another name is rejected because it
+could still expose another agent binding. After registration, the installer
+verifies that Grok's effective `witself` MCP is the exact native, enabled,
+user-scoped command requested by the install. Witself never changes Grok's
+broad compatibility settings. To stop Grok from launching all imported hooks
+or MCPs for a vendor, explicitly set `hooks = false` and/or `mcps = false`
+under `[compat.claude]` or `[compat.cursor]` in `$GROK_HOME/config.toml`; those
+switches also disable unrelated compatibility entries from that vendor.
+
 Facts also support guarded permanent deletion. Preview with
 `witself fact delete --subject SUBJECT --dry-run PREDICATE`, then apply with
 `--yes`. Apply binds both the previewed assertion and candidate-set revision;
@@ -241,12 +255,20 @@ recipient-only: the server validates that the caller received the parent and
 derives the reply recipient, thread, and parent link. Read, acknowledgement,
 claim, and completion remain separate in the CLI, API, and MCP.
 
-**Messaging status:** the agreed same-realm foreground feature is code-complete
-in `main`: direct, explicit-list, whole-realm, and client-ranked open-request
-paths have CLI/API/MCP parity, fenced processing, and account export/import.
-That is not a deployment claim. A tagged release, GitOps rollout, refreshed
-runtime installations, and live multi-provider smoke test are still required
-before the feature is operationally complete.
+**Messaging status:** the agreed same-realm foreground feature is operationally
+complete in release `v0.0.172` (`67ec81d3f5485f1865f87e265ae9f33fa15c6988`).
+The GCP sandbox rollout is recorded by `f984008`; `2e99290` synchronizes the
+other, dormant cell definitions to the same desired version without claiming
+that those cells are deployed. Codex, Claude Code, Grok Build, and Cursor
+integrations were refreshed. Live direct-message handling passed for Claude,
+Cursor, and Grok, and a reverse Claude-to-Codex flow verified Codex receive and
+completion; all four provider inboxes were clean at closeout. See the sanitized
+[activation evidence](docs/autonomous-realm-messaging.md#completion-boundary).
+This messaging closeout does not certify the broader narrative-memory system;
+its production gates remain tracked by
+[#44](https://github.com/witwave-ai/witself/issues/44),
+[#45](https://github.com/witwave-ai/witself/issues/45), and
+[#46](https://github.com/witwave-ai/witself/issues/46).
 
 There is no background Witself messaging process. At the beginning of a
 non-trivial foreground turn, the installed policy instructs a client to inspect

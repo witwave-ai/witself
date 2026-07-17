@@ -14,7 +14,17 @@ ENDPOINT      := http://localhost:8080
 # and CI can never disagree about what clean means.
 GOLANGCI_LINT_VERSION := v2.12.2
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance build check
+MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
+MEMORY_LOAD_QUALITY_SEED        ?= 20260717
+MEMORY_LOAD_QUALITY_NOISE       ?= 250
+MEMORY_LOAD_QUALITY_ITERATIONS  ?= 25
+MEMORY_LOAD_QUALITY_CONCURRENCY ?= 4
+MEMORY_LOAD_QUALITY_RELEASE     ?= $(shell git describe --tags --always --dirty)
+MEMORY_LOAD_QUALITY_COMMIT      ?= $(shell git rev-parse HEAD)
+MEMORY_LOAD_QUALITY_PROVIDER    ?= local
+MEMORY_LOAD_QUALITY_HARDWARE    ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality build check
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -56,6 +66,25 @@ test-integration: db-up ## Run the PostgreSQL-backed store tests
 test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
 	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \
 		-run '^TestNarrativeMemoryManagedCloudConformance$$' -count=1 -v -timeout 90m
+
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY := 1
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_RESULTS := $(MEMORY_LOAD_QUALITY_RESULTS)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_SEED := $(MEMORY_LOAD_QUALITY_SEED)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_NOISE_MEMORIES := $(MEMORY_LOAD_QUALITY_NOISE)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_QUERY_ITERATIONS := $(MEMORY_LOAD_QUALITY_ITERATIONS)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_CONCURRENCY := $(MEMORY_LOAD_QUALITY_CONCURRENCY)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_RELEASE := $(MEMORY_LOAD_QUALITY_RELEASE)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_COMMIT := $(MEMORY_LOAD_QUALITY_COMMIT)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_PROVIDER := $(MEMORY_LOAD_QUALITY_PROVIDER)
+test-memory-load-quality: export WITSELF_MEMORY_LOAD_QUALITY_HARDWARE_TIER := $(MEMORY_LOAD_QUALITY_HARDWARE)
+test-memory-load-quality: ## Run the opt-in deterministic PostgreSQL memory load/quality baseline
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryLoadQualityPostgres$$' \
+			-count=1 -v -timeout 30m
+	@printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_LOAD_QUALITY_RESULTS"
 
 check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lint) — run before every push
 	@unformatted="$$(gofmt -l .)"; \
