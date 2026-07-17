@@ -437,8 +437,9 @@ func TestRecallFailureWithoutCheckpointInjectsDegradationNotice(t *testing.T) {
 	}
 }
 
-func TestUnsupportedRuntimeHooksDoNotReadTheNetwork(t *testing.T) {
+func TestUnsupportedAndInternalHooksDoNotReadTheNetwork(t *testing.T) {
 	for _, request := range []Request{
+		{Runtime: transcriptcapture.RuntimeCodex, Event: transcriptcapture.HookEventCodexPermissionReview, Prompt: "internal review canary"},
 		{Runtime: transcriptcapture.RuntimeCursor, Event: EventSessionStart},
 		{Runtime: transcriptcapture.RuntimeCursor, Event: EventUserPromptSubmit, Prompt: "resume our plan"},
 		{Runtime: transcriptcapture.RuntimeGrokBuild, Event: EventSessionStart},

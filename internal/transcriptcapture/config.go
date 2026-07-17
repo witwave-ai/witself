@@ -25,6 +25,8 @@ const (
 	RuntimeClaudeCode = "claude-code"
 	RuntimeGrokBuild  = "grok-build"
 	RuntimeCursor     = "cursor"
+	// HookEventCodexPermissionReview is Codex's normalized internal approval-review event.
+	HookEventCodexPermissionReview = "PermissionReview"
 
 	ModeMessages = "messages"
 	ModeTrace    = "trace"
