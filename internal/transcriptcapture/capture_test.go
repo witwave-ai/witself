@@ -1233,6 +1233,148 @@ func TestGrokAssistantTurnRejectsMalformedCompletedRecordAfterStop(t *testing.T)
 	}
 }
 
+func TestGrokAssistantTurnIgnoresUnrelatedStructuredUpdateAfterStop(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"tool_call_update","content":[{"type":"content","content":{"type":"text","text":"provider detail"}}]}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"answer"}}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+	if err != nil || !complete || body != "answer" || model != "" {
+		t.Fatalf("Grok response with unrelated structured update = %t / %q / %q / %v", complete, body, model, err)
+	}
+}
+
+func TestGrokAssistantTurnLeavesStructuredUpdateWithoutTerminalFenceIncomplete(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"tool_call_update","content":[{"type":"content","content":{"type":"text","text":"provider detail"}}]}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+	if err != nil || complete || body != "" || model != "" {
+		t.Fatalf("unfenced Grok structured update = %t / %q / %q / %v", complete, body, model, err)
+	}
+}
+
+func TestGrokAssistantTurnRejectsUnsupportedExactAssistantChunkAfterStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "array", content: `[{"type":"text","text":"unsupported"}]`},
+		{name: "empty object", content: `{}`},
+		{name: "null", content: `null`},
+		{name: "nested text", content: `{"message":{"text":"unsupported"}}`},
+		{name: "renamed text", content: `{"message":"unsupported"}`},
+		{name: "null text", content: `{"text":null}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			grokHome := filepath.Join(t.TempDir(), ".grok")
+			t.Setenv("GROK_HOME", grokHome)
+			sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+			if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+			updates := strings.Join([]string{
+				`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+				`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":` + tc.content + `}}}`,
+				`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+			}, "\n") + "\n"
+			if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1"); err == nil ||
+				!strings.Contains(err.Error(), "unsupported relevant record") {
+				t.Fatalf("unsupported exact Grok assistant chunk error = %v", err)
+			}
+		})
+	}
+}
+
+func TestGrokAssistantTurnIgnoresUnsupportedChunkForDifferentPrompt(t *testing.T) {
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	t.Setenv("GROK_HOME", grokHome)
+	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+	updates := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-2"},"update":{"sessionUpdate":"agent_message_chunk","content":null}}}`,
+		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"answer"}}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+	if err != nil || !complete || body != "answer" || model != "" {
+		t.Fatalf("Grok response with unsupported foreign chunk = %t / %q / %q / %v", complete, body, model, err)
+	}
+}
+
+func TestGrokAssistantTurnRequiresNewTerminalAfterLateExactChunk(t *testing.T) {
+	tests := []struct {
+		name           string
+		secondTerminal bool
+		wantComplete   bool
+	}{
+		{name: "late chunk clears prior terminal"},
+		{name: "later terminal completes turn", secondTerminal: true, wantComplete: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			grokHome := filepath.Join(t.TempDir(), ".grok")
+			t.Setenv("GROK_HOME", grokHome)
+			sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+			if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			updates := []string{
+				`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+				`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"first"}}}}`,
+				`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
+				`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"late"}}}}`,
+			}
+			if tc.secondTerminal {
+				updates = append(updates, `{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`)
+			}
+			transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+			if err := os.WriteFile(transcriptPath, []byte(strings.Join(updates, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			body, model, complete, err := readGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
+			if err != nil || complete != tc.wantComplete || body != "first\n\nlate" || model != "" {
+				t.Fatalf("Grok response after late exact chunk = %t / %q / %q / %v", complete, body, model, err)
+			}
+		})
+	}
+}
+
 func TestGrokAssistantTurnBoundsOnlyTheSelectedTailTurn(t *testing.T) {
 	grokHome := filepath.Join(t.TempDir(), ".grok")
 	t.Setenv("GROK_HOME", grokHome)
