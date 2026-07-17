@@ -107,6 +107,12 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# A tag workflow can fail after GitHub has accepted some or all release assets
+# (for example, during a transient GitHub API outage). Make an exact-tag retry
+# repair that partial release instead of failing on duplicate asset names.
+release:
+  replace_existing_artifacts: true
+
 # SBOM per archive (syft). Attached to the release.
 sboms:
   - id: archive

@@ -166,8 +166,8 @@ jobs:
           # exhausted the GitHub runner during v0.0.116, so serialize builds and
           # lean on the Go cache for speed.
           RELEASE_ARGS: >-
-            ${{ github.event_name == 'push' && 'release --clean --parallelism 1'
-                || 'release --snapshot --clean --skip=sign --parallelism 1' }}
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 1 --timeout 2h'
+                || 'release --snapshot --clean --skip=sign --parallelism 1 --timeout 2h' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Required for the cross-repo Homebrew formula push (org secret).
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -210,8 +210,8 @@ jobs:
         if: always()
         env:
           RELEASE_ARGS: >-
-            ${{ github.event_name == 'push' && 'release --clean --parallelism 1'
-                || 'release --snapshot --clean --skip=sign --parallelism 1' }}
+            ${{ github.event_name == 'push' && 'release --clean --parallelism 1 --timeout 2h'
+                || 'release --snapshot --clean --skip=sign --parallelism 1 --timeout 2h' }}
           RELEASE_CACHE_HIT: ${{ steps.release-go-cache.outputs.cache-hit }}
           RELEASE_CACHE_KEY: release-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'infra/pulumi/go.sum') }}
         run: |
