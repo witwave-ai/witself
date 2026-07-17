@@ -69,13 +69,16 @@ not reliably model-visible and Grok ignores passive-hook output, so their
 always-on managed rules instruct the foreground agent to call `self.show`; that
 is a guided fallback, not automatic hook injection.
 
-Near the end of a non-trivial foreground turn, the active agent processes at
-most one pending fenced request. It may use only reversible narrative operations
-or fact proposals. If the frozen inputs contain nothing worth remembering, it
-submits and applies an empty actions plan so the exact reviewed cursors advance.
-No hook, MCP server, or backend worker starts, schedules, or delegates another
-model. Automatic delivery also does not guarantee model compliance: a guided
-runtime can ignore the rule or lose MCP access.
+The active agent completes the current user's requested work before foreground
+curation. Near the end of the turn it processes at most one pending fenced
+request, using only reversible narrative operations or fact proposals. Curation
+is subordinate housekeeping: it never replaces the requested user-facing final
+answer. After curation, or after leaving failed curation pending, the agent still
+delivers that answer. If the frozen inputs contain nothing worth remembering,
+it submits and applies an empty actions plan so the exact reviewed cursors
+advance. No hook, MCP server, or backend worker starts, schedules, or delegates
+another model. Automatic delivery also does not guarantee model compliance: a
+guided runtime can ignore the rule or lose MCP access.
 
 Checkpoint timing is eventual. The prompt hook starts transcript flushing and
 then reads `/v1/self`, so the current prompt is not guaranteed to be in the
@@ -231,7 +234,9 @@ Installed owner-authenticated hydration and focused task recall do enable
 `include_sensitive` automatically so private open-plane context can affect the
 agent's work without requiring a special user search; every record retains its
 classification and must not be gratuitously disclosed in a broad answer. An
-exact, intentional, authorized fact lookup may return a sensitive value.
+exact, intentional, authorized fact lookup may return a sensitive value. When
+it does, the requested value belongs in the final answer, not only in tool
+output or hook context.
 Selecting a provider never implies permission to reveal private data, and no
 memory route ever includes sealed secret or TOTP values.
 

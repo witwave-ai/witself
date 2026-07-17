@@ -2901,6 +2901,14 @@ and streaming chunks are out of contract. Small structured objects belong in
 `payload`; non-empty file artifacts are refused until portable object storage
 lands. See [transcript-ledger.md](transcript-ledger.md).
 
+Cursor's exact native `timestamp` plus `user_query` prompt envelope is removed
+from the canonical user body. In `raw` hook capture, a bounded original
+provider payload is retained; an oversized envelope retains only `raw_omitted`,
+`raw_bytes`, and `raw_sha256`, and native-transcript fallback does not invent
+raw prompt payloads for recovered messages. Witself preserves the body
+unchanged when that envelope is malformed, nested, repeated, or has any extra
+bytes; no other runtime uses this normalization.
+
 ## `witself install`
 
 Install both MCP access and transcript hooks for a supported local agent

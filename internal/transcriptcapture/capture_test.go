@@ -407,11 +407,14 @@ func TestCursorCaptureNormalizesConversationAndStructuredResponse(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	prompt := enqueueTestHook(t, RuntimeCursor, `{"session_id":"untrusted-session","conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","cwd":"/src/witself","prompt":"hello"}`)
+	prompt := enqueueTestHook(t, RuntimeCursor, `{"session_id":"untrusted-session","conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","cwd":"/src/witself","prompt":"<timestamp>2026-07-17T07:08:09.123456-06:00</timestamp>\n<user_query>\nhello\n</user_query>"}`)
 	response := enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"afterAgentResponse","cwd":"/src/witself","text":"hi there","input_tokens":12,"output_tokens":4}`)
 	if prompt.HookEvent != "UserPromptSubmit" || prompt.NativeHookEvent != "beforeSubmitPrompt" ||
-		prompt.TurnID != "generation-1" || prompt.SessionID != "conversation-1" {
+		prompt.TurnID != "generation-1" || prompt.SessionID != "conversation-1" || prompt.Body != "hello" {
 		t.Fatalf("prompt = %#v", prompt)
+	}
+	if !bytes.Contains(prompt.Raw, []byte("<timestamp>2026-07-17T07:08:09.123456-06:00</timestamp>")) {
+		t.Fatalf("raw provider envelope was not retained: %s", prompt.Raw)
 	}
 	if response.Kind != "message.assistant" || response.Body != "hi there" || response.ReplyToEventID != prompt.ID {
 		t.Fatalf("response = %#v", response)
@@ -419,6 +422,49 @@ func TestCursorCaptureNormalizesConversationAndStructuredResponse(t *testing.T) 
 	entries := response.Entries()
 	if len(entries) != 1 || !strings.Contains(string(entries[0].Payload), `"input_tokens":12`) || !strings.Contains(string(entries[0].Payload), `"native_event":"afterAgentResponse"`) {
 		t.Fatalf("payload = %s", entries[0].Payload)
+	}
+}
+
+func TestCursorPromptNormalizationRequiresExactNativeEnvelope(t *testing.T) {
+	timestamp := "2026-07-17T07:08:09.123456-06:00"
+	wrap := func(body string) string {
+		return "<timestamp>" + timestamp + "</timestamp>\n<user_query>\n" + body + "\n</user_query>"
+	}
+	for _, tc := range []struct {
+		name    string
+		runtime string
+		input   string
+		want    string
+	}{
+		{name: "exact cursor envelope", runtime: RuntimeCursor, input: wrap("hello"), want: "hello"},
+		{name: "multiline prompt and ordinary markup", runtime: RuntimeCursor, input: wrap("first\n<div>second</div>"), want: "first\n<div>second</div>"},
+		{name: "empty prompt", runtime: RuntimeCursor, input: wrap(""), want: ""},
+		{name: "cursor only", runtime: RuntimeClaudeCode, input: wrap("hello"), want: wrap("hello")},
+		{name: "grok unchanged", runtime: RuntimeGrokBuild, input: wrap("hello"), want: wrap("hello")},
+		{name: "missing timestamp envelope", runtime: RuntimeCursor, input: "<user_query>\nhello\n</user_query>", want: "<user_query>\nhello\n</user_query>"},
+		{name: "empty timestamp", runtime: RuntimeCursor, input: "<timestamp></timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp></timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "blank timestamp", runtime: RuntimeCursor, input: "<timestamp> \t</timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp> \t</timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "multiline timestamp", runtime: RuntimeCursor, input: "<timestamp>first\nsecond</timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp>first\nsecond</timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "unicode line separator in timestamp", runtime: RuntimeCursor, input: "<timestamp>first\u2028second</timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp>first\u2028second</timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "angle bracket in timestamp", runtime: RuntimeCursor, input: "<timestamp>first>second</timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp>first>second</timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "maximum timestamp bytes", runtime: RuntimeCursor, input: "<timestamp>" + strings.Repeat("t", 256) + "</timestamp>\n<user_query>\nhello\n</user_query>", want: "hello"},
+		{name: "oversized timestamp bytes", runtime: RuntimeCursor, input: "<timestamp>" + strings.Repeat("t", 257) + "</timestamp>\n<user_query>\nhello\n</user_query>", want: "<timestamp>" + strings.Repeat("t", 257) + "</timestamp>\n<user_query>\nhello\n</user_query>"},
+		{name: "leading bytes", runtime: RuntimeCursor, input: "prefix" + wrap("hello"), want: "prefix" + wrap("hello")},
+		{name: "trailing newline", runtime: RuntimeCursor, input: wrap("hello") + "\n", want: wrap("hello") + "\n"},
+		{name: "trailing bytes", runtime: RuntimeCursor, input: wrap("hello") + "suffix", want: wrap("hello") + "suffix"},
+		{name: "crlf separators", runtime: RuntimeCursor, input: "<timestamp>" + timestamp + "</timestamp>\r\n<user_query>\r\nhello\r\n</user_query>", want: "<timestamp>" + timestamp + "</timestamp>\r\n<user_query>\r\nhello\r\n</user_query>"},
+		{name: "missing query newline", runtime: RuntimeCursor, input: "<timestamp>" + timestamp + "</timestamp>\n<user_query>hello\n</user_query>", want: "<timestamp>" + timestamp + "</timestamp>\n<user_query>hello\n</user_query>"},
+		{name: "repeated envelopes", runtime: RuntimeCursor, input: wrap("first") + wrap("second"), want: wrap("first") + wrap("second")},
+		{name: "nested exact query", runtime: RuntimeCursor, input: wrap("<user_query>\ninner\n</user_query>"), want: wrap("<user_query>\ninner\n</user_query>")},
+		{name: "nested malformed query", runtime: RuntimeCursor, input: wrap("<user_query role=user>inner</user_query role=user>"), want: wrap("<user_query role=user>inner</user_query role=user>")},
+		{name: "timestamp tag in body", runtime: RuntimeCursor, input: wrap("explain <timestamp>now</timestamp>"), want: wrap("explain <timestamp>now</timestamp>")},
+		{name: "missing query close", runtime: RuntimeCursor, input: "<timestamp>" + timestamp + "</timestamp>\n<user_query>\nhello", want: "<timestamp>" + timestamp + "</timestamp>\n<user_query>\nhello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NormalizeUserPromptBody(tc.runtime, tc.input); got != tc.want {
+				t.Fatalf("normalized prompt = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -446,7 +492,7 @@ func TestCursorHeadlessSessionEndBackfillsVisibleNativeMessages(t *testing.T) {
 	}
 	transcriptPath := filepath.Join(sessionDir, "session-1.jsonl")
 	transcript := strings.Join([]string{
-		`{"role":"user","message":{"content":[{"type":"text","text":"headless prompt"}]}}`,
+		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>2026-07-17T07:08:09.123456-06:00</timestamp>\n<user_query>\nheadless prompt\n</user_query>"}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"working"},{"type":"tool_use","name":"CallMcpTool","input":{}}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"tool_use","name":"CallMcpTool","input":{}}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"finished"}]}}`,

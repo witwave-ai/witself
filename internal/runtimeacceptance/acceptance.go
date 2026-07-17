@@ -550,7 +550,7 @@ func Evaluate(state RunState, input VerificationInput) (Evidence, error) {
 		actionCount = &value
 	}
 	cases := []CaseEvidence{
-		caseResult("identity_binding", identityPass, "authenticated identity, installed integration, observed client version, and server build matched", identityStage),
+		caseResult("identity_binding", identityPass, "evaluates authenticated identity, installed integration, observed client version and per-stage provenance, distinct client sessions, server build, and CLI harness build", identityStage),
 		caseResult("explicit_narrative_capture", explicitPass, "the real client created a durable Witself narrative memory", captureStage, input.Backend.ExplicitMemoryIDs...),
 		caseResult("history_dependent_recall", historyPass, deliveryDetail(state.Delivery), historyStage),
 		{
@@ -620,7 +620,11 @@ func findStage(prompt Prompt, transcripts []TranscriptObservation, runtimeName, 
 	var result stageResult
 	for _, transcript := range transcripts {
 		for index, entry := range transcript.Entries {
-			if entry.Role != "user" || strings.TrimSpace(entry.Body) != strings.TrimSpace(prompt.Text) {
+			if entry.Role != "user" {
+				continue
+			}
+			candidate := transcriptcapture.NormalizeUserPromptBody(runtimeName, entry.Body)
+			if strings.TrimSpace(candidate) != strings.TrimSpace(prompt.Text) {
 				continue
 			}
 			if result.Found {
