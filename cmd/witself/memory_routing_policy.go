@@ -2,8 +2,9 @@ package main
 
 // foregroundCurationUserPriorityInstruction is shared by every managed
 // runtime contract. Foreground curation is housekeeping for an already-active
-// client turn; it must never displace the work or answer that activated it.
-const foregroundCurationUserPriorityInstruction = "Complete the user's current request before foreground curation. Curation must never replace the final answer; after curation or failure, still answer the user."
+// client turn; it must never displace the work or self-contained answer that
+// activated it. Hook and tool context are model-visible, not user-visible.
+const foregroundCurationUserPriorityInstruction = `User work first;Hook/tool context hidden. After curation/failure,self-contained final repeats all authorized requested answers/values;never only housekeeping or "above".`
 
 // runtimeNeutralMemoryRoutingInstructions is safe to load in more than one
 // agent harness. Grok intentionally scans Claude-compatible project rules when

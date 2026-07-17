@@ -333,7 +333,7 @@ func TestFactDeletionPreviewAllowsCanonicalizedSubjectAlias(t *testing.T) {
 func TestProviderRoutingContractsGuardPermanentFactDeletion(t *testing.T) {
 	contracts := map[string]string{
 		"codex":   codexMemoryRoutingInstructions,
-		"claude":  claudeMemoryRoutingInstructions,
+		"claude":  string(claudeMemoryRoutingBlock) + "\n" + claudeMCPMemoryRoutingSynopsis,
 		"grok":    grokMemoryRoutingInstructions,
 		"cursor":  cursorMemoryRoutingInstructions,
 		"neutral": runtimeNeutralMemoryRoutingInstructions,
@@ -368,22 +368,18 @@ func TestProviderRoutingContractsGuardPermanentFactDeletion(t *testing.T) {
 			if !strings.Contains(text, "fall back") && !strings.Contains(text, "fallback") {
 				t.Errorf("deletion routing contract does not prohibit native-memory fallback:\n%s", contract)
 			}
-			// Claude's complete deletion mechanics are reinforced by the tool
-			// description because its server instructions have a hard 2 KiB cap.
-			if name != "claude" && !strings.Contains(text, "preserved") && !strings.Contains(text, "remain") {
+			if !strings.Contains(text, "preserved") && !strings.Contains(text, "remain") {
 				t.Errorf("deletion routing contract does not preserve immutable value-free usage history:\n%s", contract)
 			}
-			if name != "claude" {
-				for _, want := range []string{"person_spouse", "identity/name", "web", "message", "tool", "usage", "rollup"} {
-					if !strings.Contains(text, want) {
-						t.Errorf("full deletion routing contract does not contain %q:\n%s", want, contract)
-					}
+			for _, want := range []string{"person_spouse", "identity/name", "web", "message", "tool", "usage", "rollup"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("full deletion routing contract does not contain %q:\n%s", want, contract)
 				}
 			}
 		})
 	}
 	for name, contract := range map[string]string{
-		"codex": codexMemoryRoutingInstructions, "claude": claudeMemoryRoutingInstructions,
+		"codex": codexMemoryRoutingInstructions, "claude": claudeMCPMemoryRoutingSynopsis,
 		"grok": grokMemoryRoutingInstructions, "cursor": cursorMemoryRoutingInstructions,
 	} {
 		if !strings.Contains(contract, "witself.fact.delete") {
