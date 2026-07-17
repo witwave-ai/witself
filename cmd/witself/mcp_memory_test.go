@@ -589,6 +589,16 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 		!strings.Contains(found["witself.memory.curation.rollback"], "never cascaded") {
 		t.Errorf("curation descriptions do not preserve trust/inference/rollback boundaries")
 	}
+	for _, phrase := range []string{
+		"With run_id it inspects that exact run",
+		"Omitting run_id is diagnostic only",
+		"never use an unscoped status result to choose or replace the authenticated memory_checkpoint",
+		"Process at most one checkpoint-selected request",
+	} {
+		if !strings.Contains(found["witself.memory.curation.status"], phrase) {
+			t.Errorf("curation status description lacks %q: %q", phrase, found["witself.memory.curation.status"])
+		}
+	}
 }
 
 func memoryDeletionFixture(memoryID string, applied bool) client.MemoryDeletionReceipt {

@@ -100,10 +100,11 @@ Runtime-specific delivery is:
   protocol. Its first 512 characters contain the core fact-versus-native-memory
   decision. `witself install codex` installs the same policy in global
   `AGENTS.md` guidance.
-- `--runtime claude-code` returns the Claude-specific policy plus a compact
-  operational suffix so the complete server instructions stay within Claude
-  Code's 2 KiB limit. The installed Claude rule uses runtime-neutral wording to
-  remain safe when a compatible runtime also loads it.
+- `--runtime claude-code` returns a high-salience Claude-specific synopsis plus
+  a compact operational suffix within Claude Code's 2 KiB server-instruction
+  limit. The complete contract is installed at the same time as a managed
+  runtime-neutral Claude rule, which remains safe when a compatible runtime
+  also loads it.
 - `--runtime grok-build` returns the Grok-specific policy plus the compact operational
   suffix and rewrites every dotted MCP name to Grok's underscore-safe tool
   namespace. Its managed global `AGENTS.md` block uses those portable names too.
@@ -640,6 +641,9 @@ past, and near turn end on guided runtimes**, then use `witself.memory.recall` t
 reach anything not in the digest. A pending checkpoint tells the active agent to
 process at most one fenced curation request in that foreground turn. It is not
 source content and never authorizes deletion or a canonical fact write.
+Its exact `request_id` and optional `run_id` are the sole selector for that
+foreground curation lane; do not replace them with an unscoped
+`witself.memory.curation.status` result.
 
 Input:
 
@@ -1339,9 +1343,12 @@ and queues a read-only replay of the original evidence under current heads.
 ### `witself.memory.curation.status`
 
 Read value-free owner-lane/request/run status. `run_id` is optional; omitting it
-returns current lane status. This tool is available in read-only mode and never
-reads or synthesizes memory content. Use it to resume one pending checkpoint in
-the current foreground turn; it does not wake or launch another model.
+returns a diagnostic current-lane overview, which may describe a different
+recently updated request than the checkpoint selected by `self.show` or verified
+hook hydration. Never use that unscoped result to choose or replace the
+authenticated checkpoint. With `run_id`, this tool inspects that exact run. It
+is available in read-only mode, never reads or synthesizes memory content, and
+does not wake or launch another model.
 
 ### `witself.digest.emit` (target; not implemented)
 

@@ -20,17 +20,18 @@ classifier.
 | Runtime | Managed file installed by `witself install` | MCP initialization policy |
 |---|---|---|
 | Codex | `$CODEX_HOME/AGENTS.md`, normally `~/.codex/AGENTS.md` | The full Codex-specific policy is prepended to the implemented Witself protocol. |
-| Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A concise Claude-specific policy plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
+| Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A high-salience Claude-specific synopsis plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
 | Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
 | Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 
 Codex's installed block and MCP policy use the same Codex-specific contract.
 Grok's installed block preserves the same Grok behavior with underscore-safe
-tool names. Claude's managed rule deliberately uses runtime-neutral wording,
-while its MCP initialization carries the exact Claude auto-memory semantics and
-tool names. This avoids conflicting provider names when another compatible
-runtime, including Grok Build when launched from a directory that causes it to
-scan Claude rules, also loads that global rule.
+tool names. Claude's managed rule is the complete contract and deliberately
+uses runtime-neutral wording. Its size-limited MCP initialization repeats the
+highest-salience Claude auto-memory decisions and exact tool names; the two
+surfaces are installed as one integration. This avoids conflicting provider
+names when another compatible runtime, including Grok Build when launched from
+a directory that causes it to scan Claude rules, also loads that global rule.
 
 Cursor receives a dedicated managed ancestor MDC rule with `alwaysApply: true` YAML
 frontmatter. Cursor discovers `.cursor/rules` while walking the current
@@ -69,6 +70,15 @@ not reliably model-visible and Grok ignores passive-hook output, so their
 always-on managed rules instruct the foreground agent to call `self.show`; that
 is a guided fallback, not automatic hook injection.
 
+The authenticated checkpoint is also the deterministic foreground selector.
+Its exact `request_id` and optional `run_id` drive the one curation lane for
+that turn. A client must not call `memory.curation.status` without `run_id` and
+replace the checkpoint with the unscoped owner-lane result; that form is only a
+diagnostic overview and may describe a different recently updated request.
+When `run_id` is present, the client reads that exact run and fence. Otherwise,
+it preflights and starts the checkpoint's exact `request_id`. Queue priority and
+due ordering remain backend concerns and are not reimplemented by the client.
+
 The active agent completes the current user's requested work before foreground
 curation. Near the end of the turn it processes at most one pending fenced
 request, using only reversible narrative operations or fact proposals. Curation
@@ -79,6 +89,12 @@ it submits and applies an empty actions plan so the exact reviewed cursors
 advance. No hook, MCP server, or backend worker starts, schedules, or delegates
 another model. Automatic delivery also does not guarantee model compliance: a
 guided runtime can ignore the rule or lose MCP access.
+
+Injected hook context and MCP tool results are model-visible but are not part of
+the user's visible conversation. Every provider must therefore return a
+self-contained final answer containing every authorized requested answer or
+value. It must not substitute curation or other housekeeping status, or refer
+to an answer as being "above" in hidden context.
 
 Checkpoint timing is eventual. The prompt hook starts transcript flushing and
 then reads `/v1/self`, so the current prompt is not guaranteed to be in the

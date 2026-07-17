@@ -58,6 +58,36 @@ func TestGrokMemoryRoutingContractCoversStorageAndRetrieval(t *testing.T) {
 	}
 }
 
+func TestGrokForegroundCurationKeepsSelfCheckpointAsExactSelector(t *testing.T) {
+	for _, want := range []string{
+		"authenticated value-free memory_checkpoint from witself.self.show",
+		"exact request_id/run_id is the sole foreground curation selector for this turn",
+		"never call witself.memory.curation.status without run_id to choose or replace it",
+		"With run_id, call witself.memory.curation.run.get for its exact fence",
+		"Only without run_id, call witself.memory.curation.preflight",
+		"witself.memory.curation.start for the checkpoint's exact request_id",
+	} {
+		if !strings.Contains(grokMemoryRoutingInstructions, want) {
+			t.Errorf("Grok checkpoint-selector contract does not contain %q", want)
+		}
+	}
+	if strings.Contains(grokMemoryRoutingInstructions, "After witself.memory.curation.status") {
+		t.Fatal("Grok contract still lets unscoped status select the foreground curation request")
+	}
+
+	for _, want := range []string{
+		"authenticated value-free memory_checkpoint from witself_self_show",
+		"exact request_id/run_id is the sole foreground curation selector for this turn",
+		"never call witself_memory_curation_status without run_id to choose or replace it",
+		"With run_id, call witself_memory_curation_run_get for its exact fence",
+		"witself_memory_curation_start for the checkpoint's exact request_id",
+	} {
+		if !strings.Contains(grokPortableMemoryRoutingInstructions, want) {
+			t.Errorf("portable Grok checkpoint-selector contract does not contain %q", want)
+		}
+	}
+}
+
 func TestGrokMemoryRoutingBlockHasOneManagedBoundary(t *testing.T) {
 	if bytes.Count(grokMemoryRoutingBlock, []byte(grokMemoryRoutingBeginMarker)) != 1 ||
 		bytes.Count(grokMemoryRoutingBlock, []byte(grokMemoryRoutingEndMarker)) != 1 {
