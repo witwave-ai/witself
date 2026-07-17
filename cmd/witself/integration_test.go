@@ -670,17 +670,23 @@ func TestDetectRuntimeVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		output string
+		stderr string
 		want   string
 	}{
-		{"codex", "codex-cli 0.30.0", "0.30.0"},
-		{"claude", "2.1.197 (Claude Code)", "2.1.197"},
-		{"grok", "grok 0.2.93 (f00f96316d4b) [stable]", "0.2.93"},
-		{"cursor", "3.11.13\ncommit\narm64", "3.11.13"},
-		{"fallback", "development-build", "development-build"},
+		{"codex", "codex-cli 0.30.0", "", "0.30.0"},
+		{"claude", "2.1.197 (Claude Code)", "", "2.1.197"},
+		{"grok", "grok 0.2.93 (f00f96316d4b) [stable]", "", "0.2.93"},
+		{"cursor", "3.11.13\ncommit\narm64", "", "3.11.13"},
+		{"cursor diagnostic", "3.12.10\ncommit\narm64", "[0716/234658.202288:ERROR:electron] failure", "3.12.10"},
+		{"fallback", "development-build", "", "development-build"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "runtime")
-			script := "#!/bin/sh\nprintf '%s\\n' '" + tc.output + "'\n"
+			script := "#!/bin/sh\n"
+			if tc.stderr != "" {
+				script += "printf '%s\\n' '" + tc.stderr + "' >&2\n"
+			}
+			script += "printf '%s\\n' '" + tc.output + "'\n"
 			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -688,6 +694,12 @@ func TestDetectRuntimeVersion(t *testing.T) {
 				t.Fatalf("version = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeCLICapabilityProbeAllowsColdGUIStartup(t *testing.T) {
+	if runtimeCLICapabilityProbeTimeout < 20*time.Second {
+		t.Fatalf("runtime CLI capability probe timeout = %s, want at least 20s", runtimeCLICapabilityProbeTimeout)
 	}
 }
 
