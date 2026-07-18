@@ -3,9 +3,13 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +39,9 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
+	defer func() {
+		_ = deleteAvatarAccountForArchiveRoundTrip(context.Background(), st, provisioned.AccountID)
+	}()
 	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 		t.Fatalf("activate account = %t / %v", activated, err)
 	}
@@ -214,7 +220,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		t.Fatalf("archived continuity fingerprint style = %v", err)
 	}
 
-	if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
+	if err := deleteAvatarAccountForArchiveRoundTrip(ctx, st, provisioned.AccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
@@ -280,6 +286,341 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		`SELECT COUNT(*) FROM avatar_mutation_receipts WHERE account_id=$1`,
 		provisioned.AccountID).Scan(&receipts); err != nil || receipts != 10 {
 		t.Fatalf("restored receipts = %d / %v, want 10", receipts, err)
+	}
+}
+
+func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	provisioned, err := st.ProvisionAccount(ctx,
+		fmt.Sprintf("avatar-mixed-renderer-%d@witwave.ai", time.Now().UnixNano()),
+		"avatar mixed renderer round trip", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = deleteAvatarAccountForArchiveRoundTrip(context.Background(), st, provisioned.AccountID)
+	}()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate account = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "mixed-renderer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID,
+		realm.ID, "mixed-renderer-portrait")
+	operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
+		AccountID: provisioned.AccountID, AccountStatus: "active"}
+	style, err := st.GetRealmAvatarStyle(ctx, operator, realm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revision, parent := int64(1), int64(0)
+	for version := int64(1); version <= 5; version++ {
+		proposed := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
+			revision, parent, fmt.Sprintf("mixed-renderer-propose-%d", version))
+		active, err := st.ActivateAvatar(ctx, agent, ActivateAvatarInput{
+			Version:                 version,
+			ExpectedProfileRevision: proposed.Avatar.Profile.ProfileRevision,
+			IdempotencyKey:          fmt.Sprintf("mixed-renderer-activate-%d", version),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		revision, parent = active.Avatar.Profile.ProfileRevision, version
+	}
+	// Reproduce a rolling-upgrade boundary: a pre-profile quota writer saw the
+	// then-v1 child and compacted the v1 parent with WAPF. The older writer's
+	// subsequent child row becomes legacy under schema 54, making that WAPF
+	// obsolete even though no further SVG needs compaction.
+	staleFingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(style.StylePack.References[0].SVG), style.StylePack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET payload_state='compacted',svg=NULL,description=NULL,visual_spec=NULL,
+		       payload_compacted_at=clock_timestamp(),payload_compaction_reason='quota',
+		       continuity_fingerprint=$3
+		 WHERE account_id=$1 AND agent_id=$2 AND version=1`,
+		provisioned.AccountID, agent.ID, staleFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate rows emitted by a pre-profile writer during a rolling upgrade.
+	// Their exact locked-layer digests remain valid, but they are never promoted
+	// to perceptual-v1 by byte inspection.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET renderer_profile='legacy'
+		 WHERE account_id=$1 AND agent_id=$2 AND version>=2`,
+		provisioned.AccountID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	lowered, err := st.SetAvatarQuota(ctx, operator, agent.ID, UpdateAvatarQuotaInput{
+		RetainedPayloadCountLimit: AvatarMinRetainedPayloadCountLimit,
+		RetainedPayloadByteLimit:  AvatarMaxRetainedPayloadByteLimit,
+		ExpectedProfileRevision:   revision,
+		IdempotencyKey:            "mixed-renderer-lower-quota",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lowered.Avatar.Profile.RetainedPayloadCount != AvatarMinRetainedPayloadCountLimit {
+		t.Fatalf("retained payload count = %d, want %d",
+			lowered.Avatar.Profile.RetainedPayloadCount, AvatarMinRetainedPayloadCountLimit)
+	}
+	var parentState, parentRenderer, childState, childRenderer string
+	var parentFingerprint []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT parent.payload_state,parent.renderer_profile,parent.continuity_fingerprint,
+		       child.payload_state,child.renderer_profile
+		  FROM agent_avatar_versions parent
+		  JOIN agent_avatar_versions child
+		    ON child.account_id=parent.account_id AND child.agent_id=parent.agent_id
+		   AND child.version=2 AND child.parent_version=parent.version
+		 WHERE parent.account_id=$1 AND parent.agent_id=$2 AND parent.version=1`,
+		provisioned.AccountID, agent.ID).Scan(&parentState, &parentRenderer,
+		&parentFingerprint, &childState, &childRenderer); err != nil {
+		t.Fatal(err)
+	}
+	if parentState != string(avatardomain.PayloadCompacted) ||
+		parentRenderer != string(avatardomain.RendererProfilePerceptualV1) ||
+		childState != string(avatardomain.PayloadFull) ||
+		childRenderer != string(avatardomain.RendererProfileLegacy) ||
+		len(parentFingerprint) != 0 {
+		t.Fatalf("mixed compacted boundary = parent:%s/%s child:%s/%s WAPF:%d",
+			parentState, parentRenderer, childState, childRenderer, len(parentFingerprint))
+	}
+
+	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation",
+		"mixed renderer archive round trip"); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := st.ExportAccount(ctx, provisioned.AccountID, "source-cell", "test", &archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteAvatarAccountForArchiveRoundTrip(ctx, st, provisioned.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	var retainedCount, retainedLimit int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE v.payload_state='full'),
+		       p.retained_payload_count_limit
+		  FROM agent_avatar_profiles p
+		  JOIN agent_avatar_versions v
+		    ON v.account_id=p.account_id AND v.realm_id=p.realm_id AND v.agent_id=p.agent_id
+		 WHERE p.account_id=$1 AND p.agent_id=$2
+		 GROUP BY p.retained_payload_count_limit`, provisioned.AccountID, agent.ID).
+		Scan(&retainedCount, &retainedLimit); err != nil {
+		t.Fatal(err)
+	}
+	if retainedCount != AvatarMinRetainedPayloadCountLimit || retainedCount > retainedLimit {
+		t.Fatalf("restored quota state = retained:%d limit:%d", retainedCount, retainedLimit)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT parent.payload_state,parent.renderer_profile,parent.continuity_fingerprint,
+		       child.payload_state,child.renderer_profile
+		  FROM agent_avatar_versions parent
+		  JOIN agent_avatar_versions child
+		    ON child.account_id=parent.account_id AND child.agent_id=parent.agent_id
+		   AND child.version=2 AND child.parent_version=parent.version
+		 WHERE parent.account_id=$1 AND parent.agent_id=$2 AND parent.version=1`,
+		provisioned.AccountID, agent.ID).Scan(&parentState, &parentRenderer,
+		&parentFingerprint, &childState, &childRenderer); err != nil {
+		t.Fatal(err)
+	}
+	if parentState != string(avatardomain.PayloadCompacted) ||
+		parentRenderer != string(avatardomain.RendererProfilePerceptualV1) ||
+		childState != string(avatardomain.PayloadFull) ||
+		childRenderer != string(avatardomain.RendererProfileLegacy) ||
+		len(parentFingerprint) != 0 {
+		t.Fatalf("restored mixed boundary = parent:%s/%s child:%s/%s WAPF:%d",
+			parentState, parentRenderer, childState, childRenderer, len(parentFingerprint))
+	}
+}
+
+func TestAvatarArchiveCurrentSchemaPreservesQuarantinedLegacyRendererPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	provisioned, err := st.ProvisionAccount(ctx,
+		fmt.Sprintf("avatar-legacy-renderer-%d@witwave.ai", time.Now().UnixNano()),
+		"avatar legacy renderer round trip", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate account = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "legacy-renderer-portrait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID,
+		RealmID: realm.ID, AgentName: agent.Name, AccountStatus: "active"}
+	style, err := st.GetRealmAvatarStyle(ctx, p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "A portable legacy renderer portrait."
+	visualSpec := []byte(`{"identity":{"expression":"calm"}}`)
+	proposed, err := st.ProposeAvatar(ctx, p, ProposeAvatarInput{
+		ExpectedProfileRevision: 1,
+		StylePackID:             style.StylePack.ID, StylePackVersion: style.StylePack.Version,
+		SubjectForm: avatardomain.SubjectHuman, SVG: style.StylePack.References[0].SVG,
+		Description: description, VisualSpec: visualSpec,
+		Provenance:     AvatarClientProvenance{Runtime: "codex", Model: "gpt-5.6"},
+		IdempotencyKey: "legacy-renderer-propose-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := st.ActivateAvatar(ctx, p, ActivateAvatarInput{
+		Version: 1, ExpectedProfileRevision: proposed.Avatar.Profile.ProfileRevision,
+		IdempotencyKey: "legacy-renderer-activate-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacySVG := strings.Replace(style.StylePack.References[0].SVG,
+		`<g id="experience" data-layer="experience">`,
+		`<g id="experience" data-layer="experience" transform="translate(0 0)">`, 1)
+	canonical, err := avatardomain.SanitizeSVGForStylePack([]byte(legacySVG), style.StylePack)
+	if err != nil || string(canonical) != legacySVG {
+		t.Fatalf("legacy renderer SVG = %v / canonical:%t", err, string(canonical) == legacySVG)
+	}
+	if _, err := avatardomain.SanitizePerceptualV1AvatarBaseline(
+		[]byte(legacySVG), style.StylePack); err == nil {
+		t.Fatal("legacy renderer fixture unexpectedly satisfies perceptual-v1")
+	}
+	svgDigest := sha256.Sum256([]byte(legacySVG))
+	lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(legacySVG), style.StylePack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := avatarCreativePayloadBytes(legacySVG, description, visualSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET svg=$2,svg_sha256=$3,locked_layers_sha256=$4,payload_bytes=$5,
+		       renderer_profile='legacy'
+		 WHERE agent_id=$1 AND version=1`, agent.ID, legacySVG,
+		hex.EncodeToString(svgDigest[:]), lockedDigest, payloadBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation",
+		"legacy renderer archive round trip"); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := st.ExportAccount(ctx, provisioned.AccountID, "source-cell", "test", &archive); err != nil {
+		t.Fatal(err)
+	}
+	_, rows := readAvatarArchiveRows(t, archive.Bytes(), SchemaVersion())
+	var archivedLegacy bool
+	for _, raw := range rows["agent_avatar_versions"] {
+		var row map[string]any
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["version"] == float64(1) {
+			archivedLegacy = row["renderer_profile"] == string(avatardomain.RendererProfileLegacy) &&
+				row["svg"] == legacySVG
+		}
+	}
+	if !archivedLegacy {
+		t.Fatal("current archive did not preserve the explicit legacy renderer envelope")
+	}
+
+	if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := st.GetAvatarVersion(ctx, p, 1)
+	if err != nil || restored.RendererProfile != avatardomain.RendererProfileLegacy ||
+		restored.SVG != legacySVG || restored.SVGSHA256 != hex.EncodeToString(svgDigest[:]) {
+		t.Fatalf("restored legacy renderer avatar = %#v / %v", restored, err)
+	}
+	if err := st.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same-style self evolution cannot promote a legacy parent by observation.
+	rebaseline := ProposeAvatarInput{
+		ExpectedProfileRevision: active.Avatar.Profile.ProfileRevision, ParentVersion: 1,
+		StylePackID: style.StylePack.ID, StylePackVersion: style.StylePack.Version,
+		SubjectForm: avatardomain.SubjectHuman, SVG: style.StylePack.References[0].SVG,
+		Description: description, VisualSpec: visualSpec,
+		Provenance:     AvatarClientProvenance{Runtime: "codex", Model: "gpt-5.6"},
+		IdempotencyKey: "legacy-renderer-self-evolution",
+	}
+	if _, err := st.ProposeAvatar(ctx, p, rebaseline); !errors.Is(err, ErrAvatarConflict) {
+		t.Fatalf("legacy self evolution = %v, want ErrAvatarConflict", err)
+	}
+	operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
+		AccountID: provisioned.AccountID, AccountStatus: "active"}
+	rebaseline.IdempotencyKey = "legacy-renderer-operator-replacement"
+	operatorBaseline, err := st.ProposeAgentAvatar(ctx, operator, agent.ID, rebaseline)
+	if err != nil || operatorBaseline.Avatar.Proposed == nil ||
+		operatorBaseline.Avatar.Proposed.RendererProfile != avatardomain.RendererProfilePerceptualV1 {
+		t.Fatalf("operator renderer rebaseline = %#v / %v", operatorBaseline, err)
+	}
+	reset, err := st.ResetAvatar(ctx, p, ResetAvatarInput{
+		ExpectedProfileRevision: operatorBaseline.Avatar.Profile.ProfileRevision,
+		ReasonCode:              "new_direction", IdempotencyKey: "legacy-renderer-reset",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebaseline.ExpectedProfileRevision = reset.Avatar.Profile.ProfileRevision
+	rebaseline.ParentVersion = 0
+	rebaseline.IdempotencyKey = "legacy-renderer-post-reset-baseline"
+	fresh, err := st.ProposeAvatar(ctx, p, rebaseline)
+	if err != nil || fresh.Avatar.Proposed == nil ||
+		fresh.Avatar.Proposed.RendererProfile != avatardomain.RendererProfilePerceptualV1 {
+		t.Fatalf("post-reset renderer baseline = %#v / %v", fresh, err)
 	}
 }
 
@@ -402,6 +743,35 @@ func readAvatarArchiveRows(t *testing.T, raw []byte, currentSchema int) (archive
 		t.Fatal(err)
 	}
 	return manifest, rows
+}
+
+// deleteAvatarAccountForArchiveRoundTrip clears avatar ledgers in dependency
+// order before using the shared account test cleanup. In particular,
+// prior_active_version intentionally has no cascading delete, so deleting an
+// agent with a multi-activation history directly is not a valid evacuation
+// fixture.
+func deleteAvatarAccountForArchiveRoundTrip(ctx context.Context, st *Store, accountID string) error {
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, statement := range []string{
+		`DELETE FROM agent_avatar_activations WHERE account_id=$1`,
+		`DELETE FROM agent_avatar_rejections WHERE account_id=$1`,
+		`DELETE FROM agent_avatar_resets WHERE account_id=$1`,
+		`DELETE FROM avatar_mutation_receipts WHERE account_id=$1`,
+		`DELETE FROM agent_avatar_profiles WHERE account_id=$1`,
+		`DELETE FROM agent_avatar_versions WHERE account_id=$1`,
+	} {
+		if _, err := tx.Exec(ctx, statement, accountID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return deleteAccountForIntegrationTest(ctx, st, accountID)
 }
 
 func writeAvatarArchiveRows(t *testing.T, manifest archiveexport.Manifest, tables []string, rows map[string][][]byte) []byte {

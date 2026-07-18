@@ -223,6 +223,7 @@ func toServerAvatarVersion(version store.AvatarVersion) server.AvatarVersion {
 		SubjectForm:       version.SubjectForm, Description: version.Description,
 		VisualSpec: version.VisualSpec, SVG: version.SVG, SVGSHA256: version.SVGSHA256,
 		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile,
 		Style:              version.Style,
 		Provenance: server.AvatarClientProvenance{
 			Runtime: version.Provenance.Runtime, Model: version.Provenance.Model,
@@ -245,7 +246,8 @@ func toServerAvatarVersionSummary(version store.AvatarVersionSummary) server.Ava
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
 		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
-		LockedLayersSHA256: version.LockedLayersSHA256, Style: version.Style,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile, Style: version.Style,
 		ProposedBy: server.AvatarActor{
 			Kind: version.ProposedBy.Kind, ID: version.ProposedBy.ID, Name: version.ProposedBy.Name,
 		},

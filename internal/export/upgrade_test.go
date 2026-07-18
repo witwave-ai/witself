@@ -361,6 +361,30 @@ func TestSchema51AvatarStyleRolloutUpgradePreservesExistingRows(t *testing.T) {
 	}
 }
 
+func TestSchema53AvatarRendererProfileUpgradeDefaultsLegacy(t *testing.T) {
+	upgrade := UpgraderFor(53)
+	if upgrade == nil {
+		t.Fatal("schema 53 avatar renderer-profile upgrader is not registered")
+	}
+	version, err := upgrade("agent_avatar_versions", map[string]any{
+		"id": "avver_1", "continuity_fingerprint": `\xpreprofile`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := version["renderer_profile"]; got != "legacy" {
+		t.Fatalf("renderer_profile = %#v, want legacy", got)
+	}
+	if version["continuity_fingerprint"] != nil {
+		t.Fatalf("legacy continuity_fingerprint = %#v, want nil",
+			version["continuity_fingerprint"])
+	}
+	other, err := upgrade("agents", map[string]any{"id": "agent_1"})
+	if err != nil || len(other) != 1 || other["id"] != "agent_1" {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

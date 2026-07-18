@@ -133,7 +133,10 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 	}
 	decodeAvatarTestJSON(t, body, &avatarEnvelope)
 	if avatarEnvelope.SchemaVersion != "witself.v0" || avatarEnvelope.Avatar.Profile.AgentID != "agent_self" ||
-		avatarEnvelope.Avatar.Profile.LineageGeneration != 1 || avatarEnvelope.Avatar.Active == nil || avatarEnvelope.Avatar.Active.LineageGeneration != 1 {
+		avatarEnvelope.Avatar.Profile.LineageGeneration != 1 || avatarEnvelope.Avatar.Active == nil ||
+		avatarEnvelope.Avatar.Active.LineageGeneration != 1 ||
+		avatarEnvelope.Avatar.Active.RendererProfile != avatar.RendererProfilePerceptualV1 ||
+		!strings.Contains(string(body), `"renderer_profile":"perceptual-v1"`) {
 		t.Fatalf("avatar envelope = %+v", avatarEnvelope)
 	}
 
@@ -143,7 +146,8 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 		Versions      []AvatarVersionSummary `json:"versions"`
 	}
 	decodeAvatarTestJSON(t, body, &history)
-	if history.SchemaVersion != "witself.v0" || len(history.Versions) != 1 || history.Versions[0].Version != 1 || history.Versions[0].LineageGeneration != 1 {
+	if history.SchemaVersion != "witself.v0" || len(history.Versions) != 1 || history.Versions[0].Version != 1 ||
+		history.Versions[0].LineageGeneration != 1 || history.Versions[0].RendererProfile != avatar.RendererProfilePerceptualV1 {
 		t.Fatalf("history = %+v", history)
 	}
 	for _, forbidden := range []string{"svg", "visual_spec", "description", "provenance"} {
@@ -156,7 +160,9 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 		Version AvatarVersion `json:"version"`
 	}
 	decodeAvatarTestJSON(t, body, &versionEnvelope)
-	if versionEnvelope.Version.Version != 1 || versionEnvelope.Version.LineageGeneration != 1 || versionEnvelope.Version.SVG == "" || len(versionEnvelope.Version.VisualSpec) == 0 {
+	if versionEnvelope.Version.Version != 1 || versionEnvelope.Version.LineageGeneration != 1 ||
+		versionEnvelope.Version.RendererProfile != avatar.RendererProfilePerceptualV1 ||
+		versionEnvelope.Version.SVG == "" || len(versionEnvelope.Version.VisualSpec) == 0 {
 		t.Fatalf("exact version = %+v", versionEnvelope.Version)
 	}
 
@@ -773,10 +779,11 @@ func testServerAvatarView(agentID string) AvatarView {
 		Description: "Calm human teammate.", VisualSpec: json.RawMessage(`{"expression":"calm"}`),
 		SVG: `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, SVGSHA256: strings.Repeat("a", 64),
 		LockedLayersSHA256: strings.Repeat("b", 64), PayloadState: avatar.PayloadFull,
-		PayloadBytes: 128,
-		Style:        avatar.StylePackRef{RealmID: "realm_self", StylePackID: avatar.DefaultStylePackID, Version: 1},
-		Provenance:   AvatarClientProvenance{Runtime: "codex"},
-		ProposedBy:   AvatarActor{Kind: PrincipalKindAgent, ID: agentID, Name: "Juniper"}, ProposedAt: now,
+		RendererProfile: avatar.RendererProfilePerceptualV1,
+		PayloadBytes:    128,
+		Style:           avatar.StylePackRef{RealmID: "realm_self", StylePackID: avatar.DefaultStylePackID, Version: 1},
+		Provenance:      AvatarClientProvenance{Runtime: "codex"},
+		ProposedBy:      AvatarActor{Kind: PrincipalKindAgent, ID: agentID, Name: "Juniper"}, ProposedAt: now,
 	}
 	return AvatarView{
 		Profile: AvatarProfile{
@@ -800,7 +807,8 @@ func testServerAvatarSummary(version AvatarVersion) AvatarVersionSummary {
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
 		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
-		LockedLayersSHA256: version.LockedLayersSHA256, Style: version.Style,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile, Style: version.Style,
 		ProposedBy: version.ProposedBy, ProposedAt: version.ProposedAt,
 		IsActive: version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,

@@ -108,6 +108,7 @@ type avatarVersionImportScope struct {
 	payloadBytes          int64
 	payloadCompactedAt    *time.Time
 	lockedLayersSHA256    string
+	rendererProfile       avatardomain.RendererProfile
 	continuityFingerprint []byte
 }
 
@@ -734,6 +735,11 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	if err != nil || !validFactSHA256(storedDigest) {
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg_sha256 is invalid")
 	}
+	rendererProfileText, err := requireStringField(obj, "renderer_profile")
+	rendererProfile := avatardomain.RendererProfile(rendererProfileText)
+	if err != nil || rendererProfile.Validate() != nil {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("renderer_profile is invalid")
+	}
 	var lockedLayersSHA256 string
 	deriveLockedDigest := false
 	if raw, present := obj["locked_layers_sha256"]; !present || raw == nil {
@@ -752,6 +758,9 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, err
 	}
 	if len(continuityFingerprint) > 0 {
+		if rendererProfile != avatardomain.RendererProfilePerceptualV1 {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("legacy avatar carries continuity_fingerprint")
+		}
 		if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
 			continuityFingerprint, styleScope.pack); err != nil {
 			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("continuity_fingerprint does not match the avatar style: %v", err)
@@ -792,6 +801,13 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		canonicalSVG, sanitizeErr := avatardomain.SanitizeSVGForStylePack([]byte(svgValue), styleScope.pack)
 		if sanitizeErr != nil || string(canonicalSVG) != svgValue {
 			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg is not canonical and style-valid")
+		}
+		if rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+			profileSVG, profileErr := avatardomain.SanitizePerceptualV1AvatarBaseline(
+				[]byte(svgValue), styleScope.pack)
+			if profileErr != nil || string(profileSVG) != svgValue {
+				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("perceptual-v1 SVG does not satisfy its claimed renderer profile: %v", profileErr)
+			}
 		}
 		digest := sha256.Sum256([]byte(svgValue))
 		if storedDigest != hex.EncodeToString(digest[:]) {
@@ -855,6 +871,14 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	if actorKind == PrincipalAgent && hasParent {
 		parentScope := ic.avatarVersions[avatarVersionImportKey{agentID: agentID, version: parent}]
 		if parentScope.style == style {
+			// A legacy parent cannot be promoted to perceptual-v1 by observation:
+			// that profile requires an explicit new baseline. The inverse edge is
+			// valid mixed-writer history because both versions retain a verified
+			// locked-layer digest, as is a legacy-to-legacy edge.
+			if parentScope.rendererProfile == avatardomain.RendererProfileLegacy &&
+				rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution promotes a legacy renderer without an explicit baseline")
+			}
 			if parentScope.subjectForm != form {
 				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution changes subject_form")
 			}
@@ -867,17 +891,22 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 					[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
 					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates locked-layer continuity: %v", err)
 				}
-				if err := avatardomain.ValidatePerceptualContinuity(
-					[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
-					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates perceptual continuity: %v", err)
+				if rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+					if err := avatardomain.ValidatePerceptualContinuity(
+						[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
+						return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates perceptual continuity: %v", err)
+					}
 				}
 			case parentScope.payloadState == avatardomain.PayloadCompacted && payloadState == avatardomain.PayloadFull:
-				if len(parentScope.continuityFingerprint) == 0 {
-					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution has no compacted-parent continuity fingerprint")
-				}
-				if err := avatardomain.ValidatePerceptualContinuityFromFingerprint(
-					parentScope.continuityFingerprint, []byte(svg), styleScope.pack); err != nil {
-					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates compacted-parent perceptual continuity: %v", err)
+				if parentScope.rendererProfile == avatardomain.RendererProfilePerceptualV1 &&
+					rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+					if len(parentScope.continuityFingerprint) == 0 {
+						return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution has no compacted-parent continuity fingerprint")
+					}
+					if err := avatardomain.ValidatePerceptualContinuityFromFingerprint(
+						parentScope.continuityFingerprint, []byte(svg), styleScope.pack); err != nil {
+						return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates compacted-parent perceptual continuity: %v", err)
+					}
 				}
 			}
 		}
@@ -895,6 +924,7 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		payloadState: payloadState, payloadBytes: payloadBytes,
 		payloadCompactedAt:    compactedAt,
 		lockedLayersSHA256:    lockedLayersSHA256,
+		rendererProfile:       rendererProfile,
 		continuityFingerprint: continuityFingerprint,
 	}, nil
 }
@@ -1328,12 +1358,47 @@ func requiredImportedAvatarContinuityFingerprints(versions map[avatarVersionImpo
 			agentID: childKey.agentID, version: child.parentVersion,
 		}
 		parent, exists := versions[parentKey]
-		if exists && parent.lineage == child.lineage && parent.style == child.style &&
+		if exists && parent.rendererProfile == avatardomain.RendererProfilePerceptualV1 &&
+			child.rendererProfile == avatardomain.RendererProfilePerceptualV1 &&
+			parent.lineage == child.lineage && parent.style == child.style &&
 			parent.subjectForm == child.subjectForm {
 			required[parentKey] = true
 		}
 	}
 	return required
+}
+
+func (ic *importCtx) validateImportedPerceptualV1Styles() error {
+	required := make(map[avatarStyleVersionImportKey]bool)
+	for _, version := range ic.avatarVersions {
+		if version.rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+			required[version.style] = true
+		}
+	}
+	styles := make([]avatarStyleVersionImportKey, 0, len(required))
+	for style := range required {
+		styles = append(styles, style)
+	}
+	sort.Slice(styles, func(i, j int) bool {
+		if styles[i].realmID != styles[j].realmID {
+			return styles[i].realmID < styles[j].realmID
+		}
+		if styles[i].stylePackID != styles[j].stylePackID {
+			return styles[i].stylePackID < styles[j].stylePackID
+		}
+		return styles[i].version < styles[j].version
+	})
+	for _, style := range styles {
+		scope, exists := ic.avatarStyleVersions[style]
+		if !exists {
+			return fmt.Errorf("perceptual-v1 avatar style is not present")
+		}
+		if err := avatardomain.ValidatePerceptualV1StylePack(scope.pack); err != nil {
+			return fmt.Errorf("perceptual-v1 avatar style %s/%d is invalid: %v",
+				style.stylePackID, style.version, err)
+		}
+	}
+	return nil
 }
 
 func (ic *importCtx) validateImportedAvatarGraph() error {
@@ -1352,6 +1417,9 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 		if selected.style.version != head.currentVersion {
 			return fmt.Errorf("realm %q does not select its style pack head", realmID)
 		}
+	}
+	if err := ic.validateImportedPerceptualV1Styles(); err != nil {
+		return err
 	}
 	requiredContinuityFingerprint := requiredImportedAvatarContinuityFingerprints(ic.avatarVersions)
 	versionsByAgent := importedAvatarVersionsByAgent(ic.avatarVersions)
@@ -1397,6 +1465,8 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 		}
 		maxVersion := int64(0)
 		var retainedPayloadCount, retainedPayloadBytes int64
+		var v1RetainedPayloadCount, v1RetainedPayloadBytes int64
+		var legacyFullPayloadCount int64
 		firstActivatedVersion := map[int64]int64{}
 		for _, entry := range versionsByAgent[agentID] {
 			key, version := entry.key, entry.version
@@ -1406,8 +1476,18 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			if version.payloadState == avatardomain.PayloadFull {
 				retainedPayloadCount++
 				retainedPayloadBytes += version.payloadBytes
+				if version.rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+					v1RetainedPayloadCount++
+					v1RetainedPayloadBytes += version.payloadBytes
+				} else {
+					legacyFullPayloadCount++
+				}
 			}
-			retainedPayloadBytes += int64(len(version.continuityFingerprint))
+			fingerprintBytes := int64(len(version.continuityFingerprint))
+			retainedPayloadBytes += fingerprintBytes
+			if version.rendererProfile == avatardomain.RendererProfilePerceptualV1 {
+				v1RetainedPayloadBytes += fingerprintBytes
+			}
 			if ic.avatarActivatedVersions[key] &&
 				(firstActivatedVersion[version.lineage] == 0 || key.version < firstActivatedVersion[version.lineage]) {
 				firstActivatedVersion[version.lineage] = key.version
@@ -1448,13 +1528,22 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 				}
 			}
 		}
-		// Schema-51 writers enforce this invariant on every quota change and
-		// proposal. Pre-51 archives had no quota contract and are allowed through
-		// with migration defaults so the first subsequent proposal can compact
-		// their legacy history deterministically.
-		if ic.schemaVersion >= 51 && !profile.payloadQuotaReconciliationRequired &&
-			(retainedPayloadCount > profile.retainedPayloadCountLimit ||
-				retainedPayloadBytes > profile.retainedPayloadByteLimit) {
+		// No archive may use the rolling-upgrade reconciliation marker to exceed
+		// the server's absolute per-agent storage ceiling.
+		if retainedPayloadCount > AvatarMaxRetainedPayloadCountLimit ||
+			retainedPayloadBytes > AvatarMaxRetainedPayloadByteLimit {
+			return fmt.Errorf("agent %q retained avatar payloads exceed the hard transition ceiling", agentID)
+		}
+		// A marked archive may temporarily exceed its configured profile quota
+		// only when retained legacy full payloads caused the overage. The v1
+		// subset must already satisfy the configured quota independently, so the
+		// marker cannot turn into a general quota or renderer-transition bypass.
+		if (retainedPayloadCount > profile.retainedPayloadCountLimit ||
+			retainedPayloadBytes > profile.retainedPayloadByteLimit) &&
+			(!profile.payloadQuotaReconciliationRequired ||
+				legacyFullPayloadCount == 0 ||
+				v1RetainedPayloadCount > profile.retainedPayloadCountLimit ||
+				v1RetainedPayloadBytes > profile.retainedPayloadByteLimit) {
 			return fmt.Errorf("agent %q retained avatar payloads exceed the configured quota", agentID)
 		}
 		for _, entry := range versionsByAgent[agentID] {

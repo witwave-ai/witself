@@ -65,6 +65,69 @@ func TestPerceptualContinuityFingerprintV1GoldenDurability(t *testing.T) {
 	}
 }
 
+func TestPerceptualContinuityFingerprintIdentityMaskBoundary(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	base, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withMaskPixels := func(count int) []byte {
+		fingerprint := bytes.Clone(base)
+		maskOffset := perceptualFingerprintHeaderBytes +
+			perceptualFingerprintStyleDigestBytes + perceptualFingerprintRGBBytes
+		mask := fingerprint[maskOffset : maskOffset+perceptualFingerprintIdentityMaskBytes]
+		clear(mask)
+		for pixel := 0; pixel < count; pixel++ {
+			mask[pixel/8] |= 1 << (7 - uint(pixel%8))
+		}
+		checksumOffset := len(fingerprint) - perceptualFingerprintChecksumBytes
+		checksum := sha256.Sum256(fingerprint[:checksumOffset])
+		copy(fingerprint[checksumOffset:], checksum[:])
+		return fingerprint
+	}
+	if err := ValidatePerceptualContinuityFingerprint(withMaskPixels(perceptualMinimumMaskPixels - 1)); !errors.Is(err, ErrInvalidPerceptualFingerprint) {
+		t.Fatalf("47-pixel mask error = %v", err)
+	}
+	exact := withMaskPixels(perceptualMinimumMaskPixels)
+	if err := ValidatePerceptualContinuityFingerprintForStyle(exact, pack); err != nil {
+		t.Fatalf("48-pixel mask: %v", err)
+	}
+	metrics, err := ComparePerceptualContinuityFromFingerprint(exact, []byte(humanReferenceSVG), pack)
+	if err != nil {
+		t.Fatalf("48-pixel comparison: %v", err)
+	}
+	if metrics.IdentityMaskPixels != perceptualMinimumMaskPixels {
+		t.Fatalf("identity pixels = %d, want %d", metrics.IdentityMaskPixels, perceptualMinimumMaskPixels)
+	}
+}
+
+func TestPerceptualContinuityFingerprintSpeciesAndPlaceholderGoldens(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	placeholder, err := GeneratePlaceholderSVGForStylePack("agent_golden", "Juniper", pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]struct {
+		svg    []byte
+		sha256 string
+	}{
+		"human": {svg: []byte(humanReferenceSVG), sha256: "e9e92503ae73b318a2074712b1ed05066c3dc3caa7feb9f99edf27b2d4df96e3"},
+		"animal": {svg: []byte(animalReferenceSVG), sha256: "4555628152f89d026a2594acfbb47ffab2b85eab60cae12851242b9133758880"},
+		"insect": {svg: []byte(insectReferenceSVG), sha256: "083ef47412a4697dcfd95b73694c5cbf89e65bf484318335c4c6df0e96e681ae"},
+		"placeholder": {svg: placeholder, sha256: "68813f9e8ccce13a6d4adaf8fe7e922b2ebe20314b2e8326cc2b3610d483e5a2"},
+	}
+	for name, test := range tests {
+		fingerprint, err := BuildPerceptualContinuityFingerprint(test.svg, pack)
+		if err != nil {
+			t.Fatalf("%s fingerprint: %v", name, err)
+		}
+		digest := sha256.Sum256(fingerprint)
+		if got := hex.EncodeToString(digest[:]); got != test.sha256 {
+			t.Fatalf("%s fingerprint digest = %s, want %s", name, got, test.sha256)
+		}
+	}
+}
+
 func TestPerceptualContinuityFingerprintIsDeterministicAndStrict(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()
 	first, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)

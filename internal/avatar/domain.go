@@ -42,6 +42,8 @@ var (
 	ErrInvalidEventType = errors.New("invalid avatar event type")
 	// ErrInvalidPayloadState marks an unsupported creative-payload state.
 	ErrInvalidPayloadState = errors.New("invalid avatar payload state")
+	// ErrInvalidRendererProfile marks unsupported immutable renderer provenance.
+	ErrInvalidRendererProfile = errors.New("invalid avatar renderer profile")
 	// ErrInvalidDescription marks an invalid or over-limit avatar description.
 	ErrInvalidDescription = errors.New("invalid avatar description")
 	// ErrInvalidSpecJSON marks invalid or over-limit avatar visual-spec JSON.
@@ -279,6 +281,33 @@ func (s PayloadState) Valid() bool {
 func (s PayloadState) Validate() error {
 	if !s.Valid() {
 		return fmt.Errorf("%w: %q", ErrInvalidPayloadState, s)
+	}
+	return nil
+}
+
+// RendererProfile records which exact renderer contract validated an
+// immutable avatar version. Legacy is deliberately not inferred upward from
+// the SVG bytes; only a new write that passed perceptual-v1 may claim it.
+type RendererProfile string
+
+const (
+	// RendererProfileLegacy identifies versions written before explicit
+	// renderer compatibility provenance existed.
+	RendererProfileLegacy RendererProfile = "legacy"
+	// RendererProfilePerceptualV1 identifies versions written only after the
+	// exact SVG passed the perceptual-v1 baseline checks.
+	RendererProfilePerceptualV1 RendererProfile = "perceptual-v1"
+)
+
+// Valid reports whether p is a supported renderer provenance value.
+func (p RendererProfile) Valid() bool {
+	return p == RendererProfileLegacy || p == RendererProfilePerceptualV1
+}
+
+// Validate returns an error when p is not a supported renderer provenance.
+func (p RendererProfile) Validate() error {
+	if !p.Valid() {
+		return fmt.Errorf("%w: %q", ErrInvalidRendererProfile, p)
 	}
 	return nil
 }

@@ -102,16 +102,17 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	if !pack.HasSubjectForm(in.SubjectForm) {
 		return AvatarMutationResult{}, fmt.Errorf("%w: selected style does not support subject form", ErrAvatarInputInvalid)
 	}
-	sanitizedSVG, err := avatardomain.SanitizeSVGForStylePack([]byte(in.SVG), pack)
+	// Canonicalize with the released generic sanitizer before computing the
+	// request fingerprint. This preserves byte-for-byte idempotency semantics
+	// for receipts written by an older server during a mixed-version rollout.
+	// The stricter renderer gate is deliberately applied only after a replay
+	// miss so an already-committed legacy request can still be replayed.
+	canonicalSVG, err := avatardomain.SanitizeSVGForStylePack([]byte(in.SVG), pack)
 	if err != nil {
 		return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 	}
-	svgDigest := sha256.Sum256(sanitizedSVG)
-	svgSHA256 := hex.EncodeToString(svgDigest[:])
-	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(sanitizedSVG, pack)
-	if err != nil {
-		return AvatarMutationResult{}, fmt.Errorf("%w: derive locked-layer digest: %v", ErrAvatarInputInvalid, err)
-	}
+	requestSVGDigest := sha256.Sum256(canonicalSVG)
+	requestSVGSHA256 := hex.EncodeToString(requestSVGDigest[:])
 	fingerprint, err := avatarFingerprint(struct {
 		ExpectedRevision int64                    `json:"expected_revision"`
 		ParentVersion    int64                    `json:"parent_version"`
@@ -123,7 +124,7 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		SVGSHA256        string                   `json:"svg_sha256"`
 		Provenance       AvatarClientProvenance   `json:"provenance"`
 	}{in.ExpectedProfileRevision, in.ParentVersion, stylePackID,
-		in.StylePackVersion, in.SubjectForm, description, visualSpec, svgSHA256,
+		in.StylePackVersion, in.SubjectForm, description, visualSpec, requestSVGSHA256,
 		provenance})
 	if err != nil {
 		return AvatarMutationResult{}, err
@@ -137,6 +138,20 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 			return AvatarMutationResult{}, err
 		}
 		return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
+	}
+	// Every newly persisted proposal becomes a renderer-compatible baseline,
+	// regardless of whether it was proposed by the agent or an operator. An
+	// operator may override similarity policy, but never renderer safety or the
+	// minimum locked-identity projection.
+	sanitizedSVG, err := avatardomain.SanitizePerceptualV1AvatarBaseline(canonicalSVG, pack)
+	if err != nil {
+		return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
+	}
+	svgDigest := sha256.Sum256(sanitizedSVG)
+	svgSHA256 := hex.EncodeToString(svgDigest[:])
+	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(sanitizedSVG, pack)
+	if err != nil {
+		return AvatarMutationResult{}, fmt.Errorf("%w: derive locked-layer digest: %v", ErrAvatarInputInvalid, err)
 	}
 	if !operator && profile.policy == avatardomain.AutonomyOperatorOnly {
 		return AvatarMutationResult{}, ErrAvatarForbidden
@@ -175,6 +190,9 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 			sameStyle := parentInfo.stylePackID == stylePackID &&
 				parentInfo.stylePackVersion == in.StylePackVersion
 			if sameStyle {
+				if parentInfo.rendererProfile != avatardomain.RendererProfilePerceptualV1 {
+					return AvatarMutationResult{}, fmt.Errorf("%w: active legacy avatar requires operator replacement, reset, or style migration before self evolution", ErrAvatarConflict)
+				}
 				if parentInfo.subjectForm != in.SubjectForm {
 					return AvatarMutationResult{}, fmt.Errorf("%w: same-style self evolution must preserve subject_form", ErrAvatarInputInvalid)
 				}
@@ -221,15 +239,16 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		INSERT INTO agent_avatar_versions
 		       (account_id, realm_id, agent_id, id, version, parent_version,
 		        lineage_generation, style_pack_id, style_pack_version, subject_form, svg,
-		        description, visual_spec, svg_sha256, locked_layers_sha256, provenance,
+		        description, visual_spec, svg_sha256, locked_layers_sha256, renderer_profile, provenance,
 		        proposed_by_kind, proposed_by_id, proposed_at, payload_bytes)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-		        clock_timestamp(),$19)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+		        clock_timestamp(),$20)`,
 		target.accountID, target.realmID, target.agentID, versionID, version,
 		parent, profile.lineageGeneration, stylePackID, in.StylePackVersion,
 		string(in.SubjectForm),
 		string(sanitizedSVG), description, visualSpec, svgSHA256,
-		lockedLayersSHA256, provenanceJSON, p.Kind, p.ID, incomingPayloadBytes); err != nil {
+		lockedLayersSHA256, string(avatardomain.RendererProfilePerceptualV1),
+		provenanceJSON, p.Kind, p.ID, incomingPayloadBytes); err != nil {
 		return AvatarMutationResult{}, fmt.Errorf("insert avatar version: %w", err)
 	}
 	var resultRevision int64
@@ -1081,17 +1100,18 @@ type avatarVersionMutationInfo struct {
 	stylePackID       string
 	stylePackVersion  int
 	subjectForm       avatardomain.SubjectForm
+	rendererProfile   avatardomain.RendererProfile
 	svg               string
 }
 
 func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatarTarget, version int64) (avatarVersionMutationInfo, error) {
 	var out avatarVersionMutationInfo
 	var parent *int64
-	var subjectForm string
+	var subjectForm, rendererProfile string
 	err := tx.QueryRow(ctx, `
 		SELECT v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg
+		       v.subject_form, v.renderer_profile, v.svg
 		  FROM agent_avatar_versions v
 		  LEFT JOIN agent_avatar_rejections rejection
 		    ON rejection.account_id=v.account_id AND rejection.realm_id=v.realm_id
@@ -1101,7 +1121,7 @@ func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatar
 		   AND rejection.id IS NULL`, target.accountID,
 		target.realmID, target.agentID, version).Scan(&parent,
 		&out.lineageGeneration, &out.stylePackID,
-		&out.stylePackVersion, &subjectForm, &out.svg)
+		&out.stylePackVersion, &subjectForm, &rendererProfile, &out.svg)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return avatarVersionMutationInfo{}, ErrAvatarVersionNotFound
 	}
@@ -1112,6 +1132,10 @@ func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatar
 		out.parentVersion = *parent
 	}
 	out.subjectForm = avatardomain.SubjectForm(subjectForm)
+	out.rendererProfile = avatardomain.RendererProfile(rendererProfile)
+	if err := out.rendererProfile.Validate(); err != nil {
+		return avatarVersionMutationInfo{}, fmt.Errorf("get avatar mutation version: %w", err)
+	}
 	return out, nil
 }
 

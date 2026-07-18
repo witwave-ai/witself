@@ -21,13 +21,13 @@ func FuzzSelfCardRasterizeNeverPanics(f *testing.F) {
 		if len(raw) == 0 || len(raw) > avatardomain.MaxSVGBytes {
 			return
 		}
-		canonical, err := avatardomain.SanitizeSVG(raw)
+		canonical, err := avatardomain.SanitizeSVGForPerceptualV1(raw)
 		if err != nil {
 			return
 		}
 		portrait, err := rasterizeSelfCardAvatar(canonical)
 		if err != nil {
-			return
+			t.Fatalf("profile-accepted SVG did not rasterize: %v", err)
 		}
 		if portrait == nil || portrait.Bounds().Dx() != selfCardRasterSize ||
 			portrait.Bounds().Dy() != selfCardRasterSize {

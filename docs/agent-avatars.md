@@ -28,10 +28,11 @@ creation always has a deterministic fallback.
   version so identity is not regenerated from scratch. The client reviews
   visual continuity. For self-authored evolution under the exact same style
   version, the server also preserves the subject form and normalized source of
-  every `locked_by_default` layer. This remains structural continuity; v1 does
-  not claim semantic image-similarity enforcement. A second deterministic,
-  model-free canonical-render check rejects gross whole-portrait replacement
-  and unlocked artwork that visually covers too much locked identity.
+  every `locked_by_default` layer. It also enforces semantic visual continuity
+  with deterministic `perceptual-v1` canonical renders: gross whole-portrait
+  replacement and unlocked artwork that visually covers too much locked
+  identity are rejected. This is bounded perceptual comparison, not a model,
+  embedding, or backend inference claim about the meaning of an image.
 - Initial fitting belongs to the active agent. It creates and inspects its
   first draft from its own perspective and may make one to three substantial
   local revisions when it wants changes, including a different subject form,
@@ -50,7 +51,9 @@ creation always has a deterministic fallback.
   lifecycle transition. The unlocked `experience`, `expression`, and `attire`
   layers are the normal places for gradual change.
 - Each proposal creates a durable version record whose identity and lifecycle
-  metadata are immutable. Activation changes the profile's active pointer;
+  metadata are immutable. Its public, value-free `renderer_profile` records
+  the exact rendering contract as either `perceptual-v1` or `legacy`.
+  Activation changes the profile's active pointer;
   rollback points it to a prior full-payload version.
   Quota compaction may later remove only an eligible inactive version's SVG,
   description, and visual specification; it never rewrites that version's
@@ -164,6 +167,35 @@ Realm style packs are aggregate-bounded as well as field-bounded. A style that
 cannot fit the durable JSONB contract is rejected as client input before a
 transaction starts rather than failing later as a database error.
 
+Every new proposal, style-pack reference, and generated placeholder must also
+satisfy the versioned `perceptual-v1` renderer profile. That profile leaves the
+released generic SVG sanitizer unchanged for old data, but narrows new renderer
+inputs to a square finite canvas, bounded coordinates, strokes, path groups,
+arc geometry, and deterministic raster-work budget. It rejects transforms,
+definitions, clipping, gradients, paint URLs, percentage geometry, alpha-hex
+paint, root or group opacity, alternate aspect-ratio behavior, and other
+renderer-dependent features. A new baseline also needs at least 48 pixels of
+locked identity in the canonical 96 by 96 projection. Renderer parse, work,
+or identity-mask uncertainty fails closed.
+
+Versions created before this contract, plus rows written during a mixed-version
+rollout by a server that omits the new field, are explicitly quarantined as
+`legacy`; compatible-looking bytes are never promoted by inspection. Legacy
+versions remain readable and exportable, but never create or consume a
+perceptual continuity fingerprint; schema and archive upgrades discard any
+pre-profile fingerprint because it cannot prove the renderer contract. A
+legacy parent cannot be promoted to `perceptual-v1` by same-style self
+evolution. Mixed-writer `perceptual-v1` to
+`legacy` edges and `legacy` to `legacy` edges remain valid quarantined history
+only when their verified locked-layer digests match; when both SVGs remain,
+their normalized locked layers must also match exactly. An operator replacement,
+an explicit reset followed by a parentless proposal, or a proposal under a newly
+selected style creates a fresh `perceptual-v1` baseline while preserving the
+legacy row as immutable history. During rollout only, a new client interprets a
+missing wire field from an older server as `legacy`; it does not persist that
+interpretation. Rich self-card rendering uses the strict profile and falls back
+to the plain card when legacy SVG is outside it.
+
 For evolution, the backend requires the active parent and the selected style
 version and enforces the pack's canvas, palette, and layer structure. A
 self-authored evolution under the exact same immutable style version must keep
@@ -174,14 +206,16 @@ cannot bypass the comparison. Locked layers may not depend on definitions,
 paint-server URLs, or clipping outside their projection. Operators can
 deliberately override locked-layer and subject continuity, and a self-authored
 migration after an operator selects a new style version is exempt so the agent
-can adopt the new grammar. The client still reviews overall recognizability;
-Witself does not treat structural source equality or a raster delta as semantic
-image comparison or protection against every possible visual occlusion.
+can adopt the new grammar. The client can additionally review higher-level
+recognizability. Witself's deterministic raster comparison is the enforced
+semantic visual-continuity boundary, but it is deliberately bounded: it does
+not infer image meaning or protect against every possible visual occlusion.
 
 The model-free raster guard renders five fixed 96 by 96 RGBA projections: both
 whole portraits, the parent's locked identity mask, and each version with only
-its locked layers visible. A generic locked-layer mask fallback can require one
-extra render, so the check performs at most six. Inputs are already limited to
+its locked layers visible. A locked-identity mask smaller than 48 pixels fails
+closed; it never falls back to a broad background or generic locked-layer mask.
+Inputs are already limited to
 64 KiB, 512 elements, depth 32, and 1,024 bytes per attribute, so work and
 image memory remain bounded. Ordinary wrapper groups are preserved by projection;
 declared `data-layer` groups cannot nest because style validation requires
@@ -209,7 +243,8 @@ full-parent guard builds and consumes this same format, so comparison across a
 retained-SVG and compacted-parent boundary is behaviorally identical rather
 than an approximation. Decoding requires the exact magic, version, render
 size, reserved flags, payload length, total length, checksum, and style digest.
-Quota compaction builds this fingerprint before clearing a parent SVG when a
+Quota compaction builds this fingerprint only from `perceptual-v1` bytes before
+clearing a parent SVG when a
 retained full direct child in the same lineage and style still depends on that
 boundary and was proposed by the owning agent. The exact 38,092-byte value is
 stored only on that compacted parent; full versions forbid it, and later
@@ -276,30 +311,45 @@ proposal still do not fit, the whole mutation fails closed with HTTP `409` and
 the stable error `avatar_payload_quota_exceeded`. No partial compaction, new
 proposal, profile revision, receipt, or lifecycle event is committed.
 
-The planner indexes same-lineage, same-style, same-subject, owning-agent child
-relationships and existing fingerprints before selection. For each candidate
-it projects the full-payload bytes removed, a new fingerprint required by any
-retained qualifying child, and a fingerprint pruned when its final qualifying
-child is also compacted. A candidate is selected only when the projected final
-retained content does not exceed the pre-cleanup footprint, including an
-incoming proposal. Consequently a small parent SVG stays full when replacing
-it with a 38,092-byte boundary would grow retained content; it may become
-eligible after another deterministic cleanup supplies enough offsetting
-reclamation. Planning stops only when the full-row count and inclusive
-retained-byte total both fit.
+The planner indexes same-lineage, same-style, same-subject, owning-agent
+`perceptual-v1` parent and child relationships and existing fingerprints before
+selection. For each candidate it projects the full-payload bytes removed, a new
+fingerprint required by any retained qualifying v1 child, and a fingerprint
+pruned when its final qualifying child is also compacted. A candidate is
+selected only when the projected final retained content does not exceed the
+pre-cleanup footprint, including an incoming proposal. Consequently a small
+parent SVG stays full when replacing it with a 38,092-byte boundary would grow
+retained content; it may become eligible after another deterministic cleanup
+supplies enough offsetting reclamation. Planning stops only when the full-row
+count and inclusive retained-byte total both fit.
 
 A same-lineage, same-style, owning-agent direct child that changes
 `subject_form` is corrupt historical self-evolution, not a different boundary
 class. If a compaction plan would clear either that parent or that child, the
 transaction fails closed and leaves both payloads unchanged.
 
-Before a selected parent SVG is cleared, compaction builds the exact fingerprint
-from that still-full source and validates every qualifying retained full child
-against both the stored/derived locked-layer digest and the fingerprint-based
-perceptual guard. A legacy or directly corrupted child that violates either
-boundary aborts the transaction; the parent remains full and no partial quota
-cleanup is committed.
+An obsolete fingerprint is reclaimed independently before any SVG is selected.
+That cleanup can satisfy a byte limit with zero payload compactions, including
+when every full payload is protected. The transaction still performs the
+continuity checks, executes the fingerprint prune, and verifies the resulting
+database count and byte total before it updates a quota or admits a proposal.
 
+Every enabled quota pass also pages the complete same-style, owning-agent edge
+graph that is not v1 on both sides. It rejects a subject-form change and
+`legacy` to `perceptual-v1`, verifies each available SVG against its stored
+locked-layer digest, requires equal parent and child digests, and performs exact
+normalized locked-layer continuity when both payloads are full. These
+quarantined edges never require WAPF, including a compacted v1 parent with a
+retained legacy child; the equal verified digest is sufficient when the parent
+SVG is gone. A failure rolls back the entire quota mutation even when no payload
+needed compaction.
+
+Before a selected v1 parent SVG is cleared, compaction builds the exact
+fingerprint from that still-full source and validates every qualifying retained
+full v1 child against both the stored/derived locked-layer digest and the
+fingerprint-based perceptual guard. A directly corrupted child that violates
+either boundary aborts the transaction; the parent remains full and no partial
+quota cleanup is committed.
 Before compaction clears the final qualifying full child of an already
 compacted parent, it requires a fingerprint and validates its stored format,
 checksum, and immutable style binding, then rechecks the child's stored and
@@ -336,14 +386,25 @@ while a compacted parent with a qualifying child must. Import rejects an archive
 that compacts an active, proposed, or protected rollback version.
 Current-schema import also rejects a retained full-payload count or inclusive
 retained-content byte total that exceeds the archived profile limits, so restore
-cannot bypass the live quota invariant. For a same-style agent-authored
-evolution, import validates
-normalized locked-layer source and the perceptual guard when both payloads are
-full. Across a compacted-parent/full-child boundary it requires the retained
+cannot bypass the live quota invariant. The sole exception is an archived
+profile with `payload_quota_reconciliation_required=true` that still contains
+unreconciled legacy or mixed-writer history. A marked overage must retain at
+least one full `legacy` version, its retained `perceptual-v1` subset must
+independently fit both archived limits, and total retained content must remain
+within the hard transition ceiling of 1,000 full payloads and 64 MiB. The marker
+remains portable and is cleared only when an enabled proposal or quota mutation
+successfully reconciles the retained history.
+
+For a same-style agent-authored v1 evolution, import validates normalized
+locked-layer source and the perceptual guard when both payloads are full. Across
+a compacted-v1-parent/full-v1-child boundary it requires the retained
 `locked_layers_sha256` to match and runs the same perceptual comparison from the
-stored fingerprint without attempting to render a missing parent SVG. A schema
-downgrade that would need to reconstruct a compacted payload is refused. The
-schema-51 startup finalizer derives legacy locked-layer digests in bounded
+stored fingerprint without attempting to render a missing parent SVG. For
+`perceptual-v1` to `legacy` and `legacy` to `legacy`, import requires equal
+verified locked digests, performs exact locked continuity when both SVGs are
+full, and requires no fingerprint. It rejects `legacy` to `perceptual-v1`. A
+schema downgrade that would need to reconstruct a compacted payload is refused.
+The schema-51 startup finalizer derives legacy locked-layer digests in bounded
 transactions with a batch-scoped style cache. The digest remains nullable so a
 schema-50 writer can keep inserting throughout a rolling deployment; detail and
 history reads derive a missing full-row digest, export repairs frozen-account
@@ -354,18 +415,20 @@ and fails closed.
 ### Compaction rollout
 
 Schema 51 installs a `BEFORE INSERT` compatibility trigger that derives
-`payload_bytes` when a schema-50 writer omits it. Deploy the compatible binary
-with `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=false` and wait until every old
-writer has drained. During this mixed window, no creative payload is cleared.
-Operationally freeze all avatar mutations for the short convergence window:
-proposals, activations, resets, rollbacks, style publishes, quota edits, and
-avatar-bearing import or export. Compatibility keeps a late schema-50 write
-data-safe, but avoiding new legacy active rows eliminates a later operator
-replacement. Then set the flag to `true` in a separate configuration change.
-The Helm ConfigMap checksum restarts all replicas; startup reruns the bounded
-nullable digest backfill before readiness and before any request can compact
-data. Do not roll back to a schema-50 binary after the database has advanced to
-schema 53; use a forward fix instead.
+`payload_bytes` when a schema-50 writer omits it and marks that profile for
+quota reconciliation when the writer omits the locked-layer digest. Deploy the
+compatible binary with `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=false` and
+wait until every old writer has drained. During this mixed window, no creative
+payload is cleared. Operationally freeze all avatar mutations for the short
+convergence window: proposals, activations, resets, rollbacks, style publishes,
+quota edits, and avatar-bearing import or export. Compatibility keeps a late
+schema-50 write data-safe, and schema 54 records it as `legacy`, but avoiding new
+legacy active rows eliminates a later operator replacement. Then set the flag
+to `true` in a separate configuration change. The Helm ConfigMap checksum
+restarts all replicas; startup reruns the bounded nullable digest backfill
+before readiness and before any request can compact data. Do not roll back to a
+schema-50 binary after the database has advanced to schema 54; use a forward fix
+instead.
 
 ## Large-realm style rollout
 

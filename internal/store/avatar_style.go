@@ -100,6 +100,9 @@ func (s *Store) SetRealmAvatarStyle(ctx context.Context, p Principal, realmID st
 	if realmID == "" || in.ExpectedStyleRevision < 1 {
 		return AvatarStyleMutationResult{}, fmt.Errorf("%w: realm and expected style revision are required", ErrAvatarInputInvalid)
 	}
+	// Fingerprint the request using the released generic validation contract so
+	// a receipt written by an older server remains replayable during rollout.
+	// The stricter renderer profile is enforced after a replay miss below.
 	if err := in.StylePack.Validate(); err != nil {
 		return AvatarStyleMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 	}
@@ -135,6 +138,12 @@ func (s *Store) SetRealmAvatarStyle(ctx context.Context, p Principal, realmID st
 			return AvatarStyleMutationResult{}, err
 		}
 		return AvatarStyleMutationResult{Style: style, Receipt: receipt}, nil
+	}
+	// Newly published references and their human placeholder source must be
+	// canonical-renderer compatible. Generic StylePack.Validate intentionally
+	// remains available for reading already stored legacy packs.
+	if err := avatardomain.ValidatePerceptualV1StylePack(in.StylePack); err != nil {
+		return AvatarStyleMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 	}
 
 	// Keep the publish/worker lock order account -> rollout job -> selected

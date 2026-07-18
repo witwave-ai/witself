@@ -64,14 +64,15 @@ func TestAvatarStoreToServerConversionPreservesCanonicalFields(t *testing.T) {
 			ID: "avver_active", AccountID: "acct_one", RealmID: "realm_one", AgentID: "agent_one",
 			Version: 1, LineageGeneration: 2, SubjectForm: avatardomain.SubjectHuman, Description: "active",
 			VisualSpec: json.RawMessage(`{"form":"human"}`), SVG: "<svg></svg>", SVGSHA256: "active-hash",
-			Style: style, ProposedBy: store.AvatarActor{Kind: "agent", ID: "agent_one", Name: "One"}, ProposedAt: now,
+			RendererProfile: avatardomain.RendererProfilePerceptualV1,
+			Style:           style, ProposedBy: store.AvatarActor{Kind: "agent", ID: "agent_one", Name: "One"}, ProposedAt: now,
 			IsActive: true, WasActivated: true, LastActivatedAt: &now,
 		},
 		Proposed: &store.AvatarVersion{
 			ID: "avver_proposed", AccountID: "acct_one", RealmID: "realm_one", AgentID: "agent_one",
 			Version: 2, ParentVersion: &parent, LineageGeneration: 3, SubjectForm: avatardomain.SubjectAnimal,
 			Description: "proposed", VisualSpec: json.RawMessage(`{"form":"animal"}`),
-			SVG: "<svg></svg>", SVGSHA256: "proposed-hash", Style: style,
+			SVG: "<svg></svg>", SVGSHA256: "proposed-hash", RendererProfile: avatardomain.RendererProfilePerceptualV1, Style: style,
 			Provenance: store.AvatarClientProvenance{Runtime: "codex", Model: "gpt"},
 			ProposedBy: store.AvatarActor{Kind: "agent", ID: "agent_one", Name: "One"}, ProposedAt: now,
 			IsProposed: true,
@@ -84,7 +85,8 @@ func TestAvatarStoreToServerConversionPreservesCanonicalFields(t *testing.T) {
 		got.Active == nil || got.Active.SubjectForm != avatardomain.SubjectHuman || got.Active.LineageGeneration != 2 || !got.Active.IsActive ||
 		!got.Active.WasActivated || got.Active.LastActivatedAt == nil || !got.Active.LastActivatedAt.Equal(now) ||
 		got.Proposed == nil || got.Proposed.ParentVersion == nil || *got.Proposed.ParentVersion != parent || got.Proposed.LineageGeneration != 3 ||
-		got.Proposed.Provenance.Runtime != "codex" || !got.Proposed.IsProposed {
+		got.Active.RendererProfile != avatardomain.RendererProfilePerceptualV1 ||
+		got.Proposed.Provenance.Runtime != "codex" || got.Proposed.RendererProfile != avatardomain.RendererProfilePerceptualV1 || !got.Proposed.IsProposed {
 		t.Fatalf("converted avatar = %#v", got)
 	}
 	rejectedAt := now.Add(time.Minute)
@@ -97,10 +99,12 @@ func TestAvatarStoreToServerConversionPreservesCanonicalFields(t *testing.T) {
 	summary := toServerAvatarVersionSummary(store.AvatarVersionSummary{
 		ID: "avver_history", AgentID: "agent_one", Version: 2,
 		LineageGeneration: 3, SubjectForm: avatardomain.SubjectAnimal, SVGSHA256: "summary-hash", Style: style,
-		ProposedBy: store.AvatarActor{Kind: "agent", ID: "agent_one"}, ProposedAt: now,
+		RendererProfile: avatardomain.RendererProfilePerceptualV1,
+		ProposedBy:      store.AvatarActor{Kind: "agent", ID: "agent_one"}, ProposedAt: now,
 		WasActivated: true, RollbackEligible: true, LastActivatedAt: &now,
 	})
 	if summary.ID != "avver_history" || summary.AgentID != "agent_one" || summary.LineageGeneration != 3 || summary.SVGSHA256 != "summary-hash" ||
+		summary.RendererProfile != avatardomain.RendererProfilePerceptualV1 ||
 		!summary.WasActivated || !summary.RollbackEligible || summary.LastActivatedAt == nil {
 		t.Fatalf("converted history summary = %#v", summary)
 	}

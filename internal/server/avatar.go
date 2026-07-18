@@ -103,6 +103,7 @@ type AvatarVersion struct {
 	SVG                     string                 `json:"svg,omitempty"`
 	SVGSHA256               string                 `json:"svg_sha256"`
 	LockedLayersSHA256      string                 `json:"locked_layers_sha256"`
+	RendererProfile         avatar.RendererProfile `json:"renderer_profile"`
 	Style                   avatar.StylePackRef    `json:"style"`
 	Provenance              AvatarClientProvenance `json:"provenance,omitempty"`
 	ProposedBy              AvatarActor            `json:"proposed_by"`
@@ -123,30 +124,31 @@ type AvatarVersion struct {
 // AvatarVersionSummary is the payload-free history representation used to
 // select an exact immutable version for a subsequent detail or rollback read.
 type AvatarVersionSummary struct {
-	ID                      string              `json:"id"`
-	AccountID               string              `json:"account_id"`
-	RealmID                 string              `json:"realm_id"`
-	AgentID                 string              `json:"agent_id"`
-	Version                 int64               `json:"version"`
-	ParentVersion           *int64              `json:"parent_version,omitempty"`
-	LineageGeneration       int64               `json:"lineage_generation"`
-	SubjectForm             avatar.SubjectForm  `json:"subject_form"`
-	SVGSHA256               string              `json:"svg_sha256"`
-	LockedLayersSHA256      string              `json:"locked_layers_sha256"`
-	Style                   avatar.StylePackRef `json:"style"`
-	ProposedBy              AvatarActor         `json:"proposed_by"`
-	ProposedAt              time.Time           `json:"proposed_at"`
-	IsActive                bool                `json:"is_active"`
-	IsProposed              bool                `json:"is_proposed"`
-	WasActivated            bool                `json:"was_activated"`
-	RollbackEligible        bool                `json:"rollback_eligible"`
-	Rejected                bool                `json:"rejected"`
-	LastActivatedAt         *time.Time          `json:"last_activated_at,omitempty"`
-	RejectedAt              *time.Time          `json:"rejected_at,omitempty"`
-	PayloadState            avatar.PayloadState `json:"payload_state"`
-	PayloadBytes            int64               `json:"payload_bytes"`
-	PayloadCompactedAt      *time.Time          `json:"payload_compacted_at,omitempty"`
-	PayloadCompactionReason string              `json:"payload_compaction_reason,omitempty"`
+	ID                      string                 `json:"id"`
+	AccountID               string                 `json:"account_id"`
+	RealmID                 string                 `json:"realm_id"`
+	AgentID                 string                 `json:"agent_id"`
+	Version                 int64                  `json:"version"`
+	ParentVersion           *int64                 `json:"parent_version,omitempty"`
+	LineageGeneration       int64                  `json:"lineage_generation"`
+	SubjectForm             avatar.SubjectForm     `json:"subject_form"`
+	SVGSHA256               string                 `json:"svg_sha256"`
+	LockedLayersSHA256      string                 `json:"locked_layers_sha256"`
+	RendererProfile         avatar.RendererProfile `json:"renderer_profile"`
+	Style                   avatar.StylePackRef    `json:"style"`
+	ProposedBy              AvatarActor            `json:"proposed_by"`
+	ProposedAt              time.Time              `json:"proposed_at"`
+	IsActive                bool                   `json:"is_active"`
+	IsProposed              bool                   `json:"is_proposed"`
+	WasActivated            bool                   `json:"was_activated"`
+	RollbackEligible        bool                   `json:"rollback_eligible"`
+	Rejected                bool                   `json:"rejected"`
+	LastActivatedAt         *time.Time             `json:"last_activated_at,omitempty"`
+	RejectedAt              *time.Time             `json:"rejected_at,omitempty"`
+	PayloadState            avatar.PayloadState    `json:"payload_state"`
+	PayloadBytes            int64                  `json:"payload_bytes"`
+	PayloadCompactedAt      *time.Time             `json:"payload_compacted_at,omitempty"`
+	PayloadCompactionReason string                 `json:"payload_compaction_reason,omitempty"`
 }
 
 // AvatarView contains the profile plus its exact active and pending payloads.

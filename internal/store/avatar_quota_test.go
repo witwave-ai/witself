@@ -181,6 +181,22 @@ func TestPlanAvatarPayloadCompactionPrunesLastChildFingerprint(t *testing.T) {
 	}
 }
 
+func TestPlanAvatarPayloadCompactionPrunesObsoleteFingerprintWithoutPayloadCleanup(t *testing.T) {
+	const payloadBytes = int64(50_000)
+	plan, err := planAvatarPayloadCompaction([]avatarPayloadCandidate{
+		{version: 2, lineage: 1, bytes: payloadBytes, wasActivated: true},
+	}, map[int64]int64{1: avatardomain.PerceptualContinuityFingerprintBytes},
+		1, 2, 0, 0, 0, 1, payloadBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.count != 0 || len(plan.versions) != 0 || plan.retainedCount != 1 ||
+		plan.retainedBytes != payloadBytes ||
+		plan.netReclaimedBytes != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("obsolete-only cleanup = %#v", plan)
+	}
+}
+
 func TestPlanAvatarPayloadCompactionHandlesLargeLegacyHistory(t *testing.T) {
 	const versions = 20_000
 	candidates := make([]avatarPayloadCandidate, 0, versions)

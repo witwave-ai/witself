@@ -989,7 +989,8 @@ accept `limit` (default 20, maximum 100) and exclusive `before_version` (zero or
 omitted for newest), and return `next_before_version` only when another page
 exists. Summaries never include SVG, visual specifications, descriptions, or
 generation provenance. History includes `svg_sha256`,
-`locked_layers_sha256`, style, subject, parent, `lineage_generation`, proposer,
+`locked_layers_sha256`, the value-free immutable `renderer_profile`, style,
+subject, parent, `lineage_generation`, proposer,
 timestamps, `payload_state`, original `payload_bytes`, optional
 `payload_compacted_at`, optional `payload_compaction_reason`, and the lifecycle
 projection `is_active`, `is_proposed`, `was_activated`, `rollback_eligible`, and
@@ -1003,6 +1004,15 @@ metadata, hashes, provenance, payload accounting, and compaction metadata, but
 omits `svg`, `description`, and `visual_spec`; it is never rollback-eligible.
 These fields let a client choose valid actions without inferring lifecycle or
 payload state from version order.
+
+`renderer_profile` is always explicit in current server responses. New
+versions are `perceptual-v1`; `legacy` identifies readable, exportable history
+that predates the deterministic renderer contract or was written by an older
+server during rollout. Legacy is never promoted by inspecting SVG bytes, cannot
+seed perceptual continuity or parent same-style self evolution, and is
+rebaselined only by an operator replacement, a post-reset parentless proposal,
+or a proposal under a newly selected style. A mixed-version client treats a
+missing field from an older response as legacy in memory only.
 
 Avatar profile responses include the operator-configured
 `retained_payload_count_limit` and `retained_payload_byte_limit`, the current

@@ -699,11 +699,11 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 			       (account_id, realm_id, agent_id, id, version, parent_version,
 			        lineage_generation, style_pack_id, style_pack_version,
 			        subject_form, svg, description, visual_spec, svg_sha256,
-			        locked_layers_sha256, provenance, proposed_by_kind,
+			        locked_layers_sha256, renderer_profile, provenance, proposed_by_kind,
 			        proposed_by_id, payload_bytes)
 			VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,'human',$9,
 			        'A direct boundary validation fixture.',
-			        '{"identity":{"expression":"calm"}}'::jsonb,$10,$11,
+			        '{"identity":{"expression":"calm"}}'::jsonb,$10,$11,'perceptual-v1',
 			        '{"runtime":"boundary-test"}'::jsonb,$12,$13,$14)`,
 			s.accountID, s.realmID, s.agent.ID, versionID,
 			version, parentValue, pack.ID, pack.Version, svg,
@@ -766,6 +766,245 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 			t.Fatalf("operator-child compaction = %#v / %v", plan, err)
 		}
 		assertNoFingerprints(t, s)
+	})
+
+	t.Run("legacy child does not seed a v1 boundary", func(t *testing.T) {
+		s := newScenario(t, "legacy-child")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET renderer_profile='legacy'
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compact(t, s, 1)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("legacy-child compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("zero-work reconciliation prunes stale mixed-writer WAPF", func(t *testing.T) {
+		s := newScenario(t, "stale-mixed-wapf")
+		parentSVG := s.pack.References[0].SVG
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID, parentSVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID, parentSVG, 0)
+		fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+			[]byte(parentSVG), s.pack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET payload_state=CASE WHEN version=1 THEN 'compacted' ELSE payload_state END,
+			       svg=CASE WHEN version=1 THEN NULL ELSE svg END,
+			       description=CASE WHEN version=1 THEN NULL ELSE description END,
+			       visual_spec=CASE WHEN version=1 THEN NULL ELSE visual_spec END,
+			       payload_compacted_at=CASE WHEN version=1 THEN clock_timestamp() ELSE NULL END,
+			       payload_compaction_reason=CASE WHEN version=1 THEN 'quota' ELSE NULL END,
+			       continuity_fingerprint=CASE WHEN version=1 THEN $2::bytea ELSE NULL END,
+			       renderer_profile=CASE WHEN version=2 THEN 'legacy' ELSE renderer_profile END
+			 WHERE agent_id=$1 AND version IN (1,2)`, s.agent.ID, fingerprint); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compact(t, s, 1)
+		if err != nil || plan.count != 0 || len(plan.versions) != 0 ||
+			plan.netReclaimedBytes != avatardomain.PerceptualContinuityFingerprintBytes {
+			t.Fatalf("stale mixed WAPF reconciliation = %#v / %v", plan, err)
+		}
+		var fingerprintBytes int
+		var childState string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COALESCE(octet_length(parent.continuity_fingerprint),0),child.payload_state
+			  FROM agent_avatar_versions parent
+			  JOIN agent_avatar_versions child
+			    ON child.agent_id=parent.agent_id AND child.parent_version=parent.version
+			 WHERE parent.agent_id=$1 AND parent.version=1`, s.agent.ID).
+			Scan(&fingerprintBytes, &childState); err != nil {
+			t.Fatal(err)
+		}
+		if fingerprintBytes != 0 || childState != string(avatardomain.PayloadFull) {
+			t.Fatalf("stale mixed WAPF post-state = fingerprint:%d child:%s",
+				fingerprintBytes, childState)
+		}
+	})
+
+	t.Run("legacy lineage uses locked digests without WAPF", func(t *testing.T) {
+		s := newScenario(t, "legacy-lineage")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET renderer_profile='legacy'
+			 WHERE agent_id=$1 AND version IN (1,2)`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compact(t, s, 1)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("legacy-lineage compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("legacy parent cannot promote to v1", func(t *testing.T) {
+		s := newScenario(t, "legacy-promotion")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET renderer_profile='legacy'
+			 WHERE agent_id=$1 AND version=1`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 1); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("legacy promotion compaction error = %v, want conflict", err)
+		}
+		var full int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM agent_avatar_versions
+			 WHERE agent_id=$1 AND payload_state='full'`, s.agent.ID).Scan(&full); err != nil {
+			t.Fatal(err)
+		}
+		if full != 2 {
+			t.Fatalf("legacy promotion failure retained %d full payloads, want 2", full)
+		}
+	})
+
+	t.Run("quarantined same-style edge cannot change subject form", func(t *testing.T) {
+		s := newScenario(t, "legacy-subject-change")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET renderer_profile='legacy',
+			       subject_form=CASE WHEN version=2 THEN 'animal' ELSE subject_form END
+			 WHERE agent_id=$1 AND version IN (1,2)`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 2); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("legacy subject-form reconciliation = %v, want conflict", err)
+		}
+	})
+
+	t.Run("zero-work reconciliation validates quarantined digests", func(t *testing.T) {
+		s := newScenario(t, "legacy-zero-work")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET renderer_profile='legacy',locked_layers_sha256=$2
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID, strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 2); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("zero-work digest validation = %v, want conflict", err)
+		}
+		var full int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM agent_avatar_versions
+			 WHERE agent_id=$1 AND payload_state='full'`, s.agent.ID).Scan(&full); err != nil {
+			t.Fatal(err)
+		}
+		if full != 2 {
+			t.Fatalf("zero-work validation retained %d full payloads, want 2", full)
+		}
+	})
+
+	t.Run("quarantined edge validation pages the full history", func(t *testing.T) {
+		s := newScenario(t, "legacy-paged-validation")
+		const history = int64(130)
+		for version := int64(1); version <= history; version++ {
+			parent := int64(0)
+			if version > 1 {
+				parent = 1
+			}
+			insertVersion(t, s, version, parent, s.pack, PrincipalAgent, s.agent.ID,
+				s.pack.References[0].SVG, 0)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET renderer_profile='legacy'
+			 WHERE agent_id=$1`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, int(history)); err != nil {
+			t.Fatalf("paged legacy graph validation = %v", err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET locked_layers_sha256=$2
+			 WHERE agent_id=$1 AND version=$3`, s.agent.ID,
+			strings.Repeat("0", 64), history); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, int(history)); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("paged tail digest validation = %v, want conflict", err)
+		}
+	})
+
+	t.Run("compacted legacy parent validates a selected legacy child by digest", func(t *testing.T) {
+		s := newScenario(t, "legacy-compacted-parent")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET renderer_profile='legacy',
+			       payload_state=CASE WHEN version=1 THEN 'compacted' ELSE payload_state END,
+			       svg=CASE WHEN version=1 THEN NULL ELSE svg END,
+			       description=CASE WHEN version=1 THEN NULL ELSE description END,
+			       visual_spec=CASE WHEN version=1 THEN NULL ELSE visual_spec END,
+			       payload_compacted_at=CASE WHEN version=1 THEN clock_timestamp() ELSE NULL END,
+			       payload_compaction_reason=CASE WHEN version=1 THEN 'quota' ELSE NULL END
+			 WHERE agent_id=$1 AND version IN (1,2)`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compact(t, s, 0)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 2 {
+			t.Fatalf("compacted-parent legacy child compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("compacted legacy parent digest mismatch blocks child cleanup", func(t *testing.T) {
+		s := newScenario(t, "legacy-compacted-mismatch")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET renderer_profile='legacy',
+			       locked_layers_sha256=CASE WHEN version=1 THEN $2 ELSE locked_layers_sha256 END,
+			       payload_state=CASE WHEN version=1 THEN 'compacted' ELSE payload_state END,
+			       svg=CASE WHEN version=1 THEN NULL ELSE svg END,
+			       description=CASE WHEN version=1 THEN NULL ELSE description END,
+			       visual_spec=CASE WHEN version=1 THEN NULL ELSE visual_spec END,
+			       payload_compacted_at=CASE WHEN version=1 THEN clock_timestamp() ELSE NULL END,
+			       payload_compaction_reason=CASE WHEN version=1 THEN 'quota' ELSE NULL END
+			 WHERE agent_id=$1 AND version IN (1,2)`, s.agent.ID,
+			strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 0); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("compacted-parent digest validation = %v, want conflict", err)
+		}
+		var childState string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT payload_state FROM agent_avatar_versions
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID).Scan(&childState); err != nil {
+			t.Fatal(err)
+		}
+		if childState != string(avatardomain.PayloadFull) {
+			t.Fatalf("failed digest validation child state = %s, want full", childState)
+		}
 	})
 
 	t.Run("different-style child", func(t *testing.T) {
@@ -922,7 +1161,7 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy occluding child refuses irreversible parent compaction", func(t *testing.T) {
+	t.Run("directly inserted occluding child refuses irreversible parent compaction", func(t *testing.T) {
 		s := newScenario(t, "occlusion")
 		parentSVG := s.pack.References[0].SVG
 		childSVG := strings.Replace(parentSVG,

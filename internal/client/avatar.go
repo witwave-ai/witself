@@ -77,6 +77,7 @@ type AvatarVersion struct {
 	SVG                     string                 `json:"svg,omitempty"`
 	SVGSHA256               string                 `json:"svg_sha256"`
 	LockedLayersSHA256      string                 `json:"locked_layers_sha256"`
+	RendererProfile         avatar.RendererProfile `json:"renderer_profile"`
 	Style                   avatar.StylePackRef    `json:"style"`
 	Provenance              AvatarClientProvenance `json:"provenance,omitempty"`
 	ProposedBy              AvatarActor            `json:"proposed_by"`
@@ -97,30 +98,31 @@ type AvatarVersion struct {
 // AvatarVersionSummary is the compact immutable metadata and lifecycle state
 // returned by history reads. Fetch one exact version for creative payloads.
 type AvatarVersionSummary struct {
-	ID                      string              `json:"id"`
-	AccountID               string              `json:"account_id"`
-	RealmID                 string              `json:"realm_id"`
-	AgentID                 string              `json:"agent_id"`
-	Version                 int64               `json:"version"`
-	ParentVersion           *int64              `json:"parent_version,omitempty"`
-	LineageGeneration       int64               `json:"lineage_generation"`
-	SubjectForm             avatar.SubjectForm  `json:"subject_form"`
-	SVGSHA256               string              `json:"svg_sha256"`
-	LockedLayersSHA256      string              `json:"locked_layers_sha256"`
-	Style                   avatar.StylePackRef `json:"style"`
-	ProposedBy              AvatarActor         `json:"proposed_by"`
-	ProposedAt              time.Time           `json:"proposed_at"`
-	IsActive                bool                `json:"is_active"`
-	IsProposed              bool                `json:"is_proposed"`
-	WasActivated            bool                `json:"was_activated"`
-	RollbackEligible        bool                `json:"rollback_eligible"`
-	Rejected                bool                `json:"rejected"`
-	LastActivatedAt         *time.Time          `json:"last_activated_at,omitempty"`
-	RejectedAt              *time.Time          `json:"rejected_at,omitempty"`
-	PayloadState            avatar.PayloadState `json:"payload_state"`
-	PayloadBytes            int64               `json:"payload_bytes"`
-	PayloadCompactedAt      *time.Time          `json:"payload_compacted_at,omitempty"`
-	PayloadCompactionReason string              `json:"payload_compaction_reason,omitempty"`
+	ID                      string                 `json:"id"`
+	AccountID               string                 `json:"account_id"`
+	RealmID                 string                 `json:"realm_id"`
+	AgentID                 string                 `json:"agent_id"`
+	Version                 int64                  `json:"version"`
+	ParentVersion           *int64                 `json:"parent_version,omitempty"`
+	LineageGeneration       int64                  `json:"lineage_generation"`
+	SubjectForm             avatar.SubjectForm     `json:"subject_form"`
+	SVGSHA256               string                 `json:"svg_sha256"`
+	LockedLayersSHA256      string                 `json:"locked_layers_sha256"`
+	RendererProfile         avatar.RendererProfile `json:"renderer_profile"`
+	Style                   avatar.StylePackRef    `json:"style"`
+	ProposedBy              AvatarActor            `json:"proposed_by"`
+	ProposedAt              time.Time              `json:"proposed_at"`
+	IsActive                bool                   `json:"is_active"`
+	IsProposed              bool                   `json:"is_proposed"`
+	WasActivated            bool                   `json:"was_activated"`
+	RollbackEligible        bool                   `json:"rollback_eligible"`
+	Rejected                bool                   `json:"rejected"`
+	LastActivatedAt         *time.Time             `json:"last_activated_at,omitempty"`
+	RejectedAt              *time.Time             `json:"rejected_at,omitempty"`
+	PayloadState            avatar.PayloadState    `json:"payload_state"`
+	PayloadBytes            int64                  `json:"payload_bytes"`
+	PayloadCompactedAt      *time.Time             `json:"payload_compacted_at,omitempty"`
+	PayloadCompactionReason string                 `json:"payload_compaction_reason,omitempty"`
 }
 
 // AvatarView is the exact profile plus its current active and pending version
@@ -315,6 +317,9 @@ func getAvatarHistory(ctx context.Context, route, token string, opts AvatarHisto
 	if out.Versions == nil {
 		out.Versions = []AvatarVersionSummary{}
 	}
+	for i := range out.Versions {
+		normalizeAvatarVersionSummaryRendererProfile(&out.Versions[i])
+	}
 	return &out, nil
 }
 
@@ -391,6 +396,7 @@ func getAvatarVersion(ctx context.Context, avatarRoute, token string, version in
 	if err := doJSON(ctx, http.MethodGet, avatarRoute+"/versions/"+strconv.FormatInt(version, 10), token, nil, &out); err != nil {
 		return nil, err
 	}
+	normalizeAvatarVersionRendererProfile(&out.Version)
 	return &out.Version, nil
 }
 
@@ -458,6 +464,7 @@ func getAvatar(ctx context.Context, requestURL, token string) (*AvatarView, erro
 	if err := doJSON(ctx, http.MethodGet, requestURL, token, nil, &out); err != nil {
 		return nil, err
 	}
+	normalizeAvatarViewRendererProfiles(&out.Avatar)
 	return &out.Avatar, nil
 }
 
@@ -481,7 +488,32 @@ func mutateAvatar(ctx context.Context, method, requestURL, token, idempotencyKey
 		avatarIdempotencyHeaders(idempotencyKey), body, &out); err != nil {
 		return nil, err
 	}
+	normalizeAvatarViewRendererProfiles(&out.Avatar)
 	return &out, nil
+}
+
+// normalizeAvatarViewRendererProfiles is a rollout-only read compatibility
+// seam. A v186 client can briefly receive avatar JSON from a still-running
+// v185 server that did not emit renderer_profile. Empty means legacy on the
+// wire only; this helper never upgrades or persists renderer provenance.
+func normalizeAvatarViewRendererProfiles(view *AvatarView) {
+	if view == nil {
+		return
+	}
+	normalizeAvatarVersionRendererProfile(view.Active)
+	normalizeAvatarVersionRendererProfile(view.Proposed)
+}
+
+func normalizeAvatarVersionRendererProfile(version *AvatarVersion) {
+	if version != nil && version.RendererProfile == "" {
+		version.RendererProfile = avatar.RendererProfileLegacy
+	}
+}
+
+func normalizeAvatarVersionSummaryRendererProfile(version *AvatarVersionSummary) {
+	if version != nil && version.RendererProfile == "" {
+		version.RendererProfile = avatar.RendererProfileLegacy
+	}
 }
 
 func avatarIdempotencyHeaders(key string) map[string]string {

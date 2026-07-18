@@ -138,6 +138,7 @@ type AvatarVersion struct {
 	SVG                     string
 	SVGSHA256               string
 	LockedLayersSHA256      string
+	RendererProfile         avatardomain.RendererProfile
 	Style                   avatardomain.StylePackRef
 	Provenance              AvatarClientProvenance
 	ProposedBy              AvatarActor
@@ -169,6 +170,7 @@ type AvatarVersionSummary struct {
 	SubjectForm             avatardomain.SubjectForm
 	SVGSHA256               string
 	LockedLayersSHA256      string
+	RendererProfile         avatardomain.RendererProfile
 	Style                   avatardomain.StylePackRef
 	ProposedBy              AvatarActor
 	ProposedAt              time.Time

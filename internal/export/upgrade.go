@@ -43,6 +43,7 @@ var upgraders = map[int]Upgrader{
 	49: preserveSchema49Rows,
 	50: addAvatarPayloadQuotaDefaults,
 	51: preserveSchema51Rows,
+	53: addAvatarRendererProfileDefault,
 }
 
 const (
@@ -50,6 +51,21 @@ const (
 	legacyAvatarRetainedPayloadByteLimit  = 2 * 1024 * 1024
 	legacyAvatarMaximumPayloadBytes       = 128 * 1024
 )
+
+// addAvatarRendererProfileDefault lifts every schema-53 avatar version as
+// legacy. Older writers never performed the exact perceptual-v1 baseline
+// checks, so an upgrader must not infer or fabricate stronger provenance from
+// SVG bytes that happen to pass today's validator.
+func addAvatarRendererProfileDefault(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_avatar_versions" {
+		row["renderer_profile"] = "legacy"
+		// Pre-profile fingerprints cannot prove that their source SVG used the
+		// exact perceptual-v1 renderer contract. The locked-layer digest remains
+		// the portable continuity authority for quarantined compacted rows.
+		row["continuity_fingerprint"] = nil
+	}
+	return row, nil
+}
 
 // addAvatarPayloadQuotaDefaults lifts schema-50 avatar rows into the explicit
 // full-or-compacted payload representation introduced by migration 0051.

@@ -42,6 +42,7 @@ type avatarPayloadQuotaVersion struct {
 	proposedByKind   string
 	proposedByID     string
 	payloadState     avatardomain.PayloadState
+	rendererProfile  avatardomain.RendererProfile
 	fingerprintBytes int64
 }
 
@@ -90,6 +91,27 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate,
 		}
 	}
 	preCleanupBytes := plan.retainedBytes
+	qualifyingChildCount := make(map[int64]int)
+	qualifyingChildren := make(map[int64][]int64)
+	for _, candidate := range candidates {
+		if candidate.qualifyingParentVersion == 0 {
+			continue
+		}
+		qualifyingChildCount[candidate.qualifyingParentVersion]++
+		qualifyingChildren[candidate.qualifyingParentVersion] = append(
+			qualifyingChildren[candidate.qualifyingParentVersion], candidate.version)
+	}
+	// Obsolete fingerprints are independently reclaimable metadata. Prune them
+	// in the projection before considering irreversible SVG compaction so a
+	// protected-only history can reconcile a mixed-writer boundary without
+	// destroying another payload merely to begin cleanup.
+	for parent, size := range workingFingerprints {
+		if qualifyingChildCount[parent] == 0 {
+			plan.retainedBytes -= size
+			delete(workingFingerprints, parent)
+		}
+	}
+	plan.netReclaimedBytes = preCleanupBytes - plan.retainedBytes
 	if plan.retainedCount <= countLimit && plan.retainedBytes <= byteLimit {
 		return plan, nil
 	}
@@ -150,22 +172,6 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate,
 		return eligible[i].version < eligible[j].version
 	})
 
-	qualifyingChildCount := make(map[int64]int)
-	qualifyingChildren := make(map[int64][]int64)
-	for _, candidate := range candidates {
-		if candidate.qualifyingParentVersion == 0 {
-			continue
-		}
-		qualifyingChildCount[candidate.qualifyingParentVersion]++
-		qualifyingChildren[candidate.qualifyingParentVersion] = append(
-			qualifyingChildren[candidate.qualifyingParentVersion], candidate.version)
-	}
-	var obsoleteFingerprintBytes int64
-	for parent, size := range workingFingerprints {
-		if qualifyingChildCount[parent] == 0 {
-			obsoleteFingerprintBytes += size
-		}
-	}
 	eligibleIndex := make(map[int64]int, len(eligible))
 	selected := make(map[int64]bool, len(eligible))
 	deltas := make([]int64, len(eligible))
@@ -175,7 +181,6 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate,
 			qualifyingChildCount, workingFingerprints)
 	}
 	deltaIndex := newAvatarPayloadDeltaIndex(deltas)
-	cleanupStarted := false
 	updateCandidate := func(version int64) {
 		index, ok := eligibleIndex[version]
 		if !ok || selected[version] {
@@ -196,23 +201,11 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate,
 
 	for plan.retainedCount > countLimit || plan.retainedBytes > byteLimit {
 		headroom := preCleanupBytes - plan.retainedBytes
-		if !cleanupStarted {
-			headroom += obsoleteFingerprintBytes
-		}
 		index := deltaIndex.firstAtMost(headroom)
 		if index < 0 {
 			return avatarPayloadCompactionPlan{}, ErrAvatarPayloadQuotaExceeded
 		}
 		candidate := eligible[index].avatarPayloadCandidate
-		if !cleanupStarted {
-			cleanupStarted = true
-			plan.retainedBytes -= obsoleteFingerprintBytes
-			for parent := range workingFingerprints {
-				if qualifyingChildCount[parent] == 0 {
-					delete(workingFingerprints, parent)
-				}
-			}
-		}
 		delta := avatarPayloadCandidateDelta(candidate, qualifyingChildCount,
 			workingFingerprints)
 		plan.retainedBytes += delta
@@ -319,6 +312,7 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		SELECT v.version, v.lineage_generation, v.payload_bytes,
 		       v.parent_version, v.style_pack_id, v.style_pack_version,
 		       v.subject_form, v.proposed_by_kind, v.proposed_by_id, v.payload_state,
+		       v.renderer_profile,
 		       COALESCE(octet_length(v.continuity_fingerprint),0),
 		       EXISTS (
 		         SELECT 1 FROM agent_avatar_activations activation
@@ -353,19 +347,22 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	for rows.Next() {
 		var version avatarPayloadQuotaVersion
 		var parentVersion *int64
-		var payloadState string
+		var payloadState, rendererProfile string
 		if err := rows.Scan(&version.version, &version.lineage,
 			&version.bytes, &parentVersion, &version.stylePackID,
 			&version.stylePackVersion, &version.subjectForm, &version.proposedByKind,
-			&version.proposedByID, &payloadState, &version.fingerprintBytes,
+			&version.proposedByID, &payloadState, &rendererProfile,
+			&version.fingerprintBytes,
 			&version.wasActivated, &version.rejected,
 			&version.lastActivatedAt); err != nil {
+			rows.Close()
 			return avatarPayloadCompactionPlan{}, err
 		}
 		if parentVersion != nil {
 			version.parentVersion = *parentVersion
 		}
 		version.payloadState = avatardomain.PayloadState(payloadState)
+		version.rendererProfile = avatardomain.RendererProfile(rendererProfile)
 		versions = append(versions, version)
 		versionsByNumber[version.version] = version
 	}
@@ -394,7 +391,8 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 							parentVersion: version.parentVersion,
 							childVersion:  version.version,
 						})
-				} else {
+				} else if parent.rendererProfile == avatardomain.RendererProfilePerceptualV1 &&
+					version.rendererProfile == avatardomain.RendererProfilePerceptualV1 {
 					qualifyingParentVersion = version.parentVersion
 				}
 			}
@@ -416,7 +414,7 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	plan, err := planAvatarPayloadCompaction(candidates, existingFingerprintBytes,
 		profile.lineageGeneration, activeVersion, proposedVersion, incomingCount,
 		incomingBytes, countLimit, byteLimit)
-	if err != nil || plan.count == 0 {
+	if err != nil {
 		return plan, err
 	}
 	selected := make(map[int64]bool, plan.count)
@@ -430,46 +428,52 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 				ErrAvatarConflict, mismatch.parentVersion, mismatch.childVersion)
 		}
 	}
-	fingerprints, err := buildAvatarCompactionFingerprintsTx(ctx, tx, target, plan)
-	if err != nil {
+	if err := validateAvatarNonPerceptualCompactionEdgesTx(
+		ctx, tx, target); err != nil {
 		return avatarPayloadCompactionPlan{}, err
 	}
-	if err := validateAvatarPrunedContinuityBoundariesTx(ctx, tx, target, plan); err != nil {
-		return avatarPayloadCompactionPlan{}, err
-	}
-	command, err := tx.Exec(ctx, `
-		UPDATE agent_avatar_versions
-		   SET payload_state='compacted', svg=NULL, description=NULL,
-		       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
-		       payload_compaction_reason='quota', continuity_fingerprint=NULL
-		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3
-		   AND version=ANY($4::bigint[]) AND payload_state='full'
-		   AND ($5::bigint=0 OR version<>$5)
-		   AND ($6::bigint=0 OR version<>$6)`, target.accountID, target.realmID,
-		target.agentID, plan.versions, activeVersion, proposedVersion)
-	if err != nil {
-		return avatarPayloadCompactionPlan{}, fmt.Errorf("compact avatar payloads: %w", err)
-	}
-	if command.RowsAffected() != int64(plan.count) {
-		return avatarPayloadCompactionPlan{}, ErrAvatarConflict
-	}
-	for _, version := range plan.versions {
-		fingerprint, needed := fingerprints[version]
-		if !needed {
-			continue
+	if plan.count > 0 {
+		fingerprints, err := buildAvatarCompactionFingerprintsTx(ctx, tx, target, plan)
+		if err != nil {
+			return avatarPayloadCompactionPlan{}, err
+		}
+		if err := validateAvatarPrunedContinuityBoundariesTx(ctx, tx, target, plan); err != nil {
+			return avatarPayloadCompactionPlan{}, err
 		}
 		command, err := tx.Exec(ctx, `
 			UPDATE agent_avatar_versions
-			   SET continuity_fingerprint=$5
+			   SET payload_state='compacted', svg=NULL, description=NULL,
+			       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
+			       payload_compaction_reason='quota', continuity_fingerprint=NULL
 			 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3
-			   AND version=$4 AND payload_state='compacted'
-			   AND continuity_fingerprint IS NULL`, target.accountID, target.realmID,
-			target.agentID, version, fingerprint)
+			   AND version=ANY($4::bigint[]) AND payload_state='full'
+			   AND ($5::bigint=0 OR version<>$5)
+			   AND ($6::bigint=0 OR version<>$6)`, target.accountID, target.realmID,
+			target.agentID, plan.versions, activeVersion, proposedVersion)
 		if err != nil {
-			return avatarPayloadCompactionPlan{}, fmt.Errorf("retain avatar continuity fingerprint: %w", err)
+			return avatarPayloadCompactionPlan{}, fmt.Errorf("compact avatar payloads: %w", err)
 		}
-		if command.RowsAffected() != 1 {
+		if command.RowsAffected() != int64(plan.count) {
 			return avatarPayloadCompactionPlan{}, ErrAvatarConflict
+		}
+		for _, version := range plan.versions {
+			fingerprint, needed := fingerprints[version]
+			if !needed {
+				continue
+			}
+			command, err := tx.Exec(ctx, `
+				UPDATE agent_avatar_versions
+				   SET continuity_fingerprint=$5
+				 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3
+				   AND version=$4 AND payload_state='compacted'
+				   AND continuity_fingerprint IS NULL`, target.accountID, target.realmID,
+				target.agentID, version, fingerprint)
+			if err != nil {
+				return avatarPayloadCompactionPlan{}, fmt.Errorf("retain avatar continuity fingerprint: %w", err)
+			}
+			if command.RowsAffected() != 1 {
+				return avatarPayloadCompactionPlan{}, ErrAvatarConflict
+			}
 		}
 	}
 	// A perceptual continuity fingerprint is useful on a compacted parent only
@@ -490,6 +494,7 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		        AND child.parent_version=parent.version
 		        AND child.lineage_generation=parent.lineage_generation
 		        AND child.payload_state='full'
+		        AND child.renderer_profile='perceptual-v1'
 		        AND child.proposed_by_kind='agent'
 		        AND child.proposed_by_id=child.agent_id
 		        AND child.style_pack_id=parent.style_pack_id
@@ -516,6 +521,148 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	return plan, nil
 }
 
+// validateAvatarNonPerceptualCompactionEdgesTx proves every same-style,
+// owner-authored edge that is not perceptual-v1 on both sides before an enabled
+// quota pass succeeds. Those quarantined edges never create or consume WAPF.
+// Their durable continuity authority is the exact locked-layer digest; while
+// both SVGs are still present we additionally compare their normalized locked
+// projections. Paging keeps legacy histories bounded in memory.
+func validateAvatarNonPerceptualCompactionEdgesTx(ctx context.Context, tx pgx.Tx,
+	target avatarTarget) error {
+	type styleKey struct {
+		id      string
+		version int
+	}
+	type boundary struct {
+		parentVersion, childVersion int64
+		stylePackID                 string
+		stylePackVersion            int
+		parentSubject, childSubject avatardomain.SubjectForm
+		parentState, childState     avatardomain.PayloadState
+		parentProfile, childProfile avatardomain.RendererProfile
+		parentSVG, childSVG         *string
+		parentLocked, childLocked   string
+	}
+	var afterParent, afterChild int64
+	for {
+		rows, err := tx.Query(ctx, `
+			SELECT parent.version,child.version,
+			       parent.style_pack_id,parent.style_pack_version,
+			       parent.subject_form,child.subject_form,
+			       parent.payload_state,parent.renderer_profile,parent.svg,
+			       parent.locked_layers_sha256,
+			       child.payload_state,child.renderer_profile,child.svg,
+			       child.locked_layers_sha256
+			  FROM agent_avatar_versions parent
+			  JOIN agent_avatar_versions child
+			    ON child.account_id=parent.account_id
+			   AND child.realm_id=parent.realm_id
+			   AND child.agent_id=parent.agent_id
+			   AND child.parent_version=parent.version
+			   AND child.lineage_generation=parent.lineage_generation
+			   AND child.style_pack_id=parent.style_pack_id
+			   AND child.style_pack_version=parent.style_pack_version
+			   AND child.proposed_by_kind='agent'
+			   AND child.proposed_by_id=parent.agent_id
+			 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
+			   AND NOT (parent.renderer_profile='perceptual-v1' AND
+			            child.renderer_profile='perceptual-v1')
+			   AND (parent.version,child.version)>($4::bigint,$5::bigint)
+			 ORDER BY parent.version,child.version
+			 LIMIT $6`, target.accountID, target.realmID, target.agentID,
+			afterParent, afterChild,
+			avatarContinuityValidationBatchSize)
+		if err != nil {
+			return fmt.Errorf("load quarantined avatar continuity boundaries: %w", err)
+		}
+		batch := make([]boundary, 0, avatarContinuityValidationBatchSize)
+		for rows.Next() {
+			var item boundary
+			var parentSubject, childSubject string
+			var parentState, childState, parentProfile, childProfile string
+			if err := rows.Scan(&item.parentVersion, &item.childVersion,
+				&item.stylePackID, &item.stylePackVersion,
+				&parentSubject, &childSubject,
+				&parentState, &parentProfile, &item.parentSVG, &item.parentLocked,
+				&childState, &childProfile, &item.childSVG, &item.childLocked); err != nil {
+				rows.Close()
+				return err
+			}
+			item.parentState = avatardomain.PayloadState(parentState)
+			item.childState = avatardomain.PayloadState(childState)
+			item.parentSubject = avatardomain.SubjectForm(parentSubject)
+			item.childSubject = avatardomain.SubjectForm(childSubject)
+			item.parentProfile = avatardomain.RendererProfile(parentProfile)
+			item.childProfile = avatardomain.RendererProfile(childProfile)
+			batch = append(batch, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(batch) == 0 {
+			return nil
+		}
+		packs := make(map[styleKey]avatardomain.StylePack)
+		for _, item := range batch {
+			if item.parentSubject != item.childSubject {
+				return fmt.Errorf("%w: avatar %d child %d changes subject form under the same style",
+					ErrAvatarConflict, item.parentVersion, item.childVersion)
+			}
+			if item.parentProfile == avatardomain.RendererProfileLegacy &&
+				item.childProfile == avatardomain.RendererProfilePerceptualV1 {
+				return fmt.Errorf("%w: avatar %d child %d promotes a legacy renderer without an explicit baseline",
+					ErrAvatarConflict, item.parentVersion, item.childVersion)
+			}
+			if item.parentLocked != item.childLocked {
+				return fmt.Errorf("%w: avatar %d child %d violates retained locked-layer continuity",
+					ErrAvatarConflict, item.parentVersion, item.childVersion)
+			}
+			key := styleKey{id: item.stylePackID, version: item.stylePackVersion}
+			pack, ok := packs[key]
+			if !ok {
+				pack, err = loadAvatarStylePackVersion(ctx, tx, target.accountID,
+					target.realmID, item.stylePackID, item.stylePackVersion)
+				if err != nil {
+					return err
+				}
+				packs[key] = pack
+			}
+			if item.parentState == avatardomain.PayloadFull {
+				if item.parentSVG == nil {
+					return ErrAvatarConflict
+				}
+				derived, digestErr := avatardomain.LockedLayersSHA256([]byte(*item.parentSVG), pack)
+				if digestErr != nil || derived != item.parentLocked {
+					return fmt.Errorf("%w: avatar %d retained locked-layer digest is invalid",
+						ErrAvatarConflict, item.parentVersion)
+				}
+			}
+			if item.childState == avatardomain.PayloadFull {
+				if item.childSVG == nil {
+					return ErrAvatarConflict
+				}
+				derived, digestErr := avatardomain.LockedLayersSHA256([]byte(*item.childSVG), pack)
+				if digestErr != nil || derived != item.childLocked {
+					return fmt.Errorf("%w: avatar %d child %d retained locked-layer digest is invalid",
+						ErrAvatarConflict, item.parentVersion, item.childVersion)
+				}
+			}
+			if item.parentState == avatardomain.PayloadFull &&
+				item.childState == avatardomain.PayloadFull {
+				if err := avatardomain.ValidateLockedLayerContinuity(
+					[]byte(*item.parentSVG), []byte(*item.childSVG), pack); err != nil {
+					return fmt.Errorf("%w: avatar %d child %d violates locked-layer continuity: %v",
+						ErrAvatarConflict, item.parentVersion, item.childVersion, err)
+				}
+			}
+		}
+		afterParent = batch[len(batch)-1].parentVersion
+		afterChild = batch[len(batch)-1].childVersion
+	}
+}
+
 // buildAvatarCompactionFingerprintsTx snapshots the exact bounded perceptual
 // boundary before planned parent SVGs are cleared. A compacted parent retains
 // the projection only while a full direct child outside this plan still needs
@@ -537,11 +684,13 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 		   AND parent.version=child.parent_version
 		 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 		   AND parent.version=ANY($4::bigint[]) AND parent.payload_state='full'
+		   AND parent.renderer_profile='perceptual-v1'
 		   AND child.lineage_generation=parent.lineage_generation
 		   AND child.style_pack_id=parent.style_pack_id
 		   AND child.style_pack_version=parent.style_pack_version
 		   AND child.subject_form=parent.subject_form
 		   AND child.payload_state='full'
+		   AND child.renderer_profile='perceptual-v1'
 		   AND NOT (child.version=ANY($4::bigint[]))
 		   AND child.proposed_by_kind='agent'
 		   AND child.proposed_by_id=parent.agent_id
@@ -638,6 +787,7 @@ func loadAvatarCompactionFingerprintSourcesTx(ctx context.Context, tx pgx.Tx,
 		  FROM agent_avatar_versions parent
 		 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 		   AND parent.version=ANY($4::bigint[]) AND parent.payload_state='full'
+		   AND parent.renderer_profile='perceptual-v1'
 		   AND EXISTS (
 		     SELECT 1 FROM agent_avatar_versions child
 		      WHERE child.account_id=parent.account_id
@@ -649,6 +799,7 @@ func loadAvatarCompactionFingerprintSourcesTx(ctx context.Context, tx pgx.Tx,
 		        AND child.style_pack_version=parent.style_pack_version
 		        AND child.subject_form=parent.subject_form
 		        AND child.payload_state='full'
+		        AND child.renderer_profile='perceptual-v1'
 		        AND NOT (child.version=ANY($4::bigint[]))
 		        AND child.proposed_by_kind='agent'
 		        AND child.proposed_by_id=parent.agent_id
@@ -719,6 +870,9 @@ func validateAvatarPrunedContinuityBoundariesTx(ctx context.Context, tx pgx.Tx,
 			   AND child.proposed_by_id=parent.agent_id
 			 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 			   AND parent.payload_state='compacted'
+			   AND parent.renderer_profile='perceptual-v1'
+			   AND parent.continuity_fingerprint IS NOT NULL
+			   AND child.renderer_profile='perceptual-v1'
 			   AND child.version=ANY($4::bigint[])
 			   AND (parent.version, child.version) > ($5::bigint, $6::bigint)
 			   AND NOT EXISTS (
@@ -732,6 +886,7 @@ func validateAvatarPrunedContinuityBoundariesTx(ctx context.Context, tx pgx.Tx,
 			        AND sibling.style_pack_version=parent.style_pack_version
 			        AND sibling.subject_form=parent.subject_form
 			        AND sibling.payload_state='full'
+			        AND sibling.renderer_profile='perceptual-v1'
 			        AND sibling.proposed_by_kind='agent'
 			        AND sibling.proposed_by_id=parent.agent_id
 			        AND NOT (sibling.version=ANY($4::bigint[]))

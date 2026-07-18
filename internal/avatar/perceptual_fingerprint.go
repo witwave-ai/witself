@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"math/bits"
 )
 
 const (
@@ -63,7 +64,10 @@ func BuildPerceptualContinuityFingerprint(parent []byte, pack StylePack) (finger
 			err = fmt.Errorf("%w: build continuity fingerprint", ErrPerceptualRender)
 		}
 	}()
-	parentSVG, err := SanitizeSVGForStylePack(parent, pack)
+	if err := ValidatePerceptualV1StylePack(pack); err != nil {
+		return nil, err
+	}
+	parentSVG, err := SanitizeSVGForPerceptualV1StylePack(parent, pack)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +92,7 @@ func ValidatePerceptualContinuityFingerprint(fingerprint []byte) error {
 // ValidatePerceptualContinuityFingerprintForStyle additionally verifies that
 // the fingerprint was built from the exact immutable style-pack content.
 func ValidatePerceptualContinuityFingerprintForStyle(fingerprint []byte, pack StylePack) error {
-	if err := pack.Validate(); err != nil {
+	if err := ValidatePerceptualV1StylePack(pack); err != nil {
 		return err
 	}
 	decoded, err := decodePerceptualContinuityFingerprint(fingerprint)
@@ -112,16 +116,9 @@ func renderPerceptualParentProjection(parentSVG []byte, pack StylePack) (*image.
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if countPerceptualMaskPixels(identityMask) < perceptualMinimumMaskPixels &&
-		len(allLocked) != len(lockedIdentity) {
-		identitySVG, err = selectPerceptualLayers(parentSVG, pack, allLocked)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		identityMask, err = renderPerceptualAvatar(identitySVG)
-		if err != nil {
-			return nil, nil, nil, err
-		}
+	if pixels := countPerceptualMaskPixels(identityMask); pixels < perceptualMinimumMaskPixels {
+		return nil, nil, nil, fmt.Errorf("%w: locked identity projection covers %d pixels, want at least %d",
+			ErrPerceptualRender, pixels, perceptualMinimumMaskPixels)
 	}
 	parentLockedSVG, err := selectPerceptualLayers(parentSVG, pack, allLocked)
 	if err != nil {
@@ -203,6 +200,14 @@ func decodePerceptualContinuityFingerprint(fingerprint []byte) (decodedPerceptua
 	offset += perceptualFingerprintRGBBytes
 	identityMask := stable[offset : offset+perceptualFingerprintIdentityMaskBytes]
 	offset += perceptualFingerprintIdentityMaskBytes
+	maskPixels := 0
+	for _, value := range identityMask {
+		maskPixels += bits.OnesCount8(value)
+	}
+	if maskPixels < perceptualMinimumMaskPixels {
+		return decodedPerceptualContinuityFingerprint{}, fmt.Errorf("%w: identity mask covers %d pixels, want at least %d",
+			ErrInvalidPerceptualFingerprint, maskPixels, perceptualMinimumMaskPixels)
+	}
 	unlockedInfluence := stable[offset : offset+perceptualFingerprintInfluenceBytes]
 	return decodedPerceptualContinuityFingerprint{
 		styleDigest: styleDigest, wholeRGB: wholeRGB,

@@ -2,6 +2,8 @@ package avatar
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"errors"
 	"math"
 	"testing"
 )
@@ -57,6 +59,36 @@ func FuzzSanitizeSVGForStylePackNeverPanics(f *testing.F) {
 	})
 }
 
+func FuzzSanitizeSVGForPerceptualV1NeverPanics(f *testing.F) {
+	for _, seed := range avatarSVGFuzzSeeds() {
+		f.Add(seed)
+	}
+	placeholder, err := GeneratePlaceholderSVG("agent_fuzz", "Juniper")
+	if err != nil {
+		f.Fatalf("build placeholder seed: %v", err)
+	}
+	f.Add(placeholder)
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		if len(raw) == 0 || len(raw) > MaxSVGBytes {
+			return
+		}
+		canonical, err := SanitizeSVGForPerceptualV1(raw)
+		if err != nil {
+			return
+		}
+		again, err := SanitizeSVGForPerceptualV1(canonical)
+		if err != nil {
+			t.Fatalf("accepted perceptual-v1 SVG was not accepted again: %v", err)
+		}
+		if !bytes.Equal(canonical, again) {
+			t.Fatal("perceptual-v1 canonicalization is not idempotent")
+		}
+		if _, err := renderPerceptualAvatar(canonical); err != nil {
+			t.Fatalf("profile-accepted SVG did not render: %v", err)
+		}
+	})
+}
+
 func FuzzPerceptualContinuityNeverPanics(f *testing.F) {
 	pack := BuiltInFlatVectorStylePack()
 	f.Add([]byte(humanReferenceSVG))
@@ -66,7 +98,13 @@ func FuzzPerceptualContinuityNeverPanics(f *testing.F) {
 		if len(child) == 0 || len(child) > MaxSVGBytes {
 			return
 		}
-		metrics, _ := ComparePerceptualContinuity([]byte(humanReferenceSVG), child, pack)
+		if _, err := SanitizeSVGForPerceptualV1StylePack(child, pack); err != nil {
+			return
+		}
+		metrics, err := ComparePerceptualContinuity([]byte(humanReferenceSVG), child, pack)
+		if err != nil && !errors.Is(err, ErrPerceptualContinuity) {
+			t.Fatalf("profile-accepted child failed outside continuity policy: %v", err)
+		}
 		for name, value := range map[string]float64{
 			"whole changed ratio":      metrics.WholeChangedRatio,
 			"whole mean delta":         metrics.WholeMeanDelta,
@@ -104,12 +142,48 @@ func FuzzPerceptualContinuityFingerprintNeverPanics(f *testing.F) {
 	})
 }
 
+func FuzzPerceptualContinuityStructuredFingerprintNeverPanics(f *testing.F) {
+	pack := BuiltInFlatVectorStylePack()
+	valid, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
+	if err != nil {
+		f.Fatalf("build valid seed: %v", err)
+	}
+	f.Add(uint16(0), byte(0))
+	f.Add(uint16(perceptualFingerprintIdentityMaskBytes), byte(0xff))
+	f.Add(uint16(65535), byte(0x80))
+	f.Fuzz(func(t *testing.T, offset uint16, value byte) {
+		mutated := bytes.Clone(valid)
+		checksumOffset := len(mutated) - perceptualFingerprintChecksumBytes
+		payloadOffset := perceptualFingerprintHeaderBytes + perceptualFingerprintStyleDigestBytes
+		mutableBytes := checksumOffset - payloadOffset
+		index := payloadOffset + int(offset)%mutableBytes
+		mutated[index] = value
+		checksum := sha256.Sum256(mutated[:checksumOffset])
+		copy(mutated[checksumOffset:], checksum[:])
+		if err := ValidatePerceptualContinuityFingerprintForStyle(mutated, pack); err != nil {
+			return
+		}
+		metrics, err := ComparePerceptualContinuityFromFingerprint(mutated, []byte(humanReferenceSVG), pack)
+		if err != nil && !errors.Is(err, ErrPerceptualContinuity) {
+			t.Fatalf("validated structured fingerprint failed comparison contract: %v", err)
+		}
+		if metrics.IdentityMaskPixels < perceptualMinimumMaskPixels {
+			t.Fatalf("validated fingerprint has only %d identity pixels", metrics.IdentityMaskPixels)
+		}
+	})
+}
+
 func avatarSVGFuzzSeeds() [][]byte {
 	return [][]byte{
 		[]byte(humanReferenceSVG),
 		[]byte(animalReferenceSVG),
-		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="#203247"></circle></svg>`),
+		[]byte(insectReferenceSVG),
+		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><circle cx="16" cy="16" r="12" fill="#203247"></circle></svg>`),
 		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M0 0 C1e999 -1e999 32 32 8 8" fill="#203247" transform="scale(1e999)"></path></svg>`),
+		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" width="32" height="32"><path d="M0 0 C8192 8192 -8192 -8192 1 1" fill="#203247"></path><path d="M0 0 C8192 8192 -8192 -8192 1 1" fill="#203247"></path></svg>`),
+		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><path d="M1 1 A0 4 0 0 1 20 20" fill="none" stroke="#203247"></path></svg>`),
+		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><circle cx="50%" cy="16" r="12" fill="#20324780"></circle></svg>`),
+		[]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><defs><clipPath id="clip"><circle cx="16" cy="16" r="8"></circle></clipPath></defs><circle cx="16" cy="16" r="12" fill="#203247" clip-path="url(#clip)"></circle></svg>`),
 		[]byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`),
 		[]byte(`<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>no</div></foreignObject></svg>`),
 		[]byte(`<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.invalid/avatar.png"></image></svg>`),

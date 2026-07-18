@@ -169,6 +169,20 @@ func TestValidateSelfCardRejectsIdentitySVGAndLifecycleInconsistency(t *testing.
 	}
 }
 
+func TestValidateSelfCardTreatsMissingMixedRolloutRendererProfileAsLegacy(t *testing.T) {
+	identity, view := testSelfCardFixture(t, "mixed-rollout-renderer")
+	view.Active.RendererProfile = ""
+	validated, err := validateSelfCard(identity, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Active.RendererProfile != avatardomain.RendererProfileLegacy ||
+		validated.Document.Avatar.RendererProfile != string(avatardomain.RendererProfileLegacy) {
+		t.Fatalf("mixed-rollout renderer profile = view:%q card:%q",
+			view.Active.RendererProfile, validated.Document.Avatar.RendererProfile)
+	}
+}
+
 func TestValidateSelfCardAcceptsDeterministicPlaceholder(t *testing.T) {
 	identity, view := testSelfCardFixture(t, "placeholder")
 	view.Profile.ActiveVersion = 0
@@ -432,7 +446,8 @@ func testSelfCardFixture(t *testing.T, svgCanary string) (client.SelfIdentity, *
 		Description: "A curious scientific agent in a flat circular badge.",
 		VisualSpec:  json.RawMessage(`{"expression":"curious"}`), SVG: string(svg),
 		SVGSHA256: hex.EncodeToString(sum[:]), Style: style,
-		ProposedBy: client.AvatarActor{Kind: "agent", ID: identity.AgentID}, IsActive: true,
+		RendererProfile: avatardomain.RendererProfilePerceptualV1,
+		ProposedBy:      client.AvatarActor{Kind: "agent", ID: identity.AgentID}, IsActive: true,
 		WasActivated: true,
 	}
 	activatedAt := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)

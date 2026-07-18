@@ -1358,8 +1358,9 @@ must not accept them as authentication, authorization, or a legal credential.
 The default output adapts to the destination:
 
 - On a sufficiently wide UTF-8 color terminal, the CLI revalidates the SVG,
-  verifies its SHA-256, renders it into a fixed 20x20 in-memory raster, and
-  shows the portrait as ANSI half-block cells beside the identity fields.
+  verifies its SHA-256, applies the strict deterministic `perceptual-v1`
+  renderer profile, renders it into a fixed 20x20 in-memory raster, and shows
+  the portrait as ANSI half-block cells beside the identity fields.
 - Pipes, redirected output, `NO_COLOR`, `TERM=dumb`, non-UTF-8 terminals, and
   unsupported renderings receive a deterministic text card. Narrow terminals
   receive a key/value form rather than a clipped box.
@@ -1372,6 +1373,12 @@ active pointers, unsafe or non-canonical SVG, and hash mismatches. It never
 emits SVG, `visual_spec`, facts, memories, checkpoints, or pending proposal
 content. Use `witself avatar show` or `witself avatar version` when the explicit
 creative payload is actually needed.
+
+The bounded JSON document includes the value-free `renderer_profile`. Current
+servers emit `perceptual-v1` or `legacy`; during a mixed-version rollout an
+omitted field from an older server is treated as legacy in memory only. Legacy
+SVG outside the strict profile receives the deterministic plain card rather
+than a best-effort raster.
 
 ```sh
 witself self card --account default --agent scott
@@ -4142,11 +4149,19 @@ preserve `next_before_version` plus the server lifecycle fields for each
 immutable version: `is_active`, `is_proposed`, `was_activated`,
 `rollback_eligible`, `rejected`, and the optional activation or rejection
 timestamps. They also include `payload_state`, original `payload_bytes`,
-`svg_sha256`, `locked_layers_sha256`, and optional compaction timestamp/reason.
+`svg_sha256`, `locked_layers_sha256`, immutable value-free `renderer_profile`,
+and optional compaction timestamp/reason.
 Pass that cursor back as `--before-version`; use `avatar version` for an exact
 read. A `full` exact version includes SVG, description, visual specification,
 and provenance. A `compacted` exact version returns retained metadata and
 provenance but omits those three creative fields.
+
+New proposal commands always create a `perceptual-v1` version. A `legacy`
+active version stays readable but cannot parent same-style self evolution; use
+an operator replacement, an explicit reset followed by a parentless proposal,
+or a newly selected style to establish a strict baseline. Visual-continuity
+enforcement is deterministic canonical-render comparison, not a backend model
+or embedding call.
 
 `avatar show` and `avatar operator show` report the payload count/byte limits,
 the current full-row count, inclusive full-payload plus continuity-fingerprint

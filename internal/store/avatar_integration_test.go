@@ -351,7 +351,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 			t.Fatal(err)
 		}
 	}
-	insertSchema50Version(1, "schema-50-after-schema-53")
+	insertSchema50Version(1, "schema-50-after-schema-54")
 
 	var payloadBytes, derivedPayloadBytes int64
 	var storedLockedDigest *string
@@ -389,7 +389,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 		t.Fatal("read path unexpectedly mutated the legacy digest")
 	}
 
-	// A Phase-B config restart calls Migrate again even at schema 53 and
+	// A Phase-B config restart calls Migrate again even at schema 54 and
 	// repairs the nullable digest before the process serves.
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -404,7 +404,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 	}
 
 	// Export owns a frozen account row and repairs any final legacy write that
-	// landed after startup before emitting a schema-53 archive.
+	// landed after startup before emitting a schema-54 archive.
 	insertSchema50Version(2, "schema-50-before-export")
 	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID,
 		"evacuation", "mixed-writer export"); err != nil {
@@ -660,6 +660,251 @@ func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T)
 	}
 }
 
+func TestMigration54QuarantinesLegacyWritersAndRefusesV1DowngradePostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 53)
+	ctx := context.Background()
+	provisioned, err := st.ProvisionAccount(ctx,
+		"avatar-renderer-migration@witwave.ai", "avatar renderer migration", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "renderer-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "renderer-migration-avatar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	digest := sha256.Sum256([]byte(reference.SVG))
+	lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "A renderer migration portrait."
+	visualSpec := []byte(`{"identity":{"expression":"calm"}}`)
+	payloadBytes, err := avatarCreativePayloadBytes(reference.SVG, description, visualSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertOldWriterVersion := func(version int64, versionID string) {
+		t.Helper()
+		// This is the pre-schema-54 writer shape: it intentionally omits
+		// renderer_profile while preserving every schema-51 payload field.
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_avatar_versions
+			       (account_id, realm_id, agent_id, id, version, lineage_generation,
+			        style_pack_id, style_pack_version, subject_form, svg, description,
+			        visual_spec, svg_sha256, locked_layers_sha256, provenance,
+			        proposed_by_kind, proposed_by_id, payload_bytes)
+			VALUES ($1,$2,$3,$4,$5,1,$6,1,'human',$7,$8,$9::jsonb,$10,$11,
+			        '{"runtime":"v185-test"}'::jsonb,'agent',$3,$12)`,
+			provisioned.AccountID, realm.ID, agent.ID, versionID, version,
+			pack.ID, reference.SVG, description, string(visualSpec),
+			hex.EncodeToString(digest[:]), lockedDigest, payloadBytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	insertOldWriterVersion(1, "avver_aaaaaaaaaaaaaaaa")
+	legacyFingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET payload_state='compacted',svg=NULL,description=NULL,visual_spec=NULL,
+		       payload_compacted_at=clock_timestamp(),payload_compaction_reason='quota',
+		       continuity_fingerprint=$2
+		 WHERE agent_id=$1 AND version=1`, agent.ID, legacyFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	migrationTestUpTo(t, dsn, 54)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", true)
+	assertMigrationTestTableConstraint(t, st, "agent_avatar_versions",
+		"agent_avatar_versions_renderer_profile_check", true)
+	var rendererProfile string
+	var retainedLegacyFingerprint []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT renderer_profile,continuity_fingerprint FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).
+		Scan(&rendererProfile, &retainedLegacyFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if rendererProfile != string(avatardomain.RendererProfileLegacy) {
+		t.Fatalf("schema-53 row renderer profile = %q, want legacy", rendererProfile)
+	}
+	if len(retainedLegacyFingerprint) != 0 {
+		t.Fatalf("schema-53 fingerprint survived legacy quarantine: %d bytes",
+			len(retainedLegacyFingerprint))
+	}
+	downErr := migrationTestDown(t, dsn, true)
+	if downErr == nil || !strings.Contains(downErr.Error(), "compacted avatar versions exist") {
+		t.Fatalf("schema-54 compacted-history downgrade error = %v", downErr)
+	}
+	assertMigrationTestVersion(t, dsn, 54)
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A still-running v185 writer executes the same INSERT after schema 54.
+	// The database default quarantines the row as legacy, and v186 can read it.
+	insertOldWriterVersion(2, "avver_bbbbbbbbbbbbbbbb")
+	principal := Principal{Kind: PrincipalAgent, ID: agent.ID,
+		AccountID: provisioned.AccountID, RealmID: realm.ID, AgentName: agent.Name,
+		AccountStatus: "active"}
+	exact, err := st.GetAvatarVersion(ctx, principal, 2)
+	if err != nil || exact.RendererProfile != avatardomain.RendererProfileLegacy ||
+		exact.SVG != reference.SVG {
+		t.Fatalf("old-writer exact avatar = %#v / %v", exact, err)
+	}
+
+	// A database containing only quarantined legacy rows can safely remove the
+	// provenance column.
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 53)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", false)
+	migrationTestUpTo(t, dsn, 54)
+
+	// Legacy bytes can never become a WAPF seed, even through a direct writer.
+	fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET payload_state='compacted',svg=NULL,description=NULL,visual_spec=NULL,
+		       payload_compacted_at=clock_timestamp(),payload_compaction_reason='quota',
+		       continuity_fingerprint=$2
+		 WHERE agent_id=$1 AND version=2`, agent.ID, fingerprint); err == nil {
+		t.Fatal("schema 54 accepted a continuity fingerprint on a legacy avatar")
+	}
+
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET renderer_profile='perceptual-v1'
+		 WHERE agent_id=$1 AND version=2`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	downErr = migrationTestDown(t, dsn, true)
+	if downErr == nil || !strings.Contains(downErr.Error(), "perceptual-v1 avatar versions exist") {
+		t.Fatalf("schema-54 v1 downgrade error = %v", downErr)
+	}
+	assertMigrationTestVersion(t, dsn, 54)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", true)
+	if err := st.pool.QueryRow(ctx, `
+		SELECT renderer_profile FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=2`, agent.ID).Scan(&rendererProfile); err != nil ||
+		rendererProfile != string(avatardomain.RendererProfilePerceptualV1) {
+		t.Fatalf("renderer profile after refused down = %q / %v", rendererProfile, err)
+	}
+}
+
+func TestMigration54DownLocksBeforeRendererSafetyCheckPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 41)
+	insertMigrationTestMemoryPrincipals(t, st)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	digest := sha256.Sum256([]byte(reference.SVG))
+	lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "A renderer downgrade race portrait."
+	visualSpec := `{"identity":{"expression":"calm"}}`
+	payloadBytes, err := avatarCreativePayloadBytes(reference.SVG, description, []byte(visualSpec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_avatar_versions
+		       (account_id,realm_id,agent_id,id,version,lineage_generation,
+		        style_pack_id,style_pack_version,subject_form,svg,description,
+		        visual_spec,svg_sha256,locked_layers_sha256,provenance,
+		        proposed_by_kind,proposed_by_id,payload_bytes)
+		VALUES ('acc_memory_trigger','realm_memory_trigger','agent_memory_owner',
+		        'avver_aaaaaaaaaaaaaaaa',1,1,$1,1,'human',$2,$3,$4::jsonb,$5,$6,
+		        '{"runtime":"v185-race"}'::jsonb,'agent','agent_memory_owner',$7)`,
+		pack.ID, reference.SVG, description, visualSpec, hex.EncodeToString(digest[:]),
+		lockedDigest, payloadBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(ctx, `
+		UPDATE agent_avatar_versions SET renderer_profile='perceptual-v1'
+		 WHERE agent_id='agent_memory_owner' AND version=1`); err != nil {
+		_ = writer.Rollback(ctx)
+		t.Fatal(err)
+	}
+	db := migrationTestSQLDB(t, dsn)
+	defer func() { _ = db.Close() }()
+	downDone := make(chan error, 1)
+	go func() { downDone <- goose.Down(db, "migrations") }()
+	waiting := false
+	for attempts := 0; attempts < 100; attempts++ {
+		if err := st.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM pg_locks
+			   WHERE relation='agent_avatar_versions'::regclass
+			     AND mode='AccessExclusiveLock' AND NOT granted
+			)`).Scan(&waiting); err != nil {
+			_ = writer.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !waiting {
+		_ = writer.Rollback(ctx)
+		t.Fatal("schema-54 down never waited for the renderer writer")
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-downDone:
+		if err == nil || !strings.Contains(err.Error(), "perceptual-v1 avatar versions exist") {
+			t.Fatalf("down after racing v1 writer = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("schema-54 down did not finish after renderer writer committed")
+	}
+	assertMigrationTestVersion(t, dsn, 54)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", true)
+}
+
 func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
@@ -723,6 +968,13 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 		t.Fatal(err)
 	}
 	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()-1))
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", false)
+	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
+	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema))
 	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", false)
 	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
 	if err := migrationTestDown(t, dsn, false); err != nil {
@@ -851,6 +1103,9 @@ func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testin
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := st.pool.Exec(ctx, `
 			CREATE INDEX agent_avatar_profiles_by_style_revision
 			    ON agent_avatar_profiles
@@ -882,6 +1137,9 @@ func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testin
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatalf("retry down with already-absent index: %v", err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatalf("retry down with already-absent index: %v", err)
+		}
 		assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema))
 	})
 }
@@ -901,6 +1159,9 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 		provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "down-open")
 		realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-open", 1)
 		publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "down-open-v2")
+		if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
+			t.Fatal(err)
+		}
 		if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
 			t.Fatal(err)
 		}
@@ -954,6 +1215,9 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 			provisioned.AccountID, realm.ID); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
+			t.Fatal(err)
+		}
 		if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
 			t.Fatal(err)
 		}
@@ -977,6 +1241,9 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 	}
 	provisioned, _ := provisionActiveRolloutAccountForTest(t, ctx, st, "down-race")
 	realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-race", 0)
+	if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
+		t.Fatal(err)
+	}
 	if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
 		t.Fatal(err)
 	}

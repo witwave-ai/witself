@@ -42,6 +42,210 @@ func TestAvatarArchiveValidationAcceptsCanonicalPendingEvolution(t *testing.T) {
 	}
 }
 
+func TestAvatarArchiveRendererProfileIsExplicitAndLegacyIsQuarantined(t *testing.T) {
+	legacyRow := func(t *testing.T, version, parent int64) map[string]any {
+		t.Helper()
+		row := avatarArchiveVersionRow(t, version, parent, avatardomain.SubjectHuman)
+		svg := strings.Replace(row["svg"].(string),
+			`<g id="experience" data-layer="experience">`,
+			`<g id="experience" data-layer="experience" transform="translate(0 0)">`, 1)
+		if svg == row["svg"].(string) {
+			t.Fatal("legacy renderer fixture did not add its no-op transform")
+		}
+		canonical, err := avatardomain.SanitizeSVGForStylePack(
+			[]byte(svg), avatardomain.BuiltInFlatVectorStylePack())
+		if err != nil || string(canonical) != svg {
+			t.Fatalf("legacy renderer fixture = %v / canonical:%t", err, string(canonical) == svg)
+		}
+		setAvatarArchiveVersionSVG(t, row, svg)
+		row["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+		return row
+	}
+
+	t.Run("v1 claim must match exact bytes", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		row := legacyRow(t, 1, 0)
+		row["renderer_profile"] = string(avatardomain.RendererProfilePerceptualV1)
+		err := ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "claimed renderer profile") {
+			t.Fatalf("v1 renderer mismatch error = %v", err)
+		}
+	})
+
+	t.Run("compacted v1 history still requires a strict renderer style", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		pack := avatardomain.BuiltInFlatVectorStylePack()
+		pack.ID = "custom-gradient-style"
+		pack.Name = "Custom gradient style"
+		pack.Description = "A generic-valid style outside the perceptual-v1 renderer profile."
+		pack.Grammar.AllowGradients = true
+		if err := pack.Validate(); err != nil {
+			t.Fatalf("generic custom style fixture = %v", err)
+		}
+		style := avatarStyleVersionImportKey{
+			realmID: avatarArchiveRealm, stylePackID: pack.ID, version: int64(pack.Version),
+		}
+		ic.avatarStyleVersions[style] = avatarStyleVersionImportScope{pack: pack}
+		ic.avatarStyleHeads[avatarStyleHeadImportKey{
+			realmID: avatarArchiveRealm, stylePackID: pack.ID,
+		}] = avatarStyleHeadImportScope{currentVersion: int64(pack.Version), revision: 1}
+		ic.realmAvatarStyles[avatarArchiveRealm] = realmAvatarStyleImportScope{
+			style: style, revision: 1,
+		}
+		profile := ic.avatarProfiles[avatarArchiveAgent]
+		profile.style = style
+		ic.avatarProfiles[avatarArchiveAgent] = profile
+		version := compactAvatarArchiveVersionRow(t, 1, 0, nil)
+		version["style_pack_id"] = pack.ID
+		feedAvatarArchiveVersion(t, ic, version)
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "perceptual-v1 avatar style") {
+			t.Fatalf("compacted v1 non-profile style error = %v", err)
+		}
+	})
+
+	t.Run("legacy current row remains readable without v1 inference", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		row := legacyRow(t, 1, 0)
+		feedAvatarArchiveVersion(t, ic, row)
+		got := ic.avatarVersions[avatarVersionImportKey{agentID: avatarArchiveAgent, version: 1}]
+		if got.rendererProfile != avatardomain.RendererProfileLegacy || got.svg != row["svg"] {
+			t.Fatalf("legacy import scope = %#v", got)
+		}
+	})
+
+	t.Run("same-style agent cannot promote a legacy parent to v1", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic, legacyRow(t, 1, 0))
+		err := ic.validateAndRecord("agent_avatar_versions",
+			avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman))
+		if err == nil || !strings.Contains(err.Error(), "promotes a legacy renderer") {
+			t.Fatalf("legacy self-evolution error = %v", err)
+		}
+	})
+
+	t.Run("v1 parent accepts a legacy mixed-writer child", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic,
+			avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman))
+		if err := ic.validateAndRecord("agent_avatar_versions", legacyRow(t, 2, 1)); err != nil {
+			t.Fatalf("v1 to legacy mixed-writer edge = %v", err)
+		}
+	})
+
+	t.Run("legacy parent accepts a legacy child", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic, legacyRow(t, 1, 0))
+		if err := ic.validateAndRecord("agent_avatar_versions", legacyRow(t, 2, 1)); err != nil {
+			t.Fatalf("legacy to legacy edge = %v", err)
+		}
+	})
+
+	t.Run("compacted v1 parent accepts a legacy child without WAPF", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic, compactAvatarArchiveVersionRow(t, 1, 0, nil))
+		if err := ic.validateAndRecord("agent_avatar_versions", legacyRow(t, 2, 1)); err != nil {
+			t.Fatalf("compacted v1 to legacy edge = %v", err)
+		}
+	})
+
+	t.Run("compacted legacy parent accepts a legacy child by digest", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		parent := compactAvatarArchiveVersionRow(t, 1, 0, nil)
+		parent["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+		feedAvatarArchiveVersion(t, ic, parent)
+		if err := ic.validateAndRecord("agent_avatar_versions", legacyRow(t, 2, 1)); err != nil {
+			t.Fatalf("compacted legacy to legacy edge = %v", err)
+		}
+	})
+
+	t.Run("mixed edge rejects a different verified locked digest", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic,
+			avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman))
+		child := legacyRow(t, 2, 1)
+		child["locked_layers_sha256"] = strings.Repeat("0", 64)
+		err := ic.validateAndRecord("agent_avatar_versions", child)
+		if err == nil || !strings.Contains(err.Error(), "locked_layers_sha256 mismatch") {
+			t.Fatalf("mixed locked digest error = %v", err)
+		}
+	})
+
+	t.Run("mixed edge rejects a genuinely changed locked layer", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic,
+			avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman))
+		child := legacyRow(t, 2, 1)
+		childSVG := strings.Replace(child["svg"].(string),
+			`r="116" fill="#E9C46A"`, `r="116" fill="#F0C8A0"`, 1)
+		if childSVG == child["svg"].(string) {
+			t.Fatal("locked-layer fixture did not change the face fill")
+		}
+		setAvatarArchiveVersionSVG(t, child, childSVG)
+		lockedDigest, err := avatardomain.LockedLayersSHA256(
+			[]byte(childSVG), avatardomain.BuiltInFlatVectorStylePack())
+		if err != nil {
+			t.Fatal(err)
+		}
+		child["locked_layers_sha256"] = lockedDigest
+		err = ic.validateAndRecord("agent_avatar_versions", child)
+		if err == nil || !strings.Contains(err.Error(), "retained locked-layer continuity") {
+			t.Fatalf("mixed changed locked-layer error = %v", err)
+		}
+	})
+
+	t.Run("operator replacement creates a v1 baseline", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic, legacyRow(t, 1, 0))
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		row["proposed_by_kind"] = PrincipalOperator
+		row["proposed_by_id"] = avatarArchiveOperator
+		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
+			t.Fatalf("operator v1 rebaseline = %v", err)
+		}
+	})
+
+	t.Run("style migration creates a v1 baseline", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		feedAvatarArchiveVersion(t, ic, legacyRow(t, 1, 0))
+		pack := avatardomain.BuiltInFlatVectorStylePack()
+		pack.Version = 2
+		style := avatarStyleVersionImportKey{
+			realmID: avatarArchiveRealm, stylePackID: pack.ID, version: 2,
+		}
+		ic.avatarStyleVersions[style] = avatarStyleVersionImportScope{pack: pack, previousVersion: 1}
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		row["style_pack_version"] = int64(2)
+		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
+			t.Fatalf("style-migration v1 rebaseline = %v", err)
+		}
+	})
+}
+
 func TestAvatarArchiveValidationAcceptsResetAndFreshLineage(t *testing.T) {
 	ic := newAvatarArchiveImportContext(t)
 	feedAvatarArchiveStyle(t, ic, false)
@@ -493,10 +697,12 @@ func TestAvatarArchiveGraphIndexesLargeManyAgentHistoryLinearly(t *testing.T) {
 		agentID := fmt.Sprintf("agent_archive_scale_%05d", i)
 		versions[avatarVersionImportKey{agentID: agentID, version: 1}] = avatarVersionImportScope{
 			lineage: 1, style: style, payloadState: avatardomain.PayloadCompacted,
+			rendererProfile: avatardomain.RendererProfilePerceptualV1,
 		}
 		versions[avatarVersionImportKey{agentID: agentID, version: 2}] = avatarVersionImportScope{
 			lineage: 1, style: style, parentVersion: 1,
 			payloadState: avatardomain.PayloadFull, proposedByKind: PrincipalAgent,
+			rendererProfile: avatardomain.RendererProfilePerceptualV1,
 		}
 	}
 	required := requiredImportedAvatarContinuityFingerprints(versions)
@@ -851,7 +1057,7 @@ func TestAvatarArchiveValidationRejectsRetainedPayloadUsageAboveQuota(t *testing
 		})
 	}
 
-	t.Run("legacy reconciliation marker permits transitional overage", func(t *testing.T) {
+	t.Run("reconciliation marker does not permit v1-only overage", func(t *testing.T) {
 		ic := newAvatarArchiveImportContext(t)
 		feedAvatarArchiveStyle(t, ic, false)
 		feedAvatarArchiveProfile(t, ic, map[string]any{
@@ -867,10 +1073,184 @@ func TestAvatarArchiveValidationRejectsRetainedPayloadUsageAboveQuota(t *testing
 				feedAvatarArchiveRejection(t, ic, version)
 			}
 		}
-		if err := ic.validateImportedAvatarGraph(); err != nil {
-			t.Fatalf("marked legacy overage = %v", err)
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+			t.Fatalf("marked v1-only overage error = %v", err)
 		}
 	})
+
+	t.Run("reconciliation marker permits an under-quota v1-only archive", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(1),
+			"proposed_avatar_version":               int64(1),
+			"payload_quota_reconciliation_required": true,
+		})
+		feedAvatarArchiveVersion(t, ic,
+			avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman))
+		if err := ic.validateImportedAvatarGraph(); err != nil {
+			t.Fatalf("marked under-quota v1 archive = %v", err)
+		}
+	})
+
+	t.Run("legacy reconciliation marker permits mixed transitional overage", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(5),
+			"proposed_avatar_version":               int64(5),
+			"retained_payload_count_limit":          int64(4),
+			"payload_quota_reconciliation_required": true,
+		})
+		for version := int64(1); version <= 5; version++ {
+			row := avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman)
+			if version == 1 {
+				row["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+			}
+			feedAvatarArchiveVersion(t, ic, row)
+			if version < 5 {
+				feedAvatarArchiveRejection(t, ic, version)
+			}
+		}
+		if err := ic.validateImportedAvatarGraph(); err != nil {
+			t.Fatalf("marked mixed legacy overage = %v", err)
+		}
+	})
+
+	t.Run("reconciliation marker does not permit v1 subset overage", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(6),
+			"proposed_avatar_version":               int64(6),
+			"retained_payload_count_limit":          int64(4),
+			"payload_quota_reconciliation_required": true,
+		})
+		for version := int64(1); version <= 6; version++ {
+			row := avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman)
+			if version == 1 {
+				row["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+			}
+			feedAvatarArchiveVersion(t, ic, row)
+			if version < 6 {
+				feedAvatarArchiveRejection(t, ic, version)
+			}
+		}
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+			t.Fatalf("marked v1 subset overage error = %v", err)
+		}
+	})
+
+	t.Run("reconciliation marker requires a full legacy payload", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(6),
+			"proposed_avatar_version":               int64(6),
+			"retained_payload_count_limit":          int64(4),
+			"payload_quota_reconciliation_required": true,
+		})
+		legacy := compactAvatarArchiveVersionRow(t, 1, 0, nil)
+		legacy["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+		feedAvatarArchiveVersion(t, ic, legacy)
+		feedAvatarArchiveRejection(t, ic, 1)
+		for version := int64(2); version <= 6; version++ {
+			feedAvatarArchiveVersion(t, ic,
+				avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman))
+			if version < 6 {
+				feedAvatarArchiveRejection(t, ic, version)
+			}
+		}
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+			t.Fatalf("marked compacted-only legacy evidence error = %v", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		v1Versions int64
+		wantError  bool
+	}{
+		{name: "accepts mixed transitional byte overage", v1Versions: 5},
+		{name: "rejects v1 subset byte overage", v1Versions: 6, wantError: true},
+	} {
+		t.Run("reconciliation marker "+test.name, func(t *testing.T) {
+			versions := test.v1Versions + 1
+			ic := newAvatarArchiveImportContext(t)
+			feedAvatarArchiveStyle(t, ic, false)
+			feedAvatarArchiveProfile(t, ic, map[string]any{
+				"status": "proposed", "latest_avatar_version": versions,
+				"proposed_avatar_version":               versions,
+				"retained_payload_count_limit":          int64(20),
+				"retained_payload_byte_limit":           AvatarMinRetainedPayloadByteLimit,
+				"payload_quota_reconciliation_required": true,
+			})
+			for version := int64(1); version <= versions; version++ {
+				row := avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman)
+				row["payload_bytes"] = int64(100_000)
+				if version == 1 {
+					row["renderer_profile"] = string(avatardomain.RendererProfileLegacy)
+				}
+				feedAvatarArchiveVersion(t, ic, row)
+				if version < versions {
+					feedAvatarArchiveRejection(t, ic, version)
+				}
+			}
+			err := ic.validateImportedAvatarGraph()
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+					t.Fatalf("marked v1 byte subset overage error = %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("marked mixed byte overage = %v", err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name          string
+		versions      int64
+		bytesEach     int64
+		schemaVersion int
+	}{
+		{name: "count", versions: AvatarMaxRetainedPayloadCountLimit + 1,
+			bytesEach:     avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman)["payload_bytes"].(int64),
+			schemaVersion: 50},
+		{name: "bytes", versions: 513, bytesEach: maxAvatarPayloadBytes},
+	} {
+		t.Run("hard transition ceiling rejects marked "+test.name+" overage", func(t *testing.T) {
+			ic := newAvatarArchiveImportContext(t)
+			if test.schemaVersion != 0 {
+				ic.schemaVersion = test.schemaVersion
+			}
+			feedAvatarArchiveStyle(t, ic, false)
+			feedAvatarArchiveProfile(t, ic, map[string]any{
+				"status": "proposed", "latest_avatar_version": test.versions,
+				"proposed_avatar_version":               test.versions,
+				"retained_payload_count_limit":          int64(AvatarMaxRetainedPayloadCountLimit),
+				"retained_payload_byte_limit":           AvatarMaxRetainedPayloadByteLimit,
+				"payload_quota_reconciliation_required": true,
+			})
+			style := avatarStyleVersionImportKey{
+				realmID: avatarArchiveRealm, stylePackID: avatardomain.DefaultStylePackID, version: 1,
+			}
+			for version := int64(1); version <= test.versions; version++ {
+				ic.avatarVersions[avatarVersionImportKey{agentID: avatarArchiveAgent, version: version}] =
+					avatarVersionImportScope{
+						lineage: 1, style: style, subjectForm: avatardomain.SubjectHuman,
+						payloadState: avatardomain.PayloadFull, payloadBytes: test.bytesEach,
+						rendererProfile: avatardomain.RendererProfileLegacy,
+					}
+			}
+			err := ic.validateImportedAvatarGraph()
+			if err == nil || !strings.Contains(err.Error(), "exceed the hard transition ceiling") {
+				t.Fatalf("marked hard %s overage error = %v", test.name, err)
+			}
+		})
+	}
 
 	t.Run("reconciliation marker must be boolean", func(t *testing.T) {
 		ic := newAvatarArchiveImportContext(t)
@@ -1732,6 +2112,7 @@ func avatarArchiveVersionRow(t *testing.T, version, parent int64, form avatardom
 		"visual_spec":            visualSpec,
 		"svg_sha256":             hex.EncodeToString(digest[:]),
 		"locked_layers_sha256":   lockedDigest,
+		"renderer_profile":       string(avatardomain.RendererProfilePerceptualV1),
 		"continuity_fingerprint": nil,
 		"provenance":             map[string]any{"runtime": "cursor", "model": "GPT-5.6 Sol", "recipe": "avatar", "recipe_version": "1"},
 		"proposed_by_kind":       PrincipalAgent, "proposed_by_id": avatarArchiveAgent,

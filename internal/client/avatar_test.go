@@ -378,6 +378,49 @@ func TestAvatarClientNormalizesNullHistoryAndPreservesNotFound(t *testing.T) {
 	}
 }
 
+func TestAvatarClientTreatsMissingRendererProfileAsLegacyDuringMixedRollout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self/avatar":
+			_, _ = w.Write([]byte(`{"avatar":{"active":{"version":1},"proposed":{"version":2,"renderer_profile":"perceptual-v1"}}}`))
+		case "GET /v1/self/avatar/history":
+			_, _ = w.Write([]byte(`{"versions":[{"version":1},{"version":2,"renderer_profile":"perceptual-v1"}]}`))
+		case "GET /v1/self/avatar/versions/1":
+			_, _ = w.Write([]byte(`{"version":{"version":1}}`))
+		case "POST /v1/self/avatar:activate":
+			_, _ = w.Write([]byte(`{"avatar":{"active":{"version":1}},"receipt":{}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	view, err := GetSelfAvatar(ctx, srv.URL, "token")
+	if err != nil || view.Active == nil || view.Proposed == nil ||
+		view.Active.RendererProfile != avatar.RendererProfileLegacy ||
+		view.Proposed.RendererProfile != avatar.RendererProfilePerceptualV1 {
+		t.Fatalf("mixed avatar view = %#v / %v", view, err)
+	}
+	history, err := GetSelfAvatarHistory(ctx, srv.URL, "token")
+	if err != nil || len(history.Versions) != 2 ||
+		history.Versions[0].RendererProfile != avatar.RendererProfileLegacy ||
+		history.Versions[1].RendererProfile != avatar.RendererProfilePerceptualV1 {
+		t.Fatalf("mixed avatar history = %#v / %v", history, err)
+	}
+	exact, err := GetSelfAvatarVersion(ctx, srv.URL, "token", 1)
+	if err != nil || exact.RendererProfile != avatar.RendererProfileLegacy {
+		t.Fatalf("mixed exact avatar = %#v / %v", exact, err)
+	}
+	mutation, err := ActivateSelfAvatar(ctx, srv.URL, "token", ActivateAvatarInput{
+		Version: 1, ExpectedProfileRevision: 1,
+	})
+	if err != nil || mutation.Avatar.Active == nil ||
+		mutation.Avatar.Active.RendererProfile != avatar.RendererProfileLegacy {
+		t.Fatalf("mixed mutation avatar = %#v / %v", mutation, err)
+	}
+}
+
 func TestAvatarClientHistoryPaginationUsesExclusiveVersionCursor(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +475,8 @@ func testAvatarView(now time.Time) AvatarView {
 		ID: "avv_1", AccountID: "acc_1", RealmID: "realm_1", AgentID: "agent_1",
 		Version: 1, LineageGeneration: 1, SubjectForm: avatar.SubjectAnimal,
 		Description: "A curious fox", VisualSpec: json.RawMessage(`{"expression":"curious"}`),
-		SVG: "<svg></svg>", SVGSHA256: "hash", LockedLayersSHA256: "locked-hash", Style: style,
+		SVG: "<svg></svg>", SVGSHA256: "hash", LockedLayersSHA256: "locked-hash",
+		RendererProfile: avatar.RendererProfilePerceptualV1, Style: style,
 		Provenance: AvatarClientProvenance{Runtime: "codex", Model: "gpt-test"},
 		ProposedBy: AvatarActor{Kind: "agent", ID: "agent_1"}, ProposedAt: now,
 	}
@@ -453,7 +497,8 @@ func testAvatarSummary(version AvatarVersion) AvatarVersionSummary {
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
 		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
-		LockedLayersSHA256: version.LockedLayersSHA256, Style: version.Style,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile, Style: version.Style,
 		ProposedBy: version.ProposedBy, ProposedAt: version.ProposedAt,
 		IsActive: version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,

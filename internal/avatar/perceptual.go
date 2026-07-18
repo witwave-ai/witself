@@ -16,7 +16,7 @@ import (
 
 const (
 	// PerceptualRenderSize is deliberately small and fixed. Together with the
-	// SVG byte, depth, element, and attribute limits, at most six renders consume
+	// SVG byte, depth, element, and attribute limits, at most five renders consume
 	// a bounded amount of CPU and less than one MiB of image storage per check.
 	PerceptualRenderSize = 96
 
@@ -92,11 +92,14 @@ func ValidatePerceptualContinuityFromFingerprint(fingerprint, child []byte, pack
 // ComparePerceptualContinuityFromFingerprint compares a full style-valid child
 // against a strictly decoded, style-bound parent continuity fingerprint.
 func ComparePerceptualContinuityFromFingerprint(fingerprint, child []byte, pack StylePack) (PerceptualContinuityMetrics, error) {
+	if err := ValidatePerceptualV1StylePack(pack); err != nil {
+		return PerceptualContinuityMetrics{}, err
+	}
 	parent, err := decodePerceptualContinuityFingerprint(fingerprint)
 	if err != nil {
 		return PerceptualContinuityMetrics{}, err
 	}
-	childSVG, err := SanitizeSVGForStylePack(child, pack)
+	childSVG, err := SanitizeSVGForPerceptualV1StylePack(child, pack)
 	if err != nil {
 		return PerceptualContinuityMetrics{}, err
 	}
@@ -118,17 +121,19 @@ func ComparePerceptualContinuityFromFingerprint(fingerprint, child []byte, pack 
 	}
 
 	metrics := perceptualMetricsFromFingerprint(parent, childFull, childLocked)
+	if metrics.IdentityMaskPixels < perceptualMinimumMaskPixels {
+		return metrics, fmt.Errorf("%w: locked identity projection covers %d pixels, want at least %d",
+			ErrInvalidPerceptualFingerprint, metrics.IdentityMaskPixels, perceptualMinimumMaskPixels)
+	}
 	if metrics.WholeChangedRatio > PerceptualWholeChangedRatioLimit ||
 		metrics.WholeMeanDelta > PerceptualWholeMeanDeltaLimit {
 		return metrics, fmt.Errorf("%w: whole portrait changed beyond the bounded render limit", ErrPerceptualContinuity)
 	}
-	if metrics.IdentityMaskPixels >= perceptualMinimumMaskPixels &&
-		(metrics.IdentityChangedRatio > PerceptualIdentityChangedRatioLimit ||
-			metrics.IdentityMeanDelta > PerceptualIdentityMeanDeltaLimit) {
+	if metrics.IdentityChangedRatio > PerceptualIdentityChangedRatioLimit ||
+		metrics.IdentityMeanDelta > PerceptualIdentityMeanDeltaLimit {
 		return metrics, fmt.Errorf("%w: locked identity changed beyond the bounded render limit", ErrPerceptualContinuity)
 	}
-	if metrics.IdentityMaskPixels >= perceptualMinimumMaskPixels &&
-		metrics.AddedIdentityOcclusion > PerceptualAddedOcclusionRatioLimit {
+	if metrics.AddedIdentityOcclusion > PerceptualAddedOcclusionRatioLimit {
 		return metrics, fmt.Errorf("%w: unlocked layers occlude too much locked identity", ErrPerceptualContinuity)
 	}
 	return metrics, nil
@@ -146,11 +151,6 @@ func perceptualLayerSelections(pack StylePack) (map[string]bool, map[string]bool
 			}
 		} else {
 			unlocked[layer.Name] = true
-		}
-	}
-	if len(identity) == 0 {
-		for name := range locked {
-			identity[name] = true
 		}
 	}
 	return identity, locked, unlocked

@@ -225,6 +225,7 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'description', description, 'visual_spec', visual_spec,
 			  'svg_sha256', svg_sha256,
 			  'locked_layers_sha256', locked_layers_sha256,
+			  'renderer_profile', renderer_profile,
 			  'continuity_fingerprint', continuity_fingerprint,
 			  'provenance', provenance,
 			  'payload_state', payload_state, 'payload_bytes', payload_bytes,

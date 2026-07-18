@@ -145,7 +145,7 @@ func TestPerceptualRenderFailsClosed(t *testing.T) {
 func TestPerceptualLayerProjectionPreservesNestedWrappers(t *testing.T) {
 	const title = `<title>Human teammate reference</title>`
 	wrapped := strings.Replace(humanReferenceSVG, title,
-		title+`<g transform="translate(0 0)" opacity="1">`, 1)
+		title+`<g>`, 1)
 	wrapped = strings.TrimSuffix(wrapped, `</svg>`) + `</g></svg>`
 	metrics, err := ComparePerceptualContinuity([]byte(wrapped), []byte(wrapped), BuiltInFlatVectorStylePack())
 	if err != nil {
