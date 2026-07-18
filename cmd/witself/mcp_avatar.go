@@ -337,7 +337,7 @@ func registerAvatarMCPTools(server *mcp.Server, runtimeName string, backend mcpA
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:         mcpToolName(runtimeName, "witself.avatar.generation.fail"),
-		Description:  "Record one bounded client-side avatar generation failure for the authenticated token-derived agent. Use the exact profile revision, a bounded reason code, and a fresh idempotency key. The backend records lifecycle state only and performs no inference. Keep the deterministic placeholder, preserve the user's completed work and self-contained answer, and do not loop or imply that Witself launches another model.",
+		Description:  "Record one bounded client-side avatar generation failure for the authenticated token-derived agent only after attempted creative generation or proposal validation actually fails and no proposal is pending. Never call this tool merely because a tiny read-only, lookup, or status turn deferred the avatar opportunity; deferral must leave the checkpoint pending and attempt count unchanged. Use the exact profile revision, a bounded reason code, and a fresh idempotency key. The backend records lifecycle state only and performs no inference. Keep the deterministic placeholder, preserve the user's completed work and self-contained answer, and do not loop or imply that Witself launches another model.",
 		Annotations:  mcpWriteClosedWorldAnnotations(true, true),
 		OutputSchema: mcpAvatarMutationOutputSchema,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAvatarGenerationFailureInput) (*mcp.CallToolResult, client.AvatarMutationResult, error) {

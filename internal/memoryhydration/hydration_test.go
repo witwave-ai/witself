@@ -317,7 +317,7 @@ func TestUnavailableMessageCheckpointIsVisibleWithoutBlockingHydration(t *testin
 	}
 }
 
-func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T) {
+func TestTinyReadOnlyPromptInjectsAvatarOpportunityWithoutMutatingCheckpoint(t *testing.T) {
 	retryAfter := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	for _, runtime := range []string{transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeClaudeCode} {
 		t.Run(runtime, func(t *testing.T) {
@@ -330,7 +330,7 @@ func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T)
 				},
 			}}
 			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
-				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "write a parser",
+				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "pwd",
 			}, source)
 			if err != nil {
 				t.Fatal(err)
@@ -341,6 +341,8 @@ func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T)
 				!strings.Contains(result.Context, `"profile_revision":3`) ||
 				!strings.Contains(result.Context, `"lineage_generation":2`) ||
 				!strings.Contains(result.Context, `"style_pack_id":"witself-flat-portrait"`) ||
+				!strings.Contains(result.Context, `"attempt_count":2`) ||
+				!source.self.AvatarCheckpoint.Pending || source.self.AvatarCheckpoint.AttemptCount != 2 ||
 				!strings.Contains(result.Context, foregroundAvatarCheckpointPolicy) {
 				t.Fatalf("pending avatar checkpoint result/source = %#v / %#v", result, source)
 			}
@@ -351,7 +353,14 @@ func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T)
 func TestForegroundAvatarCheckpointPolicySeparatesActivationFromGeneration(t *testing.T) {
 	for _, want := range []string{
 		"User work first",
-		"do not interrupt or replace the current user's task",
+		"opportunity for bounded foreground self-maintenance",
+		"not a requirement to interrupt every prompt",
+		"explicit avatar or pending self-maintenance request",
+		"tiny read-only, lookup, or status turn",
+		"leave the checkpoint pending and its attempt count unchanged",
+		"never call avatar.generation.fail merely because the turn was deferred",
+		"Deferral is not a lifecycle attempt or generation failure",
+		"On an eligible turn",
 		"keep the final answer self-contained",
 		"For activation_due",
 		"activate the exact proposed version",

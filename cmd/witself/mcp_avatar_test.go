@@ -298,6 +298,16 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 			t.Errorf("avatar activate description omitted %q: %q", want, tools["witself.avatar.activate"].Description)
 		}
 	}
+	for _, want := range []string{
+		"only after attempted creative generation or proposal validation actually fails",
+		"no proposal is pending",
+		"Never call this tool merely because a tiny read-only, lookup, or status turn deferred",
+		"leave the checkpoint pending and attempt count unchanged",
+	} {
+		if !strings.Contains(tools["witself.avatar.generation.fail"].Description, want) {
+			t.Errorf("avatar generation.fail description omitted %q: %q", want, tools["witself.avatar.generation.fail"].Description)
+		}
+	}
 
 	call := func(name string, args map[string]any) *mcp.CallToolResult {
 		t.Helper()
@@ -506,7 +516,11 @@ func TestAvatarMCPReadOnlyKeepsReadsAndRemovesWrites(t *testing.T) {
 		}
 	}
 	instructions := clientSession.InitializeResult().Instructions
-	for _, want := range []string{"avatar_checkpoint", "witself.avatar.show", "witself.avatar.style.show", "requires a full MCP profile", "without claiming the avatar was established"} {
+	for _, want := range []string{
+		"avatar_checkpoint", "managed opportunity policy", "tiny read-only, lookup, or status turn",
+		"attempt count unchanged", "Deferral is not a generation failure", "witself.avatar.show",
+		"witself.avatar.style.show", "requires a full MCP profile", "without claiming the avatar was established",
+	} {
 		if !strings.Contains(instructions, want) {
 			t.Errorf("read-only MCP instructions omitted %q", want)
 		}

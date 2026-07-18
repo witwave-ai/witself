@@ -78,10 +78,14 @@ creation always has a deterministic fallback.
 
 1. Agent creation establishes the placeholder and `generation_due` state.
 2. `GET /v1/self` exposes an authenticated, value-free `avatar_checkpoint`.
-3. At the first model-visible session or prompt hook, the active client keeps
-   the user's requested work first. Avatar housekeeping does not interrupt or
-   replace that work; the client handles at most one bounded lifecycle attempt
-   afterward and keeps its final answer self-contained about the user's task.
+3. At an explicit avatar or pending-self-maintenance request, or near the end of
+   an eligible non-trivial foreground turn, the active client keeps the user's
+   requested work first and may handle at most one bounded lifecycle attempt
+   before its final response. Avatar housekeeping never interrupts or replaces
+   that work, and the final response remains self-contained about the user's
+   task. A tiny read-only, lookup, or status turn may defer the opportunity: the
+   checkpoint stays pending, its attempt count remains unchanged, and the
+   client does not record a generation failure merely because it deferred.
 4. The client reads the profile and realm style pack through MCP. From the
    agent's own perspective, it creates and inspects an ephemeral SVG draft,
    description, and structured visual specification. When it wants changes, it
@@ -96,11 +100,15 @@ creation always has a deterministic fallback.
    acceptance and settles its chosen avatar. Under an operator-governed policy,
    the agent's creative selection is complete, but identity remains unsettled;
    it leaves that one proposal pending until operator activation.
-7. A failed bounded attempt keeps the placeholder, records a value-free failure
-   state, and permits a later retry; it never traps every future turn. The
-   server-stamped `retry_after` time is enforced on agent proposals and repeated
-   failure reports, not merely advertised through the checkpoint. An operator
-   may still recover the agent during that interval.
+7. An actual failed bounded attempt keeps the placeholder, records a value-free
+   failure state, and permits a later retry; it never traps every future turn.
+   The server-stamped `retry_after` time is enforced on agent proposals and
+   repeated failure reports, not merely advertised through the checkpoint. An
+   operator may still recover the agent during that interval.
+
+Deferral is not a lifecycle attempt or failure. It neither advances retry state
+nor consumes an attempt; the same authenticated checkpoint remains available
+for a later eligible foreground turn.
 
 If a later checkpoint has reason `activation_due`, the client activates the
 existing proposal and must not generate a replacement. Generation failures are

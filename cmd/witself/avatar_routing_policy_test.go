@@ -19,7 +19,12 @@ func TestManagedRuntimeContractsCarryAvatarLifecyclePolicy(t *testing.T) {
 			for _, want := range []string{
 				"avatar_checkpoint",
 				"User work comes first",
-				"Do not interrupt or replace the current user's task",
+				"opportunity for bounded foreground self-maintenance",
+				"explicit avatar or pending self-maintenance request",
+				"tiny read-only, lookup, or status turn",
+				"attempt count unchanged",
+				"merely because the turn was deferred",
+				"Deferral is not a lifecycle attempt or a generation failure",
 				"realm style pack",
 				"agent name as the strongest creative seed",
 				"all returned canonical references",
@@ -96,6 +101,23 @@ func TestAvatarLifecyclePolicyIsRuntimeNeutral(t *testing.T) {
 	}
 }
 
+func TestAvatarLifecyclePolicyDefersTinyTurnsWithoutMutationOrFailure(t *testing.T) {
+	for _, want := range []string{
+		"not a requirement to interrupt every prompt",
+		"after an explicit avatar or pending self-maintenance request",
+		"near the end of a non-trivial foreground turn",
+		"For a tiny read-only, lookup, or status turn",
+		"leave the checkpoint pending and its attempt count unchanged",
+		"never call witself.avatar.generation.fail merely because the turn was deferred",
+		"Deferral is not a lifecycle attempt or a generation failure",
+		"On an eligible turn, handle at most one bounded lifecycle attempt",
+	} {
+		if !strings.Contains(avatarRoutingInstructions, want) {
+			t.Errorf("avatar opportunity contract does not contain %q", want)
+		}
+	}
+}
+
 func TestAvatarLifecyclePolicyBranchesProposalFromActivation(t *testing.T) {
 	for _, want := range []string{
 		"For activation_due",
@@ -165,7 +187,13 @@ func TestProviderMCPInstructionsCarryInitialFittingContract(t *testing.T) {
 
 	claude := mcpInstructions(
 		transcriptcapture.RuntimeClaudeCode, "witself.self.show", "witself.message.list")
-	for _, want := range []string{"Avatar checkpoint:user-first", "self-review", "propose final"} {
+	for _, want := range []string{
+		"Avatar opportunity:user-first",
+		"Tiny/status=>defer",
+		"pending/attempt same",
+		"not failure",
+		"Eligible=>review/final",
+	} {
 		if !strings.Contains(claude, want) {
 			t.Errorf("Claude MCP synopsis omits %q", want)
 		}
