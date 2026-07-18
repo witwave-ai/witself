@@ -73,6 +73,14 @@ creation always has a deterministic fallback.
 - Avatar state is open-plane identity data. It is portable with the account,
   available to the authenticated agent and account operators through the v1
   routes below, and never enters the sealed credential plane.
+- `witself self card` is the bounded presentation surface for that identity. It
+  combines the identity-only self read with the active avatar or deterministic
+  placeholder, verifies the canonical SVG and content hash, and may render a
+  fixed in-memory terminal portrait. Its plain and JSON forms deliberately omit
+  SVG, visual specifications, facts, memories, checkpoints, and pending
+  proposal content. The card, JSON document, and SVG hash are unsigned
+  presentation data, not authentication, authorization, or a legal credential.
+  The existing `self show`, API, and MCP contracts remain unchanged.
 
 ## Runtime flow
 

@@ -2497,11 +2497,19 @@ func accountAdopt(args []string) int {
 }
 
 func selfCmd(args []string) int {
-	if len(args) == 0 || args[0] != "show" {
-		fmt.Fprintln(os.Stderr, "usage: witself self show [--account NAME] [--realm NAME] (--agent NAME | --endpoint URL --token-file FILE)")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself self show|card ...")
 		return 2
 	}
-	return selfShow(args[1:])
+	switch args[0] {
+	case "show":
+		return selfShow(args[1:])
+	case "card":
+		return selfCard(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself self: unknown subcommand %q\n", args[0])
+		return 2
+	}
 }
 
 func selfShow(args []string) int {
@@ -3900,7 +3908,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
-	usageLine(w, "  witself self show            Show the token-bound agent identity and self digest")
+	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
 	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
