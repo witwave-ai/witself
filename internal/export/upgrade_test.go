@@ -294,6 +294,50 @@ func TestSchema49AvatarUpgradePreservesExistingRows(t *testing.T) {
 	}
 }
 
+func TestSchema50AvatarPayloadQuotaUpgrade(t *testing.T) {
+	upgrade := UpgraderFor(50)
+	if upgrade == nil {
+		t.Fatal("schema 50 avatar-payload upgrader is not registered")
+	}
+	profile, err := upgrade("agent_avatar_profiles", map[string]any{"agent_id": "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile["retained_payload_count_limit"] != 20 ||
+		profile["retained_payload_byte_limit"] != 2*1024*1024 {
+		t.Fatalf("profile quota defaults = %#v", profile)
+	}
+	version, err := upgrade("agent_avatar_versions", map[string]any{
+		"id":          "avv_1",
+		"svg":         "<svg/>",
+		"description": "Atlas",
+		"visual_spec": map[string]any{"crop": "badge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := len("<svg/>") + len("Atlas") + len(`{"crop":"badge"}`)
+	if version["payload_state"] != "full" || version["payload_bytes"] != wantBytes ||
+		version["payload_compacted_at"] != nil || version["payload_compaction_reason"] != nil ||
+		version["locked_layers_sha256"] != nil || version["continuity_fingerprint"] != nil {
+		t.Fatalf("version payload defaults = %#v", version)
+	}
+	other, err := upgrade("agents", map[string]any{"id": "agent_1"})
+	if err != nil || len(other) != 1 || other["id"] != "agent_1" {
+		t.Fatalf("unrelated row = %#v / %v", other, err)
+	}
+}
+
+func TestSchema50AvatarPayloadQuotaUpgradeRejectsIncompletePayload(t *testing.T) {
+	upgrade := UpgraderFor(50)
+	_, err := upgrade("agent_avatar_versions", map[string]any{
+		"svg": "<svg/>", "description": "Atlas",
+	})
+	if err == nil {
+		t.Fatal("incomplete legacy avatar payload was accepted")
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

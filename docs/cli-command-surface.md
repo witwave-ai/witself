@@ -4116,6 +4116,10 @@ witself avatar operator rollback --agent-id AGENT ...
 witself avatar operator reset --agent-id AGENT \
   --expected-profile-revision N [--reason-code CODE] --idempotency-key KEY
 witself avatar operator policy --agent-id AGENT ...
+witself avatar operator quota --agent-id AGENT \
+  --retained-payload-count-limit 20 \
+  --retained-payload-byte-limit 2097152 \
+  --expected-profile-revision N --idempotency-key KEY
 witself avatar operator style show --realm-id REALM
 witself avatar operator style version --realm-id REALM \
   --style-file style.json --expected-style-revision N --idempotency-key KEY
@@ -4129,8 +4133,29 @@ The self and operator `history` commands print payload-free metadata pages and
 preserve `next_before_version` plus the server lifecycle fields for each
 immutable version: `is_active`, `is_proposed`, `was_activated`,
 `rollback_eligible`, `rejected`, and the optional activation or rejection
-timestamps. Pass that cursor back as `--before-version`; use `avatar version`
-for the exact SVG, description, visual specification, and provenance.
+timestamps. They also include `payload_state`, original `payload_bytes`,
+`svg_sha256`, `locked_layers_sha256`, and optional compaction timestamp/reason.
+Pass that cursor back as `--before-version`; use `avatar version` for an exact
+read. A `full` exact version includes SVG, description, visual specification,
+and provenance. A `compacted` exact version returns retained metadata and
+provenance but omits those three creative fields.
+
+`avatar show` and `avatar operator show` report the payload count/byte limits,
+current full-payload usage, and the fixed rollback floor. Defaults are 20 full
+payloads and 2 MiB per agent. `avatar operator quota` is the only quota mutation
+surface; the count range is 4–1000 and the byte range is 524288–67108864. It is
+operator-only, revision-fenced, and idempotent. Lowering a limit immediately
+compacts eligible inactive payloads as needed in the same transaction. A raise
+does not restore compacted data. If the requested state cannot preserve the
+active, proposed, and two most recently activated distinct inactive current-lineage
+payloads, the command fails closed with `avatar_payload_quota_exceeded` and
+leaves both limits and payloads unchanged.
+
+Proposal commands apply the same quota before inserting the new version.
+Eligible compaction order is retired lineage, rejected, other never-activated,
+then activated versions older than the two-version rollback floor; each class
+is oldest first. Compaction is irreversible and exact retry replays never run it
+again.
 
 `avatar reset` requires explicit fresh-start intent. It retires the current
 lineage without deleting history, returns the profile to its deterministic

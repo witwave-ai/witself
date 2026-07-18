@@ -27,6 +27,42 @@ func TestValidateLockedLayerContinuityAllowsNormalizedLockedSourceAndUnlockedCha
 	}
 }
 
+func TestLockedLayersSHA256TracksOnlyNormalizedLockedProjection(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	parent := humanReferenceSVG
+	attributeReordered := strings.Replace(parent,
+		`<rect x="0" y="0" width="512" height="512" fill="#F7FAFC"></rect>`,
+		`<rect fill="#F7FAFC" height="512" width="512" y="0" x="0"></rect>`, 1)
+	expressionChanged := strings.Replace(parent,
+		`d="M218 286 C240 304 272 304 294 286"`,
+		`d="M218 290 C240 308 272 308 294 290"`, 1)
+	lockedChanged := strings.Replace(parent, `r="220" fill="#DCEAF5"`, `r="210" fill="#DCEAF5"`, 1)
+
+	baseline, err := LockedLayersSHA256([]byte(parent), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, svg := range map[string]string{
+		"attribute order": attributeReordered,
+		"unlocked layer":  expressionChanged,
+	} {
+		digest, err := LockedLayersSHA256([]byte(svg), pack)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if digest != baseline {
+			t.Fatalf("%s digest = %s, want %s", name, digest, baseline)
+		}
+	}
+	changed, err := LockedLayersSHA256([]byte(lockedChanged), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == baseline {
+		t.Fatal("locked-layer change preserved projection digest")
+	}
+}
+
 func TestValidateLockedLayerContinuityRejectsLockedSourceChange(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()
 	child := strings.Replace(humanReferenceSVG, `r="220" fill="#DCEAF5"`, `r="210" fill="#DCEAF5"`, 1)

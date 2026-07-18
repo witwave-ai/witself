@@ -18,16 +18,18 @@ import (
 )
 
 type avatarLockedProfile struct {
-	status            avatardomain.Status
-	policy            avatardomain.AutonomyPolicy
-	stylePackID       string
-	stylePackVersion  int
-	lineageGeneration int64
-	retryReady        bool
-	revision          int64
-	latestVersion     *int64
-	proposedVersion   *int64
-	activeVersion     *int64
+	status                    avatardomain.Status
+	policy                    avatardomain.AutonomyPolicy
+	stylePackID               string
+	stylePackVersion          int
+	lineageGeneration         int64
+	retryReady                bool
+	revision                  int64
+	latestVersion             *int64
+	proposedVersion           *int64
+	activeVersion             *int64
+	retainedPayloadCountLimit int
+	retainedPayloadByteLimit  int64
 }
 
 // ProposeAvatar stores an immutable avatar proposal for the authenticated agent.
@@ -106,6 +108,10 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	}
 	svgDigest := sha256.Sum256(sanitizedSVG)
 	svgSHA256 := hex.EncodeToString(svgDigest[:])
+	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(sanitizedSVG, pack)
+	if err != nil {
+		return AvatarMutationResult{}, fmt.Errorf("%w: derive locked-layer digest: %v", ErrAvatarInputInvalid, err)
+	}
 	fingerprint, err := avatarFingerprint(struct {
 		ExpectedRevision int64                    `json:"expected_revision"`
 		ParentVersion    int64                    `json:"parent_version"`
@@ -183,6 +189,17 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 			}
 		}
 	}
+	incomingPayloadBytes, err := avatarCreativePayloadBytes(
+		string(sanitizedSVG), description, visualSpec)
+	if err != nil {
+		return AvatarMutationResult{}, err
+	}
+	compaction, err := compactAvatarPayloadsTx(ctx, tx, target,
+		profile, 1, incomingPayloadBytes, profile.retainedPayloadCountLimit,
+		profile.retainedPayloadByteLimit)
+	if err != nil {
+		return AvatarMutationResult{}, err
+	}
 
 	version := int64(1)
 	if profile.latestVersion != nil {
@@ -204,15 +221,15 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		INSERT INTO agent_avatar_versions
 		       (account_id, realm_id, agent_id, id, version, parent_version,
 		        lineage_generation, style_pack_id, style_pack_version, subject_form, svg,
-		        description, visual_spec, svg_sha256, provenance,
-		        proposed_by_kind, proposed_by_id, proposed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-		        clock_timestamp())`,
+		        description, visual_spec, svg_sha256, locked_layers_sha256, provenance,
+		        proposed_by_kind, proposed_by_id, proposed_at, payload_bytes)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+		        clock_timestamp(),$19)`,
 		target.accountID, target.realmID, target.agentID, versionID, version,
 		parent, profile.lineageGeneration, stylePackID, in.StylePackVersion,
 		string(in.SubjectForm),
-		string(sanitizedSVG), description, visualSpec, svgSHA256, provenanceJSON,
-		p.Kind, p.ID); err != nil {
+		string(sanitizedSVG), description, visualSpec, svgSHA256,
+		lockedLayersSHA256, provenanceJSON, p.Kind, p.ID, incomingPayloadBytes); err != nil {
 		return AvatarMutationResult{}, fmt.Errorf("insert avatar version: %w", err)
 	}
 	var resultRevision int64
@@ -234,6 +251,10 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	receipt, err := insertAvatarMutationReceiptTx(ctx, tx, p, target, "avatar",
 		target.agentID, "propose", key, fingerprint, resultRevision, version)
 	if err != nil {
+		return AvatarMutationResult{}, err
+	}
+	if err := logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
+		profile.retainedPayloadCountLimit, profile.retainedPayloadByteLimit); err != nil {
 		return AvatarMutationResult{}, err
 	}
 	metadata := avatarVersionEventMetadata(target.agentID, version,
@@ -1027,7 +1048,8 @@ func lockAvatarProfileTx(ctx context.Context, tx pgx.Tx, target avatarTarget) (a
 		       p.style_pack_version, p.lineage_generation,
 		       (p.retry_after IS NULL OR p.retry_after <= clock_timestamp()),
 		       p.revision, p.latest_avatar_version,
-		       p.proposed_avatar_version, p.active_avatar_version
+		       p.proposed_avatar_version, p.active_avatar_version,
+		       p.retained_payload_count_limit, p.retained_payload_byte_limit
 		  FROM agent_avatar_profiles p
 		  JOIN agents a ON a.id=p.agent_id AND a.realm_id=p.realm_id
 		  JOIN realms r ON r.id=p.realm_id AND r.account_id=p.account_id
@@ -1037,7 +1059,8 @@ func lockAvatarProfileTx(ctx context.Context, tx pgx.Tx, target avatarTarget) (a
 		&status, &policy, &out.stylePackID, &out.stylePackVersion,
 		&out.lineageGeneration, &out.retryReady,
 		&out.revision, &out.latestVersion, &out.proposedVersion,
-		&out.activeVersion)
+		&out.activeVersion, &out.retainedPayloadCountLimit,
+		&out.retainedPayloadByteLimit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return avatarLockedProfile{}, ErrAvatarNotFound
 	}
@@ -1071,7 +1094,8 @@ func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatar
 		    ON rejection.account_id=v.account_id AND rejection.realm_id=v.realm_id
 		   AND rejection.agent_id=v.agent_id AND rejection.avatar_version=v.version
 		 WHERE v.account_id=$1 AND v.realm_id=$2 AND v.agent_id=$3
-		   AND v.version=$4 AND rejection.id IS NULL`, target.accountID,
+		   AND v.version=$4 AND v.payload_state='full'
+		   AND rejection.id IS NULL`, target.accountID,
 		target.realmID, target.agentID, version).Scan(&parent,
 		&out.lineageGeneration, &out.stylePackID,
 		&out.stylePackVersion, &subjectForm, &out.svg)

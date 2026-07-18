@@ -191,6 +191,7 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 		"/v1/agents/agent_1/avatar:rollback":       "operator-rollback-1",
 		"/v1/agents/agent_1/avatar:reset":          "operator-reset-1",
 		"/v1/agents/agent_1/avatar-policy":         "operator-policy-1",
+		"/v1/agents/agent_1/avatar-quota":          "operator-quota-1",
 		"/v1/realms/realm_1/avatar-style/versions": "style-version-1",
 	}
 	calls := map[string]int{}
@@ -244,6 +245,15 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 				t.Errorf("policy body = %s", mustAvatarClientJSON(t, body))
 			}
 			writeAvatarClientJSON(t, w, AvatarMutationResult{Avatar: view})
+		case "PATCH /v1/agents/agent_1/avatar-quota":
+			body := readAvatarClientBody(t, r)
+			assertAvatarClientMutationHeaders(t, r, wantKeys[r.URL.Path], body)
+			if string(body["retained_payload_count_limit"]) != "8" ||
+				string(body["retained_payload_byte_limit"]) != "1048576" ||
+				string(body["expected_profile_revision"]) != "9" {
+				t.Errorf("quota body = %s", mustAvatarClientJSON(t, body))
+			}
+			writeAvatarClientJSON(t, w, AvatarMutationResult{Avatar: view})
 		case "GET /v1/realms/realm_1/avatar-style":
 			writeAvatarClientJSON(t, w, map[string]any{"style": style})
 		case "POST /v1/realms/realm_1/avatar-style/versions":
@@ -292,6 +302,12 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 	if _, err := UpdateAgentAvatarPolicy(ctx, srv.URL, "operator-token", "agent_1", UpdateAvatarPolicyInput{Policy: avatar.AutonomyAgentProposes, ExpectedProfileRevision: 8, IdempotencyKey: "operator-policy-1"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := UpdateAgentAvatarQuota(ctx, srv.URL, "operator-token", "agent_1", UpdateAvatarQuotaInput{
+		RetainedPayloadCountLimit: 8, RetainedPayloadByteLimit: 1_048_576,
+		ExpectedProfileRevision: 9, IdempotencyKey: "operator-quota-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if got, err := GetRealmAvatarStyle(ctx, srv.URL, "operator-token", "realm_1"); err != nil || got.StylePack.ID != avatar.DefaultStylePackID {
 		t.Fatalf("GetRealmAvatarStyle = %#v, %v", got, err)
 	}
@@ -305,7 +321,8 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 		"POST /v1/agents/agent_1/avatar/proposals",
 		"POST /v1/agents/agent_1/avatar:activate",
 		"POST /v1/agents/agent_1/avatar:reject", "POST /v1/agents/agent_1/avatar:rollback", "POST /v1/agents/agent_1/avatar:reset",
-		"PATCH /v1/agents/agent_1/avatar-policy", "GET /v1/realms/realm_1/avatar-style",
+		"PATCH /v1/agents/agent_1/avatar-policy", "PATCH /v1/agents/agent_1/avatar-quota",
+		"GET /v1/realms/realm_1/avatar-style",
 		"POST /v1/realms/realm_1/avatar-style/versions",
 	} {
 		if calls[route] != 1 {
@@ -401,7 +418,7 @@ func testAvatarView(now time.Time) AvatarView {
 		ID: "avv_1", AccountID: "acc_1", RealmID: "realm_1", AgentID: "agent_1",
 		Version: 1, LineageGeneration: 1, SubjectForm: avatar.SubjectAnimal,
 		Description: "A curious fox", VisualSpec: json.RawMessage(`{"expression":"curious"}`),
-		SVG: "<svg></svg>", SVGSHA256: "hash", Style: style,
+		SVG: "<svg></svg>", SVGSHA256: "hash", LockedLayersSHA256: "locked-hash", Style: style,
 		Provenance: AvatarClientProvenance{Runtime: "codex", Model: "gpt-test"},
 		ProposedBy: AvatarActor{Kind: "agent", ID: "agent_1"}, ProposedAt: now,
 	}
@@ -421,7 +438,8 @@ func testAvatarSummary(version AvatarVersion) AvatarVersionSummary {
 		ID: version.ID, AccountID: version.AccountID, RealmID: version.RealmID,
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
-		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256, Style: version.Style,
+		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
+		LockedLayersSHA256: version.LockedLayersSHA256, Style: version.Style,
 		ProposedBy: version.ProposedBy, ProposedAt: version.ProposedAt,
 		IsActive: version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,

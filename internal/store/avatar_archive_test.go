@@ -209,6 +209,12 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		row["svg"] = svg
 		digest := sha256.Sum256([]byte(svg))
 		row["svg_sha256"] = hex.EncodeToString(digest[:])
+		lockedDigest, digestErr := avatardomain.LockedLayersSHA256(
+			[]byte(svg), avatardomain.BuiltInFlatVectorStylePack())
+		if digestErr != nil {
+			t.Fatal(digestErr)
+		}
+		row["locked_layers_sha256"] = lockedDigest
 		err := ic.validateAndRecord("agent_avatar_versions", row)
 		if err == nil || !strings.Contains(err.Error(), "locked-layer continuity") {
 			t.Fatalf("error = %v, want locked-layer refusal", err)
@@ -227,6 +233,56 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		err := ic.validateAndRecord("agent_avatar_versions", row)
 		if err == nil || !strings.Contains(err.Error(), "perceptual continuity") {
 			t.Fatalf("error = %v, want perceptual continuity refusal", err)
+		}
+	})
+
+	t.Run("full payload locked digest must match normalized projection", func(t *testing.T) {
+		ic := newContext(t)
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		row["locked_layers_sha256"] = strings.Repeat("0", 64)
+		err := ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "locked_layers_sha256 mismatch") {
+			t.Fatalf("error = %v, want locked digest mismatch", err)
+		}
+	})
+
+	t.Run("compacted parent retains locked continuity boundary", func(t *testing.T) {
+		newCompactedContext := func(t *testing.T) *importCtx {
+			t.Helper()
+			ic := newAvatarArchiveImportContext(t)
+			feedAvatarArchiveStyle(t, ic, false)
+			feedAvatarArchiveProfile(t, ic, map[string]any{})
+			parent := avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman)
+			parent["payload_state"] = string(avatardomain.PayloadCompacted)
+			parent["svg"], parent["description"], parent["visual_spec"] = nil, nil, nil
+			parent["payload_compacted_at"] = "2026-07-17T12:30:00Z"
+			parent["payload_compaction_reason"] = "quota"
+			feedAvatarArchiveVersion(t, ic, parent)
+			return ic
+		}
+
+		ic := newCompactedContext(t)
+		if err := ic.validateAndRecord("agent_avatar_versions",
+			avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)); err != nil {
+			t.Fatalf("matching compacted-parent boundary was rejected: %v", err)
+		}
+
+		ic = newCompactedContext(t)
+		child := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		svg := strings.Replace(child["svg"].(string),
+			`r="220" fill="#DCEAF5"`, `r="210" fill="#DCEAF5"`, 1)
+		child["svg"] = svg
+		svgDigest := sha256.Sum256([]byte(svg))
+		child["svg_sha256"] = hex.EncodeToString(svgDigest[:])
+		lockedDigest, err := avatardomain.LockedLayersSHA256(
+			[]byte(svg), avatardomain.BuiltInFlatVectorStylePack())
+		if err != nil {
+			t.Fatal(err)
+		}
+		child["locked_layers_sha256"] = lockedDigest
+		err = ic.validateAndRecord("agent_avatar_versions", child)
+		if err == nil || !strings.Contains(err.Error(), "retained locked-layer continuity") {
+			t.Fatalf("error = %v, want compacted boundary refusal", err)
 		}
 	})
 
@@ -268,6 +324,94 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		row["style_pack_version"] = int64(2)
 		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
 			t.Fatalf("style-version migration was rejected: %v", err)
+		}
+	})
+}
+
+func TestImportedAvatarContinuityFingerprintBounds(t *testing.T) {
+	if present, err := importedAvatarContinuityFingerprint(map[string]any{
+		"continuity_fingerprint": `\x0102`,
+	}); err != nil || !present {
+		t.Fatalf("valid fingerprint = %t / %v", present, err)
+	}
+	for name, value := range map[string]any{
+		"wrong type":  1,
+		"missing hex": "0102",
+		"bad hex":     `\x0z`,
+		"empty":       `\x`,
+		"oversized":   `\x` + strings.Repeat("00", 38*1024+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := importedAvatarContinuityFingerprint(map[string]any{
+				"continuity_fingerprint": value,
+			}); err == nil {
+				t.Fatal("invalid fingerprint was accepted")
+			}
+		})
+	}
+}
+
+func TestAvatarArchiveValidationRejectsLifecycleAfterPayloadCompaction(t *testing.T) {
+	newCompactedContext := func(t *testing.T, profile map[string]any) *importCtx {
+		t.Helper()
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, profile)
+		version := avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman)
+		version["payload_state"] = string(avatardomain.PayloadCompacted)
+		version["svg"], version["description"], version["visual_spec"] = nil, nil, nil
+		version["payload_compacted_at"] = "2026-07-17T12:10:00Z"
+		version["payload_compaction_reason"] = "quota"
+		feedAvatarArchiveVersion(t, ic, version)
+		return ic
+	}
+
+	t.Run("activation", func(t *testing.T) {
+		ic := newCompactedContext(t, map[string]any{
+			"status": "active", "latest_avatar_version": int64(1),
+			"active_avatar_version": int64(1), "revision": int64(2),
+		})
+		feedAvatarArchiveActivation(t, ic, map[string]any{
+			"id": "avact_aaaaaaaaaaaaaaaa", "avatar_version": int64(1),
+			"prior_active_version": nil, "action": "activated",
+			"activated_at": "2026-07-17T12:20:00Z",
+		})
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "activated after payload compaction") {
+			t.Fatalf("error = %v, want post-compaction activation refusal", err)
+		}
+	})
+
+	t.Run("rejection", func(t *testing.T) {
+		ic := newCompactedContext(t, map[string]any{
+			"status": "rejected", "latest_avatar_version": int64(1),
+			"revision": int64(2),
+		})
+		feedAvatarArchiveRow(t, ic, "agent_avatar_rejections", map[string]any{
+			"id": "avrej_aaaaaaaaaaaaaaaa", "account_id": avatarArchiveAccount,
+			"realm_id": avatarArchiveRealm, "agent_id": avatarArchiveAgent,
+			"avatar_version": int64(1), "reason_code": "operator_declined",
+			"rejected_by_kind": PrincipalOperator, "rejected_by_id": avatarArchiveOperator,
+			"rejected_at": "2026-07-17T12:20:00Z",
+		})
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "rejected after payload compaction") {
+			t.Fatalf("error = %v, want post-compaction rejection refusal", err)
+		}
+	})
+
+	t.Run("reset protected pointer", func(t *testing.T) {
+		ic := newCompactedContext(t, map[string]any{
+			"status": "generation_due", "lineage_generation": int64(2),
+			"latest_avatar_version": int64(1), "revision": int64(2),
+		})
+		feedAvatarArchiveReset(t, ic, map[string]any{
+			"retired_proposed_version": int64(1),
+			"reset_at":                 "2026-07-17T12:20:00Z",
+		})
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "remained protected until after its reset boundary") {
+			t.Fatalf("error = %v, want pre-reset compaction refusal", err)
 		}
 	})
 }
@@ -503,6 +647,47 @@ func TestAvatarArchiveValidationAcceptsParentLineageLifecycleScenarios(t *testin
 			t.Fatalf("style migration lineage = %v", err)
 		}
 	})
+}
+
+func TestAvatarArchiveValidationRejectsRetainedPayloadUsageAboveQuota(t *testing.T) {
+	tests := []struct {
+		name       string
+		versions   int64
+		countLimit int64
+		byteLimit  int64
+		bytesEach  int64
+	}{
+		{name: "count", versions: 5, countLimit: 4,
+			byteLimit: AvatarDefaultRetainedPayloadByteLimit},
+		{name: "bytes", versions: 6, countLimit: 20,
+			byteLimit: AvatarMinRetainedPayloadByteLimit, bytesEach: 100_000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ic := newAvatarArchiveImportContext(t)
+			feedAvatarArchiveStyle(t, ic, false)
+			feedAvatarArchiveProfile(t, ic, map[string]any{
+				"status": "proposed", "latest_avatar_version": test.versions,
+				"proposed_avatar_version":      test.versions,
+				"retained_payload_count_limit": test.countLimit,
+				"retained_payload_byte_limit":  test.byteLimit,
+			})
+			for version := int64(1); version <= test.versions; version++ {
+				row := avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman)
+				if test.bytesEach > 0 {
+					row["payload_bytes"] = test.bytesEach
+				}
+				feedAvatarArchiveVersion(t, ic, row)
+				if version < test.versions {
+					feedAvatarArchiveRejection(t, ic, version)
+				}
+			}
+			err := ic.validateImportedAvatarGraph()
+			if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+				t.Fatalf("error = %v, want retained quota refusal", err)
+			}
+		})
+	}
 }
 
 func TestAvatarArchiveValidationAcceptsBothBuiltInPersistedRepresentations(t *testing.T) {
@@ -1025,7 +1210,9 @@ func avatarArchiveProfileRow(overrides map[string]any) map[string]any {
 		"active_avatar_version": nil, "subject_form": "human",
 		"attempt_count": int64(0), "retry_after": nil, "fallback_seed": avatarArchiveAgent,
 		"failure_code": "", "revision": int64(1),
-		"created_at": avatarArchiveTime, "updated_at": avatarArchiveTime,
+		"retained_payload_count_limit": int64(AvatarDefaultRetainedPayloadCountLimit),
+		"retained_payload_byte_limit":  AvatarDefaultRetainedPayloadByteLimit,
+		"created_at":                   avatarArchiveTime, "updated_at": avatarArchiveTime,
 	}
 	for key, value := range overrides {
 		row[key] = value
@@ -1044,9 +1231,23 @@ func avatarArchiveVersionRow(t *testing.T, version, parent int64, form avatardom
 		}
 	}
 	digest := sha256.Sum256([]byte(reference.SVG))
+	lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var parentValue any
 	if parent > 0 {
 		parentValue = parent
+	}
+	description := "A calm team portrait in the shared flat vector style."
+	visualSpec := map[string]any{"identity": map[string]any{"expression": "calm"}}
+	rawSpec, err := json.Marshal(visualSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := avatarCreativePayloadBytes(reference.SVG, description, rawSpec)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return map[string]any{
 		"account_id": avatarArchiveAccount, "realm_id": avatarArchiveRealm,
@@ -1055,12 +1256,17 @@ func avatarArchiveVersionRow(t *testing.T, version, parent int64, form avatardom
 		"parent_version": parentValue,
 		"style_pack_id":  pack.ID, "style_pack_version": int64(pack.Version),
 		"subject_form": string(form), "svg": reference.SVG,
-		"description":      "A calm team portrait in the shared flat vector style.",
-		"visual_spec":      map[string]any{"identity": map[string]any{"expression": "calm"}},
-		"svg_sha256":       hex.EncodeToString(digest[:]),
-		"provenance":       map[string]any{"runtime": "cursor", "model": "GPT-5.6 Sol", "recipe": "avatar", "recipe_version": "1"},
-		"proposed_by_kind": PrincipalAgent, "proposed_by_id": avatarArchiveAgent,
-		"proposed_at": avatarArchiveTime,
+		"description":            description,
+		"visual_spec":            visualSpec,
+		"svg_sha256":             hex.EncodeToString(digest[:]),
+		"locked_layers_sha256":   lockedDigest,
+		"continuity_fingerprint": nil,
+		"provenance":             map[string]any{"runtime": "cursor", "model": "GPT-5.6 Sol", "recipe": "avatar", "recipe_version": "1"},
+		"proposed_by_kind":       PrincipalAgent, "proposed_by_id": avatarArchiveAgent,
+		"proposed_at":          avatarArchiveTime,
+		"payload_state":        string(avatardomain.PayloadFull),
+		"payload_bytes":        payloadBytes,
+		"payload_compacted_at": nil, "payload_compaction_reason": nil,
 	}
 }
 

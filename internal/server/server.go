@@ -336,6 +336,7 @@ type Config struct {
 	RollbackAgentAvatar           func(ctx context.Context, accountID, operatorID, agentID string, in RollbackAvatarRequest) (AvatarMutationResult, error)
 	ResetAgentAvatar              func(ctx context.Context, accountID, operatorID, agentID string, in ResetAvatarRequest) (AvatarMutationResult, error)
 	UpdateAgentAvatarPolicy       func(ctx context.Context, accountID, operatorID, agentID string, in UpdateAvatarPolicyRequest) (AvatarMutationResult, error)
+	UpdateAgentAvatarQuota        func(ctx context.Context, accountID, operatorID, agentID string, in UpdateAvatarQuotaRequest) (AvatarMutationResult, error)
 	GetRealmAvatarStyle           func(ctx context.Context, accountID, operatorID, realmID string) (AvatarStyleView, error)
 	CreateRealmAvatarStyleVersion func(ctx context.Context, accountID, operatorID, realmID string, in CreateAvatarStyleVersionRequest) (AvatarStyleMutationResult, error)
 	ListSelfPeers                 func(ctx context.Context, p DomainPrincipal) ([]SelfPeer, error)
@@ -1655,6 +1656,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.UpdateAgentAvatarPolicy != nil {
 			mux.HandleFunc("PATCH /v1/agents/{agent}/avatar-policy", updateAgentAvatarPolicyHandler(cfg.Authenticate, cfg.UpdateAgentAvatarPolicy))
+		}
+		if cfg.UpdateAgentAvatarQuota != nil {
+			mux.HandleFunc("PATCH /v1/agents/{agent}/avatar-quota", updateAgentAvatarQuotaHandler(cfg.Authenticate, cfg.UpdateAgentAvatarQuota))
 		}
 		if cfg.GetRealmAvatarStyle != nil {
 			mux.HandleFunc("GET /v1/realms/{realm}/avatar-style", getRealmAvatarStyleHandler(cfg.Authenticate, cfg.GetRealmAvatarStyle))

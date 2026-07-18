@@ -17,19 +17,26 @@ import (
 )
 
 const (
-	defaultAvatarHistoryLimit           = 20
-	maxAvatarHistoryLimit               = 100
-	maxAvatarMutationRequestBytes int64 = 16 * 1024
-	maxAvatarProposalRequestBytes int64 = 768 * 1024
-	maxAvatarStyleRequestBytes    int64 = 2 * 1024 * 1024
-	maxAvatarIdempotencyKeyBytes        = 512
-	maxAvatarReasonCodeBytes            = 128
+	defaultAvatarHistoryLimit                = 20
+	maxAvatarHistoryLimit                    = 100
+	maxAvatarMutationRequestBytes      int64 = 16 * 1024
+	maxAvatarProposalRequestBytes      int64 = 768 * 1024
+	maxAvatarStyleRequestBytes         int64 = 2 * 1024 * 1024
+	maxAvatarIdempotencyKeyBytes             = 512
+	maxAvatarReasonCodeBytes                 = 128
+	minAvatarRetainedPayloadCountLimit       = 4
+	maxAvatarRetainedPayloadCountLimit       = 1000
+	minAvatarRetainedPayloadByteLimit  int64 = 512 * 1024
+	maxAvatarRetainedPayloadByteLimit  int64 = 64 * 1024 * 1024
 )
 
 var (
 	avatarTargetPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
 	avatarVersionPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 	avatarReasonPattern  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
+	// ErrAvatarPayloadQuotaExceeded is the transport sentinel for a hard,
+	// non-retryable avatar creative-payload quota refusal.
+	ErrAvatarPayloadQuotaExceeded = errors.New("avatar payload quota exceeded")
 )
 
 // AvatarActor identifies the authenticated principal responsible for a
@@ -52,75 +59,90 @@ type AvatarClientProvenance struct {
 // AvatarProfile is the mutable state and immutable-version pointers for one
 // account-scoped agent.
 type AvatarProfile struct {
-	AccountID         string                `json:"account_id"`
-	RealmID           string                `json:"realm_id"`
-	AgentID           string                `json:"agent_id"`
-	SubjectForm       avatar.SubjectForm    `json:"subject_form"`
-	AutonomyPolicy    avatar.AutonomyPolicy `json:"autonomy_policy"`
-	Status            avatar.Status         `json:"status"`
-	Style             avatar.StylePackRef   `json:"style"`
-	LineageGeneration int64                 `json:"lineage_generation"`
-	ProfileRevision   int64                 `json:"profile_revision"`
-	LatestVersion     int64                 `json:"latest_avatar_version,omitempty"`
-	ActiveVersion     int64                 `json:"active_avatar_version,omitempty"`
-	ProposedVersion   int64                 `json:"proposed_avatar_version,omitempty"`
-	AttemptCount      int                   `json:"attempt_count"`
-	RetryAfter        *time.Time            `json:"retry_after,omitempty"`
-	FallbackSeed      string                `json:"fallback_seed,omitempty"`
-	FailureCode       string                `json:"failure_code,omitempty"`
-	CreatedAt         time.Time             `json:"created_at"`
-	UpdatedAt         time.Time             `json:"updated_at"`
+	AccountID                 string                `json:"account_id"`
+	RealmID                   string                `json:"realm_id"`
+	AgentID                   string                `json:"agent_id"`
+	SubjectForm               avatar.SubjectForm    `json:"subject_form"`
+	AutonomyPolicy            avatar.AutonomyPolicy `json:"autonomy_policy"`
+	Status                    avatar.Status         `json:"status"`
+	Style                     avatar.StylePackRef   `json:"style"`
+	LineageGeneration         int64                 `json:"lineage_generation"`
+	ProfileRevision           int64                 `json:"profile_revision"`
+	LatestVersion             int64                 `json:"latest_avatar_version,omitempty"`
+	ActiveVersion             int64                 `json:"active_avatar_version,omitempty"`
+	ProposedVersion           int64                 `json:"proposed_avatar_version,omitempty"`
+	AttemptCount              int                   `json:"attempt_count"`
+	RetryAfter                *time.Time            `json:"retry_after,omitempty"`
+	FallbackSeed              string                `json:"fallback_seed,omitempty"`
+	FailureCode               string                `json:"failure_code,omitempty"`
+	RetainedPayloadCountLimit int                   `json:"retained_payload_count_limit"`
+	RetainedPayloadByteLimit  int64                 `json:"retained_payload_byte_limit"`
+	RetainedPayloadCount      int                   `json:"retained_payload_count"`
+	RetainedPayloadBytes      int64                 `json:"retained_payload_bytes"`
+	RollbackPayloadFloor      int                   `json:"rollback_payload_floor"`
+	CreatedAt                 time.Time             `json:"created_at"`
+	UpdatedAt                 time.Time             `json:"updated_at"`
 }
 
 // AvatarVersion is one immutable sanitized SVG and its model-neutral metadata.
 type AvatarVersion struct {
-	ID                string                 `json:"id"`
-	AccountID         string                 `json:"account_id"`
-	RealmID           string                 `json:"realm_id"`
-	AgentID           string                 `json:"agent_id"`
-	Version           int64                  `json:"version"`
-	ParentVersion     *int64                 `json:"parent_version,omitempty"`
-	LineageGeneration int64                  `json:"lineage_generation"`
-	SubjectForm       avatar.SubjectForm     `json:"subject_form"`
-	Description       string                 `json:"description"`
-	VisualSpec        json.RawMessage        `json:"visual_spec"`
-	SVG               string                 `json:"svg"`
-	SVGSHA256         string                 `json:"svg_sha256"`
-	Style             avatar.StylePackRef    `json:"style"`
-	Provenance        AvatarClientProvenance `json:"provenance,omitempty"`
-	ProposedBy        AvatarActor            `json:"proposed_by"`
-	ProposedAt        time.Time              `json:"proposed_at"`
-	IsActive          bool                   `json:"is_active"`
-	IsProposed        bool                   `json:"is_proposed"`
-	WasActivated      bool                   `json:"was_activated"`
-	RollbackEligible  bool                   `json:"rollback_eligible"`
-	Rejected          bool                   `json:"rejected"`
-	LastActivatedAt   *time.Time             `json:"last_activated_at,omitempty"`
-	RejectedAt        *time.Time             `json:"rejected_at,omitempty"`
+	ID                      string                 `json:"id"`
+	AccountID               string                 `json:"account_id"`
+	RealmID                 string                 `json:"realm_id"`
+	AgentID                 string                 `json:"agent_id"`
+	Version                 int64                  `json:"version"`
+	ParentVersion           *int64                 `json:"parent_version,omitempty"`
+	LineageGeneration       int64                  `json:"lineage_generation"`
+	SubjectForm             avatar.SubjectForm     `json:"subject_form"`
+	Description             string                 `json:"description,omitempty"`
+	VisualSpec              json.RawMessage        `json:"visual_spec,omitempty"`
+	SVG                     string                 `json:"svg,omitempty"`
+	SVGSHA256               string                 `json:"svg_sha256"`
+	LockedLayersSHA256      string                 `json:"locked_layers_sha256"`
+	Style                   avatar.StylePackRef    `json:"style"`
+	Provenance              AvatarClientProvenance `json:"provenance,omitempty"`
+	ProposedBy              AvatarActor            `json:"proposed_by"`
+	ProposedAt              time.Time              `json:"proposed_at"`
+	IsActive                bool                   `json:"is_active"`
+	IsProposed              bool                   `json:"is_proposed"`
+	WasActivated            bool                   `json:"was_activated"`
+	RollbackEligible        bool                   `json:"rollback_eligible"`
+	Rejected                bool                   `json:"rejected"`
+	LastActivatedAt         *time.Time             `json:"last_activated_at,omitempty"`
+	RejectedAt              *time.Time             `json:"rejected_at,omitempty"`
+	PayloadState            avatar.PayloadState    `json:"payload_state"`
+	PayloadBytes            int64                  `json:"payload_bytes"`
+	PayloadCompactedAt      *time.Time             `json:"payload_compacted_at,omitempty"`
+	PayloadCompactionReason string                 `json:"payload_compaction_reason,omitempty"`
 }
 
 // AvatarVersionSummary is the payload-free history representation used to
 // select an exact immutable version for a subsequent detail or rollback read.
 type AvatarVersionSummary struct {
-	ID                string              `json:"id"`
-	AccountID         string              `json:"account_id"`
-	RealmID           string              `json:"realm_id"`
-	AgentID           string              `json:"agent_id"`
-	Version           int64               `json:"version"`
-	ParentVersion     *int64              `json:"parent_version,omitempty"`
-	LineageGeneration int64               `json:"lineage_generation"`
-	SubjectForm       avatar.SubjectForm  `json:"subject_form"`
-	SVGSHA256         string              `json:"svg_sha256"`
-	Style             avatar.StylePackRef `json:"style"`
-	ProposedBy        AvatarActor         `json:"proposed_by"`
-	ProposedAt        time.Time           `json:"proposed_at"`
-	IsActive          bool                `json:"is_active"`
-	IsProposed        bool                `json:"is_proposed"`
-	WasActivated      bool                `json:"was_activated"`
-	RollbackEligible  bool                `json:"rollback_eligible"`
-	Rejected          bool                `json:"rejected"`
-	LastActivatedAt   *time.Time          `json:"last_activated_at,omitempty"`
-	RejectedAt        *time.Time          `json:"rejected_at,omitempty"`
+	ID                      string              `json:"id"`
+	AccountID               string              `json:"account_id"`
+	RealmID                 string              `json:"realm_id"`
+	AgentID                 string              `json:"agent_id"`
+	Version                 int64               `json:"version"`
+	ParentVersion           *int64              `json:"parent_version,omitempty"`
+	LineageGeneration       int64               `json:"lineage_generation"`
+	SubjectForm             avatar.SubjectForm  `json:"subject_form"`
+	SVGSHA256               string              `json:"svg_sha256"`
+	LockedLayersSHA256      string              `json:"locked_layers_sha256"`
+	Style                   avatar.StylePackRef `json:"style"`
+	ProposedBy              AvatarActor         `json:"proposed_by"`
+	ProposedAt              time.Time           `json:"proposed_at"`
+	IsActive                bool                `json:"is_active"`
+	IsProposed              bool                `json:"is_proposed"`
+	WasActivated            bool                `json:"was_activated"`
+	RollbackEligible        bool                `json:"rollback_eligible"`
+	Rejected                bool                `json:"rejected"`
+	LastActivatedAt         *time.Time          `json:"last_activated_at,omitempty"`
+	RejectedAt              *time.Time          `json:"rejected_at,omitempty"`
+	PayloadState            avatar.PayloadState `json:"payload_state"`
+	PayloadBytes            int64               `json:"payload_bytes"`
+	PayloadCompactedAt      *time.Time          `json:"payload_compacted_at,omitempty"`
+	PayloadCompactionReason string              `json:"payload_compaction_reason,omitempty"`
 }
 
 // AvatarView contains the profile plus its exact active and pending payloads.
@@ -234,6 +256,14 @@ type UpdateAvatarPolicyRequest struct {
 	Policy                  avatar.AutonomyPolicy `json:"policy"`
 	ExpectedProfileRevision int64                 `json:"expected_profile_revision"`
 	IdempotencyKey          string                `json:"-"`
+}
+
+// UpdateAvatarQuotaRequest updates one agent's retained creative-payload limits.
+type UpdateAvatarQuotaRequest struct {
+	RetainedPayloadCountLimit int    `json:"retained_payload_count_limit"`
+	RetainedPayloadByteLimit  int64  `json:"retained_payload_byte_limit"`
+	ExpectedProfileRevision   int64  `json:"expected_profile_revision"`
+	IdempotencyKey            string `json:"-"`
 }
 
 // CreateAvatarStyleVersionRequest publishes and selects one immutable realm
@@ -605,6 +635,35 @@ func updateAgentAvatarPolicyHandler(
 	})
 }
 
+func updateAgentAvatarQuotaHandler(
+	auth AuthFunc,
+	update func(context.Context, string, string, string, UpdateAvatarQuotaRequest) (AvatarMutationResult, error),
+) http.HandlerFunc {
+	return avatarOperatorHandler(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		agentID, ok := avatarPathTarget(w, r, "agent")
+		if !ok {
+			return
+		}
+		var in UpdateAvatarQuotaRequest
+		if !decodeAvatarMutation(w, r, &in, maxAvatarMutationRequestBytes) {
+			return
+		}
+		if in.ExpectedProfileRevision < 1 ||
+			in.RetainedPayloadCountLimit < minAvatarRetainedPayloadCountLimit ||
+			in.RetainedPayloadCountLimit > maxAvatarRetainedPayloadCountLimit ||
+			in.RetainedPayloadByteLimit < minAvatarRetainedPayloadByteLimit ||
+			in.RetainedPayloadByteLimit > maxAvatarRetainedPayloadByteLimit {
+			writeJSONError(w, http.StatusBadRequest, "invalid avatar payload quota request")
+			return
+		}
+		result, err := update(r.Context(), p.accountID, p.operatorID, agentID, in)
+		if writeAvatarError(w, err, "update avatar payload quota") {
+			return
+		}
+		writeAvatarMutation(w, http.StatusOK, result)
+	})
+}
+
 func getRealmAvatarStyleHandler(
 	auth AuthFunc,
 	get func(context.Context, string, string, string) (AvatarStyleView, error),
@@ -695,6 +754,8 @@ func decodeAvatarMutation(w http.ResponseWriter, r *http.Request, dst any, maxim
 	case *AvatarGenerationFailureRequest:
 		in.IdempotencyKey = idempotencyKey
 	case *UpdateAvatarPolicyRequest:
+		in.IdempotencyKey = idempotencyKey
+	case *UpdateAvatarQuotaRequest:
 		in.IdempotencyKey = idempotencyKey
 	case *CreateAvatarStyleVersionRequest:
 		in.IdempotencyKey = idempotencyKey
@@ -872,6 +933,8 @@ func writeAvatarError(w http.ResponseWriter, err error, operation string) bool {
 		writeJSONError(w, http.StatusNotFound, "avatar resource not found")
 	case errors.Is(err, ErrIdempotencyConflict):
 		writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different avatar mutation")
+	case errors.Is(err, ErrAvatarPayloadQuotaExceeded):
+		writeJSONError(w, http.StatusConflict, "avatar_payload_quota_exceeded")
 	case errors.Is(err, ErrConflict):
 		writeJSONError(w, http.StatusConflict, "avatar revision conflict")
 	default:
@@ -885,6 +948,7 @@ func avatarDomainInputError(err error) bool {
 		errors.Is(err, avatar.ErrInvalidAutonomyPolicy) ||
 		errors.Is(err, avatar.ErrInvalidStatus) ||
 		errors.Is(err, avatar.ErrInvalidEventType) ||
+		errors.Is(err, avatar.ErrInvalidPayloadState) ||
 		errors.Is(err, avatar.ErrInvalidDescription) ||
 		errors.Is(err, avatar.ErrInvalidSpecJSON) ||
 		errors.Is(err, avatar.ErrInvalidStylePack) ||

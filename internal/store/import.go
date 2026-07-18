@@ -105,7 +105,9 @@ var importColumns = map[string]map[string]bool{
 		"active_avatar_version": true, "subject_form": true,
 		"attempt_count": true, "retry_after": true,
 		"fallback_seed": true, "failure_code": true, "revision": true,
-		"created_at": true, "updated_at": true,
+		"retained_payload_count_limit": true,
+		"retained_payload_byte_limit":  true,
+		"created_at":                   true, "updated_at": true,
 	},
 	"agent_avatar_versions": {
 		"account_id": true, "realm_id": true, "agent_id": true,
@@ -113,7 +115,11 @@ var importColumns = map[string]map[string]bool{
 		"parent_version": true,
 		"style_pack_id":  true, "style_pack_version": true,
 		"subject_form": true, "svg": true, "description": true,
-		"visual_spec": true, "svg_sha256": true, "provenance": true,
+		"visual_spec": true, "svg_sha256": true,
+		"locked_layers_sha256": true, "continuity_fingerprint": true,
+		"provenance":    true,
+		"payload_state": true, "payload_bytes": true,
+		"payload_compacted_at": true, "payload_compaction_reason": true,
 		"proposed_by_kind": true, "proposed_by_id": true,
 		"proposed_at": true,
 	},
@@ -707,6 +713,7 @@ type agentActivityImportKey struct {
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
 	accountID                    string
+	schemaVersion                int
 	exportedAt                   time.Time
 	importedAt                   time.Time
 	accounts                     int
@@ -727,7 +734,9 @@ type importCtx struct {
 	avatarActivationCount        map[avatarLineageImportKey]int64
 	avatarActivationSequence     map[string]int64
 	avatarActivatedVersions      map[avatarVersionImportKey]bool
+	avatarLastActivatedAt        map[avatarVersionImportKey]time.Time
 	avatarRejectedVersions       map[avatarVersionImportKey]bool
+	avatarRejectedAt             map[avatarVersionImportKey]time.Time
 	avatarResets                 map[avatarLineageImportKey]avatarResetImportScope
 	avatarResetReceipts          map[avatarLineageImportKey]bool
 	avatarResetCount             map[string]int64
@@ -771,6 +780,7 @@ type importCtx struct {
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
 		accountID:                    accountID,
+		schemaVersion:                SchemaVersion(),
 		operators:                    map[string]bool{},
 		realms:                       map[string]bool{},
 		agents:                       map[string]bool{},
@@ -788,7 +798,9 @@ func newImportCtx(accountID string) *importCtx {
 		avatarActivationCount:        map[avatarLineageImportKey]int64{},
 		avatarActivationSequence:     map[string]int64{},
 		avatarActivatedVersions:      map[avatarVersionImportKey]bool{},
+		avatarLastActivatedAt:        map[avatarVersionImportKey]time.Time{},
 		avatarRejectedVersions:       map[avatarVersionImportKey]bool{},
+		avatarRejectedAt:             map[avatarVersionImportKey]time.Time{},
 		avatarResets:                 map[avatarLineageImportKey]avatarResetImportScope{},
 		avatarResetReceipts:          map[avatarLineageImportKey]bool{},
 		avatarResetCount:             map[string]int64{},
@@ -3587,6 +3599,7 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
 		OnManifest: func(m export.Manifest) error {
+			ic.schemaVersion = m.SchemaVersion
 			if m.AccountID == "" || m.AccountID != expectedAccountID {
 				return fmt.Errorf("%w: archive is for %q", ErrArchiveAccountMismatch, m.AccountID)
 			}
@@ -3626,6 +3639,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 				return err
 			}
 			if err := ic.normalizeImportedMessageRequestClaim(table, obj, importedAt); err != nil {
+				return err
+			}
+			if err := ic.normalizeLegacyImportedAvatarPayloadFields(table, obj); err != nil {
 				return err
 			}
 			if err := ic.validateAndRecord(table, obj); err != nil {

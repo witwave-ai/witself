@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,17 +57,19 @@ type realmAvatarStyleImportScope struct {
 }
 
 type avatarProfileImportScope struct {
-	agentID         string
-	realmID         string
-	lineage         int64
-	style           avatarStyleVersionImportKey
-	status          avatardomain.Status
-	policy          avatardomain.AutonomyPolicy
-	subjectForm     avatardomain.SubjectForm
-	latestVersion   int64
-	proposedVersion int64
-	activeVersion   int64
-	revision        int64
+	agentID                   string
+	realmID                   string
+	lineage                   int64
+	style                     avatarStyleVersionImportKey
+	status                    avatardomain.Status
+	policy                    avatardomain.AutonomyPolicy
+	subjectForm               avatardomain.SubjectForm
+	latestVersion             int64
+	proposedVersion           int64
+	activeVersion             int64
+	revision                  int64
+	retainedPayloadCountLimit int64
+	retainedPayloadByteLimit  int64
 }
 
 type avatarVersionImportKey struct {
@@ -75,15 +78,51 @@ type avatarVersionImportKey struct {
 }
 
 type avatarVersionImportScope struct {
-	id             string
-	realmID        string
-	lineage        int64
-	style          avatarStyleVersionImportKey
-	parentVersion  int64
-	subjectForm    avatardomain.SubjectForm
-	svg            string
-	proposedByKind string
-	proposedAt     time.Time
+	id                    string
+	realmID               string
+	lineage               int64
+	style                 avatarStyleVersionImportKey
+	parentVersion         int64
+	subjectForm           avatardomain.SubjectForm
+	svg                   string
+	proposedByKind        string
+	proposedAt            time.Time
+	payloadState          avatardomain.PayloadState
+	payloadBytes          int64
+	payloadCompactedAt    *time.Time
+	lockedLayersSHA256    string
+	continuityFingerprint bool
+}
+
+func (ic *importCtx) normalizeLegacyImportedAvatarPayloadFields(table string, obj map[string]any) error {
+	if ic.schemaVersion >= 51 {
+		return nil
+	}
+	switch table {
+	case "agent_avatar_profiles":
+		obj["retained_payload_count_limit"] = AvatarDefaultRetainedPayloadCountLimit
+		obj["retained_payload_byte_limit"] = AvatarDefaultRetainedPayloadByteLimit
+	case "agent_avatar_versions":
+		svg, svgOK := obj["svg"].(string)
+		description, descriptionOK := obj["description"].(string)
+		visualSpec, specOK := obj["visual_spec"].(map[string]any)
+		if !svgOK || !descriptionOK || !specOK {
+			return fmt.Errorf("%w: legacy avatar version payload is incomplete", ErrArchiveContent)
+		}
+		rawSpec, err := json.Marshal(visualSpec)
+		if err != nil {
+			return fmt.Errorf("%w: legacy avatar visual_spec is invalid", ErrArchiveContent)
+		}
+		payloadBytes, err := avatarCreativePayloadBytes(svg, description, rawSpec)
+		if err != nil {
+			return fmt.Errorf("%w: legacy avatar payload byte count is invalid", ErrArchiveContent)
+		}
+		obj["payload_state"] = string(avatardomain.PayloadFull)
+		obj["payload_bytes"] = payloadBytes
+		obj["payload_compacted_at"] = nil
+		obj["payload_compaction_reason"] = nil
+	}
+	return nil
 }
 
 type avatarLineageImportKey struct {
@@ -425,11 +464,23 @@ func (ic *importCtx) validateImportedAvatarProfile(obj map[string]any) (avatarPr
 	if err := ic.validateImportedAvatarTimes(obj, "created_at", "updated_at"); err != nil {
 		return avatarProfileImportScope{}, err
 	}
+	retainedCountLimit, ok := importedPositiveInteger(obj["retained_payload_count_limit"])
+	if !ok || retainedCountLimit < AvatarMinRetainedPayloadCountLimit ||
+		retainedCountLimit > AvatarMaxRetainedPayloadCountLimit {
+		return avatarProfileImportScope{}, fmt.Errorf("retained_payload_count_limit is invalid")
+	}
+	retainedByteLimit, ok := importedPositiveInteger(obj["retained_payload_byte_limit"])
+	if !ok || retainedByteLimit < AvatarMinRetainedPayloadByteLimit ||
+		retainedByteLimit > AvatarMaxRetainedPayloadByteLimit {
+		return avatarProfileImportScope{}, fmt.Errorf("retained_payload_byte_limit is invalid")
+	}
 	return avatarProfileImportScope{
 		agentID: agentID, realmID: realmID, lineage: lineage,
 		style: style, status: status,
 		policy: policy, subjectForm: form, latestVersion: latest,
 		proposedVersion: proposed, activeVersion: active, revision: revision,
+		retainedPayloadCountLimit: retainedCountLimit,
+		retainedPayloadByteLimit:  retainedByteLimit,
 	}, nil
 }
 
@@ -492,32 +543,93 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	if err != nil || form.Validate() != nil || !styleScope.pack.HasSubjectForm(form) {
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("subject_form is invalid for the style")
 	}
-	description, err := requireStringField(obj, "description")
-	normalizedDescription, normalizeErr := avatardomain.NormalizeDescription(description)
-	if err != nil || normalizeErr != nil || normalizedDescription != description {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("description is not canonical")
+	payloadStateText, err := requireStringField(obj, "payload_state")
+	payloadState := avatardomain.PayloadState(payloadStateText)
+	if err != nil || payloadState.Validate() != nil {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload_state is invalid")
 	}
-	visualSpec, ok := obj["visual_spec"].(map[string]any)
-	if !ok {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("visual_spec must be an object")
+	payloadBytes, ok := importedPositiveInteger(obj["payload_bytes"])
+	if !ok || payloadBytes > maxAvatarPayloadBytes {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload_bytes is invalid")
 	}
-	rawSpec, _ := json.Marshal(visualSpec)
-	canonicalSpec, err := avatardomain.NormalizeSpecJSON(rawSpec)
-	if err != nil || !jsonValuesEqual(rawSpec, canonicalSpec) {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("visual_spec is invalid")
-	}
-	svg, err := requireStringField(obj, "svg")
-	if err != nil {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg is required")
-	}
-	canonicalSVG, err := avatardomain.SanitizeSVGForStylePack([]byte(svg), styleScope.pack)
-	if err != nil || string(canonicalSVG) != svg {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg is not canonical and style-valid")
-	}
-	digest := sha256.Sum256([]byte(svg))
 	storedDigest, err := requireStringField(obj, "svg_sha256")
-	if err != nil || storedDigest != hex.EncodeToString(digest[:]) {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg_sha256 mismatch")
+	if err != nil || !validFactSHA256(storedDigest) {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg_sha256 is invalid")
+	}
+	lockedLayersSHA256, lockedDigestErr := requireStringField(obj, "locked_layers_sha256")
+	legacyLockedDigest := ic.schemaVersion < 51 && lockedDigestErr != nil
+	if !legacyLockedDigest && (lockedDigestErr != nil || !validFactSHA256(lockedLayersSHA256)) {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked_layers_sha256 is invalid")
+	}
+	continuityFingerprint, err := importedAvatarContinuityFingerprint(obj)
+	if err != nil {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, err
+	}
+	compactedAt, hasCompactedAt, err := importedOptionalTimestamp(obj, "payload_compacted_at")
+	if err != nil {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload_compacted_at is invalid")
+	}
+	compactionReason, hasCompactionReason := optionalStringField(obj, "payload_compaction_reason")
+	var svg string
+	switch payloadState {
+	case avatardomain.PayloadFull:
+		if hasCompactedAt || hasCompactionReason {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("full payload carries compaction metadata")
+		}
+		description, descriptionErr := requireStringField(obj, "description")
+		normalizedDescription, normalizeErr := avatardomain.NormalizeDescription(description)
+		if descriptionErr != nil || normalizeErr != nil || normalizedDescription != description {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("description is not canonical")
+		}
+		visualSpec, specOK := obj["visual_spec"].(map[string]any)
+		if !specOK {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("visual_spec must be an object")
+		}
+		rawSpec, _ := json.Marshal(visualSpec)
+		canonicalSpec, normalizeSpecErr := avatardomain.NormalizeSpecJSON(rawSpec)
+		if normalizeSpecErr != nil || !jsonValuesEqual(rawSpec, canonicalSpec) {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("visual_spec is invalid")
+		}
+		svgValue, svgErr := requireStringField(obj, "svg")
+		if svgErr != nil {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg is required")
+		}
+		canonicalSVG, sanitizeErr := avatardomain.SanitizeSVGForStylePack([]byte(svgValue), styleScope.pack)
+		if sanitizeErr != nil || string(canonicalSVG) != svgValue {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg is not canonical and style-valid")
+		}
+		digest := sha256.Sum256([]byte(svgValue))
+		if storedDigest != hex.EncodeToString(digest[:]) {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg_sha256 mismatch")
+		}
+		derivedLockedDigest, digestErr := avatardomain.LockedLayersSHA256(canonicalSVG, styleScope.pack)
+		if digestErr != nil {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked-layer projection is invalid")
+		}
+		if legacyLockedDigest {
+			lockedLayersSHA256 = derivedLockedDigest
+			obj["locked_layers_sha256"] = derivedLockedDigest
+		} else if lockedLayersSHA256 != derivedLockedDigest {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked_layers_sha256 mismatch")
+		}
+		minimumBytes := int64(len(svgValue) + len(description) + len(canonicalSpec))
+		if payloadBytes < minimumBytes {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload_bytes understates retained creative data")
+		}
+		svg = svgValue
+	case avatardomain.PayloadCompacted:
+		if legacyLockedDigest {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("legacy archive cannot contain compacted avatar payloads")
+		}
+		if obj["svg"] != nil || obj["description"] != nil || obj["visual_spec"] != nil {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("compacted payload retains creative data")
+		}
+		if !hasCompactedAt || !hasCompactionReason || compactionReason != "quota" {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("compacted payload metadata is incomplete")
+		}
+		if err := ic.requireTimestampAtOrBeforeExport("payload_compacted_at", *compactedAt); err != nil {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, err
+		}
 	}
 	provenance, ok := obj["provenance"].(map[string]any)
 	if !ok {
@@ -551,9 +663,14 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 			if parentScope.subjectForm != form {
 				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution changes subject_form")
 			}
-			if err := avatardomain.ValidateLockedLayerContinuity(
-				[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
-				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates locked-layer continuity: %v", err)
+			if parentScope.payloadState == avatardomain.PayloadFull && payloadState == avatardomain.PayloadFull {
+				if err := avatardomain.ValidateLockedLayerContinuity(
+					[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
+					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates locked-layer continuity: %v", err)
+				}
+			}
+			if parentScope.lockedLayersSHA256 != lockedLayersSHA256 {
+				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates retained locked-layer continuity")
 			}
 			if err := avatardomain.ValidatePerceptualContinuity(
 				[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
@@ -565,10 +682,33 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, err
 	}
 	proposedAt, _ := requireImportedTimestamp(obj, "proposed_at")
+	if hasCompactedAt && compactedAt.Before(*proposedAt) {
+		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload was compacted before it was proposed")
+	}
 	return key, avatarVersionImportScope{
 		id: id, realmID: realmID, lineage: lineage, style: style, parentVersion: parent,
 		subjectForm: form, svg: svg, proposedByKind: actorKind, proposedAt: proposedAt.UTC(),
+		payloadState: payloadState, payloadBytes: payloadBytes,
+		payloadCompactedAt:    compactedAt,
+		lockedLayersSHA256:    lockedLayersSHA256,
+		continuityFingerprint: continuityFingerprint,
 	}, nil
+}
+
+func importedAvatarContinuityFingerprint(obj map[string]any) (bool, error) {
+	raw, present := obj["continuity_fingerprint"]
+	if !present || raw == nil {
+		return false, nil
+	}
+	encoded, ok := raw.(string)
+	if !ok || !strings.HasPrefix(encoded, `\x`) || len(encoded) <= 2 || len(encoded)%2 != 0 {
+		return false, fmt.Errorf("continuity_fingerprint is invalid")
+	}
+	decoded, err := hex.DecodeString(encoded[2:])
+	if err != nil || len(decoded) < 1 || len(decoded) > 38*1024 {
+		return false, fmt.Errorf("continuity_fingerprint is invalid")
+	}
+	return true, nil
 }
 
 func (ic *importCtx) validImportedAvatarActor(kind, id, realmID string) bool {
@@ -663,6 +803,9 @@ func (ic *importCtx) validateImportedAvatarActivation(obj map[string]any) error 
 	ic.avatarActivationCount[lineageKey] = count + 1
 	ic.avatarActivationSequence[agentID] = sequence
 	ic.avatarActivatedVersions[versionKey] = true
+	if previous := ic.avatarLastActivatedAt[versionKey]; previous.IsZero() || activatedAt.After(previous) {
+		ic.avatarLastActivatedAt[versionKey] = activatedAt.UTC()
+	}
 	ic.recordAvatarLineageTime(lineageKey, activatedAt.UTC())
 	return nil
 }
@@ -708,6 +851,7 @@ func (ic *importCtx) validateImportedAvatarRejection(obj map[string]any) (avatar
 	}
 	rejectedAt, _ := requireImportedTimestamp(obj, "rejected_at")
 	ic.avatarLedgerIDs[id] = true
+	ic.avatarRejectedAt[key] = rejectedAt.UTC()
 	ic.recordAvatarLineageTime(avatarLineageImportKey{
 		agentID: agentID, generation: ic.avatarVersions[key].lineage,
 	}, rejectedAt.UTC())
@@ -847,7 +991,8 @@ func (ic *importCtx) validateImportedAvatarReceipt(obj map[string]any) error {
 	operation, err := requireStringField(obj, "operation")
 	allowed := map[string]bool{
 		"propose": true, "activate": true, "reject": true, "rollback": true,
-		"reset": true, "set_policy": true, "set_style": true, "fail": true,
+		"reset": true, "set_policy": true, "set_quota": true,
+		"set_style": true, "fail": true,
 	}
 	if err != nil || !allowed[operation] {
 		return fmt.Errorf("operation is invalid")
@@ -862,7 +1007,7 @@ func (ic *importCtx) validateImportedAvatarReceipt(obj map[string]any) error {
 		return fmt.Errorf("agent receipt actor does not own the avatar")
 	}
 	switch operation {
-	case "reject", "set_policy", "set_style":
+	case "reject", "set_policy", "set_quota", "set_style":
 		if actorKind != PrincipalOperator {
 			return fmt.Errorf("operation requires an operator actor")
 		}
@@ -985,6 +1130,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			}
 		}
 		maxVersion := int64(0)
+		var retainedPayloadCount, retainedPayloadBytes int64
 		firstActivatedVersion := map[int64]int64{}
 		for key, version := range ic.avatarVersions {
 			if key.agentID == agentID && key.version > maxVersion {
@@ -992,6 +1138,10 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			}
 			if key.agentID != agentID {
 				continue
+			}
+			if version.payloadState == avatardomain.PayloadFull {
+				retainedPayloadCount++
+				retainedPayloadBytes += version.payloadBytes
 			}
 			if ic.avatarActivatedVersions[key] &&
 				(firstActivatedVersion[version.lineage] == 0 || key.version < firstActivatedVersion[version.lineage]) {
@@ -1007,6 +1157,44 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 					return fmt.Errorf("agent %q avatar version %d names a parent that was never activated", agentID, key.version)
 				}
 			}
+			if version.payloadState == avatardomain.PayloadCompacted && version.continuityFingerprint {
+				needed := false
+				for childKey, child := range ic.avatarVersions {
+					if childKey.agentID == agentID && child.parentVersion == key.version &&
+						child.lineage == version.lineage && child.payloadState == avatardomain.PayloadFull &&
+						child.proposedByKind == PrincipalAgent && child.style == version.style {
+						needed = true
+						break
+					}
+				}
+				if !needed {
+					return fmt.Errorf("agent %q compacted avatar version %d retains an obsolete continuity_fingerprint", agentID, key.version)
+				}
+			}
+			if version.payloadState == avatardomain.PayloadCompacted {
+				compactedAt := *version.payloadCompactedAt
+				if activatedAt := ic.avatarLastActivatedAt[key]; !activatedAt.IsZero() && compactedAt.Before(activatedAt) {
+					return fmt.Errorf("agent %q avatar version %d was activated after payload compaction", agentID, key.version)
+				}
+				if rejectedAt := ic.avatarRejectedAt[key]; !rejectedAt.IsZero() && compactedAt.Before(rejectedAt) {
+					return fmt.Errorf("agent %q avatar version %d was rejected after payload compaction", agentID, key.version)
+				}
+				if reset, exists := ic.avatarResets[avatarLineageImportKey{
+					agentID: agentID, generation: version.lineage,
+				}]; exists && (reset.retiredActive == key.version || reset.retiredProposed == key.version) &&
+					compactedAt.Before(reset.resetAt) {
+					return fmt.Errorf("agent %q avatar version %d remained protected until after its reset boundary", agentID, key.version)
+				}
+			}
+		}
+		// Schema-51 writers enforce this invariant on every quota change and
+		// proposal. Pre-51 archives had no quota contract and are allowed through
+		// with migration defaults so the first subsequent proposal can compact
+		// their legacy history deterministically.
+		if ic.schemaVersion >= 51 &&
+			(retainedPayloadCount > profile.retainedPayloadCountLimit ||
+				retainedPayloadBytes > profile.retainedPayloadByteLimit) {
+			return fmt.Errorf("agent %q retained avatar payloads exceed the configured quota", agentID)
 		}
 		for key, version := range ic.avatarVersions {
 			if key.agentID != agentID {
@@ -1014,6 +1202,34 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			}
 			if first := firstActivatedVersion[version.lineage]; first > 0 && key.version > first && version.parentVersion == 0 {
 				return fmt.Errorf("agent %q avatar version %d omits a parent after activation in lineage %d", agentID, key.version, version.lineage)
+			}
+		}
+		type importedRollbackPayload struct {
+			version int64
+			state   avatardomain.PayloadState
+			at      time.Time
+		}
+		rollbackPayloads := make([]importedRollbackPayload, 0)
+		for key, version := range ic.avatarVersions {
+			if key.agentID != agentID || version.lineage != profile.lineage ||
+				key.version == profile.activeVersion || !ic.avatarActivatedVersions[key] ||
+				ic.avatarRejectedVersions[key] {
+				continue
+			}
+			rollbackPayloads = append(rollbackPayloads, importedRollbackPayload{
+				version: key.version, state: version.payloadState,
+				at: ic.avatarLastActivatedAt[key],
+			})
+		}
+		sort.Slice(rollbackPayloads, func(i, j int) bool {
+			if !rollbackPayloads[i].at.Equal(rollbackPayloads[j].at) {
+				return rollbackPayloads[i].at.After(rollbackPayloads[j].at)
+			}
+			return rollbackPayloads[i].version > rollbackPayloads[j].version
+		})
+		for i := 0; i < len(rollbackPayloads) && i < AvatarRollbackPayloadFloor; i++ {
+			if rollbackPayloads[i].state != avatardomain.PayloadFull {
+				return fmt.Errorf("agent %q compacted protected rollback avatar version %d", agentID, rollbackPayloads[i].version)
 			}
 		}
 		if profile.latestVersion != maxVersion {
@@ -1024,6 +1240,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			var exists bool
 			active, exists = ic.avatarVersions[avatarVersionImportKey{agentID: agentID, version: profile.activeVersion}]
 			if !exists || active.lineage != profile.lineage ||
+				active.payloadState != avatardomain.PayloadFull ||
 				ic.avatarRejectedVersions[avatarVersionImportKey{agentID: agentID, version: profile.activeVersion}] {
 				return fmt.Errorf("agent %q active avatar is missing or rejected", agentID)
 			}
@@ -1064,6 +1281,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 		if profile.proposedVersion > 0 {
 			proposed, exists := ic.avatarVersions[avatarVersionImportKey{agentID: agentID, version: profile.proposedVersion}]
 			if !exists || proposed.lineage != profile.lineage || proposed.style != profile.style ||
+				proposed.payloadState != avatardomain.PayloadFull ||
 				ic.avatarRejectedVersions[avatarVersionImportKey{agentID: agentID, version: profile.proposedVersion}] {
 				return fmt.Errorf("agent %q proposed avatar is missing, rejected, or off-style", agentID)
 			}

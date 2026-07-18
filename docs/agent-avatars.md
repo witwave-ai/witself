@@ -49,8 +49,13 @@ creation always has a deterministic fallback.
   uses the exact active parent, selected style, autonomy policy, and one bounded
   lifecycle transition. The unlocked `experience`, `expression`, and `attire`
   layers are the normal places for gradual change.
-- Each proposal is immutable. Activation changes the profile's active pointer;
-  rollback points it to a prior immutable version. All mutations use
+- Each proposal creates a durable version record whose identity and lifecycle
+  metadata are immutable. Activation changes the profile's active pointer;
+  rollback points it to a prior full-payload version.
+  Quota compaction may later remove only an eligible inactive version's SVG,
+  description, and visual specification; it never rewrites that version's
+  identity, hashes, generation provenance, proposer, lineage, style, or
+  lifecycle ledgers. All mutations use
   idempotency and optimistic concurrency. An exact idempotent replay returns
   the original value-free receipt together with the resource's current
   projection; it never rewinds mutable profile state to an older response.
@@ -66,7 +71,8 @@ creation always has a deterministic fallback.
   A self reset is available only under `agent_self_managed`; the other policies
   require an account operator to execute it. Reset requires an active or
   proposed avatar, so it cannot churn an empty lineage or bypass generation
-  retry backoff. Permanent SVG purging is deliberately outside this operation.
+  retry backoff. Reset itself does not purge SVG data, although the retired
+  lineage becomes the first class eligible for later quota compaction.
 - `operator_only`, `agent_proposes`, and `agent_self_managed` are explicit
   autonomy policies. Payload, style, parent-version, and SVG validation apply
   in every mode. An `operator_only` agent sees `awaiting_operator` as
@@ -210,10 +216,80 @@ TOAST-compressible, the projection still contains raster-derived avatar
 content; it is not value-free metadata and must follow the SVG's access,
 export, and deletion controls.
 
-Raster previews are caches, not identity authority. The SVG, structured visual
-specification, and immutable version metadata are canonical. Small v1 assets
-remain inline in PostgreSQL so self-hosted installations do not acquire an
-object-store dependency merely for avatars.
+Raster previews are caches, not identity authority. For a `full` version, the
+SVG, structured visual specification, and immutable version metadata are
+canonical. Small retained assets remain inline in PostgreSQL so self-hosted
+installations do not acquire an object-store dependency merely for avatars.
+Every version also retains `svg_sha256` and `locked_layers_sha256`; those hashes
+remain available after creative-payload compaction.
+
+## Payload retention and compaction
+
+Each agent has two operator-configurable limits over versions whose creative
+payload is still `full`:
+
+- `retained_payload_count_limit`: default `20`, allowed range `4`–`1000`.
+- `retained_payload_byte_limit`: default `2097152` bytes (2 MiB), allowed range
+  `524288`–`67108864` bytes (512 KiB–64 MiB).
+
+`payload_bytes` records the original retained creative-payload size: canonical
+sanitized SVG bytes plus the normalized description and canonical visual
+specification. The profile reports both limits, the current
+`retained_payload_count` and `retained_payload_bytes` over `full` rows, and the
+fixed `rollback_payload_floor` of `2`. Raising a limit never reconstructs a
+payload that was already compacted.
+
+Compaction runs transactionally before a new proposal is inserted and whenever
+an operator lowers either limit. A quota update and every compaction it requires
+commit together; if the requested limits cannot be met, neither the new limits
+nor any payload changes persist. Exact idempotent replays return the original
+receipt and current projection without running compaction again.
+
+The planner never compacts the active version, a pending proposed version, or
+the two most recently activated distinct inactive versions in the current
+lineage. Those two retained versions are the documented rollback floor; when
+fewer than two exist, every available member of the floor stays full. Eligible
+payloads are compacted only until both limits fit, in this order:
+
+1. Retired-lineage versions, oldest version first.
+2. Rejected current-lineage versions, oldest first.
+3. Other never-activated, non-rollbackable current-lineage versions, oldest
+   first.
+4. Activated current-lineage versions older than the rollback floor, oldest
+   first.
+
+If all eligible payloads are exhausted and protected payloads plus an incoming
+proposal still do not fit, the whole mutation fails closed with HTTP `409` and
+the stable error `avatar_payload_quota_exceeded`. No partial compaction, new
+proposal, profile revision, receipt, or lifecycle event is committed.
+
+Compaction is irreversible. It changes `payload_state` from `full` to
+`compacted`, clears SVG, description, and visual specification, and records
+`payload_compacted_at` with `payload_compaction_reason=quota`. The immutable
+version id, version/parent/lineage, subject and style, original `payload_bytes`,
+`svg_sha256`, `locked_layers_sha256`, generation provenance, proposer, proposal
+timestamp, and activation/rejection/reset history remain. A compacted version
+is never active, proposed, or rollback-eligible.
+
+Exact-version reads continue to return HTTP `200` for a compacted version. They
+return its retained metadata and provenance with `payload_state=compacted`, but
+omit `svg`, `description`, and `visual_spec`. History is always payload-free and
+includes `payload_state`, `payload_bytes`, optional `payload_compacted_at`, and
+optional `payload_compaction_reason`, so clients do not mistake a compacted
+version for a missing resource.
+
+Identity archives represent this state explicitly. Full rows export their
+creative fields; compacted rows export those fields as `null` while retaining
+the hashes, provenance, payload accounting, and compaction metadata. Import
+rejects an archive that compacts an active, proposed, or protected rollback
+version. Current-schema import also rejects a retained full-payload count or
+byte total that exceeds the archived profile limits, so restore cannot bypass
+the live quota invariant. For a same-style agent-authored evolution, import
+compares normalized locked-layer source when both payloads are full and compares
+the retained `locked_layers_sha256` when either side is compacted. The digest
+preserves the same structural continuity boundary as the live validator; it is
+not semantic image-similarity proof. A schema downgrade that would need to
+reconstruct a compacted payload is refused.
 
 ## Lifecycle events
 
@@ -229,23 +305,32 @@ Avatar changes emit value-free, transactionally coupled lifecycle events:
 - `avatar.reset`
 - `avatar.policy.changed`
 - `avatar.style.changed`
+- `avatar.quota.changed`
+- `avatar.payload.compacted`
 
-Event metadata may contain stable ids, version numbers, status, and subject
-form. It must never contain SVG, prompts, descriptions, visual specifications,
-or raw idempotency keys. Account audit records are the durable source for a
-future generic outbound-webhook dispatcher; runtime hooks remain the mechanism
-that gates the active AI client.
+Event metadata may contain stable ids, version numbers, status, subject form,
+and value-free quota counts and byte totals. `avatar.quota.changed` is attributed
+to the operator; `avatar.payload.compacted` is a system event coupled to the
+proposal or quota update that caused compaction. Events must never contain SVG,
+prompts, descriptions, visual specifications, hashes, provenance, or raw
+idempotency keys. Account audit records are the durable source for a future
+generic outbound-webhook dispatcher; runtime hooks remain the mechanism that
+gates the active AI client.
 
-History reads are payload-free metadata summaries; SVG, visual specification,
-description, and generation provenance require an exact version read. History
+History reads are payload-free metadata summaries. A full version's SVG, visual
+specification, description, and generation provenance require an exact version
+read; a compacted exact read retains provenance but no longer has the three
+creative fields. History
 uses `limit` (default 20, maximum 100) and exclusive `before_version`; a nonzero
 `next_before_version` continues the newest-first scan without overlap. Current
 profile pointers produce `is_active` and `is_proposed`; activation history
 produces `was_activated` and optional `last_activated_at`; server-evaluated
 every profile and version exposes `lineage_generation`; rollback availability
-produces `rollback_eligible` only inside the current lineage; rejection history produces
-`rejected` and optional `rejected_at`. Clients must use these fields instead of
-guessing lifecycle state from version order.
+produces `rollback_eligible` only for a full inactive version inside the current
+lineage; rejection history produces `rejected` and optional `rejected_at`.
+Payload retention fields identify full versus compacted history. Clients must
+use these fields instead of guessing lifecycle or payload state from version
+order.
 
 Each optional generation-provenance label (`runtime`, `model`, `recipe`, and
 `recipe_version`) is untrusted audit metadata bounded to 256 bytes. Labels
@@ -285,6 +370,7 @@ self-only agent routes:
 - `POST /v1/agents/{agent}/avatar:rollback`
 - `POST /v1/agents/{agent}/avatar:reset`
 - `PATCH /v1/agents/{agent}/avatar-policy`
+- `PATCH /v1/agents/{agent}/avatar-quota`
 - `GET /v1/realms/{realm}/avatar-style`
 - `POST /v1/realms/{realm}/avatar-style/versions`
 

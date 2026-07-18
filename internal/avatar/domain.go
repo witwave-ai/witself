@@ -40,6 +40,8 @@ var (
 	ErrInvalidStatus = errors.New("invalid avatar status")
 	// ErrInvalidEventType marks an unsupported avatar lifecycle event.
 	ErrInvalidEventType = errors.New("invalid avatar event type")
+	// ErrInvalidPayloadState marks an unsupported creative-payload state.
+	ErrInvalidPayloadState = errors.New("invalid avatar payload state")
 	// ErrInvalidDescription marks an invalid or over-limit avatar description.
 	ErrInvalidDescription = errors.New("invalid avatar description")
 	// ErrInvalidSpecJSON marks invalid or over-limit avatar visual-spec JSON.
@@ -214,6 +216,8 @@ const (
 	EventReset               EventType = "avatar.reset"
 	EventPolicyChanged       EventType = "avatar.policy.changed"
 	EventStyleChanged        EventType = "avatar.style.changed"
+	EventQuotaChanged        EventType = "avatar.quota.changed"
+	EventPayloadCompacted    EventType = "avatar.payload.compacted"
 )
 
 var eventTypes = []EventType{
@@ -227,6 +231,8 @@ var eventTypes = []EventType{
 	EventReset,
 	EventPolicyChanged,
 	EventStyleChanged,
+	EventQuotaChanged,
+	EventPayloadCompacted,
 }
 
 // EventTypes returns all supported lifecycle events.
@@ -248,6 +254,31 @@ func (e EventType) Valid() bool {
 func (e EventType) Validate() error {
 	if !e.Valid() {
 		return fmt.Errorf("%w: %q", ErrInvalidEventType, e)
+	}
+	return nil
+}
+
+// PayloadState distinguishes retained creative data from an irreversible,
+// metadata-only compacted version envelope.
+type PayloadState string
+
+const (
+	// PayloadFull means SVG, description, and visual specification are retained.
+	PayloadFull PayloadState = "full"
+	// PayloadCompacted means creative fields were removed under quota while the
+	// immutable hash, identity, provenance, and lifecycle metadata remain.
+	PayloadCompacted PayloadState = "compacted"
+)
+
+// Valid reports whether s is a supported payload state.
+func (s PayloadState) Valid() bool {
+	return s == PayloadFull || s == PayloadCompacted
+}
+
+// Validate returns an error when s is not a supported payload state.
+func (s PayloadState) Validate() error {
+	if !s.Valid() {
+		return fmt.Errorf("%w: %q", ErrInvalidPayloadState, s)
 	}
 	return nil
 }

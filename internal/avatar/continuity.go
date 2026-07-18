@@ -2,13 +2,46 @@ package avatar
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 )
+
+// LockedLayersSHA256 returns a stable digest of every locked-by-default layer
+// in style-pack order. The digest includes normalized inherited presentation
+// state and explicit absence, so it remains safe to compare after the source
+// SVG has been compacted.
+func LockedLayersSHA256(svg []byte, pack StylePack) (string, error) {
+	if err := pack.Validate(); err != nil {
+		return "", err
+	}
+	sanitized, err := SanitizeSVG(svg)
+	if err != nil {
+		return "", err
+	}
+	if err := validateStylePackSVG(sanitized, pack); err != nil {
+		return "", err
+	}
+	layers, err := normalizedLockedLayers(sanitized, pack)
+	if err != nil {
+		return "", err
+	}
+	var projection bytes.Buffer
+	for _, layer := range pack.Layers {
+		if !layer.LockedByDefault {
+			continue
+		}
+		writeContinuityField(&projection, layer.Name)
+		writeContinuityField(&projection, string(layers[layer.Name]))
+	}
+	digest := sha256.Sum256(projection.Bytes())
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // ErrLockedLayerContinuity marks a same-style evolution that changes a layer
 // the selected style pack declares locked by default, or that makes the

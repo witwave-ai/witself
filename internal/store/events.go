@@ -150,6 +150,8 @@ const (
 	VerbAvatarReset               = "avatar.reset"
 	VerbAvatarPolicyChanged       = "avatar.policy.changed"
 	VerbAvatarStyleChanged        = "avatar.style.changed"
+	VerbAvatarQuotaChanged        = "avatar.quota.changed"
+	VerbAvatarPayloadCompacted    = "avatar.payload.compacted"
 
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
@@ -525,6 +527,15 @@ var verbMetadataSchema = map[string]verbSpec{
 	),
 	VerbAvatarStyleChanged: avatarEventSpec(
 		[]string{ActorOperator}, "realm_id", "style_pack_id", "style_pack_version", "style_revision",
+	),
+	VerbAvatarQuotaChanged: avatarEventSpec(
+		[]string{ActorOperator}, "agent_id", "count_limit_from", "count_limit_to",
+		"byte_limit_from", "byte_limit_to", "rollback_floor",
+	),
+	VerbAvatarPayloadCompacted: avatarEventSpec(
+		[]string{ActorSystem}, "agent_id", "compacted_versions", "compacted_count", "compacted_bytes",
+		"retained_payload_count", "retained_payload_bytes", "count_limit",
+		"byte_limit", "rollback_floor",
 	),
 
 	// Support-ticket verbs. ticket_id is required on all four so the

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -11,6 +13,86 @@ import (
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 )
 
+func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 50)
+	ctx := context.Background()
+	provisioned, err := st.ProvisionAccount(ctx,
+		"avatar-quota-migration@witwave.ai", "avatar quota migration", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "migration-avatar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	digest := sha256.Sum256([]byte(reference.SVG))
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_avatar_versions
+		       (account_id, realm_id, agent_id, id, version, lineage_generation,
+		        style_pack_id, style_pack_version, subject_form, svg, description,
+		        visual_spec, svg_sha256, provenance, proposed_by_kind,
+		        proposed_by_id)
+		VALUES ($1,$2,$3,'avver_aaaaaaaaaaaaaaaa',1,1,$4,1,'human',$5,$6,
+		        '{"identity":{"expression":"calm"}}'::jsonb,$7,
+		        '{"runtime":"migration-test"}'::jsonb,'agent',$3)`,
+		provisioned.AccountID, realm.ID, agent.ID, pack.ID, reference.SVG,
+		"A migration backfill portrait.", hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 51)
+	wantLockedDigest, err := avatardomain.LockedLayersSHA256([]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state, lockedDigest string
+	var payloadBytes int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT payload_state, payload_bytes, locked_layers_sha256
+		  FROM agent_avatar_versions WHERE agent_id=$1 AND version=1`, agent.ID).
+		Scan(&state, &payloadBytes, &lockedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if state != "full" || payloadBytes < 1 || lockedDigest != wantLockedDigest {
+		t.Fatalf("schema-51 backfill = state:%q bytes:%d locked:%q", state, payloadBytes, lockedDigest)
+	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 50)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET payload_state='compacted', svg=NULL, description=NULL,
+		       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
+		       payload_compaction_reason='quota'
+		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTestDown(t, dsn, true); err == nil {
+		t.Fatal("schema-51 downgrade accepted an irreversible compacted payload")
+	}
+	assertMigrationTestVersion(t, dsn, 51)
+}
+
 func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
@@ -19,9 +101,7 @@ func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 41)
 	insertMigrationTestMemoryPrincipals(t, st)
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestUpTo(t, dsn, 50)
 	assertMigrationTestVersion(t, dsn, 50)
 	ctx := context.Background()
 	var styles, selections, profiles int
@@ -37,6 +117,24 @@ func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 	if styles != 1 || selections != 1 || profiles != 3 {
 		t.Fatalf("avatar backfill counts = styles:%d selections:%d profiles:%d", styles, selections, profiles)
 	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 41)
+	assertMigrationTestTable(t, st, "agent_avatar_profiles", false)
+	assertMigrationTestTable(t, st, "avatar_style_packs", false)
+	migrationTestUpTo(t, dsn, 50)
+	assertMigrationTestVersion(t, dsn, 50)
+	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_avatar_profiles`).Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 3 {
+		t.Fatalf("avatar profiles after re-upgrade = %d, want 3", profiles)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 51)
 	view, err := st.GetAvatar(ctx, Principal{Kind: PrincipalAgent,
 		ID: "agent_memory_owner", AccountID: "acc_memory_trigger",
 		RealmID: "realm_memory_trigger", AgentName: "owner"})
@@ -45,24 +143,11 @@ func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 	}
 	if view.Profile.Status != avatardomain.StatusGenerationDue ||
 		view.Profile.AutonomyPolicy != avatardomain.AutonomyAgentSelfManaged ||
-		view.Active == nil || view.Active.Version != 0 {
+		view.Profile.RetainedPayloadCountLimit != AvatarDefaultRetainedPayloadCountLimit ||
+		view.Profile.RetainedPayloadByteLimit != AvatarDefaultRetainedPayloadByteLimit ||
+		view.Active == nil || view.Active.Version != 0 ||
+		view.Active.LockedLayersSHA256 == "" {
 		t.Fatalf("backfilled avatar = %#v", view)
-	}
-	if err := migrationTestDown(t, dsn, false); err != nil {
-		t.Fatal(err)
-	}
-	assertMigrationTestVersion(t, dsn, 41)
-	assertMigrationTestTable(t, st, "agent_avatar_profiles", false)
-	assertMigrationTestTable(t, st, "avatar_style_packs", false)
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	assertMigrationTestVersion(t, dsn, 50)
-	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_avatar_profiles`).Scan(&profiles); err != nil {
-		t.Fatal(err)
-	}
-	if profiles != 3 {
-		t.Fatalf("avatar profiles after re-upgrade = %d, want 3", profiles)
 	}
 }
 

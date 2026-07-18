@@ -237,6 +237,19 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 		       p.active_avatar_version, p.lineage_generation,
 		       p.subject_form, p.attempt_count,
 		       p.retry_after, p.fallback_seed, p.failure_code, p.revision,
+		       p.retained_payload_count_limit,
+		       p.retained_payload_byte_limit,
+		       (SELECT COUNT(*) FROM agent_avatar_versions retained
+		         WHERE retained.account_id=p.account_id
+		           AND retained.realm_id=p.realm_id
+		           AND retained.agent_id=p.agent_id
+		           AND retained.payload_state='full'),
+		       (SELECT COALESCE(SUM(retained.payload_bytes),0)
+		          FROM agent_avatar_versions retained
+		         WHERE retained.account_id=p.account_id
+		           AND retained.realm_id=p.realm_id
+		           AND retained.agent_id=p.agent_id
+		           AND retained.payload_state='full'),
 		       p.created_at, p.updated_at, a.name
 		  FROM agent_avatar_profiles p
 		  JOIN agents a ON a.id=p.agent_id AND a.realm_id=p.realm_id
@@ -250,6 +263,10 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 		&subjectForm,
 		&out.Profile.AttemptCount, &retryAfter, &out.Profile.FallbackSeed,
 		&out.Profile.FailureCode, &out.Profile.ProfileRevision,
+		&out.Profile.RetainedPayloadCountLimit,
+		&out.Profile.RetainedPayloadByteLimit,
+		&out.Profile.RetainedPayloadCount,
+		&out.Profile.RetainedPayloadBytes,
 		&out.Profile.CreatedAt, &out.Profile.UpdatedAt, &agentName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarView{}, ErrAvatarNotFound
@@ -265,6 +282,7 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 	out.Profile.SubjectForm = avatardomain.SubjectForm(subjectForm)
 	out.Profile.Style.RealmID = out.Profile.RealmID
 	out.Profile.Style.StylePackID = stylePackID
+	out.Profile.RollbackPayloadFloor = AvatarRollbackPayloadFloor
 	out.Profile.RetryAfter = retryAfter
 	if activeVersion != nil {
 		out.Profile.ActiveVersion = *activeVersion
@@ -318,7 +336,9 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		SELECT v.id, v.account_id, v.realm_id, v.agent_id, v.version,
 		       v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg_sha256, v.proposed_by_kind,
+		       v.subject_form, v.svg_sha256, v.locked_layers_sha256, v.payload_state,
+		       v.payload_bytes, v.payload_compacted_at,
+		       COALESCE(v.payload_compaction_reason,''), v.proposed_by_kind,
 		       v.proposed_by_id, v.proposed_at,
 		       COALESCE(v.version=p.active_avatar_version, FALSE),
 		       COALESCE(v.version=p.proposed_avatar_version, FALSE),
@@ -363,12 +383,15 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 	for rows.Next() {
 		var version AvatarVersionSummary
 		var currentLineage int64
-		var subjectForm, actorKind string
+		var subjectForm, actorKind, payloadState string
 		if err := rows.Scan(&version.ID, &version.AccountID,
 			&version.RealmID, &version.AgentID, &version.Version,
 			&version.ParentVersion, &version.LineageGeneration,
 			&version.Style.StylePackID,
 			&version.Style.Version, &subjectForm, &version.SVGSHA256,
+			&version.LockedLayersSHA256,
+			&payloadState, &version.PayloadBytes, &version.PayloadCompactedAt,
+			&version.PayloadCompactionReason,
 			&actorKind, &version.ProposedBy.ID, &version.ProposedAt,
 			&version.IsActive, &version.IsProposed, &version.WasActivated,
 			&version.LastActivatedAt, &currentLineage,
@@ -377,9 +400,11 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		}
 		version.Style.RealmID = version.RealmID
 		version.SubjectForm = avatardomain.SubjectForm(subjectForm)
+		version.PayloadState = avatardomain.PayloadState(payloadState)
 		version.ProposedBy.Kind = actorKind
 		version.Rejected = version.RejectedAt != nil
-		version.RollbackEligible = version.WasActivated && !version.IsActive &&
+		version.RollbackEligible = version.PayloadState == avatardomain.PayloadFull &&
+			version.WasActivated && !version.IsActive &&
 			!version.Rejected && version.LineageGeneration == currentLineage
 		out.Versions = append(out.Versions, version)
 	}
@@ -444,14 +469,18 @@ func queryAvatarRows(ctx context.Context, q avatarRowQuerier, sql string, args .
 func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarget, version int64, activeVersion, proposedVersion *int64, currentLineage int64) (AvatarVersion, error) {
 	var out AvatarVersion
 	var parentVersion *int64
-	var subjectForm, actorKind string
+	var subjectForm, actorKind, payloadState string
 	var spec, provenance json.RawMessage
 	err := q.QueryRow(ctx, `
 		SELECT v.id, v.account_id, v.realm_id, v.agent_id, v.version,
 		       v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg, v.description, v.visual_spec,
-		       v.svg_sha256, v.provenance, v.proposed_by_kind,
+		       v.subject_form, COALESCE(v.svg,''), COALESCE(v.description,''),
+		       COALESCE(v.visual_spec,'null'::jsonb),
+		       v.svg_sha256, v.locked_layers_sha256, v.provenance,
+		       v.payload_state, v.payload_bytes,
+		       v.payload_compacted_at, COALESCE(v.payload_compaction_reason,''),
+		       v.proposed_by_kind,
 		       v.proposed_by_id, v.proposed_at,
 		       EXISTS (
 		         SELECT 1 FROM agent_avatar_activations activation
@@ -481,7 +510,10 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		&out.Version, &parentVersion, &out.LineageGeneration,
 		&out.Style.StylePackID,
 		&out.Style.Version, &subjectForm, &out.SVG, &out.Description, &spec,
-		&out.SVGSHA256, &provenance, &actorKind, &out.ProposedBy.ID,
+		&out.SVGSHA256, &out.LockedLayersSHA256, &provenance,
+		&payloadState, &out.PayloadBytes,
+		&out.PayloadCompactedAt, &out.PayloadCompactionReason,
+		&actorKind, &out.ProposedBy.ID,
 		&out.ProposedAt, &out.WasActivated, &out.LastActivatedAt,
 		&out.RejectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -494,10 +526,17 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 	out.IsActive = activeVersion != nil && *activeVersion == out.Version
 	out.IsProposed = proposedVersion != nil && *proposedVersion == out.Version
 	out.Rejected = out.RejectedAt != nil
-	out.RollbackEligible = out.WasActivated && !out.IsActive && !out.Rejected &&
+	out.PayloadState = avatardomain.PayloadState(payloadState)
+	out.RollbackEligible = out.PayloadState == avatardomain.PayloadFull &&
+		out.WasActivated && !out.IsActive && !out.Rejected &&
 		out.LineageGeneration == currentLineage
 	out.SubjectForm = avatardomain.SubjectForm(subjectForm)
 	out.VisualSpec = append(json.RawMessage(nil), spec...)
+	if out.PayloadState == avatardomain.PayloadCompacted {
+		out.SVG = ""
+		out.Description = ""
+		out.VisualSpec = nil
+	}
 	out.Style.RealmID = out.RealmID
 	out.ProposedBy.Kind = actorKind
 	if len(provenance) > 0 {
@@ -554,6 +593,14 @@ func deterministicAvatarPlaceholder(target avatarTarget, agentName string, style
 		_, _ = idHash.Write([]byte{0})
 	}
 	idDigestText := hex.EncodeToString(idHash.Sum(nil))
+	payloadBytes, err := avatarCreativePayloadBytes(string(svg), description, visualSpec)
+	if err != nil {
+		return AvatarVersion{}, fmt.Errorf("measure avatar placeholder: %w", err)
+	}
+	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(svg, pack)
+	if err != nil {
+		return AvatarVersion{}, fmt.Errorf("derive avatar placeholder locked-layer digest: %w", err)
+	}
 	return AvatarVersion{
 		ID: "placeholder-" + idDigestText[:16], AccountID: target.accountID,
 		RealmID: target.realmID, AgentID: target.agentID, Version: 0,
@@ -561,7 +608,9 @@ func deterministicAvatarPlaceholder(target avatarTarget, agentName string, style
 		SubjectForm:       avatardomain.SubjectHuman,
 		Description:       description,
 		VisualSpec:        visualSpec,
-		SVG:               string(svg), SVGSHA256: digestText, Style: style,
+		SVG:               string(svg), SVGSHA256: digestText,
+		LockedLayersSHA256: lockedLayersSHA256, Style: style,
+		PayloadState: avatardomain.PayloadFull, PayloadBytes: payloadBytes,
 		ProposedBy: AvatarActor{Kind: ActorSystem}, ProposedAt: createdAt,
 		IsActive: true,
 	}, nil

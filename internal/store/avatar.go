@@ -25,6 +25,23 @@ const (
 	defaultAvatarHistoryLimit    = 20
 	maxAvatarHistoryLimit        = 100
 	maxAvatarGenerationBackoff   = time.Hour
+	// AvatarRollbackPayloadFloor preserves the two most recently activated,
+	// inactive current-lineage payloads as usable rollback targets.
+	AvatarRollbackPayloadFloor = 2
+	// AvatarDefaultRetainedPayloadCountLimit is the per-agent full-payload default.
+	AvatarDefaultRetainedPayloadCountLimit = 20
+	// AvatarMinRetainedPayloadCountLimit leaves room for active, proposed, and
+	// the documented rollback floor.
+	AvatarMinRetainedPayloadCountLimit = AvatarRollbackPayloadFloor + 2
+	// AvatarMaxRetainedPayloadCountLimit bounds operator configuration.
+	AvatarMaxRetainedPayloadCountLimit = 1000
+	// AvatarDefaultRetainedPayloadByteLimit is the per-agent creative-payload default.
+	AvatarDefaultRetainedPayloadByteLimit int64 = 2 * 1024 * 1024
+	// AvatarMinRetainedPayloadByteLimit safely accommodates maximum-size protected payloads.
+	AvatarMinRetainedPayloadByteLimit int64 = 512 * 1024
+	// AvatarMaxRetainedPayloadByteLimit bounds per-agent storage configuration.
+	AvatarMaxRetainedPayloadByteLimit int64 = 64 * 1024 * 1024
+	maxAvatarPayloadBytes             int64 = 128 * 1024
 )
 
 var (
@@ -49,6 +66,9 @@ var (
 	// ErrAvatarIdempotencyConflict reports reuse of one retry key for different
 	// normalized request semantics.
 	ErrAvatarIdempotencyConflict = errors.New("avatar idempotency key conflict")
+	// ErrAvatarPayloadQuotaExceeded reports that protected payloads plus the
+	// incoming proposal cannot fit after every eligible payload is compacted.
+	ErrAvatarPayloadQuotaExceeded = errors.New("avatar payload quota exceeded")
 )
 
 // AvatarActor identifies the authenticated principal that proposed or applied
@@ -70,77 +90,92 @@ type AvatarClientProvenance struct {
 
 // AvatarProfile is one agent's mutable policy and version-pointer projection.
 type AvatarProfile struct {
-	AccountID         string
-	RealmID           string
-	AgentID           string
-	SubjectForm       avatardomain.SubjectForm
-	AutonomyPolicy    avatardomain.AutonomyPolicy
-	Status            avatardomain.Status
-	Style             avatardomain.StylePackRef
-	LineageGeneration int64
-	ProfileRevision   int64
-	LatestVersion     int64
-	ActiveVersion     int64
-	ProposedVersion   int64
-	AttemptCount      int
-	RetryAfter        *time.Time
-	FallbackSeed      string
-	FailureCode       string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	AccountID                 string
+	RealmID                   string
+	AgentID                   string
+	SubjectForm               avatardomain.SubjectForm
+	AutonomyPolicy            avatardomain.AutonomyPolicy
+	Status                    avatardomain.Status
+	Style                     avatardomain.StylePackRef
+	LineageGeneration         int64
+	ProfileRevision           int64
+	LatestVersion             int64
+	ActiveVersion             int64
+	ProposedVersion           int64
+	AttemptCount              int
+	RetryAfter                *time.Time
+	FallbackSeed              string
+	FailureCode               string
+	RetainedPayloadCountLimit int
+	RetainedPayloadByteLimit  int64
+	RetainedPayloadCount      int
+	RetainedPayloadBytes      int64
+	RollbackPayloadFloor      int
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 // AvatarVersion is one immutable sanitized avatar payload plus lifecycle
 // timestamps projected from append-only activation/rejection rows.
 type AvatarVersion struct {
-	ID                string
-	AccountID         string
-	RealmID           string
-	AgentID           string
-	Version           int64
-	ParentVersion     *int64
-	LineageGeneration int64
-	SubjectForm       avatardomain.SubjectForm
-	Description       string
-	VisualSpec        json.RawMessage
-	SVG               string
-	SVGSHA256         string
-	Style             avatardomain.StylePackRef
-	Provenance        AvatarClientProvenance
-	ProposedBy        AvatarActor
-	ProposedAt        time.Time
-	IsActive          bool
-	IsProposed        bool
-	WasActivated      bool
-	RollbackEligible  bool
-	Rejected          bool
-	LastActivatedAt   *time.Time
-	RejectedAt        *time.Time
+	ID                      string
+	AccountID               string
+	RealmID                 string
+	AgentID                 string
+	Version                 int64
+	ParentVersion           *int64
+	LineageGeneration       int64
+	SubjectForm             avatardomain.SubjectForm
+	Description             string
+	VisualSpec              json.RawMessage
+	SVG                     string
+	SVGSHA256               string
+	LockedLayersSHA256      string
+	Style                   avatardomain.StylePackRef
+	Provenance              AvatarClientProvenance
+	ProposedBy              AvatarActor
+	ProposedAt              time.Time
+	IsActive                bool
+	IsProposed              bool
+	WasActivated            bool
+	RollbackEligible        bool
+	Rejected                bool
+	LastActivatedAt         *time.Time
+	RejectedAt              *time.Time
+	PayloadState            avatardomain.PayloadState
+	PayloadBytes            int64
+	PayloadCompactedAt      *time.Time
+	PayloadCompactionReason string
 }
 
 // AvatarVersionSummary is the bounded metadata and lifecycle projection used
 // by history listings. Creative payloads remain available only through an
 // exact version read.
 type AvatarVersionSummary struct {
-	ID                string
-	AccountID         string
-	RealmID           string
-	AgentID           string
-	Version           int64
-	ParentVersion     *int64
-	LineageGeneration int64
-	SubjectForm       avatardomain.SubjectForm
-	SVGSHA256         string
-	Style             avatardomain.StylePackRef
-	ProposedBy        AvatarActor
-	ProposedAt        time.Time
-	IsActive          bool
-	IsProposed        bool
-	WasActivated      bool
-	RollbackEligible  bool
-	Rejected          bool
-	LastActivatedAt   *time.Time
-	RejectedAt        *time.Time
+	ID                      string
+	AccountID               string
+	RealmID                 string
+	AgentID                 string
+	Version                 int64
+	ParentVersion           *int64
+	LineageGeneration       int64
+	SubjectForm             avatardomain.SubjectForm
+	SVGSHA256               string
+	LockedLayersSHA256      string
+	Style                   avatardomain.StylePackRef
+	ProposedBy              AvatarActor
+	ProposedAt              time.Time
+	IsActive                bool
+	IsProposed              bool
+	WasActivated            bool
+	RollbackEligible        bool
+	Rejected                bool
+	LastActivatedAt         *time.Time
+	RejectedAt              *time.Time
+	PayloadState            avatardomain.PayloadState
+	PayloadBytes            int64
+	PayloadCompactedAt      *time.Time
+	PayloadCompactionReason string
 }
 
 // AvatarView combines the exact profile with active and pending payloads. A
@@ -252,6 +287,15 @@ type UpdateAvatarPolicyInput struct {
 	Policy                  avatardomain.AutonomyPolicy
 	ExpectedProfileRevision int64
 	IdempotencyKey          string
+}
+
+// UpdateAvatarQuotaInput changes one agent's retained creative-payload limits.
+// Any required compaction is applied atomically with the limit change.
+type UpdateAvatarQuotaInput struct {
+	RetainedPayloadCountLimit int
+	RetainedPayloadByteLimit  int64
+	ExpectedProfileRevision   int64
+	IdempotencyKey            string
 }
 
 // CreateAvatarStyleVersionInput creates a new version of a realm style pack.

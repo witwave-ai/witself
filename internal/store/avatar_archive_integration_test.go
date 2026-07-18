@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -144,6 +145,18 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	}
 	pending = propose(freshActive.Avatar.Profile.ProfileRevision, 4,
 		avatardomain.SubjectAnimal, "avatar-archive-propose-5")
+	quota, err := st.SetAvatarQuota(ctx, operator, agent.ID, UpdateAvatarQuotaInput{
+		RetainedPayloadCountLimit: AvatarMinRetainedPayloadCountLimit,
+		RetainedPayloadByteLimit:  AvatarMaxRetainedPayloadByteLimit,
+		ExpectedProfileRevision:   pending.Avatar.Profile.ProfileRevision,
+		IdempotencyKey:            "avatar-archive-quota-4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.Avatar.Profile.RetainedPayloadCount != 4 {
+		t.Fatalf("archive quota compaction = %#v", quota.Avatar.Profile)
+	}
 
 	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation", "avatar archive round trip"); err != nil {
 		t.Fatal(err)
@@ -165,6 +178,21 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	if manifest.SchemaVersion != SchemaVersion() {
 		t.Fatalf("manifest schema = %d, want %d", manifest.SchemaVersion, SchemaVersion())
 	}
+	var archivedCompacted bool
+	for _, row := range rows["agent_avatar_versions"] {
+		var version map[string]any
+		if err := json.Unmarshal(row, &version); err != nil {
+			t.Fatal(err)
+		}
+		if number, ok := version["version"].(float64); ok && number == 1 {
+			archivedCompacted = version["payload_state"] == "compacted" &&
+				version["svg"] == nil && version["description"] == nil &&
+				version["visual_spec"] == nil && version["locked_layers_sha256"] != nil
+		}
+	}
+	if !archivedCompacted {
+		t.Fatal("archive did not explicitly retain the compacted version envelope")
+	}
 
 	if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
 		t.Fatal(err)
@@ -183,7 +211,9 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		restored.Active == nil || restored.Active.LineageGeneration != 2 ||
 		restored.Active.SubjectForm != avatardomain.SubjectAnimal || restored.Proposed == nil ||
 		restored.Proposed.LineageGeneration != 2 ||
-		restored.Proposed.SubjectForm != avatardomain.SubjectAnimal {
+		restored.Proposed.SubjectForm != avatardomain.SubjectAnimal ||
+		restored.Profile.RetainedPayloadCountLimit != 4 ||
+		restored.Profile.RetainedPayloadCount != 4 {
 		t.Fatalf("restored pending evolution = %#v", restored)
 	}
 	history, err := st.GetAvatarHistory(ctx, p, 10)
@@ -192,17 +222,26 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	}
 	if history.Versions[4].Version != 1 || history.Versions[4].LineageGeneration != 1 ||
 		!history.Versions[4].WasActivated || history.Versions[4].RollbackEligible ||
+		history.Versions[4].PayloadState != avatardomain.PayloadCompacted ||
+		history.Versions[4].LockedLayersSHA256 == "" ||
 		history.Versions[3].Version != 2 || history.Versions[3].WasActivated ||
 		history.Versions[3].RollbackEligible ||
 		history.Versions[1].Version != 4 || history.Versions[1].LineageGeneration != 2 ||
 		!history.Versions[1].IsActive {
 		t.Fatalf("restored lineage history = %#v", history.Versions)
 	}
+	compactedVersion, err := st.GetAvatarVersion(ctx, p, 1)
+	if err != nil || compactedVersion.PayloadState != avatardomain.PayloadCompacted ||
+		compactedVersion.SVG != "" || compactedVersion.Description != "" ||
+		compactedVersion.VisualSpec != nil || compactedVersion.SVGSHA256 == "" ||
+		compactedVersion.LockedLayersSHA256 == "" {
+		t.Fatalf("restored compacted exact version = %#v / %v", compactedVersion, err)
+	}
 	var receipts int
 	if err := st.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM avatar_mutation_receipts WHERE account_id=$1`,
-		provisioned.AccountID).Scan(&receipts); err != nil || receipts != 9 {
-		t.Fatalf("restored receipts = %d / %v, want 9", receipts, err)
+		provisioned.AccountID).Scan(&receipts); err != nil || receipts != 10 {
+		t.Fatalf("restored receipts = %d / %v, want 10", receipts, err)
 	}
 }
 

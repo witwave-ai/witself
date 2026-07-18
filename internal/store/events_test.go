@@ -78,6 +78,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAvatarActivated, VerbAvatarEvolved, VerbAvatarRejected,
 		VerbAvatarGenerationFailed, VerbAvatarRolledBack,
 		VerbAvatarReset, VerbAvatarPolicyChanged, VerbAvatarStyleChanged,
+		VerbAvatarQuotaChanged, VerbAvatarPayloadCompacted,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
@@ -163,6 +164,19 @@ func TestAvatarAuditSchemasAreValueFree(t *testing.T) {
 			Verb: VerbAvatarStyleChanged, Metadata: map[string]any{
 				"realm_id": "realm_1", "style_pack_id": "witself-flat-portrait",
 				"style_pack_version": "2", "style_revision": "2",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorOperator, ActorID: "op_1",
+			Verb: VerbAvatarQuotaChanged, Metadata: map[string]any{
+				"agent_id": "agent_1", "count_limit_from": "20",
+				"count_limit_to": "10", "byte_limit_from": "2097152",
+				"byte_limit_to": "1048576", "rollback_floor": "2",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorSystem,
+			Verb: VerbAvatarPayloadCompacted, Metadata: map[string]any{
+				"agent_id": "agent_1", "compacted_versions": "1,2", "compacted_count": "2",
+				"compacted_bytes": "8192", "retained_payload_count": "4",
+				"retained_payload_bytes": "16384", "count_limit": "4",
+				"byte_limit": "524288", "rollback_floor": "2",
 			}},
 	}
 	for _, input := range tests {

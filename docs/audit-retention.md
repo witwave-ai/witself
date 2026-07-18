@@ -87,6 +87,8 @@ Audit records must never include:
 - PII of any subject (agent, operator, or third party).
 - Identity content: memory `content` or any portion of it.
 - Fact values, including `sensitive` fact values.
+- Avatar SVG, description, visual specification, content/locked-layer hashes,
+  generation provenance, or prompts.
 - Message bodies or structured message payloads.
 - Embedding vectors or any derived vector data.
 - Raw agent or operator tokens, or token-file contents.
@@ -214,6 +216,36 @@ The `fact set` command and the `remember` upsert do not have their own event: a
 name with no existing fact emits `fact.created`, and a name that already exists
 emits `fact.updated`. (`fact.imported` covers the `ingest` path; see
 [Identity Export and Import](#identity-export-and-import).)
+
+### Avatar
+
+- `avatar.generation.requested`
+- `avatar.proposed`
+- `avatar.activated`
+- `avatar.evolved`
+- `avatar.rejected`
+- `avatar.generation.failed`
+- `avatar.rolled_back`
+- `avatar.reset`
+- `avatar.policy.changed`
+- `avatar.style.changed`
+- `avatar.quota.changed`
+- `avatar.payload.compacted`
+
+Avatar lifecycle events are transactionally coupled and value-free. They may
+carry stable agent/realm ids, version and lineage numbers, status, subject form,
+style identity, bounded reason code, and attempt count where applicable. They
+never carry creative payload, prompts, hashes, client provenance, or raw
+idempotency keys.
+
+`avatar.quota.changed` is attributed to the operator and records prior/new count
+and byte limits plus the rollback floor. `avatar.payload.compacted` is attributed
+to the system and records the affected version numbers, aggregate compacted
+count/bytes, resulting retained count/bytes, applied limits, and rollback floor.
+Version numbers provide durable lifecycle attribution without exposing creative
+payloads or their hashes. Compaction caused by either proposal creation or a
+lowered quota is committed with that triggering mutation. A failed-closed quota
+decision or exact idempotent replay emits no new compaction event.
 
 ### Cross-Agent Access
 
