@@ -173,34 +173,36 @@ Witself does not treat structural source equality or a raster delta as semantic
 image comparison or protection against every possible visual occlusion.
 
 The model-free raster guard renders five fixed 96 by 96 RGBA projections: both
-whole portraits, the parent's locked identity mask, and each version's
-unlocked layers. A generic locked-layer mask fallback can require one extra
-render, so the check performs at most six. Inputs are already limited to 64
-KiB, 512 elements, depth 32, and 1,024 bytes per attribute, so work and image
-memory remain bounded. Ordinary wrapper groups are preserved by projection;
+whole portraits, the parent's locked identity mask, and each version with only
+its locked layers visible. A generic locked-layer mask fallback can require one
+extra render, so the check performs at most six. Inputs are already limited to
+64 KiB, 512 elements, depth 32, and 1,024 bytes per attribute, so work and
+image memory remain bounded. Ordinary wrapper groups are preserved by projection;
 declared `data-layer` groups cannot nest because style validation requires
 visible geometry to belong to exactly one declared layer. A pixel counts as
 changed above normalized delta `0.12`. The proposal is rejected when
 whole-portrait changed pixels exceed `0.42` or mean delta exceeds `0.20`, when
 locked-identity changed pixels exceed `0.46` or mean delta exceeds `0.24`, or
-when newly added unlocked alpha covers more than `0.30` of the locked identity
-mask. Calibration leaves ordinary expression, attire, and experience edits
-well below those limits while rejecting full-canvas replacement and a
-face-covering overlay. The comparison is deterministic pure Go, and renderer
-failure is fail-closed. It applies only where structural continuity already
-applies: self-authored evolution under the same style version. Operator
-override and an operator-selected style migration retain their existing
-exemptions.
+when newly added visible unlocked-layer influence covers more than `0.30` of
+the locked identity mask. Visible influence is the per-pixel delta between the
+whole portrait and its locked-only render, so opaque unlocked artwork hidden
+behind locked layers does not become a false occlusion. Calibration leaves
+ordinary expression, attire, and experience edits well below those limits
+while rejecting full-canvas replacement and a face-covering front overlay. The
+comparison is deterministic pure Go, and renderer failure is fail-closed. It
+applies only where structural continuity already applies: self-authored
+evolution under the same style version. Operator override and an
+operator-selected style migration retain their existing exemptions.
 
 The pure avatar domain also exposes a versioned continuity fingerprint for a
 parent whose historical SVG will later be compacted. Version 1 is exactly
 38,092 bytes: a small fixed header, an exact style-pack digest, the parent's
-96 by 96 composite RGB bytes, a binary locked-identity mask, unlocked-layer
-alpha bytes, and a SHA-256 corruption checksum. The normal full-parent guard
-builds and consumes this same format, so comparison across a retained-SVG and
-compacted-parent boundary is behaviorally identical rather than an
-approximation. Decoding requires the exact magic, version, render size,
-reserved flags, payload length, total length, checksum, and style digest.
+96 by 96 composite RGB bytes, a binary locked-identity mask, visible
+unlocked-layer influence bytes, and a SHA-256 corruption checksum. The normal
+full-parent guard builds and consumes this same format, so comparison across a
+retained-SVG and compacted-parent boundary is behaviorally identical rather
+than an approximation. Decoding requires the exact magic, version, render
+size, reserved flags, payload length, total length, checksum, and style digest.
 Fingerprint persistence and archive wiring remain a quota-compaction merge
 dependency: until that storage path is present, compaction must retain every
 parent SVG needed to validate a retained child. Although smaller and readily

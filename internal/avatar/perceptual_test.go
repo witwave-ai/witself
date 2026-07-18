@@ -80,10 +80,25 @@ func TestPerceptualContinuityRejectsUnlockedLockedIdentityOcclusion(t *testing.T
 	if !errors.Is(err, ErrPerceptualContinuity) {
 		t.Fatalf("locked identity occlusion error = %v, metrics=%+v", err, metrics)
 	}
-	if metrics.IdentityChangedRatio <= PerceptualIdentityChangedRatioLimit &&
-		metrics.IdentityMeanDelta <= PerceptualIdentityMeanDeltaLimit &&
-		metrics.AddedIdentityOcclusion <= PerceptualAddedOcclusionRatioLimit {
-		t.Fatalf("identity occlusion metrics did not cross a limit: %+v", metrics)
+	if metrics.AddedIdentityOcclusion <= PerceptualAddedOcclusionRatioLimit {
+		t.Fatalf("front overlay did not cross the visible unlocked-influence limit: %+v", metrics)
+	}
+}
+
+func TestPerceptualContinuityAllowsUnlockedArtworkHiddenBehindLockedIdentity(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	const emptyExperience = `<g id="experience" data-layer="experience"></g>`
+	const hiddenExperience = `<g id="experience" data-layer="experience"><rect x="0" y="0" width="512" height="512" fill="#7868E6"></rect></g>`
+	child := strings.Replace(humanReferenceSVG, emptyExperience, "", 1)
+	child = strings.Replace(child, `<g id="background"`, hiddenExperience+`<g id="background"`, 1)
+
+	metrics, err := ComparePerceptualContinuity([]byte(humanReferenceSVG), []byte(child), pack)
+	if err != nil {
+		t.Fatalf("pixel-identical artwork behind locked layers was rejected: %v; metrics=%+v", err, metrics)
+	}
+	if metrics.WholeChangedRatio != 0 || metrics.WholeMeanDelta != 0 ||
+		metrics.AddedIdentityOcclusion != 0 {
+		t.Fatalf("hidden unlocked artwork changed visible metrics: %+v", metrics)
 	}
 }
 

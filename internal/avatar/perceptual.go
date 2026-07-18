@@ -36,7 +36,8 @@ const (
 
 const (
 	perceptualMaskAlpha          = uint8(32)
-	perceptualOcclusionAlphaStep = uint8(64)
+	perceptualMinimumInfluence   = uint8(32)
+	perceptualAddedInfluenceStep = uint8(64)
 	perceptualMinimumMaskPixels  = 48
 )
 
@@ -106,17 +107,17 @@ func ComparePerceptualContinuityFromFingerprint(fingerprint, child []byte, pack 
 	if err != nil {
 		return PerceptualContinuityMetrics{}, err
 	}
-	_, _, unlocked := perceptualLayerSelections(pack)
-	childUnlockedSVG, err := selectPerceptualLayers(childSVG, pack, unlocked)
+	_, locked, _ := perceptualLayerSelections(pack)
+	childLockedSVG, err := selectPerceptualLayers(childSVG, pack, locked)
 	if err != nil {
 		return PerceptualContinuityMetrics{}, err
 	}
-	childUnlocked, err := renderPerceptualAvatar(childUnlockedSVG)
+	childLocked, err := renderPerceptualAvatar(childLockedSVG)
 	if err != nil {
 		return PerceptualContinuityMetrics{}, err
 	}
 
-	metrics := perceptualMetricsFromFingerprint(parent, childFull, childUnlocked)
+	metrics := perceptualMetricsFromFingerprint(parent, childFull, childLocked)
 	if metrics.WholeChangedRatio > PerceptualWholeChangedRatioLimit ||
 		metrics.WholeMeanDelta > PerceptualWholeMeanDeltaLimit {
 		return metrics, fmt.Errorf("%w: whole portrait changed beyond the bounded render limit", ErrPerceptualContinuity)

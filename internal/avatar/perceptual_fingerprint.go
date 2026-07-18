@@ -24,10 +24,10 @@ const (
 	perceptualFingerprintPixelCount        = PerceptualRenderSize * PerceptualRenderSize
 	perceptualFingerprintRGBBytes          = perceptualFingerprintPixelCount * 3
 	perceptualFingerprintIdentityMaskBytes = (perceptualFingerprintPixelCount + 7) / 8
-	perceptualFingerprintUnlockedBytes     = perceptualFingerprintPixelCount
+	perceptualFingerprintInfluenceBytes    = perceptualFingerprintPixelCount
 	perceptualFingerprintPayloadBytes      = perceptualFingerprintStyleDigestBytes +
 		perceptualFingerprintRGBBytes + perceptualFingerprintIdentityMaskBytes +
-		perceptualFingerprintUnlockedBytes
+		perceptualFingerprintInfluenceBytes
 	perceptualFingerprintChecksumBytes = sha256.Size
 
 	// PerceptualContinuityFingerprintBytes is the exact persisted byte length
@@ -46,10 +46,10 @@ var (
 )
 
 type decodedPerceptualContinuityFingerprint struct {
-	styleDigest   []byte
-	wholeRGB      []byte
-	identityMask  []byte
-	unlockedAlpha []byte
+	styleDigest       []byte
+	wholeRGB          []byte
+	identityMask      []byte
+	unlockedInfluence []byte
 }
 
 // BuildPerceptualContinuityFingerprint converts a full parent SVG into the
@@ -67,7 +67,7 @@ func BuildPerceptualContinuityFingerprint(parent []byte, pack StylePack) (finger
 	if err != nil {
 		return nil, err
 	}
-	parentFull, identityMask, parentUnlocked, err := renderPerceptualParentProjection(parentSVG, pack)
+	parentFull, identityMask, parentLocked, err := renderPerceptualParentProjection(parentSVG, pack)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func BuildPerceptualContinuityFingerprint(parent []byte, pack StylePack) (finger
 	if err != nil {
 		return nil, err
 	}
-	return encodePerceptualContinuityFingerprint(styleDigest, parentFull, identityMask, parentUnlocked), nil
+	return encodePerceptualContinuityFingerprint(styleDigest, parentFull, identityMask, parentLocked), nil
 }
 
 // ValidatePerceptualContinuityFingerprint verifies the exact format, version,
@@ -103,7 +103,7 @@ func renderPerceptualParentProjection(parentSVG []byte, pack StylePack) (*image.
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	lockedIdentity, allLocked, unlocked := perceptualLayerSelections(pack)
+	lockedIdentity, allLocked, _ := perceptualLayerSelections(pack)
 	identitySVG, err := selectPerceptualLayers(parentSVG, pack, lockedIdentity)
 	if err != nil {
 		return nil, nil, nil, err
@@ -123,18 +123,18 @@ func renderPerceptualParentProjection(parentSVG []byte, pack StylePack) (*image.
 			return nil, nil, nil, err
 		}
 	}
-	parentUnlockedSVG, err := selectPerceptualLayers(parentSVG, pack, unlocked)
+	parentLockedSVG, err := selectPerceptualLayers(parentSVG, pack, allLocked)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	parentUnlocked, err := renderPerceptualAvatar(parentUnlockedSVG)
+	parentLocked, err := renderPerceptualAvatar(parentLockedSVG)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return parentFull, identityMask, parentUnlocked, nil
+	return parentFull, identityMask, parentLocked, nil
 }
 
-func encodePerceptualContinuityFingerprint(styleDigest [sha256.Size]byte, parentFull, identityMask, parentUnlocked *image.RGBA) []byte {
+func encodePerceptualContinuityFingerprint(styleDigest [sha256.Size]byte, parentFull, identityMask, parentLocked *image.RGBA) []byte {
 	fingerprint := make([]byte, PerceptualContinuityFingerprintBytes)
 	copy(fingerprint[:4], perceptualFingerprintMagic)
 	fingerprint[4] = PerceptualContinuityFingerprintVersion
@@ -146,7 +146,7 @@ func encodePerceptualContinuityFingerprint(styleDigest [sha256.Size]byte, parent
 	offset += sha256.Size
 	rgbOffset := offset
 	maskOffset := rgbOffset + perceptualFingerprintRGBBytes
-	alphaOffset := maskOffset + perceptualFingerprintIdentityMaskBytes
+	influenceOffset := maskOffset + perceptualFingerprintIdentityMaskBytes
 	for y := 0; y < PerceptualRenderSize; y++ {
 		for x := 0; x < PerceptualRenderSize; x++ {
 			pixel := y*PerceptualRenderSize + x
@@ -155,7 +155,8 @@ func encodePerceptualContinuityFingerprint(styleDigest [sha256.Size]byte, parent
 			if identityMask.RGBAAt(x, y).A >= perceptualMaskAlpha {
 				fingerprint[maskOffset+pixel/8] |= 1 << (7 - uint(pixel%8))
 			}
-			fingerprint[alphaOffset+pixel] = parentUnlocked.RGBAAt(x, y).A
+			fingerprint[influenceOffset+pixel] = perceptualVisibleUnlockedInfluence(
+				parentFull.RGBAAt(x, y), parentLocked.RGBAAt(x, y))
 		}
 	}
 	checksumOffset := PerceptualContinuityFingerprintBytes - perceptualFingerprintChecksumBytes
@@ -202,10 +203,10 @@ func decodePerceptualContinuityFingerprint(fingerprint []byte) (decodedPerceptua
 	offset += perceptualFingerprintRGBBytes
 	identityMask := stable[offset : offset+perceptualFingerprintIdentityMaskBytes]
 	offset += perceptualFingerprintIdentityMaskBytes
-	unlockedAlpha := stable[offset : offset+perceptualFingerprintUnlockedBytes]
+	unlockedInfluence := stable[offset : offset+perceptualFingerprintInfluenceBytes]
 	return decodedPerceptualContinuityFingerprint{
 		styleDigest: styleDigest, wholeRGB: wholeRGB,
-		identityMask: identityMask, unlockedAlpha: unlockedAlpha,
+		identityMask: identityMask, unlockedInfluence: unlockedInfluence,
 	}, nil
 }
 
@@ -232,7 +233,7 @@ func validatePerceptualFingerprintStyle(fingerprint decodedPerceptualContinuityF
 	return nil
 }
 
-func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerprint, childFull, childUnlocked *image.RGBA) PerceptualContinuityMetrics {
+func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerprint, childFull, childLocked *image.RGBA) PerceptualContinuityMetrics {
 	metrics := PerceptualContinuityMetrics{}
 	wholeChanged := 0
 	identityChanged := 0
@@ -255,10 +256,11 @@ func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerpr
 			if delta > PerceptualPixelDeltaLimit {
 				identityChanged++
 			}
-			parentAlpha := parent.unlockedAlpha[pixel]
-			childAlpha := childUnlocked.RGBAAt(x, y).A
-			if childAlpha >= perceptualMaskAlpha &&
-				int(childAlpha)-int(parentAlpha) >= int(perceptualOcclusionAlphaStep) {
+			parentInfluence := parent.unlockedInfluence[pixel]
+			childInfluence := perceptualVisibleUnlockedInfluence(
+				childFull.RGBAAt(x, y), childLocked.RGBAAt(x, y))
+			if childInfluence >= perceptualMinimumInfluence &&
+				int(childInfluence)-int(parentInfluence) >= int(perceptualAddedInfluenceStep) {
 				addedOcclusion++
 			}
 		}
@@ -271,6 +273,22 @@ func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerpr
 		metrics.AddedIdentityOcclusion = float64(addedOcclusion) / float64(metrics.IdentityMaskPixels)
 	}
 	return metrics
+}
+
+// perceptualVisibleUnlockedInfluence measures how much the final composited
+// pixel differs from the same document rendered with only locked layers. This
+// makes the stored projection sensitive to visible paint order: unlocked art
+// hidden behind an opaque locked identity contributes zero influence instead
+// of looking like a false occlusion merely because it has alpha.
+func perceptualVisibleUnlockedInfluence(full, locked color.RGBA) uint8 {
+	fullRGB := perceptualCompositeRGB(full)
+	lockedRGB := perceptualCompositeRGB(locked)
+	delta := perceptualRGBDelta(lockedRGB[:], fullRGB)
+	value := int(math.Floor(delta*255 + 0.5))
+	if value > 255 {
+		return 255
+	}
+	return uint8(value)
 }
 
 func perceptualCompositeRGB(value color.RGBA) [3]byte {
