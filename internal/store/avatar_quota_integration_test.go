@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -386,7 +387,7 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
 	if err != nil {
@@ -564,6 +565,52 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 		assertNoFingerprints(t, s)
 	})
 
+	t.Run("different-subject child", func(t *testing.T) {
+		s := newScenario(t, "subject")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET subject_form='animal'
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compact(t, s, 1)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("different-subject compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("large selected history loads only boundary SVGs", func(t *testing.T) {
+		s := newScenario(t, "bounded-sources")
+		const selectedHistory = 257
+		selected := make([]int64, 0, selectedHistory)
+		for version := int64(1); version <= selectedHistory; version++ {
+			insertVersion(t, s, version, 0, s.pack, PrincipalAgent, s.agent.ID,
+				s.pack.References[0].SVG, 50_000)
+			selected = append(selected, version)
+		}
+		insertVersion(t, s, selectedHistory+1, 1, s.pack, PrincipalAgent,
+			s.agent.ID, s.pack.References[0].SVG, 0)
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		sources, err := loadAvatarCompactionFingerprintSourcesTx(ctx, tx,
+			avatarTarget{accountID: s.accountID, realmID: s.realmID,
+				agentID: s.agent.ID, agentName: s.agent.AgentName},
+			avatarPayloadCompactionPlan{versions: selected, count: len(selected)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sources) != 1 || sources[0].version != 1 {
+			t.Fatalf("fingerprint sources = %#v, want only version 1", sources)
+		}
+	})
+
 	t.Run("legacy occluding child refuses irreversible parent compaction", func(t *testing.T) {
 		s := newScenario(t, "occlusion")
 		parentSVG := s.pack.References[0].SVG
@@ -590,6 +637,97 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 			len(fingerprint) != 0 {
 			t.Fatalf("failed-closed parent = state:%s svg:%v fingerprint:%d",
 				state, svg != nil, len(fingerprint))
+		}
+	})
+
+	t.Run("corrupt final child refuses compacted boundary pruning", func(t *testing.T) {
+		s := newScenario(t, "corrupt-final-child")
+		parentSVG := s.pack.References[0].SVG
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 50_000)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 0)
+		if plan, err := compact(t, s, 1); err != nil ||
+			len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("prepare compacted boundary = %#v / %v", plan, err)
+		}
+		childSVG := strings.Replace(parentSVG,
+			`<g id="experience" data-layer="experience"></g>`,
+			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+		digest := sha256.Sum256([]byte(childSVG))
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET svg=$2, svg_sha256=$3
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID, childSVG,
+			hex.EncodeToString(digest[:])); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 0); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("corrupt final-child compaction error = %v, want conflict", err)
+		}
+		var state string
+		var retainedSVG *string
+		var fingerprintBytes int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT child.payload_state, child.svg,
+			       octet_length(parent.continuity_fingerprint)
+			  FROM agent_avatar_versions child
+			  JOIN agent_avatar_versions parent
+			    ON parent.agent_id=child.agent_id AND parent.version=1
+			 WHERE child.agent_id=$1 AND child.version=2`, s.agent.ID).
+			Scan(&state, &retainedSVG, &fingerprintBytes); err != nil {
+			t.Fatal(err)
+		}
+		if state != string(avatardomain.PayloadFull) || retainedSVG == nil ||
+			*retainedSVG != childSVG ||
+			fingerprintBytes != avatardomain.PerceptualContinuityFingerprintBytes {
+			t.Fatalf("failed-closed child = state:%s svg:%v fingerprint:%d",
+				state, retainedSVG != nil, fingerprintBytes)
+		}
+	})
+
+	t.Run("corrupt fingerprint refuses final child compaction", func(t *testing.T) {
+		s := newScenario(t, "corrupt-fingerprint")
+		parentSVG := s.pack.References[0].SVG
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 50_000)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 0)
+		if plan, err := compact(t, s, 1); err != nil ||
+			len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("prepare compacted boundary = %#v / %v", plan, err)
+		}
+		var corrupt []byte
+		if err := st.pool.QueryRow(ctx, `
+			SELECT continuity_fingerprint FROM agent_avatar_versions
+			 WHERE agent_id=$1 AND version=1`, s.agent.ID).Scan(&corrupt); err != nil {
+			t.Fatal(err)
+		}
+		corrupt[len(corrupt)-1] ^= 0xff
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET continuity_fingerprint=$2
+			 WHERE agent_id=$1 AND version=1`, s.agent.ID, corrupt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 0); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("corrupt-fingerprint compaction error = %v, want conflict", err)
+		}
+		var state string
+		var retainedSVG *string
+		var retainedFingerprint []byte
+		if err := st.pool.QueryRow(ctx, `
+			SELECT child.payload_state, child.svg, parent.continuity_fingerprint
+			  FROM agent_avatar_versions child
+			  JOIN agent_avatar_versions parent
+			    ON parent.agent_id=child.agent_id AND parent.version=1
+			 WHERE child.agent_id=$1 AND child.version=2`, s.agent.ID).
+			Scan(&state, &retainedSVG, &retainedFingerprint); err != nil {
+			t.Fatal(err)
+		}
+		if state != string(avatardomain.PayloadFull) || retainedSVG == nil ||
+			*retainedSVG != parentSVG || !bytes.Equal(retainedFingerprint, corrupt) {
+			t.Fatalf("failed-closed corrupt fingerprint = state:%s svg:%v retained:%t",
+				state, retainedSVG != nil, bytes.Equal(retainedFingerprint, corrupt))
 		}
 	})
 }

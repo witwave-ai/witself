@@ -11,6 +11,7 @@ import (
 	"time"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/id"
 )
 
 func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t *testing.T) {
@@ -119,6 +120,106 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 		t.Fatal("schema-51 downgrade accepted an irreversible compacted payload")
 	}
 	assertMigrationTestVersion(t, dsn, 51)
+}
+
+func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 50)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	provisioned, err := st.ProvisionAccount(ctx,
+		"avatar-quota-batched-migration@witwave.ai", "avatar quota batched migration", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "batched-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "batched-migration-avatar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	digest := sha256.Sum256([]byte(reference.SVG))
+	const historyRows = avatarLockedLayerDigestBackfillBatchSize*2 + 17
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for version := int64(1); version <= historyRows; version++ {
+		versionID, err := id.New("avver")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO agent_avatar_versions
+			       (account_id, realm_id, agent_id, id, version, lineage_generation,
+			        style_pack_id, style_pack_version, subject_form, svg, description,
+			        visual_spec, svg_sha256, provenance, proposed_by_kind,
+			        proposed_by_id)
+			VALUES ($1,$2,$3,$4,$5,1,$6,1,'human',$7,$8,
+			        '{"identity":{"expression":"calm"}}'::jsonb,$9,
+			        '{"runtime":"migration-batch-test"}'::jsonb,'agent',$3)`,
+			provisioned.AccountID, realm.ID, agent.ID, versionID, version,
+			pack.ID, reference.SVG, "A batched migration backfill portrait.",
+			hex.EncodeToString(digest[:])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply the SQL half first so the test can inspect the application-level
+	// finalizer's real transactional batch envelope.
+	migrationTestUpTo(t, dsn, 51)
+	stats, err := st.finalizeAvatarLockedLayerDigestMigration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.rows != historyRows || stats.batches != 3 ||
+		stats.maxBatchSize != avatarLockedLayerDigestBackfillBatchSize {
+		t.Fatalf("backfill stats = %#v, want rows:%d batches:3 max:%d", stats,
+			historyRows, avatarLockedLayerDigestBackfillBatchSize)
+	}
+	var total, digests int
+	var notNull, temporaryProofExists bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(locked_layers_sha256)
+		  FROM agent_avatar_versions WHERE agent_id=$1`, agent.ID).
+		Scan(&total, &digests); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT attnotnull
+		  FROM pg_attribute
+		 WHERE attrelid='agent_avatar_versions'::regclass
+		   AND attname='locked_layers_sha256' AND NOT attisdropped`).
+		Scan(&notNull); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM pg_constraint
+		   WHERE conname='agent_avatar_versions_locked_layers_sha256_not_null'
+		     AND conrelid='agent_avatar_versions'::regclass
+		)`).Scan(&temporaryProofExists); err != nil {
+		t.Fatal(err)
+	}
+	if total != historyRows || digests != historyRows || !notNull || temporaryProofExists {
+		t.Fatalf("finalized backfill = total:%d digests:%d not-null:%t proof:%t",
+			total, digests, notNull, temporaryProofExists)
+	}
 }
 
 func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {

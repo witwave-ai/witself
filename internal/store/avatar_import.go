@@ -1142,7 +1142,8 @@ func requiredImportedAvatarContinuityFingerprints(versions map[avatarVersionImpo
 			agentID: childKey.agentID, version: child.parentVersion,
 		}
 		parent, exists := versions[parentKey]
-		if exists && parent.lineage == child.lineage && parent.style == child.style {
+		if exists && parent.lineage == child.lineage && parent.style == child.style &&
+			parent.subjectForm == child.subjectForm {
 			required[parentKey] = true
 		}
 	}

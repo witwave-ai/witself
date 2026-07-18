@@ -38,7 +38,8 @@ const (
 	// AvatarDefaultRetainedPayloadByteLimit is the per-agent retained-content
 	// default over full creative payloads plus continuity fingerprints.
 	AvatarDefaultRetainedPayloadByteLimit int64 = 2 * 1024 * 1024
-	// AvatarMinRetainedPayloadByteLimit safely accommodates maximum-size protected payloads.
+	// AvatarMinRetainedPayloadByteLimit is exactly four maximum creative
+	// payloads: active, proposed, and the two documented rollback targets.
 	AvatarMinRetainedPayloadByteLimit int64 = 512 * 1024
 	// AvatarMaxRetainedPayloadByteLimit bounds per-agent storage configuration.
 	AvatarMaxRetainedPayloadByteLimit int64 = 64 * 1024 * 1024

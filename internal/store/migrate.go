@@ -81,7 +81,7 @@ func (s *Store) Migrate() error {
 		)
 	}
 	if current >= 51 {
-		if err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
+		if _, err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
 			return fmt.Errorf("finalize avatar locked-layer digests: %w", err)
 		}
 	}

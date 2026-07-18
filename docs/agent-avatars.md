@@ -270,16 +270,17 @@ proposal still do not fit, the whole mutation fails closed with HTTP `409` and
 the stable error `avatar_payload_quota_exceeded`. No partial compaction, new
 proposal, profile revision, receipt, or lifecycle event is committed.
 
-The planner indexes same-lineage, same-style, owning-agent child relationships
-and existing fingerprints before selection. For each candidate it projects the
-full-payload bytes removed, a new fingerprint required by any retained
-qualifying child, and a fingerprint pruned when its final qualifying child is
-also compacted. A candidate is selected only when the projected final retained
-content does not exceed the pre-cleanup footprint, including an incoming
-proposal. Consequently a small parent SVG stays full when replacing it with a
-38,092-byte boundary would grow retained content; it may become eligible after
-another deterministic cleanup supplies enough offsetting reclamation. Planning
-stops only when the full-row count and inclusive retained-byte total both fit.
+The planner indexes same-lineage, same-style, same-subject, owning-agent child
+relationships and existing fingerprints before selection. For each candidate
+it projects the full-payload bytes removed, a new fingerprint required by any
+retained qualifying child, and a fingerprint pruned when its final qualifying
+child is also compacted. A candidate is selected only when the projected final
+retained content does not exceed the pre-cleanup footprint, including an
+incoming proposal. Consequently a small parent SVG stays full when replacing
+it with a 38,092-byte boundary would grow retained content; it may become
+eligible after another deterministic cleanup supplies enough offsetting
+reclamation. Planning stops only when the full-row count and inclusive
+retained-byte total both fit.
 
 Before a selected parent SVG is cleared, compaction builds the exact fingerprint
 from that still-full source and validates every qualifying retained full child
@@ -288,6 +289,13 @@ perceptual guard. A legacy or directly corrupted child that violates either
 boundary aborts the transaction; the parent remains full and no partial quota
 cleanup is committed.
 
+Before compaction clears the final qualifying full child of an already
+compacted parent, it also validates the parent's stored fingerprint format,
+checksum, and immutable style binding, then rechecks the child's stored and
+derived locked-layer digest and fingerprint-based perceptual continuity. A
+corrupt historical child or boundary therefore fails before the fingerprint can
+be pruned, leaving both rows unchanged.
+
 Compaction is irreversible. It changes `payload_state` from `full` to
 `compacted`, clears SVG, description, and visual specification, and records
 `payload_compacted_at` with `payload_compaction_reason=quota`. The immutable
@@ -295,9 +303,10 @@ version id, version/parent/lineage, subject and style, original `payload_bytes`,
 `svg_sha256`, `locked_layers_sha256`, generation provenance, proposer, proposal
 timestamp, and activation/rejection/reset history remain. A compacted parent
 also retains its exact perceptual continuity fingerprint only while a full,
-same-lineage, same-style, owning-agent direct child outside the compaction plan
-needs it; all obsolete fingerprints are cleared in the same transaction. A
-compacted version is never active, proposed, or rollback-eligible.
+same-lineage, same-style, same-subject, owning-agent direct child outside the
+compaction plan needs it; all obsolete fingerprints are cleared in the same
+transaction. A compacted version is never active, proposed, or
+rollback-eligible.
 
 Exact-version reads continue to return HTTP `200` for a compacted version. They
 return its retained metadata and provenance with `payload_state=compacted`, but
@@ -322,7 +331,10 @@ normalized locked-layer source and the perceptual guard when both payloads are
 full. Across a compacted-parent/full-child boundary it requires the retained
 `locked_layers_sha256` to match and runs the same perceptual comparison from the
 stored fingerprint without attempting to render a missing parent SVG. A schema
-downgrade that would need to reconstruct a compacted payload is refused.
+downgrade that would need to reconstruct a compacted payload is refused. The
+schema-51 startup finalizer derives legacy locked-layer digests in bounded
+transactional batches with a batch-scoped style cache before validating and
+making the column mandatory.
 
 ## Lifecycle events
 
