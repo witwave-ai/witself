@@ -576,38 +576,112 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 			 WHERE agent_id=$1 AND version=2`, s.agent.ID); err != nil {
 			t.Fatal(err)
 		}
-		plan, err := compact(t, s, 1)
-		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
-			t.Fatalf("different-subject compaction = %#v / %v", plan, err)
+		if _, err := compact(t, s, 1); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("different-subject compaction error = %v, want conflict", err)
 		}
-		assertNoFingerprints(t, s)
+		var full, payloads, fingerprints int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FILTER (WHERE payload_state='full'),
+			       COUNT(svg), COUNT(continuity_fingerprint)
+			  FROM agent_avatar_versions WHERE agent_id=$1`, s.agent.ID).
+			Scan(&full, &payloads, &fingerprints); err != nil {
+			t.Fatal(err)
+		}
+		if full != 2 || payloads != 2 || fingerprints != 0 {
+			t.Fatalf("different-subject rollback = full:%d payloads:%d fingerprints:%d",
+				full, payloads, fingerprints)
+		}
 	})
 
-	t.Run("large selected history loads only boundary SVGs", func(t *testing.T) {
+	t.Run("different-subject final child remains full", func(t *testing.T) {
+		s := newScenario(t, "subject-final-child")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 50_000)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		if plan, err := compact(t, s, 1); err != nil ||
+			len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("prepare subject boundary = %#v / %v", plan, err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET subject_form='animal'
+			 WHERE agent_id=$1 AND version=2`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 0); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("different-subject final-child error = %v, want conflict", err)
+		}
+		var parentState, childState string
+		var fingerprint []byte
+		var childSVG *string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT parent.payload_state, parent.continuity_fingerprint,
+			       child.payload_state, child.svg
+			  FROM agent_avatar_versions parent
+			  JOIN agent_avatar_versions child
+			    ON child.agent_id=parent.agent_id AND child.version=2
+			 WHERE parent.agent_id=$1 AND parent.version=1`, s.agent.ID).
+			Scan(&parentState, &fingerprint, &childState, &childSVG); err != nil {
+			t.Fatal(err)
+		}
+		if parentState != string(avatardomain.PayloadCompacted) ||
+			len(fingerprint) != avatardomain.PerceptualContinuityFingerprintBytes ||
+			childState != string(avatardomain.PayloadFull) || childSVG == nil {
+			t.Fatalf("different-subject final-child rollback = parent:%s fingerprint:%d child:%s svg:%t",
+				parentState, len(fingerprint), childState, childSVG != nil)
+		}
+	})
+
+	t.Run("large selected history compacts transactionally", func(t *testing.T) {
 		s := newScenario(t, "bounded-sources")
 		const selectedHistory = 257
-		selected := make([]int64, 0, selectedHistory)
 		for version := int64(1); version <= selectedHistory; version++ {
 			insertVersion(t, s, version, 0, s.pack, PrincipalAgent, s.agent.ID,
 				s.pack.References[0].SVG, 50_000)
-			selected = append(selected, version)
 		}
 		insertVersion(t, s, selectedHistory+1, 1, s.pack, PrincipalAgent,
 			s.agent.ID, s.pack.References[0].SVG, 0)
-		tx, err := st.pool.Begin(ctx)
+		plan, err := compact(t, s, 1)
 		if err != nil {
+			t.Fatalf("large-history compaction: %v", err)
+		}
+		if plan.count != selectedHistory || len(plan.versions) != selectedHistory ||
+			plan.versions[0] != 1 || plan.versions[len(plan.versions)-1] != selectedHistory ||
+			plan.retainedCount != 1 {
+			t.Fatalf("large-history plan = %#v", plan)
+		}
+		var full, compacted int
+		var retainedBytes int64
+		var fingerprint []byte
+		var childState string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FILTER (WHERE payload_state='full'),
+			       COUNT(*) FILTER (WHERE payload_state='compacted'),
+			       COALESCE(SUM(CASE WHEN payload_state='full' THEN payload_bytes ELSE 0 END),0) +
+			       COALESCE(SUM(octet_length(continuity_fingerprint)),0)
+			  FROM agent_avatar_versions WHERE agent_id=$1`, s.agent.ID).
+			Scan(&full, &compacted, &retainedBytes); err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		sources, err := loadAvatarCompactionFingerprintSourcesTx(ctx, tx,
-			avatarTarget{accountID: s.accountID, realmID: s.realmID,
-				agentID: s.agent.ID, agentName: s.agent.AgentName},
-			avatarPayloadCompactionPlan{versions: selected, count: len(selected)})
-		if err != nil {
+		if err := st.pool.QueryRow(ctx, `
+			SELECT parent.continuity_fingerprint, child.payload_state
+			  FROM agent_avatar_versions parent
+			  JOIN agent_avatar_versions child
+			    ON child.agent_id=parent.agent_id AND child.version=$2
+			 WHERE parent.agent_id=$1 AND parent.version=1`, s.agent.ID,
+			selectedHistory+1).Scan(&fingerprint, &childState); err != nil {
 			t.Fatal(err)
 		}
-		if len(sources) != 1 || sources[0].version != 1 {
-			t.Fatalf("fingerprint sources = %#v, want only version 1", sources)
+		if full != 1 || compacted != selectedHistory ||
+			retainedBytes != plan.retainedBytes ||
+			len(fingerprint) != avatardomain.PerceptualContinuityFingerprintBytes ||
+			childState != string(avatardomain.PayloadFull) {
+			t.Fatalf("large-history committed state = full:%d compacted:%d bytes:%d/%d fingerprint:%d child:%s",
+				full, compacted, retainedBytes, plan.retainedBytes, len(fingerprint), childState)
+		}
+		if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+			fingerprint, s.pack); err != nil {
+			t.Fatalf("large-history boundary fingerprint: %v", err)
 		}
 	})
 
@@ -728,6 +802,46 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 			*retainedSVG != parentSVG || !bytes.Equal(retainedFingerprint, corrupt) {
 			t.Fatalf("failed-closed corrupt fingerprint = state:%s svg:%v retained:%t",
 				state, retainedSVG != nil, bytes.Equal(retainedFingerprint, corrupt))
+		}
+	})
+
+	t.Run("missing fingerprint refuses final child compaction", func(t *testing.T) {
+		s := newScenario(t, "missing-fingerprint")
+		parentSVG := s.pack.References[0].SVG
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 50_000)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 0)
+		if plan, err := compact(t, s, 1); err != nil ||
+			len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("prepare compacted boundary = %#v / %v", plan, err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_versions SET continuity_fingerprint=NULL
+			 WHERE agent_id=$1 AND version=1`, s.agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compact(t, s, 0); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("missing-fingerprint compaction error = %v, want conflict", err)
+		}
+		var parentState, childState string
+		var fingerprint []byte
+		var childSVG *string
+		if err := st.pool.QueryRow(ctx, `
+			SELECT parent.payload_state, parent.continuity_fingerprint,
+			       child.payload_state, child.svg
+			  FROM agent_avatar_versions parent
+			  JOIN agent_avatar_versions child
+			    ON child.agent_id=parent.agent_id AND child.version=2
+			 WHERE parent.agent_id=$1 AND parent.version=1`, s.agent.ID).
+			Scan(&parentState, &fingerprint, &childState, &childSVG); err != nil {
+			t.Fatal(err)
+		}
+		if parentState != string(avatardomain.PayloadCompacted) || len(fingerprint) != 0 ||
+			childState != string(avatardomain.PayloadFull) || childSVG == nil ||
+			*childSVG != parentSVG {
+			t.Fatalf("missing-fingerprint rollback = parent:%s fingerprint:%d child:%s svg:%t",
+				parentState, len(fingerprint), childState, childSVG != nil)
 		}
 	})
 }

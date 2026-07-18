@@ -282,6 +282,11 @@ eligible after another deterministic cleanup supplies enough offsetting
 reclamation. Planning stops only when the full-row count and inclusive
 retained-byte total both fit.
 
+A same-lineage, same-style, owning-agent direct child that changes
+`subject_form` is corrupt historical self-evolution, not a different boundary
+class. If a compaction plan would clear either that parent or that child, the
+transaction fails closed and leaves both payloads unchanged.
+
 Before a selected parent SVG is cleared, compaction builds the exact fingerprint
 from that still-full source and validates every qualifying retained full child
 against both the stored/derived locked-layer digest and the fingerprint-based
@@ -290,11 +295,11 @@ boundary aborts the transaction; the parent remains full and no partial quota
 cleanup is committed.
 
 Before compaction clears the final qualifying full child of an already
-compacted parent, it also validates the parent's stored fingerprint format,
+compacted parent, it requires a fingerprint and validates its stored format,
 checksum, and immutable style binding, then rechecks the child's stored and
 derived locked-layer digest and fingerprint-based perceptual continuity. A
-corrupt historical child or boundary therefore fails before the fingerprint can
-be pruned, leaving both rows unchanged.
+missing or corrupt historical boundary therefore fails before the child can be
+cleared or the fingerprint pruned, leaving both rows unchanged.
 
 Compaction is irreversible. It changes `payload_state` from `full` to
 `compacted`, clears SVG, description, and visual specification, and records

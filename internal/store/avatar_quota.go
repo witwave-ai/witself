@@ -60,6 +60,11 @@ type avatarCompactionFingerprintChild struct {
 	lockedDigest  string
 }
 
+type avatarCompactionSubjectMismatch struct {
+	parentVersion int64
+	childVersion  int64
+}
+
 // planAvatarPayloadCompaction is deterministic and deliberately separates
 // eligibility from SQL. Protected pointers and the rollback floor are never
 // returned, even when the configured quota cannot accommodate them. The
@@ -371,24 +376,34 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	rows.Close()
 	candidates := make([]avatarPayloadCandidate, 0, len(versions))
 	existingFingerprintBytes := make(map[int64]int64)
+	subjectMismatches := make([]avatarCompactionSubjectMismatch, 0)
 	for _, version := range versions {
 		if version.fingerprintBytes > 0 {
 			existingFingerprintBytes[version.version] = version.fingerprintBytes
 		}
-		if version.payloadState != avatardomain.PayloadFull {
-			continue
-		}
-		candidate := version.avatarPayloadCandidate
+		var qualifyingParentVersion int64
 		if version.parentVersion > 0 && version.proposedByKind == PrincipalAgent &&
 			version.proposedByID == target.agentID {
 			if parent, exists := versionsByNumber[version.parentVersion]; exists &&
 				parent.lineage == version.lineage &&
 				parent.stylePackID == version.stylePackID &&
-				parent.stylePackVersion == version.stylePackVersion &&
-				parent.subjectForm == version.subjectForm {
-				candidate.qualifyingParentVersion = version.parentVersion
+				parent.stylePackVersion == version.stylePackVersion {
+				if parent.subjectForm != version.subjectForm {
+					subjectMismatches = append(subjectMismatches,
+						avatarCompactionSubjectMismatch{
+							parentVersion: version.parentVersion,
+							childVersion:  version.version,
+						})
+				} else {
+					qualifyingParentVersion = version.parentVersion
+				}
 			}
 		}
+		if version.payloadState != avatardomain.PayloadFull {
+			continue
+		}
+		candidate := version.avatarPayloadCandidate
+		candidate.qualifyingParentVersion = qualifyingParentVersion
 		candidates = append(candidates, candidate)
 	}
 	var activeVersion, proposedVersion int64
@@ -403,6 +418,17 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		incomingBytes, countLimit, byteLimit)
 	if err != nil || plan.count == 0 {
 		return plan, err
+	}
+	selected := make(map[int64]bool, plan.count)
+	for _, version := range plan.versions {
+		selected[version] = true
+	}
+	for _, mismatch := range subjectMismatches {
+		if selected[mismatch.parentVersion] || selected[mismatch.childVersion] {
+			return avatarPayloadCompactionPlan{}, fmt.Errorf(
+				"%w: avatar %d child %d changes subject_form across same-style self evolution",
+				ErrAvatarConflict, mismatch.parentVersion, mismatch.childVersion)
+		}
 	}
 	fingerprints, err := buildAvatarCompactionFingerprintsTx(ctx, tx, target, plan)
 	if err != nil {
@@ -693,7 +719,6 @@ func validateAvatarPrunedContinuityBoundariesTx(ctx context.Context, tx pgx.Tx,
 			   AND child.proposed_by_id=parent.agent_id
 			 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 			   AND parent.payload_state='compacted'
-			   AND parent.continuity_fingerprint IS NOT NULL
 			   AND child.version=ANY($4::bigint[])
 			   AND (parent.version, child.version) > ($5::bigint, $6::bigint)
 			   AND NOT EXISTS (
