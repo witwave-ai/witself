@@ -231,6 +231,8 @@ emits `fact.updated`. (`fact.imported` covers the `ingest` path; see
 - `avatar.style.changed`
 - `avatar.quota.changed`
 - `avatar.payload.compacted`
+- `avatar.style.rollout.completed`
+- `avatar.style.rollout.superseded`
 
 Avatar lifecycle events are transactionally coupled and value-free. They may
 carry stable agent/realm ids, version and lineage numbers, status, subject form,
