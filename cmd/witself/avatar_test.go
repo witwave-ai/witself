@@ -60,6 +60,12 @@ func TestAvatarCLIProposalReadsSeparateFilesAndSendsHeaderOnlyKey(t *testing.T) 
 		if err := json.Unmarshal(body["svg"], &svg); err != nil || svg != `<svg xmlns="http://www.w3.org/2000/svg"></svg>` {
 			t.Fatalf("svg = %q / %v", svg, err)
 		}
+		var provenance struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(body["provenance"], &provenance); err != nil || provenance.Model != "GPT-5.6 Sol" {
+			t.Fatalf("provenance = %#v / %v", provenance, err)
+		}
 		writeAvatarCLIJSON(t, w, map[string]any{
 			"avatar":  map[string]any{"profile": map[string]any{"agent_id": "agent_1", "profile_revision": 5}},
 			"receipt": map[string]any{"operation": "propose", "result_revision": 5, "result_version": 4},
@@ -72,7 +78,7 @@ func TestAvatarCLIProposalReadsSeparateFilesAndSendsHeaderOnlyKey(t *testing.T) 
 		"--expected-profile-revision", "4", "--parent-version", "3",
 		"--style-pack-id", avatar.DefaultStylePackID, "--style-pack-version", "1",
 		"--subject-form", "animal", "--description", "A curious fox",
-		"--spec-file", specFile, "--svg-file", svgFile, "--runtime", "codex",
+		"--spec-file", specFile, "--svg-file", svgFile, "--runtime", "cursor", "--model", "GPT-5.6 Sol",
 		"--idempotency-key", "avatar-proposal-1",
 	})
 	if code != 0 || calls != 1 {

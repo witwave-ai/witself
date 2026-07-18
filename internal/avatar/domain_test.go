@@ -112,6 +112,36 @@ func TestNormalizeDescription(t *testing.T) {
 	}
 }
 
+func TestNormalizeClientProvenanceLabelAllowsProviderDisplayNames(t *testing.T) {
+	got, err := NormalizeClientProvenanceLabel("  GPT-5.6 Sol  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "GPT-5.6 Sol" {
+		t.Fatalf("NormalizeClientProvenanceLabel() = %q", got)
+	}
+
+	for _, valid := range []string{"", "codex", "claude-code", "openai/gpt-5.6:sol@2026+stable", "GPT  5"} {
+		if _, err := NormalizeClientProvenanceLabel(valid); err != nil {
+			t.Errorf("NormalizeClientProvenanceLabel(%q) error = %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{
+		"-leading-punctuation",
+		"GPT\t5",
+		"GPT\n5",
+		"GPT\u00a05",
+		`GPT "Sol"`,
+		"GPT<Sol>",
+		strings.Repeat("x", MaxClientProvenanceLabelBytes+1),
+		string([]byte{0xff}),
+	} {
+		if _, err := NormalizeClientProvenanceLabel(invalid); !errors.Is(err, ErrInvalidClientProvenanceLabel) {
+			t.Errorf("NormalizeClientProvenanceLabel(%q) error = %v", invalid, err)
+		}
+	}
+}
+
 func TestNormalizeSpecJSON(t *testing.T) {
 	raw := []byte(` {
   "weight": 8,

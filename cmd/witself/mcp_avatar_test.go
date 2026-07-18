@@ -320,7 +320,7 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 		"subject_form": "animal", "description": "A curious fox",
 		"visual_spec":     map[string]any{"expression": "curious"},
 		"svg":             `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
-		"provenance":      map[string]any{"runtime": "codex", "model": "gpt-test"},
+		"provenance":      map[string]any{"runtime": "cursor", "model": "GPT-5.6 Sol"},
 		"idempotency_key": "proposal-1",
 	})
 	call("witself.avatar.activate", map[string]any{
@@ -451,7 +451,7 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 	}
 	if backend.lastProposal.ExpectedProfileRevision != 1 || backend.lastProposal.ParentVersion != 1 ||
 		backend.lastProposal.SubjectForm != avatar.SubjectAnimal || backend.lastProposal.IdempotencyKey != "proposal-1" ||
-		backend.lastProposal.Provenance.Runtime != "codex" {
+		backend.lastProposal.Provenance.Runtime != "cursor" || backend.lastProposal.Provenance.Model != "GPT-5.6 Sol" {
 		t.Fatalf("proposal = %#v", backend.lastProposal)
 	}
 	var spec map[string]any

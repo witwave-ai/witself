@@ -22,15 +22,13 @@ import (
 const (
 	maxAvatarIdempotencyKeyBytes = 512
 	maxAvatarReasonCodeBytes     = 128
-	maxAvatarClientLabelBytes    = 256
 	defaultAvatarHistoryLimit    = 20
 	maxAvatarHistoryLimit        = 100
 	maxAvatarGenerationBackoff   = time.Hour
 )
 
 var (
-	avatarReasonCodePattern  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
-	avatarClientLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}$`)
+	avatarReasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
 )
 
 var (
@@ -344,16 +342,11 @@ func normalizeAvatarReasonCode(code string, required bool) (string, error) {
 func normalizeAvatarClient(in AvatarClientProvenance) (AvatarClientProvenance, error) {
 	values := []*string{&in.Runtime, &in.Model, &in.Recipe, &in.RecipeVersion}
 	for _, value := range values {
-		*value = strings.TrimSpace(*value)
-		if len(*value) > maxAvatarClientLabelBytes || !utf8.ValidString(*value) ||
-			(*value != "" && !avatarClientLabelPattern.MatchString(*value)) {
+		normalized, err := avatardomain.NormalizeClientProvenanceLabel(*value)
+		if err != nil {
 			return AvatarClientProvenance{}, fmt.Errorf("%w: invalid client provenance", ErrAvatarInputInvalid)
 		}
-		for _, r := range *value {
-			if unicode.IsControl(r) {
-				return AvatarClientProvenance{}, fmt.Errorf("%w: invalid client provenance", ErrAvatarInputInvalid)
-			}
-		}
+		*value = normalized
 	}
 	return in, nil
 }

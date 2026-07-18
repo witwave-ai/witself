@@ -24,14 +24,12 @@ const (
 	maxAvatarStyleRequestBytes    int64 = 2 * 1024 * 1024
 	maxAvatarIdempotencyKeyBytes        = 512
 	maxAvatarReasonCodeBytes            = 128
-	maxAvatarProvenanceBytes            = 256
 )
 
 var (
-	avatarTargetPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
-	avatarVersionPattern    = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
-	avatarReasonPattern     = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
-	avatarProvenancePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}$`)
+	avatarTargetPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
+	avatarVersionPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+	avatarReasonPattern  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
 )
 
 // AvatarActor identifies the authenticated principal responsible for a
@@ -741,16 +739,15 @@ func normalizeAvatarProposal(w http.ResponseWriter, in *ProposeAvatarRequest) bo
 }
 
 func normalizeAvatarProvenance(in *AvatarClientProvenance) bool {
-	in.Runtime = strings.TrimSpace(in.Runtime)
-	in.Model = strings.TrimSpace(in.Model)
-	in.Recipe = strings.TrimSpace(in.Recipe)
-	in.RecipeVersion = strings.TrimSpace(in.RecipeVersion)
-	return validAvatarProvenance(in.Runtime) && validAvatarProvenance(in.Model) &&
-		validAvatarProvenance(in.Recipe) && validAvatarProvenance(in.RecipeVersion)
-}
-
-func validAvatarProvenance(value string) bool {
-	return value == "" || (len(value) <= maxAvatarProvenanceBytes && avatarProvenancePattern.MatchString(value))
+	values := []*string{&in.Runtime, &in.Model, &in.Recipe, &in.RecipeVersion}
+	for _, value := range values {
+		normalized, err := avatar.NormalizeClientProvenanceLabel(*value)
+		if err != nil {
+			return false
+		}
+		*value = normalized
+	}
+	return true
 }
 
 func validAvatarMetadata(value string, maximum int) bool {

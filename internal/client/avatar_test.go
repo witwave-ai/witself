@@ -91,6 +91,10 @@ func TestAvatarSelfClientContract(t *testing.T) {
 			if err := json.Unmarshal(body["svg"], &svg); err != nil || svg != "<svg></svg>" {
 				t.Errorf("proposal svg = %q / %v", svg, err)
 			}
+			var provenance AvatarClientProvenance
+			if err := json.Unmarshal(body["provenance"], &provenance); err != nil || provenance.Model != "GPT-5.6 Sol" {
+				t.Errorf("proposal provenance = %#v / %v", provenance, err)
+			}
 			writeAvatarClientJSON(t, w, AvatarMutationResult{Avatar: view, Receipt: receipt})
 		case "POST /v1/self/avatar:activate":
 			body := readAvatarClientBody(t, r)
@@ -145,7 +149,7 @@ func TestAvatarSelfClientContract(t *testing.T) {
 		StylePackID: avatar.DefaultStylePackID, StylePackVersion: 1,
 		SubjectForm: avatar.SubjectAnimal, Description: "A curious fox",
 		VisualSpec: json.RawMessage(`{"expression":"curious"}`), SVG: "<svg></svg>",
-		Provenance:     AvatarClientProvenance{Runtime: "codex", Model: "gpt-test"},
+		Provenance:     AvatarClientProvenance{Runtime: "cursor", Model: "GPT-5.6 Sol"},
 		IdempotencyKey: "proposal-1",
 	})
 	if err != nil || proposal.Receipt.ResultVersion != 2 || proposal.Receipt.ResultLineageGeneration != 1 || proposal.Avatar.Profile.ProfileRevision != 2 {

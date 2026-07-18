@@ -26,6 +26,9 @@ const (
 	MaxSpecJSONNodes = 512
 	// MaxSVGBytes bounds source and sanitized SVG avatar assets.
 	MaxSVGBytes = 64 * 1024
+	// MaxClientProvenanceLabelBytes bounds each untrusted, self-reported
+	// runtime, model, recipe, and recipe-version label.
+	MaxClientProvenanceLabelBytes = 256
 )
 
 var (
@@ -41,6 +44,9 @@ var (
 	ErrInvalidDescription = errors.New("invalid avatar description")
 	// ErrInvalidSpecJSON marks invalid or over-limit avatar visual-spec JSON.
 	ErrInvalidSpecJSON = errors.New("invalid avatar spec JSON")
+	// ErrInvalidClientProvenanceLabel marks an invalid or over-limit
+	// self-reported avatar generation label.
+	ErrInvalidClientProvenanceLabel = errors.New("invalid avatar client provenance label")
 )
 
 // SubjectForm describes what an avatar depicts independently of its visual
@@ -272,6 +278,38 @@ func NormalizeDescription(description string) (string, error) {
 func ValidateDescription(description string) error {
 	_, err := NormalizeDescription(description)
 	return err
+}
+
+// NormalizeClientProvenanceLabel trims and validates one untrusted,
+// self-reported avatar generation label. Provider model display names may use
+// internal ASCII spaces, while controls, non-ASCII text, quotes, markup, and
+// leading punctuation remain outside the portable audit-metadata contract.
+func NormalizeClientProvenanceLabel(value string) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("%w: label is not valid UTF-8", ErrInvalidClientProvenanceLabel)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > MaxClientProvenanceLabelBytes {
+		return "", fmt.Errorf("%w: label exceeds %d bytes", ErrInvalidClientProvenanceLabel, MaxClientProvenanceLabelBytes)
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if isASCIIAlphaNumeric(character) {
+			continue
+		}
+		if index > 0 && strings.ContainsRune(" _.:/@+-", rune(character)) {
+			continue
+		}
+		return "", fmt.Errorf("%w: label contains an unsupported character", ErrInvalidClientProvenanceLabel)
+	}
+	return value, nil
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
 // NormalizeSpecJSON validates and returns a canonical compact JSON object.
