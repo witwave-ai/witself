@@ -31,6 +31,7 @@ const (
 	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
 	avatarStyleRolloutIntervalEnv     = "WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL"
 	avatarStyleRolloutBatchTimeoutEnv = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT"
+	avatarPayloadCompactionEnabledEnv = "WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED"
 )
 
 func main() {
@@ -73,6 +74,11 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	avatarPayloadCompactionEnabled, err := avatarPayloadCompactionEnabledFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -80,7 +86,8 @@ func serve() int {
 	cfg := server.ConfigFromEnv()
 	var stopAvatarRolloutWorker func()
 	if dsn := dbDSN(); dsn != "" {
-		st, err := store.Open(ctx, dsn)
+		st, err := store.Open(ctx, dsn,
+			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
@@ -1417,6 +1424,8 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout worker enabled (batch %d, interval %s)\n",
 				avatarRolloutConfig.BatchSize, avatarRolloutConfig.Interval)
 		}
+		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
+			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
@@ -1432,6 +1441,19 @@ func serve() int {
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
+	raw, ok := os.LookupEnv(avatarPayloadCompactionEnabledEnv)
+	if !ok {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w",
+			avatarPayloadCompactionEnabledEnv, err)
+	}
+	return enabled, nil
 }
 
 func avatarStyleRolloutConfigFromEnv() (bool, store.AvatarStyleRolloutWorkerConfig, error) {

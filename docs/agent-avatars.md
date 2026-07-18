@@ -247,7 +247,13 @@ both current totals plus the fixed `rollback_payload_floor` of `2`. Raising a
 limit never reconstructs a payload that was already compacted.
 
 Compaction runs transactionally before a new proposal is inserted and whenever
-an operator lowers either limit. A quota update and every compaction it requires
+an operator lowers either limit, but only after the process-lifetime activation
+gate `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=true`. With the gate false,
+quota accounting and limits remain visible and enforced: a proposal or quota
+change succeeds when the resulting retained totals already fit, while one that
+would require cleanup fails without mutation with HTTP `409` and stable error
+`avatar_payload_compaction_not_active`. That conflict is retryable after the
+activation rollout. A quota update and every enabled compaction it requires
 commit together; if the requested limits cannot be met, neither the new limits
 nor any payload changes persist. Exact idempotent replays return the original
 receipt and current projection without running compaction again.
@@ -338,8 +344,28 @@ full. Across a compacted-parent/full-child boundary it requires the retained
 stored fingerprint without attempting to render a missing parent SVG. A schema
 downgrade that would need to reconstruct a compacted payload is refused. The
 schema-51 startup finalizer derives legacy locked-layer digests in bounded
-transactional batches with a batch-scoped style cache before validating and
-making the column mandatory.
+transactions with a batch-scoped style cache. The digest remains nullable so a
+schema-50 writer can keep inserting throughout a rolling deployment; detail and
+history reads derive a missing full-row digest, export repairs frozen-account
+rows before streaming, and import derives a missing full-row digest from the
+validated SVG and style. A compacted row without its digest cannot be repaired
+and fails closed.
+
+### Compaction rollout
+
+Schema 51 installs a `BEFORE INSERT` compatibility trigger that derives
+`payload_bytes` when a schema-50 writer omits it. Deploy the compatible binary
+with `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=false` and wait until every old
+writer has drained. During this mixed window, no creative payload is cleared.
+Operationally freeze all avatar mutations for the short convergence window:
+proposals, activations, resets, rollbacks, style publishes, quota edits, and
+avatar-bearing import or export. Compatibility keeps a late schema-50 write
+data-safe, but avoiding new legacy active rows eliminates a later operator
+replacement. Then set the flag to `true` in a separate configuration change.
+The Helm ConfigMap checksum restarts all replicas; startup reruns the bounded
+nullable digest backfill before readiness and before any request can compact
+data. Do not roll back to a schema-50 binary after the database has advanced to
+schema 53; use a forward fix instead.
 
 ## Large-realm style rollout
 

@@ -55,6 +55,17 @@ Large-realm avatar style propagation is enabled by default. The
 `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` (server bound 100ms-5m). Every replica
 may run the worker; PostgreSQL job locking provides the shared fence.
 
+Avatar payload compaction is disabled by default.
+`avatar.payloadCompaction.enabled` renders
+`WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED`. Keep it false while rolling out a
+new schema-51-compatible binary. After every old writer has drained, enable it
+in a separate values change. The ConfigMap checksum restarts every pod, and
+each restarted server reruns the bounded nullable-digest backfill before it
+serves or performs irreversible cleanup. Freeze all avatar mutations and
+avatar-bearing import/export during the brief old/new-writer convergence
+window; compatibility is data-safe, but the freeze avoids new legacy active
+rows that need later operator replacement.
+
 For an existing multi-replica database, the rollout sequence is mandatory:
 first deploy schema-27-compatible writers with the flag off and wait for full
 convergence; next deploy schema 28 with the flag still off and wait again; only
@@ -90,7 +101,8 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
-`features.factDeletion.enabled`, `avatar.styleRollout.*`, `database.existingSecret.*`,
+`features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
+`avatar.styleRollout.*`, `database.existingSecret.*`,
 `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,

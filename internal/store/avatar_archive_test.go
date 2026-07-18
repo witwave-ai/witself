@@ -247,6 +247,31 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		}
 	})
 
+	t.Run("full payload missing mixed-writer digest is derived", func(t *testing.T) {
+		ic := newContext(t)
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		row["locked_layers_sha256"] = nil
+		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
+			t.Fatalf("nullable full-row digest was rejected: %v", err)
+		}
+		digest, ok := row["locked_layers_sha256"].(string)
+		if !ok || !validFactSHA256(digest) {
+			t.Fatalf("derived archive digest = %#v", row["locked_layers_sha256"])
+		}
+	})
+
+	t.Run("compacted payload missing digest fails closed", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		row := compactAvatarArchiveVersionRow(t, 1, 0, nil)
+		row["locked_layers_sha256"] = nil
+		err := ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "lacks locked_layers_sha256") {
+			t.Fatalf("error = %v, want unrecoverable compacted-digest refusal", err)
+		}
+	})
+
 	t.Run("compacted parent retains structural and perceptual continuity boundary", func(t *testing.T) {
 		newCompactedContext := func(t *testing.T) *importCtx {
 			t.Helper()

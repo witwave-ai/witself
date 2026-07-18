@@ -20,7 +20,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}

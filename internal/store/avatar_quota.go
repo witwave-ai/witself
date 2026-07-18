@@ -831,6 +831,60 @@ func avatarCreativePayloadBytes(svg, description string, visualSpec []byte) (int
 	return size, nil
 }
 
+func avatarRetainedPayloadUsageTx(ctx context.Context, tx pgx.Tx,
+	target avatarTarget) (int, int64, error) {
+	var count int
+	var bytes int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE payload_state='full'),
+		       COALESCE(SUM(CASE WHEN payload_state='full' THEN payload_bytes ELSE 0 END),0) +
+		       COALESCE(SUM(octet_length(continuity_fingerprint)),0)
+		  FROM agent_avatar_versions
+		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`, target.accountID,
+		target.realmID, target.agentID).Scan(&count, &bytes); err != nil {
+		return 0, 0, fmt.Errorf("read avatar retained payload usage: %w", err)
+	}
+	return count, bytes, nil
+}
+
+// enforceAvatarPayloadQuotaTx is the rollout activation boundary. Disabled
+// mode retains exact accounting and permits only mutations that already fit;
+// it never clears creative payloads. Enabled mode first repairs any final
+// legacy NULL digest under the profile fence and then applies normal cleanup.
+func (s *Store) enforceAvatarPayloadQuotaTx(ctx context.Context, tx pgx.Tx,
+	target avatarTarget, profile avatarLockedProfile, incomingCount int,
+	incomingBytes int64, countLimit int,
+	byteLimit int64) (avatarPayloadCompactionPlan, error) {
+	if s.avatarPayloadCompactionEnabled {
+		if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
+			avatarLockedLayerDigestBackfillFilter{
+				accountID: target.accountID,
+				realmID:   target.realmID,
+				agentID:   target.agentID,
+			}); err != nil {
+			return avatarPayloadCompactionPlan{}, fmt.Errorf(
+				"repair avatar digests before payload compaction: %w", err)
+		}
+		return compactAvatarPayloadsTx(ctx, tx, target, profile, incomingCount,
+			incomingBytes, countLimit, byteLimit)
+	}
+	retainedCount, retainedBytes, err := avatarRetainedPayloadUsageTx(ctx, tx, target)
+	if err != nil {
+		return avatarPayloadCompactionPlan{}, err
+	}
+	retainedCount += incomingCount
+	retainedBytes += incomingBytes
+	if retainedCount > countLimit || retainedBytes > byteLimit {
+		return avatarPayloadCompactionPlan{}, fmt.Errorf(
+			"%w: enable avatar payload compaction and retry",
+			ErrAvatarPayloadCompactionDisabled)
+	}
+	return avatarPayloadCompactionPlan{
+		retainedCount: retainedCount,
+		retainedBytes: retainedBytes,
+	}, nil
+}
+
 // SetAvatarQuota updates one operator-selected agent's retained-payload limits.
 func (s *Store) SetAvatarQuota(ctx context.Context, p Principal, agentID string,
 	in UpdateAvatarQuotaInput) (AvatarMutationResult, error) {
@@ -880,7 +934,7 @@ func (s *Store) SetAvatarQuota(ctx context.Context, p Principal, agentID string,
 	if profile.revision != in.ExpectedProfileRevision {
 		return AvatarMutationResult{}, ErrAvatarConflict
 	}
-	compaction, err := compactAvatarPayloadsTx(ctx, tx, target,
+	compaction, err := s.enforceAvatarPayloadQuotaTx(ctx, tx, target,
 		profile, 0, 0, in.RetainedPayloadCountLimit,
 		in.RetainedPayloadByteLimit)
 	if err != nil {

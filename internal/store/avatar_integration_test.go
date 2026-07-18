@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,39 @@ import (
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/id"
 )
+
+func createSchema50AvatarAgentForMigrationTest(t *testing.T, ctx context.Context,
+	st *Store, accountID, realmID, name string) Agent {
+	t.Helper()
+	agentID, err := id.New("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO agents (id,realm_id,name) VALUES ($1,$2,$3)`,
+		agentID, realmID, name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO agent_avatar_profiles
+		       (account_id,realm_id,agent_id,style_pack_id,
+		        style_pack_version,fallback_seed)
+		SELECT $1,$2,$3,style_pack_id,style_pack_version,$3
+		  FROM realm_avatar_styles
+		 WHERE account_id=$1 AND realm_id=$2`, accountID, realmID,
+		agentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return Agent{ID: agentID, Name: name}
+}
 
 func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
@@ -37,10 +71,8 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "migration-avatar")
-	if err != nil {
-		t.Fatal(err)
-	}
+	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+		provisioned.AccountID, realm.ID, "migration-avatar")
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
 	digest := sha256.Sum256([]byte(reference.SVG))
@@ -57,7 +89,8 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 		"A migration backfill portrait.", hex.EncodeToString(digest[:])); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Migrate(); err != nil {
+	migrationTestUpTo(t, dsn, 51)
+	if _, err := st.finalizeAvatarLockedLayerDigestMigration(ctx); err != nil {
 		t.Fatal(err)
 	}
 	assertMigrationTestVersion(t, dsn, 51)
@@ -98,7 +131,8 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 		t.Fatal(err)
 	}
 	assertMigrationTestVersion(t, dsn, 50)
-	if err := st.Migrate(); err != nil {
+	migrationTestUpTo(t, dsn, 51)
+	if _, err := st.finalizeAvatarLockedLayerDigestMigration(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.pool.Exec(ctx, `
@@ -146,10 +180,8 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "batched-migration-avatar")
-	if err != nil {
-		t.Fatal(err)
-	}
+	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+		provisioned.AccountID, realm.ID, "batched-migration-avatar")
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
 	digest := sha256.Sum256([]byte(reference.SVG))
@@ -186,14 +218,41 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 	// Apply the SQL half first so the test can inspect the application-level
 	// finalizer's real transactional batch envelope.
 	migrationTestUpTo(t, dsn, 51)
-	stats, err := st.finalizeAvatarLockedLayerDigestMigration(ctx)
+	legacyVersionID, err := id.New("avver")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.rows != historyRows || stats.batches != 3 ||
+	insertedDuringBackfill := false
+	stats, err := st.backfillAvatarLockedLayerDigests(ctx,
+		avatarLockedLayerDigestBackfillFilter{},
+		func(progress avatarLockedLayerDigestBackfillStats) error {
+			if progress.batches != 1 || insertedDuringBackfill {
+				return nil
+			}
+			insertedDuringBackfill = true
+			_, err := st.pool.Exec(ctx, `
+				INSERT INTO agent_avatar_versions
+				       (account_id, realm_id, agent_id, id, version,
+				        lineage_generation, style_pack_id, style_pack_version,
+				        subject_form, svg, description, visual_spec, svg_sha256,
+				        provenance, proposed_by_kind, proposed_by_id)
+				VALUES ($1,$2,$3,$4,$5,1,$6,1,'human',$7,$8,
+				        '{"identity":{"expression":"calm"}}'::jsonb,$9,
+				        '{"runtime":"schema-50-concurrent-writer"}'::jsonb,
+				        'agent',$3)`, provisioned.AccountID, realm.ID, agent.ID,
+				legacyVersionID, int64(historyRows+1), pack.ID, reference.SVG,
+				"A concurrent schema-50 writer portrait.",
+				hex.EncodeToString(digest[:]))
+			return err
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !insertedDuringBackfill || stats.rows != historyRows+1 || stats.batches != 3 ||
 		stats.maxBatchSize != avatarLockedLayerDigestBackfillBatchSize {
-		t.Fatalf("backfill stats = %#v, want rows:%d batches:3 max:%d", stats,
-			historyRows, avatarLockedLayerDigestBackfillBatchSize)
+		t.Fatalf("backfill stats = %#v inserted:%t, want rows:%d batches:3 max:%d", stats,
+			insertedDuringBackfill, historyRows+1,
+			avatarLockedLayerDigestBackfillBatchSize)
 	}
 	var total, digests int
 	var notNull, temporaryProofExists bool
@@ -219,9 +278,154 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 		)`).Scan(&temporaryProofExists); err != nil {
 		t.Fatal(err)
 	}
-	if total != historyRows || digests != historyRows || !notNull || temporaryProofExists {
+	if total != historyRows+1 || digests != historyRows+1 || notNull || temporaryProofExists {
 		t.Fatalf("finalized backfill = total:%d digests:%d not-null:%t proof:%t",
 			total, digests, notNull, temporaryProofExists)
+	}
+}
+
+func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 50)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	provisioned, err := st.ProvisionAccount(ctx,
+		"avatar-mixed-writer@witwave.ai", "avatar mixed writer", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "mixed-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+		provisioned.AccountID, realm.ID, "mixed-writer-avatar")
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	svgDigest := sha256.Sum256([]byte(reference.SVG))
+	wantLockedDigest, err := avatardomain.LockedLayersSHA256(
+		[]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertSchema50Version := func(version int64, runtime string) {
+		t.Helper()
+		versionID, err := id.New("avver")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parent any
+		if version > 1 {
+			parent = version - 1
+		}
+		// This is the schema-50 writer's exact column surface: it names neither
+		// payload_bytes nor locked_layers_sha256.
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_avatar_versions
+			       (account_id, realm_id, agent_id, id, version, parent_version,
+			        lineage_generation, style_pack_id, style_pack_version,
+			        subject_form, svg, description, visual_spec, svg_sha256,
+			        provenance, proposed_by_kind, proposed_by_id, proposed_at)
+			VALUES ($1,$2,$3,$4,$5,$6,1,$7,1,'human',$8,$9,
+			        '{"identity":{"expression":"calm"}}'::jsonb,$10,
+			        jsonb_build_object('runtime',$11::text),'agent',$3,
+			        clock_timestamp())`,
+			provisioned.AccountID, realm.ID, agent.ID, versionID, version,
+			parent, pack.ID, reference.SVG, "A schema-50 mixed-writer portrait.",
+			hex.EncodeToString(svgDigest[:]), runtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertSchema50Version(1, "schema-50-after-schema-53")
+
+	var payloadBytes, derivedPayloadBytes int64
+	var storedLockedDigest *string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT payload_bytes,
+		       octet_length(svg)+octet_length(description)+octet_length(visual_spec::text),
+		       locked_layers_sha256
+		  FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(
+		&payloadBytes, &derivedPayloadBytes, &storedLockedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if payloadBytes != derivedPayloadBytes || payloadBytes < 1 || storedLockedDigest != nil {
+		t.Fatalf("legacy insert = bytes:%d derived:%d locked:%v",
+			payloadBytes, derivedPayloadBytes, storedLockedDigest)
+	}
+	p := Principal{Kind: PrincipalAgent, ID: agent.ID,
+		AccountID: provisioned.AccountID, RealmID: realm.ID,
+		AgentName: agent.Name, AccountStatus: "active"}
+	detail, err := st.GetAvatarVersion(ctx, p, 1)
+	if err != nil || detail.LockedLayersSHA256 != wantLockedDigest {
+		t.Fatalf("legacy exact read = %#v / %v", detail, err)
+	}
+	history, err := st.GetAvatarHistory(ctx, p, 10)
+	if err != nil || len(history.Versions) != 1 ||
+		history.Versions[0].LockedLayersSHA256 != wantLockedDigest {
+		t.Fatalf("legacy history read = %#v / %v", history, err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT locked_layers_sha256 FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&storedLockedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if storedLockedDigest != nil {
+		t.Fatal("read path unexpectedly mutated the legacy digest")
+	}
+
+	// A Phase-B config restart calls Migrate again even at schema 53 and
+	// repairs the nullable digest before the process serves.
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT locked_layers_sha256 FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&storedLockedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if storedLockedDigest == nil || *storedLockedDigest != wantLockedDigest {
+		t.Fatalf("restart backfill locked digest = %v", storedLockedDigest)
+	}
+
+	// Export owns a frozen account row and repairs any final legacy write that
+	// landed after startup before emitting a schema-53 archive.
+	insertSchema50Version(2, "schema-50-before-export")
+	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID,
+		"evacuation", "mixed-writer export"); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := st.ExportAccount(ctx, provisioned.AccountID,
+		"source-cell", "test", &archive); err != nil {
+		t.Fatal(err)
+	}
+	_, archived := readAvatarArchiveRows(t, archive.Bytes(), SchemaVersion())
+	if len(archived["agent_avatar_versions"]) != 2 {
+		t.Fatalf("archived avatar versions = %d, want 2",
+			len(archived["agent_avatar_versions"]))
+	}
+	for _, raw := range archived["agent_avatar_versions"] {
+		var row map[string]any
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Fatal(err)
+		}
+		digest, ok := row["locked_layers_sha256"].(string)
+		if !ok || digest != wantLockedDigest {
+			t.Fatalf("archived legacy digest = %#v", row["locked_layers_sha256"])
+		}
 	}
 }
 

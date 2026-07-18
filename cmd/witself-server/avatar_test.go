@@ -123,6 +123,8 @@ func TestMapAvatarErrorUsesStableHTTPContract(t *testing.T) {
 		{store.ErrAvatarVersionNotFound, server.ErrNotFound},
 		{store.ErrAvatarStyleNotFound, server.ErrNotFound},
 		{store.ErrAvatarIdempotencyConflict, server.ErrIdempotencyConflict},
+		{store.ErrAvatarPayloadQuotaExceeded, server.ErrAvatarPayloadQuotaExceeded},
+		{store.ErrAvatarPayloadCompactionDisabled, server.ErrAvatarPayloadCompactionDisabled},
 		{store.ErrAvatarConflict, server.ErrConflict},
 	}
 	for _, test := range tests {

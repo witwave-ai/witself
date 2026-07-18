@@ -69,6 +69,15 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 	if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
 	}
+	// A schema-50 pod may have inserted a full avatar while schema 51 was
+	// already live. The frozen account cannot acquire another legitimate avatar
+	// write, so repair those nullable application-derived digests in bounded
+	// memory before streaming a current-schema portable archive. A compacted row
+	// without a digest is unrecoverable and fails the export closed.
+	if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
+		avatarLockedLayerDigestBackfillFilter{accountID: accountID}); err != nil {
+		return fmt.Errorf("repair avatar digests before export: %w", err)
+	}
 	// Export itself is a legitimate lazy-expiry touch. Materialize every due
 	// request and cancel its active fences before the snapshot streams, so an
 	// archive can never carry time-expired authority as state=open.

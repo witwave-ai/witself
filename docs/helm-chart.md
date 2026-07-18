@@ -87,6 +87,8 @@ Production chart defaults should assume:
 - Dedicated API, health, and metrics container ports.
 - Prometheus-compatible metrics enabled by default unless explicitly disabled.
 - Structured logs with redaction.
+- An explicit `avatar.payloadCompaction.enabled` expand/activate gate that is
+  false by default and changed only after all legacy writers have drained.
 - A bounded, restart-safe avatar style rollout worker on every replica, tuned
   with `avatar.styleRollout.enabled`, `batchSize`, `interval`, and
   `batchTimeout`.

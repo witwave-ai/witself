@@ -119,6 +119,49 @@ func TestValidateFactDeletionFeatureSchemaGate(t *testing.T) {
 	}
 }
 
+func TestAvatarPayloadCompactionEnabledFromEnv(t *testing.T) {
+	original, wasSet := os.LookupEnv(avatarPayloadCompactionEnabledEnv)
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv(avatarPayloadCompactionEnabledEnv, original)
+			return
+		}
+		_ = os.Unsetenv(avatarPayloadCompactionEnabledEnv)
+	})
+	if err := os.Unsetenv(avatarPayloadCompactionEnabledEnv); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := avatarPayloadCompactionEnabledFromEnv(); err != nil || enabled {
+		t.Fatalf("unset avatar compaction = (%t, %v), want (false, nil)", enabled, err)
+	}
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "false", want: false},
+		{value: "true", want: true},
+		{value: " TRUE ", want: true},
+	} {
+		if err := os.Setenv(avatarPayloadCompactionEnabledEnv, test.value); err != nil {
+			t.Fatal(err)
+		}
+		enabled, err := avatarPayloadCompactionEnabledFromEnv()
+		if err != nil || enabled != test.want {
+			t.Fatalf("avatar compaction %q = (%t, %v), want (%t, nil)",
+				test.value, enabled, err, test.want)
+		}
+	}
+	for _, value := range []string{"", "enabled", "later"} {
+		if err := os.Setenv(avatarPayloadCompactionEnabledEnv, value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := avatarPayloadCompactionEnabledFromEnv(); err == nil ||
+			!strings.Contains(err.Error(), avatarPayloadCompactionEnabledEnv) {
+			t.Fatalf("avatar compaction %q error = %v, want named validation error", value, err)
+		}
+	}
+}
+
 func TestAvatarStyleRolloutConfigFromEnv(t *testing.T) {
 	keys := []string{
 		avatarStyleRolloutEnabledEnv,

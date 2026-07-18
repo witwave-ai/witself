@@ -26,6 +26,31 @@ ALTER TABLE agent_avatar_versions
   -- same-style, agent-authored direct child still needs the boundary proof.
   ADD COLUMN continuity_fingerprint    BYTEA;
 
+-- Schema 50 writers do not name payload_bytes. Keep those writers valid for
+-- the entire mixed-version rollout by deriving the exact retained byte count
+-- before the schema-51 NOT NULL constraint is checked. The trigger remains in
+-- place until a later contract migration explicitly retires schema-50 writers.
+-- +goose StatementBegin
+CREATE FUNCTION witself_fill_avatar_payload_bytes()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.payload_state = 'full' AND NEW.payload_bytes IS NULL THEN
+    NEW.payload_bytes := octet_length(NEW.svg)
+                       + octet_length(NEW.description)
+                       + octet_length(NEW.visual_spec::text);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER agent_avatar_versions_fill_payload_bytes
+BEFORE INSERT ON agent_avatar_versions
+FOR EACH ROW
+EXECUTE FUNCTION witself_fill_avatar_payload_bytes();
+
 UPDATE agent_avatar_versions
    SET payload_bytes = octet_length(svg)
                      + octet_length(description)
@@ -104,8 +129,11 @@ ALTER TABLE avatar_mutation_receipts
 
 DROP INDEX agent_avatar_versions_full_payloads;
 
+DROP TRIGGER agent_avatar_versions_fill_payload_bytes
+  ON agent_avatar_versions;
+DROP FUNCTION witself_fill_avatar_payload_bytes();
+
 ALTER TABLE agent_avatar_versions
-  ALTER COLUMN locked_layers_sha256 DROP NOT NULL,
   DROP CONSTRAINT agent_avatar_versions_payload_shape_check,
   DROP CONSTRAINT agent_avatar_versions_continuity_fingerprint_check,
   DROP CONSTRAINT agent_avatar_versions_locked_layers_sha256_check,

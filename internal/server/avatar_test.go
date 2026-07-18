@@ -651,6 +651,8 @@ func TestAvatarErrorMapping(t *testing.T) {
 		{name: "idempotency conflict", err: ErrIdempotencyConflict, status: http.StatusConflict},
 		{name: "payload quota", err: ErrAvatarPayloadQuotaExceeded, status: http.StatusConflict,
 			wantError: "avatar_payload_quota_exceeded"},
+		{name: "payload compaction activation", err: ErrAvatarPayloadCompactionDisabled,
+			status: http.StatusConflict, wantError: "avatar_payload_compaction_not_active"},
 		{name: "internal", err: errors.New("database unavailable"), status: http.StatusInternalServerError},
 	}
 	for _, test := range tests {

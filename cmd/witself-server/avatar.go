@@ -319,6 +319,8 @@ func mapAvatarError(err error) error {
 		return server.ErrIdempotencyConflict
 	case errors.Is(err, store.ErrAvatarPayloadQuotaExceeded):
 		return server.ErrAvatarPayloadQuotaExceeded
+	case errors.Is(err, store.ErrAvatarPayloadCompactionDisabled):
+		return server.ErrAvatarPayloadCompactionDisabled
 	case errors.Is(err, store.ErrAvatarConflict):
 		return server.ErrConflict
 	default:

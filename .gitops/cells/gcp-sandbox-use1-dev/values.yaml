@@ -16,6 +16,9 @@ apps:
     chartVersion: 0.0.185
     imageTag: 0.0.185
     factDeletionEnabled: true
+    # Phase A: flip to true only in a separate config rollout after every
+    # schema-51-compatible server pod has replaced the old writers.
+    avatarPayloadCompactionEnabled: false
     backendKind: managed
     replicaCount: 2
     minReadySeconds: 10

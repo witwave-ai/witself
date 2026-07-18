@@ -18,6 +18,205 @@ import (
 	"github.com/witwave-ai/witself/internal/id"
 )
 
+func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	phaseA, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer phaseA.Close()
+	if phaseA.avatarPayloadCompactionEnabled {
+		t.Fatal("avatar payload compaction defaulted on")
+	}
+	if err := phaseA.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := phaseA.ProvisionAccount(ctx,
+		fmt.Sprintf("avatar-compaction-gate-%d@witwave.ai", time.Now().UnixNano()),
+		"avatar compaction gate", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = deleteAccountForIntegrationTest(context.Background(), phaseA,
+			provisioned.AccountID)
+	}()
+	if activated, err := phaseA.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate account = %t / %v", activated, err)
+	}
+	realm, err := phaseA.CreateRealm(ctx, provisioned.AccountID, "compaction-gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := createAvatarResetTestAgent(ctx, t, phaseA,
+		provisioned.AccountID, realm.ID, "compaction-gate-agent")
+	operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
+		AccountID: provisioned.AccountID, AccountStatus: "active"}
+	style, err := phaseA.GetRealmAvatarStyle(ctx, operator, realm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalInput := func(revision, parent, version int64) ProposeAvatarInput {
+		return ProposeAvatarInput{
+			ExpectedProfileRevision: revision,
+			ParentVersion:           parent,
+			StylePackID:             style.StylePack.ID,
+			StylePackVersion:        style.StylePack.Version,
+			SubjectForm:             avatardomain.SubjectHuman,
+			Description:             "An operator-reviewed portrait during a safe rollout.",
+			VisualSpec:              json.RawMessage(`{"identity":{"expression":"calm"}}`),
+			SVG:                     style.StylePack.References[0].SVG,
+			Provenance: AvatarClientProvenance{Runtime: "codex", Model: "gpt-5.6",
+				Recipe: "compaction-gate-test", RecipeVersion: "1"},
+			IdempotencyKey: fmt.Sprintf("compaction-gate-propose-%d", version),
+		}
+	}
+	revision, parent := int64(1), int64(0)
+	for version := int64(1); version <= 5; version++ {
+		proposed, err := phaseA.ProposeAgentAvatar(ctx, operator, agent.ID,
+			proposalInput(revision, parent, version))
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := phaseA.ActivateAgentAvatar(ctx, operator, agent.ID,
+			ActivateAvatarInput{Version: version,
+				ExpectedProfileRevision: proposed.Avatar.Profile.ProfileRevision,
+				IdempotencyKey:          fmt.Sprintf("compaction-gate-activate-%d", version)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		revision, parent = active.Avatar.Profile.ProfileRevision, version
+	}
+	// Model a schema-50 writer that committed during Phase A after this pod's
+	// startup backfill. Disabled quota accounting must tolerate the nullable
+	// application-derived digest without attempting cleanup.
+	if _, err := phaseA.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET locked_layers_sha256=NULL
+		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A no-cleanup lower succeeds while the gate remains off.
+	quotaSix, err := phaseA.SetAvatarQuota(ctx, operator, agent.ID,
+		UpdateAvatarQuotaInput{RetainedPayloadCountLimit: 6,
+			RetainedPayloadByteLimit: AvatarDefaultRetainedPayloadByteLimit,
+			ExpectedProfileRevision:  revision,
+			IdempotencyKey:           "compaction-gate-quota-six"})
+	if err != nil || quotaSix.Avatar.Profile.RetainedPayloadCount != 5 {
+		t.Fatalf("phase-A no-cleanup quota = %#v / %v", quotaSix, err)
+	}
+	revision = quotaSix.Avatar.Profile.ProfileRevision
+	proposedSix, err := phaseA.ProposeAgentAvatar(ctx, operator, agent.ID,
+		proposalInput(revision, parent, 6))
+	if err != nil {
+		t.Fatalf("phase-A fitting proposal = %v", err)
+	}
+	activeSix, err := phaseA.ActivateAgentAvatar(ctx, operator, agent.ID,
+		ActivateAvatarInput{Version: 6,
+			ExpectedProfileRevision: proposedSix.Avatar.Profile.ProfileRevision,
+			IdempotencyKey:          "compaction-gate-activate-6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, parent = activeSix.Avatar.Profile.ProfileRevision, 6
+
+	if _, err := phaseA.ProposeAgentAvatar(ctx, operator, agent.ID,
+		proposalInput(revision, parent, 7)); !errors.Is(err, ErrAvatarPayloadCompactionDisabled) {
+		t.Fatalf("phase-A cleanup proposal error = %v, want activation conflict", err)
+	}
+	quotaFourInput := UpdateAvatarQuotaInput{
+		RetainedPayloadCountLimit: AvatarMinRetainedPayloadCountLimit,
+		RetainedPayloadByteLimit:  AvatarDefaultRetainedPayloadByteLimit,
+		ExpectedProfileRevision:   revision,
+		IdempotencyKey:            "compaction-gate-quota-four",
+	}
+	if _, err := phaseA.SetAvatarQuota(ctx, operator, agent.ID,
+		quotaFourInput); !errors.Is(err, ErrAvatarPayloadCompactionDisabled) {
+		t.Fatalf("phase-A cleanup quota error = %v, want activation conflict", err)
+	}
+	phaseAView, err := phaseA.GetAvatar(ctx, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phaseAView.Profile.ProfileRevision != revision ||
+		phaseAView.Profile.LatestVersion != 6 ||
+		phaseAView.Profile.RetainedPayloadCount != 6 ||
+		phaseAView.Profile.RetainedPayloadCountLimit != 6 {
+		t.Fatalf("phase-A conflict mutated avatar = %#v", phaseAView.Profile)
+	}
+	var compactedBefore int
+	if err := phaseA.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND payload_state='compacted'`, agent.ID).
+		Scan(&compactedBefore); err != nil || compactedBefore != 0 {
+		t.Fatalf("phase-A compacted rows = %d / %v", compactedBefore, err)
+	}
+
+	// Phase B is a config-only restart. Migrate reruns the nullable digest
+	// repair before this enabled store can serve a cleanup mutation.
+	phaseB, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer phaseB.Close()
+	if err := phaseB.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var repairedDigest *string
+	if err := phaseB.pool.QueryRow(ctx, `
+		SELECT locked_layers_sha256 FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&repairedDigest); err != nil ||
+		repairedDigest == nil {
+		t.Fatalf("Phase-B restart digest repair = %v / %v", repairedDigest, err)
+	}
+	// The enabled mutation boundary also repairs a last nullable legacy row in
+	// case one committed between startup repair and old-writer convergence.
+	if _, err := phaseB.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET locked_layers_sha256=NULL
+		 WHERE agent_id=$1 AND version=6`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	lowered, err := phaseB.SetAvatarQuota(ctx, operator, agent.ID, quotaFourInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lowered.Avatar.Profile.RetainedPayloadCount != 4 ||
+		lowered.Avatar.Profile.RetainedPayloadCountLimit != 4 ||
+		lowered.Avatar.Profile.ActiveVersion != 6 {
+		t.Fatalf("phase-B activated cleanup = %#v", lowered.Avatar.Profile)
+	}
+	var compactedAfter int
+	if err := phaseB.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND payload_state='compacted'`, agent.ID).
+		Scan(&compactedAfter); err != nil || compactedAfter != 2 {
+		t.Fatalf("phase-B compacted rows = %d / %v, want 2", compactedAfter, err)
+	}
+	if err := phaseB.pool.QueryRow(ctx, `
+		SELECT locked_layers_sha256 FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=6`, agent.ID).Scan(&repairedDigest); err != nil ||
+		repairedDigest == nil {
+		t.Fatalf("enabled quota digest repair = %v / %v", repairedDigest, err)
+	}
+	var compactedVersion int64
+	if err := phaseB.pool.QueryRow(ctx, `
+		UPDATE agent_avatar_versions SET locked_layers_sha256=NULL
+		 WHERE agent_id=$1 AND version=(
+		   SELECT MIN(version) FROM agent_avatar_versions
+		    WHERE agent_id=$1 AND payload_state='compacted'
+		 ) RETURNING version`, agent.ID).Scan(&compactedVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := phaseB.GetAvatarVersion(ctx, agent, compactedVersion); err == nil ||
+		!strings.Contains(err.Error(), "lacks a recoverable locked-layer digest") {
+		t.Fatalf("unrecoverable compacted-row read error = %v", err)
+	}
+}
+
 func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -25,7 +224,7 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}

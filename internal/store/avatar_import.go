@@ -727,10 +727,18 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	if err != nil || !validFactSHA256(storedDigest) {
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("svg_sha256 is invalid")
 	}
-	lockedLayersSHA256, lockedDigestErr := requireStringField(obj, "locked_layers_sha256")
-	legacyLockedDigest := ic.schemaVersion < 51 && lockedDigestErr != nil
-	if !legacyLockedDigest && (lockedDigestErr != nil || !validFactSHA256(lockedLayersSHA256)) {
-		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked_layers_sha256 is invalid")
+	var lockedLayersSHA256 string
+	deriveLockedDigest := false
+	if raw, present := obj["locked_layers_sha256"]; !present || raw == nil {
+		// Schema-50 archives and schema-51+ archives written during the rolling
+		// mixed-writer window may both lack this application-derived value.
+		deriveLockedDigest = true
+	} else {
+		var ok bool
+		lockedLayersSHA256, ok = raw.(string)
+		if !ok || !validFactSHA256(lockedLayersSHA256) {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked_layers_sha256 is invalid")
+		}
 	}
 	continuityFingerprint, err := importedAvatarContinuityFingerprint(obj)
 	if err != nil {
@@ -786,7 +794,7 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		if digestErr != nil {
 			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("locked-layer projection is invalid")
 		}
-		if legacyLockedDigest {
+		if deriveLockedDigest {
 			lockedLayersSHA256 = derivedLockedDigest
 			obj["locked_layers_sha256"] = derivedLockedDigest
 		} else if lockedLayersSHA256 != derivedLockedDigest {
@@ -798,8 +806,8 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 		}
 		svg = svgValue
 	case avatardomain.PayloadCompacted:
-		if legacyLockedDigest {
-			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("legacy archive cannot contain compacted avatar payloads")
+		if deriveLockedDigest {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("compacted avatar payload lacks locked_layers_sha256")
 		}
 		if obj["svg"] != nil || obj["description"] != nil || obj["visual_spec"] != nil {
 			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("compacted payload retains creative data")

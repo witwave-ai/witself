@@ -74,8 +74,15 @@
     },
     "avatar": {
       "type": "object",
-      "required": ["styleRollout"],
+      "required": ["payloadCompaction", "styleRollout"],
       "properties": {
+        "payloadCompaction": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "styleRollout": {
           "type": "object",
           "required": ["enabled", "batchSize", "interval", "batchTimeout"],

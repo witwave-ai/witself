@@ -194,7 +194,7 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	if err != nil {
 		return AvatarMutationResult{}, err
 	}
-	compaction, err := compactAvatarPayloadsTx(ctx, tx, target,
+	compaction, err := s.enforceAvatarPayloadQuotaTx(ctx, tx, target,
 		profile, 1, incomingPayloadBytes, profile.retainedPayloadCountLimit,
 		profile.retainedPayloadByteLimit)
 	if err != nil {

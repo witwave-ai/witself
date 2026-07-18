@@ -37,6 +37,10 @@ var (
 	// ErrAvatarPayloadQuotaExceeded is the transport sentinel for a hard,
 	// non-retryable avatar creative-payload quota refusal.
 	ErrAvatarPayloadQuotaExceeded = errors.New("avatar payload quota exceeded")
+	// ErrAvatarPayloadCompactionDisabled is a stable retryable rollout conflict:
+	// the mutation fits only after cleanup, but irreversible cleanup is not yet
+	// activated for this server process.
+	ErrAvatarPayloadCompactionDisabled = errors.New("avatar payload compaction is temporarily disabled")
 )
 
 // AvatarActor identifies the authenticated principal responsible for a
@@ -960,6 +964,8 @@ func writeAvatarError(w http.ResponseWriter, err error, operation string) bool {
 		writeJSONError(w, http.StatusConflict, "idempotency key was reused for a different avatar mutation")
 	case errors.Is(err, ErrAvatarPayloadQuotaExceeded):
 		writeJSONError(w, http.StatusConflict, "avatar_payload_quota_exceeded")
+	case errors.Is(err, ErrAvatarPayloadCompactionDisabled):
+		writeJSONError(w, http.StatusConflict, "avatar_payload_compaction_not_active")
 	case errors.Is(err, ErrConflict):
 		writeJSONError(w, http.StatusConflict, "avatar revision conflict")
 	default:

@@ -71,6 +71,11 @@ var (
 	// ErrAvatarPayloadQuotaExceeded reports that protected payloads plus the
 	// incoming proposal cannot fit after every eligible payload is compacted.
 	ErrAvatarPayloadQuotaExceeded = errors.New("avatar payload quota exceeded")
+	// ErrAvatarPayloadCompactionDisabled reports that the requested mutation
+	// would require irreversible cleanup while the rollout activation gate is
+	// still disabled. It is a stable retryable conflict, not a hard quota
+	// refusal: retry after every writer has converged and the gate is enabled.
+	ErrAvatarPayloadCompactionDisabled = errors.New("avatar payload compaction is temporarily disabled")
 )
 
 // AvatarActor identifies the authenticated principal that proposed or applied

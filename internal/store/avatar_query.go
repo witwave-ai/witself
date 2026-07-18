@@ -339,7 +339,9 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		SELECT v.id, v.account_id, v.realm_id, v.agent_id, v.version,
 		       v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg_sha256, v.locked_layers_sha256, v.payload_state,
+		       v.subject_form, v.svg_sha256, v.locked_layers_sha256,
+		       CASE WHEN v.locked_layers_sha256 IS NULL THEN v.svg END,
+		       v.payload_state,
 		       v.payload_bytes, v.payload_compacted_at,
 		       COALESCE(v.payload_compaction_reason,''), v.proposed_by_kind,
 		       v.proposed_by_id, v.proposed_at,
@@ -381,29 +383,48 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 	if err != nil {
 		return AvatarHistoryPage{}, fmt.Errorf("list avatar history: %w", err)
 	}
-	defer rows.Close()
 	out := AvatarHistoryPage{Versions: make([]AvatarVersionSummary, 0, opts.Limit+1)}
+	type pendingLockedDigest struct {
+		index int
+		svg   string
+	}
+	pendingDigests := make([]pendingLockedDigest, 0)
 	for rows.Next() {
 		var version AvatarVersionSummary
 		var currentLineage int64
 		var subjectForm, actorKind, payloadState string
+		var lockedDigest, digestSVG *string
 		if err := rows.Scan(&version.ID, &version.AccountID,
 			&version.RealmID, &version.AgentID, &version.Version,
 			&version.ParentVersion, &version.LineageGeneration,
 			&version.Style.StylePackID,
 			&version.Style.Version, &subjectForm, &version.SVGSHA256,
-			&version.LockedLayersSHA256,
+			&lockedDigest, &digestSVG,
 			&payloadState, &version.PayloadBytes, &version.PayloadCompactedAt,
 			&version.PayloadCompactionReason,
 			&actorKind, &version.ProposedBy.ID, &version.ProposedAt,
 			&version.IsActive, &version.IsProposed, &version.WasActivated,
 			&version.LastActivatedAt, &currentLineage,
 			&version.RejectedAt); err != nil {
+			rows.Close()
 			return AvatarHistoryPage{}, err
 		}
 		version.Style.RealmID = version.RealmID
 		version.SubjectForm = avatardomain.SubjectForm(subjectForm)
 		version.PayloadState = avatardomain.PayloadState(payloadState)
+		if lockedDigest != nil {
+			version.LockedLayersSHA256 = *lockedDigest
+		} else {
+			if version.PayloadState != avatardomain.PayloadFull || digestSVG == nil {
+				rows.Close()
+				return AvatarHistoryPage{}, fmt.Errorf(
+					"avatar version %d lacks a recoverable locked-layer digest",
+					version.Version)
+			}
+			pendingDigests = append(pendingDigests, pendingLockedDigest{
+				index: len(out.Versions), svg: *digestSVG,
+			})
+		}
 		version.ProposedBy.Kind = actorKind
 		version.Rejected = version.RejectedAt != nil
 		version.RollbackEligible = version.PayloadState == avatardomain.PayloadFull &&
@@ -412,7 +433,37 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		out.Versions = append(out.Versions, version)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return AvatarHistoryPage{}, err
+	}
+	rows.Close()
+	type styleKey struct {
+		accountID string
+		realmID   string
+		packID    string
+		version   int
+	}
+	packs := make(map[styleKey]avatardomain.StylePack)
+	for _, pending := range pendingDigests {
+		version := &out.Versions[pending.index]
+		key := styleKey{version.AccountID, version.RealmID,
+			version.Style.StylePackID, version.Style.Version}
+		pack, ok := packs[key]
+		if !ok {
+			pack, err = loadAvatarStylePackVersion(ctx, q, key.accountID,
+				key.realmID, key.packID, key.version)
+			if err != nil {
+				return AvatarHistoryPage{}, err
+			}
+			packs[key] = pack
+		}
+		digest, err := avatardomain.LockedLayersSHA256([]byte(pending.svg), pack)
+		if err != nil {
+			return AvatarHistoryPage{}, fmt.Errorf(
+				"derive avatar version %d locked-layer digest: %w",
+				version.Version, err)
+		}
+		version.LockedLayersSHA256 = digest
 	}
 	if len(out.Versions) > opts.Limit {
 		out.Versions = out.Versions[:opts.Limit]
@@ -472,6 +523,7 @@ func queryAvatarRows(ctx context.Context, q avatarRowQuerier, sql string, args .
 func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarget, version int64, activeVersion, proposedVersion *int64, currentLineage int64) (AvatarVersion, error) {
 	var out AvatarVersion
 	var parentVersion *int64
+	var lockedDigest *string
 	var subjectForm, actorKind, payloadState string
 	var spec, provenance json.RawMessage
 	err := q.QueryRow(ctx, `
@@ -513,7 +565,7 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		&out.Version, &parentVersion, &out.LineageGeneration,
 		&out.Style.StylePackID,
 		&out.Style.Version, &subjectForm, &out.SVG, &out.Description, &spec,
-		&out.SVGSHA256, &out.LockedLayersSHA256, &provenance,
+		&out.SVGSHA256, &lockedDigest, &provenance,
 		&payloadState, &out.PayloadBytes,
 		&out.PayloadCompactedAt, &out.PayloadCompactionReason,
 		&actorKind, &out.ProposedBy.ID,
@@ -535,6 +587,27 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		out.LineageGeneration == currentLineage
 	out.SubjectForm = avatardomain.SubjectForm(subjectForm)
 	out.VisualSpec = append(json.RawMessage(nil), spec...)
+	if lockedDigest != nil {
+		out.LockedLayersSHA256 = *lockedDigest
+	} else {
+		if out.PayloadState != avatardomain.PayloadFull || out.SVG == "" {
+			return AvatarVersion{}, fmt.Errorf(
+				"avatar version %d lacks a recoverable locked-layer digest",
+				out.Version)
+		}
+		pack, err := loadAvatarStylePackVersion(ctx, q, out.AccountID,
+			out.RealmID, out.Style.StylePackID, out.Style.Version)
+		if err != nil {
+			return AvatarVersion{}, err
+		}
+		digest, err := avatardomain.LockedLayersSHA256([]byte(out.SVG), pack)
+		if err != nil {
+			return AvatarVersion{}, fmt.Errorf(
+				"derive avatar version %d locked-layer digest: %w",
+				out.Version, err)
+		}
+		out.LockedLayersSHA256 = digest
+	}
 	if out.PayloadState == avatardomain.PayloadCompacted {
 		out.SVG = ""
 		out.Description = ""
