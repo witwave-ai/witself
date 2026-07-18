@@ -16,6 +16,37 @@ import (
 	"github.com/witwave-ai/witself/internal/avatar"
 )
 
+func TestAvatarMutationReceiptResultLineageJSONContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		lineage   int64
+		wantJSON  string
+		wantField bool
+	}{
+		{name: "non-reset omits unset lineage", operation: "propose", wantField: false},
+		{name: "reset includes positive lineage", operation: "reset", lineage: 3, wantJSON: "3", wantField: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(AvatarMutationReceipt{
+				Operation: tt.operation, ResultLineageGeneration: tt.lineage,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := fields["result_lineage_generation"]
+			if ok != tt.wantField || ok && string(got) != tt.wantJSON {
+				t.Fatalf("result_lineage_generation = %s, present = %v; JSON=%s", got, ok, raw)
+			}
+		})
+	}
+}
+
 func TestSelfAvatarHTTPRoutes(t *testing.T) {
 	wantPrincipal := testAvatarAgentPrincipal()
 	view := testServerAvatarView("agent_self")
