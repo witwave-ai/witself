@@ -4170,7 +4170,10 @@ payloads and 2 MiB per agent. `avatar operator quota` is the only quota mutation
 surface; the count range is 4–1000 and the byte range is 524288–67108864. It is
 operator-only, revision-fenced, and idempotent. Lowering a limit immediately
 compacts eligible inactive payloads as needed in the same transaction. A raise
-does not restore compacted data. If the requested state cannot preserve the
+does not restore compacted data. While server-side compaction is disabled, a
+proposal or quota change that already fits succeeds; one requiring cleanup
+fails without mutation as `avatar_payload_compaction_not_active` and is
+retryable after phase-B activation. If the requested state cannot preserve the
 active, proposed, and two most recently activated distinct inactive current-lineage
 payloads, the command fails closed with `avatar_payload_quota_exceeded` and
 leaves both limits and payloads unchanged.

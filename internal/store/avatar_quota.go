@@ -871,7 +871,6 @@ func validateAvatarPrunedContinuityBoundariesTx(ctx context.Context, tx pgx.Tx,
 			 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 			   AND parent.payload_state='compacted'
 			   AND parent.renderer_profile='perceptual-v1'
-			   AND parent.continuity_fingerprint IS NOT NULL
 			   AND child.renderer_profile='perceptual-v1'
 			   AND child.version=ANY($4::bigint[])
 			   AND (parent.version, child.version) > ($5::bigint, $6::bigint)

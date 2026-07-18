@@ -2543,7 +2543,10 @@ model, embedding, or inference call.
 `witself.avatar.propose` transactionally compacts the oldest eligible inactive
 payloads before inserting its new full payload. It never compacts the active or
 proposed version or the two most recently activated distinct inactive versions
-in the current lineage. If the protected payloads plus the incoming proposal
+in the current lineage. While server-side compaction is disabled, a proposal
+that already fits succeeds; one requiring cleanup fails without mutation as
+`avatar_payload_compaction_not_active` and is retryable after phase-B
+activation. If the protected payloads plus the incoming proposal
 still cannot fit, the proposal fails closed with the stable API error
 `avatar_payload_quota_exceeded`; no payload or profile change is committed. An
 exact idempotent replay returns the original receipt without re-running

@@ -19,7 +19,7 @@ import (
 	"github.com/witwave-ai/witself/internal/id"
 )
 
-func createSchema50AvatarAgentForMigrationTest(t *testing.T, ctx context.Context,
+func createSchema50AvatarAgentForMigrationTest(ctx context.Context, t *testing.T,
 	st *Store, accountID, realmID, name string) Agent {
 	t.Helper()
 	agentID, err := id.New("agent")
@@ -72,7 +72,7 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+	agent := createSchema50AvatarAgentForMigrationTest(ctx, t, st,
 		provisioned.AccountID, realm.ID, "migration-avatar")
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
@@ -183,7 +183,7 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+	agent := createSchema50AvatarAgentForMigrationTest(ctx, t, st,
 		provisioned.AccountID, realm.ID, "batched-migration-avatar")
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
@@ -308,7 +308,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+	agent := createSchema50AvatarAgentForMigrationTest(ctx, t, st,
 		provisioned.AccountID, realm.ID, "mixed-writer-avatar")
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -432,7 +432,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 	}
 }
 
-func insertAvatarQuotaReconciliationHistory(t *testing.T, ctx context.Context,
+func insertAvatarQuotaReconciliationHistory(ctx context.Context, t *testing.T,
 	st *Store, accountID, realmID, agentID, operatorID string,
 	firstVersion, lastVersion int64, schema50Writer, rejectHead bool) {
 	t.Helper()
@@ -553,17 +553,17 @@ func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+			agent := createSchema50AvatarAgentForMigrationTest(ctx, t, st,
 				provisioned.AccountID, realm.ID, "quota-reconcile-agent")
 			if test.existingAtSchema50 {
-				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+				insertAvatarQuotaReconciliationHistory(ctx, t, st,
 					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
 					1, 21, true, false)
 				if err := st.Migrate(); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+				insertAvatarQuotaReconciliationHistory(ctx, t, st,
 					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
 					1, 20, false, true)
 				var marked bool
@@ -573,7 +573,7 @@ func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T)
 					Scan(&marked); err != nil || marked {
 					t.Fatalf("pre-legacy marker = %t / %v, want false", marked, err)
 				}
-				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+				insertAvatarQuotaReconciliationHistory(ctx, t, st,
 					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
 					21, 21, true, false)
 			}
@@ -1156,9 +1156,9 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "down-open")
-		realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-open", 1)
-		publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "down-open-v2")
+		provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "down-open")
+		realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-open", 1)
+		publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "down-open-v2")
 		if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
 			t.Fatal(err)
 		}
@@ -1203,9 +1203,9 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "down-superseded")
-		realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-superseded", 0)
-		publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "down-superseded-v2")
+		provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "down-superseded")
+		realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-superseded", 0)
+		publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "down-superseded-v2")
 		if _, err := st.pool.Exec(ctx, `
 			WITH stamp AS MATERIALIZED (SELECT statement_timestamp() AS at)
 			UPDATE avatar_style_rollout_jobs
@@ -1239,8 +1239,8 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, _ := provisionActiveRolloutAccountForTest(t, ctx, st, "down-race")
-	realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-race", 0)
+	provisioned, _ := provisionActiveRolloutAccountForTest(ctx, t, st, "down-race")
+	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-race", 0)
 	if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
 		t.Fatal(err)
 	}
@@ -1261,7 +1261,7 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 		t.Fatal(err)
 	}
 	db := migrationTestSQLDB(t, dsn)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	downDone := make(chan error, 1)
 	go func() { downDone <- goose.Down(db, "migrations") }()
 	waiting := false
@@ -1605,7 +1605,7 @@ func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testi
 	if styleUpdate.Style.StyleRevision != 2 || styleUpdate.Style.StylePack.Version != 2 {
 		t.Fatalf("style update = %#v", styleUpdate.Style)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 10)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 10)
 	afterStyle, err := st.GetAvatar(ctx, agentPrincipal)
 	if err != nil {
 		t.Fatal(err)

@@ -1041,6 +1041,11 @@ lineages first, then rejected versions, other never-activated versions, and
 finally activated versions older than that rollback floor; each class is oldest
 version first.
 
+While `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=false`, a proposal or quota
+change that already fits succeeds normally. One that would require cleanup
+returns HTTP `409` with `avatar_payload_compaction_not_active` and makes no
+mutation; this phase-A conflict is retryable after compaction is activated.
+
 If protected payloads plus an incoming proposal cannot fit after all eligible
 payloads are compacted, or a lowered quota cannot be satisfied, the mutation
 returns HTTP `409` with `avatar_payload_quota_exceeded`. The transaction leaves

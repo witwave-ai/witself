@@ -114,10 +114,10 @@ var importColumns = map[string]map[string]bool{
 		"active_avatar_version": true, "subject_form": true,
 		"attempt_count": true, "retry_after": true,
 		"fallback_seed": true, "failure_code": true, "revision": true,
-		"retained_payload_count_limit": true,
-		"retained_payload_byte_limit":  true,
+		"retained_payload_count_limit":          true,
+		"retained_payload_byte_limit":           true,
 		"payload_quota_reconciliation_required": true,
-		"created_at":                   true, "updated_at": true,
+		"created_at":                            true, "updated_at": true,
 	},
 	"agent_avatar_versions": {
 		"account_id": true, "realm_id": true, "agent_id": true,

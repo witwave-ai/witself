@@ -14,7 +14,7 @@ import (
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 )
 
-func drainAvatarStyleRolloutsForTest(t *testing.T, ctx context.Context, st *Store, batchSize int) {
+func drainAvatarStyleRolloutsForTest(ctx context.Context, t *testing.T, st *Store, batchSize int) {
 	t.Helper()
 	for attempts := 0; attempts < 1000; attempts++ {
 		result, err := st.ProcessAvatarStyleRolloutBatch(ctx, batchSize)
@@ -113,7 +113,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 		}
 		beforeRevision[agent.ID] = view.Profile.ProfileRevision
 	}
-	styleV2 := publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "rollout-style-v2")
+	styleV2 := publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "rollout-style-v2")
 	if styleV2.Style.Rollout == nil || styleV2.Style.Rollout.Status != "pending" ||
 		styleV2.Style.Rollout.TargetProfileCount != nil ||
 		styleV2.Style.Rollout.ProcessedProfileCount != 0 ||
@@ -170,7 +170,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 2)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 2)
 	completed, err := st.GetRealmAvatarStyle(ctx, operator, realm.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -215,12 +215,12 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	// A newer publish fences a partially processed job. A concurrently created
 	// agent inherits the selected style directly, while a deleted target is
 	// excluded from the final mismatch check and explains target-count slack.
-	publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 2, 3, "rollout-style-v3")
+	publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 2, 3, "rollout-style-v3")
 	partialV3, err := st.ProcessAvatarStyleRolloutBatch(ctx, 2)
 	if err != nil || partialV3.ProcessedProfiles != 2 {
 		t.Fatalf("partial v3 = %#v / %v", partialV3, err)
 	}
-	styleV4 := publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 3, 4, "rollout-style-v4")
+	styleV4 := publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 3, 4, "rollout-style-v4")
 	if styleV4.Style.Rollout == nil || styleV4.Style.Rollout.TargetProfileCount != nil {
 		t.Fatalf("v4 rollout = %#v", styleV4.Style.Rollout)
 	}
@@ -235,7 +235,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	if err := st.DeleteAgent(ctx, provisioned.AccountID, realm.ID, agents[4].ID); err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 2)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 2)
 	var v3Status string
 	var v3SupersededStampAligned bool
 	if err := st.pool.QueryRow(ctx, `
@@ -262,7 +262,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 
 	// Suspension is an exact write pause: discovery ignores the job until the
 	// authority that suspended the account resumes it.
-	publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 4, 5, "rollout-style-v5")
+	publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 4, 5, "rollout-style-v5")
 	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation", "rollout pause"); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	if err := st.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 2)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 2)
 
 	// An empty realm can be deleted while its zero-target job is pending. The
 	// worker still discovers that durable row and supersedes it value-free.
@@ -281,7 +281,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishAvatarStyleForTest(t, ctx, st, operator, emptyRealm.ID, 1, 2, "deleted-realm-style-v2")
+	publishAvatarStyleForTest(ctx, t, st, operator, emptyRealm.ID, 1, 2, "deleted-realm-style-v2")
 	if err := st.DeleteRealm(ctx, provisioned.AccountID, emptyRealm.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testi
 	}
 	operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
 		AccountID: provisioned.AccountID, AccountStatus: "active"}
-	publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "archive-rollout-v2")
+	publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "archive-rollout-v2")
 	partial, err := st.ProcessAvatarStyleRolloutBatch(ctx, 1)
 	if err != nil || partial.ProcessedProfiles != 1 || partial.Completed {
 		t.Fatalf("partial archive batch = %#v / %v", partial, err)
@@ -370,7 +370,7 @@ func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testi
 	if err := st.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 1)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 1)
 	resumed, err := st.GetRealmAvatarStyle(ctx, operator, realm.ID)
 	if err != nil || resumed.Rollout == nil || resumed.Rollout.Status != "completed" ||
 		resumed.Rollout.ProcessedProfileCount != 3 || resumed.Rollout.TargetProfileCount == nil ||
@@ -433,7 +433,7 @@ func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testin
 	if createErr != nil || publishErr != nil {
 		t.Fatalf("create/publish = %v / %v", createErr, publishErr)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 1)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 1)
 	view, err := st.GetAvatar(ctx, Principal{Kind: PrincipalAgent, ID: created.ID,
 		AccountID: provisioned.AccountID, RealmID: realm.ID, AgentName: created.Name,
 		AccountStatus: "active"})
@@ -457,12 +457,12 @@ func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testin
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "scheduler")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "scheduler")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
-	realmA := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "fair-a", 3)
-	realmB := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "fair-b", 3)
-	publishAvatarStyleForTest(t, ctx, st, operator, realmA.ID, 1, 2, "fair-a-v2")
-	publishAvatarStyleForTest(t, ctx, st, operator, realmB.ID, 1, 2, "fair-b-v2")
+	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "fair-a", 3)
+	realmB := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "fair-b", 3)
+	publishAvatarStyleForTest(ctx, t, st, operator, realmA.ID, 1, 2, "fair-a-v2")
+	publishAvatarStyleForTest(ctx, t, st, operator, realmB.ID, 1, 2, "fair-b-v2")
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE avatar_style_rollout_jobs
 		   SET created_at=CASE realm_id WHEN $2 THEN statement_timestamp()-interval '2 minutes'
@@ -514,7 +514,7 @@ func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testin
 	if err := lockTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 2)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 2)
 }
 
 func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *testing.T) {
@@ -532,12 +532,12 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "timeout")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "timeout")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
-	realmA := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "timeout-a", 1)
-	realmB := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "timeout-b", 1)
-	publishAvatarStyleForTest(t, ctx, st, operator, realmA.ID, 1, 2, "timeout-a-v2")
-	publishAvatarStyleForTest(t, ctx, st, operator, realmB.ID, 1, 2, "timeout-b-v2")
+	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "timeout-a", 1)
+	realmB := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "timeout-b", 1)
+	publishAvatarStyleForTest(ctx, t, st, operator, realmA.ID, 1, 2, "timeout-a-v2")
+	publishAvatarStyleForTest(ctx, t, st, operator, realmB.ID, 1, 2, "timeout-b-v2")
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE avatar_style_rollout_jobs
 		   SET created_at=CASE realm_id WHEN $2 THEN statement_timestamp()-interval '2 minutes'
@@ -590,7 +590,7 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 		 WHERE account_id=$1 AND realm_id=$2`, provisioned.AccountID, realmA.ID); err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 1)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 1)
 	var status string
 	if err := st.pool.QueryRow(ctx, `
 		SELECT status,failure_count,last_failure_code
@@ -618,10 +618,10 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "caller-cancel")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "caller-cancel")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
-	realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "caller-cancel", 1)
-	publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "caller-cancel-v2")
+	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "caller-cancel", 1)
+	publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "caller-cancel-v2")
 
 	profileLock, err := st.pool.Begin(ctx)
 	if err != nil {
@@ -661,7 +661,7 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 		t.Fatalf("caller cancellation mutated job = status:%q failures:%d retry:%v code:%q processed:%d batches:%d",
 			status, failures, retryAfter, failureCode, processed, batches)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 1)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 1)
 	style, err := st.GetRealmAvatarStyle(ctx, operator, realm.ID)
 	if err != nil || style.Rollout == nil || style.Rollout.Status != "completed" {
 		t.Fatalf("rollout did not resume after cancellation = %#v / %v", style.Rollout, err)
@@ -683,12 +683,12 @@ func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) 
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "account-close")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "account-close")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
-	realmA := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "close-a", 2)
-	realmB := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "close-b", 1)
-	publishAvatarStyleForTest(t, ctx, st, operator, realmA.ID, 1, 2, "close-a-v2")
-	publishAvatarStyleForTest(t, ctx, st, operator, realmB.ID, 1, 2, "close-b-v2")
+	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "close-a", 2)
+	realmB := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "close-b", 1)
+	publishAvatarStyleForTest(ctx, t, st, operator, realmA.ID, 1, 2, "close-a-v2")
+	publishAvatarStyleForTest(ctx, t, st, operator, realmB.ID, 1, 2, "close-b-v2")
 	partial, err := st.ProcessAvatarStyleRolloutBatch(ctx, 1)
 	if err != nil || !partial.Found {
 		t.Fatalf("partial pre-close batch = %#v / %v", partial, err)
@@ -752,10 +752,10 @@ func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *tes
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "legacy-close")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "legacy-close")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
-	realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "legacy-close", 1)
-	publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "legacy-close-v2")
+	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "legacy-close", 1)
+	publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "legacy-close-v2")
 	// Simulate an older binary that knows the account lifecycle but predates
 	// avatar rollout terminalization.
 	if _, err := st.pool.Exec(ctx, `
@@ -799,7 +799,7 @@ func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "plan")
+	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "plan")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "large-plan")
 	if err != nil {
@@ -826,11 +826,11 @@ func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `ANALYZE agent_avatar_profiles`); err != nil {
 		t.Fatal(err)
 	}
-	published := publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "large-plan-v2")
+	published := publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "large-plan-v2")
 	if published.Style.Rollout == nil || published.Style.Rollout.TargetProfileCount != nil {
 		t.Fatalf("large publish synchronously finalized target count: %#v", published.Style.Rollout)
 	}
-	assertAvatarStyleRevisionIndexPlan(t, ctx, st, provisioned.AccountID, realm.ID, 2)
+	assertAvatarStyleRevisionIndexPlan(ctx, t, st, provisioned.AccountID, realm.ID, 2)
 	for batch := 0; batch < 3; batch++ {
 		result, err := st.ProcessAvatarStyleRolloutBatch(ctx, 100)
 		if err != nil || result.RealmID != realm.ID || result.ProcessedProfiles != 100 || result.Completed {
@@ -847,12 +847,12 @@ func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
 	if projected != 300 {
 		t.Fatalf("projected profiles after three batches = %d, want 300", projected)
 	}
-	assertAvatarStyleRevisionIndexPlan(t, ctx, st, provisioned.AccountID, realm.ID, 2)
+	assertAvatarStyleRevisionIndexPlan(ctx, t, st, provisioned.AccountID, realm.ID, 2)
 }
 
 func provisionActiveRolloutAccountForTest(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	label string,
 ) (ProvisionedAccount, Principal) {
@@ -871,8 +871,8 @@ func provisionActiveRolloutAccountForTest(
 }
 
 func createRolloutRealmWithAgentsForTest(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID, name string,
 	count int,
@@ -891,8 +891,8 @@ func createRolloutRealmWithAgentsForTest(
 }
 
 func assertAvatarStyleRevisionIndexPlan(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID, realmID string,
 	desiredRevision int64,
@@ -916,8 +916,8 @@ func assertAvatarStyleRevisionIndexPlan(
 }
 
 func publishAvatarStyleForTest(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	operator Principal,
 	realmID string,

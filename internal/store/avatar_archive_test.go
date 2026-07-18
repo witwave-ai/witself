@@ -1829,9 +1829,9 @@ func TestAvatarArchiveValidationScalesAcrossManyRolloutJobsAndProfiles(t *testin
 		ic.agents[agentID] = true
 		ic.liveAgents[agentID] = true
 		ic.agentRealms[agentID] = avatarArchiveRealm
-		copy := profile
-		copy.agentID = agentID
-		ic.avatarProfiles[agentID] = copy
+		profileCopy := profile
+		profileCopy.agentID = agentID
+		ic.avatarProfiles[agentID] = profileCopy
 	}
 	zero := int64(0)
 	for revision := int64(1); revision <= population; revision++ {

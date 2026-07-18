@@ -110,7 +110,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	drainAvatarStyleRolloutsForTest(t, ctx, st, 10)
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 10)
 	style = styleUpdate.Style
 	afterStyle, err := st.GetAvatar(ctx, p)
 	if err != nil {
