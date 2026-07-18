@@ -2513,8 +2513,9 @@ acceptance and settles the avatar. Under an operator-governed policy, the
 agent's creative selection is complete but identity remains unsettled until
 operator activation. A `retry_due` profile with an active version instead uses
 the bounded single-candidate evolution path.
-`witself.avatar.show` reports per-agent retained-payload count/byte limits,
-current full-payload usage, and the fixed rollback floor. Quota configuration is
+`witself.avatar.show` reports per-agent retained-payload count/byte limits, the
+current full-row count, inclusive full-payload plus continuity-fingerprint byte
+usage, and the fixed rollback floor. Quota configuration is
 operator-only through HTTP/CLI; there is no agent-self or operator MCP quota
 mutation tool.
 

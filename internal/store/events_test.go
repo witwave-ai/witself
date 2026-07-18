@@ -174,7 +174,7 @@ func TestAvatarAuditSchemasAreValueFree(t *testing.T) {
 		{AccountID: "acc_1", ActorKind: ActorSystem,
 			Verb: VerbAvatarPayloadCompacted, Metadata: map[string]any{
 				"agent_id": "agent_1", "compacted_versions": "1,2", "compacted_count": "2",
-				"compacted_bytes": "8192", "retained_payload_count": "4",
+				"net_reclaimed_bytes": "8192", "retained_payload_count": "4",
 				"retained_payload_bytes": "16384", "count_limit": "4",
 				"byte_limit": "524288", "rollback_floor": "2",
 			}},

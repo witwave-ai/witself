@@ -1005,8 +1005,9 @@ These fields let a client choose valid actions without inferring lifecycle or
 payload state from version order.
 
 Avatar profile responses include the operator-configured
-`retained_payload_count_limit` and `retained_payload_byte_limit`, current
-full-payload usage in `retained_payload_count` and `retained_payload_bytes`, and
+`retained_payload_count_limit` and `retained_payload_byte_limit`, the current
+full-row count in `retained_payload_count`, inclusive full-payload plus retained
+continuity-fingerprint bytes in `retained_payload_bytes`, and
 `rollback_payload_floor=2`. Defaults are `20` full payloads and `2097152` bytes.
 Supported bounds are `4`–`1000` payloads and `524288`–`67108864` bytes.
 

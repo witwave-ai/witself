@@ -4141,7 +4141,8 @@ and provenance. A `compacted` exact version returns retained metadata and
 provenance but omits those three creative fields.
 
 `avatar show` and `avatar operator show` report the payload count/byte limits,
-current full-payload usage, and the fixed rollback floor. Defaults are 20 full
+the current full-row count, inclusive full-payload plus continuity-fingerprint
+byte usage, and the fixed rollback floor. Defaults are 20 full
 payloads and 2 MiB per agent. `avatar operator quota` is the only quota mutation
 surface; the count range is 4–1000 and the byte range is 524288–67108864. It is
 operator-only, revision-fenced, and idempotent. Lowering a limit immediately

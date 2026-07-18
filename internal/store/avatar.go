@@ -35,7 +35,8 @@ const (
 	AvatarMinRetainedPayloadCountLimit = AvatarRollbackPayloadFloor + 2
 	// AvatarMaxRetainedPayloadCountLimit bounds operator configuration.
 	AvatarMaxRetainedPayloadCountLimit = 1000
-	// AvatarDefaultRetainedPayloadByteLimit is the per-agent creative-payload default.
+	// AvatarDefaultRetainedPayloadByteLimit is the per-agent retained-content
+	// default over full creative payloads plus continuity fingerprints.
 	AvatarDefaultRetainedPayloadByteLimit int64 = 2 * 1024 * 1024
 	// AvatarMinRetainedPayloadByteLimit safely accommodates maximum-size protected payloads.
 	AvatarMinRetainedPayloadByteLimit int64 = 512 * 1024
@@ -289,7 +290,7 @@ type UpdateAvatarPolicyInput struct {
 	IdempotencyKey          string
 }
 
-// UpdateAvatarQuotaInput changes one agent's retained creative-payload limits.
+// UpdateAvatarQuotaInput changes one agent's retained-content limits.
 // Any required compaction is applied atomically with the limit change.
 type UpdateAvatarQuotaInput struct {
 	RetainedPayloadCountLimit int

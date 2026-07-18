@@ -217,7 +217,10 @@ compaction prunes it as soon as no retained child needs it. Although smaller
 and readily TOAST-compressible, the projection still contains raster-derived
 avatar content. It is internal boundary evidence, is not returned by exact or
 history reads, and follows the SVG's access, identity-export, and deletion
-controls rather than value-free metadata controls.
+controls rather than value-free metadata controls. A checked-in compressed WAPF
+v1 fixture pins the exact binary hash, renderer output, decoder, and comparator;
+an intentional projection change requires a new format version rather than a
+silent rewrite of historical boundaries.
 
 Raster previews are caches, not identity authority. For a `full` version, the
 SVG, structured visual specification, and immutable version metadata are
@@ -228,8 +231,7 @@ remain available after creative-payload compaction.
 
 ## Payload retention and compaction
 
-Each agent has two operator-configurable limits over versions whose creative
-payload is still `full`:
+Each agent has two operator-configurable retained-content limits:
 
 - `retained_payload_count_limit`: default `20`, allowed range `4`–`1000`.
 - `retained_payload_byte_limit`: default `2097152` bytes (2 MiB), allowed range
@@ -237,10 +239,12 @@ payload is still `full`:
 
 `payload_bytes` records the original retained creative-payload size: canonical
 sanitized SVG bytes plus the normalized description and canonical visual
-specification. The profile reports both limits, the current
-`retained_payload_count` and `retained_payload_bytes` over `full` rows, and the
-fixed `rollback_payload_floor` of `2`. Raising a limit never reconstructs a
-payload that was already compacted.
+specification. `retained_payload_count` counts `full` rows.
+`retained_payload_bytes` is the storage-bearing total governed by the byte
+limit: every `full` row's `payload_bytes` plus every retained 38,092-byte
+continuity fingerprint on a compacted row. The profile reports both limits and
+both current totals plus the fixed `rollback_payload_floor` of `2`. Raising a
+limit never reconstructs a payload that was already compacted.
 
 Compaction runs transactionally before a new proposal is inserted and whenever
 an operator lowers either limit. A quota update and every compaction it requires
@@ -252,7 +256,7 @@ The planner never compacts the active version, a pending proposed version, or
 the two most recently activated distinct inactive versions in the current
 lineage. Those two retained versions are the documented rollback floor; when
 fewer than two exist, every available member of the floor stays full. Eligible
-payloads are compacted only until both limits fit, in this order:
+payloads are considered in this lifecycle order:
 
 1. Retired-lineage versions, oldest version first.
 2. Rejected current-lineage versions, oldest first.
@@ -265,6 +269,24 @@ If all eligible payloads are exhausted and protected payloads plus an incoming
 proposal still do not fit, the whole mutation fails closed with HTTP `409` and
 the stable error `avatar_payload_quota_exceeded`. No partial compaction, new
 proposal, profile revision, receipt, or lifecycle event is committed.
+
+The planner indexes same-lineage, same-style, owning-agent child relationships
+and existing fingerprints before selection. For each candidate it projects the
+full-payload bytes removed, a new fingerprint required by any retained
+qualifying child, and a fingerprint pruned when its final qualifying child is
+also compacted. A candidate is selected only when the projected final retained
+content does not exceed the pre-cleanup footprint, including an incoming
+proposal. Consequently a small parent SVG stays full when replacing it with a
+38,092-byte boundary would grow retained content; it may become eligible after
+another deterministic cleanup supplies enough offsetting reclamation. Planning
+stops only when the full-row count and inclusive retained-byte total both fit.
+
+Before a selected parent SVG is cleared, compaction builds the exact fingerprint
+from that still-full source and validates every qualifying retained full child
+against both the stored/derived locked-layer digest and the fingerprint-based
+perceptual guard. A legacy or directly corrupted child that violates either
+boundary aborts the transaction; the parent remains full and no partial quota
+cleanup is committed.
 
 Compaction is irreversible. It changes `payload_state` from `full` to
 `compacted`, clears SVG, description, and visual specification, and records
@@ -292,9 +314,10 @@ only the exact fingerprint length, checksum, version, and archived style digest;
 full rows and compacted parents without a qualifying child must not carry one,
 while a compacted parent with a qualifying child must. Import rejects an archive
 that compacts an active, proposed, or protected rollback version.
-Current-schema import also rejects a retained full-payload count or byte total
-that exceeds the archived profile limits, so restore cannot bypass the live
-quota invariant. For a same-style agent-authored evolution, import validates
+Current-schema import also rejects a retained full-payload count or inclusive
+retained-content byte total that exceeds the archived profile limits, so restore
+cannot bypass the live quota invariant. For a same-style agent-authored
+evolution, import validates
 normalized locked-layer source and the perceptual guard when both payloads are
 full. Across a compacted-parent/full-child boundary it requires the retained
 `locked_layers_sha256` to match and runs the same perceptual comparison from the

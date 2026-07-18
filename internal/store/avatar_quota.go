@@ -15,20 +15,33 @@ import (
 )
 
 type avatarPayloadCandidate struct {
-	version         int64
-	lineage         int64
-	bytes           int64
-	wasActivated    bool
-	rejected        bool
-	lastActivatedAt *time.Time
+	version                 int64
+	lineage                 int64
+	bytes                   int64
+	qualifyingParentVersion int64
+	wasActivated            bool
+	rejected                bool
+	lastActivatedAt         *time.Time
 }
 
 type avatarPayloadCompactionPlan struct {
-	versions      []int64
-	count         int
-	bytes         int64
-	retainedCount int
-	retainedBytes int64
+	versions              []int64
+	count                 int
+	compactedPayloadBytes int64
+	netReclaimedBytes     int64
+	retainedCount         int
+	retainedBytes         int64
+}
+
+type avatarPayloadQuotaVersion struct {
+	avatarPayloadCandidate
+	parentVersion    int64
+	stylePackID      string
+	stylePackVersion int
+	proposedByKind   string
+	proposedByID     string
+	payloadState     avatardomain.PayloadState
+	fingerprintBytes int64
 }
 
 type avatarCompactionFingerprintSource struct {
@@ -36,15 +49,26 @@ type avatarCompactionFingerprintSource struct {
 	stylePackID      string
 	stylePackVersion int
 	svg              string
-	needed           bool
+	lockedDigest     string
+}
+
+type avatarCompactionFingerprintChild struct {
+	parentVersion int64
+	version       int64
+	svg           string
+	lockedDigest  string
 }
 
 // planAvatarPayloadCompaction is deterministic and deliberately separates
 // eligibility from SQL. Protected pointers and the rollback floor are never
-// returned, even when the configured quota cannot accommodate them.
-func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate, currentLineage,
-	activeVersion, proposedVersion int64, incomingCount int, incomingBytes int64, countLimit int,
-	byteLimit int64) (avatarPayloadCompactionPlan, error) {
+// returned, even when the configured quota cannot accommodate them. The
+// lifecycle-ordered min-delta index finds the first candidate that fits the
+// cleanup's non-growth headroom in O(log F), with only local parent/child point
+// updates, so a pre-quota legacy history does not turn planning quadratic.
+func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate,
+	existingFingerprintBytes map[int64]int64, currentLineage,
+	activeVersion, proposedVersion int64, incomingCount int, incomingBytes int64,
+	countLimit int, byteLimit int64) (avatarPayloadCompactionPlan, error) {
 	plan := avatarPayloadCompactionPlan{
 		retainedCount: len(candidates) + incomingCount,
 		retainedBytes: incomingBytes,
@@ -52,6 +76,14 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate, currentLin
 	for _, candidate := range candidates {
 		plan.retainedBytes += candidate.bytes
 	}
+	workingFingerprints := make(map[int64]int64, len(existingFingerprintBytes))
+	for version, size := range existingFingerprintBytes {
+		if size > 0 {
+			workingFingerprints[version] = size
+			plan.retainedBytes += size
+		}
+	}
+	preCleanupBytes := plan.retainedBytes
 	if plan.retainedCount <= countLimit && plan.retainedBytes <= byteLimit {
 		return plan, nil
 	}
@@ -111,20 +143,166 @@ func planAvatarPayloadCompaction(candidates []avatarPayloadCandidate, currentLin
 		}
 		return eligible[i].version < eligible[j].version
 	})
-	for _, candidate := range eligible {
-		if plan.retainedCount <= countLimit && plan.retainedBytes <= byteLimit {
-			break
+
+	qualifyingChildCount := make(map[int64]int)
+	qualifyingChildren := make(map[int64][]int64)
+	for _, candidate := range candidates {
+		if candidate.qualifyingParentVersion == 0 {
+			continue
 		}
+		qualifyingChildCount[candidate.qualifyingParentVersion]++
+		qualifyingChildren[candidate.qualifyingParentVersion] = append(
+			qualifyingChildren[candidate.qualifyingParentVersion], candidate.version)
+	}
+	var obsoleteFingerprintBytes int64
+	for parent, size := range workingFingerprints {
+		if qualifyingChildCount[parent] == 0 {
+			obsoleteFingerprintBytes += size
+		}
+	}
+	eligibleIndex := make(map[int64]int, len(eligible))
+	selected := make(map[int64]bool, len(eligible))
+	deltas := make([]int64, len(eligible))
+	for i := range eligible {
+		eligibleIndex[eligible[i].version] = i
+		deltas[i] = avatarPayloadCandidateDelta(eligible[i].avatarPayloadCandidate,
+			qualifyingChildCount, workingFingerprints)
+	}
+	deltaIndex := newAvatarPayloadDeltaIndex(deltas)
+	cleanupStarted := false
+	updateCandidate := func(version int64) {
+		index, ok := eligibleIndex[version]
+		if !ok || selected[version] {
+			return
+		}
+		deltaIndex.update(index, avatarPayloadCandidateDelta(
+			eligible[index].avatarPayloadCandidate, qualifyingChildCount,
+			workingFingerprints))
+	}
+	remainingQualifyingChild := func(parent int64) int64 {
+		for _, child := range qualifyingChildren[parent] {
+			if !selected[child] {
+				return child
+			}
+		}
+		return 0
+	}
+
+	for plan.retainedCount > countLimit || plan.retainedBytes > byteLimit {
+		headroom := preCleanupBytes - plan.retainedBytes
+		if !cleanupStarted {
+			headroom += obsoleteFingerprintBytes
+		}
+		index := deltaIndex.firstAtMost(headroom)
+		if index < 0 {
+			return avatarPayloadCompactionPlan{}, ErrAvatarPayloadQuotaExceeded
+		}
+		candidate := eligible[index].avatarPayloadCandidate
+		if !cleanupStarted {
+			cleanupStarted = true
+			plan.retainedBytes -= obsoleteFingerprintBytes
+			for parent := range workingFingerprints {
+				if qualifyingChildCount[parent] == 0 {
+					delete(workingFingerprints, parent)
+				}
+			}
+		}
+		delta := avatarPayloadCandidateDelta(candidate, qualifyingChildCount,
+			workingFingerprints)
+		plan.retainedBytes += delta
 		plan.versions = append(plan.versions, candidate.version)
 		plan.count++
-		plan.bytes += candidate.bytes
+		plan.compactedPayloadBytes += candidate.bytes
 		plan.retainedCount--
-		plan.retainedBytes -= candidate.bytes
+		selected[candidate.version] = true
+		deltaIndex.update(index, avatarPayloadDisabledDelta)
+
+		if parent := candidate.qualifyingParentVersion; parent > 0 {
+			before := qualifyingChildCount[parent]
+			qualifyingChildCount[parent] = before - 1
+			if before == 1 {
+				delete(workingFingerprints, parent)
+				updateCandidate(parent)
+			} else if before == 2 {
+				if _, retained := workingFingerprints[parent]; retained {
+					updateCandidate(remainingQualifyingChild(parent))
+				}
+			}
+		}
+		if qualifyingChildCount[candidate.version] > 0 {
+			workingFingerprints[candidate.version] = avatardomain.PerceptualContinuityFingerprintBytes
+			if qualifyingChildCount[candidate.version] == 1 {
+				updateCandidate(remainingQualifyingChild(candidate.version))
+			}
+		}
 	}
 	if plan.retainedCount > countLimit || plan.retainedBytes > byteLimit {
 		return avatarPayloadCompactionPlan{}, ErrAvatarPayloadQuotaExceeded
 	}
+	plan.netReclaimedBytes = preCleanupBytes - plan.retainedBytes
 	return plan, nil
+}
+
+func avatarPayloadCandidateDelta(candidate avatarPayloadCandidate,
+	qualifyingChildCount map[int64]int, fingerprints map[int64]int64) int64 {
+	delta := -candidate.bytes
+	if qualifyingChildCount[candidate.version] > 0 {
+		delta += avatardomain.PerceptualContinuityFingerprintBytes
+	}
+	if parent := candidate.qualifyingParentVersion; parent > 0 &&
+		qualifyingChildCount[parent] == 1 {
+		delta -= fingerprints[parent]
+	}
+	return delta
+}
+
+const avatarPayloadDisabledDelta int64 = 1 << 62
+
+type avatarPayloadDeltaIndex struct {
+	size int
+	min  []int64
+}
+
+func newAvatarPayloadDeltaIndex(values []int64) *avatarPayloadDeltaIndex {
+	size := 1
+	for size < len(values) {
+		size *= 2
+	}
+	index := &avatarPayloadDeltaIndex{size: size, min: make([]int64, size*2)}
+	for i := range index.min {
+		index.min[i] = avatarPayloadDisabledDelta
+	}
+	copy(index.min[size:], values)
+	for i := size - 1; i > 0; i-- {
+		index.min[i] = min(index.min[i*2], index.min[i*2+1])
+	}
+	return index
+}
+
+func (i *avatarPayloadDeltaIndex) update(position int, value int64) {
+	if position < 0 || position >= i.size {
+		return
+	}
+	position += i.size
+	i.min[position] = value
+	for position /= 2; position > 0; position /= 2 {
+		i.min[position] = min(i.min[position*2], i.min[position*2+1])
+	}
+}
+
+func (i *avatarPayloadDeltaIndex) firstAtMost(limit int64) int {
+	if len(i.min) < 2 || i.min[1] > limit {
+		return -1
+	}
+	position := 1
+	for position < i.size {
+		if i.min[position*2] <= limit {
+			position *= 2
+		} else {
+			position = position*2 + 1
+		}
+	}
+	return position - i.size
 }
 
 func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
@@ -132,6 +310,9 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	incomingBytes int64, countLimit int, byteLimit int64) (avatarPayloadCompactionPlan, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT v.version, v.lineage_generation, v.payload_bytes,
+		       v.parent_version, v.style_pack_id, v.style_pack_version,
+		       v.proposed_by_kind, v.proposed_by_id, v.payload_state,
+		       COALESCE(octet_length(v.continuity_fingerprint),0),
 		       EXISTS (
 		         SELECT 1 FROM agent_avatar_activations activation
 		          WHERE activation.account_id=v.account_id
@@ -156,26 +337,57 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		           AND activation.lineage_generation=v.lineage_generation)
 		  FROM agent_avatar_versions v
 		 WHERE v.account_id=$1 AND v.realm_id=$2 AND v.agent_id=$3
-		   AND v.payload_state='full'`, target.accountID, target.realmID,
-		target.agentID)
+		 ORDER BY v.version`, target.accountID, target.realmID, target.agentID)
 	if err != nil {
 		return avatarPayloadCompactionPlan{}, fmt.Errorf("list avatar payload quota state: %w", err)
 	}
-	candidates := make([]avatarPayloadCandidate, 0)
+	versions := make([]avatarPayloadQuotaVersion, 0)
+	versionsByNumber := make(map[int64]avatarPayloadQuotaVersion)
 	for rows.Next() {
-		var candidate avatarPayloadCandidate
-		if err := rows.Scan(&candidate.version, &candidate.lineage,
-			&candidate.bytes, &candidate.wasActivated, &candidate.rejected,
-			&candidate.lastActivatedAt); err != nil {
+		var version avatarPayloadQuotaVersion
+		var parentVersion *int64
+		var payloadState string
+		if err := rows.Scan(&version.version, &version.lineage,
+			&version.bytes, &parentVersion, &version.stylePackID,
+			&version.stylePackVersion, &version.proposedByKind,
+			&version.proposedByID, &payloadState, &version.fingerprintBytes,
+			&version.wasActivated, &version.rejected,
+			&version.lastActivatedAt); err != nil {
 			return avatarPayloadCompactionPlan{}, err
 		}
-		candidates = append(candidates, candidate)
+		if parentVersion != nil {
+			version.parentVersion = *parentVersion
+		}
+		version.payloadState = avatardomain.PayloadState(payloadState)
+		versions = append(versions, version)
+		versionsByNumber[version.version] = version
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return avatarPayloadCompactionPlan{}, err
 	}
 	rows.Close()
+	candidates := make([]avatarPayloadCandidate, 0, len(versions))
+	existingFingerprintBytes := make(map[int64]int64)
+	for _, version := range versions {
+		if version.fingerprintBytes > 0 {
+			existingFingerprintBytes[version.version] = version.fingerprintBytes
+		}
+		if version.payloadState != avatardomain.PayloadFull {
+			continue
+		}
+		candidate := version.avatarPayloadCandidate
+		if version.parentVersion > 0 && version.proposedByKind == PrincipalAgent &&
+			version.proposedByID == target.agentID {
+			if parent, exists := versionsByNumber[version.parentVersion]; exists &&
+				parent.lineage == version.lineage &&
+				parent.stylePackID == version.stylePackID &&
+				parent.stylePackVersion == version.stylePackVersion {
+				candidate.qualifyingParentVersion = version.parentVersion
+			}
+		}
+		candidates = append(candidates, candidate)
+	}
 	var activeVersion, proposedVersion int64
 	if profile.activeVersion != nil {
 		activeVersion = *profile.activeVersion
@@ -183,7 +395,7 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	if profile.proposedVersion != nil {
 		proposedVersion = *profile.proposedVersion
 	}
-	plan, err := planAvatarPayloadCompaction(candidates,
+	plan, err := planAvatarPayloadCompaction(candidates, existingFingerprintBytes,
 		profile.lineageGeneration, activeVersion, proposedVersion, incomingCount,
 		incomingBytes, countLimit, byteLimit)
 	if err != nil || plan.count == 0 {
@@ -253,6 +465,21 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		   )`, target.accountID, target.realmID, target.agentID); err != nil {
 		return avatarPayloadCompactionPlan{}, fmt.Errorf("prune avatar continuity fingerprints: %w", err)
 	}
+	var retainedFullCount int
+	var retainedContentBytes int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE payload_state='full'),
+		       COALESCE(SUM(CASE WHEN payload_state='full' THEN payload_bytes ELSE 0 END),0) +
+		       COALESCE(SUM(octet_length(continuity_fingerprint)),0)
+		  FROM agent_avatar_versions
+		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`, target.accountID,
+		target.realmID, target.agentID).Scan(&retainedFullCount, &retainedContentBytes); err != nil {
+		return avatarPayloadCompactionPlan{}, fmt.Errorf("verify avatar payload compaction: %w", err)
+	}
+	if retainedFullCount+incomingCount != plan.retainedCount ||
+		retainedContentBytes+incomingBytes != plan.retainedBytes {
+		return avatarPayloadCompactionPlan{}, ErrAvatarConflict
+	}
 	return plan, nil
 }
 
@@ -264,21 +491,7 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 	target avatarTarget, plan avatarPayloadCompactionPlan) (map[int64][]byte, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT parent.version, parent.style_pack_id, parent.style_pack_version,
-		       parent.svg,
-		       EXISTS (
-		         SELECT 1 FROM agent_avatar_versions child
-		          WHERE child.account_id=parent.account_id
-		            AND child.realm_id=parent.realm_id
-		            AND child.agent_id=parent.agent_id
-		            AND child.parent_version=parent.version
-		            AND child.lineage_generation=parent.lineage_generation
-		            AND child.style_pack_id=parent.style_pack_id
-		            AND child.style_pack_version=parent.style_pack_version
-		            AND child.payload_state='full'
-		            AND NOT (child.version=ANY($4::bigint[]))
-		            AND child.proposed_by_kind='agent'
-		            AND child.proposed_by_id=parent.agent_id
-		       )
+		       parent.svg, parent.locked_layers_sha256
 		  FROM agent_avatar_versions parent
 		 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
 		   AND parent.version=ANY($4::bigint[]) AND parent.payload_state='full'
@@ -291,7 +504,7 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 	for rows.Next() {
 		var source avatarCompactionFingerprintSource
 		if err := rows.Scan(&source.version, &source.stylePackID,
-			&source.stylePackVersion, &source.svg, &source.needed); err != nil {
+			&source.stylePackVersion, &source.svg, &source.lockedDigest); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -305,6 +518,44 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 	if len(sources) != plan.count {
 		return nil, ErrAvatarConflict
 	}
+	childRows, err := tx.Query(ctx, `
+		SELECT child.parent_version, child.version, child.svg,
+		       child.locked_layers_sha256
+		  FROM agent_avatar_versions child
+		  JOIN agent_avatar_versions parent
+		    ON parent.account_id=child.account_id
+		   AND parent.realm_id=child.realm_id
+		   AND parent.agent_id=child.agent_id
+		   AND parent.version=child.parent_version
+		 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
+		   AND parent.version=ANY($4::bigint[]) AND parent.payload_state='full'
+		   AND child.lineage_generation=parent.lineage_generation
+		   AND child.style_pack_id=parent.style_pack_id
+		   AND child.style_pack_version=parent.style_pack_version
+		   AND child.payload_state='full'
+		   AND NOT (child.version=ANY($4::bigint[]))
+		   AND child.proposed_by_kind='agent'
+		   AND child.proposed_by_id=parent.agent_id
+		 ORDER BY child.parent_version, child.version`, target.accountID,
+		target.realmID, target.agentID, plan.versions)
+	if err != nil {
+		return nil, fmt.Errorf("load retained avatar continuity children: %w", err)
+	}
+	children := make(map[int64][]avatarCompactionFingerprintChild)
+	for childRows.Next() {
+		var child avatarCompactionFingerprintChild
+		if err := childRows.Scan(&child.parentVersion, &child.version,
+			&child.svg, &child.lockedDigest); err != nil {
+			childRows.Close()
+			return nil, err
+		}
+		children[child.parentVersion] = append(children[child.parentVersion], child)
+	}
+	if err := childRows.Err(); err != nil {
+		childRows.Close()
+		return nil, err
+	}
+	childRows.Close()
 	type styleKey struct {
 		id      string
 		version int
@@ -312,7 +563,8 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 	packs := make(map[styleKey]avatardomain.StylePack)
 	fingerprints := make(map[int64][]byte)
 	for _, source := range sources {
-		if !source.needed {
+		retainedChildren := children[source.version]
+		if len(retainedChildren) == 0 {
 			continue
 		}
 		key := styleKey{id: source.stylePackID, version: source.stylePackVersion}
@@ -337,6 +589,30 @@ func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
 			fingerprint, pack); err != nil {
 			return nil, fmt.Errorf("validate avatar %d continuity fingerprint: %w", source.version, err)
 		}
+		parentLockedDigest, err := avatardomain.LockedLayersSHA256([]byte(source.svg), pack)
+		if err != nil || parentLockedDigest != source.lockedDigest {
+			return nil, fmt.Errorf("%w: avatar %d retained locked-layer digest is invalid",
+				ErrAvatarConflict, source.version)
+		}
+		for _, child := range retainedChildren {
+			childLockedDigest, digestErr := avatardomain.LockedLayersSHA256(
+				[]byte(child.svg), pack)
+			if digestErr != nil || childLockedDigest != child.lockedDigest ||
+				child.lockedDigest != source.lockedDigest {
+				return nil, fmt.Errorf("%w: avatar %d child %d violates retained locked-layer continuity",
+					ErrAvatarConflict, source.version, child.version)
+			}
+			if err := avatardomain.ValidateLockedLayerContinuity(
+				[]byte(source.svg), []byte(child.svg), pack); err != nil {
+				return nil, fmt.Errorf("%w: avatar %d child %d violates locked-layer continuity: %v",
+					ErrAvatarConflict, source.version, child.version, err)
+			}
+			if err := avatardomain.ValidatePerceptualContinuityFromFingerprint(
+				fingerprint, []byte(child.svg), pack); err != nil {
+				return nil, fmt.Errorf("%w: avatar %d child %d violates perceptual continuity: %v",
+					ErrAvatarConflict, source.version, child.version, err)
+			}
+		}
 		fingerprints[source.version] = fingerprint
 	}
 	return fingerprints, nil
@@ -359,7 +635,7 @@ func logAvatarPayloadCompactionTx(ctx context.Context, tx pgx.Tx,
 			"agent_id":               target.agentID,
 			"compacted_versions":     strings.Join(versions, ","),
 			"compacted_count":        strconv.Itoa(compaction.count),
-			"compacted_bytes":        strconv.FormatInt(compaction.bytes, 10),
+			"net_reclaimed_bytes":    strconv.FormatInt(compaction.netReclaimedBytes, 10),
 			"retained_payload_count": strconv.Itoa(compaction.retainedCount),
 			"retained_payload_bytes": strconv.FormatInt(compaction.retainedBytes, 10),
 			"count_limit":            strconv.Itoa(countLimit),

@@ -2,11 +2,68 @@ package avatar
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPerceptualContinuityFingerprintV1GoldenDurability(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/wapf_v1_human_reference.gz.base64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := base64.StdEncoding.DecodeString(string(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(historical) != PerceptualContinuityFingerprintBytes {
+		t.Fatalf("historical WAPF v1 length = %d, want %d",
+			len(historical), PerceptualContinuityFingerprintBytes)
+	}
+	digest := sha256.Sum256(historical)
+	if got, want := hex.EncodeToString(digest[:]), "e9e92503ae73b318a2074712b1ed05066c3dc3caa7feb9f99edf27b2d4df96e3"; got != want {
+		t.Fatalf("historical WAPF v1 digest = %s, want %s", got, want)
+	}
+	pack := BuiltInFlatVectorStylePack()
+	if err := ValidatePerceptualContinuityFingerprintForStyle(historical, pack); err != nil {
+		t.Fatalf("decode historical WAPF v1: %v", err)
+	}
+	current, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(current, historical) {
+		t.Fatal("current WAPF v1 builder differs from the durable historical fixture; introduce a new format version")
+	}
+	if err := ValidatePerceptualContinuityFromFingerprint(
+		historical, []byte(humanReferenceSVG), pack); err != nil {
+		t.Fatalf("historical WAPF v1 comparator rejected its unchanged child: %v", err)
+	}
+	occluded := replacePerceptualTestLayer(t, humanReferenceSVG, "experience",
+		`<circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle>`)
+	if err := ValidatePerceptualContinuityFromFingerprint(
+		historical, []byte(occluded), pack); !errors.Is(err, ErrPerceptualContinuity) {
+		t.Fatalf("historical WAPF v1 comparator accepted an occluding child: %v", err)
+	}
+}
 
 func TestPerceptualContinuityFingerprintIsDeterministicAndStrict(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()

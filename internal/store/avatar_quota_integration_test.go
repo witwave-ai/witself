@@ -2,15 +2,19 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/id"
 )
 
 func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
@@ -76,10 +80,31 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	}
 	pending := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
 		rejected.Avatar.Profile.ProfileRevision, parent, "quota-propose-pending-6")
+	// Simulate a larger historical rejected payload so compacting version 5
+	// offsets the exact WAPF retained when the small version 1 boundary is
+	// compacted. The planner must never let boundary creation grow total retained
+	// content, even when the mutation is count-quota driven.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET payload_bytes=50000
+		 WHERE agent_id=$1 AND version=5`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	retainedContentBytes := func() int64 {
+		t.Helper()
+		var bytes int64
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(CASE WHEN payload_state='full' THEN payload_bytes ELSE 0 END),0) +
+			       COALESCE(SUM(octet_length(continuity_fingerprint)),0)
+			  FROM agent_avatar_versions WHERE agent_id=$1`, agent.ID).Scan(&bytes); err != nil {
+			t.Fatal(err)
+		}
+		return bytes
+	}
+	beforeLoweringBytes := retainedContentBytes()
 
 	quotaInput := UpdateAvatarQuotaInput{
 		RetainedPayloadCountLimit: AvatarMinRetainedPayloadCountLimit,
-		RetainedPayloadByteLimit:  AvatarMaxRetainedPayloadByteLimit,
+		RetainedPayloadByteLimit:  AvatarMinRetainedPayloadByteLimit,
 		ExpectedProfileRevision:   pending.Avatar.Profile.ProfileRevision,
 		IdempotencyKey:            "quota-lower-immediate",
 	}
@@ -92,6 +117,17 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 		lowered.Avatar.Profile.ActiveVersion != 4 ||
 		lowered.Avatar.Profile.ProposedVersion != 6 {
 		t.Fatalf("lowered quota view = %#v", lowered.Avatar.Profile)
+	}
+	afterLoweringBytes := retainedContentBytes()
+	if afterLoweringBytes > beforeLoweringBytes {
+		t.Fatalf("quota cleanup grew retained content from %d to %d bytes",
+			beforeLoweringBytes, afterLoweringBytes)
+	}
+	if afterLoweringBytes > quotaInput.RetainedPayloadByteLimit ||
+		lowered.Avatar.Profile.RetainedPayloadBytes != afterLoweringBytes {
+		t.Fatalf("inclusive retained bytes = db:%d view:%d limit:%d",
+			afterLoweringBytes, lowered.Avatar.Profile.RetainedPayloadBytes,
+			quotaInput.RetainedPayloadByteLimit)
 	}
 	history, err := st.GetAvatarHistory(ctx, agent, 10)
 	if err != nil {
@@ -169,6 +205,9 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 			}
 			if metadata["compacted_versions"] != firstVersions {
 				t.Fatalf("first compaction metadata = %#v", metadata)
+			}
+			if metadata["net_reclaimed_bytes"] == "" || metadata["compacted_bytes"] != "" {
+				t.Fatalf("compaction byte metadata = %#v", metadata)
 			}
 		}
 	}
@@ -303,6 +342,256 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 		t.Fatalf("retained continuity fingerprints = %d, want only version 1", fingerprintCount)
 	}
 	assertCompactionEvents(3, "")
+
+	activatedEight, err := st.ActivateAvatar(ctx, agent, ActivateAvatarInput{
+		Version: 8, ExpectedProfileRevision: final.Profile.ProfileRevision,
+		IdempotencyKey: "quota-activate-8-for-fingerprint-prune",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruningProposal := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
+		activatedEight.Avatar.Profile.ProfileRevision, 8, "quota-proposal-prunes-boundary")
+	if pruningProposal.Avatar.Proposed == nil || pruningProposal.Avatar.Proposed.Version != 9 {
+		t.Fatalf("fingerprint-pruning proposal = %#v", pruningProposal.Avatar)
+	}
+	versionTwo, err := st.GetAvatarVersion(ctx, agent, 2)
+	if err != nil || versionTwo.PayloadState != avatardomain.PayloadCompacted {
+		t.Fatalf("last qualifying child was not compacted: %#v / %v", versionTwo, err)
+	}
+	var prunedFingerprint []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT continuity_fingerprint FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&prunedFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if len(prunedFingerprint) != 0 {
+		t.Fatalf("last-child compaction retained %d obsolete fingerprint bytes", len(prunedFingerprint))
+	}
+	var transferredBoundary []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT continuity_fingerprint FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=2`, agent.ID).Scan(&transferredBoundary); err != nil {
+		t.Fatal(err)
+	}
+	if len(transferredBoundary) != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("new compacted parent boundary length = %d, want %d",
+			len(transferredBoundary), avatardomain.PerceptualContinuityFingerprintBytes)
+	}
+	assertCompactionEvents(4, "")
+}
+
+func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	type scenario struct {
+		accountID string
+		realmID   string
+		agent     Principal
+		operator  Principal
+		pack      avatardomain.StylePack
+	}
+	newScenario := func(t *testing.T, name string) scenario {
+		t.Helper()
+		provisioned, err := st.ProvisionAccount(ctx,
+			fmt.Sprintf("avatar-boundary-%s-%d@witwave.ai", name, time.Now().UnixNano()),
+			"avatar boundary", time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID)
+		})
+		if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+			t.Fatalf("activate account = %t / %v", activated, err)
+		}
+		realm, err := st.CreateRealm(ctx, provisioned.AccountID, "boundary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID,
+			realm.ID, "boundary-agent")
+		operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
+			AccountID: provisioned.AccountID, AccountStatus: "active"}
+		style, err := st.GetRealmAvatarStyle(ctx, operator, realm.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scenario{accountID: provisioned.AccountID, realmID: realm.ID,
+			agent: agent, operator: operator, pack: style.StylePack}
+	}
+	insertVersion := func(t *testing.T, s scenario, version, parent int64,
+		pack avatardomain.StylePack, actorKind, actorID, svg string, payloadBytes int64) {
+		t.Helper()
+		versionID, err := id.New("avver")
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256([]byte(svg))
+		lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(svg), pack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parentValue any
+		if parent > 0 {
+			parentValue = parent
+		}
+		if payloadBytes == 0 {
+			payloadBytes, err = avatarCreativePayloadBytes(svg,
+				"A direct boundary validation fixture.", []byte(`{"identity":{"expression":"calm"}}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_avatar_versions
+			       (account_id, realm_id, agent_id, id, version, parent_version,
+			        lineage_generation, style_pack_id, style_pack_version,
+			        subject_form, svg, description, visual_spec, svg_sha256,
+			        locked_layers_sha256, provenance, proposed_by_kind,
+			        proposed_by_id, payload_bytes)
+			VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,'human',$9,
+			        'A direct boundary validation fixture.',
+			        '{"identity":{"expression":"calm"}}'::jsonb,$10,$11,
+			        '{"runtime":"boundary-test"}'::jsonb,$12,$13,$14)`,
+			s.accountID, s.realmID, s.agent.ID, versionID,
+			version, parentValue, pack.ID, pack.Version, svg,
+			hex.EncodeToString(digest[:]), lockedDigest, actorKind, actorID,
+			payloadBytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compact := func(t *testing.T, s scenario, countLimit int) (avatarPayloadCompactionPlan, error) {
+		t.Helper()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := lockAccountForMint(ctx, tx, s.accountID, false); err != nil {
+			t.Fatal(err)
+		}
+		profile, err := lockAvatarProfileTx(ctx, tx, avatarTarget{
+			accountID: s.accountID, realmID: s.realmID,
+			agentID: s.agent.ID, agentName: s.agent.AgentName,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := compactAvatarPayloadsTx(ctx, tx, avatarTarget{
+			accountID: s.accountID, realmID: s.realmID,
+			agentID: s.agent.ID, agentName: s.agent.AgentName,
+		}, profile, 0, 0, countLimit, AvatarMaxRetainedPayloadByteLimit)
+		if err != nil {
+			return avatarPayloadCompactionPlan{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return plan, nil
+	}
+	assertNoFingerprints := func(t *testing.T, s scenario) {
+		t.Helper()
+		var count int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM agent_avatar_versions
+			 WHERE agent_id=$1 AND continuity_fingerprint IS NOT NULL`, s.agent.ID).
+			Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("retained continuity fingerprints = %d, want 0", count)
+		}
+	}
+
+	t.Run("operator-authored child", func(t *testing.T) {
+		s := newScenario(t, "operator")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalOperator, s.operator.ID,
+			s.pack.References[0].SVG, 0)
+		plan, err := compact(t, s, 1)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("operator-child compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("different-style child", func(t *testing.T) {
+		s := newScenario(t, "style")
+		packV2 := s.pack
+		packV2.Version = 2
+		packV2.Description = "A second immutable boundary-test style version."
+		if _, err := st.SetRealmAvatarStyle(ctx, s.operator, s.realmID,
+			CreateAvatarStyleVersionInput{ExpectedStyleRevision: 1, StylePack: packV2,
+				IdempotencyKey: "boundary-style-v2"}); err != nil {
+			t.Fatal(err)
+		}
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, packV2, PrincipalAgent, s.agent.ID,
+			packV2.References[0].SVG, 0)
+		plan, err := compact(t, s, 1)
+		if err != nil || len(plan.versions) != 1 || plan.versions[0] != 1 {
+			t.Fatalf("different-style compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("child in same plan", func(t *testing.T) {
+		s := newScenario(t, "same-plan")
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			s.pack.References[0].SVG, 0)
+		plan, err := compact(t, s, 0)
+		if err != nil || len(plan.versions) != 2 {
+			t.Fatalf("same-plan child compaction = %#v / %v", plan, err)
+		}
+		assertNoFingerprints(t, s)
+	})
+
+	t.Run("legacy occluding child refuses irreversible parent compaction", func(t *testing.T) {
+		s := newScenario(t, "occlusion")
+		parentSVG := s.pack.References[0].SVG
+		childSVG := strings.Replace(parentSVG,
+			`<g id="experience" data-layer="experience"></g>`,
+			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+		insertVersion(t, s, 1, 0, s.pack, PrincipalAgent, s.agent.ID,
+			parentSVG, 50_000)
+		insertVersion(t, s, 2, 1, s.pack, PrincipalAgent, s.agent.ID,
+			childSVG, 0)
+		if _, err := compact(t, s, 1); !errors.Is(err, ErrAvatarConflict) {
+			t.Fatalf("occluding legacy child compaction error = %v, want conflict", err)
+		}
+		var state string
+		var svg *string
+		var fingerprint []byte
+		if err := st.pool.QueryRow(ctx, `
+			SELECT payload_state, svg, continuity_fingerprint
+			  FROM agent_avatar_versions WHERE agent_id=$1 AND version=1`, s.agent.ID).
+			Scan(&state, &svg, &fingerprint); err != nil {
+			t.Fatal(err)
+		}
+		if state != string(avatardomain.PayloadFull) || svg == nil || *svg != parentSVG ||
+			len(fingerprint) != 0 {
+			t.Fatalf("failed-closed parent = state:%s svg:%v fingerprint:%d",
+				state, svg != nil, len(fingerprint))
+		}
+	})
 }
 
 func avatarPayloadStateSnapshot(ctx context.Context, t *testing.T, st *Store, agentID string) []string {

@@ -145,6 +145,14 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	}
 	pending = propose(freshActive.Avatar.Profile.ProfileRevision, 4,
 		avatardomain.SubjectAnimal, "avatar-archive-propose-5")
+	// Preserve a real compacted-parent boundary in this round trip without ever
+	// growing retained content: the archived historical version records a
+	// payload larger than the exact WAPF that replaces it.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET payload_bytes=50000
+		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
 	quota, err := st.SetAvatarQuota(ctx, operator, agent.ID, UpdateAvatarQuotaInput{
 		RetainedPayloadCountLimit: AvatarMinRetainedPayloadCountLimit,
 		RetainedPayloadByteLimit:  AvatarMaxRetainedPayloadByteLimit,

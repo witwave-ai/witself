@@ -240,8 +240,10 @@ idempotency keys.
 
 `avatar.quota.changed` is attributed to the operator and records prior/new count
 and byte limits plus the rollback floor. `avatar.payload.compacted` is attributed
-to the system and records the affected version numbers, aggregate compacted
-count/bytes, resulting retained count/bytes, applied limits, and rollback floor.
+to the system and records the affected version numbers, compacted count,
+`net_reclaimed_bytes`, resulting retained count/inclusive bytes, applied limits,
+and rollback floor. Net reclamation includes fingerprints created or pruned and
+is never negative.
 Version numbers provide durable lifecycle attribution without exposing creative
 payloads or their hashes. Compaction caused by either proposal creation or a
 lowered quota is committed with that triggering mutation. A failed-closed quota

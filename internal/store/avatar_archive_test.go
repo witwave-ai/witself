@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +457,35 @@ func TestAvatarArchiveGraphRequiresPerceptualFingerprintExactlyWhenNeeded(t *tes
 	})
 }
 
+func TestAvatarArchiveGraphIndexesLargeManyAgentHistoryLinearly(t *testing.T) {
+	const agentCount = 5_000
+	versions := make(map[avatarVersionImportKey]avatarVersionImportScope, agentCount*2)
+	style := avatarStyleVersionImportKey{
+		realmID: avatarArchiveRealm, stylePackID: avatardomain.DefaultStylePackID, version: 1,
+	}
+	for i := 0; i < agentCount; i++ {
+		agentID := fmt.Sprintf("agent_archive_scale_%05d", i)
+		versions[avatarVersionImportKey{agentID: agentID, version: 1}] = avatarVersionImportScope{
+			lineage: 1, style: style, payloadState: avatardomain.PayloadCompacted,
+		}
+		versions[avatarVersionImportKey{agentID: agentID, version: 2}] = avatarVersionImportScope{
+			lineage: 1, style: style, parentVersion: 1,
+			payloadState: avatardomain.PayloadFull, proposedByKind: PrincipalAgent,
+		}
+	}
+	required := requiredImportedAvatarContinuityFingerprints(versions)
+	grouped := importedAvatarVersionsByAgent(versions)
+	if len(required) != agentCount || len(grouped) != agentCount {
+		t.Fatalf("large archive indexes = required:%d agents:%d, want %d",
+			len(required), len(grouped), agentCount)
+	}
+	for agentID, entries := range grouped {
+		if len(entries) != 2 || entries[0].key.version != 1 || entries[1].key.version != 2 {
+			t.Fatalf("agent %q grouped versions = %#v", agentID, entries)
+		}
+	}
+}
+
 func TestAvatarArchiveValidationRejectsLifecycleAfterPayloadCompaction(t *testing.T) {
 	newCompactedContext := func(t *testing.T, profile map[string]any) *importCtx {
 		t.Helper()
@@ -793,6 +823,41 @@ func TestAvatarArchiveValidationRejectsRetainedPayloadUsageAboveQuota(t *testing
 			}
 		})
 	}
+
+	t.Run("continuity fingerprint bytes", func(t *testing.T) {
+		pack := avatardomain.BuiltInFlatVectorStylePack()
+		fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+			[]byte(pack.References[0].SVG), pack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(5),
+			"active_avatar_version": int64(1), "proposed_avatar_version": int64(5),
+			"retained_payload_count_limit": int64(20),
+			"retained_payload_byte_limit":  AvatarMinRetainedPayloadByteLimit,
+		})
+		feedAvatarArchiveVersion(t, ic, compactAvatarArchiveVersionRow(t, 1, 0, fingerprint))
+		for version := int64(2); version <= 5; version++ {
+			row := avatarArchiveVersionRow(t, version, 1, avatardomain.SubjectHuman)
+			row["payload_bytes"] = int64(125_000)
+			if version > 2 {
+				row["proposed_by_kind"] = PrincipalOperator
+				row["proposed_by_id"] = avatarArchiveOperator
+			}
+			feedAvatarArchiveVersion(t, ic, row)
+		}
+		feedAvatarArchiveActivation(t, ic, map[string]any{
+			"id": "avact_aaaaaaaaaaaaaaaa", "avatar_version": int64(1),
+			"prior_active_version": nil, "action": "activated",
+		})
+		err = ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "exceed the configured quota") {
+			t.Fatalf("error = %v, want inclusive fingerprint-byte quota refusal", err)
+		}
+	})
 }
 
 func TestAvatarArchiveValidationAcceptsBothBuiltInPersistedRepresentations(t *testing.T) {

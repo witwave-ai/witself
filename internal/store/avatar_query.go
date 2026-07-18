@@ -244,12 +244,14 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 		           AND retained.realm_id=p.realm_id
 		           AND retained.agent_id=p.agent_id
 		           AND retained.payload_state='full'),
-		       (SELECT COALESCE(SUM(retained.payload_bytes),0)
+		       (SELECT COALESCE(SUM(
+		                 CASE WHEN retained.payload_state='full'
+		                      THEN retained.payload_bytes ELSE 0 END),0) +
+		               COALESCE(SUM(octet_length(retained.continuity_fingerprint)),0)
 		          FROM agent_avatar_versions retained
 		         WHERE retained.account_id=p.account_id
 		           AND retained.realm_id=p.realm_id
-		           AND retained.agent_id=p.agent_id
-		           AND retained.payload_state='full'),
+		           AND retained.agent_id=p.agent_id),
 		       p.created_at, p.updated_at, a.name
 		  FROM agent_avatar_profiles p
 		  JOIN agents a ON a.id=p.agent_id AND a.realm_id=p.realm_id

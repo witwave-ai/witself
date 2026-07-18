@@ -633,7 +633,7 @@ func avatarQuota(args []string) int {
 	fs.SetOutput(os.Stderr)
 	connFlags := addAvatarOperatorConnectionFlags(fs, "agent")
 	countLimit := fs.Int("retained-payload-count-limit", 0, "retained full-payload count limit (4-1000)")
-	byteLimit := fs.Int64("retained-payload-byte-limit", 0, "retained creative-payload byte limit (524288-67108864)")
+	byteLimit := fs.Int64("retained-payload-byte-limit", 0, "retained payload plus continuity-fingerprint byte limit (524288-67108864)")
 	expectedRevision := fs.Int64("expected-profile-revision", 0, "exact current avatar profile revision")
 	idempotencyKey := fs.String("idempotency-key", "", "fresh retry key for this quota change")
 	if err := fs.Parse(args); err != nil {

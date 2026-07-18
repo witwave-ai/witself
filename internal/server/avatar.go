@@ -258,7 +258,7 @@ type UpdateAvatarPolicyRequest struct {
 	IdempotencyKey          string                `json:"-"`
 }
 
-// UpdateAvatarQuotaRequest updates one agent's retained creative-payload limits.
+// UpdateAvatarQuotaRequest updates one agent's retained-content limits.
 type UpdateAvatarQuotaRequest struct {
 	RetainedPayloadCountLimit int    `json:"retained_payload_count_limit"`
 	RetainedPayloadByteLimit  int64  `json:"retained_payload_byte_limit"`

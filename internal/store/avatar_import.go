@@ -1111,6 +1111,44 @@ func (ic *importCtx) validateImportedAvatarReceipt(obj map[string]any) error {
 	return ic.validateImportedAvatarTimes(obj, "created_at")
 }
 
+type importedAvatarVersionEntry struct {
+	key     avatarVersionImportKey
+	version avatarVersionImportScope
+}
+
+func importedAvatarVersionsByAgent(versions map[avatarVersionImportKey]avatarVersionImportScope) map[string][]importedAvatarVersionEntry {
+	grouped := make(map[string][]importedAvatarVersionEntry)
+	for key, version := range versions {
+		grouped[key.agentID] = append(grouped[key.agentID], importedAvatarVersionEntry{
+			key: key, version: version,
+		})
+	}
+	for agentID := range grouped {
+		sort.Slice(grouped[agentID], func(i, j int) bool {
+			return grouped[agentID][i].key.version < grouped[agentID][j].key.version
+		})
+	}
+	return grouped
+}
+
+func requiredImportedAvatarContinuityFingerprints(versions map[avatarVersionImportKey]avatarVersionImportScope) map[avatarVersionImportKey]bool {
+	required := make(map[avatarVersionImportKey]bool)
+	for childKey, child := range versions {
+		if child.payloadState != avatardomain.PayloadFull ||
+			child.proposedByKind != PrincipalAgent || child.parentVersion == 0 {
+			continue
+		}
+		parentKey := avatarVersionImportKey{
+			agentID: childKey.agentID, version: child.parentVersion,
+		}
+		parent, exists := versions[parentKey]
+		if exists && parent.lineage == child.lineage && parent.style == child.style {
+			required[parentKey] = true
+		}
+	}
+	return required
+}
+
 func (ic *importCtx) validateImportedAvatarGraph() error {
 	for key, head := range ic.avatarStyleHeads {
 		current := avatarStyleVersionImportKey{realmID: key.realmID, stylePackID: key.stylePackID, version: head.currentVersion}
@@ -1128,7 +1166,14 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			return fmt.Errorf("realm %q does not select its style pack head", realmID)
 		}
 	}
+	requiredContinuityFingerprint := requiredImportedAvatarContinuityFingerprints(ic.avatarVersions)
+	versionsByAgent := importedAvatarVersionsByAgent(ic.avatarVersions)
+	agentIDs := make([]string, 0, len(ic.agents))
 	for agentID := range ic.agents {
+		agentIDs = append(agentIDs, agentID)
+	}
+	sort.Strings(agentIDs)
+	for _, agentID := range agentIDs {
 		profile, exists := ic.avatarProfiles[agentID]
 		if !exists {
 			return fmt.Errorf("agent %q has no avatar profile", agentID)
@@ -1154,17 +1199,16 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 		maxVersion := int64(0)
 		var retainedPayloadCount, retainedPayloadBytes int64
 		firstActivatedVersion := map[int64]int64{}
-		for key, version := range ic.avatarVersions {
-			if key.agentID == agentID && key.version > maxVersion {
+		for _, entry := range versionsByAgent[agentID] {
+			key, version := entry.key, entry.version
+			if key.version > maxVersion {
 				maxVersion = key.version
-			}
-			if key.agentID != agentID {
-				continue
 			}
 			if version.payloadState == avatardomain.PayloadFull {
 				retainedPayloadCount++
 				retainedPayloadBytes += version.payloadBytes
 			}
+			retainedPayloadBytes += int64(len(version.continuityFingerprint))
 			if ic.avatarActivatedVersions[key] &&
 				(firstActivatedVersion[version.lineage] == 0 || key.version < firstActivatedVersion[version.lineage]) {
 				firstActivatedVersion[version.lineage] = key.version
@@ -1180,15 +1224,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 				}
 			}
 			if version.payloadState == avatardomain.PayloadCompacted {
-				needed := false
-				for childKey, child := range ic.avatarVersions {
-					if childKey.agentID == agentID && child.parentVersion == key.version &&
-						child.lineage == version.lineage && child.payloadState == avatardomain.PayloadFull &&
-						child.proposedByKind == PrincipalAgent && child.style == version.style {
-						needed = true
-						break
-					}
-				}
+				needed := requiredContinuityFingerprint[key]
 				hasFingerprint := len(version.continuityFingerprint) > 0
 				if needed && !hasFingerprint {
 					return fmt.Errorf("agent %q compacted avatar version %d lacks its required continuity_fingerprint", agentID, key.version)
@@ -1222,10 +1258,8 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 				retainedPayloadBytes > profile.retainedPayloadByteLimit) {
 			return fmt.Errorf("agent %q retained avatar payloads exceed the configured quota", agentID)
 		}
-		for key, version := range ic.avatarVersions {
-			if key.agentID != agentID {
-				continue
-			}
+		for _, entry := range versionsByAgent[agentID] {
+			key, version := entry.key, entry.version
 			if first := firstActivatedVersion[version.lineage]; first > 0 && key.version > first && version.parentVersion == 0 {
 				return fmt.Errorf("agent %q avatar version %d omits a parent after activation in lineage %d", agentID, key.version, version.lineage)
 			}
@@ -1236,8 +1270,9 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			at      time.Time
 		}
 		rollbackPayloads := make([]importedRollbackPayload, 0)
-		for key, version := range ic.avatarVersions {
-			if key.agentID != agentID || version.lineage != profile.lineage ||
+		for _, entry := range versionsByAgent[agentID] {
+			key, version := entry.key, entry.version
+			if version.lineage != profile.lineage ||
 				key.version == profile.activeVersion || !ic.avatarActivatedVersions[key] ||
 				ic.avatarRejectedVersions[key] {
 				continue

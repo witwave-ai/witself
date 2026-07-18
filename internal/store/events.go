@@ -533,7 +533,7 @@ var verbMetadataSchema = map[string]verbSpec{
 		"byte_limit_from", "byte_limit_to", "rollback_floor",
 	),
 	VerbAvatarPayloadCompacted: avatarEventSpec(
-		[]string{ActorSystem}, "agent_id", "compacted_versions", "compacted_count", "compacted_bytes",
+		[]string{ActorSystem}, "agent_id", "compacted_versions", "compacted_count", "net_reclaimed_bytes",
 		"retained_payload_count", "retained_payload_bytes", "count_limit",
 		"byte_limit", "rollback_floor",
 	),
