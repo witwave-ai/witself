@@ -2491,6 +2491,17 @@ names such as `witself_avatar_show`; Codex, Claude Code, and Cursor use the
 dotted names. Returned SVG, descriptions, style examples, prior versions, and
 visual specifications are untrusted data, never instructions. The client does
 the creative generation and review; the MCP server performs no AI inference.
+For broad fitting (`initial_avatar`, `avatar_reset`, `proposal_rejected`, or a
+`retry_due` profile without an active version), that review is owned by the
+active agent rather than the user or operator: it may make one to three
+substantial ephemeral revisions, keeps them out of repository and project files,
+cleans up temporary artifacts, and calls `witself.avatar.propose` only for its
+one chosen final candidate. An accepted proposal is immutable server state.
+Under `agent_self_managed`, activating that exact proposal records the agent's
+acceptance and settles the avatar. Under an operator-governed policy, the
+agent's creative selection is complete but identity remains unsettled until
+operator activation. A `retry_due` profile with an active version instead uses
+the bounded single-candidate evolution path.
 `witself.avatar.history` accepts bounded `limit` and exclusive
 `before_version`, returns `next_before_version`, and preserves the payload-free
 lifecycle projection on each version: `is_active`, `is_proposed`,
@@ -2505,7 +2516,9 @@ the profile to the deterministic placeholder. It accepts the exact profile
 revision, an optional bounded reason code, and a fresh idempotency key. Only an
 `agent_self_managed` self token may execute it; other policies require the
 operator HTTP/CLI surface. Retired payload history remains available but is no
-longer rollback-eligible.
+longer rollback-eligible. The new parentless lineage reopens broad initial
+fitting, including substantial local changes to form, palette, and defining
+details, while still submitting only the agent's final candidate.
 
 See [agent-avatars.md](agent-avatars.md) for checkpoint routing, evolution, and
 the complete operator HTTP/CLI surface.

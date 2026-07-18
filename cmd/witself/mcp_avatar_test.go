@@ -159,10 +159,36 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 		"current user's explicit request", "first read avatar.show", "no durable active or proposed version",
 		"do not call reset", "already at a fresh start", "bounded generation-due flow", "exactly one call",
 		"agent_self_managed", "agent_proposes and operator_only require an operator",
-		"Vague dissatisfaction is not reset authority", "lineage retirement, never purge",
+		"Vague dissatisfaction is not reset authority", "reopen the agent-owned initial fitting flow",
+		"broad freedom to revise form, palette, and defining details locally",
+		"submit only its one chosen final candidate", "lineage retirement, never purge",
 	} {
 		if !strings.Contains(tools["witself.avatar.reset"].Description, want) {
 			t.Errorf("avatar reset description omitted %q: %q", want, tools["witself.avatar.reset"].Description)
+		}
+	}
+	for _, want := range []string{
+		"active agent may inspect and substantially revise ephemeral local drafts from its own perspective",
+		"without asking the user or operator to choose the design",
+		"Do not put those drafts in repository or project files",
+		"clean up temporary artifacts",
+		"Submit only the agent-chosen final candidate",
+		"never send intermediate or discarded drafts",
+		"every accepted proposal is immutable server state",
+		"one bounded submission attempt after local review",
+		"preserve the user's work",
+	} {
+		if !strings.Contains(tools["witself.avatar.propose"].Description, want) {
+			t.Errorf("avatar propose description omitted %q: %q", want, tools["witself.avatar.propose"].Description)
+		}
+	}
+	for _, want := range []string{
+		"agent_self_managed initial proposal",
+		"activation records the active agent's acceptance and settles its chosen avatar",
+		"Under agent_proposes, creative selection is complete but identity remains unsettled until operator activation",
+	} {
+		if !strings.Contains(tools["witself.avatar.activate"].Description, want) {
+			t.Errorf("avatar activate description omitted %q: %q", want, tools["witself.avatar.activate"].Description)
 		}
 	}
 

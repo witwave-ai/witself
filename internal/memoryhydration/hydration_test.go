@@ -350,12 +350,24 @@ func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T)
 
 func TestForegroundAvatarCheckpointPolicySeparatesActivationFromGeneration(t *testing.T) {
 	for _, want := range []string{
+		"User work first",
+		"do not interrupt or replace the current user's task",
+		"keep the final answer self-contained",
 		"For activation_due",
 		"activate the exact proposed version",
 		"never generate or overwrite it",
-		"For initial_avatar, avatar_reset, style_changed, proposal_rejected, or retry_due",
+		"For initial_avatar, avatar_reset, or proposal_rejected",
+		"retry_due when avatar.show has no active_version",
 		"avatar_reset",
+		"active agent's own perspective",
+		"one to three substantial local revisions",
+		"not a user or operator approval dialog",
+		"never submit or store intermediate variants",
+		"An accepted proposal is immutable history",
+		"For style_changed, and for retry_due when avatar.show has an active_version",
 		"immediately activate the returned proposed version",
+		"activation records the agent's acceptance and settles the chosen avatar",
+		"identity remains unsettled until operator activation",
 		"Report a generation failure only when",
 		"On activation failure leave the proposal pending",
 	} {
