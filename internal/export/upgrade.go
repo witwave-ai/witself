@@ -42,6 +42,7 @@ var upgraders = map[int]Upgrader{
 	36: addMessageAudienceDefaults,
 	49: preserveSchema49Rows,
 	50: addAvatarPayloadQuotaDefaults,
+	51: preserveSchema51Rows,
 }
 
 const (
@@ -83,6 +84,18 @@ func addAvatarPayloadQuotaDefaults(table string, row map[string]any) (map[string
 		// validates it after style rows have been loaded.
 		row["locked_layers_sha256"] = nil
 		row["continuity_fingerprint"] = nil
+	}
+	return row, nil
+}
+
+// preserveSchema51Rows acknowledges the one-open-avatar-style-rollout
+// uniqueness invariant introduced by migration 0052. A schema-51 archive has
+// no rollout-job stream, so there are no preexisting rows to reconcile.
+func preserveSchema51Rows(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_avatar_profiles" {
+		// Existing projections predate the durable selection-revision fence.
+		// NULL makes the first later rollout discover them lazily.
+		row["style_revision"] = nil
 	}
 	return row, nil
 }

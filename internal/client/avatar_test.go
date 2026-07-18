@@ -48,6 +48,12 @@ func TestAvatarSelfClientContract(t *testing.T) {
 	now := time.Date(2026, 7, 17, 14, 15, 16, 0, time.UTC)
 	view := testAvatarView(now)
 	style := testAvatarStyleView(now)
+	style.Rollout = &AvatarStyleRollout{
+		StyleRevision: 1, StylePackID: avatar.DefaultStylePackID,
+		StylePackVersion: 1, Status: "running",
+		ProcessedProfileCount: 2, BatchCount: 1, LastBatchSize: 2,
+		CreatedAt: now, StartedAt: &now, UpdatedAt: now,
+	}
 	receipt := AvatarMutationReceipt{
 		Operation: "propose", Actor: AvatarActor{Kind: "agent", ID: "agent_1"},
 		RequestHash: "hash_1", ResultRevision: 3, ResultVersion: 2, ResultLineageGeneration: 1, CreatedAt: now,
@@ -184,6 +190,12 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 	now := time.Date(2026, 7, 17, 14, 15, 16, 0, time.UTC)
 	view := testAvatarView(now)
 	style := testAvatarStyleView(now)
+	style.Rollout = &AvatarStyleRollout{
+		StyleRevision: 1, StylePackID: avatar.DefaultStylePackID,
+		StylePackVersion: 1, Status: "running",
+		ProcessedProfileCount: 2, BatchCount: 1, LastBatchSize: 2,
+		CreatedAt: now, StartedAt: &now, UpdatedAt: now,
+	}
 	wantKeys := map[string]string{
 		"/v1/agents/agent_1/avatar/proposals":      "operator-proposal-1",
 		"/v1/agents/agent_1/avatar:activate":       "operator-activate-1",
@@ -308,7 +320,9 @@ func TestAvatarOperatorClientContract(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := GetRealmAvatarStyle(ctx, srv.URL, "operator-token", "realm_1"); err != nil || got.StylePack.ID != avatar.DefaultStylePackID {
+	if got, err := GetRealmAvatarStyle(ctx, srv.URL, "operator-token", "realm_1"); err != nil ||
+		got.StylePack.ID != avatar.DefaultStylePackID || got.Rollout == nil ||
+		got.Rollout.Status != "running" || got.Rollout.ProcessedProfileCount != 2 {
 		t.Fatalf("GetRealmAvatarStyle = %#v, %v", got, err)
 	}
 	if got, err := CreateRealmAvatarStyleVersion(ctx, srv.URL, "operator-token", "realm_1", CreateAvatarStyleVersionInput{ExpectedStyleRevision: 1, StylePack: avatar.BuiltInFlatVectorStylePack(), IdempotencyKey: "style-version-1"}); err != nil || got.Style.StyleRevision != 1 {

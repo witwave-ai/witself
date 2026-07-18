@@ -93,6 +93,15 @@ var importColumns = map[string]map[string]bool{
 		"style_pack_version": true, "revision": true,
 		"created_at": true, "updated_at": true,
 	},
+	"avatar_style_rollout_jobs": {
+		"account_id": true, "realm_id": true, "style_revision": true,
+		"style_pack_id": true, "style_pack_version": true, "status": true,
+		"target_profile_count": true, "processed_profile_count": true,
+		"batch_count": true, "last_batch_size": true,
+		"failure_count": true, "retry_after": true, "last_failure_code": true,
+		"created_at": true, "started_at": true, "updated_at": true,
+		"completed_at": true, "superseded_at": true,
+	},
 	"agents": {
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
@@ -100,7 +109,7 @@ var importColumns = map[string]map[string]bool{
 	"agent_avatar_profiles": {
 		"account_id": true, "realm_id": true, "agent_id": true,
 		"status": true, "lineage_generation": true, "autonomy_policy": true,
-		"style_pack_id": true, "style_pack_version": true,
+		"style_pack_id": true, "style_pack_version": true, "style_revision": true,
 		"latest_avatar_version": true, "proposed_avatar_version": true,
 		"active_avatar_version": true, "subject_form": true,
 		"attempt_count": true, "retry_after": true,
@@ -713,6 +722,7 @@ type agentActivityImportKey struct {
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
 	accountID                    string
+	accountStatus                string
 	schemaVersion                int
 	exportedAt                   time.Time
 	importedAt                   time.Time
@@ -726,6 +736,8 @@ type importCtx struct {
 	avatarStyleHeads             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
 	avatarStyleVersions          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
 	realmAvatarStyles            map[string]realmAvatarStyleImportScope
+	avatarStyleRollouts          map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope
+	avatarStyleOpenRollouts      map[string]int
 	avatarProfiles               map[string]avatarProfileImportScope
 	avatarVersions               map[avatarVersionImportKey]avatarVersionImportScope
 	avatarVersionIDs             map[string]bool
@@ -790,6 +802,8 @@ func newImportCtx(accountID string) *importCtx {
 		avatarStyleHeads:             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
 		avatarStyleVersions:          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
 		realmAvatarStyles:            map[string]realmAvatarStyleImportScope{},
+		avatarStyleRollouts:          map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope{},
+		avatarStyleOpenRollouts:      map[string]int{},
 		avatarProfiles:               map[string]avatarProfileImportScope{},
 		avatarVersions:               map[avatarVersionImportKey]avatarVersionImportScope{},
 		avatarVersionIDs:             map[string]bool{},
@@ -1029,6 +1043,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
+		"avatar_style_rollout_jobs",
 		"agent_avatar_profiles", "agent_avatar_versions",
 		"agent_avatar_activations", "agent_avatar_rejections", "agent_avatar_resets",
 		"avatar_mutation_receipts",
@@ -1064,6 +1079,9 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			if b, _ := v.(bool); b {
 				return badf("accounts row claims is_default=true")
 			}
+		}
+		if status, ok := obj["status"].(string); ok {
+			ic.accountStatus = status
 		}
 		// Plan-snapshot shape checks: these jsonb columns are decoded into
 		// typed Go values on every read (map[string]int64 / []string), so a
@@ -1143,6 +1161,21 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("realm_avatar_styles row duplicates realm %q", scope.style.realmID)
 		}
 		ic.realmAvatarStyles[scope.style.realmID] = scope
+	case "avatar_style_rollout_jobs":
+		key, scope, err := ic.validateImportedAvatarStyleRollout(obj)
+		if err != nil {
+			return badf("avatar_style_rollout_jobs row %v", err)
+		}
+		if _, duplicate := ic.avatarStyleRollouts[key]; duplicate {
+			return badf("avatar_style_rollout_jobs row duplicates realm %q revision %d", key.realmID, key.styleRevision)
+		}
+		if scope.status == "pending" || scope.status == "running" {
+			ic.avatarStyleOpenRollouts[key.realmID]++
+			if ic.avatarStyleOpenRollouts[key.realmID] > 1 {
+				return badf("avatar_style_rollout_jobs has multiple open jobs for realm %q", key.realmID)
+			}
+		}
+		ic.avatarStyleRollouts[key] = scope
 	case "agents":
 		realmID, err := requireStringField(obj, "realm_id")
 		if err != nil {
@@ -3609,6 +3642,7 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := validateArchiveManifestTables(m.SchemaVersion, m.Tables); err != nil {
 				return err
 			}
+			ic.schemaVersion = m.SchemaVersion
 			if err := validateArchiveExportedAt(m.ExportedAt, importedAt); err != nil {
 				return err
 			}
@@ -3661,8 +3695,10 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		if err := synthesizeLegacyImportedAvatars(ctx, tx, ic); err != nil {
 			return export.Manifest{}, fmt.Errorf("synthesize legacy avatar defaults: %w", err)
 		}
-	} else if err := ic.validateImportedAvatarGraph(); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
+	} else {
+		if err := ic.validateImportedAvatarGraph(); err != nil {
+			return export.Manifest{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
+		}
 	}
 	if m.SchemaVersion < 35 {
 		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {

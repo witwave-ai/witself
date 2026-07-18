@@ -20,6 +20,10 @@ type archiveTableIntroduction struct {
 	introducedSchema int
 }
 
+// avatarStyleRolloutArchiveSchema is the first archive schema that carries
+// lazy profile style revisions and their resumable rollout job.
+const avatarStyleRolloutArchiveSchema = 52
+
 var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "accounts", introducedSchema: 1},
 	{name: "operators", introducedSchema: 2},
@@ -27,6 +31,7 @@ var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "avatar_style_packs", introducedSchema: 50},
 	{name: "avatar_style_pack_versions", introducedSchema: 50},
 	{name: "realm_avatar_styles", introducedSchema: 50},
+	{name: "avatar_style_rollout_jobs", introducedSchema: avatarStyleRolloutArchiveSchema},
 	{name: "agents", introducedSchema: 5},
 	{name: "agent_avatar_profiles", introducedSchema: 50},
 	{name: "agent_avatar_versions", introducedSchema: 50},

@@ -44,6 +44,9 @@ func (s *Store) ReapPendingAccount(ctx context.Context, accountID, reason string
 			 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 			return false, fmt.Errorf("revoke reaped account tokens: %w", err)
 		}
+		if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
+			return false, err
+		}
 		return false, tx.Commit(ctx)
 	}
 	// Strict allowlist: an automated destroyer fails closed. Only 'pending'
@@ -62,6 +65,9 @@ func (s *Store) ReapPendingAccount(ctx context.Context, accountID, reason string
 		`UPDATE tokens SET consumed_at = now()
 		 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 		return false, fmt.Errorf("revoke reaped account tokens: %w", err)
+	}
+	if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
+		return false, err
 	}
 	// Only fired on a genuine pending→closed transition — the
 	// already-closed branch above returned without touching state.

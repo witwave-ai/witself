@@ -338,6 +338,28 @@ func TestSchema50AvatarPayloadQuotaUpgradeRejectsIncompletePayload(t *testing.T)
 	}
 }
 
+func TestSchema51AvatarStyleRolloutUpgradePreservesExistingRows(t *testing.T) {
+	upgrade := UpgraderFor(51)
+	if upgrade == nil {
+		t.Fatal("schema 51 avatar style rollout upgrader is not registered")
+	}
+	row := map[string]any{"id": "account-before-rollouts"}
+	got, err := upgrade("accounts", row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["id"] != row["id"] || len(got) != 1 {
+		t.Fatalf("avatar style rollout upgrader changed a prior row: %#v", got)
+	}
+	profile, err := upgrade("agent_avatar_profiles", map[string]any{"agent_id": "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, exists := profile["style_revision"]; !exists || value != nil {
+		t.Fatalf("legacy profile style revision = %#v, want explicit null", profile)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

@@ -207,8 +207,31 @@ type AvatarStyleView struct {
 	RealmID       string
 	StyleRevision int64
 	StylePack     avatardomain.StylePack
+	Rollout       *AvatarStyleRollout
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+// AvatarStyleRollout is value-free durable progress for asynchronously
+// projecting one selected realm style onto every live agent profile. Creative
+// payloads remain in immutable style/avatar versions and never enter the job.
+type AvatarStyleRollout struct {
+	StyleRevision         int64
+	StylePackID           string
+	StylePackVersion      int
+	Status                string
+	TargetProfileCount    *int64
+	ProcessedProfileCount int64
+	BatchCount            int64
+	LastBatchSize         int
+	FailureCount          int
+	RetryAfter            *time.Time
+	LastFailureCode       string
+	CreatedAt             time.Time
+	StartedAt             *time.Time
+	UpdatedAt             time.Time
+	CompletedAt           *time.Time
+	SupersededAt          *time.Time
 }
 
 // AvatarMutationReceipt is the durable value-free retry receipt for one

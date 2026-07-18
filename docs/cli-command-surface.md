@@ -4129,6 +4129,14 @@ witself avatar operator style version --realm-id REALM \
 but both payloads cannot consume the same stdin stream. See
 [agent-avatars.md](agent-avatars.md).
 
+Realm operator style reads include a value-free `rollout` object after a style
+publish. Its `pending`, `running`, `completed`, or `superseded` status and
+bounded counters let automation observe large-realm propagation without
+reading any SVG or generation prompt. `target_profile_count` is absent while a
+job is open and finalized when it becomes terminal; retry timestamps and the
+last value-free failure class expose bounded worker backoff. Self-agent
+`avatar style show` does not expose this realm-wide operator telemetry.
+
 The self and operator `history` commands print payload-free metadata pages and
 preserve `next_before_version` plus the server lifecycle fields for each
 immutable version: `is_active`, `is_proposed`, `was_activated`,

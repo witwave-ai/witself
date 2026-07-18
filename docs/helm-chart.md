@@ -87,6 +87,9 @@ Production chart defaults should assume:
 - Dedicated API, health, and metrics container ports.
 - Prometheus-compatible metrics enabled by default unless explicitly disabled.
 - Structured logs with redaction.
+- A bounded, restart-safe avatar style rollout worker on every replica, tuned
+  with `avatar.styleRollout.enabled`, `batchSize`, `interval`, and
+  `batchTimeout`.
 - Resource requests and limits.
 - Pod disruption budget where practical.
 - Optional horizontal pod autoscaling.

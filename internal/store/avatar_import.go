@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -56,11 +57,26 @@ type realmAvatarStyleImportScope struct {
 	revision int64
 }
 
+type avatarStyleRolloutImportKey struct {
+	realmID       string
+	styleRevision int64
+}
+
+type avatarStyleRolloutImportScope struct {
+	style     avatarStyleVersionImportKey
+	status    string
+	targets   *int64
+	processed int64
+	batches   int64
+	lastBatch int64
+}
+
 type avatarProfileImportScope struct {
 	agentID                   string
 	realmID                   string
 	lineage                   int64
 	style                     avatarStyleVersionImportKey
+	styleRevision             int64
 	status                    avatardomain.Status
 	policy                    avatardomain.AutonomyPolicy
 	subjectForm               avatardomain.SubjectForm
@@ -360,6 +376,146 @@ func (ic *importCtx) validateImportedRealmAvatarStyle(obj map[string]any) (realm
 	return realmAvatarStyleImportScope{style: style, revision: revision}, nil
 }
 
+func (ic *importCtx) validateImportedAvatarStyleRollout(obj map[string]any) (avatarStyleRolloutImportKey, avatarStyleRolloutImportScope, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("references realm %q not present in this archive", realmID)
+	}
+	styleRevision, ok := importedPositiveInteger(obj["style_revision"])
+	if !ok {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("style_revision is invalid")
+	}
+	stylePackID, err := requireStringField(obj, "style_pack_id")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("style_pack_id is required")
+	}
+	stylePackVersion, ok := importedPositiveInteger(obj["style_pack_version"])
+	if !ok {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("style_pack_version is invalid")
+	}
+	style := avatarStyleVersionImportKey{
+		realmID: realmID, stylePackID: stylePackID, version: stylePackVersion,
+	}
+	if _, exists := ic.avatarStyleVersions[style]; !exists {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("style version is not present")
+	}
+	status, err := requireStringField(obj, "status")
+	if err != nil || (status != "pending" && status != "running" &&
+		status != "completed" && status != "superseded") {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("status is invalid")
+	}
+	var targets *int64
+	targetRaw, targetPresent := obj["target_profile_count"]
+	if !targetPresent {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("target_profile_count is required")
+	}
+	if targetRaw != nil {
+		targetValue, ok := importedNonnegativeInteger(targetRaw)
+		if !ok {
+			return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("target_profile_count is invalid")
+		}
+		targets = &targetValue
+	}
+	processed, ok := importedNonnegativeInteger(obj["processed_profile_count"])
+	if !ok || (targets != nil && processed > *targets) ||
+		((status == "pending" || status == "running") &&
+			processed > math.MaxInt64-int64(maxAvatarStyleRolloutBatchSize)) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("processed_profile_count is invalid")
+	}
+	batches, ok := importedNonnegativeInteger(obj["batch_count"])
+	if !ok || ((status == "pending" || status == "running") && batches == math.MaxInt64) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("batch_count is invalid")
+	}
+	lastBatch, ok := importedNonnegativeInteger(obj["last_batch_size"])
+	if !ok || lastBatch > maxAvatarStyleRolloutBatchSize || lastBatch > processed ||
+		(batches == 0 && lastBatch != 0) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("last_batch_size is invalid")
+	}
+	failures, ok := importedNonnegativeInteger(obj["failure_count"])
+	if !ok || failures > 1000000 {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("failure_count is invalid")
+	}
+	failureCode, _ := obj["last_failure_code"].(string)
+	if failureCode != "" && failureCode != "batch_timeout" &&
+		failureCode != "lock_timeout" && failureCode != "statement_timeout" &&
+		failureCode != "candidate_failed" {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("last_failure_code is invalid")
+	}
+	failureRetryAfter, hasFailureRetry, err := importedOptionalTimestamp(obj, "retry_after")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("retry_after is invalid")
+	}
+	validFailure := (failures == 0 && !hasFailureRetry && failureCode == "") ||
+		(failures > 0 && (status == "pending" || status == "running") &&
+			hasFailureRetry && failureCode != "")
+	if !validFailure {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("failure retry state is inconsistent")
+	}
+	if hasFailureRetry && !ic.importedAt.IsZero() &&
+		failureRetryAfter.After(ic.importedAt.Add(5*time.Minute+maxArchiveManifestFutureSkew)) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("retry_after exceeds destination import time plus rollout backoff and clock skew")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("created_at is invalid")
+	}
+	updatedAt, err := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updatedAt.Before(*createdAt) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("updated_at is invalid")
+	}
+	startedAt, hasStarted, err := importedOptionalTimestamp(obj, "started_at")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("started_at is invalid")
+	}
+	completedAt, hasCompleted, err := importedOptionalTimestamp(obj, "completed_at")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("completed_at is invalid")
+	}
+	supersededAt, hasSuperseded, err := importedOptionalTimestamp(obj, "superseded_at")
+	if err != nil {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("superseded_at is invalid")
+	}
+	if (hasStarted && startedAt.Before(*createdAt)) ||
+		(hasCompleted && (!hasStarted || completedAt.Before(*startedAt))) ||
+		(hasSuperseded && supersededAt.Before(*createdAt)) ||
+		(hasStarted && updatedAt.Before(*startedAt)) ||
+		(hasCompleted && updatedAt.Before(*completedAt)) ||
+		(hasSuperseded && updatedAt.Before(*supersededAt)) {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("lifecycle timestamps are out of order")
+	}
+	validLifecycle := (status == "pending" && !hasStarted && !hasCompleted && !hasSuperseded) ||
+		(status == "running" && hasStarted && !hasCompleted && !hasSuperseded) ||
+		(status == "completed" && hasStarted && hasCompleted && !hasSuperseded) ||
+		(status == "superseded" && !hasCompleted && hasSuperseded)
+	if !validLifecycle {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("status and lifecycle timestamps disagree")
+	}
+	validCounters := (status == "pending" && targets == nil && processed == 0 && batches == 0 && lastBatch == 0) ||
+		(status == "running" && targets == nil && batches >= 1) ||
+		(status == "completed" && targets != nil && *targets == processed && batches >= 1) ||
+		(status == "superseded" && targets != nil && *targets == processed &&
+			((!hasStarted && processed == 0 && batches == 0 && lastBatch == 0) ||
+				(hasStarted && batches >= 1)))
+	if !validCounters {
+		return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, fmt.Errorf("status and progress counters disagree")
+	}
+	for field, timestamp := range map[string]*time.Time{
+		"created_at": createdAt, "updated_at": updatedAt, "started_at": startedAt,
+		"completed_at": completedAt, "superseded_at": supersededAt,
+	} {
+		if timestamp != nil {
+			if err := ic.requireTimestampAtOrBeforeExport(field, *timestamp); err != nil {
+				return avatarStyleRolloutImportKey{}, avatarStyleRolloutImportScope{}, err
+			}
+		}
+	}
+	return avatarStyleRolloutImportKey{realmID: realmID, styleRevision: styleRevision},
+		avatarStyleRolloutImportScope{
+			style: style, status: status, targets: targets, processed: processed,
+			batches: batches, lastBatch: lastBatch,
+		}, nil
+}
+
 func (ic *importCtx) validateImportedAvatarProfile(obj map[string]any) (avatarProfileImportScope, error) {
 	agentID, err := requireStringField(obj, "agent_id")
 	if err != nil || !ic.agents[agentID] {
@@ -380,6 +536,21 @@ func (ic *importCtx) validateImportedAvatarProfile(obj map[string]any) (avatarPr
 	style := avatarStyleVersionImportKey{realmID: realmID, stylePackID: stylePackID, version: styleVersion}
 	if _, exists := ic.avatarStyleVersions[style]; !exists {
 		return avatarProfileImportScope{}, fmt.Errorf("profile style version is not present")
+	}
+	styleRevisionRaw, styleRevisionPresent := obj["style_revision"]
+	if !styleRevisionPresent {
+		return avatarProfileImportScope{}, fmt.Errorf("style_revision is required")
+	}
+	var styleRevision int64
+	if styleRevisionRaw != nil {
+		var ok bool
+		styleRevision, ok = importedPositiveInteger(styleRevisionRaw)
+		if !ok {
+			return avatarProfileImportScope{}, fmt.Errorf("style_revision is invalid")
+		}
+	}
+	if selected, exists := ic.realmAvatarStyles[realmID]; exists && styleRevision > selected.revision {
+		return avatarProfileImportScope{}, fmt.Errorf("style_revision exceeds the selected realm style revision")
 	}
 	statusText, err := requireStringField(obj, "status")
 	status := avatardomain.Status(statusText)
@@ -476,7 +647,7 @@ func (ic *importCtx) validateImportedAvatarProfile(obj map[string]any) (avatarPr
 	}
 	return avatarProfileImportScope{
 		agentID: agentID, realmID: realmID, lineage: lineage,
-		style: style, status: status,
+		style: style, styleRevision: styleRevision, status: status,
 		policy: policy, subjectForm: form, latestVersion: latest,
 		proposedVersion: proposed, activeVersion: active, revision: revision,
 		retainedPayloadCountLimit: retainedCountLimit,
@@ -1180,7 +1351,19 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			return fmt.Errorf("agent %q has no avatar profile", agentID)
 		}
 		selected := ic.realmAvatarStyles[profile.realmID]
-		if ic.liveAgents[agentID] && profile.style != selected.style {
+		if profile.styleRevision > selected.revision {
+			return fmt.Errorf("agent %q profile style revision exceeds the selected realm style", agentID)
+		}
+		if ic.liveAgents[agentID] && profile.style == selected.style &&
+			profile.styleRevision != 0 && profile.styleRevision != selected.revision {
+			return fmt.Errorf("agent %q aligned profile carries a stale style revision", agentID)
+		}
+		if ic.liveAgents[agentID] && profile.style != selected.style &&
+			profile.styleRevision >= selected.revision {
+			return fmt.Errorf("agent %q mismatched profile is not behind the selected style revision", agentID)
+		}
+		if ic.liveAgents[agentID] && profile.style != selected.style &&
+			ic.schemaVersion < avatarStyleRolloutArchiveSchema {
 			return fmt.Errorf("agent %q profile does not use the selected realm style", agentID)
 		}
 		if got, want := ic.avatarResetCount[agentID], profile.lineage-1; got != want {
@@ -1360,6 +1543,61 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 			return fmt.Errorf("agent %q subject form disagrees with active avatar", agentID)
 		}
 	}
+	// Rollout histories can be much larger than the number of realms. Build
+	// profile populations once so validating every historical terminal job is
+	// O(profiles+rollouts), not one full profile scan per job.
+	realmProfileCounts := make(map[string]int64, len(ic.realms))
+	for _, profile := range ic.avatarProfiles {
+		realmProfileCounts[profile.realmID]++
+	}
+	for key, rollout := range ic.avatarStyleRollouts {
+		selected := ic.realmAvatarStyles[key.realmID]
+		profileCount := realmProfileCounts[key.realmID]
+		if key.styleRevision > selected.revision {
+			return fmt.Errorf("realm %q rollout revision exceeds its selected style revision", key.realmID)
+		}
+		if key.styleRevision == selected.revision && rollout.style != selected.style {
+			return fmt.Errorf("realm %q rollout at the selected revision targets another style", key.realmID)
+		}
+		if rollout.processed > profileCount {
+			return fmt.Errorf("realm %q rollout processed count exceeds its profile population", key.realmID)
+		}
+		if rollout.targets != nil && *rollout.targets > profileCount {
+			return fmt.Errorf("realm %q rollout target count exceeds its profile population", key.realmID)
+		}
+		maxBatches := profileCount
+		if rollout.status == "completed" && maxBatches < math.MaxInt64 {
+			// An exact-multiple rollout needs one final empty confirmation batch.
+			maxBatches++
+		}
+		if rollout.batches > maxBatches {
+			return fmt.Errorf("realm %q rollout batch count exceeds its profile population bound", key.realmID)
+		}
+		if rollout.status == "pending" || rollout.status == "running" {
+			if ic.accountStatus == "closed" {
+				return fmt.Errorf("closed account carries an open avatar style rollout for realm %q", key.realmID)
+			}
+			if key.styleRevision != selected.revision || rollout.style != selected.style {
+				return fmt.Errorf("realm %q open rollout does not target its selected style", key.realmID)
+			}
+		}
+	}
+	for agentID, profile := range ic.avatarProfiles {
+		if !ic.liveAgents[agentID] {
+			continue
+		}
+		selected := ic.realmAvatarStyles[profile.realmID]
+		if profile.style == selected.style {
+			continue
+		}
+		rollout, exists := ic.avatarStyleRollouts[avatarStyleRolloutImportKey{
+			realmID: profile.realmID, styleRevision: selected.revision,
+		}]
+		if !exists || (rollout.status != "pending" && rollout.status != "running") ||
+			rollout.style != selected.style {
+			return fmt.Errorf("agent %q style mismatch has no open selected-style rollout", agentID)
+		}
+	}
 	return nil
 }
 
@@ -1380,8 +1618,8 @@ func synthesizeLegacyImportedAvatars(ctx context.Context, tx pgx.Tx, ic *importC
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO agent_avatar_profiles
 			       (account_id, realm_id, agent_id, style_pack_id,
-			        style_pack_version, fallback_seed)
-			SELECT $1, $2, $3, style_pack_id, style_pack_version, $3
+			        style_pack_version, style_revision, fallback_seed)
+			SELECT $1, $2, $3, style_pack_id, style_pack_version, revision, $3
 			  FROM realm_avatar_styles
 			 WHERE account_id=$1 AND realm_id=$2`, ic.accountID, realmID, agentID); err != nil {
 			return fmt.Errorf("create legacy imported avatar profile: %w", err)

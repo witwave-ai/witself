@@ -336,6 +336,54 @@ schema-51 startup finalizer derives legacy locked-layer digests in bounded
 transactional batches with a batch-scoped style cache before validating and
 making the column mandatory.
 
+## Large-realm style rollout
+
+Selecting a new realm style is immediate, while projecting that selection onto
+agent profiles is a durable bounded rollout. The publish transaction creates a
+`pending` job and fences any older `pending` or `running` job. Server replicas
+then reconcile at most `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` mismatched live
+profiles per transaction, no more often than
+`WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL`. Every replica may run the worker: the
+locked job row is the cross-replica fence. Profiles carry a selected-style
+revision, and a concurrent expression index lets each batch read only older
+revisions. Rows leave that range transactionally, so restart, deletion, and
+concurrent profile changes cannot leave a cursor gap or force repeated scans of
+an already-updated realm.
+
+`GET /v1/realms/{realm}/avatar-style` and the corresponding operator CLI
+read expose a value-free `rollout` block with status, target and processed
+profile counts, batch count, last batch size, failure class/backoff, and
+lifecycle timestamps. Publish never scans a large realm: target count is absent
+while work remains and is finalized to the number of live profiles actually
+projected when the job completes or is superseded. Self-agent HTTP and MCP
+style reads omit this operator-only team-size and scheduler telemetry.
+
+The worker never rewrites an immutable avatar version or active pointer. For a
+profile it updates the next-generation style, clears one stale proposal
+pointer, preserves the active subject form, resets generation failure state,
+and moves the profile to `generation_due` or `evolution_due`. A profile is
+updated only while mismatched, so retries do not repeatedly advance its
+revision. New agents serialize with style publishing and inherit the selected
+style revision directly. Deleted agents receive only the internal revision
+fence so they leave bounded scans; their avatar projection is not rewritten. A
+job for a deleted realm is durably superseded.
+
+Suspended accounts are not discovered by workers. A suspended archive carries
+the exact job and counters, and the destination resumes processing only after
+the account is explicitly resumed. Closing an account terminally supersedes
+every open rollout in the same account-locked transaction; archives for a
+closed account are rejected if they try to restore an open job. During a
+mixed-version deployment, the worker also reconciles a closed account left
+with an open job by an older writer. The worker settings are strictly bounded:
+batch size 1-1000, interval 100ms-1h, and worker-attempt/batch timeout
+100ms-5m; defaults are 100, 2s, and 30s. The timeout is enforced by both the
+whole-tick client deadline, each candidate cancellation scope, and
+transaction-local PostgreSQL lock/statement timeouts. Caller cancellation is
+not persisted as a job failure. A failed job receives a value-free error class
+and bounded durable backoff, then the same tick may advance another realm. Set
+`WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED=false` only for an intentional operator
+pause, because style publication remains available and queues durable work.
+
 ## Lifecycle events
 
 Avatar changes emit value-free, transactionally coupled lifecycle events:
@@ -352,6 +400,8 @@ Avatar changes emit value-free, transactionally coupled lifecycle events:
 - `avatar.style.changed`
 - `avatar.quota.changed`
 - `avatar.payload.compacted`
+- `avatar.style.rollout.completed`
+- `avatar.style.rollout.superseded`
 
 Event metadata may contain stable ids, version numbers, status, subject form,
 and value-free quota counts and byte totals. `avatar.quota.changed` is attributed

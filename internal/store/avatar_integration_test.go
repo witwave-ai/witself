@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pressly/goose/v3"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/id"
@@ -222,7 +225,7 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 	}
 }
 
-func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
+func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
@@ -263,7 +266,10 @@ func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	assertMigrationTestVersion(t, dsn, 51)
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
+	assertMigrationTestColumn(t, st, "agent_avatar_profiles", "style_revision", true)
+	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
 	view, err := st.GetAvatar(ctx, Principal{Kind: PrincipalAgent,
 		ID: "agent_memory_owner", AccountID: "acc_memory_trigger",
 		RealmID: "realm_memory_trigger", AgentName: "owner"})
@@ -278,6 +284,316 @@ func TestMigration50BackfillsAndRollsBackAvatarStatePostgres(t *testing.T) {
 		view.Active.LockedLayersSHA256 == "" {
 		t.Fatalf("backfilled avatar = %#v", view)
 	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()-1))
+	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", false)
+	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema-1))
+	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", false)
+	assertMigrationTestColumn(t, st, "agent_avatar_profiles", "style_revision", false)
+	assertMigrationTestTable(t, st, "agent_avatar_profiles", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 50)
+	assertMigrationTestColumn(t, st, "agent_avatar_profiles", "retained_payload_count_limit", false)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "payload_state", false)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 41)
+	assertMigrationTestTable(t, st, "agent_avatar_profiles", false)
+	assertMigrationTestTable(t, st, "avatar_style_packs", false)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+	if err := st.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_avatar_profiles`).Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 3 {
+		t.Fatalf("avatar profiles after re-upgrade = %d, want 3", profiles)
+	}
+}
+
+func TestAvatarStyleRevisionConstraintUsesWriterCompatibleValidationPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 41)
+	insertMigrationTestMemoryPrincipals(t, st)
+	migrationTestUpTo(t, dsn, int64(avatarStyleRolloutArchiveSchema-1))
+	const extraProfiles = 20000
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agents (id,realm_id,name)
+		SELECT 'agent_style_constraint_' || lpad(g::text,5,'0'),
+		       'realm_memory_trigger','constraint-' || lpad(g::text,5,'0')
+		  FROM generate_series(1,$1) g`, extraProfiles); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_avatar_profiles
+		       (account_id,realm_id,agent_id,style_pack_id,style_pack_version,fallback_seed)
+		SELECT 'acc_memory_trigger','realm_memory_trigger',a.id,
+		       ras.style_pack_id,ras.style_pack_version,a.id
+		  FROM agents a
+		  JOIN realm_avatar_styles ras
+		    ON ras.account_id='acc_memory_trigger' AND ras.realm_id='realm_memory_trigger'
+		 WHERE a.id LIKE 'agent_style_constraint_%'`); err != nil {
+		t.Fatal(err)
+	}
+	migrationTestUpTo(t, dsn, int64(avatarStyleRolloutArchiveSchema))
+	var validated bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT convalidated FROM pg_constraint
+		 WHERE conrelid='agent_avatar_profiles'::regclass
+		   AND conname='agent_avatar_profiles_style_revision_positive'`).Scan(&validated); err != nil {
+		t.Fatal(err)
+	}
+	if validated {
+		t.Fatal("base rollout migration scanned and validated the large profile constraint under its metadata lock")
+	}
+
+	writer, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(ctx, `LOCK TABLE agent_avatar_profiles IN ROW EXCLUSIVE MODE`); err != nil {
+		_ = writer.Rollback(ctx)
+		t.Fatal(err)
+	}
+	validationDone := make(chan error, 1)
+	go func() {
+		_, err := st.pool.Exec(ctx, `
+			ALTER TABLE agent_avatar_profiles
+			VALIDATE CONSTRAINT agent_avatar_profiles_style_revision_positive`)
+		validationDone <- err
+	}()
+	select {
+	case err := <-validationDone:
+		if err != nil {
+			_ = writer.Rollback(ctx)
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = writer.Rollback(ctx)
+		t.Fatal("constraint validation blocked behind a writer-compatible ROW EXCLUSIVE table lock")
+	}
+	if err := writer.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT convalidated FROM pg_constraint
+		 WHERE conrelid='agent_avatar_profiles'::regclass
+		   AND conname='agent_avatar_profiles_style_revision_positive'`).Scan(&validated); err != nil || !validated {
+		t.Fatalf("validated constraint = %t / %v", validated, err)
+	}
+	migrationTestUpTo(t, dsn, int64(SchemaVersion()))
+	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
+}
+
+func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+
+	t.Run("up after index build before version record", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			CREATE INDEX agent_avatar_profiles_by_style_revision
+			    ON agent_avatar_profiles
+			       (account_id,realm_id,(COALESCE(style_revision,0)),agent_id)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Migrate(); err != nil {
+			t.Fatalf("retry migration with pre-existing named index: %v", err)
+		}
+		var readyAndValid bool
+		if err := st.pool.QueryRow(ctx, `
+			SELECT i.indisready AND i.indisvalid
+			  FROM pg_index i
+			  JOIN pg_class c ON c.oid=i.indexrelid
+			 WHERE c.relname='agent_avatar_profiles_by_style_revision'`).Scan(&readyAndValid); err != nil || !readyAndValid {
+			t.Fatalf("retried index ready/valid = %t / %v", readyAndValid, err)
+		}
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+	})
+
+	t.Run("down after index already absent", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `DROP INDEX CONCURRENTLY agent_avatar_profiles_by_style_revision`); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatalf("retry down with already-absent index: %v", err)
+		}
+		assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema))
+	})
+}
+
+func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+
+	t.Run("open and mismatched terminal jobs refuse; aligned completed permits", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "down-open")
+		realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-open", 1)
+		publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "down-open-v2")
+		if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
+			t.Fatal(err)
+		}
+		err := migrationTestDown(t, dsn, true)
+		if err == nil || !strings.Contains(err.Error(), "pending or running") {
+			t.Fatalf("open rollout down error = %v", err)
+		}
+		assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema))
+		if _, err := st.pool.Exec(ctx, `
+			WITH stamp AS MATERIALIZED (SELECT statement_timestamp() AS at)
+			UPDATE avatar_style_rollout_jobs
+			   SET status='completed',target_profile_count=0,batch_count=1,
+			       started_at=stamp.at,completed_at=stamp.at,updated_at=stamp.at
+			  FROM stamp WHERE account_id=$1 AND realm_id=$2`,
+			provisioned.AccountID, realm.ID); err != nil {
+			t.Fatal(err)
+		}
+		err = migrationTestDown(t, dsn, true)
+		if err == nil || !strings.Contains(err.Error(), "live profile differs") {
+			t.Fatalf("forged terminal mismatch down error = %v", err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_avatar_profiles p
+			   SET style_pack_id=ras.style_pack_id,style_pack_version=ras.style_pack_version
+			  FROM realm_avatar_styles ras
+			 WHERE p.account_id=ras.account_id AND p.realm_id=ras.realm_id
+			   AND p.account_id=$1 AND p.realm_id=$2`, provisioned.AccountID, realm.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrationTestDown(t, dsn, false); err != nil {
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema-1))
+		assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", false)
+	})
+
+	t.Run("aligned superseded history permits", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		provisioned, operator := provisionActiveRolloutAccountForTest(t, ctx, st, "down-superseded")
+		realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-superseded", 0)
+		publishAvatarStyleForTest(t, ctx, st, operator, realm.ID, 1, 2, "down-superseded-v2")
+		if _, err := st.pool.Exec(ctx, `
+			WITH stamp AS MATERIALIZED (SELECT statement_timestamp() AS at)
+			UPDATE avatar_style_rollout_jobs
+			   SET status='superseded',target_profile_count=0,
+			       superseded_at=stamp.at,updated_at=stamp.at
+			  FROM stamp WHERE account_id=$1 AND realm_id=$2`,
+			provisioned.AccountID, realm.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
+			t.Fatal(err)
+		}
+		if err := migrationTestDown(t, dsn, false); err != nil { // remove the rollout job and profile fence
+			t.Fatal(err)
+		}
+		assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema-1))
+	})
+}
+
+func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, _ := provisionActiveRolloutAccountForTest(t, ctx, st, "down-race")
+	realm := createRolloutRealmWithAgentsForTest(t, ctx, st, provisioned.AccountID, "down-race", 0)
+	if err := migrationTestDown(t, dsn, false); err != nil { // remove the concurrent lookup index
+		t.Fatal(err)
+	}
+	writer, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(ctx, `
+		INSERT INTO avatar_style_rollout_jobs
+		       (account_id,realm_id,style_revision,style_pack_id,style_pack_version)
+		SELECT account_id,realm_id,revision,style_pack_id,style_pack_version
+		  FROM realm_avatar_styles WHERE account_id=$1 AND realm_id=$2`,
+		provisioned.AccountID, realm.ID); err != nil {
+		_ = writer.Rollback(ctx)
+		t.Fatal(err)
+	}
+	db := migrationTestSQLDB(t, dsn)
+	defer db.Close()
+	downDone := make(chan error, 1)
+	go func() { downDone <- goose.Down(db, "migrations") }()
+	waiting := false
+	for attempts := 0; attempts < 100; attempts++ {
+		if err := st.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM pg_locks
+			   WHERE relation='avatar_style_rollout_jobs'::regclass
+			     AND mode='AccessExclusiveLock' AND NOT granted
+			)`).Scan(&waiting); err != nil {
+			_ = writer.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !waiting {
+		_ = writer.Rollback(ctx)
+		t.Fatal("down migration never waited for the transaction-held rollout table lock")
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-downDone:
+		if err == nil || !strings.Contains(err.Error(), "pending or running") {
+			t.Fatalf("down after racing insert = %v, want open-job refusal", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("down migration did not finish after writer committed")
+	}
+	assertMigrationTestVersion(t, dsn, int64(avatarStyleRolloutArchiveSchema))
 }
 
 func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testing.T) {
@@ -587,6 +903,7 @@ func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testi
 	if styleUpdate.Style.StyleRevision != 2 || styleUpdate.Style.StylePack.Version != 2 {
 		t.Fatalf("style update = %#v", styleUpdate.Style)
 	}
+	drainAvatarStyleRolloutsForTest(t, ctx, st, 10)
 	afterStyle, err := st.GetAvatar(ctx, agentPrincipal)
 	if err != nil {
 		t.Fatal(err)

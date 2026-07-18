@@ -13,3 +13,7 @@ data:
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
   WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: {{ .Values.avatar.styleRollout.enabled | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.avatar.styleRollout.batchSize | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: {{ .Values.avatar.styleRollout.interval | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: {{ .Values.avatar.styleRollout.batchTimeout | quote }}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -761,6 +762,7 @@ func TestAvatarArchiveValidationAcceptsParentLineageLifecycleScenarios(t *testin
 		ic.realmAvatarStyles[avatarArchiveRealm] = selected
 		feedAvatarArchiveProfile(t, ic, map[string]any{
 			"status": "active", "style_pack_version": int64(2),
+			"style_revision":        int64(2),
 			"latest_avatar_version": int64(2), "active_avatar_version": int64(2),
 			"subject_form": "animal", "revision": int64(5),
 		})
@@ -1159,6 +1161,7 @@ func TestAvatarArchiveValidationRejectsOffStyleActiveProjection(t *testing.T) {
 	ic.realmAvatarStyles[avatarArchiveRealm] = realmAvatarStyleImportScope{style: selected, revision: 2}
 	profile := ic.avatarProfiles[avatarArchiveAgent]
 	profile.style = selected
+	profile.styleRevision = 2
 	ic.avatarProfiles[avatarArchiveAgent] = profile
 
 	err := ic.validateImportedAvatarGraph()
@@ -1167,11 +1170,250 @@ func TestAvatarArchiveValidationRejectsOffStyleActiveProjection(t *testing.T) {
 	}
 }
 
+func TestAvatarArchiveValidationRequiresExactOpenRolloutForPartialProjection(t *testing.T) {
+	newPartial := func(t *testing.T, schema int) (*importCtx, avatarStyleVersionImportKey) {
+		t.Helper()
+		ic := newAvatarArchiveImportContext(t)
+		ic.schemaVersion = schema
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		selected := avatarStyleVersionImportKey{
+			realmID: avatarArchiveRealm, stylePackID: avatardomain.DefaultStylePackID, version: 2,
+		}
+		ic.avatarStyleVersions[selected] = avatarStyleVersionImportScope{}
+		headKey := avatarStyleHeadImportKey{realmID: avatarArchiveRealm, stylePackID: avatardomain.DefaultStylePackID}
+		ic.avatarStyleHeads[headKey] = avatarStyleHeadImportScope{currentVersion: 2, revision: 2}
+		ic.realmAvatarStyles[avatarArchiveRealm] = realmAvatarStyleImportScope{style: selected, revision: 2}
+		return ic, selected
+	}
+
+	t.Run("pre rollout schema rejects mismatch", func(t *testing.T) {
+		ic, _ := newPartial(t, avatarStyleRolloutArchiveSchema-1)
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "does not use the selected realm style") {
+			t.Fatalf("error = %v, want legacy mismatch refusal", err)
+		}
+	})
+
+	t.Run("current schema requires durable exact job", func(t *testing.T) {
+		ic, _ := newPartial(t, avatarStyleRolloutArchiveSchema)
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "no open selected-style rollout") {
+			t.Fatalf("error = %v, want missing job refusal", err)
+		}
+	})
+
+	t.Run("exact pending job accepts partial projection", func(t *testing.T) {
+		ic, selected := newPartial(t, avatarStyleRolloutArchiveSchema)
+		key := avatarStyleRolloutImportKey{realmID: avatarArchiveRealm, styleRevision: 2}
+		ic.avatarStyleRollouts[key] = avatarStyleRolloutImportScope{
+			style: selected, status: "pending",
+		}
+		if err := ic.validateImportedAvatarGraph(); err != nil {
+			t.Fatalf("partial rollout graph = %v", err)
+		}
+	})
+
+	t.Run("closed account rejects otherwise exact open job", func(t *testing.T) {
+		ic, selected := newPartial(t, avatarStyleRolloutArchiveSchema)
+		if err := ic.validateAndRecord("accounts", map[string]any{
+			"id": avatarArchiveAccount, "status": "closed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		key := avatarStyleRolloutImportKey{realmID: avatarArchiveRealm, styleRevision: 2}
+		ic.avatarStyleRollouts[key] = avatarStyleRolloutImportScope{
+			style: selected, status: "pending",
+		}
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "closed account carries an open") {
+			t.Fatalf("error = %v, want closed/open refusal", err)
+		}
+	})
+
+	t.Run("future terminal revision cannot preoccupy a publish key", func(t *testing.T) {
+		ic, selected := newPartial(t, avatarStyleRolloutArchiveSchema)
+		key := avatarStyleRolloutImportKey{realmID: avatarArchiveRealm, styleRevision: 3}
+		ic.avatarStyleRollouts[key] = avatarStyleRolloutImportScope{
+			style: selected, status: "completed",
+		}
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "rollout revision exceeds") {
+			t.Fatalf("error = %v, want future revision refusal", err)
+		}
+	})
+
+	t.Run("selected revision binds exact style even when terminal", func(t *testing.T) {
+		ic, _ := newPartial(t, avatarStyleRolloutArchiveSchema)
+		oldStyle := avatarStyleVersionImportKey{
+			realmID: avatarArchiveRealm, stylePackID: avatardomain.DefaultStylePackID, version: 1,
+		}
+		key := avatarStyleRolloutImportKey{realmID: avatarArchiveRealm, styleRevision: 2}
+		ic.avatarStyleRollouts[key] = avatarStyleRolloutImportScope{
+			style: oldStyle, status: "superseded",
+		}
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "targets another style") {
+			t.Fatalf("error = %v, want equal-revision style refusal", err)
+		}
+	})
+}
+
+func TestAvatarArchiveValidationBindsRolloutStatusCountersAndTimes(t *testing.T) {
+	base := func(t *testing.T) (*importCtx, map[string]any) {
+		t.Helper()
+		ic := newAvatarArchiveImportContext(t)
+		ic.schemaVersion = avatarStyleRolloutArchiveSchema
+		feedAvatarArchiveStyle(t, ic, false)
+		return ic, map[string]any{
+			"account_id": avatarArchiveAccount, "realm_id": avatarArchiveRealm,
+			"style_revision": int64(1), "style_pack_id": avatardomain.DefaultStylePackID,
+			"style_pack_version": int64(1), "status": "pending",
+			"target_profile_count": nil, "processed_profile_count": int64(0),
+			"batch_count": int64(0), "last_batch_size": int64(0),
+			"failure_count": int64(0), "retry_after": nil, "last_failure_code": "",
+			"created_at": avatarArchiveTime, "started_at": nil,
+			"updated_at": avatarArchiveTime, "completed_at": nil, "superseded_at": nil,
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{"pending counters", func(row map[string]any) { row["processed_profile_count"] = int64(1) }, "status and progress counters disagree"},
+		{"pending finalized target", func(row map[string]any) { row["target_profile_count"] = int64(0) }, "status and progress counters disagree"},
+		{"open processed overflow", func(row map[string]any) { row["processed_profile_count"] = int64(math.MaxInt64) }, "processed_profile_count is invalid"},
+		{"open processed lacks batch headroom", func(row map[string]any) {
+			row["status"] = "running"
+			row["processed_profile_count"] = int64(math.MaxInt64 - maxAvatarStyleRolloutBatchSize + 1)
+			row["batch_count"] = int64(1)
+			row["last_batch_size"] = int64(1)
+			row["started_at"] = avatarArchiveTime
+		}, "processed_profile_count is invalid"},
+		{"open batch overflow", func(row map[string]any) { row["batch_count"] = int64(math.MaxInt64) }, "batch_count is invalid"},
+		{"running without batch", func(row map[string]any) {
+			row["status"] = "running"
+			row["started_at"] = avatarArchiveTime
+		}, "status and progress counters disagree"},
+		{"completed without batch", func(row map[string]any) {
+			row["status"] = "completed"
+			row["started_at"] = avatarArchiveTime
+			row["completed_at"] = avatarArchiveTime
+		}, "status and progress counters disagree"},
+		{"unstarted superseded counters", func(row map[string]any) {
+			row["status"] = "superseded"
+			row["target_profile_count"] = int64(1)
+			row["processed_profile_count"] = int64(1)
+			row["batch_count"] = int64(1)
+			row["last_batch_size"] = int64(1)
+			row["superseded_at"] = avatarArchiveTime
+		}, "status and progress counters disagree"},
+		{"updated before completion", func(row map[string]any) {
+			row["status"] = "completed"
+			row["target_profile_count"] = int64(1)
+			row["processed_profile_count"] = int64(1)
+			row["batch_count"] = int64(1)
+			row["last_batch_size"] = int64(1)
+			row["started_at"] = "2026-07-17T11:59:59Z"
+			row["completed_at"] = "2026-07-17T12:00:01Z"
+		}, "lifecycle timestamps are out of order"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ic, row := base(t)
+			test.mutate(row)
+			_, _, err := ic.validateImportedAvatarStyleRollout(row)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestAvatarArchiveValidationBoundsOpenRolloutCountersByPopulation(t *testing.T) {
+	newContext := func(t *testing.T) (*importCtx, map[string]any) {
+		t.Helper()
+		ic := newAvatarArchiveImportContext(t)
+		ic.schemaVersion = avatarStyleRolloutArchiveSchema
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		row := map[string]any{
+			"account_id": avatarArchiveAccount, "realm_id": avatarArchiveRealm,
+			"style_revision": int64(1), "style_pack_id": avatardomain.DefaultStylePackID,
+			"style_pack_version": int64(1), "status": "running",
+			"target_profile_count": nil, "processed_profile_count": int64(1),
+			"batch_count": int64(1), "last_batch_size": int64(1),
+			"failure_count": int64(0), "retry_after": nil, "last_failure_code": "",
+			"created_at": avatarArchiveTime, "started_at": avatarArchiveTime,
+			"updated_at": avatarArchiveTime, "completed_at": nil, "superseded_at": nil,
+		}
+		return ic, row
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{"processed", func(row map[string]any) { row["processed_profile_count"] = int64(2) }, "processed count exceeds"},
+		{"batches", func(row map[string]any) { row["batch_count"] = int64(math.MaxInt64 - 1) }, "batch count exceeds"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ic, row := newContext(t)
+			test.mutate(row)
+			if err := ic.validateAndRecord("avatar_style_rollout_jobs", row); err != nil {
+				t.Fatal(err)
+			}
+			err := ic.validateImportedAvatarGraph()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestAvatarArchiveValidationScalesAcrossManyRolloutJobsAndProfiles(t *testing.T) {
+	const population = 4000
+	ic := newAvatarArchiveImportContext(t)
+	ic.schemaVersion = avatarStyleRolloutArchiveSchema
+	feedAvatarArchiveStyle(t, ic, false)
+	feedAvatarArchiveProfile(t, ic, map[string]any{})
+
+	selected := ic.realmAvatarStyles[avatarArchiveRealm]
+	selected.revision = population
+	ic.realmAvatarStyles[avatarArchiveRealm] = selected
+	profile := ic.avatarProfiles[avatarArchiveAgent]
+	profile.styleRevision = population
+	ic.avatarProfiles[avatarArchiveAgent] = profile
+	for i := 1; i < population; i++ {
+		agentID := fmt.Sprintf("agent_rollout_scale_%05d", i)
+		ic.agents[agentID] = true
+		ic.liveAgents[agentID] = true
+		ic.agentRealms[agentID] = avatarArchiveRealm
+		copy := profile
+		copy.agentID = agentID
+		ic.avatarProfiles[agentID] = copy
+	}
+	zero := int64(0)
+	for revision := int64(1); revision <= population; revision++ {
+		ic.avatarStyleRollouts[avatarStyleRolloutImportKey{
+			realmID: avatarArchiveRealm, styleRevision: revision,
+		}] = avatarStyleRolloutImportScope{
+			style: selected.style, status: "superseded", targets: &zero,
+		}
+	}
+	if err := ic.validateImportedAvatarGraph(); err != nil {
+		t.Fatalf("large rollout/profile graph = %v", err)
+	}
+}
+
 func TestAvatarArchiveValidationRejectsEveryCrossTenantAvatarRow(t *testing.T) {
 	for _, table := range []string{
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
 		"agent_avatar_profiles", "agent_avatar_versions", "agent_avatar_activations",
 		"agent_avatar_rejections", "agent_avatar_resets", "avatar_mutation_receipts",
+		"avatar_style_rollout_jobs",
 	} {
 		t.Run(table, func(t *testing.T) {
 			ic := newAvatarArchiveImportContext(t)
@@ -1376,6 +1618,7 @@ func avatarArchiveProfileRow(overrides map[string]any) map[string]any {
 		"lineage_generation": int64(1),
 		"autonomy_policy":    "agent_self_managed",
 		"style_pack_id":      avatardomain.DefaultStylePackID, "style_pack_version": int64(1),
+		"style_revision":        int64(1),
 		"latest_avatar_version": nil, "proposed_avatar_version": nil,
 		"active_avatar_version": nil, "subject_form": "human",
 		"attempt_count": int64(0), "retry_after": nil, "fallback_seed": avatarArchiveAgent,

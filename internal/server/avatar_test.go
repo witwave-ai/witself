@@ -161,6 +161,9 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 	}
 
 	body = avatarRequest(t, srv.URL, http.MethodGet, "/v1/self/avatar/style", "agent-token", "", "", http.StatusOK)
+	if strings.Contains(string(body), `"rollout"`) {
+		t.Fatalf("self style leaked operator rollout progress: %s", body)
+	}
 	var styleEnvelope struct {
 		Style AvatarStyleView `json:"style"`
 	}
@@ -436,7 +439,14 @@ func TestOperatorAvatarHTTPRoutesAreAccountScoped(t *testing.T) {
 	avatarRequest(t, srv.URL, http.MethodPost, "/v1/agents/agent_target/avatar:reset", "operator-token", "reset-key", `{"expected_profile_revision":6}`, http.StatusOK)
 	avatarRequest(t, srv.URL, http.MethodPatch, "/v1/agents/agent_target/avatar-policy", "operator-token", "policy-key", `{"policy":"operator_only","expected_profile_revision":6}`, http.StatusOK)
 	avatarRequest(t, srv.URL, http.MethodPatch, "/v1/agents/agent_target/avatar-quota", "operator-token", "quota-key", `{"retained_payload_count_limit":8,"retained_payload_byte_limit":1048576,"expected_profile_revision":6}`, http.StatusOK)
-	avatarRequest(t, srv.URL, http.MethodGet, "/v1/realms/realm_self/avatar-style", "operator-token", "", "", http.StatusOK)
+	operatorStyleBody := avatarRequest(t, srv.URL, http.MethodGet, "/v1/realms/realm_self/avatar-style", "operator-token", "", "", http.StatusOK)
+	var operatorStyleEnvelope struct {
+		Style AvatarStyleView `json:"style"`
+	}
+	decodeAvatarTestJSON(t, operatorStyleBody, &operatorStyleEnvelope)
+	if operatorStyleEnvelope.Style.Rollout == nil || operatorStyleEnvelope.Style.Rollout.Status != "running" {
+		t.Fatalf("operator style omitted rollout progress: %+v", operatorStyleEnvelope.Style)
+	}
 	styleRequest, _ := json.Marshal(CreateAvatarStyleVersionRequest{ExpectedStyleRevision: 2, StylePack: avatar.BuiltInFlatVectorStylePack()})
 	body := avatarRequest(t, srv.URL, http.MethodPost, "/v1/realms/realm_self/avatar-style/versions", "operator-token", "style-key", string(styleRequest), http.StatusCreated)
 	var styleMutation struct {
@@ -803,7 +813,13 @@ func testServerAvatarStyle() AvatarStyleView {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	return AvatarStyleView{
 		RealmID: "realm_self", StyleRevision: 2,
-		StylePack: avatar.BuiltInFlatVectorStylePack(), CreatedAt: now, UpdatedAt: now,
+		StylePack: avatar.BuiltInFlatVectorStylePack(),
+		Rollout: &AvatarStyleRollout{
+			StyleRevision: 2, StylePackID: avatar.DefaultStylePackID, StylePackVersion: 1,
+			Status: "running", ProcessedProfileCount: 3,
+			BatchCount: 1, LastBatchSize: 3, CreatedAt: now, StartedAt: &now, UpdatedAt: now,
+		},
+		CreatedAt: now, UpdatedAt: now,
 	}
 }
 

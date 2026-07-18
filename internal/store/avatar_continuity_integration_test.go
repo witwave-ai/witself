@@ -185,6 +185,7 @@ func TestAvatarSameStyleSelfContinuityOperatorOverrideAndStyleMigrationPostgres(
 	if err != nil {
 		t.Fatal(err)
 	}
+	drainAvatarStyleRolloutsForTest(t, ctx, st, 10)
 	afterStyle, err := st.GetAvatar(ctx, agentPrincipal)
 	if err != nil {
 		t.Fatal(err)

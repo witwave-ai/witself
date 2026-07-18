@@ -79,6 +79,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAvatarGenerationFailed, VerbAvatarRolledBack,
 		VerbAvatarReset, VerbAvatarPolicyChanged, VerbAvatarStyleChanged,
 		VerbAvatarQuotaChanged, VerbAvatarPayloadCompacted,
+		VerbAvatarStyleRolloutCompleted, VerbAvatarStyleRolloutSuperseded,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
@@ -177,6 +178,17 @@ func TestAvatarAuditSchemasAreValueFree(t *testing.T) {
 				"net_reclaimed_bytes": "8192", "retained_payload_count": "4",
 				"retained_payload_bytes": "16384", "count_limit": "4",
 				"byte_limit": "524288", "rollback_floor": "2",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorSystem,
+			Verb: VerbAvatarStyleRolloutCompleted, Metadata: map[string]any{
+				"realm_id": "realm_1", "style_pack_id": "witself-flat-portrait",
+				"style_pack_version": "2", "style_revision": "2",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorSystem,
+			Verb: VerbAvatarStyleRolloutSuperseded, Metadata: map[string]any{
+				"realm_id": "realm_1", "style_pack_id": "witself-flat-portrait",
+				"style_pack_version": "2", "style_revision": "2",
+				"reason": "newer_style_selected", "superseded_by_style_revision": "3",
 			}},
 	}
 	for _, input := range tests {

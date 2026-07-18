@@ -41,6 +41,15 @@ features:
     # separate release; older compiled schemas refuse to start when enabled.
     enabled: false
 
+avatar:
+  styleRollout:
+    # Every replica may run this worker; the Postgres job row is the durable
+    # cross-replica fence. Each tick performs at most one bounded transaction.
+    enabled: true
+    batchSize: 100
+    interval: 2s
+    batchTimeout: 30s
+
 database:
   existingSecret:
     # Name of a Secret containing the Postgres DSN. Empty disables DB wiring.

@@ -148,11 +148,32 @@ type AvatarHistoryOptions struct {
 // AvatarStyleView is the realm's active immutable style-pack version and its
 // optimistic-concurrency revision.
 type AvatarStyleView struct {
-	RealmID       string           `json:"realm_id"`
-	StyleRevision int64            `json:"style_revision"`
-	StylePack     avatar.StylePack `json:"style_pack"`
-	CreatedAt     time.Time        `json:"created_at"`
-	UpdatedAt     time.Time        `json:"updated_at"`
+	RealmID       string              `json:"realm_id"`
+	StyleRevision int64               `json:"style_revision"`
+	StylePack     avatar.StylePack    `json:"style_pack"`
+	Rollout       *AvatarStyleRollout `json:"rollout,omitempty"`
+	CreatedAt     time.Time           `json:"created_at"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+}
+
+// AvatarStyleRollout is durable, value-free profile propagation progress.
+type AvatarStyleRollout struct {
+	StyleRevision         int64      `json:"style_revision"`
+	StylePackID           string     `json:"style_pack_id"`
+	StylePackVersion      int        `json:"style_pack_version"`
+	Status                string     `json:"status"`
+	TargetProfileCount    *int64     `json:"target_profile_count,omitempty"`
+	ProcessedProfileCount int64      `json:"processed_profile_count"`
+	BatchCount            int64      `json:"batch_count"`
+	LastBatchSize         int        `json:"last_batch_size"`
+	FailureCount          int        `json:"failure_count"`
+	RetryAfter            *time.Time `json:"retry_after,omitempty"`
+	LastFailureCode       string     `json:"last_failure_code,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	StartedAt             *time.Time `json:"started_at,omitempty"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+	SupersededAt          *time.Time `json:"superseded_at,omitempty"`
 }
 
 // AvatarMutationReceipt is a value-free, retry-safe lifecycle receipt.

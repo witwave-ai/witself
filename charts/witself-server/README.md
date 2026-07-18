@@ -47,6 +47,14 @@ renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 27 or older refuses to start when it is enabled, so turn it on only with schema
 28 or newer.
 
+Large-realm avatar style propagation is enabled by default. The
+`avatar.styleRollout` values render
+`WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED`,
+`WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` (1-1000),
+`WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` (100ms-1h), and
+`WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` (server bound 100ms-5m). Every replica
+may run the worker; PostgreSQL job locking provides the shared fence.
+
 For an existing multi-replica database, the rollout sequence is mandatory:
 first deploy schema-27-compatible writers with the flag off and wait for full
 convergence; next deploy schema 28 with the flag still off and wait again; only
@@ -82,7 +90,7 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
-`features.factDeletion.enabled`, `database.existingSecret.*`,
+`features.factDeletion.enabled`, `avatar.styleRollout.*`, `database.existingSecret.*`,
 `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,

@@ -36,19 +36,20 @@ type SelfAvatarCheckpoint struct {
 func createAgentAvatarProfileTx(ctx context.Context, tx pgx.Tx, accountID, realmID, agentID string) error {
 	var stylePackID string
 	var stylePackVersion int
+	var styleRevision int64
 	if err := tx.QueryRow(ctx, `
-		SELECT style_pack_id, style_pack_version
+		SELECT style_pack_id, style_pack_version, revision
 		  FROM realm_avatar_styles
 		 WHERE account_id=$1 AND realm_id=$2`, accountID, realmID).Scan(
-		&stylePackID, &stylePackVersion); err != nil {
+		&stylePackID, &stylePackVersion, &styleRevision); err != nil {
 		return fmt.Errorf("resolve initial avatar style: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO agent_avatar_profiles
 		       (account_id, realm_id, agent_id, style_pack_id,
-		        style_pack_version, fallback_seed)
-		VALUES ($1,$2,$3,$4,$5,$3)`, accountID, realmID, agentID,
-		stylePackID, stylePackVersion); err != nil {
+		        style_pack_version, style_revision, fallback_seed)
+		VALUES ($1,$2,$3,$4,$5,$6,$3)`, accountID, realmID, agentID,
+		stylePackID, stylePackVersion, styleRevision); err != nil {
 		return fmt.Errorf("create agent avatar profile: %w", err)
 	}
 	return logEventTx(ctx, tx, EventInput{

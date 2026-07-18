@@ -260,10 +260,31 @@ func toServerAvatarVersionSummary(version store.AvatarVersionSummary) server.Ava
 }
 
 func toServerAvatarStyle(style store.AvatarStyleView) server.AvatarStyleView {
-	return server.AvatarStyleView{
+	out := server.AvatarStyleView{
 		RealmID: style.RealmID, StyleRevision: style.StyleRevision, StylePack: style.StylePack,
 		CreatedAt: style.CreatedAt, UpdatedAt: style.UpdatedAt,
 	}
+	if style.Rollout != nil {
+		out.Rollout = &server.AvatarStyleRollout{
+			StyleRevision:         style.Rollout.StyleRevision,
+			StylePackID:           style.Rollout.StylePackID,
+			StylePackVersion:      style.Rollout.StylePackVersion,
+			Status:                style.Rollout.Status,
+			TargetProfileCount:    style.Rollout.TargetProfileCount,
+			ProcessedProfileCount: style.Rollout.ProcessedProfileCount,
+			BatchCount:            style.Rollout.BatchCount,
+			LastBatchSize:         style.Rollout.LastBatchSize,
+			FailureCount:          style.Rollout.FailureCount,
+			RetryAfter:            style.Rollout.RetryAfter,
+			LastFailureCode:       style.Rollout.LastFailureCode,
+			CreatedAt:             style.Rollout.CreatedAt,
+			StartedAt:             style.Rollout.StartedAt,
+			UpdatedAt:             style.Rollout.UpdatedAt,
+			CompletedAt:           style.Rollout.CompletedAt,
+			SupersededAt:          style.Rollout.SupersededAt,
+		}
+	}
+	return out
 }
 
 func toServerAvatarReceipt(receipt store.AvatarMutationReceipt) server.AvatarMutationReceipt {

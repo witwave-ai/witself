@@ -104,6 +104,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	drainAvatarStyleRolloutsForTest(t, ctx, st, 10)
 	style = styleUpdate.Style
 	afterStyle, err := st.GetAvatar(ctx, p)
 	if err != nil {
@@ -176,6 +177,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	manifest, rows := readAvatarArchiveRows(t, archive.Bytes(), SchemaVersion())
 	for _, table := range []string{
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
+		"avatar_style_rollout_jobs",
 		"agent_avatar_profiles", "agent_avatar_versions", "agent_avatar_activations",
 		"agent_avatar_resets", "avatar_mutation_receipts",
 	} {

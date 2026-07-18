@@ -158,6 +158,22 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'updated_at', updated_at)
 			FROM realm_avatar_styles WHERE account_id = $1
 			ORDER BY realm_id`, arg: accountID},
+		&querySource{tx: tx, table: "avatar_style_rollout_jobs", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'style_revision', style_revision,
+			  'style_pack_id', style_pack_id,
+			  'style_pack_version', style_pack_version,
+			  'status', status, 'target_profile_count', target_profile_count,
+			  'processed_profile_count', processed_profile_count,
+			  'batch_count', batch_count, 'last_batch_size', last_batch_size,
+			  'failure_count', failure_count, 'retry_after', retry_after,
+			  'last_failure_code', last_failure_code,
+			  'created_at', created_at, 'started_at', started_at,
+			  'updated_at', updated_at, 'completed_at', completed_at,
+			  'superseded_at', superseded_at)
+			FROM avatar_style_rollout_jobs WHERE account_id = $1
+			ORDER BY realm_id, style_revision`, arg: accountID},
 		&querySource{tx: tx, table: "agents", q: `
 			SELECT jsonb_build_object(
 			  'id', a.id, 'realm_id', a.realm_id, 'name', a.name,
@@ -173,6 +189,7 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'autonomy_policy', autonomy_policy,
 			  'style_pack_id', style_pack_id,
 			  'style_pack_version', style_pack_version,
+			  'style_revision', style_revision,
 			  'latest_avatar_version', latest_avatar_version,
 			  'proposed_avatar_version', proposed_avatar_version,
 			  'active_avatar_version', active_avatar_version,

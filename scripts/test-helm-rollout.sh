@@ -36,6 +36,10 @@ require_line "  minReadySeconds: 10" "$default_render"
 require_line "    type: RollingUpdate" "$default_render"
 require_line "      maxSurge: 1" "$default_render"
 require_line "      maxUnavailable: 0" "$default_render"
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$default_render"
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: "100"' "$default_render"
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: "2s"' "$default_render"
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$default_render"
 if grep -Fqx "          lifecycle:" "$default_render"; then
   echo "default render unexpectedly contains a container lifecycle handler" >&2
   exit 1
@@ -57,6 +61,31 @@ require_line "          whenUnsatisfiable: DoNotSchedule" "$gcp_render"
 if helm template witself-server "$server_chart" --namespace witself \
   --set lifecycle.preStopSleepSeconds=-1 >/dev/null 2>&1; then
   echo "negative lifecycle.preStopSleepSeconds unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set avatar.styleRollout.batchSize=1001 >/dev/null 2>&1; then
+  echo "oversized avatar.styleRollout.batchSize unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set avatar.styleRollout.interval=99ms >/dev/null 2>&1; then
+  echo "undersized avatar.styleRollout.interval unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set avatar.styleRollout.interval=2h >/dev/null 2>&1; then
+  echo "oversized avatar.styleRollout.interval unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set avatar.styleRollout.batchTimeout=99ms >/dev/null 2>&1; then
+  echo "undersized avatar.styleRollout.batchTimeout unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set avatar.styleRollout.batchTimeout=6m >/dev/null 2>&1; then
+  echo "oversized avatar.styleRollout.batchTimeout unexpectedly passed schema validation" >&2
   exit 1
 fi
 if helm template witself-server "$server_chart" --namespace witself \
