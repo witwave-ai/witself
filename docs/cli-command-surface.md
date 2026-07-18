@@ -216,7 +216,7 @@ witself
   billing show|usage|limits|plans|subscribe|subscription|payment-methods|sessions|crypto|invoices
   support create|list|show|comment|close
   remember
-  self show
+  self show|card
   usage
   session start|end                       # target; not implemented
   memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
@@ -1342,6 +1342,54 @@ Flags:
 | `--salient-limit N` | Maximum salient memories to include. Default: `10`. |
 | `--max-bytes N` | Hard cap on digest size; sets `elided=true` when the cap is hit. |
 | `--json` | Emit `{ identity, primary_facts[], salient_memories[], memory_checkpoint, message_checkpoint, index, elided }`. |
+
+## `witself self card`
+
+Show a presentation-only identity card for the token-bound agent. This command
+does not widen either backend contract: it composes an identity-only
+`GET /v1/self` read with the existing `GET /v1/self/avatar` read and renders
+only the authenticated identity plus the active avatar's bounded display
+metadata. A new agent's deterministic placeholder is the active presentation
+until an immutable avatar version is activated. A pending proposal may appear
+only as `pending_update=true`; proposed artwork is never rendered as identity.
+The card, JSON document, and SVG hash are unsigned presentation data; callers
+must not accept them as authentication, authorization, or a legal credential.
+
+The default output adapts to the destination:
+
+- On a sufficiently wide UTF-8 color terminal, the CLI revalidates the SVG,
+  verifies its SHA-256, renders it into a fixed 20x20 in-memory raster, and
+  shows the portrait as ANSI half-block cells beside the identity fields.
+- Pipes, redirected output, `NO_COLOR`, `TERM=dumb`, non-UTF-8 terminals, and
+  unsupported renderings receive a deterministic text card. Narrow terminals
+  receive a key/value form rather than a clipped box.
+- `--plain` always disables the color portrait. `--json` emits the bounded card
+  document for scripts. The two flags are mutually exclusive.
+
+All displayed text is single-line, control- and bidi-sanitized, and bounded.
+The command rejects mismatched self/profile/avatar identities, inconsistent
+active pointers, unsafe or non-canonical SVG, and hash mismatches. It never
+emits SVG, `visual_spec`, facts, memories, checkpoints, or pending proposal
+content. Use `witself avatar show` or `witself avatar version` when the explicit
+creative payload is actually needed.
+
+```sh
+witself self card --account default --agent scott
+witself self card --plain --account default --agent scott
+witself self card --json --account default --agent scott
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--account NAME` | Local account binding. Default: `WITSELF_ACCOUNT` or `default`. |
+| `--realm NAME` | Local realm selector. Default: `WITSELF_REALM` or `default`. |
+| `--agent NAME` | Local agent selector. Default: `WITSELF_AGENT`; required for managed credential lookup. |
+| `--endpoint URL` | Explicit cell endpoint; use with `--token-file` for an unmanaged credential. |
+| `--token-file PATH` | Explicit agent token file; requires `--endpoint`. |
+| `--plain` | Print the deterministic text card even when rich terminal rendering is available. |
+| `--json` | Emit `witself.self-card.v1` identity and bounded active-avatar display metadata. |
 
 ## `witself usage`
 
