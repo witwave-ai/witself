@@ -555,6 +555,10 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 				[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
 				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates locked-layer continuity: %v", err)
 			}
+			if err := avatardomain.ValidatePerceptualContinuity(
+				[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
+				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates perceptual continuity: %v", err)
+			}
 		}
 	}
 	if err := ic.validateImportedAvatarTimes(obj, "proposed_at"); err != nil {

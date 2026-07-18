@@ -176,6 +176,10 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 					[]byte(parentInfo.svg), sanitizedSVG, pack); err != nil {
 					return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 				}
+				if err := avatardomain.ValidatePerceptualContinuity(
+					[]byte(parentInfo.svg), sanitizedSVG, pack); err != nil {
+					return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
+				}
 			}
 		}
 	}

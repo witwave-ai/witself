@@ -215,6 +215,21 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		}
 	})
 
+	t.Run("same style unlocked identity occlusion", func(t *testing.T) {
+		ic := newContext(t)
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		svg := strings.Replace(row["svg"].(string),
+			`<g id="experience" data-layer="experience"></g>`,
+			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+		row["svg"] = svg
+		digest := sha256.Sum256([]byte(svg))
+		row["svg_sha256"] = hex.EncodeToString(digest[:])
+		err := ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "perceptual continuity") {
+			t.Fatalf("error = %v, want perceptual continuity refusal", err)
+		}
+	})
+
 	t.Run("operator override", func(t *testing.T) {
 		ic := newContext(t)
 		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectAnimal)
@@ -222,6 +237,22 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		row["proposed_by_id"] = avatarArchiveOperator
 		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
 			t.Fatalf("operator override was rejected: %v", err)
+		}
+	})
+
+	t.Run("operator perceptual override", func(t *testing.T) {
+		ic := newContext(t)
+		row := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		svg := strings.Replace(row["svg"].(string),
+			`<g id="experience" data-layer="experience"></g>`,
+			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+		row["svg"] = svg
+		digest := sha256.Sum256([]byte(svg))
+		row["svg_sha256"] = hex.EncodeToString(digest[:])
+		row["proposed_by_kind"] = PrincipalOperator
+		row["proposed_by_id"] = avatarArchiveOperator
+		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
+			t.Fatalf("operator perceptual override was rejected: %v", err)
 		}
 	})
 

@@ -29,7 +29,9 @@ creation always has a deterministic fallback.
   visual continuity. For self-authored evolution under the exact same style
   version, the server also preserves the subject form and normalized source of
   every `locked_by_default` layer. This remains structural continuity; v1 does
-  not claim semantic image-similarity enforcement.
+  not claim semantic image-similarity enforcement. A second deterministic,
+  model-free canonical-render check rejects gross whole-portrait replacement
+  and unlocked artwork that visually covers too much locked identity.
 - Initial fitting belongs to the active agent. It creates and inspects its
   first draft from its own perspective and may make one to three substantial
   local revisions when it wants changes, including a different subject form,
@@ -167,8 +169,44 @@ paint-server URLs, or clipping outside their projection. Operators can
 deliberately override locked-layer and subject continuity, and a self-authored
 migration after an operator selects a new style version is exempt so the agent
 can adopt the new grammar. The client still reviews overall recognizability;
-Witself does not treat structural source equality as semantic image comparison
-or protection against every possible visual occlusion.
+Witself does not treat structural source equality or a raster delta as semantic
+image comparison or protection against every possible visual occlusion.
+
+The model-free raster guard renders five fixed 96 by 96 RGBA projections: both
+whole portraits, the parent's locked identity mask, and each version's
+unlocked layers. A generic locked-layer mask fallback can require one extra
+render, so the check performs at most six. Inputs are already limited to 64
+KiB, 512 elements, depth 32, and 1,024 bytes per attribute, so work and image
+memory remain bounded. Ordinary wrapper groups are preserved by projection;
+declared `data-layer` groups cannot nest because style validation requires
+visible geometry to belong to exactly one declared layer. A pixel counts as
+changed above normalized delta `0.12`. The proposal is rejected when
+whole-portrait changed pixels exceed `0.42` or mean delta exceeds `0.20`, when
+locked-identity changed pixels exceed `0.46` or mean delta exceeds `0.24`, or
+when newly added unlocked alpha covers more than `0.30` of the locked identity
+mask. Calibration leaves ordinary expression, attire, and experience edits
+well below those limits while rejecting full-canvas replacement and a
+face-covering overlay. The comparison is deterministic pure Go, and renderer
+failure is fail-closed. It applies only where structural continuity already
+applies: self-authored evolution under the same style version. Operator
+override and an operator-selected style migration retain their existing
+exemptions.
+
+The pure avatar domain also exposes a versioned continuity fingerprint for a
+parent whose historical SVG will later be compacted. Version 1 is exactly
+38,092 bytes: a small fixed header, an exact style-pack digest, the parent's
+96 by 96 composite RGB bytes, a binary locked-identity mask, unlocked-layer
+alpha bytes, and a SHA-256 corruption checksum. The normal full-parent guard
+builds and consumes this same format, so comparison across a retained-SVG and
+compacted-parent boundary is behaviorally identical rather than an
+approximation. Decoding requires the exact magic, version, render size,
+reserved flags, payload length, total length, checksum, and style digest.
+Fingerprint persistence and archive wiring remain a quota-compaction merge
+dependency: until that storage path is present, compaction must retain every
+parent SVG needed to validate a retained child. Although smaller and readily
+TOAST-compressible, the projection still contains raster-derived avatar
+content; it is not value-free metadata and must follow the SVG's access,
+export, and deletion controls.
 
 Raster previews are caches, not identity authority. The SVG, structured visual
 specification, and immutable version metadata are canonical. Small v1 assets

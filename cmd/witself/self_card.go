@@ -493,7 +493,16 @@ func padCardText(value string, width int) string {
 	return value + strings.Repeat(" ", width-visible)
 }
 
-func rasterizeSelfCardAvatar(svg []byte) (*image.RGBA, error) {
+func rasterizeSelfCardAvatar(svg []byte) (portrait *image.RGBA, err error) {
+	if len(svg) == 0 || len(svg) > avatardomain.MaxSVGBytes {
+		return nil, fmt.Errorf("safe avatar SVG must contain 1-%d bytes", avatardomain.MaxSVGBytes)
+	}
+	defer func() {
+		if recover() != nil {
+			portrait = nil
+			err = errors.New("safe avatar SVG renderer rejected the input")
+		}
+	}()
 	icon, err := oksvg.ReadIconStream(bytes.NewReader(svg), oksvg.StrictErrorMode)
 	if err != nil {
 		return nil, fmt.Errorf("parse safe avatar SVG for terminal display: %w", err)
@@ -506,18 +515,18 @@ func rasterizeSelfCardAvatar(svg []byte) (*image.RGBA, error) {
 		math.IsNaN(icon.ViewBox.W) || math.IsNaN(icon.ViewBox.H) {
 		return nil, errors.New("avatar SVG has an unsupported view box")
 	}
-	img := image.NewRGBA(image.Rect(0, 0, selfCardRasterSize, selfCardRasterSize))
+	portrait = image.NewRGBA(image.Rect(0, 0, selfCardRasterSize, selfCardRasterSize))
 	background := color.RGBA{R: 247, G: 250, B: 252, A: 255}
 	for y := 0; y < selfCardRasterSize; y++ {
 		for x := 0; x < selfCardRasterSize; x++ {
-			img.SetRGBA(x, y, background)
+			portrait.SetRGBA(x, y, background)
 		}
 	}
-	scanner := rasterx.NewScannerGV(selfCardRasterSize, selfCardRasterSize, img, img.Bounds())
+	scanner := rasterx.NewScannerGV(selfCardRasterSize, selfCardRasterSize, portrait, portrait.Bounds())
 	raster := rasterx.NewDasher(selfCardRasterSize, selfCardRasterSize, scanner)
 	icon.SetTarget(0, 0, selfCardRasterSize, selfCardRasterSize)
 	icon.Draw(raster, 1)
-	return img, nil
+	return portrait, nil
 }
 
 func selfCardANSIImage(img image.Image, profile termenv.Profile) ([]string, error) {
