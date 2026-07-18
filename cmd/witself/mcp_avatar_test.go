@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
+
+const fakeAvatarMCPVisualSpec = `{"expression":"calm","details":{"accent":"teal","level":2},"traits":["glasses",true]}`
 
 type fakeAvatarMCPBackend struct {
 	*fakeMCPBackend
@@ -60,10 +63,10 @@ func (b *fakeAvatarMCPBackend) AvatarHistory(_ context.Context, opts client.Avat
 func (b *fakeAvatarMCPBackend) ShowAvatarVersion(_ context.Context, version int64) (client.AvatarVersion, error) {
 	b.versionCalls++
 	b.lastVersion = version
-	return client.AvatarVersion{
-		Version: version, LineageGeneration: 2, Description: "Exact portrait", VisualSpec: json.RawMessage(`{"expression":"calm"}`),
-		SVG: `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, SVGSHA256: strings.Repeat("a", 64),
-	}, nil
+	avatarVersion := fakeAvatarMCPVersion(version)
+	avatarVersion.IsActive = true
+	avatarVersion.IsProposed = false
+	return avatarVersion, nil
 }
 
 func (b *fakeAvatarMCPBackend) ShowAvatarStyle(context.Context) (client.AvatarStyleView, error) {
@@ -101,11 +104,103 @@ func (b *fakeAvatarMCPBackend) FailAvatarGeneration(_ context.Context, in client
 }
 
 func fakeAvatarMCPView() client.AvatarView {
+	active := fakeAvatarMCPVersion(1)
+	active.IsActive = true
+	active.WasActivated = true
+	proposed := fakeAvatarMCPVersion(2)
+	proposed.IsProposed = true
 	return client.AvatarView{Profile: client.AvatarProfile{
 		AccountID: "acc_1", RealmID: "realm_1", AgentID: "agent_1",
 		SubjectForm: avatar.SubjectAnimal, AutonomyPolicy: avatar.AutonomyAgentSelfManaged,
-		Status: avatar.StatusActive, LineageGeneration: 2, ProfileRevision: 1,
-	}}
+		Status: avatar.StatusProposed, Style: avatar.StylePackRef{
+			RealmID: "realm_1", StylePackID: avatar.DefaultStylePackID, Version: avatar.BuiltInStylePackVersion,
+		},
+		LineageGeneration: 2, ProfileRevision: 1, LatestVersion: 2, ActiveVersion: 1, ProposedVersion: 2,
+		CreatedAt: active.ProposedAt.Add(-time.Hour), UpdatedAt: proposed.ProposedAt,
+	}, Active: &active, Proposed: &proposed}
+}
+
+func fakeAvatarMCPVersion(version int64) client.AvatarVersion {
+	proposedAt := time.Date(2026, 7, 17, 20, int(version), 0, 0, time.UTC)
+	return client.AvatarVersion{
+		ID: "av_" + string(rune('0'+version)), AccountID: "acc_1", RealmID: "realm_1", AgentID: "agent_1",
+		Version: version, LineageGeneration: 2, SubjectForm: avatar.SubjectAnimal, Description: "Exact portrait",
+		VisualSpec: json.RawMessage(fakeAvatarMCPVisualSpec),
+		SVG:        `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, SVGSHA256: strings.Repeat("a", 64),
+		Style: avatar.StylePackRef{
+			RealmID: "realm_1", StylePackID: avatar.DefaultStylePackID, Version: avatar.BuiltInStylePackVersion,
+		},
+		Provenance: client.AvatarClientProvenance{Runtime: "claude-code", Model: "claude-test"},
+		ProposedBy: client.AvatarActor{Kind: "agent", ID: "agent_1", Name: "Avatar Test"}, ProposedAt: proposedAt,
+	}
+}
+
+func requireAvatarMCPObjectSchema(t *testing.T, value any, path string) map[string]any {
+	t.Helper()
+	schema, ok := value.(map[string]any)
+	if !ok {
+		raw, _ := json.Marshal(value)
+		t.Fatalf("%s schema = %s (%T), want a typed schema object", path, raw, value)
+	}
+	typeIncludesObject := schema["type"] == "object"
+	if types, ok := schema["type"].([]any); ok {
+		for _, schemaType := range types {
+			if schemaType == "object" {
+				typeIncludesObject = true
+				break
+			}
+		}
+	}
+	if !typeIncludesObject {
+		raw, _ := json.Marshal(schema)
+		t.Fatalf("%s schema = %s, want type object", path, raw)
+	}
+	return schema
+}
+
+func requireAvatarMCPObjectProperty(t *testing.T, schema map[string]any, property, path string) map[string]any {
+	t.Helper()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		raw, _ := json.Marshal(schema)
+		t.Fatalf("%s schema has no properties object: %s", path, raw)
+	}
+	value, ok := properties[property]
+	if !ok {
+		t.Fatalf("%s schema omitted property %q", path, property)
+	}
+	return requireAvatarMCPObjectSchema(t, value, path+".properties."+property)
+}
+
+func assertMCPAvatarVersionSchema(t *testing.T, schema map[string]any, path string) {
+	t.Helper()
+	visualSpec := requireAvatarMCPObjectProperty(t, schema, "visual_spec", path)
+	if additional, exists := visualSpec["additionalProperties"]; exists && additional == false {
+		t.Fatalf("%s.properties.visual_spec must permit arbitrary object fields", path)
+	}
+}
+
+func assertMCPAvatarViewSchema(t *testing.T, schema map[string]any, path string) {
+	t.Helper()
+	requireAvatarMCPObjectProperty(t, schema, "profile", path)
+	for _, property := range []string{"active", "proposed"} {
+		versionSchema := requireAvatarMCPObjectProperty(t, schema, property, path)
+		assertMCPAvatarVersionSchema(t, versionSchema, path+".properties."+property)
+	}
+}
+
+func assertFakeAvatarMCPVisualSpec(t *testing.T, visualSpec json.RawMessage) {
+	t.Helper()
+	var got, want any
+	if err := json.Unmarshal(visualSpec, &got); err != nil {
+		t.Fatalf("decode returned visual_spec: %v; JSON=%s", err, visualSpec)
+	}
+	if err := json.Unmarshal([]byte(fakeAvatarMCPVisualSpec), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("visual_spec = %#v, want %#v", got, want)
+	}
 }
 
 func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
@@ -131,6 +226,18 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 	tools := make(map[string]*mcp.Tool, len(page.Tools))
 	for _, tool := range page.Tools {
 		tools[tool.Name] = tool
+	}
+	showSchema := requireAvatarMCPObjectSchema(t, tools["witself.avatar.show"].OutputSchema, "avatar.show.outputSchema")
+	assertMCPAvatarViewSchema(t, requireAvatarMCPObjectProperty(t, showSchema, "avatar", "avatar.show.outputSchema"), "avatar.show.outputSchema.properties.avatar")
+	versionSchema := requireAvatarMCPObjectSchema(t, tools["witself.avatar.version.show"].OutputSchema, "avatar.version.show.outputSchema")
+	assertMCPAvatarVersionSchema(t, requireAvatarMCPObjectProperty(t, versionSchema, "version", "avatar.version.show.outputSchema"), "avatar.version.show.outputSchema.properties.version")
+	for _, name := range []string{
+		"witself.avatar.propose", "witself.avatar.activate", "witself.avatar.rollback",
+		"witself.avatar.reset", "witself.avatar.generation.fail",
+	} {
+		mutationSchema := requireAvatarMCPObjectSchema(t, tools[name].OutputSchema, name+".outputSchema")
+		assertMCPAvatarViewSchema(t, requireAvatarMCPObjectProperty(t, mutationSchema, "avatar", name+".outputSchema"), name+".outputSchema.properties.avatar")
+		requireAvatarMCPObjectProperty(t, mutationSchema, "receipt", name+".outputSchema")
 	}
 	reads := []string{"witself.avatar.show", "witself.avatar.history", "witself.avatar.version.show", "witself.avatar.style.show"}
 	writes := []struct {
@@ -262,26 +369,34 @@ func TestAvatarMCPRegistersAgentTokenToolsAndCallsBackend(t *testing.T) {
 	var versionOutput struct {
 		Version client.AvatarVersion `json:"version"`
 	}
-	if err := json.Unmarshal(versionJSON, &versionOutput); err != nil || versionOutput.Version.Version != 2 || versionOutput.Version.LineageGeneration != 2 || versionOutput.Version.SVG == "" {
+	if err := json.Unmarshal(versionJSON, &versionOutput); err != nil || versionOutput.Version.Version != 2 ||
+		versionOutput.Version.LineageGeneration != 2 || versionOutput.Version.SVG == "" {
 		t.Fatalf("MCP exact version = %+v / %v", versionOutput, err)
 	}
+	assertFakeAvatarMCPVisualSpec(t, versionOutput.Version.VisualSpec)
 	showJSON, err := json.Marshal(showResult.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var showOutput mcpAvatarOutput
-	if err := json.Unmarshal(showJSON, &showOutput); err != nil || showOutput.Avatar.Profile.LineageGeneration != 2 {
+	if err := json.Unmarshal(showJSON, &showOutput); err != nil || showOutput.Avatar.Profile.LineageGeneration != 2 ||
+		showOutput.Avatar.Active == nil || showOutput.Avatar.Proposed == nil {
 		t.Fatalf("MCP avatar lineage = %+v / %v", showOutput, err)
 	}
+	assertFakeAvatarMCPVisualSpec(t, showOutput.Avatar.Active.VisualSpec)
+	assertFakeAvatarMCPVisualSpec(t, showOutput.Avatar.Proposed.VisualSpec)
 	resetJSON, err := json.Marshal(resetResult.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var resetOutput client.AvatarMutationResult
 	if err := json.Unmarshal(resetJSON, &resetOutput); err != nil || resetOutput.Avatar.Profile.LineageGeneration != 3 ||
-		resetOutput.Receipt.ResultLineageGeneration != 3 {
+		resetOutput.Receipt.ResultLineageGeneration != 3 || resetOutput.Avatar.Active == nil ||
+		resetOutput.Avatar.Proposed == nil {
 		t.Fatalf("MCP reset lineage = %+v / %v", resetOutput, err)
 	}
+	assertFakeAvatarMCPVisualSpec(t, resetOutput.Avatar.Active.VisualSpec)
+	assertFakeAvatarMCPVisualSpec(t, resetOutput.Avatar.Proposed.VisualSpec)
 	invalidVersion, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 		Name: "witself.avatar.version.show", Arguments: map[string]any{"version": 0},
 	})
