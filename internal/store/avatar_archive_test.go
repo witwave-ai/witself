@@ -1027,7 +1027,7 @@ func avatarArchiveVersionRow(t *testing.T, version, parent int64, form avatardom
 		"description":      "A calm team portrait in the shared flat vector style.",
 		"visual_spec":      map[string]any{"identity": map[string]any{"expression": "calm"}},
 		"svg_sha256":       hex.EncodeToString(digest[:]),
-		"provenance":       map[string]any{"runtime": "codex", "model": "gpt-5.6", "recipe": "avatar", "recipe_version": "1"},
+		"provenance":       map[string]any{"runtime": "cursor", "model": "GPT-5.6 Sol", "recipe": "avatar", "recipe_version": "1"},
 		"proposed_by_kind": PrincipalAgent, "proposed_by_id": avatarArchiveAgent,
 		"proposed_at": avatarArchiveTime,
 	}

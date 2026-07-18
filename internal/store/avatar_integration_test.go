@@ -158,7 +158,7 @@ func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testi
 		Description:             "A calm human teammate in the shared flat portrait style.",
 		VisualSpec:              []byte(`{"identity":{"expression":"calm"}}`),
 		SVG:                     style.StylePack.References[0].SVG,
-		Provenance: AvatarClientProvenance{Runtime: "codex", Model: "gpt-5.6",
+		Provenance: AvatarClientProvenance{Runtime: "cursor", Model: "GPT-5.6 Sol",
 			Recipe: "avatar-initial", RecipeVersion: "1"},
 		IdempotencyKey: "avatar-proposal-1",
 	}
@@ -169,6 +169,7 @@ func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testi
 	if proposed.Avatar.Profile.ProfileRevision != 2 ||
 		proposed.Avatar.Profile.Status != avatardomain.StatusProposed ||
 		proposed.Avatar.Proposed == nil || proposed.Avatar.Proposed.Version != 1 ||
+		proposed.Avatar.Proposed.Provenance.Model != "GPT-5.6 Sol" ||
 		!proposed.Avatar.Proposed.IsProposed || proposed.Avatar.Proposed.WasActivated ||
 		proposed.Avatar.Active == nil || proposed.Avatar.Active.Version != 0 {
 		t.Fatalf("proposed avatar = %#v", proposed.Avatar)

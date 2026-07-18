@@ -191,6 +191,13 @@ produces `rollback_eligible` only inside the current lineage; rejection history 
 `rejected` and optional `rejected_at`. Clients must use these fields instead of
 guessing lifecycle state from version order.
 
+Each optional generation-provenance label (`runtime`, `model`, `recipe`, and
+`recipe_version`) is untrusted audit metadata bounded to 256 bytes. Labels
+start with an ASCII letter or digit and otherwise accept the portable
+identifier punctuation plus internal ASCII spaces, preserving provider display
+names such as `GPT-5.6 Sol`. Outer whitespace is normalized; controls,
+non-ASCII characters, quotes, and markup remain invalid inside a label.
+
 ## Initial surfaces
 
 Agent-token surfaces:

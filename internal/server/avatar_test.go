@@ -88,7 +88,8 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 			if !sameAvatarPrincipal(p, wantPrincipal) || in.IdempotencyKey != "proposal-key" ||
 				in.ExpectedProfileRevision != 4 || in.SubjectForm != avatar.SubjectHuman ||
 				in.Description != "Calm human teammate." || string(in.VisualSpec) != `{"expression":"calm"}` ||
-				strings.Contains(in.SVG, "comment") || in.Provenance.Runtime != "codex" {
+				strings.Contains(in.SVG, "comment") || in.Provenance.Runtime != "codex" ||
+				in.Provenance.Model != "GPT-5.6 Sol" {
 				return AvatarMutationResult{}, ErrBadInput
 			}
 			return result, nil
@@ -680,7 +681,7 @@ func validServerAvatarProposal() ProposeAvatarRequest {
 		Description:             "  Calm human teammate.  ",
 		VisualSpec:              json.RawMessage(`{"expression":"calm"}`),
 		SVG:                     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"><!--comment--><circle cx="256" cy="256" r="100" fill="#DCEAF5"></circle></svg>`,
-		Provenance:              AvatarClientProvenance{Runtime: " codex ", Model: "gpt", Recipe: "initial", RecipeVersion: "1"},
+		Provenance:              AvatarClientProvenance{Runtime: " codex ", Model: " GPT-5.6 Sol ", Recipe: "initial", RecipeVersion: "1"},
 	}
 }
 
