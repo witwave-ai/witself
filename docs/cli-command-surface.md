@@ -2968,6 +2968,7 @@ witself install claude
 witself install grok
 witself install cursor
 witself install claude,codex,grok,cursor --agent scott --location home
+witself install claude,codex --routing-only
 ```
 
 The installer reuses an existing binding or the only local agent credential. If
@@ -2979,6 +2980,14 @@ with a stable generated local id. A supplied label is pinned in both commands;
 when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
+
+`--routing-only` atomically refreshes only the runtime's managed static
+instruction block. It does not resolve credentials, contact Witself, invoke a
+provider CLI, change the integration binding, register MCP, or install/remove
+hooks. It intentionally conflicts with every binding and hook flag. Use it
+when the installed binary contains newer routing policy but administrator-
+managed hooks and the existing MCP registration are already correct; restart
+the runtime or begin a new task afterward so it reloads the file.
 
 The installer also reports the runtime's automatic-hydration delivery modes.
 The transcript hook durably queues capture first, then uses the exact installed
