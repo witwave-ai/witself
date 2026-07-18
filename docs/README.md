@@ -5,7 +5,7 @@ sections were reconciled on 2026-07-14; older documents retain explicit
 supersession notices where implementation has moved ahead of the original draft.
 
 Witself is the agent durable-state platform and the trust fabric agents
-collaborate over: one open plane (memories + facts, plaintext at rest,
+collaborate over: one open plane (memories + facts + avatars, plaintext at rest,
 recallable, in the self-digest, plaintext-exportable) and one sealed plane
 (secrets + TOTP, envelope-encrypted, reveal-gated, never embedded, recalled, in
 the digest, or plaintext-exported). On top of that durable, attributable self,
@@ -83,6 +83,10 @@ plane.
   signed realm/agent discovery, the blind cloud relay, cross-realm conversations,
   the loop and safety stack, and deny-by-default federation; extends
   inter-agent-messaging.md as the first post-v0 epic.
+- [agent-avatars.md](agent-avatars.md): portable versioned agent portraits,
+  deterministic placeholders, realm style packs, client-side AI generation,
+  autonomy policy, safe SVG validation, evolution, and CLI/API/MCP routing for
+  Codex, Claude Code, Grok Build, and Cursor.
 - [operator-auth.md](operator-auth.md): CLI-initiated human/operator auth,
   device-code fallback, self-hosted bootstrap, and unattended token posture.
 - [threat-model.md](threat-model.md): assets, principals, trust boundaries,
@@ -104,8 +108,8 @@ plane.
   sensitive action route conventions.
 - [data-model.md](data-model.md): the full relational data model across both
   planes — realm/account/operator/agent/token tables, open-plane tables
-  (versioned memories, evidence and lineage, facts, policies, groups, messages,
-  audit, usage), and sealed-plane tables (secrets, secret_fields,
+  (versioned memories, evidence and lineage, facts, avatars, policies, groups,
+  messages, audit, usage), and sealed-plane tables (secrets, secret_fields,
   secret_grants, totp_enrollments, realm_keys, secret_deks, attachments).
 - [storage.md](storage.md): authoritative PostgreSQL storage, deterministic
   full-text retrieval, optional client-supplied vectors, object/blob usage, KMS

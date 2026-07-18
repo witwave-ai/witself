@@ -85,6 +85,8 @@ func run(args []string) int {
 		return factCmd(args[1:])
 	case "memory":
 		return memoryCmd(args[1:])
+	case "avatar":
+		return avatarCmd(args[1:])
 	case "transcript":
 		return transcriptCmd(args[1:])
 	case "message":
@@ -2543,6 +2545,7 @@ func selfShow(args []string) int {
 		IncludeCounts:            true,
 		IncludeCheckpoint:        true,
 		IncludeMessageCheckpoint: true,
+		IncludeAvatarCheckpoint:  true,
 		SalientLimit:             *salientLimit,
 		MaximumByteSize:          *maxBytes,
 	})
@@ -2589,6 +2592,14 @@ func selfShow(args []string) int {
 		}
 		fmt.Printf("memory:\t%s\t%s\t%.3f\t%s\n",
 			memory.ID, safeText(memory.Kind), memory.Salience, safeText(snippet))
+	}
+	if checkpoint := digest.AvatarCheckpoint; checkpoint != nil {
+		state := checkpoint.Status
+		if checkpoint.Unavailable {
+			state = "unavailable"
+		}
+		fmt.Printf("avatar:\t%s\tpending=%t\trevision=%d\n",
+			safeText(state), checkpoint.Pending, checkpoint.ProfileRevision)
 	}
 	kinds := "-"
 	if len(digest.Index.Kinds) > 0 {
@@ -3894,6 +3905,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
 	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
+	usageLine(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")

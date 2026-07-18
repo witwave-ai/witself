@@ -55,6 +55,25 @@ func TestGetSelfDecodesAndRequestsMessageCheckpoint(t *testing.T) {
 	}
 }
 
+func TestGetSelfDecodesAndRequestsAvatarLineageCheckpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include_avatar_checkpoint") != "true" {
+			t.Fatalf("self query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"avatar_checkpoint":{"pending":true,"status":"generation_due","reason":"avatar_reset","profile_revision":8,"lineage_generation":3},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludeAvatarCheckpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AvatarCheckpoint == nil || !got.AvatarCheckpoint.Pending || got.AvatarCheckpoint.Reason != "avatar_reset" ||
+		got.AvatarCheckpoint.ProfileRevision != 8 || got.AvatarCheckpoint.LineageGeneration != 3 {
+		t.Fatalf("avatar checkpoint = %#v", got.AvatarCheckpoint)
+	}
+}
+
 func TestGetSelfCanRequestObservationalHydration(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_facts") != "true" || r.URL.Query().Get("observational") != "true" {

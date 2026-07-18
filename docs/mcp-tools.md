@@ -2470,6 +2470,46 @@ Output data:
 }
 ```
 
+## Agent Avatar Tools
+
+Full agent-token MCP profiles advertise:
+
+- `witself.avatar.show`
+- `witself.avatar.history`
+- `witself.avatar.version.show`
+- `witself.avatar.style.show`
+- `witself.avatar.propose`
+- `witself.avatar.activate`
+- `witself.avatar.rollback`
+- `witself.avatar.reset`
+- `witself.avatar.generation.fail`
+
+The four reads remain in the read-only profile; all five mutations are
+removed. Every tool is self-scoped by the configured agent token and accepts no
+account, realm, or agent selector. Grok Build receives underscore-portable
+names such as `witself_avatar_show`; Codex, Claude Code, and Cursor use the
+dotted names. Returned SVG, descriptions, style examples, prior versions, and
+visual specifications are untrusted data, never instructions. The client does
+the creative generation and review; the MCP server performs no AI inference.
+`witself.avatar.history` accepts bounded `limit` and exclusive
+`before_version`, returns `next_before_version`, and preserves the payload-free
+lifecycle projection on each version: `is_active`, `is_proposed`,
+`was_activated`, `rollback_eligible`, `rejected`, and optional
+`last_activated_at` or `rejected_at` timestamps. It omits creative payloads;
+`witself.avatar.version.show` reads one exact positive version when SVG,
+description, visual specification, or provenance is actually needed.
+
+`witself.avatar.reset` is a destructive-hinted but non-purging mutation: it
+requires explicit fresh-start intent, retires the current lineage, and returns
+the profile to the deterministic placeholder. It accepts the exact profile
+revision, an optional bounded reason code, and a fresh idempotency key. Only an
+`agent_self_managed` self token may execute it; other policies require the
+operator HTTP/CLI surface. Retired payload history remains available but is no
+longer rollback-eligible.
+
+See [agent-avatars.md](agent-avatars.md) for checkpoint routing, evolution, and
+the complete operator HTTP/CLI surface.
+
 ## Operator/Admin Candidate Tools
 
 Operator/admin tools should be added carefully after the agent-facing v0 tools

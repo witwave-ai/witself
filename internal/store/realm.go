@@ -60,6 +60,9 @@ func (s *Store) CreateRealm(ctx context.Context, accountID, name string) (Realm,
 		}
 		return Realm{}, fmt.Errorf("create realm: %w", err)
 	}
+	if err := createDefaultRealmAvatarStyleTx(ctx, tx, accountID, realmID); err != nil {
+		return Realm{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Realm{}, err
 	}

@@ -947,6 +947,65 @@ identity export. The routes back `witself export` and `witself import`:
 - `GET /v1/imports/{import_id}` reports import status and the resolved record
   counts.
 
+## Agent Avatar Routes
+
+Avatar generation stays in the active AI client. These routes own the
+authenticated profile, deterministic fallback, immutable versions, style-pack
+selection, validation, activation policy, and retry state:
+
+Agent proposals and repeated generation-failure reports are rejected until a
+server-stamped `retry_after` is due. Operator proposals remain an explicit
+recovery path. Idempotent mutation replays return the original value-free
+receipt plus the resource's current projection; they do not restore an older
+mutable view.
+
+```text
+GET  /v1/self/avatar
+GET  /v1/self/avatar/history
+GET  /v1/self/avatar/versions/{version}
+GET  /v1/self/avatar/style
+POST /v1/self/avatar/proposals
+POST /v1/self/avatar:activate
+POST /v1/self/avatar:rollback
+POST /v1/self/avatar:reset
+POST /v1/self/avatar:generation-failed
+
+GET   /v1/agents/{agent}/avatar
+GET   /v1/agents/{agent}/avatar/history
+GET   /v1/agents/{agent}/avatar/versions/{version}
+POST  /v1/agents/{agent}/avatar/proposals
+POST  /v1/agents/{agent}/avatar:activate
+POST  /v1/agents/{agent}/avatar:reject
+POST  /v1/agents/{agent}/avatar:rollback
+POST  /v1/agents/{agent}/avatar:reset
+PATCH /v1/agents/{agent}/avatar-policy
+GET   /v1/realms/{realm}/avatar-style
+POST  /v1/realms/{realm}/avatar-style/versions
+```
+
+Both history routes return newest-first, payload-free immutable metadata. They
+accept `limit` (default 20, maximum 100) and exclusive `before_version` (zero or
+omitted for newest), and return `next_before_version` only when another page
+exists. Summaries never include SVG, visual specifications, descriptions, or
+generation provenance. Use the positive-version detail routes for that exact
+immutable creative payload. History includes `svg_sha256`, style, subject,
+parent, `lineage_generation`, proposer, timestamps, and the lifecycle projection `is_active`,
+`is_proposed`, `was_activated`,
+`rollback_eligible`, and `rejected`. `last_activated_at` and `rejected_at` are
+included when the corresponding lifecycle record exists. These fields let a
+client choose valid actions without inferring state from version order.
+
+Reset accepts the exact profile revision, an optional bounded `reason_code`,
+and an `Idempotency-Key`. It preserves all immutable versions while advancing
+the profile to a fresh lineage and deterministic placeholder. Self reset is
+authorized only by `agent_self_managed`; other policies require the operator
+route. Reset is not permanent deletion and cannot be used on an empty lineage.
+
+Self routes derive account, realm, and agent only from the bearer token.
+Operator paths remain account-scoped. Mutations require an `Idempotency-Key`
+header and exact current revision; every response is `private, no-store`. See
+[agent-avatars.md](agent-avatars.md) for the lifecycle and SVG boundary.
+
 ## Related Docs
 
 - [api-contract.md](api-contract.md)
@@ -967,5 +1026,6 @@ identity export. The routes back `witself export` and `witself import`:
 - [security-groups.md](security-groups.md)
 - [inter-agent-messaging.md](inter-agent-messaging.md)
 - [agent-collaboration.md](agent-collaboration.md)
+- [agent-avatars.md](agent-avatars.md)
 - [deployment-cells.md](deployment-cells.md)
 - [observability-and-operations.md](observability-and-operations.md)

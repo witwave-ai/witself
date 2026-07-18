@@ -79,6 +79,24 @@ type SelfMessageCheckpoint struct {
 	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
 }
 
+// SelfAvatarCheckpoint is value-free, authenticated lifecycle state for an
+// agent avatar that needs attention from an active AI client. It never carries
+// SVG, prompt, description, or visual-spec content.
+type SelfAvatarCheckpoint struct {
+	Pending           bool       `json:"pending"`
+	Unavailable       bool       `json:"unavailable,omitempty"`
+	Status            string     `json:"status,omitempty"`
+	Reason            string     `json:"reason,omitempty"`
+	ProfileRevision   int64      `json:"profile_revision,omitempty"`
+	LineageGeneration int64      `json:"lineage_generation,omitempty"`
+	StylePackID       string     `json:"style_pack_id,omitempty"`
+	StylePackVersion  int64      `json:"style_pack_version,omitempty"`
+	ActiveVersion     int64      `json:"active_version,omitempty"`
+	ProposedVersion   int64      `json:"proposed_version,omitempty"`
+	AttemptCount      int        `json:"attempt_count,omitempty"`
+	RetryAfter        *time.Time `json:"retry_after,omitempty"`
+}
+
 // SelfDigest is the bounded response from GET /v1/self.
 type SelfDigest struct {
 	SchemaVersion     string                 `json:"schema_version"`
@@ -87,6 +105,7 @@ type SelfDigest struct {
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
+	AvatarCheckpoint  *SelfAvatarCheckpoint  `json:"avatar_checkpoint,omitempty"`
 	Index             SelfIndex              `json:"index"`
 	Elided            bool                   `json:"elided"`
 }
@@ -106,6 +125,9 @@ type SelfOptions struct {
 	// mailbox and open-request work. Identity-only callers should leave this
 	// false to avoid messaging queries.
 	IncludeMessageCheckpoint bool
+	// IncludeAvatarCheckpoint requests content-free avatar lifecycle state.
+	// Identity-only callers should leave this false to avoid avatar queries.
+	IncludeAvatarCheckpoint bool
 	// IncludeSensitive intentionally includes authorized private fact and memory
 	// values. Sealed secrets are a separate service and are never in this digest.
 	IncludeSensitive bool
@@ -144,6 +166,7 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params.Set("include_counts", strconv.FormatBool(opts.IncludeCounts))
 	params.Set("include_checkpoint", strconv.FormatBool(opts.IncludeCheckpoint))
 	params.Set("include_message_checkpoint", strconv.FormatBool(opts.IncludeMessageCheckpoint))
+	params.Set("include_avatar_checkpoint", strconv.FormatBool(opts.IncludeAvatarCheckpoint))
 	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
 	if opts.Observational {
 		params.Set("observational", "true")

@@ -50,7 +50,8 @@ var cursorMemoryRoutingBlock = []byte(
 		"alwaysApply: true\n" +
 		"---\n" +
 		cursorMemoryRoutingInstructions + "\n\n" +
-		foregroundMessagingRoutingInstructions + "\n" +
+		foregroundMessagingRoutingInstructions + "\n\n" +
+		avatarRoutingInstructions + "\n" +
 		cursorMemoryRoutingEndMarker,
 )
 

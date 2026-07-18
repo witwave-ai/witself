@@ -77,7 +77,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		assertMigrationTestIndexShape(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator",
 			[]string{"account_id", "realm_id", "coordinator_agent_id", "expires_at", "offer_deadline", "id"},
 			[]string{"state", "open"})
@@ -111,11 +111,42 @@ func TestMigration41Postgres(t *testing.T) {
 		assertMigrationTestTableConstraint(t, st, "agent_message_deliveries", "agent_message_deliveries_result_message_unique", true)
 	})
 
-	t.Run("curation queue, activity, message request, and audience migrations roll back in order", func(t *testing.T) {
+	t.Run("avatar schema rolls back and reapplies cleanly", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
+		migrationTestUpTo(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestTable(t, st, "agent_avatar_profiles", false)
+
+		migrationTestUpTo(t, dsn, 50)
+		assertMigrationTestVersion(t, dsn, 50)
+		for _, table := range []string{
+			"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
+			"agent_avatar_profiles", "agent_avatar_versions", "agent_avatar_activations",
+			"agent_avatar_rejections", "agent_avatar_resets", "avatar_mutation_receipts",
+		} {
+			assertMigrationTestTable(t, st, table, true)
+		}
+		assertMigrationTestColumn(t, st, "agent_avatar_profiles", "lineage_generation", true)
+		assertMigrationTestColumn(t, st, "agent_avatar_versions", "lineage_generation", true)
+		assertMigrationTestColumn(t, st, "agent_avatar_activations", "lineage_generation", true)
+		assertMigrationTestColumn(t, st, "avatar_mutation_receipts", "result_lineage_generation", true)
+
+		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
+		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestTable(t, st, "agent_avatar_profiles", false)
+		assertMigrationTestTable(t, st, "agent_avatar_resets", false)
+
+		migrationTestUpTo(t, dsn, 50)
+		assertMigrationTestVersion(t, dsn, 50)
+		assertMigrationTestTable(t, st, "agent_avatar_profiles", true)
+		assertMigrationTestTable(t, st, "agent_avatar_resets", true)
+	})
+
+	t.Run("curation queue, activity, message request, and audience migrations roll back in order", func(t *testing.T) {
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 41)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -145,9 +176,7 @@ func TestMigration41Postgres(t *testing.T) {
 		}
 		assertMigrationTestVersion(t, dsn, 36)
 		assertMigrationTestColumn(t, st, "agent_messages", "audience_kind", false)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 41)
 		assertMigrationTestVersion(t, dsn, 41)
 		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", true)
 		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", true)
@@ -166,15 +195,21 @@ func TestMigration41Postgres(t *testing.T) {
 		if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 			t.Fatalf("activate = %t / %v", activated, err)
 		}
-		realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
-		if err != nil {
+		// This fixture intentionally runs current code against schema 30. Insert
+		// the pre-avatar realm and agent shape directly: CreateRealm/CreateAgent
+		// now atomically create avatar rows that do not exist until schema 50.
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO realms (id,account_id,name)
+			VALUES ('realm_migration_curator',$1,'default')`,
+			provisioned.AccountID); err != nil {
 			t.Fatal(err)
 		}
-		agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "legacy")
-		if err != nil {
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agents (id,realm_id,name)
+			VALUES ('agent_migration_curator','realm_migration_curator','legacy')`); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, _, err := st.CreateAgentToken(ctx, provisioned.AccountID, provisioned.OperatorID, agent.ID); err != nil {
+		if _, _, _, err := st.CreateAgentToken(ctx, provisioned.AccountID, provisioned.OperatorID, "agent_migration_curator"); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, _, err := st.CreateOperatorToken(ctx, provisioned.AccountID, provisioned.OperatorID, "legacy operator", nil); err != nil {
@@ -184,7 +219,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		assertMigrationTestTableConstraint(t, st, "tokens", "tokens_access_profile_kind_check", true)
 		var total, full int
 		if err := st.pool.QueryRow(ctx, `
@@ -232,7 +267,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		assertMigrationTestColumn(t, st, "agent_messages", "reply_to_message_id", true)
 		var parent *string
 		if err := st.pool.QueryRow(ctx, `
@@ -267,7 +302,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		var state, claimHash, completeHash string
 		var generation int64
 		var claimID, lease, completedAt, resultID any
@@ -312,7 +347,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		for messageID, want := range map[string]int64{
 			"msg_depth_root": 1, "msg_depth_reply_1": 2,
 			"msg_depth_reply_2": 3, "msg_depth_forged_thread_root": 1,
@@ -350,7 +385,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		var failureCount int64
 		if err := st.pool.QueryRow(ctx, `
 			SELECT failure_count FROM agent_message_deliveries
@@ -499,7 +534,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 	})
 
 	t.Run("populated schema 26 cannot skip compatibility release", func(t *testing.T) {
@@ -536,7 +571,7 @@ func TestMigration41Postgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
-		assertMigrationTestVersion(t, dsn, 41)
+		assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
 	})
 
@@ -592,9 +627,7 @@ func TestMigration41Postgres(t *testing.T) {
 
 	t.Run("clean down removes curation queue, messaging, reply, and narrative schemas and can re-upgrade", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 41)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -666,9 +699,7 @@ func TestMigration41Postgres(t *testing.T) {
 		}
 		assertMigrationTestVersion(t, dsn, 28)
 		assertMigrationTestConstraint(t, st, "facts_owner_agent_id_subject_id_predicate_key", false)
-		if err := st.Migrate(); err != nil {
-			t.Fatalf("re-upgrade schema 28 to 41: %v", err)
-		}
+		migrationTestUpTo(t, dsn, 41)
 		assertMigrationTestVersion(t, dsn, 41)
 		assertMigrationTestIndex(t, st, "agent_message_requests", "agent_message_requests_open_by_coordinator", true)
 		assertMigrationTestIndex(t, st, "agent_message_request_candidates", "agent_message_request_candidates_pending_by_request", true)
@@ -680,9 +711,7 @@ func TestMigration41Postgres(t *testing.T) {
 
 	t.Run("down refuses duplicate recreated address without data loss", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 41)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}

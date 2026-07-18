@@ -35,6 +35,16 @@ var upgraders = map[int]Upgrader{
 	34: addMessageCausalDepthDefault,
 	35: addMessageFailureCountDefault,
 	36: addMessageAudienceDefaults,
+	49: preserveSchema49Rows,
+}
+
+// preserveSchema49Rows acknowledges the avatar aggregate, deferred foreign
+// keys, and uniqueness constraints introduced by migration 0050. A schema-49
+// archive has no avatar streams to transform; the account importer creates
+// deterministic realm style and agent placeholder rows after its legacy
+// realms and agents have landed.
+func preserveSchema49Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // addMessageAudienceDefaults lifts the one-recipient message shape written

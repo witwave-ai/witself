@@ -74,6 +74,10 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbMemoryCurationPlanned, VerbMemoryCurationApplied,
 		VerbMemoryCurationConflicted, VerbMemoryCurationInterrupted,
 		VerbMemoryCurationCancelled, VerbMemoryCurationRolledBack,
+		VerbAvatarGenerationRequested, VerbAvatarProposed,
+		VerbAvatarActivated, VerbAvatarEvolved, VerbAvatarRejected,
+		VerbAvatarGenerationFailed, VerbAvatarRolledBack,
+		VerbAvatarReset, VerbAvatarPolicyChanged, VerbAvatarStyleChanged,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
@@ -97,6 +101,91 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		if !inList(k) {
 			t.Errorf("verbMetadataSchema has stale entry %q not in the verb-constant list", k)
 		}
+	}
+}
+
+func TestAvatarAuditSchemasAreValueFree(t *testing.T) {
+	forbidden := []string{
+		"svg", "description", "visual_spec", "prompt", "provenance",
+		"svg_sha256", "request_hash", "idempotency_key", "model", "runtime",
+	}
+	tests := []EventInput{
+		{AccountID: "acc_1", ActorKind: ActorSystem,
+			Verb: VerbAvatarGenerationRequested, Metadata: map[string]any{
+				"agent_id": "agent_1", "status": "generation_due",
+				"style_pack_id": "witself-flat-portrait", "style_pack_version": "1",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+			Verb: VerbAvatarProposed, Metadata: map[string]any{
+				"agent_id": "agent_1", "avatar_version": "1", "status": "proposed",
+				"style_pack_id": "witself-flat-portrait", "style_pack_version": "1",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+			Verb: VerbAvatarActivated, Metadata: map[string]any{
+				"agent_id": "agent_1", "avatar_version": "1", "status": "active",
+				"style_pack_id": "witself-flat-portrait", "style_pack_version": "1",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+			Verb: VerbAvatarEvolved, Metadata: map[string]any{
+				"agent_id": "agent_1", "avatar_version": "2", "parent_version": "1",
+				"status": "active", "style_pack_id": "witself-flat-portrait",
+				"style_pack_version": "1",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorOperator, ActorID: "op_1",
+			Verb: VerbAvatarRejected, Metadata: map[string]any{
+				"agent_id": "agent_1", "avatar_version": "2", "status": "rejected",
+				"reason_code": "style_mismatch",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+			Verb: VerbAvatarGenerationFailed, Metadata: map[string]any{
+				"agent_id": "agent_1", "status": "generation_failed",
+				"attempt_count": "1", "reason_code": "renderer_unavailable",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorOperator, ActorID: "op_1",
+			Verb: VerbAvatarRolledBack, Metadata: map[string]any{
+				"agent_id": "agent_1", "avatar_version": "1",
+				"prior_active_version": "2", "status": "active",
+				"style_pack_id": "witself-flat-portrait", "style_pack_version": "1",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+			Verb: VerbAvatarReset, Metadata: map[string]any{
+				"agent_id": "agent_1", "status": "generation_due",
+				"retired_lineage_generation": "1", "new_lineage_generation": "2",
+				"retired_active_version": "2", "retired_proposed_version": "3",
+				"reason_code": "identity_restart",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorOperator, ActorID: "op_1",
+			Verb: VerbAvatarPolicyChanged, Metadata: map[string]any{
+				"agent_id": "agent_1", "policy_from": "agent_proposes",
+				"policy_to": "agent_self_managed", "status": "active",
+			}},
+		{AccountID: "acc_1", ActorKind: ActorOperator, ActorID: "op_1",
+			Verb: VerbAvatarStyleChanged, Metadata: map[string]any{
+				"realm_id": "realm_1", "style_pack_id": "witself-flat-portrait",
+				"style_pack_version": "2", "style_revision": "2",
+			}},
+	}
+	for _, input := range tests {
+		t.Run(input.Verb, func(t *testing.T) {
+			if err := checkEventShape(input); err != nil {
+				t.Fatalf("valid avatar event: %v", err)
+			}
+			spec := verbMetadataSchema[input.Verb]
+			for _, key := range forbidden {
+				if slicesContains(spec.allowedKeys, key) {
+					t.Fatalf("avatar event schema allows private/value key %q", key)
+				}
+			}
+			invalid := input
+			invalid.Metadata = make(map[string]any, len(input.Metadata)+1)
+			for key, value := range input.Metadata {
+				invalid.Metadata[key] = value
+			}
+			invalid.Metadata["svg"] = "<svg/>"
+			if err := checkEventShape(invalid); err == nil || !strings.Contains(err.Error(), `unknown key "svg"`) {
+				t.Fatalf("private avatar metadata accepted: %v", err)
+			}
+		})
 	}
 }
 

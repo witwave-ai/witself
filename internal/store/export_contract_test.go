@@ -156,7 +156,7 @@ func parseExportedColumns() (map[string]map[string]bool, error) {
 	//         'id', id, 'is_default', is_default, ...
 	//       ) FROM ...`, arg: accountID},
 	tableRe := regexp.MustCompile(`table:\s*"([a-z_]+)"[\s\S]*?jsonb_build_object\(([\s\S]*?)\)`)
-	quotedFieldRe := regexp.MustCompile(`'([a-z_]+)'`)
+	quotedFieldRe := regexp.MustCompile(`'([a-z][a-z0-9_]*)'`)
 
 	out := map[string]map[string]bool{}
 	for _, m := range tableRe.FindAllStringSubmatch(text, -1) {
