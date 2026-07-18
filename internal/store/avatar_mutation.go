@@ -238,10 +238,13 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		   SET latest_avatar_version=$4, proposed_avatar_version=$4,
 		       status='proposed', subject_form=$5, attempt_count=0,
 		       retry_after=NULL, failure_code='', revision=revision+1,
+		       payload_quota_reconciliation_required=
+		         CASE WHEN $7 THEN false ELSE payload_quota_reconciliation_required END,
 		       updated_at=clock_timestamp()
 		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3 AND revision=$6
 		 RETURNING revision`, target.accountID, target.realmID, target.agentID,
-		version, string(in.SubjectForm), in.ExpectedProfileRevision).Scan(&resultRevision)
+		version, string(in.SubjectForm), in.ExpectedProfileRevision,
+		s.avatarPayloadCompactionEnabled).Scan(&resultRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarMutationResult{}, ErrAvatarConflict
 	}

@@ -100,6 +100,12 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := phaseA.pool.Exec(ctx, `
+		UPDATE agent_avatar_profiles
+		   SET payload_quota_reconciliation_required=true
+		 WHERE agent_id=$1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
 	// A no-cleanup lower succeeds while the gate remains off.
 	quotaSix, err := phaseA.SetAvatarQuota(ctx, operator, agent.ID,
 		UpdateAvatarQuotaInput{RetainedPayloadCountLimit: 6,
@@ -148,6 +154,14 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 		phaseAView.Profile.RetainedPayloadCountLimit != 6 {
 		t.Fatalf("phase-A conflict mutated avatar = %#v", phaseAView.Profile)
 	}
+	var reconciliationRequired bool
+	if err := phaseA.pool.QueryRow(ctx, `
+		SELECT payload_quota_reconciliation_required
+		  FROM agent_avatar_profiles WHERE agent_id=$1`, agent.ID).
+		Scan(&reconciliationRequired); err != nil || !reconciliationRequired {
+		t.Fatalf("phase-A reconciliation marker = %t / %v, want retained",
+			reconciliationRequired, err)
+	}
 	var compactedBefore int
 	if err := phaseA.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM agent_avatar_versions
@@ -189,6 +203,13 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 		lowered.Avatar.Profile.ActiveVersion != 6 {
 		t.Fatalf("phase-B activated cleanup = %#v", lowered.Avatar.Profile)
 	}
+	if err := phaseB.pool.QueryRow(ctx, `
+		SELECT payload_quota_reconciliation_required
+		  FROM agent_avatar_profiles WHERE agent_id=$1`, agent.ID).
+		Scan(&reconciliationRequired); err != nil || reconciliationRequired {
+		t.Fatalf("phase-B quota reconciliation marker = %t / %v, want cleared",
+			reconciliationRequired, err)
+	}
 	var compactedAfter int
 	if err := phaseB.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM agent_avatar_versions
@@ -201,6 +222,23 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 		 WHERE agent_id=$1 AND version=6`, agent.ID).Scan(&repairedDigest); err != nil ||
 		repairedDigest == nil {
 		t.Fatalf("enabled quota digest repair = %v / %v", repairedDigest, err)
+	}
+	if _, err := phaseB.pool.Exec(ctx, `
+		UPDATE agent_avatar_profiles
+		   SET payload_quota_reconciliation_required=true
+		 WHERE agent_id=$1`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := phaseB.ProposeAgentAvatar(ctx, operator, agent.ID,
+		proposalInput(lowered.Avatar.Profile.ProfileRevision, 6, 7)); err != nil {
+		t.Fatalf("phase-B proposal reconciliation = %v", err)
+	}
+	if err := phaseB.pool.QueryRow(ctx, `
+		SELECT payload_quota_reconciliation_required
+		  FROM agent_avatar_profiles WHERE agent_id=$1`, agent.ID).
+		Scan(&reconciliationRequired); err != nil || reconciliationRequired {
+		t.Fatalf("phase-B proposal reconciliation marker = %t / %v, want cleared",
+			reconciliationRequired, err)
 	}
 	var compactedVersion int64
 	if err := phaseB.pool.QueryRow(ctx, `

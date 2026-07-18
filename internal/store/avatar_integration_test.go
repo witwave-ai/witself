@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -131,6 +132,8 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 		t.Fatal(err)
 	}
 	assertMigrationTestVersion(t, dsn, 50)
+	assertMigrationTestColumn(t, st, "agent_avatar_profiles",
+		"payload_quota_reconciliation_required", false)
 	migrationTestUpTo(t, dsn, 51)
 	if _, err := st.finalizeAvatarLockedLayerDigestMigration(ctx); err != nil {
 		t.Fatal(err)
@@ -426,6 +429,234 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 		if !ok || digest != wantLockedDigest {
 			t.Fatalf("archived legacy digest = %#v", row["locked_layers_sha256"])
 		}
+	}
+}
+
+func insertAvatarQuotaReconciliationHistory(t *testing.T, ctx context.Context,
+	st *Store, accountID, realmID, agentID, operatorID string,
+	firstVersion, lastVersion int64, schema50Writer, rejectHead bool) {
+	t.Helper()
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	reference := pack.References[0]
+	svgDigest := sha256.Sum256([]byte(reference.SVG))
+	lockedDigest, err := avatardomain.LockedLayersSHA256([]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "A schema-50 portable portrait retained for quota reconciliation."
+	visualSpec := json.RawMessage(`{"identity":{"expression":"calm"}}`)
+	payloadBytes, err := avatarCreativePayloadBytes(reference.SVG, description, visualSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := firstVersion; version <= lastVersion; version++ {
+		versionID, err := id.New("avver")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if schema50Writer {
+			_, err = st.pool.Exec(ctx, `
+				INSERT INTO agent_avatar_versions
+				       (account_id, realm_id, agent_id, id, version,
+				        lineage_generation, style_pack_id, style_pack_version,
+				        subject_form, svg, description, visual_spec, svg_sha256,
+				        provenance, proposed_by_kind, proposed_by_id, proposed_at)
+				VALUES ($1,$2,$3,$4,$5,1,$6,1,'human',$7,$8,$9,$10,
+				        '{"runtime":"schema-50-round-trip"}'::jsonb,
+				        'operator',$11,clock_timestamp())`, accountID, realmID,
+				agentID, versionID, version, pack.ID, reference.SVG, description,
+				visualSpec, hex.EncodeToString(svgDigest[:]), operatorID)
+		} else {
+			_, err = st.pool.Exec(ctx, `
+				INSERT INTO agent_avatar_versions
+				       (account_id, realm_id, agent_id, id, version,
+				        lineage_generation, style_pack_id, style_pack_version,
+				        subject_form, svg, description, visual_spec, svg_sha256,
+				        locked_layers_sha256, provenance, proposed_by_kind,
+				        proposed_by_id, proposed_at, payload_bytes)
+				VALUES ($1,$2,$3,$4,$5,1,$6,1,'human',$7,$8,$9,$10,$11,
+				        '{"runtime":"current-round-trip"}'::jsonb,
+				        'operator',$12,clock_timestamp(),$13)`, accountID, realmID,
+				agentID, versionID, version, pack.ID, reference.SVG, description,
+				visualSpec, hex.EncodeToString(svgDigest[:]), lockedDigest,
+				operatorID, payloadBytes)
+		}
+		if err != nil {
+			t.Fatalf("insert avatar version %d: %v", version, err)
+		}
+		if version < lastVersion || rejectHead {
+			rejectionID, err := id.New("avrej")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `
+				INSERT INTO agent_avatar_rejections
+				       (id,account_id,realm_id,agent_id,avatar_version,
+				        reason_code,rejected_by_kind,rejected_by_id,rejected_at)
+				VALUES ($1,$2,$3,$4,$5,'superseded','operator',$6,
+				        clock_timestamp())`, rejectionID, accountID, realmID,
+				agentID, version, operatorID); err != nil {
+				t.Fatalf("reject avatar version %d: %v", version, err)
+			}
+		}
+	}
+	status := string(avatardomain.StatusProposed)
+	var proposed any = lastVersion
+	if rejectHead {
+		status = string(avatardomain.StatusRejected)
+		proposed = nil
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_profiles
+		   SET status=$4, latest_avatar_version=$5,
+		       proposed_avatar_version=$6, active_avatar_version=NULL,
+		       subject_form='human', revision=revision+1,
+		       updated_at=clock_timestamp()
+		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`, accountID,
+		realmID, agentID, status, lastVersion, proposed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	tests := []struct {
+		name               string
+		existingAtSchema50 bool
+	}{
+		{name: "existing schema-50 overage", existingAtSchema50: true},
+		{name: "late schema-50 writer", existingAtSchema50: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st, dsn := newMigrationTestStore(t, baseDSN)
+			if test.existingAtSchema50 {
+				migrationTestUpTo(t, dsn, 50)
+			} else if err := st.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			provisioned, err := st.ProvisionAccount(ctx,
+				fmt.Sprintf("avatar-quota-reconcile-%d@witwave.ai", time.Now().UnixNano()),
+				"avatar quota reconciliation", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+				t.Fatalf("activate = %t / %v", activated, err)
+			}
+			realm, err := st.CreateRealm(ctx, provisioned.AccountID, "quota-reconcile")
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent := createSchema50AvatarAgentForMigrationTest(t, ctx, st,
+				provisioned.AccountID, realm.ID, "quota-reconcile-agent")
+			if test.existingAtSchema50 {
+				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
+					1, 21, true, false)
+				if err := st.Migrate(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
+					1, 20, false, true)
+				var marked bool
+				if err := st.pool.QueryRow(ctx, `
+					SELECT payload_quota_reconciliation_required
+					  FROM agent_avatar_profiles WHERE agent_id=$1`, agent.ID).
+					Scan(&marked); err != nil || marked {
+					t.Fatalf("pre-legacy marker = %t / %v, want false", marked, err)
+				}
+				insertAvatarQuotaReconciliationHistory(t, ctx, st,
+					provisioned.AccountID, realm.ID, agent.ID, provisioned.OperatorID,
+					21, 21, true, false)
+			}
+			var marked bool
+			var fullCount int
+			if err := st.pool.QueryRow(ctx, `
+				SELECT p.payload_quota_reconciliation_required,
+				       COUNT(*) FILTER (WHERE v.payload_state='full')
+				  FROM agent_avatar_profiles p
+				  JOIN agent_avatar_versions v ON v.agent_id=p.agent_id
+				 WHERE p.agent_id=$1
+				 GROUP BY p.payload_quota_reconciliation_required`, agent.ID).
+				Scan(&marked, &fullCount); err != nil || !marked || fullCount != 21 {
+				t.Fatalf("legacy overage = marker:%t full:%d / %v", marked, fullCount, err)
+			}
+			if err := st.SuspendAccountSystem(ctx, provisioned.AccountID,
+				"evacuation", "avatar quota reconciliation round trip"); err != nil {
+				t.Fatal(err)
+			}
+			var archive bytes.Buffer
+			if err := st.ExportAccount(ctx, provisioned.AccountID,
+				"source-cell", "test", &archive); err != nil {
+				t.Fatal(err)
+			}
+			if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.ImportAccount(ctx, provisioned.AccountID,
+				bytes.NewReader(archive.Bytes())); err != nil {
+				t.Fatalf("import current-schema legacy overage: %v", err)
+			}
+			if err := st.pool.QueryRow(ctx, `
+				SELECT p.payload_quota_reconciliation_required,
+				       COUNT(*) FILTER (WHERE v.payload_state='full')
+				  FROM agent_avatar_profiles p
+				  JOIN agent_avatar_versions v ON v.agent_id=p.agent_id
+				 WHERE p.agent_id=$1
+				 GROUP BY p.payload_quota_reconciliation_required`, agent.ID).
+				Scan(&marked, &fullCount); err != nil || !marked || fullCount != 21 {
+				t.Fatalf("restored legacy overage = marker:%t full:%d / %v",
+					marked, fullCount, err)
+			}
+
+			phaseB, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer phaseB.Close()
+			if err := phaseB.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			if err := phaseB.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
+				t.Fatal(err)
+			}
+			var revision int64
+			if err := phaseB.pool.QueryRow(ctx, `
+				SELECT revision FROM agent_avatar_profiles WHERE agent_id=$1`, agent.ID).
+				Scan(&revision); err != nil {
+				t.Fatal(err)
+			}
+			operator := Principal{Kind: PrincipalOperator, ID: provisioned.OperatorID,
+				AccountID: provisioned.AccountID, AccountStatus: "active"}
+			if _, err := phaseB.SetAvatarQuota(ctx, operator, agent.ID,
+				UpdateAvatarQuotaInput{
+					RetainedPayloadCountLimit: AvatarDefaultRetainedPayloadCountLimit,
+					RetainedPayloadByteLimit:  AvatarDefaultRetainedPayloadByteLimit,
+					ExpectedProfileRevision:   revision,
+					IdempotencyKey:            "reconcile-restored-legacy-overage",
+				}); err != nil {
+				t.Fatalf("phase-B reconcile restored legacy overage: %v", err)
+			}
+			if err := phaseB.pool.QueryRow(ctx, `
+				SELECT p.payload_quota_reconciliation_required,
+				       COUNT(*) FILTER (WHERE v.payload_state='full')
+				  FROM agent_avatar_profiles p
+				  JOIN agent_avatar_versions v ON v.agent_id=p.agent_id
+				 WHERE p.agent_id=$1
+				 GROUP BY p.payload_quota_reconciliation_required`, agent.ID).
+				Scan(&marked, &fullCount); err != nil || marked || fullCount != 20 {
+				t.Fatalf("reconciled restored overage = marker:%t full:%d / %v",
+					marked, fullCount, err)
+			}
+		})
 	}
 }
 

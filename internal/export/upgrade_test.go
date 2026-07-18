@@ -304,7 +304,8 @@ func TestSchema50AvatarPayloadQuotaUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	if profile["retained_payload_count_limit"] != 20 ||
-		profile["retained_payload_byte_limit"] != 2*1024*1024 {
+		profile["retained_payload_byte_limit"] != 2*1024*1024 ||
+		profile["payload_quota_reconciliation_required"] != true {
 		t.Fatalf("profile quota defaults = %#v", profile)
 	}
 	version, err := upgrade("agent_avatar_versions", map[string]any{

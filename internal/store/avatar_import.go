@@ -72,20 +72,21 @@ type avatarStyleRolloutImportScope struct {
 }
 
 type avatarProfileImportScope struct {
-	agentID                   string
-	realmID                   string
-	lineage                   int64
-	style                     avatarStyleVersionImportKey
-	styleRevision             int64
-	status                    avatardomain.Status
-	policy                    avatardomain.AutonomyPolicy
-	subjectForm               avatardomain.SubjectForm
-	latestVersion             int64
-	proposedVersion           int64
-	activeVersion             int64
-	revision                  int64
-	retainedPayloadCountLimit int64
-	retainedPayloadByteLimit  int64
+	agentID                            string
+	realmID                            string
+	lineage                            int64
+	style                              avatarStyleVersionImportKey
+	styleRevision                      int64
+	status                             avatardomain.Status
+	policy                             avatardomain.AutonomyPolicy
+	subjectForm                        avatardomain.SubjectForm
+	latestVersion                      int64
+	proposedVersion                    int64
+	activeVersion                      int64
+	revision                           int64
+	retainedPayloadCountLimit          int64
+	retainedPayloadByteLimit           int64
+	payloadQuotaReconciliationRequired bool
 }
 
 type avatarVersionImportKey struct {
@@ -118,6 +119,7 @@ func (ic *importCtx) normalizeLegacyImportedAvatarPayloadFields(table string, ob
 	case "agent_avatar_profiles":
 		obj["retained_payload_count_limit"] = AvatarDefaultRetainedPayloadCountLimit
 		obj["retained_payload_byte_limit"] = AvatarDefaultRetainedPayloadByteLimit
+		obj["payload_quota_reconciliation_required"] = true
 	case "agent_avatar_versions":
 		svg, svgOK := obj["svg"].(string)
 		description, descriptionOK := obj["description"].(string)
@@ -645,13 +647,18 @@ func (ic *importCtx) validateImportedAvatarProfile(obj map[string]any) (avatarPr
 		retainedByteLimit > AvatarMaxRetainedPayloadByteLimit {
 		return avatarProfileImportScope{}, fmt.Errorf("retained_payload_byte_limit is invalid")
 	}
+	reconciliationRequired, ok := obj["payload_quota_reconciliation_required"].(bool)
+	if !ok {
+		return avatarProfileImportScope{}, fmt.Errorf("payload_quota_reconciliation_required must be a boolean")
+	}
 	return avatarProfileImportScope{
 		agentID: agentID, realmID: realmID, lineage: lineage,
 		style: style, styleRevision: styleRevision, status: status,
 		policy: policy, subjectForm: form, latestVersion: latest,
 		proposedVersion: proposed, activeVersion: active, revision: revision,
-		retainedPayloadCountLimit: retainedCountLimit,
-		retainedPayloadByteLimit:  retainedByteLimit,
+		retainedPayloadCountLimit:          retainedCountLimit,
+		retainedPayloadByteLimit:           retainedByteLimit,
+		payloadQuotaReconciliationRequired: reconciliationRequired,
 	}, nil
 }
 
@@ -1445,7 +1452,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 		// proposal. Pre-51 archives had no quota contract and are allowed through
 		// with migration defaults so the first subsequent proposal can compact
 		// their legacy history deterministically.
-		if ic.schemaVersion >= 51 &&
+		if ic.schemaVersion >= 51 && !profile.payloadQuotaReconciliationRequired &&
 			(retainedPayloadCount > profile.retainedPayloadCountLimit ||
 				retainedPayloadBytes > profile.retainedPayloadByteLimit) {
 			return fmt.Errorf("agent %q retained avatar payloads exceed the configured quota", agentID)

@@ -7,6 +7,7 @@
 ALTER TABLE agent_avatar_profiles
   ADD COLUMN retained_payload_count_limit INTEGER NOT NULL DEFAULT 20,
   ADD COLUMN retained_payload_byte_limit  BIGINT  NOT NULL DEFAULT 2097152,
+  ADD COLUMN payload_quota_reconciliation_required BOOLEAN NOT NULL DEFAULT false,
   ADD CONSTRAINT agent_avatar_profiles_retained_payload_count_limit_check
     CHECK (retained_payload_count_limit BETWEEN 4 AND 1000),
   ADD CONSTRAINT agent_avatar_profiles_retained_payload_byte_limit_check
@@ -41,6 +42,13 @@ BEGIN
                        + octet_length(NEW.description)
                        + octet_length(NEW.visual_spec::text);
   END IF;
+  IF NEW.locked_layers_sha256 IS NULL THEN
+    UPDATE agent_avatar_profiles
+       SET payload_quota_reconciliation_required = true
+     WHERE account_id = NEW.account_id
+       AND realm_id = NEW.realm_id
+       AND agent_id = NEW.agent_id;
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -55,6 +63,22 @@ UPDATE agent_avatar_versions
    SET payload_bytes = octet_length(svg)
                      + octet_length(description)
                      + octet_length(visual_spec::text);
+
+-- Schema 50 had no retained-payload quota. Preserve that provenance for any
+-- history that already exceeds the new defaults so a current-schema archive
+-- remains restorable until an enabled mutation reconciles it transactionally.
+UPDATE agent_avatar_profiles profile
+   SET payload_quota_reconciliation_required = true
+ WHERE EXISTS (
+   SELECT 1
+     FROM agent_avatar_versions version
+    WHERE version.account_id = profile.account_id
+      AND version.realm_id = profile.realm_id
+      AND version.agent_id = profile.agent_id
+   GROUP BY version.account_id, version.realm_id, version.agent_id
+   HAVING COUNT(*) > profile.retained_payload_count_limit
+       OR SUM(version.payload_bytes) > profile.retained_payload_byte_limit
+ );
 
 ALTER TABLE agent_avatar_versions
   ALTER COLUMN payload_bytes SET NOT NULL,
@@ -163,4 +187,5 @@ ALTER TABLE agent_avatar_profiles
   DROP CONSTRAINT agent_avatar_profiles_retained_payload_byte_limit_check,
   DROP CONSTRAINT agent_avatar_profiles_retained_payload_count_limit_check,
   DROP COLUMN retained_payload_byte_limit,
-  DROP COLUMN retained_payload_count_limit;
+  DROP COLUMN retained_payload_count_limit,
+  DROP COLUMN payload_quota_reconciliation_required;

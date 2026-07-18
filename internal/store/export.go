@@ -207,6 +207,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'failure_code', failure_code,
 			  'retained_payload_count_limit', retained_payload_count_limit,
 			  'retained_payload_byte_limit', retained_payload_byte_limit,
+			  'payload_quota_reconciliation_required',
+			    payload_quota_reconciliation_required,
 			  'revision', revision,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM agent_avatar_profiles WHERE account_id = $1

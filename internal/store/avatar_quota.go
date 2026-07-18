@@ -945,11 +945,13 @@ func (s *Store) SetAvatarQuota(ctx context.Context, p Principal, agentID string,
 		UPDATE agent_avatar_profiles
 		   SET retained_payload_count_limit=$4,
 		       retained_payload_byte_limit=$5,
+		       payload_quota_reconciliation_required=
+		         CASE WHEN $7 THEN false ELSE payload_quota_reconciliation_required END,
 		       revision=revision+1, updated_at=clock_timestamp()
 		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3 AND revision=$6
 		 RETURNING revision`, target.accountID, target.realmID, target.agentID,
 		in.RetainedPayloadCountLimit, in.RetainedPayloadByteLimit,
-		in.ExpectedProfileRevision).Scan(&resultRevision)
+		in.ExpectedProfileRevision, s.avatarPayloadCompactionEnabled).Scan(&resultRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarMutationResult{}, ErrAvatarConflict
 	}

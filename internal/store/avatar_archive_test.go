@@ -851,6 +851,39 @@ func TestAvatarArchiveValidationRejectsRetainedPayloadUsageAboveQuota(t *testing
 		})
 	}
 
+	t.Run("legacy reconciliation marker permits transitional overage", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "latest_avatar_version": int64(5),
+			"proposed_avatar_version":               int64(5),
+			"retained_payload_count_limit":          int64(4),
+			"payload_quota_reconciliation_required": true,
+		})
+		for version := int64(1); version <= 5; version++ {
+			feedAvatarArchiveVersion(t, ic,
+				avatarArchiveVersionRow(t, version, 0, avatardomain.SubjectHuman))
+			if version < 5 {
+				feedAvatarArchiveRejection(t, ic, version)
+			}
+		}
+		if err := ic.validateImportedAvatarGraph(); err != nil {
+			t.Fatalf("marked legacy overage = %v", err)
+		}
+	})
+
+	t.Run("reconciliation marker must be boolean", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		row := avatarArchiveProfileRow(map[string]any{
+			"payload_quota_reconciliation_required": "true",
+		})
+		if _, err := ic.validateImportedAvatarProfile(row); err == nil ||
+			!strings.Contains(err.Error(), "must be a boolean") {
+			t.Fatalf("marker validation error = %v", err)
+		}
+	})
+
 	t.Run("continuity fingerprint bytes", func(t *testing.T) {
 		pack := avatardomain.BuiltInFlatVectorStylePack()
 		fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
@@ -1648,9 +1681,10 @@ func avatarArchiveProfileRow(overrides map[string]any) map[string]any {
 		"active_avatar_version": nil, "subject_form": "human",
 		"attempt_count": int64(0), "retry_after": nil, "fallback_seed": avatarArchiveAgent,
 		"failure_code": "", "revision": int64(1),
-		"retained_payload_count_limit": int64(AvatarDefaultRetainedPayloadCountLimit),
-		"retained_payload_byte_limit":  AvatarDefaultRetainedPayloadByteLimit,
-		"created_at":                   avatarArchiveTime, "updated_at": avatarArchiveTime,
+		"retained_payload_count_limit":          int64(AvatarDefaultRetainedPayloadCountLimit),
+		"retained_payload_byte_limit":           AvatarDefaultRetainedPayloadByteLimit,
+		"payload_quota_reconciliation_required": false,
+		"created_at":                            avatarArchiveTime, "updated_at": avatarArchiveTime,
 	}
 	for key, value := range overrides {
 		row[key] = value

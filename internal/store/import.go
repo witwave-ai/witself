@@ -116,6 +116,7 @@ var importColumns = map[string]map[string]bool{
 		"fallback_seed": true, "failure_code": true, "revision": true,
 		"retained_payload_count_limit": true,
 		"retained_payload_byte_limit":  true,
+		"payload_quota_reconciliation_required": true,
 		"created_at":                   true, "updated_at": true,
 	},
 	"agent_avatar_versions": {

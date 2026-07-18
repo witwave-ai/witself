@@ -60,6 +60,7 @@ func addAvatarPayloadQuotaDefaults(table string, row map[string]any) (map[string
 	case "agent_avatar_profiles":
 		row["retained_payload_count_limit"] = legacyAvatarRetainedPayloadCountLimit
 		row["retained_payload_byte_limit"] = legacyAvatarRetainedPayloadByteLimit
+		row["payload_quota_reconciliation_required"] = true
 	case "agent_avatar_versions":
 		svg, svgOK := row["svg"].(string)
 		description, descriptionOK := row["description"].(string)
