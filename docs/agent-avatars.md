@@ -174,9 +174,12 @@ inputs to a square finite canvas, bounded coordinates, strokes, path groups,
 arc geometry, and deterministic raster-work budget. It rejects transforms,
 definitions, clipping, gradients, paint URLs, percentage geometry, alpha-hex
 paint, root or group opacity, alternate aspect-ratio behavior, and other
-renderer-dependent features. A new baseline also needs at least 48 pixels of
-locked identity in the canonical 96 by 96 projection. Renderer parse, work,
-or identity-mask uncertainty fails closed.
+renderer-dependent features. In the canonical 96 by 96 projection, a new
+baseline's locked-identity mask must cover no more than 6,144 pixels and must
+cover at least 1,152 pixels inside a fixed centered portrait-focus ellipse.
+The general 48-pixel mask floor remains a low-level sanity bound, but the
+centered-focus requirement is the effective minimum for new baselines.
+Renderer parse, work, or identity-mask uncertainty fails closed.
 
 Versions created before this contract, plus rows written during a mixed-version
 rollout by a server that omits the new field, are explicitly quarantined as
@@ -213,8 +216,11 @@ not infer image meaning or protect against every possible visual occlusion.
 
 The model-free raster guard renders five fixed 96 by 96 RGBA projections: both
 whole portraits, the parent's locked identity mask, and each version with only
-its locked layers visible. A locked-identity mask smaller than 48 pixels fails
-closed; it never falls back to a broad background or generic locked-layer mask.
+its locked layers visible. A locked-identity mask outside the baseline bounds
+fails closed; it never falls back to a broad background or generic locked-layer
+mask. Change and occlusion metrics use every pixel in the fixed centered
+ellipse, independently of the parent-supplied mask, so a client cannot hide a
+drastic head-and-shoulders repaint by moving or enlarging its locked shape.
 Inputs are already limited to
 64 KiB, 512 elements, depth 32, and 1,024 bytes per attribute, so work and
 image memory remain bounded. Ordinary wrapper groups are preserved by projection;
@@ -224,9 +230,11 @@ changed above normalized delta `0.12`. The proposal is rejected when
 whole-portrait changed pixels exceed `0.42` or mean delta exceeds `0.20`, when
 locked-identity changed pixels exceed `0.46` or mean delta exceeds `0.24`, or
 when newly added visible unlocked-layer influence covers more than `0.30` of
-the locked identity mask. Visible influence is the per-pixel delta between the
-whole portrait and its locked-only render, so opaque unlocked artwork hidden
-behind locked layers does not become a false occlusion. Calibration leaves
+the locked identity mask. Within the centered focus, the independent limits
+are `0.26` changed pixels, `0.13` mean delta, and `0.30` newly added unlocked
+influence. Visible influence is the per-pixel delta between the whole portrait
+and its locked-only render, so opaque unlocked artwork hidden behind locked
+layers does not become a false occlusion. Calibration leaves
 ordinary expression, attire, and experience edits well below those limits
 while rejecting full-canvas replacement and a face-covering front overlay. The
 comparison is deterministic pure Go, and renderer failure is fail-closed. It
@@ -238,7 +246,13 @@ The pure avatar domain also exposes a versioned continuity fingerprint for a
 parent whose historical SVG will later be compacted. Version 1 is exactly
 38,092 bytes: a small fixed header, an exact style-pack digest, the parent's
 96 by 96 composite RGB bytes, a binary locked-identity mask, visible
-unlocked-layer influence bytes, and a SHA-256 corruption checksum. The normal
+unlocked-layer influence bytes, and a SHA-256 corruption checksum. The focus
+guard is derived from the existing whole-RGB, identity-mask, and unlocked-
+influence projections, so these stricter decoder and comparison rules do not
+change the version 1 wire length or layout. A policy golden pins the exact
+thresholds and centered-focus bitmap to the profile/fingerprint version.
+Any future change to the focus geometry, thresholds, or projection semantics
+after release requires a new perceptual profile or fingerprint version. The normal
 full-parent guard builds and consumes this same format, so comparison across a
 retained-SVG and compacted-parent boundary is behaviorally identical rather
 than an approximation. Decoding requires the exact magic, version, render

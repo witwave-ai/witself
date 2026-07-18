@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -65,39 +67,99 @@ func TestPerceptualContinuityFingerprintV1GoldenDurability(t *testing.T) {
 	}
 }
 
+func TestPerceptualV1PolicyGolden(t *testing.T) {
+	exactFloat := func(value float64) string {
+		return strconv.FormatFloat(value, 'g', -1, 64)
+	}
+	gotPolicy := fmt.Sprintf(
+		"wapf=%d;render=%d;pixel=%s;whole=%s/%s;identity=%s/%s;occlusion=%s;mask=%d-%d;focus=%d,%d/%d,%d;focus-mask=%d;focus-limits=%s/%s/%s",
+		PerceptualContinuityFingerprintVersion, PerceptualRenderSize,
+		exactFloat(PerceptualPixelDeltaLimit), exactFloat(PerceptualWholeChangedRatioLimit),
+		exactFloat(PerceptualWholeMeanDeltaLimit), exactFloat(PerceptualIdentityChangedRatioLimit),
+		exactFloat(PerceptualIdentityMeanDeltaLimit), exactFloat(PerceptualAddedOcclusionRatioLimit),
+		perceptualMinimumMaskPixels, perceptualMaximumMaskPixels,
+		perceptualFocusCenterX2, perceptualFocusCenterY2,
+		perceptualFocusHorizontalRadius2, perceptualFocusVerticalRadius2,
+		perceptualMinimumFocusMaskPixels, exactFloat(PerceptualFocusChangedRatioLimit),
+		exactFloat(PerceptualFocusMeanDeltaLimit), exactFloat(PerceptualFocusAddedOcclusionRatioLimit))
+	const wantPolicy = "wapf=1;render=96;pixel=0.12;whole=0.42/0.2;identity=0.46/0.24;occlusion=0.3;mask=48-6144;focus=96,86/48,52;focus-mask=1152;focus-limits=0.26/0.13/0.3"
+	if gotPolicy != wantPolicy {
+		t.Fatalf("perceptual-v1 policy changed without a new profile/fingerprint version:\n got %s\nwant %s", gotPolicy, wantPolicy)
+	}
+
+	bitmap := make([]byte, perceptualFingerprintIdentityMaskBytes)
+	focusPixels := 0
+	for pixel := 0; pixel < perceptualFingerprintPixelCount; pixel++ {
+		if !perceptualFocusPixel(pixel%PerceptualRenderSize, pixel/PerceptualRenderSize) {
+			continue
+		}
+		bitmap[pixel/8] |= 1 << (7 - uint(pixel%8))
+		focusPixels++
+	}
+	if focusPixels != 1968 {
+		t.Fatalf("perceptual-v1 focus pixels = %d, want 1968", focusPixels)
+	}
+	digest := sha256.Sum256(bitmap)
+	if got, want := hex.EncodeToString(digest[:]), "dff28b03717654128c1f0bb49a09fdc2b6e7a5b2caae1b537117575952e918e6"; got != want {
+		t.Fatalf("perceptual-v1 focus bitmap digest = %s, want %s", got, want)
+	}
+}
+
 func TestPerceptualContinuityFingerprintIdentityMaskBoundary(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()
 	base, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
 	if err != nil {
 		t.Fatal(err)
 	}
-	withMaskPixels := func(count int) []byte {
+	withMaskPixels := func(focusCount, totalCount int) []byte {
 		fingerprint := bytes.Clone(base)
 		maskOffset := perceptualFingerprintHeaderBytes +
 			perceptualFingerprintStyleDigestBytes + perceptualFingerprintRGBBytes
 		mask := fingerprint[maskOffset : maskOffset+perceptualFingerprintIdentityMaskBytes]
 		clear(mask)
-		for pixel := 0; pixel < count; pixel++ {
+		set := 0
+		for pixel := 0; pixel < perceptualFingerprintPixelCount && set < focusCount; pixel++ {
+			if !perceptualFocusPixel(pixel%PerceptualRenderSize, pixel/PerceptualRenderSize) {
+				continue
+			}
 			mask[pixel/8] |= 1 << (7 - uint(pixel%8))
+			set++
+		}
+		for pixel := 0; pixel < perceptualFingerprintPixelCount && set < totalCount; pixel++ {
+			if mask[pixel/8]&(1<<(7-uint(pixel%8))) != 0 {
+				continue
+			}
+			mask[pixel/8] |= 1 << (7 - uint(pixel%8))
+			set++
 		}
 		checksumOffset := len(fingerprint) - perceptualFingerprintChecksumBytes
 		checksum := sha256.Sum256(fingerprint[:checksumOffset])
 		copy(fingerprint[checksumOffset:], checksum[:])
 		return fingerprint
 	}
-	if err := ValidatePerceptualContinuityFingerprint(withMaskPixels(perceptualMinimumMaskPixels - 1)); !errors.Is(err, ErrInvalidPerceptualFingerprint) {
-		t.Fatalf("47-pixel mask error = %v", err)
+	if err := ValidatePerceptualContinuityFingerprint(withMaskPixels(
+		perceptualMinimumFocusMaskPixels-1, perceptualMinimumFocusMaskPixels-1)); !errors.Is(err, ErrInvalidPerceptualFingerprint) {
+		t.Fatalf("undersized focus mask error = %v", err)
 	}
-	exact := withMaskPixels(perceptualMinimumMaskPixels)
+	exact := withMaskPixels(perceptualMinimumFocusMaskPixels, perceptualMinimumFocusMaskPixels)
 	if err := ValidatePerceptualContinuityFingerprintForStyle(exact, pack); err != nil {
-		t.Fatalf("48-pixel mask: %v", err)
+		t.Fatalf("minimum focus mask: %v", err)
 	}
 	metrics, err := ComparePerceptualContinuityFromFingerprint(exact, []byte(humanReferenceSVG), pack)
 	if err != nil {
-		t.Fatalf("48-pixel comparison: %v", err)
+		t.Fatalf("minimum focus comparison: %v", err)
 	}
-	if metrics.IdentityMaskPixels != perceptualMinimumMaskPixels {
-		t.Fatalf("identity pixels = %d, want %d", metrics.IdentityMaskPixels, perceptualMinimumMaskPixels)
+	if metrics.IdentityMaskPixels != perceptualMinimumFocusMaskPixels || metrics.FocusPixels != 1968 {
+		t.Fatalf("identity/fixed-focus pixels = %d/%d, want %d/1968", metrics.IdentityMaskPixels,
+			metrics.FocusPixels, perceptualMinimumFocusMaskPixels)
+	}
+	if err := ValidatePerceptualContinuityFingerprint(withMaskPixels(
+		perceptualMinimumFocusMaskPixels, perceptualMaximumMaskPixels)); err != nil {
+		t.Fatalf("maximum mask: %v", err)
+	}
+	if err := ValidatePerceptualContinuityFingerprint(withMaskPixels(
+		perceptualMinimumFocusMaskPixels, perceptualMaximumMaskPixels+1)); !errors.Is(err, ErrInvalidPerceptualFingerprint) {
+		t.Fatalf("oversized mask error = %v", err)
 	}
 }
 
@@ -111,9 +173,9 @@ func TestPerceptualContinuityFingerprintSpeciesAndPlaceholderGoldens(t *testing.
 		svg    []byte
 		sha256 string
 	}{
-		"human": {svg: []byte(humanReferenceSVG), sha256: "e9e92503ae73b318a2074712b1ed05066c3dc3caa7feb9f99edf27b2d4df96e3"},
-		"animal": {svg: []byte(animalReferenceSVG), sha256: "4555628152f89d026a2594acfbb47ffab2b85eab60cae12851242b9133758880"},
-		"insect": {svg: []byte(insectReferenceSVG), sha256: "083ef47412a4697dcfd95b73694c5cbf89e65bf484318335c4c6df0e96e681ae"},
+		"human":       {svg: []byte(humanReferenceSVG), sha256: "e9e92503ae73b318a2074712b1ed05066c3dc3caa7feb9f99edf27b2d4df96e3"},
+		"animal":      {svg: []byte(animalReferenceSVG), sha256: "4555628152f89d026a2594acfbb47ffab2b85eab60cae12851242b9133758880"},
+		"insect":      {svg: []byte(insectReferenceSVG), sha256: "083ef47412a4697dcfd95b73694c5cbf89e65bf484318335c4c6df0e96e681ae"},
 		"placeholder": {svg: placeholder, sha256: "68813f9e8ccce13a6d4adaf8fe7e922b2ebe20314b2e8326cc2b3610d483e5a2"},
 	}
 	for name, test := range tests {

@@ -32,13 +32,28 @@ const (
 	PerceptualIdentityMeanDeltaLimit = 0.24
 	// PerceptualAddedOcclusionRatioLimit bounds newly covered locked identity.
 	PerceptualAddedOcclusionRatioLimit = 0.30
+	// PerceptualFocusChangedRatioLimit prevents any parent-supplied mask from
+	// diluting a drastic change to the fixed centered portrait region.
+	PerceptualFocusChangedRatioLimit = 0.26
+	// PerceptualFocusMeanDeltaLimit catches broad lower-contrast repainting in
+	// that fixed portrait focus independently of parent-supplied mask geometry.
+	PerceptualFocusMeanDeltaLimit = 0.13
+	// PerceptualFocusAddedOcclusionRatioLimit bounds newly covered identity in
+	// the centered focus without allowing unrelated mask area to dilute it.
+	PerceptualFocusAddedOcclusionRatioLimit = 0.30
 )
 
 const (
-	perceptualMaskAlpha          = uint8(32)
-	perceptualMinimumInfluence   = uint8(32)
-	perceptualAddedInfluenceStep = uint8(64)
-	perceptualMinimumMaskPixels  = 48
+	perceptualMaskAlpha              = uint8(32)
+	perceptualMinimumInfluence       = uint8(32)
+	perceptualAddedInfluenceStep     = uint8(64)
+	perceptualMinimumMaskPixels      = 48
+	perceptualMaximumMaskPixels      = PerceptualRenderSize * PerceptualRenderSize * 2 / 3
+	perceptualMinimumFocusMaskPixels = PerceptualRenderSize * PerceptualRenderSize / 8
+	perceptualFocusCenterX2          = PerceptualRenderSize
+	perceptualFocusCenterY2          = 86
+	perceptualFocusHorizontalRadius2 = 48
+	perceptualFocusVerticalRadius2   = 52
 )
 
 var (
@@ -61,6 +76,10 @@ type PerceptualContinuityMetrics struct {
 	IdentityMeanDelta      float64
 	AddedIdentityOcclusion float64
 	IdentityMaskPixels     int
+	FocusChangedRatio      float64
+	FocusMeanDelta         float64
+	FocusAddedOcclusion    float64
+	FocusPixels            int
 }
 
 // ValidatePerceptualContinuity rejects drastic same-style visual changes that
@@ -128,6 +147,13 @@ func ComparePerceptualContinuityFromFingerprint(fingerprint, child []byte, pack 
 	if metrics.WholeChangedRatio > PerceptualWholeChangedRatioLimit ||
 		metrics.WholeMeanDelta > PerceptualWholeMeanDeltaLimit {
 		return metrics, fmt.Errorf("%w: whole portrait changed beyond the bounded render limit", ErrPerceptualContinuity)
+	}
+	if metrics.FocusChangedRatio > PerceptualFocusChangedRatioLimit ||
+		metrics.FocusMeanDelta > PerceptualFocusMeanDeltaLimit {
+		return metrics, fmt.Errorf("%w: centered portrait focus changed beyond the bounded render limit", ErrPerceptualContinuity)
+	}
+	if metrics.FocusAddedOcclusion > PerceptualFocusAddedOcclusionRatioLimit {
+		return metrics, fmt.Errorf("%w: unlocked layers occlude too much centered identity", ErrPerceptualContinuity)
 	}
 	if metrics.IdentityChangedRatio > PerceptualIdentityChangedRatioLimit ||
 		metrics.IdentityMeanDelta > PerceptualIdentityMeanDeltaLimit {
@@ -263,4 +289,24 @@ func countPerceptualMaskPixels(mask *image.RGBA) int {
 		}
 	}
 	return count
+}
+
+func countPerceptualFocusMaskPixels(mask *image.RGBA) int {
+	count := 0
+	for y := 0; y < PerceptualRenderSize; y++ {
+		for x := 0; x < PerceptualRenderSize; x++ {
+			if perceptualFocusPixel(x, y) && mask.RGBAAt(x, y).A >= perceptualMaskAlpha {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func perceptualFocusPixel(x, y int) bool {
+	dx := 2*x + 1 - perceptualFocusCenterX2
+	dy := 2*y + 1 - perceptualFocusCenterY2
+	horizontalSquared := perceptualFocusHorizontalRadius2 * perceptualFocusHorizontalRadius2
+	verticalSquared := perceptualFocusVerticalRadius2 * perceptualFocusVerticalRadius2
+	return dx*dx*verticalSquared+dy*dy*horizontalSquared <= horizontalSquared*verticalSquared
 }

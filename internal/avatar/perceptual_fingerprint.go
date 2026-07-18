@@ -11,7 +11,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"math/bits"
 )
 
 const (
@@ -116,9 +115,15 @@ func renderPerceptualParentProjection(parentSVG []byte, pack StylePack) (*image.
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if pixels := countPerceptualMaskPixels(identityMask); pixels < perceptualMinimumMaskPixels {
-		return nil, nil, nil, fmt.Errorf("%w: locked identity projection covers %d pixels, want at least %d",
-			ErrPerceptualRender, pixels, perceptualMinimumMaskPixels)
+	maskPixels := countPerceptualMaskPixels(identityMask)
+	if maskPixels < perceptualMinimumMaskPixels || maskPixels > perceptualMaximumMaskPixels {
+		return nil, nil, nil, fmt.Errorf("%w: locked identity projection covers %d pixels, want %d-%d",
+			ErrPerceptualRender, maskPixels, perceptualMinimumMaskPixels, perceptualMaximumMaskPixels)
+	}
+	focusPixels := countPerceptualFocusMaskPixels(identityMask)
+	if focusPixels < perceptualMinimumFocusMaskPixels {
+		return nil, nil, nil, fmt.Errorf("%w: centered locked identity projection covers %d pixels, want at least %d",
+			ErrPerceptualRender, focusPixels, perceptualMinimumFocusMaskPixels)
 	}
 	parentLockedSVG, err := selectPerceptualLayers(parentSVG, pack, allLocked)
 	if err != nil {
@@ -201,12 +206,23 @@ func decodePerceptualContinuityFingerprint(fingerprint []byte) (decodedPerceptua
 	identityMask := stable[offset : offset+perceptualFingerprintIdentityMaskBytes]
 	offset += perceptualFingerprintIdentityMaskBytes
 	maskPixels := 0
-	for _, value := range identityMask {
-		maskPixels += bits.OnesCount8(value)
+	focusPixels := 0
+	for pixel := 0; pixel < perceptualFingerprintPixelCount; pixel++ {
+		if identityMask[pixel/8]&(1<<(7-uint(pixel%8))) == 0 {
+			continue
+		}
+		maskPixels++
+		if perceptualFocusPixel(pixel%PerceptualRenderSize, pixel/PerceptualRenderSize) {
+			focusPixels++
+		}
 	}
-	if maskPixels < perceptualMinimumMaskPixels {
-		return decodedPerceptualContinuityFingerprint{}, fmt.Errorf("%w: identity mask covers %d pixels, want at least %d",
-			ErrInvalidPerceptualFingerprint, maskPixels, perceptualMinimumMaskPixels)
+	if maskPixels < perceptualMinimumMaskPixels || maskPixels > perceptualMaximumMaskPixels {
+		return decodedPerceptualContinuityFingerprint{}, fmt.Errorf("%w: identity mask covers %d pixels, want %d-%d",
+			ErrInvalidPerceptualFingerprint, maskPixels, perceptualMinimumMaskPixels, perceptualMaximumMaskPixels)
+	}
+	if focusPixels < perceptualMinimumFocusMaskPixels {
+		return decodedPerceptualContinuityFingerprint{}, fmt.Errorf("%w: centered identity mask covers %d pixels, want at least %d",
+			ErrInvalidPerceptualFingerprint, focusPixels, perceptualMinimumFocusMaskPixels)
 	}
 	unlockedInfluence := stable[offset : offset+perceptualFingerprintInfluenceBytes]
 	return decodedPerceptualContinuityFingerprint{
@@ -241,8 +257,10 @@ func validatePerceptualFingerprintStyle(fingerprint decodedPerceptualContinuityF
 func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerprint, childFull, childLocked *image.RGBA) PerceptualContinuityMetrics {
 	metrics := PerceptualContinuityMetrics{}
 	wholeChanged := 0
+	focusChanged := 0
 	identityChanged := 0
 	addedOcclusion := 0
+	focusAddedOcclusion := 0
 	for y := 0; y < PerceptualRenderSize; y++ {
 		for x := 0; x < PerceptualRenderSize; x++ {
 			pixel := y*PerceptualRenderSize + x
@@ -253,6 +271,25 @@ func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerpr
 			if delta > PerceptualPixelDeltaLimit {
 				wholeChanged++
 			}
+			parentInfluence := parent.unlockedInfluence[pixel]
+			childInfluence := perceptualVisibleUnlockedInfluence(
+				childFull.RGBAAt(x, y), childLocked.RGBAAt(x, y))
+			added := childInfluence >= perceptualMinimumInfluence &&
+				int(childInfluence)-int(parentInfluence) >= int(perceptualAddedInfluenceStep)
+			// The portrait focus is an immutable server-defined region, not the
+			// intersection with a parent-supplied identity mask. Otherwise a
+			// client could place its minimum locked mask away from the actual
+			// face and make a drastic unlocked repaint invisible to this guard.
+			if perceptualFocusPixel(x, y) {
+				metrics.FocusPixels++
+				metrics.FocusMeanDelta += delta
+				if delta > PerceptualPixelDeltaLimit {
+					focusChanged++
+				}
+				if added {
+					focusAddedOcclusion++
+				}
+			}
 			if parent.identityMask[pixel/8]&(1<<(7-uint(pixel%8))) == 0 {
 				continue
 			}
@@ -261,17 +298,18 @@ func perceptualMetricsFromFingerprint(parent decodedPerceptualContinuityFingerpr
 			if delta > PerceptualPixelDeltaLimit {
 				identityChanged++
 			}
-			parentInfluence := parent.unlockedInfluence[pixel]
-			childInfluence := perceptualVisibleUnlockedInfluence(
-				childFull.RGBAAt(x, y), childLocked.RGBAAt(x, y))
-			if childInfluence >= perceptualMinimumInfluence &&
-				int(childInfluence)-int(parentInfluence) >= int(perceptualAddedInfluenceStep) {
+			if added {
 				addedOcclusion++
 			}
 		}
 	}
 	metrics.WholeChangedRatio = float64(wholeChanged) / perceptualFingerprintPixelCount
 	metrics.WholeMeanDelta /= perceptualFingerprintPixelCount
+	if metrics.FocusPixels > 0 {
+		metrics.FocusChangedRatio = float64(focusChanged) / float64(metrics.FocusPixels)
+		metrics.FocusMeanDelta /= float64(metrics.FocusPixels)
+		metrics.FocusAddedOcclusion = float64(focusAddedOcclusion) / float64(metrics.FocusPixels)
+	}
 	if metrics.IdentityMaskPixels > 0 {
 		metrics.IdentityChangedRatio = float64(identityChanged) / float64(metrics.IdentityMaskPixels)
 		metrics.IdentityMeanDelta /= float64(metrics.IdentityMaskPixels)

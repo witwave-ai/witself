@@ -56,6 +56,40 @@ func TestPerceptualContinuityToleratesOrdinaryUnlockedEvolution(t *testing.T) {
 	}
 }
 
+func TestPerceptualContinuityToleratesAccessoriesAcrossBuiltInForms(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	fixtures := make(map[string]string, len(pack.References)+1)
+	for _, reference := range pack.References {
+		fixtures[string(reference.SubjectForm)] = reference.SVG
+	}
+	placeholder, err := GeneratePlaceholderSVGForStylePack("agent_accessory", "Juniper", pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtures["placeholder"] = string(placeholder)
+	const accessories = `<circle cx="214" cy="236" r="28" fill="none" stroke="#203247" stroke-width="6"></circle>` +
+		`<circle cx="298" cy="236" r="28" fill="none" stroke="#203247" stroke-width="6"></circle>` +
+		`<path d="M242 236 L270 236" fill="none" stroke="#203247" stroke-width="6"></path>` +
+		`<path d="M226 274 C240 264 250 270 256 282 C262 270 272 264 286 274 C276 296 236 296 226 274 Z" fill="#203247"></path>`
+	for name, parent := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			child := replacePerceptualTestLayer(t, parent, "experience", accessories)
+			if _, err := SanitizePerceptualV1AvatarBaseline([]byte(child), pack); err != nil {
+				t.Fatalf("accessory baseline: %v", err)
+			}
+			metrics, err := ComparePerceptualContinuity([]byte(parent), []byte(child), pack)
+			if err != nil {
+				t.Fatalf("ordinary accessories rejected: %v; metrics=%+v", err, metrics)
+			}
+			if metrics.FocusChangedRatio > PerceptualFocusChangedRatioLimit ||
+				metrics.FocusMeanDelta > PerceptualFocusMeanDeltaLimit ||
+				metrics.FocusAddedOcclusion > PerceptualFocusAddedOcclusionRatioLimit {
+				t.Fatalf("ordinary accessory metrics crossed focus limit: %+v", metrics)
+			}
+		})
+	}
+}
+
 func TestPerceptualContinuityRejectsDrasticWholePortraitReplacement(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()
 	child := replacePerceptualTestLayer(t, humanReferenceSVG, "experience",
@@ -82,6 +116,44 @@ func TestPerceptualContinuityRejectsUnlockedLockedIdentityOcclusion(t *testing.T
 	}
 	if metrics.AddedIdentityOcclusion <= PerceptualAddedOcclusionRatioLimit {
 		t.Fatalf("front overlay did not cross the visible unlocked-influence limit: %+v", metrics)
+	}
+}
+
+func TestPerceptualContinuityRejectsWithinFocusMaskDilution(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	parent := replacePerceptualTestLayer(t, humanReferenceSVG, "base-identity",
+		`<circle cx="256" cy="240" r="175" fill="#DCEAF5" stroke="#203247" stroke-width="8"></circle>`)
+	parent = replacePerceptualTestLayer(t, parent, "expression",
+		`<circle cx="256" cy="230" r="75" fill="#E9C46A" stroke="#203247" stroke-width="8"></circle>`+
+			`<circle cx="228" cy="224" r="9" fill="#203247"></circle>`+
+			`<circle cx="284" cy="224" r="9" fill="#203247"></circle>`+
+			`<path d="M226 270 C242 286 270 286 286 270" fill="none" stroke="#203247" stroke-width="8" stroke-linecap="round"></path>`)
+	child := replacePerceptualTestLayer(t, parent, "expression",
+		`<circle cx="256" cy="230" r="75" fill="#7868E6" stroke="#203247" stroke-width="8"></circle>`+
+			`<path d="M204 208 L308 250 M204 250 L308 208" fill="none" stroke="#F7FAFC" stroke-width="14" stroke-linecap="round"></path>`)
+	if _, err := SanitizePerceptualV1AvatarBaseline([]byte(parent), pack); err != nil {
+		t.Fatalf("parent baseline: %v", err)
+	}
+	if _, err := SanitizePerceptualV1AvatarBaseline([]byte(child), pack); err != nil {
+		t.Fatalf("child baseline: %v", err)
+	}
+	if err := ValidateLockedLayerContinuity([]byte(parent), []byte(child), pack); err != nil {
+		t.Fatalf("locked layers changed in dilution fixture: %v", err)
+	}
+	metrics, err := ComparePerceptualContinuity([]byte(parent), []byte(child), pack)
+	if !errors.Is(err, ErrPerceptualContinuity) {
+		t.Fatalf("within-focus mask dilution error = %v, metrics=%+v", err, metrics)
+	}
+	if metrics.WholeChangedRatio > PerceptualWholeChangedRatioLimit ||
+		metrics.WholeMeanDelta > PerceptualWholeMeanDeltaLimit ||
+		metrics.IdentityChangedRatio > PerceptualIdentityChangedRatioLimit ||
+		metrics.IdentityMeanDelta > PerceptualIdentityMeanDeltaLimit ||
+		metrics.AddedIdentityOcclusion > PerceptualAddedOcclusionRatioLimit {
+		t.Fatalf("fixture no longer isolates the fixed-focus guard: %+v", metrics)
+	}
+	if metrics.FocusChangedRatio <= PerceptualFocusChangedRatioLimit &&
+		metrics.FocusMeanDelta <= PerceptualFocusMeanDeltaLimit {
+		t.Fatalf("fixed focus did not cross a continuity limit: %+v", metrics)
 	}
 }
 

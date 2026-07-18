@@ -32,6 +32,35 @@ func TestPerceptualV1BuiltInSpeciesAndPlaceholderAreCompatible(t *testing.T) {
 	}
 }
 
+func TestPerceptualV1BuiltInIdentityProjectionsStayWithinBounds(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	fixtures := make(map[string][]byte, len(pack.References)+1)
+	for _, reference := range pack.References {
+		fixtures[string(reference.SubjectForm)] = []byte(reference.SVG)
+	}
+	placeholder, err := GeneratePlaceholderSVGForStylePack("agent_profile", "Juniper", pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtures["placeholder"] = placeholder
+	for name, fixture := range fixtures {
+		_, mask, _, err := renderPerceptualParentProjection(fixture, pack)
+		if err != nil {
+			t.Fatalf("%s projection: %v", name, err)
+		}
+		maskPixels := countPerceptualMaskPixels(mask)
+		focusPixels := countPerceptualFocusMaskPixels(mask)
+		if maskPixels < perceptualMinimumMaskPixels || maskPixels > perceptualMaximumMaskPixels {
+			t.Fatalf("%s mask pixels = %d", name, maskPixels)
+		}
+		if focusPixels < perceptualMinimumFocusMaskPixels {
+			t.Fatalf("%s focus pixels = %d", name, focusPixels)
+		}
+		t.Logf("%s mask=%d/%d focus=%d", name, maskPixels,
+			PerceptualRenderSize*PerceptualRenderSize, focusPixels)
+	}
+}
+
 func TestPerceptualV1RejectsRendererMismatchWithoutNarrowingGenericSanitizer(t *testing.T) {
 	tests := map[string]string{
 		"transform":      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><circle cx="16" cy="16" r="12" fill="#203247" transform="translate(1 0)"></circle></svg>`,
@@ -110,6 +139,15 @@ func TestPerceptualV1BaselineFailsClosedOnTinyLockedIdentity(t *testing.T) {
 		`<circle cx="1" cy="1" r="1" fill="#203247"></circle>`)
 	if _, err := SanitizePerceptualV1AvatarBaseline([]byte(tiny), pack); !errors.Is(err, ErrPerceptualRender) {
 		t.Fatalf("tiny baseline error = %v, want ErrPerceptualRender", err)
+	}
+}
+
+func TestPerceptualV1BaselineFailsClosedOnOversizedLockedIdentity(t *testing.T) {
+	pack := BuiltInFlatVectorStylePack()
+	oversized := replacePerceptualTestLayer(t, humanReferenceSVG, "base-identity",
+		`<rect x="0" y="0" width="512" height="512" fill="#DCEAF5"></rect>`)
+	if _, err := SanitizePerceptualV1AvatarBaseline([]byte(oversized), pack); !errors.Is(err, ErrPerceptualRender) {
+		t.Fatalf("oversized baseline error = %v, want ErrPerceptualRender", err)
 	}
 }
 

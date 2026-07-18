@@ -111,6 +111,9 @@ func FuzzPerceptualContinuityNeverPanics(f *testing.F) {
 			"identity changed ratio":   metrics.IdentityChangedRatio,
 			"identity mean delta":      metrics.IdentityMeanDelta,
 			"added identity occlusion": metrics.AddedIdentityOcclusion,
+			"focus changed ratio":      metrics.FocusChangedRatio,
+			"focus mean delta":         metrics.FocusMeanDelta,
+			"focus added occlusion":    metrics.FocusAddedOcclusion,
 		} {
 			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
 				t.Fatalf("%s is outside [0,1]: %v", name, value)
@@ -119,6 +122,9 @@ func FuzzPerceptualContinuityNeverPanics(f *testing.F) {
 		if metrics.IdentityMaskPixels < 0 ||
 			metrics.IdentityMaskPixels > PerceptualRenderSize*PerceptualRenderSize {
 			t.Fatalf("identity mask pixel count is invalid: %d", metrics.IdentityMaskPixels)
+		}
+		if metrics.FocusPixels != 1968 {
+			t.Fatalf("fixed focus pixel count is %d, want 1968", metrics.FocusPixels)
 		}
 	})
 }
@@ -167,10 +173,82 @@ func FuzzPerceptualContinuityStructuredFingerprintNeverPanics(f *testing.F) {
 		if err != nil && !errors.Is(err, ErrPerceptualContinuity) {
 			t.Fatalf("validated structured fingerprint failed comparison contract: %v", err)
 		}
-		if metrics.IdentityMaskPixels < perceptualMinimumMaskPixels {
-			t.Fatalf("validated fingerprint has only %d identity pixels", metrics.IdentityMaskPixels)
+		if metrics.IdentityMaskPixels < perceptualMinimumMaskPixels ||
+			metrics.IdentityMaskPixels > perceptualMaximumMaskPixels {
+			t.Fatalf("validated fingerprint has invalid identity mask size %d", metrics.IdentityMaskPixels)
+		}
+		if metrics.FocusPixels != 1968 {
+			t.Fatalf("validated fingerprint has fixed focus size %d, want 1968", metrics.FocusPixels)
+		}
+		decoded, err := decodePerceptualContinuityFingerprint(mutated)
+		if err != nil {
+			t.Fatalf("validated fingerprint did not decode again: %v", err)
+		}
+		if focusPixels := perceptualFingerprintFocusMaskPixels(decoded.identityMask); focusPixels < perceptualMinimumFocusMaskPixels {
+			t.Fatalf("validated fingerprint has only %d identity pixels in fixed focus", focusPixels)
 		}
 	})
+}
+
+func FuzzPerceptualContinuityFingerprintMaskRunsNeverPanics(f *testing.F) {
+	pack := BuiltInFlatVectorStylePack()
+	valid, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
+	if err != nil {
+		f.Fatalf("build valid seed: %v", err)
+	}
+	f.Add(uint16(0), uint16(0), false)
+	f.Add(uint16(0), uint16(perceptualMinimumFocusMaskPixels-1), true)
+	f.Add(uint16(perceptualFingerprintPixelCount-1), uint16(perceptualFingerprintPixelCount), false)
+	f.Add(uint16(65535), uint16(65535), true)
+	f.Fuzz(func(t *testing.T, startRaw, runRaw uint16, set bool) {
+		mutated := bytes.Clone(valid)
+		maskOffset := perceptualFingerprintHeaderBytes +
+			perceptualFingerprintStyleDigestBytes + perceptualFingerprintRGBBytes
+		mask := mutated[maskOffset : maskOffset+perceptualFingerprintIdentityMaskBytes]
+		start := int(startRaw) % perceptualFingerprintPixelCount
+		run := int(runRaw) % (perceptualFingerprintPixelCount + 1)
+		for step := 0; step < run; step++ {
+			pixel := (start + step) % perceptualFingerprintPixelCount
+			bit := byte(1 << (7 - uint(pixel%8)))
+			if set {
+				mask[pixel/8] |= bit
+			} else {
+				mask[pixel/8] &^= bit
+			}
+		}
+		checksumOffset := len(mutated) - perceptualFingerprintChecksumBytes
+		checksum := sha256.Sum256(mutated[:checksumOffset])
+		copy(mutated[checksumOffset:], checksum[:])
+		if err := ValidatePerceptualContinuityFingerprintForStyle(mutated, pack); err != nil {
+			return
+		}
+		decoded, err := decodePerceptualContinuityFingerprint(mutated)
+		if err != nil {
+			t.Fatalf("validated run-mutated fingerprint did not decode: %v", err)
+		}
+		focusPixels := perceptualFingerprintFocusMaskPixels(decoded.identityMask)
+		if focusPixels < perceptualMinimumFocusMaskPixels {
+			t.Fatalf("validated run-mutated fingerprint has %d focus mask pixels", focusPixels)
+		}
+		metrics, err := ComparePerceptualContinuityFromFingerprint(mutated, []byte(humanReferenceSVG), pack)
+		if err != nil && !errors.Is(err, ErrPerceptualContinuity) {
+			t.Fatalf("validated run-mutated fingerprint failed comparison contract: %v", err)
+		}
+		if metrics.FocusPixels != 1968 {
+			t.Fatalf("run-mutated fingerprint has fixed focus size %d, want 1968", metrics.FocusPixels)
+		}
+	})
+}
+
+func perceptualFingerprintFocusMaskPixels(mask []byte) int {
+	count := 0
+	for pixel := 0; pixel < perceptualFingerprintPixelCount; pixel++ {
+		if mask[pixel/8]&(1<<(7-uint(pixel%8))) != 0 &&
+			perceptualFocusPixel(pixel%PerceptualRenderSize, pixel/PerceptualRenderSize) {
+			count++
+		}
+	}
+	return count
 }
 
 func avatarSVGFuzzSeeds() [][]byte {
