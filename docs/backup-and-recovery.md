@@ -513,6 +513,67 @@ encrypted secret material, and service availability.
   contain plaintext secret values, TOTP seeds/codes, or key material. See
   [audit-retention.md](audit-retention.md).
 
+### GCP Cloud SQL pre-migration backup
+
+Before a managed GCP rollout can start a binary that may advance the database
+schema, create and verify one on-demand Cloud SQL backup. `VERSION` omits the
+Git tag's `v` prefix, and `CELL` is the exact GitOps cell name:
+
+```sh
+VERSION="${RELEASE_VERSION:?set release version without the v prefix}"
+PROJECT="${GCP_PROJECT:?set GCP project ID}"
+CELL="${WITSELF_CELL:?set Witself cell name}"
+
+INSTANCE="$(
+  gcloud sql instances list --project "$PROJECT" \
+    --filter="name~'^witself-${CELL}-db-'" \
+    --format='value(name)'
+)"
+test -n "$INSTANCE"
+test "$(printf '%s\n' "$INSTANCE" | wc -l | tr -d ' ')" -eq 1
+
+BACKUP_DESCRIPTION="pre-v${VERSION}-migration-$(date -u +%Y%m%dT%H%M%SZ)"
+gcloud sql backups create \
+  --project "$PROJECT" \
+  --instance "$INSTANCE" \
+  --description "$BACKUP_DESCRIPTION"
+
+BACKUP_ID="$(
+  gcloud sql backups list \
+    --project "$PROJECT" \
+    --instance "$INSTANCE" \
+    --filter="description='$BACKUP_DESCRIPTION'" \
+    --sort-by='~enqueuedTime' \
+    --limit=1 \
+    --format='value(id)'
+)"
+test -n "$BACKUP_ID"
+
+gcloud sql backups describe "$BACKUP_ID" \
+  --project "$PROJECT" \
+  --instance "$INSTANCE" \
+  --format='yaml(id,status,type,description,enqueuedTime,startTime,endTime)'
+
+test "$(
+  gcloud sql backups describe "$BACKUP_ID" \
+    --project "$PROJECT" \
+    --instance "$INSTANCE" \
+    --format='value(status)'
+)" = SUCCESSFUL
+```
+
+Record the instance name and backup ID in the private rollout record before
+changing GitOps. GCP cells using the development/minimal database profile have
+automatic backups disabled, so an on-demand backup is a hard rollout gate for
+them. Create this backup before a schema-changing rollout even when scheduled
+backups are enabled; do not assume that a recent scheduled backup has completed.
+
+Once any new server process begins or completes a schema migration, do not
+downgrade to an older server binary. Keep the feature gate off and ship a
+forward fix. Restoring the pre-migration backup is a destructive recovery
+action, not an automatic deployment rollback: it requires explicit operator
+approval, a coordinated write freeze, and a separate restore plan.
+
 ## Self-Hosted Recovery
 
 Self-hosted operators own:
