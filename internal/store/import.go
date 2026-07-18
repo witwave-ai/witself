@@ -76,9 +76,79 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "account_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
 	},
+	"avatar_style_packs": {
+		"account_id": true, "realm_id": true, "id": true,
+		"current_version": true, "revision": true,
+		"created_at": true, "updated_at": true,
+	},
+	"avatar_style_pack_versions": {
+		"account_id": true, "realm_id": true, "style_pack_id": true,
+		"version": true, "previous_version": true, "name": true,
+		"description": true, "style_spec": true,
+		"reference_examples": true, "provenance": true,
+		"created_by_kind": true, "created_by_id": true, "created_at": true,
+	},
+	"realm_avatar_styles": {
+		"account_id": true, "realm_id": true, "style_pack_id": true,
+		"style_pack_version": true, "revision": true,
+		"created_at": true, "updated_at": true,
+	},
 	"agents": {
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
+	},
+	"agent_avatar_profiles": {
+		"account_id": true, "realm_id": true, "agent_id": true,
+		"status": true, "lineage_generation": true, "autonomy_policy": true,
+		"style_pack_id": true, "style_pack_version": true,
+		"latest_avatar_version": true, "proposed_avatar_version": true,
+		"active_avatar_version": true, "subject_form": true,
+		"attempt_count": true, "retry_after": true,
+		"fallback_seed": true, "failure_code": true, "revision": true,
+		"created_at": true, "updated_at": true,
+	},
+	"agent_avatar_versions": {
+		"account_id": true, "realm_id": true, "agent_id": true,
+		"id": true, "version": true, "lineage_generation": true,
+		"parent_version": true,
+		"style_pack_id":  true, "style_pack_version": true,
+		"subject_form": true, "svg": true, "description": true,
+		"visual_spec": true, "svg_sha256": true, "provenance": true,
+		"proposed_by_kind": true, "proposed_by_id": true,
+		"proposed_at": true,
+	},
+	"agent_avatar_activations": {
+		"id": true, "account_id": true, "realm_id": true,
+		"agent_id": true, "sequence": true,
+		"lineage_generation": true, "avatar_version": true,
+		"prior_active_version": true, "action": true,
+		"activated_by_kind": true, "activated_by_id": true,
+		"activated_at": true,
+	},
+	"agent_avatar_rejections": {
+		"id": true, "account_id": true, "realm_id": true,
+		"agent_id": true, "avatar_version": true, "reason_code": true,
+		"rejected_by_kind": true, "rejected_by_id": true,
+		"rejected_at": true,
+	},
+	"agent_avatar_resets": {
+		"id": true, "account_id": true, "realm_id": true,
+		"agent_id": true, "sequence": true,
+		"retired_lineage_generation": true,
+		"new_lineage_generation":     true,
+		"retired_active_version":     true,
+		"retired_proposed_version":   true,
+		"reason_code":                true, "reset_by_kind": true,
+		"reset_by_id": true, "reset_at": true,
+	},
+	"avatar_mutation_receipts": {
+		"account_id": true, "realm_id": true,
+		"target_kind": true, "target_id": true,
+		"actor_kind": true, "actor_id": true, "operation": true,
+		"idempotency_key": true, "request_hash": true,
+		"result_revision": true, "result_version": true,
+		"result_lineage_generation": true,
+		"created_at":                true,
 	},
 	"agent_activity": {
 		"agent_id": true, "runtime": true, "location_id": true, "location": true,
@@ -638,6 +708,7 @@ type agentActivityImportKey struct {
 type importCtx struct {
 	accountID                    string
 	exportedAt                   time.Time
+	importedAt                   time.Time
 	accounts                     int
 	operators                    map[string]bool
 	realms                       map[string]bool
@@ -645,6 +716,24 @@ type importCtx struct {
 	liveAgents                   map[string]bool
 	agentRealms                  map[string]string
 	agentActivity                map[agentActivityImportKey]bool
+	avatarStyleHeads             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
+	avatarStyleVersions          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
+	realmAvatarStyles            map[string]realmAvatarStyleImportScope
+	avatarProfiles               map[string]avatarProfileImportScope
+	avatarVersions               map[avatarVersionImportKey]avatarVersionImportScope
+	avatarVersionIDs             map[string]bool
+	avatarLedgerIDs              map[string]bool
+	avatarActivationHeads        map[avatarLineageImportKey]int64
+	avatarActivationCount        map[avatarLineageImportKey]int64
+	avatarActivationSequence     map[string]int64
+	avatarActivatedVersions      map[avatarVersionImportKey]bool
+	avatarRejectedVersions       map[avatarVersionImportKey]bool
+	avatarResets                 map[avatarLineageImportKey]avatarResetImportScope
+	avatarResetReceipts          map[avatarLineageImportKey]bool
+	avatarResetCount             map[string]int64
+	avatarLineageEarliestAt      map[avatarLineageImportKey]time.Time
+	avatarLineageLatestAt        map[avatarLineageImportKey]time.Time
+	avatarLastResetAt            map[string]time.Time
 	tickets                      map[string]bool
 	transcripts                  map[string]transcriptImportScope
 	entries                      map[string]string
@@ -688,6 +777,24 @@ func newImportCtx(accountID string) *importCtx {
 		liveAgents:                   map[string]bool{},
 		agentRealms:                  map[string]string{},
 		agentActivity:                map[agentActivityImportKey]bool{},
+		avatarStyleHeads:             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
+		avatarStyleVersions:          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
+		realmAvatarStyles:            map[string]realmAvatarStyleImportScope{},
+		avatarProfiles:               map[string]avatarProfileImportScope{},
+		avatarVersions:               map[avatarVersionImportKey]avatarVersionImportScope{},
+		avatarVersionIDs:             map[string]bool{},
+		avatarLedgerIDs:              map[string]bool{},
+		avatarActivationHeads:        map[avatarLineageImportKey]int64{},
+		avatarActivationCount:        map[avatarLineageImportKey]int64{},
+		avatarActivationSequence:     map[string]int64{},
+		avatarActivatedVersions:      map[avatarVersionImportKey]bool{},
+		avatarRejectedVersions:       map[avatarVersionImportKey]bool{},
+		avatarResets:                 map[avatarLineageImportKey]avatarResetImportScope{},
+		avatarResetReceipts:          map[avatarLineageImportKey]bool{},
+		avatarResetCount:             map[string]int64{},
+		avatarLineageEarliestAt:      map[avatarLineageImportKey]time.Time{},
+		avatarLineageLatestAt:        map[avatarLineageImportKey]time.Time{},
+		avatarLastResetAt:            map[string]time.Time{},
 		tickets:                      map[string]bool{},
 		transcripts:                  map[string]transcriptImportScope{},
 		entries:                      map[string]string{},
@@ -909,6 +1016,10 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
+		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
+		"agent_avatar_profiles", "agent_avatar_versions",
+		"agent_avatar_activations", "agent_avatar_rejections", "agent_avatar_resets",
+		"avatar_mutation_receipts",
 		"support_tickets", "support_ticket_messages",
 		"transcript_conversations", "transcript_entries",
 		"usage_events", "usage_rollups",
@@ -993,6 +1104,33 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if id, ok := stringField(obj, "id"); ok {
 			ic.realms[id] = true
 		}
+	case "avatar_style_packs":
+		key, scope, err := ic.validateImportedAvatarStyleHead(obj)
+		if err != nil {
+			return badf("avatar_style_packs row %v", err)
+		}
+		if _, duplicate := ic.avatarStyleHeads[key]; duplicate {
+			return badf("avatar_style_packs row duplicates %s/%s", key.realmID, key.stylePackID)
+		}
+		ic.avatarStyleHeads[key] = scope
+	case "avatar_style_pack_versions":
+		key, scope, err := ic.validateImportedAvatarStyleVersion(obj)
+		if err != nil {
+			return badf("avatar_style_pack_versions row %v", err)
+		}
+		if _, duplicate := ic.avatarStyleVersions[key]; duplicate {
+			return badf("avatar_style_pack_versions row duplicates %s/%s@%d", key.realmID, key.stylePackID, key.version)
+		}
+		ic.avatarStyleVersions[key] = scope
+	case "realm_avatar_styles":
+		scope, err := ic.validateImportedRealmAvatarStyle(obj)
+		if err != nil {
+			return badf("realm_avatar_styles row %v", err)
+		}
+		if _, duplicate := ic.realmAvatarStyles[scope.style.realmID]; duplicate {
+			return badf("realm_avatar_styles row duplicates realm %q", scope.style.realmID)
+		}
+		ic.realmAvatarStyles[scope.style.realmID] = scope
 	case "agents":
 		realmID, err := requireStringField(obj, "realm_id")
 		if err != nil {
@@ -1009,6 +1147,49 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.agents[id] = true
 			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
+		}
+	case "agent_avatar_profiles":
+		scope, err := ic.validateImportedAvatarProfile(obj)
+		if err != nil {
+			return badf("agent_avatar_profiles row %v", err)
+		}
+		if _, duplicate := ic.avatarProfiles[scope.agentID]; duplicate {
+			return badf("agent_avatar_profiles row duplicates agent %q", scope.agentID)
+		}
+		ic.avatarProfiles[scope.agentID] = scope
+	case "agent_avatar_versions":
+		key, scope, err := ic.validateImportedAvatarVersion(obj)
+		if err != nil {
+			return badf("agent_avatar_versions row %v", err)
+		}
+		if _, duplicate := ic.avatarVersions[key]; duplicate || ic.avatarVersionIDs[scope.id] {
+			return badf("agent_avatar_versions row duplicates version or id")
+		}
+		ic.avatarVersions[key] = scope
+		ic.avatarVersionIDs[scope.id] = true
+		ic.recordAvatarLineageTime(avatarLineageImportKey{
+			agentID: key.agentID, generation: scope.lineage,
+		}, scope.proposedAt)
+	case "agent_avatar_activations":
+		if err := ic.validateImportedAvatarActivation(obj); err != nil {
+			return badf("agent_avatar_activations row %v", err)
+		}
+	case "agent_avatar_rejections":
+		key, err := ic.validateImportedAvatarRejection(obj)
+		if err != nil {
+			return badf("agent_avatar_rejections row %v", err)
+		}
+		if ic.avatarRejectedVersions[key] {
+			return badf("agent_avatar_rejections row duplicates agent version")
+		}
+		ic.avatarRejectedVersions[key] = true
+	case "agent_avatar_resets":
+		if err := ic.validateImportedAvatarReset(obj); err != nil {
+			return badf("agent_avatar_resets row %v", err)
+		}
+	case "avatar_mutation_receipts":
+		if err := ic.validateImportedAvatarReceipt(obj); err != nil {
+			return badf("avatar_mutation_receipts row %v", err)
 		}
 	case "agent_activity":
 		agentID, err := requireStringField(obj, "agent_id")
@@ -3401,6 +3582,7 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		return export.Manifest{}, fmt.Errorf("read destination database clock: %w", err)
 	}
 	importedAt = importedAt.UTC()
+	ic.importedAt = importedAt
 
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
@@ -3458,6 +3640,13 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	})
 	if err != nil {
 		return export.Manifest{}, err
+	}
+	if m.SchemaVersion < 50 {
+		if err := synthesizeLegacyImportedAvatars(ctx, tx, ic); err != nil {
+			return export.Manifest{}, fmt.Errorf("synthesize legacy avatar defaults: %w", err)
+		}
+	} else if err := ic.validateImportedAvatarGraph(); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
 	}
 	if m.SchemaVersion < 35 {
 		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {

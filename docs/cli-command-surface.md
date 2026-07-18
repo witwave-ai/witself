@@ -4028,6 +4028,59 @@ Flags:
 |---|---|
 | `--install` | Install completion for the current shell when supported. |
 
+## `witself avatar`
+
+The avatar CLI mirrors the self and account-operator lifecycle without putting
+SVG or structured visual specifications in shell arguments:
+
+```sh
+witself avatar show
+witself avatar history [--limit 20] [--before-version N]
+witself avatar version --version N
+witself avatar style show
+witself avatar propose --expected-profile-revision N \
+  --style-pack-id ID --style-pack-version N --subject-form FORM \
+  --description TEXT --spec-file spec.json --svg-file avatar.svg \
+  --idempotency-key KEY
+witself avatar activate --version N --expected-profile-revision N --idempotency-key KEY
+witself avatar rollback --version N --expected-profile-revision N --idempotency-key KEY
+witself avatar reset --expected-profile-revision N \
+  [--reason-code CODE] --idempotency-key KEY
+witself avatar generation fail --expected-profile-revision N \
+  --reason-code CODE --idempotency-key KEY
+
+witself avatar operator show --agent-id AGENT
+witself avatar operator history --agent-id AGENT [--limit 20] [--before-version N]
+witself avatar operator version --agent-id AGENT --version N
+witself avatar operator propose --agent-id AGENT ...
+witself avatar operator activate --agent-id AGENT ...
+witself avatar operator reject --agent-id AGENT ...
+witself avatar operator rollback --agent-id AGENT ...
+witself avatar operator reset --agent-id AGENT \
+  --expected-profile-revision N [--reason-code CODE] --idempotency-key KEY
+witself avatar operator policy --agent-id AGENT ...
+witself avatar operator style show --realm-id REALM
+witself avatar operator style version --realm-id REALM \
+  --style-file style.json --expected-style-revision N --idempotency-key KEY
+```
+
+`--spec-file -`/`--spec-stdin` and `--svg-file -`/`--svg-stdin` are supported,
+but both payloads cannot consume the same stdin stream. See
+[agent-avatars.md](agent-avatars.md).
+
+The self and operator `history` commands print payload-free metadata pages and
+preserve `next_before_version` plus the server lifecycle fields for each
+immutable version: `is_active`, `is_proposed`, `was_activated`,
+`rollback_eligible`, `rejected`, and the optional activation or rejection
+timestamps. Pass that cursor back as `--before-version`; use `avatar version`
+for the exact SVG, description, visual specification, and provenance.
+
+`avatar reset` requires explicit fresh-start intent. It retires the current
+lineage without deleting history, returns the profile to its deterministic
+placeholder, and makes the next proposal parentless in the new lineage. It is
+available to a self token only under `agent_self_managed`; otherwise an account
+operator uses `avatar operator reset`. It is not a permanent purge command.
+
 ## First Implementation Slice
 
 The first CLI slice should validate the managed-service command shape while

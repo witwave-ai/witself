@@ -113,6 +113,51 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'deleted_at', deleted_at)
 			FROM realms WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		// Realm avatar style heads and immutable versions precede agents so
+		// profiles can reference the selected style as soon as they stream.
+		// The current-version head foreign key is deferred because the head and
+		// immutable version intentionally form one portable aggregate.
+		&querySource{tx: tx, table: "avatar_style_packs", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id, 'id', id,
+			  'current_version', current_version, 'revision', revision,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM avatar_style_packs WHERE account_id = $1
+			ORDER BY realm_id, id`, arg: accountID},
+		&querySource{tx: tx, table: "avatar_style_pack_versions", q: `
+			WITH RECURSIVE style_order AS (
+			  SELECT v.*, 0 AS chain_depth
+			    FROM avatar_style_pack_versions v
+			   WHERE v.account_id = $1 AND v.previous_version IS NULL
+			  UNION ALL
+			  SELECT child.*, parent.chain_depth + 1
+			    FROM avatar_style_pack_versions child
+			    JOIN style_order parent
+			      ON child.account_id=parent.account_id
+			     AND child.realm_id=parent.realm_id
+			     AND child.style_pack_id=parent.style_pack_id
+			     AND child.previous_version=parent.version
+			   WHERE child.account_id = $1
+			)
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'style_pack_id', style_pack_id, 'version', version,
+			  'previous_version', previous_version, 'name', name,
+			  'description', description, 'style_spec', style_spec,
+			  'reference_examples', reference_examples,
+			  'provenance', provenance, 'created_by_kind', created_by_kind,
+			  'created_by_id', created_by_id, 'created_at', created_at)
+			FROM style_order
+			ORDER BY realm_id, style_pack_id, chain_depth, version`, arg: accountID},
+		&querySource{tx: tx, table: "realm_avatar_styles", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'style_pack_id', style_pack_id,
+			  'style_pack_version', style_pack_version,
+			  'revision', revision, 'created_at', created_at,
+			  'updated_at', updated_at)
+			FROM realm_avatar_styles WHERE account_id = $1
+			ORDER BY realm_id`, arg: accountID},
 		&querySource{tx: tx, table: "agents", q: `
 			SELECT jsonb_build_object(
 			  'id', a.id, 'realm_id', a.realm_id, 'name', a.name,
@@ -120,6 +165,87 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_avatar_profiles", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'status', status,
+			  'lineage_generation', lineage_generation,
+			  'autonomy_policy', autonomy_policy,
+			  'style_pack_id', style_pack_id,
+			  'style_pack_version', style_pack_version,
+			  'latest_avatar_version', latest_avatar_version,
+			  'proposed_avatar_version', proposed_avatar_version,
+			  'active_avatar_version', active_avatar_version,
+			  'subject_form', subject_form, 'attempt_count', attempt_count,
+			  'retry_after', retry_after, 'fallback_seed', fallback_seed,
+			  'failure_code', failure_code, 'revision', revision,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM agent_avatar_profiles WHERE account_id = $1
+			ORDER BY realm_id, agent_id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_avatar_versions", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'id', id, 'version', version,
+			  'lineage_generation', lineage_generation,
+			  'parent_version', parent_version,
+			  'style_pack_id', style_pack_id,
+			  'style_pack_version', style_pack_version,
+			  'subject_form', subject_form, 'svg', svg,
+			  'description', description, 'visual_spec', visual_spec,
+			  'svg_sha256', svg_sha256, 'provenance', provenance,
+			  'proposed_by_kind', proposed_by_kind,
+			  'proposed_by_id', proposed_by_id,
+			  'proposed_at', proposed_at)
+			FROM agent_avatar_versions WHERE account_id = $1
+			ORDER BY realm_id, agent_id, version`, arg: accountID},
+		&querySource{tx: tx, table: "agent_avatar_activations", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'sequence', sequence,
+			  'lineage_generation', lineage_generation,
+			  'avatar_version', avatar_version,
+			  'prior_active_version', prior_active_version, 'action', action,
+			  'activated_by_kind', activated_by_kind,
+			  'activated_by_id', activated_by_id,
+			  'activated_at', activated_at)
+			FROM agent_avatar_activations WHERE account_id = $1
+			ORDER BY realm_id, agent_id, sequence`, arg: accountID},
+		&querySource{tx: tx, table: "agent_avatar_rejections", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'avatar_version', avatar_version,
+			  'reason_code', reason_code,
+			  'rejected_by_kind', rejected_by_kind,
+			  'rejected_by_id', rejected_by_id,
+			  'rejected_at', rejected_at)
+			FROM agent_avatar_rejections WHERE account_id = $1
+			ORDER BY rejected_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_avatar_resets", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'agent_id', agent_id, 'sequence', sequence,
+			  'retired_lineage_generation', retired_lineage_generation,
+			  'new_lineage_generation', new_lineage_generation,
+			  'retired_active_version', retired_active_version,
+			  'retired_proposed_version', retired_proposed_version,
+			  'reason_code', reason_code,
+			  'reset_by_kind', reset_by_kind, 'reset_by_id', reset_by_id,
+			  'reset_at', reset_at)
+			FROM agent_avatar_resets WHERE account_id = $1
+			ORDER BY realm_id, agent_id, sequence`, arg: accountID},
+		&querySource{tx: tx, table: "avatar_mutation_receipts", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'target_kind', target_kind, 'target_id', target_id,
+			  'actor_kind', actor_kind, 'actor_id', actor_id,
+			  'operation', operation, 'idempotency_key', idempotency_key,
+			  'request_hash', request_hash, 'result_revision', result_revision,
+			  'result_version', result_version,
+			  'result_lineage_generation', result_lineage_generation,
+			  'created_at', created_at)
+			FROM avatar_mutation_receipts WHERE account_id = $1
+			ORDER BY realm_id, target_kind, target_id, actor_kind, actor_id,
+			         operation, idempotency_key`, arg: accountID},
 		&querySource{tx: tx, table: "agent_activity", q: `
 			SELECT jsonb_build_object(
 			  'agent_id', aa.agent_id, 'runtime', aa.runtime,

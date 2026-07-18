@@ -90,6 +90,9 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		}
 		return Agent{}, fmt.Errorf("create agent: %w", err)
 	}
+	if err := createAgentAvatarProfileTx(ctx, tx, accountID, realmID, agentID); err != nil {
+		return Agent{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Agent{}, err
 	}

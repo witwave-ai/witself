@@ -279,6 +279,21 @@ func TestSchema36MessageAudienceUpgradeDefaultsToDirect(t *testing.T) {
 	}
 }
 
+func TestSchema49AvatarUpgradePreservesExistingRows(t *testing.T) {
+	upgrade := UpgraderFor(49)
+	if upgrade == nil {
+		t.Fatal("schema 49 avatar upgrader is not registered")
+	}
+	row := map[string]any{"id": "agent_1", "name": "atlas"}
+	got, err := upgrade("agents", row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["id"] != "agent_1" || got["name"] != "atlas" || len(got) != 2 {
+		t.Fatalf("avatar upgrader changed a pre-avatar row: %#v", got)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)

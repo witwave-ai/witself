@@ -97,6 +97,43 @@ func TestSelfDigestIncludesValueFreeMemoryCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSelfDigestIncludesValueFreeAvatarLineageCheckpoint(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfAvatarCheckpoint: func(_ context.Context, p DomainPrincipal) (*SelfAvatarCheckpoint, error) {
+			if p.ID != "agent_1" || p.AccountID != "acc_1" || p.RealmID != "realm_1" {
+				t.Fatalf("avatar checkpoint principal = %+v", p)
+			}
+			return &SelfAvatarCheckpoint{
+				Pending: true, Status: "generation_due", Reason: "avatar_reset",
+				ProfileRevision: 8, LineageGeneration: 3, StylePackID: "witself-flat-portrait", StylePackVersion: 1,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_avatar_checkpoint=true", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.AvatarCheckpoint == nil || !digest.AvatarCheckpoint.Pending ||
+		digest.AvatarCheckpoint.Reason != "avatar_reset" || digest.AvatarCheckpoint.ProfileRevision != 8 ||
+		digest.AvatarCheckpoint.LineageGeneration != 3 {
+		t.Fatalf("avatar checkpoint = %+v", digest.AvatarCheckpoint)
+	}
+}
+
 func TestSelfDigestFailsOpenWhenMemoryCheckpointIsUnavailable(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{

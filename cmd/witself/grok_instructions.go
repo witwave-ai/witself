@@ -42,7 +42,7 @@ On an explicit remember/save/store request, call witself.fact.set in the same tu
 )
 
 var grokPortableMemoryRoutingInstructions = grokPortableMCPInstructions(
-	grokMemoryRoutingInstructions+"\n\n"+foregroundMessagingRoutingInstructions,
+	grokMemoryRoutingInstructions+"\n\n"+foregroundMessagingRoutingInstructions+"\n\n"+avatarRoutingInstructions,
 	"witself_self_show",
 	"witself_message_list",
 )
@@ -120,6 +120,15 @@ func grokPortableMCPInstructions(instructions, selfTool, messageListTool string)
 		"witself.message.request.renew",
 		"witself.message.request.release",
 		"witself.message.request.complete",
+		"witself.avatar.generation.fail",
+		"witself.avatar.style.show",
+		"witself.avatar.version.show",
+		"witself.avatar.history",
+		"witself.avatar.propose",
+		"witself.avatar.activate",
+		"witself.avatar.rollback",
+		"witself.avatar.reset",
+		"witself.avatar.show",
 		"witself.fact.list",
 		"witself.fact.get",
 		"witself.fact.set",

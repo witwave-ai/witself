@@ -317,6 +317,87 @@ func TestUnavailableMessageCheckpointIsVisibleWithoutBlockingHydration(t *testin
 	}
 }
 
+func TestOrdinaryPromptInjectsPendingAvatarCheckpointWithoutRecall(t *testing.T) {
+	retryAfter := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	for _, runtime := range []string{transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeClaudeCode} {
+		t.Run(runtime, func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(),
+				AvatarCheckpoint: &client.SelfAvatarCheckpoint{
+					Pending: true, Status: "generation_due", Reason: "initial_avatar",
+					ProfileRevision: 3, LineageGeneration: 2, StylePackID: "witself-flat-portrait",
+					StylePackVersion: 1, AttemptCount: 2, RetryAfter: &retryAfter,
+				},
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: runtime, Event: EventUserPromptSubmit, Prompt: "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Attempted || !result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
+				!source.selfOptions.IncludeAvatarCheckpoint ||
+				!strings.Contains(result.Context, `"avatar_checkpoint"`) ||
+				!strings.Contains(result.Context, `"profile_revision":3`) ||
+				!strings.Contains(result.Context, `"lineage_generation":2`) ||
+				!strings.Contains(result.Context, `"style_pack_id":"witself-flat-portrait"`) ||
+				!strings.Contains(result.Context, foregroundAvatarCheckpointPolicy) {
+				t.Fatalf("pending avatar checkpoint result/source = %#v / %#v", result, source)
+			}
+		})
+	}
+}
+
+func TestForegroundAvatarCheckpointPolicySeparatesActivationFromGeneration(t *testing.T) {
+	for _, want := range []string{
+		"For activation_due",
+		"activate the exact proposed version",
+		"never generate or overwrite it",
+		"For initial_avatar, avatar_reset, style_changed, proposal_rejected, or retry_due",
+		"avatar_reset",
+		"immediately activate the returned proposed version",
+		"Report a generation failure only when",
+		"On activation failure leave the proposal pending",
+	} {
+		if !strings.Contains(foregroundAvatarCheckpointPolicy, want) {
+			t.Errorf("foreground avatar policy does not contain %q", want)
+		}
+	}
+}
+
+func TestUnavailableAvatarCheckpointIsVisibleWithoutLifecyclePolicy(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(), AvatarCheckpoint: &client.SelfAvatarCheckpoint{Unavailable: true},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || !strings.Contains(result.Context, `"avatar_checkpoint":{"pending":false,"unavailable":true}`) ||
+		strings.Contains(result.Context, foregroundAvatarCheckpointPolicy) {
+		t.Fatalf("unavailable avatar checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestIdleAvatarCheckpointDoesNotInjectContext(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(), AvatarCheckpoint: &client.SelfAvatarCheckpoint{
+			Pending: false, Status: "active", ProfileRevision: 4,
+		},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Injected || strings.Contains(result.Context, "avatar_checkpoint") {
+		t.Fatalf("idle avatar checkpoint injected context: %#v", result)
+	}
+}
+
 func TestPendingMemoryAndMessageCheckpointsFitMinimumHydrationBudget(t *testing.T) {
 	source := &hydrationSourceStub{self: client.SelfDigest{
 		Identity: exactIdentity(),

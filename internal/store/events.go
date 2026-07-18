@@ -136,6 +136,21 @@ const (
 	VerbMemoryCurationCancelled   = "memory.curation.cancelled"
 	VerbMemoryCurationRolledBack  = "memory.curation.rolled_back"
 
+	// Agent-avatar lifecycle events are deliberately value-free. The SVG,
+	// description, visual specification, model prompt, provenance, hashes, and
+	// retry keys remain in the avatar tables and never enter the owner audit
+	// ledger.
+	VerbAvatarGenerationRequested = "avatar.generation.requested"
+	VerbAvatarProposed            = "avatar.proposed"
+	VerbAvatarActivated           = "avatar.activated"
+	VerbAvatarEvolved             = "avatar.evolved"
+	VerbAvatarRejected            = "avatar.rejected"
+	VerbAvatarGenerationFailed    = "avatar.generation.failed"
+	VerbAvatarRolledBack          = "avatar.rolled_back"
+	VerbAvatarReset               = "avatar.reset"
+	VerbAvatarPolicyChanged       = "avatar.policy.changed"
+	VerbAvatarStyleChanged        = "avatar.style.changed"
+
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
 	// owner's audit ledger surfaces "you filed a ticket / support
@@ -472,6 +487,46 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbMemoryCurationCancelled:   memoryCurationEventSpec(),
 	VerbMemoryCurationRolledBack:  memoryCurationEventSpec(),
 
+	VerbAvatarGenerationRequested: avatarEventSpec(
+		[]string{ActorSystem}, "agent_id", "status", "style_pack_id", "style_pack_version",
+	),
+	VerbAvatarProposed: avatarEventSpec(
+		[]string{ActorAgent, ActorOperator}, "agent_id", "avatar_version", "status", "style_pack_id", "style_pack_version",
+	),
+	VerbAvatarActivated: avatarEventSpec(
+		[]string{ActorAgent, ActorOperator}, "agent_id", "avatar_version", "status", "style_pack_id", "style_pack_version",
+	),
+	VerbAvatarEvolved: avatarEventSpec(
+		[]string{ActorAgent, ActorOperator}, "agent_id", "avatar_version", "status", "style_pack_id", "style_pack_version",
+	),
+	VerbAvatarRejected: avatarEventSpec(
+		[]string{ActorOperator}, "agent_id", "avatar_version", "status",
+	),
+	VerbAvatarGenerationFailed: avatarEventSpec(
+		[]string{ActorAgent}, "agent_id", "status", "attempt_count",
+	),
+	VerbAvatarRolledBack: avatarEventSpec(
+		[]string{ActorAgent, ActorOperator}, "agent_id", "avatar_version", "status", "style_pack_id", "style_pack_version",
+	),
+	VerbAvatarReset: {
+		requiredKeys: []string{
+			"agent_id", "status",
+			"retired_lineage_generation", "new_lineage_generation",
+		},
+		allowedKeys: []string{
+			"agent_id", "status",
+			"retired_lineage_generation", "new_lineage_generation",
+			"retired_active_version", "retired_proposed_version", "reason_code",
+		},
+		allowedActors: []string{ActorAgent, ActorOperator},
+	},
+	VerbAvatarPolicyChanged: avatarEventSpec(
+		[]string{ActorOperator}, "agent_id", "policy_from", "policy_to", "status",
+	),
+	VerbAvatarStyleChanged: avatarEventSpec(
+		[]string{ActorOperator}, "realm_id", "style_pack_id", "style_pack_version", "style_revision",
+	),
+
 	// Support-ticket verbs. ticket_id is required on all four so the
 	// owner can correlate an audit entry back to the ticket. subject
 	// is a short human string carried on opened/closed so the audit
@@ -523,6 +578,17 @@ func memoryCurationEventSpec() verbSpec {
 		},
 		allowedActors: []string{ActorAgent},
 	}
+}
+
+func avatarEventSpec(actors []string, required ...string) verbSpec {
+	allowed := append([]string(nil), required...)
+	switch {
+	case slices.Contains(required, "avatar_version"):
+		allowed = append(allowed, "parent_version", "prior_active_version", "reason_code")
+	case slices.Contains(required, "attempt_count"):
+		allowed = append(allowed, "reason_code")
+	}
+	return verbSpec{requiredKeys: required, allowedKeys: allowed, allowedActors: actors}
 }
 
 func messageProcessingEventSpec(completed bool) verbSpec {

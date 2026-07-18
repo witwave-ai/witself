@@ -659,6 +659,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 - [Inter-Agent Messaging](docs/inter-agent-messaging.md)
 - [Autonomous Realm Messaging](docs/autonomous-realm-messaging.md)
 - [Agent Collaboration](docs/agent-collaboration.md)
+- [Agent Avatars](docs/agent-avatars.md)
 - [Operator Authentication](docs/operator-auth.md)
 - [Token Lifecycle](docs/token-lifecycle.md)
 - [Workflow Scripts](docs/workflow-scripts.md)
