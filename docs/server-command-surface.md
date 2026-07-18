@@ -83,6 +83,11 @@ Expected server environment variables may include:
 | `WITSELF_BOOTSTRAP_TOKEN_FILE` | File containing a first-operator bootstrap token. Default deployment path: `/.witself/tokens/bootstrap.token`; cell deployments mount a cell-scoped path under `/.witself/tokens/<cell>/`. |
 | `WITSELF_BOOTSTRAP_TOKEN_TTL` | Lifetime applied when the server adopts the bootstrap token. Current deployment default: `24h`. |
 | `WITSELF_FACT_DELETION_ENABLED` | Enable permanent fact deletion routes and explicit recreation of a deleted fact. Default: `false`. Invalid booleans fail startup, and enabling requires compiled store schema 28 or newer. Existing deployments must first converge all writers on the schema-27 compatibility release, then converge schema 28 with this flag still false, and only then set it true; skipping the compatibility release is unsafe. Helm maps `features.factDeletion.enabled` to this variable. |
+| `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED` | Enable irreversible cleanup of eligible inactive avatar SVG payloads. Default: `false`. Keep it false through the compatible image/chart rollout and old-writer convergence, then enable it in a separate config-only Phase-B rollout. Requests that need cleanup fail retryably while it is false. Helm maps `avatar.payloadCompaction.enabled` to this variable. |
+| `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation worker. Default: `true` in both the server and chart. Every replica may run it; PostgreSQL job fencing prevents duplicate progress. |
+| `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
+| `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
+| `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` | Deadline for one bounded style-rollout batch. Default: `30s`; valid range: `100ms`-`5m`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |

@@ -112,27 +112,34 @@ checksum:
 # repair that partial release instead of failing on duplicate asset names.
 release:
   replace_existing_artifacts: true
+  # The signer wrapper creates this detached compatibility signature before the
+  # release pipe begins. The canonical bundle and PEM certificate are tracked
+  # directly by the sign pipe; this third output is picked up here.
+  extra_files:
+    - glob: dist/checksums.txt.sig
 
 # SBOM per archive (syft). Attached to the release.
 sboms:
   - id: archive
     artifacts: archive
 
-# Keyless cosign signature over the checksums file (Sigstore; uses CI OIDC).
-# Verify: cosign verify-blob --certificate checksums.txt.pem \
-#   --signature checksums.txt.sig --certificate-identity-regexp '.*' \
+# Keyless Cosign v3 bundle over the checksums file (Sigstore; uses CI OIDC).
+# The signer wrapper derives legacy .sig/.pem companions from this bundle for
+# already-released upgraders and verifies both formats before publishing starts.
+# Verify: cosign verify-blob --bundle checksums.txt.sigstore.json \
+#   --certificate-identity \
+#   'https://github.com/witwave-ai/witself/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
 #   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
 signs:
   - id: checksums
-    cmd: cosign
-    signature: "${artifact}.sig"
+    cmd: bash
+    signature: "${artifact}.sigstore.json"
     certificate: "${artifact}.pem"
     args:
-      - sign-blob
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - ./scripts/cosign-checksums.sh
       - "${artifact}"
-      - "--yes"
+      - "${signature}"
+      - "${certificate}"
     artifacts: checksum
     output: true
 
@@ -293,4 +300,3 @@ brews:
       bin.install "witself-admin"
     test: |
       system "#{bin}/witself-admin", "version"
-

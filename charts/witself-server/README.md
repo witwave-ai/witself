@@ -58,8 +58,8 @@ may run the worker; PostgreSQL job locking provides the shared fence.
 Avatar payload compaction is disabled by default.
 `avatar.payloadCompaction.enabled` renders
 `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED`. Keep it false while rolling out a
-new schema-51-compatible binary. After every old writer has drained, enable it
-in a separate values change. The ConfigMap checksum restarts every pod, and
+schema-54 renderer-profile-compatible binary. After every old writer has
+drained, enable it in a separate values change. The ConfigMap checksum restarts every pod, and
 each restarted server reruns the bounded nullable-digest backfill before it
 serves or performs irreversible cleanup. Freeze all avatar mutations and
 avatar-bearing import/export during the brief old/new-writer convergence

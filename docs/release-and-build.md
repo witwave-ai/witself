@@ -26,7 +26,8 @@ git push origin "v${VERSION}"
 
 The tag-triggered `release` workflow reruns the Go, PostgreSQL, lint, nested
 Pulumi-module, and vulnerability gates before publishing. GoReleaser then
-publishes the macOS/Linux archives, checksum signature and certificate,
+publishes the macOS/Linux archives, checksum Sigstore bundle and transitional
+detached-signature compatibility assets,
 archive SBOMs, GitHub release, multi-architecture CLI and server images,
 signed image manifests, and the `witself`, `witself-infra`, and
 `witself-admin` Homebrew formulae. The workflow separately publishes and
@@ -204,7 +205,8 @@ The implemented release action owns:
 - Building release archives for macOS and Linux.
 - Building `witself`, `witself-server`, `witself-admin`, and `witself-infra`.
 - Generating SHA256 checksums.
-- Signing the checksum manifest with a keyless certificate.
+- Signing the checksum manifest into a keyless Sigstore bundle, while retaining
+  the detached `.sig` and `.pem` assets required by older updaters.
 - Generating archive SBOMs and container SBOM attestations.
 - Publishing build-provenance attestations for archives and the chart.
 - Publishing public GitHub Release assets.
@@ -269,9 +271,27 @@ Current release artifacts include:
 - Separate compressed archives for `witself`, `witself-server`,
   `witself-admin`, and `witself-infra` on each target platform.
 - SHA256 checksums.
-- A keyless signature and certificate for the checksum manifest.
+- A keyless `checksums.txt.sigstore.json` bundle for the checksum manifest,
+  plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
+  assets for older `witself-admin` updaters.
 - Per-archive SBOMs.
 - Build-provenance attestations for release archives.
+
+Verify the preferred bundle form with:
+
+```sh
+TAG=v0.0.186
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/witwave-ai/witself/.github/workflows/release.yml@refs/tags/${TAG}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+```
+
+When `witself-admin` finds Cosign on `PATH`, self-upgrade signature checks fail
+closed. Use Cosign v3, or patched Cosign v2.6.2 or newer; an older installed
+Cosign that cannot verify the bundle blocks the upgrade and should be upgraded
+before retrying.
 
 Machine-readable release metadata and shell completions remain hardening
 targets.

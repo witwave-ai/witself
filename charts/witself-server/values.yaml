@@ -43,9 +43,10 @@ features:
 
 avatar:
   payloadCompaction:
-    # Phase A of a rolling schema-51 upgrade must remain false. Enable only in
-    # a later config-only rollout after every writer runs compatible code; the
-    # ConfigMap checksum then restarts all pods and reruns digest backfill.
+    # Phase A of a rolling schema-54 renderer-profile upgrade must remain false.
+    # Enable only in a later config-only rollout after every writer runs
+    # compatible code; the ConfigMap checksum then restarts all pods and reruns
+    # digest backfill.
     enabled: false
   styleRollout:
     # Every replica may run this worker; the Postgres job row is the durable

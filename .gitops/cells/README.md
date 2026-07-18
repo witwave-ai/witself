@@ -38,6 +38,17 @@ For DNS, keep the stable names here:
   permanent fact deletion. Keep it `false` through the mandatory schema-27
   compatibility rollout and until all writers have converged on schema 28;
   only then flip it to `true` and verify that rollout before relying on DELETE.
+- `apps.witselfServer.avatarPayloadCompactionEnabled` is the irreversible
+  creative-payload cleanup gate. Keep it `false` during the schema-compatible
+  image/chart rollout, verify the pre-migration backup, freeze avatar
+  mutation/import/export while all old writers drain, and flip it to `true`
+  only in a later config-only commit. That Phase-B change restarts the pods via
+  the nested chart's ConfigMap checksum; never combine it with a version pin.
+- `apps.witselfServer.avatarStyleRollout` pins the bounded profile propagation
+  worker for the cell. Managed defaults are enabled with batch size `100`,
+  interval `2s`, and batch timeout `30s`; change them deliberately and keep the
+  values within the server/chart bounds rather than inheriting downstream
+  defaults accidentally.
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.

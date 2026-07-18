@@ -4,7 +4,7 @@
 {{- $bootstrapTargetName := default "witself-bootstrap" $bootstrap.targetName -}}
 {{- $bootstrapMountPath := default (printf "/.witself/tokens/%s/bootstrap.token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
-{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled) "styleRollout" .Values.apps.witselfServer.avatarStyleRollout) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- $_ := set $serverValues "replicaCount" .Values.apps.witselfServer.replicaCount -}}
 {{- $_ := set $serverValues "minReadySeconds" .Values.apps.witselfServer.minReadySeconds -}}
 {{- $_ := set $serverValues "strategy" .Values.apps.witselfServer.strategy -}}

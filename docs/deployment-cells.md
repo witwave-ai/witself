@@ -140,6 +140,13 @@ helm show chart oci://ghcr.io/witwave-ai/charts/witself-server \
   --version "$VERSION"
 ```
 
+Before any release that can advance the database schema, create and verify a
+pre-migration backup for the canary cell and record its identifier in the
+private rollout record. Managed GCP rollouts must complete the on-demand Cloud
+SQL procedure in
+[Backup And Recovery](backup-and-recovery.md#gcp-cloud-sql-pre-migration-backup)
+before `roll-cell.sh`; a recent scheduled backup is not a substitute.
+
 Then roll one provisioned canary by its exact cell-directory name:
 
 ```sh
@@ -168,6 +175,13 @@ advancing:
    embedded Goose migrations before serving when a database DSN is configured;
    a migration error exits the process rather than serving the new build.
 5. The release-specific API, CLI/MCP, and multi-provider client smoke tests pass.
+
+For avatar creative-payload compaction, this release pin is Phase A: leave
+`apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar
+mutation/import/export during writer convergence, and wait until every old
+writer has drained. After Phase A is healthy, use a separate config-only commit
+to set the gate to `true`; verify that the nested ConfigMap checksum restarts
+every pod. Do not mix the Phase-B gate flip with another chart/image change.
 
 Repeat the same narrow GitOps change and verification for later waves. A values
 pin, a Git commit, or an Argo sync alone is not proof that a feature is

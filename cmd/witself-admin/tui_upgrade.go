@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,9 @@ var (
 	releaseLatestURL    = "https://api.github.com/repos/witwave-ai/witself/releases/latest"
 	releaseDownloadBase = "https://github.com/witwave-ai/witself/releases/download"
 	cosignLook          = func() (string, error) { return exec.LookPath("cosign") }
+	cosignRun           = func(ctx context.Context, bin string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	}
 )
 
 // latestReleaseTag asks GitHub for the newest release tag ("v0.0.95").
@@ -177,13 +181,18 @@ func verifyInstalledVersion(ctx context.Context, binPath, tag string) bool {
 // protects against corruption/truncation — an attacker who can replace
 // release assets can replace both files. The release pipeline
 // cosign-signs checksums.txt (keyless, GitHub-Actions OIDC); when a
-// cosign binary is available on PATH we fetch the .sig/.pem companions
-// and verify the signature against the pinned repository identity
-// before trusting the sums, which closes the asset-swap window.
+// cosign binary is available on PATH we fetch its Sigstore bundle and
+// verify the signature against the exact release workflow and requested
+// tag before trusting the sums, which closes the asset-swap window. Releases made
+// before the bundle migration are still verified through their legacy
+// .sig/.pem companions when the bundle asset is absent.
 // Without cosign we proceed checksum-only — parity with install.sh —
 // because vendoring the sigstore verification tree into this binary
 // is a dependency-budget decision deferred to its own issue.
 func downloadAndReplace(ctx context.Context, tag, binPath string) error {
+	if _, err := releaseWorkflowIdentity(tag); err != nil {
+		return err
+	}
 	ver := strings.TrimPrefix(tag, "v")
 	name := fmt.Sprintf("witself-admin_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
 
@@ -220,38 +229,124 @@ func downloadAndReplace(ctx context.Context, tag, binPath string) error {
 		return err
 	}
 
-	// Atomic swap: write next to the target (same filesystem), then
-	// rename over it. A crash mid-write leaves the old binary intact.
-	tmp := binPath + ".upgrade-" + ver
-	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
-		return fmt.Errorf("stage new binary: %w", err)
+	return stageAndReplaceBinary(binPath, ver, bin)
+}
+
+// stageAndReplaceBinary creates an unpredictable, exclusively-created
+// staging file next to the installed binary, fully persists its content,
+// then atomically renames it over the target. Same-directory staging keeps
+// rename on one filesystem; CreateTemp's O_EXCL semantics prevent a
+// pre-planted symlink at a predictable upgrade path from being followed.
+func stageAndReplaceBinary(binPath, ver string, bin []byte) error {
+	dir := filepath.Dir(binPath)
+	prefix := "." + filepath.Base(binPath) + ".upgrade-" + ver + "-"
+	staged, err := os.CreateTemp(dir, prefix)
+	if err != nil {
+		return fmt.Errorf("create upgrade staging file: %w", err)
 	}
-	if err := os.Rename(tmp, binPath); err != nil {
-		_ = os.Remove(tmp)
+	stagedPath := staged.Name()
+	defer func() {
+		_ = staged.Close()
+		_ = os.Remove(stagedPath)
+	}()
+	n, err := staged.Write(bin)
+	if err != nil {
+		return fmt.Errorf("write upgrade staging file: %w", err)
+	}
+	if n != len(bin) {
+		return fmt.Errorf("write upgrade staging file: %w", io.ErrShortWrite)
+	}
+	if err := staged.Sync(); err != nil {
+		return fmt.Errorf("sync upgrade staging file: %w", err)
+	}
+	// Keep the exclusive staging file non-executable until all bytes are
+	// durable. A crash during the write can then leave only an inert 0600
+	// dotfile, never a partial executable.
+	if err := staged.Chmod(0o755); err != nil {
+		return fmt.Errorf("chmod upgrade staging file: %w", err)
+	}
+	if err := staged.Sync(); err != nil {
+		return fmt.Errorf("sync upgrade staging metadata: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close upgrade staging file: %w", err)
+	}
+	if err := os.Rename(stagedPath, binPath); err != nil {
 		return fmt.Errorf("swap binary: %w", err)
 	}
 	return nil
 }
 
 // verifyChecksumsSignature verifies the cosign keyless signature over
-// checksums.txt when a cosign binary is available. Verification FAILURE
-// (cosign present, signature bad) hard-fails the upgrade; cosign being
-// absent skips with no error (checksum-only parity with install.sh).
-// The certificate identity is pinned to this repository's GitHub
-// Actions workflows so a signature from any other Sigstore identity is
-// rejected.
+// checksums.txt when a cosign binary is available. New releases publish
+// a Sigstore bundle, the native cosign v3 format. A bundle HTTP 404 falls
+// back to the legacy detached .sig/.pem assets so older releases remain
+// installable. Any other bundle fetch error and every verification
+// failure hard-fail the upgrade; a present-but-invalid bundle never
+// downgrades to legacy verification. A missing cosign skips verification
+// (checksum-only parity with install.sh).
+//
+// The certificate identity is pinned to this repository's release workflow
+// at the exact requested tag, so signatures from another workflow, branch,
+// or tag are rejected.
 func verifyChecksumsSignature(ctx context.Context, tag string, sums []byte) error {
+	identity, err := releaseWorkflowIdentity(tag)
+	if err != nil {
+		return err
+	}
 	cosignBin, err := cosignLook()
 	if err != nil {
 		return nil // no cosign — best-effort mode
 	}
+	bundle, err := fetchBytes(ctx, fmt.Sprintf("%s/%s/checksums.txt.sigstore.json", releaseDownloadBase, tag), 4<<20)
+	if err == nil {
+		return verifyChecksumsBundle(ctx, cosignBin, identity, sums, bundle)
+	}
+	if !isHTTPStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("fetch checksums signature bundle: %w", err)
+	}
+	return verifyChecksumsLegacy(ctx, tag, cosignBin, identity, sums)
+}
+
+func releaseWorkflowIdentity(tag string) (string, error) {
+	parsed, ok := parseSemver(tag)
+	canonical := fmt.Sprintf("v%d.%d.%d", parsed[0], parsed[1], parsed[2])
+	if !ok || tag != canonical {
+		return "", fmt.Errorf("invalid release tag %q: expected vMAJOR.MINOR.PATCH", tag)
+	}
+	return "https://github.com/witwave-ai/witself/.github/workflows/release.yml@refs/tags/" + tag, nil
+}
+
+func verifyChecksumsBundle(ctx context.Context, cosignBin, identity string, sums, bundle []byte) error {
+	dir, err := os.MkdirTemp("", "witself-upgrade-verify-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	sumsPath := filepath.Join(dir, "checksums.txt")
+	bundlePath := filepath.Join(dir, "checksums.txt.sigstore.json")
+	for p, b := range map[string][]byte{sumsPath: sums, bundlePath: bundle} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			return err
+		}
+	}
+	return runCosignVerification(ctx, cosignBin,
+		"verify-blob",
+		"--bundle", bundlePath,
+		"--certificate-identity", identity,
+		"--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
+		sumsPath,
+	)
+}
+
+func verifyChecksumsLegacy(ctx context.Context, tag, cosignBin, identity string, sums []byte) error {
 	sig, err := fetchBytes(ctx, fmt.Sprintf("%s/%s/checksums.txt.sig", releaseDownloadBase, tag), 1<<20)
 	if err != nil {
-		return fmt.Errorf("fetch checksums signature: %w", err)
+		return fmt.Errorf("fetch legacy checksums signature: %w", err)
 	}
 	cert, err := fetchBytes(ctx, fmt.Sprintf("%s/%s/checksums.txt.pem", releaseDownloadBase, tag), 1<<20)
 	if err != nil {
-		return fmt.Errorf("fetch checksums certificate: %w", err)
+		return fmt.Errorf("fetch legacy checksums certificate: %w", err)
 	}
 	dir, err := os.MkdirTemp("", "witself-upgrade-verify-")
 	if err != nil {
@@ -266,14 +361,18 @@ func verifyChecksumsSignature(ctx context.Context, tag string, sums []byte) erro
 			return err
 		}
 	}
-	cmd := exec.CommandContext(ctx, cosignBin, "verify-blob",
+	return runCosignVerification(ctx, cosignBin,
+		"verify-blob",
 		"--certificate", certPath,
 		"--signature", sigPath,
-		"--certificate-identity-regexp", `^https://github\.com/witwave-ai/witself/`,
+		"--certificate-identity", identity,
 		"--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
 		sumsPath,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+}
+
+func runCosignVerification(ctx context.Context, cosignBin string, args ...string) error {
+	if out, err := cosignRun(ctx, cosignBin, args...); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if len(msg) > 300 {
 			msg = msg[:300]
@@ -281,6 +380,20 @@ func verifyChecksumsSignature(ctx context.Context, tag string, sums []byte) erro
 		return fmt.Errorf("checksums signature verification FAILED — refusing to install: %s", msg)
 	}
 	return nil
+}
+
+type fetchHTTPError struct {
+	url        string
+	statusCode int
+}
+
+func (e *fetchHTTPError) Error() string {
+	return fmt.Sprintf("GET %s: HTTP %d", e.url, e.statusCode)
+}
+
+func isHTTPStatus(err error, statusCode int) bool {
+	var httpErr *fetchHTTPError
+	return errors.As(err, &httpErr) && httpErr.statusCode == statusCode
 }
 
 func fetchBytes(ctx context.Context, url string, limit int64) ([]byte, error) {
@@ -296,7 +409,7 @@ func fetchBytes(ctx context.Context, url string, limit int64) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+		return nil, &fetchHTTPError{url: url, statusCode: resp.StatusCode}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
