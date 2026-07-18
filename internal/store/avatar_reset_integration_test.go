@@ -51,7 +51,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	}
 
 	t.Run("active and pending lineage reset", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-main")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-main")
 		initial, err := st.GetAvatar(ctx, agent)
 		if err != nil {
 			t.Fatal(err)
@@ -66,7 +66,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 			t.Fatalf("empty-lineage reset = %v, want conflict", err)
 		}
 
-		proposed1 := proposeAvatarResetVersion(t, ctx, st, agent, style.StylePack,
+		proposed1 := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
 			1, 0, "reset-main-propose-1")
 		active1, err := st.ActivateAvatar(ctx, agent, ActivateAvatarInput{
 			Version:                 proposed1.Avatar.Profile.ProposedVersion,
@@ -76,7 +76,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		proposed2 := proposeAvatarResetVersion(t, ctx, st, agent, style.StylePack,
+		proposed2 := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
 			active1.Avatar.Profile.ProfileRevision, active1.Avatar.Profile.ActiveVersion,
 			"reset-main-propose-2")
 		if proposed2.Avatar.Profile.LatestVersion != 2 ||
@@ -171,7 +171,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 			t.Fatalf("repeated empty reset = %v, want conflict", err)
 		}
 
-		proposed3 := proposeAvatarResetVersion(t, ctx, st, agent, style.StylePack,
+		proposed3 := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
 			profile.ProfileRevision, 0, "reset-main-propose-3")
 		if proposed3.Avatar.Proposed == nil || proposed3.Avatar.Proposed.Version != 3 ||
 			proposed3.Avatar.Proposed.ParentVersion != nil ||
@@ -228,8 +228,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 		{"operator only requires operator", avatardomain.AutonomyOperatorOnly},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, test.name)
-			active := activateInitialAvatarResetVersion(t, ctx, st, agent, style.StylePack, test.name)
+			agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, test.name)
+			active := activateInitialAvatarResetVersion(ctx, t, st, agent, style.StylePack, test.name)
 			updated, err := st.SetAvatarPolicy(ctx, operator, agent.ID, UpdateAvatarPolicyInput{
 				Policy: test.policy, ExpectedProfileRevision: active.Avatar.Profile.ProfileRevision,
 				IdempotencyKey: test.name + "-policy",
@@ -251,8 +251,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	}
 
 	t.Run("pending-only reset is allowed", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-pending-only")
-		proposed := proposeAvatarResetVersion(t, ctx, st, agent, style.StylePack,
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-pending-only")
+		proposed := proposeAvatarResetVersion(ctx, t, st, agent, style.StylePack,
 			1, 0, "pending-only-proposal")
 		reset, err := st.ResetAvatar(ctx, agent, ResetAvatarInput{
 			ExpectedProfileRevision: proposed.Avatar.Profile.ProfileRevision,
@@ -274,7 +274,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("failure backoff cannot be bypassed without durable avatar", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-bare-failure")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-bare-failure")
 		if _, err := st.pool.Exec(ctx, `UPDATE agent_avatar_profiles
 			SET status='generation_failed', attempt_count=1,
 			    retry_after=clock_timestamp()+interval '30 minutes',
@@ -290,8 +290,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("active failure state is cleared", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-active-failure")
-		active := activateInitialAvatarResetVersion(t, ctx, st, agent, style.StylePack, "active-failure")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-active-failure")
+		active := activateInitialAvatarResetVersion(ctx, t, st, agent, style.StylePack, "active-failure")
 		if _, err := st.pool.Exec(ctx, `UPDATE agent_avatar_profiles
 			SET status='generation_failed', attempt_count=3,
 			    retry_after=clock_timestamp()+interval '30 minutes',
@@ -310,8 +310,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("reset transaction rolls back when audit event insertion fails", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-atomicity")
-		before := activateInitialAvatarResetVersion(t, ctx, st, agent, style.StylePack, "reset-atomicity")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-atomicity")
+		before := activateInitialAvatarResetVersion(ctx, t, st, agent, style.StylePack, "reset-atomicity")
 		triggerName := fmt.Sprintf("avatar_reset_fault_%d", time.Now().UnixNano())
 		var quotedAccountID string
 		if err := st.pool.QueryRow(ctx, `SELECT quote_literal($1)`,
@@ -375,8 +375,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("concurrent stale revision permits one reset", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-race")
-		active := activateInitialAvatarResetVersion(t, ctx, st, agent, style.StylePack, "reset-race")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-race")
+		active := activateInitialAvatarResetVersion(ctx, t, st, agent, style.StylePack, "reset-race")
 		revision := active.Avatar.Profile.ProfileRevision
 		start := make(chan struct{})
 		errs := make(chan error, 2)
@@ -413,8 +413,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("reset and proposal serialize on one profile revision", func(t *testing.T) {
-		agent := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-proposal-race")
-		active := activateInitialAvatarResetVersion(t, ctx, st, agent, style.StylePack, "reset-proposal-race")
+		agent := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-proposal-race")
+		active := activateInitialAvatarResetVersion(ctx, t, st, agent, style.StylePack, "reset-proposal-race")
 		revision := active.Avatar.Profile.ProfileRevision
 		proposal := ProposeAvatarInput{
 			ExpectedProfileRevision: revision,
@@ -485,8 +485,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 
 	t.Run("archived and deleted targets fail closed", func(t *testing.T) {
-		archived := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-archived")
-		active := activateInitialAvatarResetVersion(t, ctx, st, archived, style.StylePack, "reset-archived")
+		archived := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-archived")
+		active := activateInitialAvatarResetVersion(ctx, t, st, archived, style.StylePack, "reset-archived")
 		if _, err := st.pool.Exec(ctx, `UPDATE agent_avatar_profiles SET status='archived'
 			WHERE agent_id=$1`, archived.ID); err != nil {
 			t.Fatal(err)
@@ -498,8 +498,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 			t.Fatalf("archived reset = %v, want conflict", err)
 		}
 
-		deleted := createAvatarResetTestAgent(t, ctx, st, provisioned.AccountID, realm.ID, "reset-deleted")
-		_ = activateInitialAvatarResetVersion(t, ctx, st, deleted, style.StylePack, "reset-deleted")
+		deleted := createAvatarResetTestAgent(ctx, t, st, provisioned.AccountID, realm.ID, "reset-deleted")
+		_ = activateInitialAvatarResetVersion(ctx, t, st, deleted, style.StylePack, "reset-deleted")
 		if err := st.DeleteAgent(ctx, provisioned.AccountID, realm.ID, deleted.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -511,7 +511,7 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	})
 }
 
-func createAvatarResetTestAgent(t *testing.T, ctx context.Context, st *Store, accountID, realmID, name string) Principal {
+func createAvatarResetTestAgent(ctx context.Context, t *testing.T, st *Store, accountID, realmID, name string) Principal {
 	t.Helper()
 	agent, err := st.CreateAgent(ctx, accountID, realmID, name)
 	if err != nil {
@@ -521,7 +521,7 @@ func createAvatarResetTestAgent(t *testing.T, ctx context.Context, st *Store, ac
 		RealmID: realmID, AgentName: agent.Name, AccountStatus: "active"}
 }
 
-func proposeAvatarResetVersion(t *testing.T, ctx context.Context, st *Store, agent Principal, pack avatardomain.StylePack, expectedRevision, parentVersion int64, key string) AvatarMutationResult {
+func proposeAvatarResetVersion(ctx context.Context, t *testing.T, st *Store, agent Principal, pack avatardomain.StylePack, expectedRevision, parentVersion int64, key string) AvatarMutationResult {
 	t.Helper()
 	result, err := st.ProposeAvatar(ctx, agent, ProposeAvatarInput{
 		ExpectedProfileRevision: expectedRevision,
@@ -542,9 +542,9 @@ func proposeAvatarResetVersion(t *testing.T, ctx context.Context, st *Store, age
 	return result
 }
 
-func activateInitialAvatarResetVersion(t *testing.T, ctx context.Context, st *Store, agent Principal, pack avatardomain.StylePack, key string) AvatarMutationResult {
+func activateInitialAvatarResetVersion(ctx context.Context, t *testing.T, st *Store, agent Principal, pack avatardomain.StylePack, key string) AvatarMutationResult {
 	t.Helper()
-	proposed := proposeAvatarResetVersion(t, ctx, st, agent, pack, 1, 0, key+"-proposal")
+	proposed := proposeAvatarResetVersion(ctx, t, st, agent, pack, 1, 0, key+"-proposal")
 	active, err := st.ActivateAvatar(ctx, agent, ActivateAvatarInput{
 		Version:                 proposed.Avatar.Profile.ProposedVersion,
 		ExpectedProfileRevision: proposed.Avatar.Profile.ProfileRevision,

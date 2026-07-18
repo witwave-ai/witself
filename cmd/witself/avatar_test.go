@@ -82,7 +82,7 @@ func TestAvatarCLIProposalReadsSeparateFilesAndSendsHeaderOnlyKey(t *testing.T) 
 
 func TestAvatarCLIRejectsShellValueAndAmbiguousStdinBeforeHTTP(t *testing.T) {
 	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		http.Error(w, "unexpected", http.StatusInternalServerError)
 	}))

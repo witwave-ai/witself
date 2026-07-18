@@ -17,6 +17,7 @@ const (
 	MaxSeedAgentNameBytes = 512
 )
 
+// ErrInvalidPlaceholderSeed marks an invalid deterministic placeholder seed.
 var ErrInvalidPlaceholderSeed = errors.New("invalid avatar placeholder seed")
 
 var placeholderBackgrounds = []string{"#DCEAF5", "#E5E1FA", "#FBE5DD", "#E1F2ED"}

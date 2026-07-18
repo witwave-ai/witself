@@ -598,7 +598,7 @@ func TestCapabilitiesReportsAvatarSupport(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		body, err := io.ReadAll(response.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -767,7 +767,7 @@ func avatarRequest(t *testing.T, baseURL, method, path, token, idempotencyKey, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)

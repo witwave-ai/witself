@@ -48,6 +48,8 @@ var (
 // consistent style pack.
 type SubjectForm string
 
+// SubjectHuman and the other SubjectForm constants identify the supported
+// kinds of subjects an avatar may depict.
 const (
 	SubjectHuman           SubjectForm = "human"
 	SubjectAnimal          SubjectForm = "animal"
@@ -95,6 +97,8 @@ func (f SubjectForm) Validate() error {
 // self-selection and authorization remain separate concerns.
 type AutonomyPolicy string
 
+// AutonomyOperatorOnly and the other AutonomyPolicy constants identify who
+// may activate an avatar proposal.
 const (
 	AutonomyOperatorOnly     AutonomyPolicy = "operator_only"
 	AutonomyAgentProposes    AutonomyPolicy = "agent_proposes"
@@ -140,6 +144,8 @@ func (p AutonomyPolicy) Validate() error {
 // Status is the persisted state of an agent's avatar profile.
 type Status string
 
+// StatusPlaceholder and the other Status constants identify persisted avatar
+// lifecycle states.
 const (
 	StatusPlaceholder      Status = "placeholder"
 	StatusGenerationDue    Status = "generation_due"
@@ -189,6 +195,8 @@ func (s Status) Validate() error {
 // profile state; events notify integrations after durable transitions.
 type EventType string
 
+// EventGenerationRequested and the other EventType constants identify stable
+// outbound avatar lifecycle events.
 const (
 	EventGenerationRequested EventType = "avatar.generation.requested"
 	EventProposed            EventType = "avatar.proposed"

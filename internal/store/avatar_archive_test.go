@@ -607,7 +607,7 @@ func TestAvatarArchiveValidationRejectsSameRealmPeerAsAvatarActor(t *testing.T) 
 		},
 		{
 			name: "activation", table: "agent_avatar_activations",
-			row: func(t *testing.T) map[string]any {
+			row: func(_ *testing.T) map[string]any {
 				return avatarArchiveActivationRow(map[string]any{
 					"id": "avact_aaaaaaaaaaaaaaaa", "avatar_version": int64(1),
 					"prior_active_version": nil, "action": "activated", "activated_by_id": peer,

@@ -30,6 +30,7 @@ type avatarLockedProfile struct {
 	activeVersion     *int64
 }
 
+// ProposeAvatar stores an immutable avatar proposal for the authenticated agent.
 func (s *Store) ProposeAvatar(ctx context.Context, p Principal, in ProposeAvatarInput) (AvatarMutationResult, error) {
 	target, err := requireSelfAvatarPrincipal(p)
 	if err != nil {
@@ -38,6 +39,7 @@ func (s *Store) ProposeAvatar(ctx context.Context, p Principal, in ProposeAvatar
 	return s.proposeAvatar(ctx, p, target, in, false)
 }
 
+// ProposeAgentAvatar stores an immutable avatar proposal for an operator-selected agent.
 func (s *Store) ProposeAgentAvatar(ctx context.Context, p Principal, agentID string, in ProposeAvatarInput) (AvatarMutationResult, error) {
 	target, err := resolveOperatorAvatarTarget(ctx, s.pool, p, agentID)
 	if err != nil {
@@ -249,6 +251,7 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
 }
 
+// ActivateAvatar activates the authenticated agent's pending avatar proposal.
 func (s *Store) ActivateAvatar(ctx context.Context, p Principal, in ActivateAvatarInput) (AvatarMutationResult, error) {
 	target, err := requireSelfAvatarPrincipal(p)
 	if err != nil {
@@ -257,6 +260,7 @@ func (s *Store) ActivateAvatar(ctx context.Context, p Principal, in ActivateAvat
 	return s.activateAvatar(ctx, p, target, in, false)
 }
 
+// ActivateAgentAvatar activates a pending avatar proposal for an operator-selected agent.
 func (s *Store) ActivateAgentAvatar(ctx context.Context, p Principal, agentID string, in ActivateAvatarInput) (AvatarMutationResult, error) {
 	target, err := resolveOperatorAvatarTarget(ctx, s.pool, p, agentID)
 	if err != nil {
@@ -375,6 +379,7 @@ func (s *Store) activateAvatar(ctx context.Context, p Principal, target avatarTa
 	return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
 }
 
+// RollbackAvatar reactivates an earlier avatar version for the authenticated agent.
 func (s *Store) RollbackAvatar(ctx context.Context, p Principal, in RollbackAvatarInput) (AvatarMutationResult, error) {
 	target, err := requireSelfAvatarPrincipal(p)
 	if err != nil {
@@ -383,6 +388,7 @@ func (s *Store) RollbackAvatar(ctx context.Context, p Principal, in RollbackAvat
 	return s.rollbackAvatar(ctx, p, target, in, false)
 }
 
+// RollbackAgentAvatar reactivates an earlier avatar version for an operator-selected agent.
 func (s *Store) RollbackAgentAvatar(ctx context.Context, p Principal, agentID string, in RollbackAvatarInput) (AvatarMutationResult, error) {
 	target, err := resolveOperatorAvatarTarget(ctx, s.pool, p, agentID)
 	if err != nil {
@@ -674,6 +680,7 @@ func (s *Store) resetAvatar(ctx context.Context, p Principal, target avatarTarge
 	return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
 }
 
+// RejectAgentAvatar rejects the pending avatar proposal for an operator-selected agent.
 func (s *Store) RejectAgentAvatar(ctx context.Context, p Principal, agentID string, in RejectAvatarInput) (AvatarMutationResult, error) {
 	target, err := resolveOperatorAvatarTarget(ctx, s.pool, p, agentID)
 	if err != nil {
@@ -800,6 +807,7 @@ func (s *Store) RejectAgentAvatar(ctx context.Context, p Principal, agentID stri
 	return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
 }
 
+// ReportAvatarGenerationFailure records a failed avatar generation attempt for the authenticated agent.
 func (s *Store) ReportAvatarGenerationFailure(ctx context.Context, p Principal, in AvatarGenerationFailureInput) (AvatarMutationResult, error) {
 	target, err := requireSelfAvatarPrincipal(p)
 	if err != nil {
@@ -922,6 +930,7 @@ func (s *Store) ReportAvatarGenerationFailure(ctx context.Context, p Principal, 
 	return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
 }
 
+// SetAvatarPolicy updates the autonomy policy for an operator-selected agent's avatar.
 func (s *Store) SetAvatarPolicy(ctx context.Context, p Principal, agentID string, in UpdateAvatarPolicyInput) (AvatarMutationResult, error) {
 	target, err := resolveOperatorAvatarTarget(ctx, s.pool, p, agentID)
 	if err != nil {

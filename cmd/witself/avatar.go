@@ -715,7 +715,7 @@ func readAvatarPayload(label, path string, stdin bool, maximum int, stdinReader 
 		reader = file
 	}
 	if closeFile != nil {
-		defer closeFile.Close()
+		defer func() { _ = closeFile.Close() }()
 	}
 	limited := io.LimitReader(reader, int64(maximum)+1)
 	raw, err := io.ReadAll(limited)

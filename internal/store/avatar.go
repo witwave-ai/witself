@@ -216,12 +216,14 @@ type ProposeAvatarInput struct {
 	IdempotencyKey          string
 }
 
+// ActivateAvatarInput identifies the proposed avatar version to activate.
 type ActivateAvatarInput struct {
 	Version                 int64
 	ExpectedProfileRevision int64
 	IdempotencyKey          string
 }
 
+// RollbackAvatarInput identifies the prior avatar version to restore.
 type RollbackAvatarInput = ActivateAvatarInput
 
 // ResetAvatarInput starts a fresh non-destructive avatar lineage. Existing
@@ -232,6 +234,7 @@ type ResetAvatarInput struct {
 	IdempotencyKey          string
 }
 
+// RejectAvatarInput identifies the proposed avatar version to reject.
 type RejectAvatarInput struct {
 	Version                 int64
 	ExpectedProfileRevision int64
@@ -239,18 +242,21 @@ type RejectAvatarInput struct {
 	IdempotencyKey          string
 }
 
+// AvatarGenerationFailureInput records a failed avatar generation attempt.
 type AvatarGenerationFailureInput struct {
 	ExpectedProfileRevision int64
 	ReasonCode              string
 	IdempotencyKey          string
 }
 
+// UpdateAvatarPolicyInput changes an avatar profile's autonomy policy.
 type UpdateAvatarPolicyInput struct {
 	Policy                  avatardomain.AutonomyPolicy
 	ExpectedProfileRevision int64
 	IdempotencyKey          string
 }
 
+// CreateAvatarStyleVersionInput creates a new version of a realm style pack.
 type CreateAvatarStyleVersionInput struct {
 	ExpectedStyleRevision int64
 	StylePack             avatardomain.StylePack
