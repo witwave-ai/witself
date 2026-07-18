@@ -179,19 +179,29 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		t.Fatalf("manifest schema = %d, want %d", manifest.SchemaVersion, SchemaVersion())
 	}
 	var archivedCompacted bool
+	var archivedFingerprint []byte
 	for _, row := range rows["agent_avatar_versions"] {
 		var version map[string]any
 		if err := json.Unmarshal(row, &version); err != nil {
 			t.Fatal(err)
 		}
 		if number, ok := version["version"].(float64); ok && number == 1 {
+			archivedFingerprint, err = importedAvatarContinuityFingerprint(version)
+			if err != nil {
+				t.Fatalf("archived continuity fingerprint = %v", err)
+			}
 			archivedCompacted = version["payload_state"] == "compacted" &&
 				version["svg"] == nil && version["description"] == nil &&
-				version["visual_spec"] == nil && version["locked_layers_sha256"] != nil
+				version["visual_spec"] == nil && version["locked_layers_sha256"] != nil &&
+				len(archivedFingerprint) == avatardomain.PerceptualContinuityFingerprintBytes
 		}
 	}
 	if !archivedCompacted {
 		t.Fatal("archive did not explicitly retain the compacted version envelope")
+	}
+	if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+		archivedFingerprint, avatardomain.BuiltInFlatVectorStylePack()); err != nil {
+		t.Fatalf("archived continuity fingerprint style = %v", err)
 	}
 
 	if err := deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
@@ -199,6 +209,24 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	}
 	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
 		t.Fatal(err)
+	}
+	var restoredFingerprint []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT continuity_fingerprint FROM agent_avatar_versions
+		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3 AND version=1`,
+		provisioned.AccountID, realm.ID, agent.ID).Scan(&restoredFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if len(restoredFingerprint) != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("restored continuity fingerprint length = %d, want %d",
+			len(restoredFingerprint), avatardomain.PerceptualContinuityFingerprintBytes)
+	}
+	if !bytes.Equal(restoredFingerprint, archivedFingerprint) {
+		t.Fatal("restored continuity fingerprint differs from the archived boundary")
+	}
+	if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+		restoredFingerprint, avatardomain.BuiltInFlatVectorStylePack()); err != nil {
+		t.Fatalf("restored continuity fingerprint style = %v", err)
 	}
 	restored, err := st.GetAvatar(ctx, p)
 	if err != nil {

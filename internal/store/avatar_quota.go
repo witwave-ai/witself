@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 )
 
 type avatarPayloadCandidate struct {
@@ -27,6 +29,14 @@ type avatarPayloadCompactionPlan struct {
 	bytes         int64
 	retainedCount int
 	retainedBytes int64
+}
+
+type avatarCompactionFingerprintSource struct {
+	version          int64
+	stylePackID      string
+	stylePackVersion int
+	svg              string
+	needed           bool
 }
 
 // planAvatarPayloadCompaction is deterministic and deliberately separates
@@ -179,11 +189,15 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	if err != nil || plan.count == 0 {
 		return plan, err
 	}
+	fingerprints, err := buildAvatarCompactionFingerprintsTx(ctx, tx, target, plan)
+	if err != nil {
+		return avatarPayloadCompactionPlan{}, err
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE agent_avatar_versions
 		   SET payload_state='compacted', svg=NULL, description=NULL,
 		       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
-		       payload_compaction_reason='quota'
+		       payload_compaction_reason='quota', continuity_fingerprint=NULL
 		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3
 		   AND version=ANY($4::bigint[]) AND payload_state='full'
 		   AND ($5::bigint=0 OR version<>$5)
@@ -194,6 +208,25 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 	}
 	if command.RowsAffected() != int64(plan.count) {
 		return avatarPayloadCompactionPlan{}, ErrAvatarConflict
+	}
+	for _, version := range plan.versions {
+		fingerprint, needed := fingerprints[version]
+		if !needed {
+			continue
+		}
+		command, err := tx.Exec(ctx, `
+			UPDATE agent_avatar_versions
+			   SET continuity_fingerprint=$5
+			 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3
+			   AND version=$4 AND payload_state='compacted'
+			   AND continuity_fingerprint IS NULL`, target.accountID, target.realmID,
+			target.agentID, version, fingerprint)
+		if err != nil {
+			return avatarPayloadCompactionPlan{}, fmt.Errorf("retain avatar continuity fingerprint: %w", err)
+		}
+		if command.RowsAffected() != 1 {
+			return avatarPayloadCompactionPlan{}, ErrAvatarConflict
+		}
 	}
 	// A perceptual continuity fingerprint is useful on a compacted parent only
 	// while a retained full, same-style, agent-authored direct child still
@@ -221,6 +254,92 @@ func compactAvatarPayloadsTx(ctx context.Context, tx pgx.Tx,
 		return avatarPayloadCompactionPlan{}, fmt.Errorf("prune avatar continuity fingerprints: %w", err)
 	}
 	return plan, nil
+}
+
+// buildAvatarCompactionFingerprintsTx snapshots the exact bounded perceptual
+// boundary before planned parent SVGs are cleared. A compacted parent retains
+// the projection only while a full direct child outside this plan still needs
+// it for same-style, owner-authored continuity validation.
+func buildAvatarCompactionFingerprintsTx(ctx context.Context, tx pgx.Tx,
+	target avatarTarget, plan avatarPayloadCompactionPlan) (map[int64][]byte, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT parent.version, parent.style_pack_id, parent.style_pack_version,
+		       parent.svg,
+		       EXISTS (
+		         SELECT 1 FROM agent_avatar_versions child
+		          WHERE child.account_id=parent.account_id
+		            AND child.realm_id=parent.realm_id
+		            AND child.agent_id=parent.agent_id
+		            AND child.parent_version=parent.version
+		            AND child.lineage_generation=parent.lineage_generation
+		            AND child.style_pack_id=parent.style_pack_id
+		            AND child.style_pack_version=parent.style_pack_version
+		            AND child.payload_state='full'
+		            AND NOT (child.version=ANY($4::bigint[]))
+		            AND child.proposed_by_kind='agent'
+		            AND child.proposed_by_id=parent.agent_id
+		       )
+		  FROM agent_avatar_versions parent
+		 WHERE parent.account_id=$1 AND parent.realm_id=$2 AND parent.agent_id=$3
+		   AND parent.version=ANY($4::bigint[]) AND parent.payload_state='full'
+		 ORDER BY parent.version`, target.accountID, target.realmID, target.agentID,
+		plan.versions)
+	if err != nil {
+		return nil, fmt.Errorf("load avatar compaction fingerprint sources: %w", err)
+	}
+	sources := make([]avatarCompactionFingerprintSource, 0, plan.count)
+	for rows.Next() {
+		var source avatarCompactionFingerprintSource
+		if err := rows.Scan(&source.version, &source.stylePackID,
+			&source.stylePackVersion, &source.svg, &source.needed); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(sources) != plan.count {
+		return nil, ErrAvatarConflict
+	}
+	type styleKey struct {
+		id      string
+		version int
+	}
+	packs := make(map[styleKey]avatardomain.StylePack)
+	fingerprints := make(map[int64][]byte)
+	for _, source := range sources {
+		if !source.needed {
+			continue
+		}
+		key := styleKey{id: source.stylePackID, version: source.stylePackVersion}
+		pack, ok := packs[key]
+		if !ok {
+			pack, err = loadAvatarStylePackVersion(ctx, tx, target.accountID,
+				target.realmID, source.stylePackID, source.stylePackVersion)
+			if err != nil {
+				return nil, err
+			}
+			packs[key] = pack
+		}
+		fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+			[]byte(source.svg), pack)
+		if err != nil {
+			return nil, fmt.Errorf("build avatar %d continuity fingerprint: %w", source.version, err)
+		}
+		if len(fingerprint) != avatardomain.PerceptualContinuityFingerprintBytes {
+			return nil, fmt.Errorf("build avatar %d continuity fingerprint: exact length mismatch", source.version)
+		}
+		if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+			fingerprint, pack); err != nil {
+			return nil, fmt.Errorf("validate avatar %d continuity fingerprint: %w", source.version, err)
+		}
+		fingerprints[source.version] = fingerprint
+	}
+	return fingerprints, nil
 }
 
 func logAvatarPayloadCompactionTx(ctx context.Context, tx pgx.Tx,

@@ -48,7 +48,8 @@ ALTER TABLE agent_avatar_versions
            locked_layers_sha256 ~ '^[0-9a-f]{64}$'),
   ADD CONSTRAINT agent_avatar_versions_continuity_fingerprint_check
     CHECK (continuity_fingerprint IS NULL OR
-           octet_length(continuity_fingerprint) BETWEEN 1 AND 38912),
+           (payload_state = 'compacted' AND
+            octet_length(continuity_fingerprint) = 38092)),
   ADD CONSTRAINT agent_avatar_versions_svg_check
     CHECK (svg IS NULL OR octet_length(svg) BETWEEN 1 AND 65536),
   ADD CONSTRAINT agent_avatar_versions_description_check

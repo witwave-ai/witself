@@ -209,12 +209,15 @@ full-parent guard builds and consumes this same format, so comparison across a
 retained-SVG and compacted-parent boundary is behaviorally identical rather
 than an approximation. Decoding requires the exact magic, version, render
 size, reserved flags, payload length, total length, checksum, and style digest.
-Fingerprint persistence and archive wiring remain a quota-compaction merge
-dependency: until that storage path is present, compaction must retain every
-parent SVG needed to validate a retained child. Although smaller and readily
-TOAST-compressible, the projection still contains raster-derived avatar
-content; it is not value-free metadata and must follow the SVG's access,
-export, and deletion controls.
+Quota compaction builds this fingerprint before clearing a parent SVG when a
+retained full direct child in the same lineage and style still depends on that
+boundary and was proposed by the owning agent. The exact 38,092-byte value is
+stored only on that compacted parent; full versions forbid it, and later
+compaction prunes it as soon as no retained child needs it. Although smaller
+and readily TOAST-compressible, the projection still contains raster-derived
+avatar content. It is internal boundary evidence, is not returned by exact or
+history reads, and follows the SVG's access, identity-export, and deletion
+controls rather than value-free metadata controls.
 
 Raster previews are caches, not identity authority. For a `full` version, the
 SVG, structured visual specification, and immutable version metadata are
@@ -268,8 +271,11 @@ Compaction is irreversible. It changes `payload_state` from `full` to
 `payload_compacted_at` with `payload_compaction_reason=quota`. The immutable
 version id, version/parent/lineage, subject and style, original `payload_bytes`,
 `svg_sha256`, `locked_layers_sha256`, generation provenance, proposer, proposal
-timestamp, and activation/rejection/reset history remain. A compacted version
-is never active, proposed, or rollback-eligible.
+timestamp, and activation/rejection/reset history remain. A compacted parent
+also retains its exact perceptual continuity fingerprint only while a full,
+same-lineage, same-style, owning-agent direct child outside the compaction plan
+needs it; all obsolete fingerprints are cleared in the same transaction. A
+compacted version is never active, proposed, or rollback-eligible.
 
 Exact-version reads continue to return HTTP `200` for a compacted version. They
 return its retained metadata and provenance with `payload_state=compacted`, but
@@ -280,16 +286,20 @@ version for a missing resource.
 
 Identity archives represent this state explicitly. Full rows export their
 creative fields; compacted rows export those fields as `null` while retaining
-the hashes, provenance, payload accounting, and compaction metadata. Import
-rejects an archive that compacts an active, proposed, or protected rollback
-version. Current-schema import also rejects a retained full-payload count or
-byte total that exceeds the archived profile limits, so restore cannot bypass
-the live quota invariant. For a same-style agent-authored evolution, import
-compares normalized locked-layer source when both payloads are full and compares
-the retained `locked_layers_sha256` when either side is compacted. The digest
-preserves the same structural continuity boundary as the live validator; it is
-not semantic image-similarity proof. A schema downgrade that would need to
-reconstruct a compacted payload is refused.
+the hashes, provenance, payload accounting, compaction metadata, and a
+continuity fingerprint only when a retained child requires one. Import accepts
+only the exact fingerprint length, checksum, version, and archived style digest;
+full rows and compacted parents without a qualifying child must not carry one,
+while a compacted parent with a qualifying child must. Import rejects an archive
+that compacts an active, proposed, or protected rollback version.
+Current-schema import also rejects a retained full-payload count or byte total
+that exceeds the archived profile limits, so restore cannot bypass the live
+quota invariant. For a same-style agent-authored evolution, import validates
+normalized locked-layer source and the perceptual guard when both payloads are
+full. Across a compacted-parent/full-child boundary it requires the retained
+`locked_layers_sha256` to match and runs the same perceptual comparison from the
+stored fingerprint without attempting to render a missing parent SVG. A schema
+downgrade that would need to reconstruct a compacted payload is refused.
 
 ## Lifecycle events
 

@@ -91,7 +91,7 @@ type avatarVersionImportScope struct {
 	payloadBytes          int64
 	payloadCompactedAt    *time.Time
 	lockedLayersSHA256    string
-	continuityFingerprint bool
+	continuityFingerprint []byte
 }
 
 func (ic *importCtx) normalizeLegacyImportedAvatarPayloadFields(table string, obj map[string]any) error {
@@ -565,6 +565,12 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	if err != nil {
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, err
 	}
+	if len(continuityFingerprint) > 0 {
+		if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+			continuityFingerprint, styleScope.pack); err != nil {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("continuity_fingerprint does not match the avatar style: %v", err)
+		}
+	}
 	compactedAt, hasCompactedAt, err := importedOptionalTimestamp(obj, "payload_compacted_at")
 	if err != nil {
 		return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("payload_compacted_at is invalid")
@@ -573,6 +579,9 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	var svg string
 	switch payloadState {
 	case avatardomain.PayloadFull:
+		if len(continuityFingerprint) > 0 {
+			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("full payload carries continuity_fingerprint")
+		}
 		if hasCompactedAt || hasCompactionReason {
 			return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("full payload carries compaction metadata")
 		}
@@ -663,18 +672,27 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 			if parentScope.subjectForm != form {
 				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution changes subject_form")
 			}
-			if parentScope.payloadState == avatardomain.PayloadFull && payloadState == avatardomain.PayloadFull {
+			if parentScope.lockedLayersSHA256 != lockedLayersSHA256 {
+				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates retained locked-layer continuity")
+			}
+			switch {
+			case parentScope.payloadState == avatardomain.PayloadFull && payloadState == avatardomain.PayloadFull:
 				if err := avatardomain.ValidateLockedLayerContinuity(
 					[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
 					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates locked-layer continuity: %v", err)
 				}
-			}
-			if parentScope.lockedLayersSHA256 != lockedLayersSHA256 {
-				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates retained locked-layer continuity")
-			}
-			if err := avatardomain.ValidatePerceptualContinuity(
-				[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
-				return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates perceptual continuity: %v", err)
+				if err := avatardomain.ValidatePerceptualContinuity(
+					[]byte(parentScope.svg), []byte(svg), styleScope.pack); err != nil {
+					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates perceptual continuity: %v", err)
+				}
+			case parentScope.payloadState == avatardomain.PayloadCompacted && payloadState == avatardomain.PayloadFull:
+				if len(parentScope.continuityFingerprint) == 0 {
+					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution has no compacted-parent continuity fingerprint")
+				}
+				if err := avatardomain.ValidatePerceptualContinuityFromFingerprint(
+					parentScope.continuityFingerprint, []byte(svg), styleScope.pack); err != nil {
+					return avatarVersionImportKey{}, avatarVersionImportScope{}, fmt.Errorf("same-style agent-authored evolution violates compacted-parent perceptual continuity: %v", err)
+				}
 			}
 		}
 	}
@@ -695,20 +713,24 @@ func (ic *importCtx) validateImportedAvatarVersion(obj map[string]any) (avatarVe
 	}, nil
 }
 
-func importedAvatarContinuityFingerprint(obj map[string]any) (bool, error) {
+func importedAvatarContinuityFingerprint(obj map[string]any) ([]byte, error) {
 	raw, present := obj["continuity_fingerprint"]
 	if !present || raw == nil {
-		return false, nil
+		return nil, nil
 	}
 	encoded, ok := raw.(string)
-	if !ok || !strings.HasPrefix(encoded, `\x`) || len(encoded) <= 2 || len(encoded)%2 != 0 {
-		return false, fmt.Errorf("continuity_fingerprint is invalid")
+	wantEncodedBytes := 2 + avatardomain.PerceptualContinuityFingerprintBytes*2
+	if !ok || !strings.HasPrefix(encoded, `\x`) || len(encoded) != wantEncodedBytes {
+		return nil, fmt.Errorf("continuity_fingerprint is invalid")
 	}
 	decoded, err := hex.DecodeString(encoded[2:])
-	if err != nil || len(decoded) < 1 || len(decoded) > 38*1024 {
-		return false, fmt.Errorf("continuity_fingerprint is invalid")
+	if err != nil {
+		return nil, fmt.Errorf("continuity_fingerprint is invalid")
 	}
-	return true, nil
+	if err := avatardomain.ValidatePerceptualContinuityFingerprint(decoded); err != nil {
+		return nil, fmt.Errorf("continuity_fingerprint is invalid: %v", err)
+	}
+	return decoded, nil
 }
 
 func (ic *importCtx) validImportedAvatarActor(kind, id, realmID string) bool {
@@ -1157,7 +1179,7 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 					return fmt.Errorf("agent %q avatar version %d names a parent that was never activated", agentID, key.version)
 				}
 			}
-			if version.payloadState == avatardomain.PayloadCompacted && version.continuityFingerprint {
+			if version.payloadState == avatardomain.PayloadCompacted {
 				needed := false
 				for childKey, child := range ic.avatarVersions {
 					if childKey.agentID == agentID && child.parentVersion == key.version &&
@@ -1167,7 +1189,11 @@ func (ic *importCtx) validateImportedAvatarGraph() error {
 						break
 					}
 				}
-				if !needed {
+				hasFingerprint := len(version.continuityFingerprint) > 0
+				if needed && !hasFingerprint {
+					return fmt.Errorf("agent %q compacted avatar version %d lacks its required continuity_fingerprint", agentID, key.version)
+				}
+				if !needed && hasFingerprint {
 					return fmt.Errorf("agent %q compacted avatar version %d retains an obsolete continuity_fingerprint", agentID, key.version)
 				}
 			}

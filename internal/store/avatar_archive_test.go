@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -227,9 +228,7 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		svg := strings.Replace(row["svg"].(string),
 			`<g id="experience" data-layer="experience"></g>`,
 			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
-		row["svg"] = svg
-		digest := sha256.Sum256([]byte(svg))
-		row["svg_sha256"] = hex.EncodeToString(digest[:])
+		setAvatarArchiveVersionSVG(t, row, svg)
 		err := ic.validateAndRecord("agent_avatar_versions", row)
 		if err == nil || !strings.Contains(err.Error(), "perceptual continuity") {
 			t.Fatalf("error = %v, want perceptual continuity refusal", err)
@@ -246,17 +245,19 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		}
 	})
 
-	t.Run("compacted parent retains locked continuity boundary", func(t *testing.T) {
+	t.Run("compacted parent retains structural and perceptual continuity boundary", func(t *testing.T) {
 		newCompactedContext := func(t *testing.T) *importCtx {
 			t.Helper()
 			ic := newAvatarArchiveImportContext(t)
 			feedAvatarArchiveStyle(t, ic, false)
 			feedAvatarArchiveProfile(t, ic, map[string]any{})
 			parent := avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman)
+			parentFingerprint := avatarArchiveContinuityFingerprint(t, parent["svg"].(string))
 			parent["payload_state"] = string(avatardomain.PayloadCompacted)
 			parent["svg"], parent["description"], parent["visual_spec"] = nil, nil, nil
 			parent["payload_compacted_at"] = "2026-07-17T12:30:00Z"
 			parent["payload_compaction_reason"] = "quota"
+			parent["continuity_fingerprint"] = parentFingerprint
 			feedAvatarArchiveVersion(t, ic, parent)
 			return ic
 		}
@@ -284,6 +285,17 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "retained locked-layer continuity") {
 			t.Fatalf("error = %v, want compacted boundary refusal", err)
 		}
+
+		ic = newCompactedContext(t)
+		occluded := avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman)
+		svg = strings.Replace(occluded["svg"].(string),
+			`<g id="experience" data-layer="experience"></g>`,
+			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+		setAvatarArchiveVersionSVG(t, occluded, svg)
+		err = ic.validateAndRecord("agent_avatar_versions", occluded)
+		if err == nil || !strings.Contains(err.Error(), "compacted-parent perceptual continuity") {
+			t.Fatalf("error = %v, want compacted-parent occlusion refusal", err)
+		}
 	})
 
 	t.Run("operator override", func(t *testing.T) {
@@ -302,9 +314,7 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 		svg := strings.Replace(row["svg"].(string),
 			`<g id="experience" data-layer="experience"></g>`,
 			`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
-		row["svg"] = svg
-		digest := sha256.Sum256([]byte(svg))
-		row["svg_sha256"] = hex.EncodeToString(digest[:])
+		setAvatarArchiveVersionSVG(t, row, svg)
 		row["proposed_by_kind"] = PrincipalOperator
 		row["proposed_by_id"] = avatarArchiveOperator
 		if err := ic.validateAndRecord("agent_avatar_versions", row); err != nil {
@@ -328,18 +338,29 @@ func TestAvatarArchiveValidationEnforcesAgentAuthoredContinuity(t *testing.T) {
 	})
 }
 
-func TestImportedAvatarContinuityFingerprintBounds(t *testing.T) {
-	if present, err := importedAvatarContinuityFingerprint(map[string]any{
-		"continuity_fingerprint": `\x0102`,
-	}); err != nil || !present {
-		t.Fatalf("valid fingerprint = %t / %v", present, err)
+func TestImportedAvatarContinuityFingerprintValidation(t *testing.T) {
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(pack.References[0].SVG), pack)
+	if err != nil {
+		t.Fatal(err)
 	}
+	encoded := `\x` + hex.EncodeToString(fingerprint)
+	decoded, err := importedAvatarContinuityFingerprint(map[string]any{
+		"continuity_fingerprint": encoded,
+	})
+	if err != nil || !bytes.Equal(decoded, fingerprint) {
+		t.Fatalf("valid fingerprint = %d bytes / %v", len(decoded), err)
+	}
+	badChecksum := append([]byte(nil), fingerprint...)
+	badChecksum[len(badChecksum)-1] ^= 0xff
 	for name, value := range map[string]any{
-		"wrong type":  1,
-		"missing hex": "0102",
-		"bad hex":     `\x0z`,
-		"empty":       `\x`,
-		"oversized":   `\x` + strings.Repeat("00", 38*1024+1),
+		"wrong type":     1,
+		"missing hex":    encoded[2:],
+		"bad hex":        `\x` + strings.Repeat("00", len(fingerprint)-1) + "0z",
+		"wrong length":   `\x` + hex.EncodeToString(fingerprint[:len(fingerprint)-1]),
+		"bad checksum":   `\x` + hex.EncodeToString(badChecksum),
+		"trailing bytes": encoded + "00",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := importedAvatarContinuityFingerprint(map[string]any{
@@ -349,6 +370,90 @@ func TestImportedAvatarContinuityFingerprintBounds(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("style mismatch", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		other := pack
+		other.Name += " alternate"
+		foreign, err := avatardomain.BuildPerceptualContinuityFingerprint(
+			[]byte(other.References[0].SVG), other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := compactAvatarArchiveVersionRow(t, 1, 0, foreign)
+		err = ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "does not match the avatar style") {
+			t.Fatalf("error = %v, want fingerprint style refusal", err)
+		}
+	})
+
+	t.Run("full row forbidden", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{})
+		row := avatarArchiveVersionRow(t, 1, 0, avatardomain.SubjectHuman)
+		row["continuity_fingerprint"] = encoded
+		err := ic.validateAndRecord("agent_avatar_versions", row)
+		if err == nil || !strings.Contains(err.Error(), "full payload carries continuity_fingerprint") {
+			t.Fatalf("error = %v, want full-row fingerprint refusal", err)
+		}
+	})
+}
+
+func TestAvatarArchiveGraphRequiresPerceptualFingerprintExactlyWhenNeeded(t *testing.T) {
+	pack := avatardomain.BuiltInFlatVectorStylePack()
+	fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(pack.References[0].SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("missing compacted parent boundary", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "proposed", "subject_form": "human",
+			"latest_avatar_version": int64(2), "proposed_avatar_version": int64(2),
+			"active_avatar_version": int64(1), "revision": int64(5),
+		})
+		feedAvatarArchiveVersion(t, ic, compactAvatarArchiveVersionRow(t, 1, 0, fingerprint))
+		feedAvatarArchiveVersion(t, ic, avatarArchiveVersionRow(t, 2, 1, avatardomain.SubjectHuman))
+		feedAvatarArchiveActivation(t, ic, map[string]any{
+			"id": "avact_aaaaaaaaaaaaaaaa", "avatar_version": int64(1),
+			"prior_active_version": nil, "action": "activated",
+		})
+
+		key := avatarVersionImportKey{agentID: avatarArchiveAgent, version: 1}
+		parent := ic.avatarVersions[key]
+		parent.continuityFingerprint = nil
+		ic.avatarVersions[key] = parent
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "lacks its required continuity_fingerprint") {
+			t.Fatalf("error = %v, want missing compacted-parent fingerprint refusal", err)
+		}
+	})
+
+	t.Run("obsolete compacted parent boundary", func(t *testing.T) {
+		ic := newAvatarArchiveImportContext(t)
+		feedAvatarArchiveStyle(t, ic, false)
+		feedAvatarArchiveProfile(t, ic, map[string]any{
+			"status": "active", "subject_form": "human",
+			"latest_avatar_version": int64(1), "active_avatar_version": int64(1),
+			"revision": int64(3),
+		})
+		feedAvatarArchiveVersion(t, ic, compactAvatarArchiveVersionRow(t, 1, 0, fingerprint))
+		feedAvatarArchiveActivation(t, ic, map[string]any{
+			"id": "avact_aaaaaaaaaaaaaaaa", "avatar_version": int64(1),
+			"prior_active_version": nil, "action": "activated",
+		})
+
+		err := ic.validateImportedAvatarGraph()
+		if err == nil || !strings.Contains(err.Error(), "retains an obsolete continuity_fingerprint") {
+			t.Fatalf("error = %v, want obsolete compacted-parent fingerprint refusal", err)
+		}
+	})
 }
 
 func TestAvatarArchiveValidationRejectsLifecycleAfterPayloadCompaction(t *testing.T) {
@@ -1268,6 +1373,49 @@ func avatarArchiveVersionRow(t *testing.T, version, parent int64, form avatardom
 		"payload_bytes":        payloadBytes,
 		"payload_compacted_at": nil, "payload_compaction_reason": nil,
 	}
+}
+
+func avatarArchiveContinuityFingerprint(t *testing.T, svg string) string {
+	t.Helper()
+	fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(svg), avatardomain.BuiltInFlatVectorStylePack())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fingerprint) != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("fingerprint length = %d, want %d", len(fingerprint),
+			avatardomain.PerceptualContinuityFingerprintBytes)
+	}
+	return `\x` + hex.EncodeToString(fingerprint)
+}
+
+func compactAvatarArchiveVersionRow(t *testing.T, version, parent int64, fingerprint []byte) map[string]any {
+	t.Helper()
+	row := avatarArchiveVersionRow(t, version, parent, avatardomain.SubjectHuman)
+	row["payload_state"] = string(avatardomain.PayloadCompacted)
+	row["svg"], row["description"], row["visual_spec"] = nil, nil, nil
+	row["payload_compacted_at"] = "2026-07-17T12:30:00Z"
+	row["payload_compaction_reason"] = "quota"
+	if len(fingerprint) > 0 {
+		row["continuity_fingerprint"] = `\x` + hex.EncodeToString(fingerprint)
+	}
+	return row
+}
+
+func setAvatarArchiveVersionSVG(t *testing.T, row map[string]any, svg string) {
+	t.Helper()
+	row["svg"] = svg
+	digest := sha256.Sum256([]byte(svg))
+	row["svg_sha256"] = hex.EncodeToString(digest[:])
+	rawSpec, err := json.Marshal(row["visual_spec"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := avatarCreativePayloadBytes(svg, row["description"].(string), rawSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row["payload_bytes"] = payloadBytes
 }
 
 func avatarArchiveVersionID(version int64) string {

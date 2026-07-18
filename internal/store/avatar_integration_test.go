@@ -72,6 +72,24 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 	if state != "full" || payloadBytes < 1 || lockedDigest != wantLockedDigest {
 		t.Fatalf("schema-51 backfill = state:%q bytes:%d locked:%q", state, payloadBytes, lockedDigest)
 	}
+	fingerprint, err := avatardomain.BuildPerceptualContinuityFingerprint(
+		[]byte(reference.SVG), pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions SET continuity_fingerprint=$2
+		 WHERE agent_id=$1 AND version=1`, agent.ID, fingerprint); err == nil {
+		t.Fatal("schema-51 accepted a continuity fingerprint on a full payload")
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_avatar_versions
+		   SET payload_state='compacted', svg=NULL, description=NULL,
+		       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
+		       payload_compaction_reason='quota', continuity_fingerprint=$2
+		 WHERE agent_id=$1 AND version=1`, agent.ID, fingerprint[:len(fingerprint)-1]); err == nil {
+		t.Fatal("schema-51 accepted a compacted continuity fingerprint with the wrong length")
+	}
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +101,19 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 		UPDATE agent_avatar_versions
 		   SET payload_state='compacted', svg=NULL, description=NULL,
 		       visual_spec=NULL, payload_compacted_at=clock_timestamp(),
-		       payload_compaction_reason='quota'
-		 WHERE agent_id=$1 AND version=1`, agent.ID); err != nil {
+		       payload_compaction_reason='quota', continuity_fingerprint=$2
+		 WHERE agent_id=$1 AND version=1`, agent.ID, fingerprint); err != nil {
 		t.Fatal(err)
+	}
+	var retainedFingerprintBytes int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT octet_length(continuity_fingerprint) FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&retainedFingerprintBytes); err != nil {
+		t.Fatal(err)
+	}
+	if retainedFingerprintBytes != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("schema-51 continuity fingerprint length = %d, want %d",
+			retainedFingerprintBytes, avatardomain.PerceptualContinuityFingerprintBytes)
 	}
 	if err := migrationTestDown(t, dsn, true); err == nil {
 		t.Fatal("schema-51 downgrade accepted an irreversible compacted payload")

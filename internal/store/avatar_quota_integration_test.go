@@ -119,6 +119,28 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 		!byVersion[2].RollbackEligible || !byVersion[3].RollbackEligible {
 		t.Fatalf("protected lifecycle projection = %#v", byVersion)
 	}
+	var boundaryFingerprint, obsoleteFingerprint []byte
+	if err := st.pool.QueryRow(ctx, `
+		SELECT continuity_fingerprint FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=1`, agent.ID).Scan(&boundaryFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if len(boundaryFingerprint) != avatardomain.PerceptualContinuityFingerprintBytes {
+		t.Fatalf("boundary fingerprint length = %d, want %d", len(boundaryFingerprint),
+			avatardomain.PerceptualContinuityFingerprintBytes)
+	}
+	if err := avatardomain.ValidatePerceptualContinuityFingerprintForStyle(
+		boundaryFingerprint, style.StylePack); err != nil {
+		t.Fatalf("boundary fingerprint = %v", err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT continuity_fingerprint FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND version=5`, agent.ID).Scan(&obsoleteFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if len(obsoleteFingerprint) != 0 {
+		t.Fatalf("obsolete rejected version retained %d fingerprint bytes", len(obsoleteFingerprint))
+	}
 	compacted, err := st.GetAvatarVersion(ctx, agent, 5)
 	if err != nil {
 		t.Fatal(err)
@@ -269,6 +291,16 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	versionSeven, err := st.GetAvatarVersion(ctx, agent, 7)
 	if err != nil || versionSeven.PayloadState != avatardomain.PayloadCompacted {
 		t.Fatalf("concurrent proposal compaction = %#v / %v", versionSeven, err)
+	}
+	var fingerprintCount int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM agent_avatar_versions
+		 WHERE agent_id=$1 AND continuity_fingerprint IS NOT NULL`, agent.ID).
+		Scan(&fingerprintCount); err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintCount != 1 {
+		t.Fatalf("retained continuity fingerprints = %d, want only version 1", fingerprintCount)
 	}
 	assertCompactionEvents(3, "")
 }

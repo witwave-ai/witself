@@ -87,8 +87,8 @@ Audit records must never include:
 - PII of any subject (agent, operator, or third party).
 - Identity content: memory `content` or any portion of it.
 - Fact values, including `sensitive` fact values.
-- Avatar SVG, description, visual specification, content/locked-layer hashes,
-  generation provenance, or prompts.
+- Avatar SVG, description, visual specification, perceptual continuity
+  fingerprint, content/locked-layer hashes, generation provenance, or prompts.
 - Message bodies or structured message payloads.
 - Embedding vectors or any derived vector data.
 - Raw agent or operator tokens, or token-file contents.
