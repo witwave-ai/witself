@@ -30,6 +30,15 @@ creation always has a deterministic fallback.
   version, the server also preserves the subject form and normalized source of
   every `locked_by_default` layer. This remains structural continuity; v1 does
   not claim semantic image-similarity enforcement.
+- Initial fitting belongs to the active agent. It creates and inspects its
+  first draft from its own perspective and may make one to three substantial
+  local revisions when it wants changes, including a different subject form,
+  facial hair, eyewear, eye color, palette, accessories, or expression. This is
+  not a human approval dialog. Unchosen drafts are ephemeral and non-durable:
+  they never enter repository or project files, temporary artifacts are cleaned
+  up, and they are not proposals, history, or server state. The agent submits
+  only its one chosen final SVG, description, and visual specification. An
+  accidentally accepted proposal cannot be withdrawn from immutable history.
 - An active agent may propose a voluntary evolution when its operator asks or
   when client-visible work reaches a meaningful identity or experience
   milestone; it does not need a server checkpoint for that proposal. This is
@@ -69,33 +78,50 @@ creation always has a deterministic fallback.
 
 1. Agent creation establishes the placeholder and `generation_due` state.
 2. `GET /v1/self` exposes an authenticated, value-free `avatar_checkpoint`.
-3. At the first model-visible session or prompt hook, the active client pauses
-   the current task once and tells the user that it is establishing its avatar.
-4. The client reads the profile and realm style pack through MCP, creates and
-   locally reviews an SVG, description, and structured visual specification,
-   then submits a proposal.
-5. Witself validates and sanitizes the SVG, applies the autonomy policy, and
-   stores an immutable version. With `agent_self_managed`, the client then
-   activates that exact returned version and revision in the same bounded
-   attempt; other policies leave it pending for an operator.
-6. The client resumes the original user task. A failed bounded attempt keeps
-   the placeholder, records a value-free failure state, and permits a later
-   retry; it never traps every future turn. The server-stamped `retry_after`
-   time is enforced on agent proposals and repeated failure reports, not merely
-   advertised through the checkpoint. An operator may still recover the agent
-   during that interval.
+3. At the first model-visible session or prompt hook, the active client keeps
+   the user's requested work first. Avatar housekeeping does not interrupt or
+   replace that work; the client handles at most one bounded lifecycle attempt
+   afterward and keeps its final answer self-contained about the user's task.
+4. The client reads the profile and realm style pack through MCP. From the
+   agent's own perspective, it creates and inspects an ephemeral SVG draft,
+   description, and structured visual specification. When it wants changes, it
+   may make one to three substantial local revisions before settling on a
+   design. It does not ask the user or operator to make the creative choice.
+5. The client cleans up unchosen variants without putting them in repository or
+   project files and submits exactly one chosen final proposal. Witself validates
+   and sanitizes that candidate, applies the autonomy policy, and stores one
+   immutable version.
+6. With `agent_self_managed`, the client activates that exact returned version
+   and revision in the same bounded attempt. Activation records the agent's
+   acceptance and settles its chosen avatar. Under an operator-governed policy,
+   the agent's creative selection is complete, but identity remains unsettled;
+   it leaves that one proposal pending until operator activation.
+7. A failed bounded attempt keeps the placeholder, records a value-free failure
+   state, and permits a later retry; it never traps every future turn. The
+   server-stamped `retry_after` time is enforced on agent proposals and repeated
+   failure reports, not merely advertised through the checkpoint. An operator
+   may still recover the agent during that interval.
 
 If a later checkpoint has reason `activation_due`, the client activates the
 existing proposal and must not generate a replacement. Generation failures are
 recorded only when no proposal is pending; activation failures leave the
 immutable proposal in place for a later fenced retry.
 
+`proposal_rejected` also re-enters broad fitting because no active version
+exists. `retry_due` branches on the fresh profile read: without an
+`active_version` it re-enters broad fitting; with one, it is a bounded
+single-candidate evolution retry. `style_changed` likewise follows the bounded
+evolution path from the active parent rather than restarting identity.
+
 After a successful reset, the checkpoint reason is `avatar_reset`. The client
-uses the same single bounded generation flow as initial setup, but reads the
-new exact `lineage_generation`, keeps `parent_version` empty, and continues the
-global version sequence. Natural-language routing requires explicit fresh-start
-intent such as "start my avatar over from scratch"; ordinary dissatisfaction
-or a request for gradual improvement remains an evolution, not a reset.
+uses the same bounded, agent-owned initial fitting flow, but reads the new exact
+`lineage_generation`, keeps `parent_version` empty, and continues the global
+version sequence. Reset reopens broad fitting freedom: the agent may change its
+subject form, palette, and defining details substantially, keeps unchosen drafts
+ephemeral, cleans up temporary artifacts, and submits only its chosen final
+candidate. Natural-language routing requires explicit fresh-start intent such
+as "start my avatar over from scratch"; ordinary dissatisfaction or a request
+for gradual improvement remains an evolution, not a reset.
 
 Codex and Claude can receive the checkpoint through model-visible hook
 additional context. Cursor and Grok use the managed-instruction/MCP fallback

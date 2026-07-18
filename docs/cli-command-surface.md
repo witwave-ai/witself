@@ -4077,9 +4077,12 @@ for the exact SVG, description, visual specification, and provenance.
 
 `avatar reset` requires explicit fresh-start intent. It retires the current
 lineage without deleting history, returns the profile to its deterministic
-placeholder, and makes the next proposal parentless in the new lineage. It is
-available to a self token only under `agent_self_managed`; otherwise an account
-operator uses `avatar operator reset`. It is not a permanent purge command.
+placeholder, and makes the next proposal parentless in the new lineage. That
+checkpoint reopens the active agent's broad initial fitting: local draft
+variants may change form, palette, and defining details, but only the one
+agent-chosen final candidate is submitted. It is available to a self token only
+under `agent_self_managed`; otherwise an account operator uses `avatar operator
+reset`. It is not a permanent purge command.
 
 ## First Implementation Slice
 

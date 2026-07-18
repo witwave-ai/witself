@@ -161,7 +161,7 @@ type AvatarMutationReceipt struct {
 	RequestHash             string      `json:"request_hash"`
 	ResultRevision          int64       `json:"result_revision"`
 	ResultVersion           int64       `json:"result_version,omitempty"`
-	ResultLineageGeneration int64       `json:"result_lineage_generation"`
+	ResultLineageGeneration int64       `json:"result_lineage_generation,omitempty"`
 	Replayed                bool        `json:"replayed,omitempty"`
 	CreatedAt               time.Time   `json:"created_at"`
 }
