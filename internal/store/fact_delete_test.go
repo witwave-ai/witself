@@ -239,6 +239,142 @@ func TestOrdinarySetFingerprintRemainsSchema26Compatible(t *testing.T) {
 	}
 }
 
+// TestFactDeletionInvisibleToObservationalReads locks the deletion boundary:
+// a permanently deleted fact must be absent from every live retrieval surface,
+// including the usage-free observational variants, not only the metered reads.
+func TestFactDeletionInvisibleToObservationalReads(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := st.ProvisionAccount(ctx, "fact-delete-visibility@witwave.ai", "fact delete visibility", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deleteFactTestAccount(ctx, st, provisioned.AccountID) }()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %v / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "keeper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID, RealmID: realm.ID, AccountStatus: "active"}
+
+	spouse, err := st.SetFact(ctx, p, SetFactInput{
+		Subject: "person_spouse", Predicate: "identity/name",
+		Value: json.RawMessage(`"test-only name"`), Sensitive: true,
+		SourceKind: FactSourceAgent, IdempotencyKey: "visibility-spouse-set",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := UpcomingFactOptions{
+		From:  time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+	}
+	dated, err := st.SetFact(ctx, p, SetFactInput{
+		Subject: "person_spouse", Predicate: "dates/anniversary",
+		ValueType: "date", Value: json.RawMessage(`"2026-08-01"`),
+		SourceKind: FactSourceAgent, IdempotencyKey: "visibility-date-set",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The exclusions below are only meaningful if every surface serves the
+	// fact while it is alive.
+	if observed, err := st.GetFactObservational(ctx, p, "person_spouse", "identity/name"); err != nil || observed.ID != spouse.ID {
+		t.Fatalf("live observational exact read = %#v / %v", observed, err)
+	}
+	if listed, err := st.ListFactsObservational(ctx, p, FactListOptions{IncludeSensitive: true}); err != nil || len(listed) != 2 {
+		t.Fatalf("live observational list = %#v / %v", listed, err)
+	}
+	if occurrences, err := st.UpcomingFactsObservational(ctx, p, window); err != nil || len(occurrences) != 1 || occurrences[0].Fact.ID != dated.ID {
+		t.Fatalf("live observational upcoming = %#v / %v", occurrences, err)
+	}
+	if count, err := st.CountFacts(ctx, p, FactListOptions{}); err != nil || count != 2 {
+		t.Fatalf("live fact count = %d / %v", count, err)
+	}
+
+	deleteFact := func(factID string, key string) {
+		t.Helper()
+		preview, err := st.DeleteFact(ctx, p, DeleteFactInput{FactID: factID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.DeleteFact(ctx, p, DeleteFactInput{
+			FactID: factID, ExpectedResolvedAssertionID: preview.PriorResolvedAssertionID,
+			ExpectedCandidateRevision: preview.CandidateRevision,
+			IdempotencyKey:            key, Apply: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleteFact(spouse.ID, "visibility-spouse-delete")
+
+	if _, err := st.GetFact(ctx, p, "person_spouse", "identity/name"); !errors.Is(err, ErrFactNotFound) {
+		t.Fatalf("deleted exact read = %v", err)
+	}
+	if _, err := st.GetFactObservational(ctx, p, "person_spouse", "identity/name"); !errors.Is(err, ErrFactNotFound) {
+		t.Fatalf("deleted observational exact read = %v", err)
+	}
+	if _, err := st.FactHistory(ctx, p, spouse.ID); !errors.Is(err, ErrFactNotFound) {
+		t.Fatalf("deleted fact history = %v", err)
+	}
+	for name, list := range map[string]func(context.Context, Principal, FactListOptions) ([]Fact, error){
+		"metered": st.ListFacts, "observational": st.ListFactsObservational,
+	} {
+		listed, err := list(ctx, p, FactListOptions{IncludeSensitive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(listed) != 1 || listed[0].ID != dated.ID {
+			t.Fatalf("%s list after deletion = %#v", name, listed)
+		}
+	}
+	if count, err := st.CountFacts(ctx, p, FactListOptions{}); err != nil || count != 1 {
+		t.Fatalf("fact count after deletion = %d / %v", count, err)
+	}
+
+	deleteFact(dated.ID, "visibility-date-delete")
+	for name, upcoming := range map[string]func(context.Context, Principal, UpcomingFactOptions) ([]FactOccurrence, error){
+		"metered": st.UpcomingFacts, "observational": st.UpcomingFactsObservational,
+	} {
+		occurrences, err := upcoming(ctx, p, window)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(occurrences) != 0 {
+			t.Fatalf("%s upcoming after deletion = %#v", name, occurrences)
+		}
+	}
+
+	// The boundary is a value-free tombstone, not a vanished row: the address
+	// stays reserved while the resolved assertion is gone.
+	var deletedAt *time.Time
+	var resolvedID *string
+	if err := st.pool.QueryRow(ctx, `SELECT deleted_at, resolved_assertion_id FROM facts WHERE id = $1`, spouse.ID).Scan(&deletedAt, &resolvedID); err != nil {
+		t.Fatal(err)
+	}
+	if deletedAt == nil || resolvedID != nil {
+		t.Fatalf("tombstone shape = deleted_at %v resolved %v", deletedAt, resolvedID)
+	}
+}
+
 func TestFactDeletedEventShapeIsValueFree(t *testing.T) {
 	err := checkEventShape(EventInput{
 		AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agt_1",
