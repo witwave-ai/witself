@@ -894,6 +894,101 @@ func TestEventsStreamEmitsMemoriesFromRedactedList(t *testing.T) {
 	cancel()
 }
 
+// TestEventsStreamEmitsUpstreamStateChangesOnly proves a failing poll source
+// surfaces as exactly one "upstream" error event when it starts failing and
+// exactly one clearing event when it recovers — steady failure across ticks
+// never spams — and that no frame leaks the bearer token.
+func TestEventsStreamEmitsUpstreamStateChangesOnly(t *testing.T) {
+	var mu sync.Mutex
+	memoryPolls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/memories":
+			mu.Lock()
+			memoryPolls++
+			failing := memoryPolls <= 3
+			mu.Unlock()
+			if failing {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"memories exploded"}`))
+				return
+			}
+			writeTestJSON(t, w, client.MemoryPage{Items: []client.Memory{{ID: "mem_back"}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?memories=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	type upstreamFrame struct {
+		Source  string `json:"source"`
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}
+	var frames []upstreamFrame
+	recovered, ticksAfterRecovery := false, 0
+	lastEvent := ""
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && ticksAfterRecovery < 3 {
+		line := scanner.Text()
+		if strings.Contains(line, testBearer) {
+			t.Fatalf("bearer token leaked into the SSE stream: %q", line)
+		}
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
+			// Count post-recovery ticks by their self frames to prove the
+			// steady recovered state stays silent too.
+			if recovered && lastEvent == "self" {
+				ticksAfterRecovery++
+			}
+			continue
+		}
+		if lastEvent != "upstream" || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame upstreamFrame
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+			t.Fatalf("decode upstream frame %q: %v", line, err)
+		}
+		frames = append(frames, frame)
+		if frame.OK {
+			recovered = true
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		t.Fatalf("scan events stream: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("upstream frames = %+v, want exactly one error and one recovery", frames)
+	}
+	if frames[0].Source != "memories" || frames[0].OK || frames[0].Message != "memories exploded" {
+		t.Fatalf("error frame = %+v", frames[0])
+	}
+	if frames[1].Source != "memories" || !frames[1].OK || frames[1].Message != "" {
+		t.Fatalf("recovery frame = %+v", frames[1])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if memoryPolls < 4 {
+		t.Fatalf("memory polls = %d, want at least 4 (three failing ticks, then recovery)", memoryPolls)
+	}
+	cancel()
+}
+
 // answerFactReadProbe replies to the one-time observational capability probe
 // (client.ProbeObservationalFactReads) the way every cell that parses the
 // parameter does — 400 before any read — and reports whether it handled the

@@ -295,6 +295,23 @@ implemented same-realm direct, fanout, and client-ranked open-request boundary.
 Group audiences, cross-realm routing, and responsibility-aware eligibility
 remain separate follow-on work.
 
+## Local Agent Dashboard
+
+One command serves a loopback-only, read-only web dashboard for a single
+agent: six live surfaces (overview, transcripts, facts, memories,
+conversations, and sealed-secret metadata) over the agent's own token, using
+observational and passive reads so viewing never perturbs retrieval usage or
+read-state. The listener binds `127.0.0.1` only and requires the per-process
+tokened URL printed at startup; `status` and `stop` manage running dashboards
+from the same local registry. See
+[ADR 0004](docs/decisions/0004-local-agent-dashboard.md).
+
+```sh
+witself dashboard serve --agent scout --open
+witself dashboard status
+witself dashboard stop --agent scout
+```
+
 ## Infrastructure Example
 
 `witself-infra` provisions one complete isolated cell per cloud account/region.

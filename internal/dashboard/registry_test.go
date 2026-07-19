@@ -1,11 +1,13 @@
 package dashboard
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,6 +189,42 @@ func TestLiveRegistryEntryDetectsStalePIDs(t *testing.T) {
 	}
 	if _, live, err := LiveRegistryEntry("agt_dash"); err != nil || live {
 		t.Fatalf("corrupt entry: live=%v err=%v, want false nil", live, err)
+	}
+}
+
+// TestEntryOwned proves the ownership probe distinguishes the serve that
+// wrote an entry from any other dashboard answering on its recorded port,
+// against the real secure middleware: only the serve that minted the entry's
+// access token answers the one-time ?token= exchange with 303, so a foreign
+// dashboard occupying the port (or anything else) is never "owned" — the
+// verdict `dashboard stop` requires before signaling the recorded PID.
+func TestEntryOwned(t *testing.T) {
+	srv, cfg := newDashboard(t, func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("ownership probe reached the cell: %s %s", r.Method, r.URL.Path)
+	}, nil)
+
+	if !EntryOwned(RegistryEntry{AccessURL: srv.URL + "/?token=" + cfg.AccessToken}) {
+		t.Fatal("entry carrying the serve's own token must be owned")
+	}
+	if EntryOwned(RegistryEntry{AccessURL: srv.URL + "/?token=" + strings.Repeat("ef", 16)}) {
+		t.Fatal("a dashboard must not own an entry carrying another serve's token")
+	}
+	if EntryOwned(RegistryEntry{}) {
+		t.Fatal("an entry without an AccessURL is never owned")
+	}
+
+	// A markerless responder that happens to answer 303 is not a dashboard.
+	unmarked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	t.Cleanup(unmarked.Close)
+	if EntryOwned(RegistryEntry{AccessURL: unmarked.URL + "/?token=x"}) {
+		t.Fatal("a markerless responder must not be owned")
+	}
+
+	closed := fmt.Sprintf("http://127.0.0.1:%d/?token=x", closedLoopbackPort(t))
+	if EntryOwned(RegistryEntry{AccessURL: closed}) {
+		t.Fatal("a closed port must not be owned")
 	}
 }
 

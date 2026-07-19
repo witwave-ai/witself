@@ -130,7 +130,16 @@ the agent checks `witself dashboard status -json` (registry read plus PID
 liveness), starts `witself dashboard serve` itself as a runtime-managed
 background task when none is live, and opens the tokened URL in its
 integrated browser. The process then belongs to the runtime's task manager
-and ends with the session rather than becoming an orphan daemon. So that
+and ends with the session rather than becoming an orphan daemon.
+`witself dashboard stop` completes that runtime-managed lifecycle: it is the
+same purely local registry read, and it delivers SIGINT only after the
+marker-header liveness probe confirms a live dashboard and the entry's own
+tokened URL proves the answering serve minted that entry's access token (the
+marker proves only "some dashboard" — another agent's serve can occupy the
+recorded port after a crash — while only the owner answers the `?token=`
+exchange with a redirect) — never to a bare recorded PID, which may have
+been reused by an unrelated process — then waits briefly for the serve to
+shut down and release its registry entry. So that
 tooling which did not start the serve can still open it, the 0600 registry
 entry records the tokened URL; the same-user exposure is identical to the
 agent token file, which already grants the underlying reads. A read-only

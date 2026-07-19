@@ -1053,10 +1053,11 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 		flusher.Flush()
 
 		ctx := r.Context()
+		upstream := newUpstreamTracker()
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
-			lastSeen = emitEvents(ctx, cfg, factReads, secrets, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, lastSeen)
+			lastSeen = emitEvents(ctx, cfg, factReads, secrets, upstream, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, lastSeen)
 			select {
 			case <-ctx.Done():
 				return
@@ -1066,27 +1067,68 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 	})
 }
 
+// upstreamEvent is the payload of one "upstream" SSE event: a per-source
+// state change of the poll loop's cell reads. Message carries the error text
+// on ok=false and is empty on the clearing ok=true event; it never carries a
+// request URL with a token (upstream URLs have none, and none may be added).
+type upstreamEvent struct {
+	Source  string `json:"source"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+// upstreamTracker records the last per-source upstream verdict for one SSE
+// connection so state changes emit exactly one "upstream" event each way —
+// ok→error once with the error text, error→ok once clearing it — and steady
+// states stay silent instead of spamming every tick.
+type upstreamTracker struct {
+	failed map[string]bool
+}
+
+func newUpstreamTracker() *upstreamTracker {
+	return &upstreamTracker{failed: map[string]bool{}}
+}
+
+func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source string, err error) {
+	if err == nil {
+		if t.failed[source] {
+			delete(t.failed, source)
+			writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: true})
+		}
+		return
+	}
+	if t.failed[source] {
+		return
+	}
+	t.failed[source] = true
+	writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: false, Message: err.Error()})
+}
+
 // emitEvents sends one poll tick: the observational self digest, the passive
 // mailbox pages and the redacted memory and fact pages when requested, then
 // every transcript entry after lastSeen, draining full-size upstream pages
 // until the live edge (bounded by maxSSEPagesPerTick) so an active transcript
-// is never rate-limited to one page per tick. Upstream failures end the tick;
-// the next tick retries from the same cursor.
-func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets bool, lastSeen int64) int64 {
-	if digest, observational, err := fetchSelf(ctx, cfg); err == nil {
+// is never rate-limited to one page per tick. Upstream failures end the tick
+// and the next tick retries from the same cursor; each failure and recovery
+// also flows through the tracker so the browser sees per-source "upstream"
+// state-change events instead of a silent stall.
+func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, upstream *upstreamTracker, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets bool, lastSeen int64) int64 {
+	digest, observational, err := fetchSelf(ctx, cfg)
+	upstream.observe(w, flusher, "self", err)
+	if err == nil {
 		writeSSE(w, flusher, "self", "", cfg.selfEnvelope(digest, observational))
 	}
 	if includeMessages {
-		emitMessagesEvent(ctx, cfg, w, flusher)
+		upstream.observe(w, flusher, "messages", emitMessagesEvent(ctx, cfg, w, flusher))
 	}
 	if includeMemories {
-		emitMemoriesEvent(ctx, cfg, w, flusher)
+		upstream.observe(w, flusher, "memories", emitMemoriesEvent(ctx, cfg, w, flusher))
 	}
 	if includeFacts {
-		emitFactsEvent(ctx, cfg, factReads, w, flusher)
+		upstream.observe(w, flusher, "facts", emitFactsEvent(ctx, cfg, factReads, w, flusher))
 	}
 	if includeSecrets {
-		emitSecretsEvent(ctx, cfg, secrets, w, flusher)
+		upstream.observe(w, flusher, "secrets", emitSecretsEvent(ctx, cfg, secrets, w, flusher))
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -1100,6 +1142,7 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 			Limit:         sseTranscriptPageLimit,
 			Observational: true,
 		})
+		upstream.observe(w, flusher, "transcript", err)
 		if err != nil || len(page.Entries) == 0 {
 			return lastSeen
 		}
@@ -1125,8 +1168,9 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 // :read or :listen, which mutate read-state or consume listen slots — one
 // newest-first first page per direction, and emits both pages as one
 // "messages" event for the browser's thread grouping. Either upstream
-// failure skips the event; the next tick retries.
-func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) {
+// failure skips the event and is returned for the tracker; the next tick
+// retries.
+func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) error {
 	pages := map[string][]client.Message{}
 	for _, direction := range []string{"inbox", "outbox"} {
 		page, err := client.ListMessages(ctx, cfg.Endpoint, cfg.BearerToken, client.MessageListOptions{
@@ -1134,7 +1178,7 @@ func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 			Limit:     sseMessagePageLimit,
 		})
 		if err != nil {
-			return
+			return err
 		}
 		if page.Messages == nil {
 			page.Messages = []client.Message{}
@@ -1142,21 +1186,23 @@ func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 		pages[direction] = stripMessageBodies(page.Messages)
 	}
 	writeSSE(w, flusher, "messages", "", pages)
+	return nil
 }
 
 // emitMemoriesEvent polls the first page of the redacted-by-default broad
 // memory list — never include_sensitive — so the memories surface
 // live-updates like every other surface. The browser skips identical frames;
 // an upstream failure skips the event and the next tick retries.
-func emitMemoriesEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) {
+func emitMemoriesEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) error {
 	page, err := client.ListMemories(ctx, cfg.Endpoint, cfg.BearerToken, client.MemoryListOptions{Limit: sseMemoryPageLimit})
 	if err != nil {
-		return
+		return err
 	}
 	if page.Items == nil {
 		page.Items = []client.Memory{}
 	}
 	writeSSE(w, flusher, "memories", "", page)
+	return nil
 }
 
 // emitFactsEvent polls the first page of the observational fact list — never
@@ -1166,19 +1212,25 @@ func emitMemoriesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 // such a cell — like one that 501s — simply gets no facts tick rather than a
 // silently perturbing fallback. Sensitive values are zeroed before the
 // frame; the browser skips identical frames, and an upstream failure skips
-// the event so the next tick retries.
-func emitFactsEvent(ctx context.Context, cfg Config, factReads *factReadCapability, w io.Writer, flusher http.Flusher) {
-	if supported, err := factReads.observationalSupported(ctx, cfg); err != nil || !supported {
-		return
+// the event so the next tick retries. An unsupported cell is a settled
+// capability answer the facts pane already renders, not an upstream error.
+func emitFactsEvent(ctx context.Context, cfg Config, factReads *factReadCapability, w io.Writer, flusher http.Flusher) error {
+	supported, err := factReads.observationalSupported(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return nil
 	}
 	facts, err := client.ListFacts(ctx, cfg.Endpoint, cfg.BearerToken, client.FactListOptions{
 		Limit:         sseFactPageLimit,
 		Observational: true,
 	})
 	if err != nil {
-		return
+		return err
 	}
 	writeSSE(w, flusher, "facts", "", map[string]any{"facts": redactSensitiveFacts(facts)})
+	return nil
 }
 
 // emitSecretsEvent polls the first page of the sealed-plane metadata list.
@@ -1187,10 +1239,11 @@ func emitFactsEvent(ctx context.Context, cfg Config, factReads *factReadCapabili
 // calls) records audit and usage — so a 2s poll writes nothing anywhere.
 // Every frame passes through the same allow-list projection as the list
 // route; a pre-sealed-plane cell 404s once, is memoized, and gets no
-// further tick until the negative answer's recheck window lapses.
-func emitSecretsEvent(ctx context.Context, cfg Config, secrets *secretsCapability, w io.Writer, flusher http.Flusher) {
+// further tick until the negative answer's recheck window lapses — that
+// settled unavailable state is not an upstream error.
+func emitSecretsEvent(ctx context.Context, cfg Config, secrets *secretsCapability, w io.Writer, flusher http.Flusher) error {
 	if secrets.knownUnavailable() {
-		return
+		return nil
 	}
 	page, err := client.ListSecrets(ctx, cfg.Endpoint, cfg.BearerToken, client.SecretListOptions{
 		Limit:         sseSecretPageLimit,
@@ -1199,11 +1252,13 @@ func emitSecretsEvent(ctx context.Context, cfg Config, secrets *secretsCapabilit
 	if err != nil {
 		if errors.Is(err, client.ErrNotFound) {
 			secrets.note(false)
+			return nil
 		}
-		return
+		return err
 	}
 	secrets.note(true)
 	writeSSE(w, flusher, "secrets", "", map[string]any{"secrets": sanitizeSecrets(page.Items), "next_cursor": page.NextCursor})
+	return nil
 }
 
 // writeSSE emits one server-sent event; a non-empty id becomes the SSE id

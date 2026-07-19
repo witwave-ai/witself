@@ -166,6 +166,21 @@ select {
 .empty { color: var(--fg-dim); padding: 1rem 0.5rem; }
 .error { color: var(--danger); padding: 1rem 0.5rem; font-family: var(--font-mono); }
 
+/* List filtering (pure client-side over already-fetched rows) */
+.filter-input {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.filter-input::placeholder { color: var(--fg-dim); }
+
 /* Transcript entries */
 .entries { font-family: var(--font-mono); font-size: 0.85rem; }
 .entry { display: flex; gap: 0.6rem; padding: 0.25rem 0.5rem; white-space: pre-wrap; word-break: break-word; }
@@ -176,6 +191,28 @@ select {
 .entry.role-assistant .role { color: var(--accent-2); }
 .entry.role-system .role, .entry.role-tool .role { color: var(--fg-dim); }
 .entry.anchored { background: var(--bg-panel); outline: 1px solid var(--accent); }
+
+/* JSON-object entry bodies: compact head, collapsed pretty-print disclosure */
+.entry-json summary { cursor: pointer; }
+.entry-json .json-body {
+  margin: 0.25rem 0 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+}
+.tool-badge {
+  border: 1px solid var(--accent-2);
+  border-radius: 8px;
+  padding: 0 0.5rem;
+  font-size: 0.7rem;
+  color: var(--accent-2);
+  font-family: var(--font-ui);
+}
+.json-keys { color: var(--fg-dim); }
 
 /* Facts */
 .fact-value { display: inline-flex; align-items: center; gap: 0.4rem; max-width: 18rem; min-width: 0; }
@@ -285,3 +322,5 @@ select {
   overflow-x: auto;
   white-space: nowrap;
 }
+.statusbar .upstream { color: var(--danger); }
+.statusbar .upstream:empty { display: none; }

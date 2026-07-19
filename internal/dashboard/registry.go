@@ -237,6 +237,34 @@ func EntryLive(entry RegistryEntry) bool {
 	return dashboardResponds(entry.Port)
 }
 
+// EntryOwned reports whether the dashboard answering on the entry's recorded
+// port is the process that wrote the entry. EntryLive's marker probe proves
+// only that some witself dashboard answers there — after a crash, another
+// agent's serve (derived-port fallback collision, or an explicit --port) can
+// occupy the recorded port while the recorded PID is reused by an unrelated
+// process — so a caller about to signal entry.PID needs this stronger
+// verdict. The entry's own tokened AccessURL settles it with no new surface:
+// the serve that minted the token answers the one-time ?token= exchange with
+// 303 See Other, while every other dashboard rejects the foreign token with
+// 401.
+func EntryOwned(entry RegistryEntry) bool {
+	if entry.AccessURL == "" {
+		return false
+	}
+	probe := &http.Client{
+		Timeout: time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := probe.Get(entry.AccessURL)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.Header.Get(markerHeader) != "" && resp.StatusCode == http.StatusSeeOther
+}
+
 // ListRegistryEntries loads every readable registry entry, sorted by agent
 // name then id for stable output. A missing registry directory means no
 // dashboards; corrupt files are stale (never live), so the scan skips them

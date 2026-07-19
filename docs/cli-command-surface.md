@@ -279,7 +279,7 @@ witself
   export
   import
   mcp serve|tools
-  dashboard serve|status
+  dashboard serve|status|stop
   config get|set|list|unset
   completion
 ```
@@ -4388,6 +4388,7 @@ body fields are stripped by the proxy before anything reaches the browser.
 
 ```sh
 ws dashboard serve --agent scout
+ws dashboard serve --agent scout --open
 ws dashboard serve --agent scout --port 51234 --poll 5s
 ws dashboard serve --endpoint https://cell.example --token-file ./scout.token --agent scout
 ```
@@ -4403,6 +4404,7 @@ Flags:
 | `--token-file` | File containing an agent token (requires `--endpoint`). |
 | `--port` | Listen port on 127.0.0.1. `0` (default) derives a stable port in 50000-59999 from the agent id, with next-free fallback. |
 | `--poll` | Cell poll interval for live updates (default `2s`). |
+| `--open` | Open the tokened access URL in the OS browser (`open` on macOS, `xdg-open` on Linux) once serving. Best-effort and fire-and-forget: a launch failure only warns on stderr. |
 
 ### `witself dashboard status`
 
@@ -4430,6 +4432,41 @@ Flags:
 | `--account` | Only dashboards under this local account name. |
 | `--realm` | Only dashboards in this realm. |
 | `--json` | Print JSON instead of columns. |
+
+### `witself dashboard stop`
+
+Gracefully stop registered dashboards. Like `status` the command is purely
+local — a registry scan plus the same liveness verdict `serve` uses — so an
+AI runtime can end the serve it started without tracking the process itself
+([ADR 0004](decisions/0004-local-agent-dashboard.md)). Each matching entry
+gets SIGINT only after the liveness probe confirms a live dashboard (PID
+liveness plus the marker-header probe of the recorded port) and an ownership
+probe of the entry's recorded tokened URL confirms the answering serve
+minted that entry's access token (only the owner answers the one-time
+`?token=` exchange with a redirect; any other dashboard rejects the foreign
+token), so a stale entry whose PID was reused by an unrelated process is
+never signaled — even when a different agent's dashboard has since occupied
+the recorded port. After signaling, the command waits a few seconds for the
+serve to shut down and release its registry entry, then reports what
+happened. Stopping when no matching dashboard is live and owned is a
+friendly no-op with exit code 0; a dashboard still serving after the wait is
+an error. `--json` emits a `dashboards` array carrying every matched
+registry entry plus `live` (the pre-signal live-and-owned verdict) and
+`stopped` bools.
+
+```sh
+ws dashboard stop --agent scout
+ws dashboard stop --json
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--agent` | Only dashboards serving this agent name. |
+| `--account` | Only dashboards under this local account name. |
+| `--realm` | Only dashboards in this realm. |
+| `--json` | Print JSON instead of a summary. |
 
 ## First Implementation Slice
 

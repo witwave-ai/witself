@@ -16,6 +16,8 @@
     seenSequences: {},   // transcript id -> highest rendered sequence
     messages: {},        // direction + " " + message id -> passive metadata
     facts: {},           // fact id -> redacted fact (never a revealed value)
+    filters: {},         // section -> list filter text, reapplied on re-render
+    upstreamErrors: {},  // SSE source -> upstream error text while degraded
     lastSelfData: null,     // last raw "self" frame, to skip no-op re-renders
     lastMemoriesData: null, // last raw "memories" frame, same reason
     lastFactsData: null,    // last raw "facts" frame, same reason
@@ -78,6 +80,55 @@
     });
   }
 
+  // --- list filtering ---------------------------------------------------
+  // One filter input per list view, matching case-insensitively against each
+  // row's visible text. Filtering is pure client-side over already-fetched
+  // rows (zero requests); the value lives in state per section so SSE-driven
+  // re-renders reapply it, and clearing the input shows every row again.
+  function filterInputHTML(section) {
+    return '<input class="filter-input" id="filter-' + esc(section) + '" type="search"' +
+      ' placeholder="filter\u2026" aria-label="filter ' + esc(section) + '"' +
+      ' value="' + esc(state.filters[section] || "") + '">';
+  }
+
+  function applyRowFilter(section) {
+    var input = $("filter-" + section);
+    var panel = input && input.closest ? input.closest(".panel") : null;
+    if (!panel) { return; }
+    var query = (state.filters[section] || "").toLowerCase();
+    panel.querySelectorAll(".row").forEach(function (row) {
+      row.style.display = !query || row.textContent.toLowerCase().indexOf(query) >= 0 ? "" : "none";
+    });
+  }
+
+  function bindFilter(section) {
+    var input = $("filter-" + section);
+    if (!input) { return; }
+    input.addEventListener("input", function () {
+      state.filters[section] = input.value;
+      applyRowFilter(section);
+    });
+    applyRowFilter(section);
+  }
+
+  // An SSE-driven list re-render replaces the whole panel: the rebuilt input
+  // carries the saved filter value but not keyboard focus, so keystrokes
+  // landing mid-typing would silently go nowhere. Capture focus and caret
+  // before the innerHTML swap and restore them onto the rebuilt input after.
+  function captureFilterFocus(section) {
+    var active = document.activeElement;
+    if (!active || active.id !== "filter-" + section) { return null; }
+    return { start: active.selectionStart, end: active.selectionEnd };
+  }
+
+  function restoreFilterFocus(section, caret) {
+    if (!caret) { return; }
+    var input = $("filter-" + section);
+    if (!input) { return; }
+    input.focus();
+    try { input.setSelectionRange(caret.start, caret.end); } catch (_) { /* unsupported */ }
+  }
+
   function renderHeader(self) {
     state.self = self;
     var identity = self.identity || {};
@@ -97,6 +148,24 @@
     dot.classList.toggle("down", up === false);
     $("live-label").textContent = up === true ? "live" : (up === false ? "offline" : "connecting");
     $("status-sse").textContent = "sse " + (up === true ? "connected" : (up === false ? "reconnecting" : "idle"));
+  }
+
+  // Upstream degradation from the SSE "upstream" channel: the segment lists
+  // the erroring sources while any is down and clears on recovery. Text goes
+  // in via textContent/title assignment only, so the server-supplied error
+  // text stays inert markup-wise.
+  function renderUpstreamStatus() {
+    var node = $("status-upstream");
+    var sources = Object.keys(state.upstreamErrors).sort();
+    if (!sources.length) {
+      node.textContent = "";
+      node.removeAttribute("title");
+      return;
+    }
+    node.textContent = "upstream degraded: " + sources.join(", ");
+    node.title = sources.map(function (source) {
+      return source + ": " + state.upstreamErrors[source];
+    }).join("\n");
   }
 
   // --- server-sent events ----------------------------------------------
@@ -127,8 +196,28 @@
     state.sseMemories = withMemories;
     state.sseFacts = withFacts;
     state.sseSecrets = withSecrets;
-    source.onopen = function () { setSSEState(true); };
+    // Each stream's tracker starts fresh server-side and re-announces any
+    // still-failing source, so stale degradation must not carry over. The
+    // same reset runs in onopen: a browser auto-reconnect reuses this
+    // EventSource without re-running openEvents, and a source that recovered
+    // while disconnected emits no clearing event — the fresh tracker only
+    // announces failures — so it would otherwise stay red forever.
+    state.upstreamErrors = {};
+    renderUpstreamStatus();
+    source.onopen = function () {
+      setSSEState(true);
+      state.upstreamErrors = {};
+      renderUpstreamStatus();
+    };
     source.onerror = function () { setSSEState(false); };
+    source.addEventListener("upstream", function (event) {
+      var body;
+      try { body = JSON.parse(event.data); } catch (_) { return; }
+      if (!body || !body.source) { return; }
+      if (body.ok) { delete state.upstreamErrors[body.source]; }
+      else { state.upstreamErrors[body.source] = String(body.message || "upstream error"); }
+      renderUpstreamStatus();
+    });
     source.addEventListener("self", function (event) {
       setSSEState(true);
       // The digest carries no clock, so identical frames mean nothing
@@ -301,9 +390,44 @@
           '<span class="dim mono">' + esc(transcript.id) + '</span>' +
           '<span class="dim">' + esc((transcript.updated_at || "").slice(0, 19)) + "</span></div>";
       }).join("");
-      $("view").innerHTML = '<div class="panel"><h2>transcripts</h2><div class="list">' +
-        (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
+      $("view").innerHTML = '<div class="panel"><h2>transcripts</h2>' + filterInputHTML("transcripts") +
+        '<div class="list">' + (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
+      bindFilter("transcripts");
     }).catch(showError);
+  }
+
+  // parseJSONObjectBody returns the parsed object only when body is a JSON
+  // object literal. The leading-character scan keeps the common prose path
+  // parse-free, so long tails (hundreds of entries) stay cheap.
+  function parseJSONObjectBody(body) {
+    if (typeof body !== "string") { return null; }
+    var start = 0;
+    while (start < body.length && " \t\r\n".indexOf(body.charAt(start)) >= 0) { start++; }
+    if (body.charAt(start) !== "{") { return null; }
+    var parsed;
+    try { parsed = JSON.parse(body); } catch (_) { return null; }
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  }
+
+  // Bodies that parse as a JSON object (tool calls, structured events) render
+  // as a compact head — the tool_name badge when present, else the object's
+  // first keys — plus the pretty-printed JSON behind a native, CSP-safe
+  // <details> disclosure. Every fragment passes esc() before embedding,
+  // including the <summary> content; non-JSON bodies render as before.
+  function entryBodyHTML(entry) {
+    var body = entry.body || (entry.payload ? "[payload]" : "");
+    var parsed = parseJSONObjectBody(body);
+    if (!parsed) { return esc(body); }
+    var head;
+    if (typeof parsed.tool_name === "string" && parsed.tool_name) {
+      head = '<span class="tool-badge">' + esc(parsed.tool_name) + "</span>";
+    } else {
+      var keys = Object.keys(parsed);
+      head = '<span class="json-keys">{' +
+        esc(keys.slice(0, 3).join(", ") + (keys.length > 3 ? ", \u2026" : "")) + "}</span>";
+    }
+    return '<details class="entry-json"><summary>' + head + "</summary>" +
+      '<pre class="json-body">' + esc(JSON.stringify(parsed, null, 2)) + "</pre></details>";
   }
 
   function entryHTML(entry, anchored) {
@@ -311,7 +435,7 @@
     return '<div class="entry role-' + esc(role) + (anchored ? " anchored" : "") + '" data-seq="' + esc(entry.sequence) + '">' +
       '<span class="seq">' + esc(entry.sequence) + "</span>" +
       '<span class="role">' + esc(entry.role || "?") + "</span>" +
-      '<span class="body">' + esc(entry.body || (entry.payload ? "[payload]" : "")) + "</span></div>";
+      '<span class="body">' + entryBodyHTML(entry) + "</span></div>";
   }
 
   function appendEntries(transcriptID, entries) {
@@ -417,8 +541,11 @@
         '<span class="dim">' + esc(fact.source_kind || "") + "</span>" +
         '<span class="dim">' + esc((fact.updated_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
-    $("view").innerHTML = '<div class="panel"><h2>facts</h2><div class="list">' +
-      (rows || '<div class="empty">no facts</div>') + "</div></div>";
+    var caret = captureFilterFocus("facts");
+    $("view").innerHTML = '<div class="panel"><h2>facts</h2>' + filterInputHTML("facts") +
+      '<div class="list">' + (rows || '<div class="empty">no facts</div>') + "</div></div>";
+    bindFilter("facts");
+    restoreFilterFocus("facts", caret);
   }
 
   function viewFacts() {
@@ -539,8 +666,11 @@
         '<span class="dim">' + esc(memory.state || "") + "</span>" +
         '<span class="dim mono">' + esc(memory.salience != null ? memory.salience.toFixed(2) : "") + "</span></div>";
     }).join("");
-    $("view").innerHTML = '<div class="panel"><h2>memories</h2><div class="list">' +
-      (rows || '<div class="empty">no memories</div>') + "</div></div>";
+    var caret = captureFilterFocus("memories");
+    $("view").innerHTML = '<div class="panel"><h2>memories</h2>' + filterInputHTML("memories") +
+      '<div class="list">' + (rows || '<div class="empty">no memories</div>') + "</div></div>";
+    bindFilter("memories");
+    restoreFilterFocus("memories", caret);
   }
 
   function viewMemories() {
@@ -634,9 +764,12 @@
         '<span class="dim">' + esc(secret.lifecycle || "") + "</span>" +
         '<span class="dim">' + esc((secret.updated_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
+    var caret = captureFilterFocus("secrets");
     $("view").innerHTML = '<div class="panel"><h2>secrets <span class="badge">metadata only</span></h2>' +
-      SECRETS_NOTE + '<div class="list">' +
+      SECRETS_NOTE + filterInputHTML("secrets") + '<div class="list">' +
       (rows || '<div class="empty">no secrets</div>') + "</div></div>";
+    bindFilter("secrets");
+    restoreFilterFocus("secrets", caret);
   }
 
   function viewSecrets() {
@@ -760,8 +893,11 @@
         '<span class="dim">' + esc(thread.messages.length) + " msg" + (thread.messages.length === 1 ? "" : "s") + "</span>" +
         '<span class="dim">' + esc(thread.latestAt.slice(0, 19)) + "</span></div>";
     }).join("");
-    $("view").innerHTML = '<div class="panel"><h2>conversations</h2><div class="list">' +
-      (rows || '<div class="empty">no messages</div>') + "</div></div>";
+    var caret = captureFilterFocus("conversations");
+    $("view").innerHTML = '<div class="panel"><h2>conversations</h2>' + filterInputHTML("conversations") +
+      '<div class="list">' + (rows || '<div class="empty">no messages</div>') + "</div></div>";
+    bindFilter("conversations");
+    restoreFilterFocus("conversations", caret);
   }
 
   function bubbleHTML(msg) {

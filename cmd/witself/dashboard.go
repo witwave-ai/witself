@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -20,14 +22,17 @@ import (
 )
 
 const dashboardServeUsage = "usage: witself dashboard serve [--account NAME] [--realm NAME] [--agent NAME] " +
-	"[--endpoint URL --token-file FILE] [--port PORT] [--poll DURATION]"
+	"[--endpoint URL --token-file FILE] [--port PORT] [--poll DURATION] [--open]"
 
 const dashboardStatusUsage = "usage: witself dashboard status [--agent NAME] [--account NAME] [--realm NAME] [--json]"
+
+const dashboardStopUsage = "usage: witself dashboard stop [--agent NAME] [--account NAME] [--realm NAME] [--json]"
 
 func dashboardCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, dashboardServeUsage)
 		fmt.Fprintln(os.Stderr, dashboardStatusUsage)
+		fmt.Fprintln(os.Stderr, dashboardStopUsage)
 		return 2
 	}
 	switch args[0] {
@@ -37,6 +42,8 @@ func dashboardCmd(args []string) int {
 		return dashboardServe(ctx, args[1:])
 	case "status":
 		return dashboardStatus(args[1:])
+	case "stop":
+		return dashboardStop(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself dashboard: unknown subcommand %q\n", args[0])
 		return 2
@@ -104,6 +111,134 @@ func dashboardStatus(args []string) int {
 	return 0
 }
 
+// dashboardStopWait and dashboardStopPoll bound how long stop waits for a
+// signaled dashboard to shut down and release its registry entry. Vars only
+// so tests can lower them.
+var (
+	dashboardStopWait = 5 * time.Second
+	dashboardStopPoll = 100 * time.Millisecond
+)
+
+// signalDashboard delivers SIGINT to a PID the caller has just proven to be
+// a live dashboard via dashboard.EntryLive's marker-header probe and the
+// owner of its registry entry via dashboard.EntryOwned's access-token probe.
+// A var only so tests can stub delivery instead of interrupting themselves.
+var signalDashboard = func(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Signal(syscall.SIGINT)
+}
+
+// dashboardStop gracefully stops registered dashboards. Like status it is
+// purely local — a registry scan plus the same liveness verdict serve uses —
+// and it signals SIGINT only after dashboard.EntryLive confirms both the PID
+// and the marker-header probe of the recorded port AND dashboard.EntryOwned
+// proves the answering dashboard minted this entry's access token. The
+// marker alone proves only "some dashboard": after a crash, another agent's
+// serve can occupy the recorded port while the recorded PID is reused by an
+// unrelated process, and that PID must never be signaled. Stopping when
+// nothing is live and owned is a friendly no-op.
+func dashboardStop(args []string) int {
+	fs := flag.NewFlagSet("dashboard stop", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	agent := fs.String("agent", "", "only dashboards serving this agent name")
+	account := fs.String("account", "", "only dashboards under this local account name")
+	realm := fs.String("realm", "", "only dashboards in this realm")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, dashboardStopUsage)
+		return 2
+	}
+
+	entries, err := dashboard.ListRegistryEntries()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	type dashboardStopEntry struct {
+		dashboard.RegistryEntry
+		Live    bool `json:"live"`
+		Stopped bool `json:"stopped"`
+	}
+	code := 0
+	results := make([]dashboardStopEntry, 0, len(entries))
+	for _, entry := range entries {
+		if *agent != "" && entry.AgentName != *agent {
+			continue
+		}
+		if *account != "" && entry.Account != *account {
+			continue
+		}
+		if *realm != "" && entry.Realm != *realm {
+			continue
+		}
+		result := dashboardStopEntry{RegistryEntry: entry}
+		if dashboard.EntryLive(entry) && dashboard.EntryOwned(entry) {
+			result.Live = true
+			if err := stopDashboardEntry(entry); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+				code = 1
+			} else {
+				result.Stopped = true
+			}
+		}
+		results = append(results, result)
+	}
+	if *jsonOut {
+		if printCode := printJSON(map[string]any{"dashboards": results}); printCode != 0 {
+			return printCode
+		}
+		return code
+	}
+	stopped := false
+	for _, result := range results {
+		if result.Stopped {
+			fmt.Printf("stopped dashboard for agent %s (pid %d, port %d)\n", result.AgentName, result.PID, result.Port)
+			stopped = true
+		}
+	}
+	if !stopped && code == 0 {
+		fmt.Println("no live dashboard to stop")
+	}
+	return code
+}
+
+// stopDashboardEntry signals one just-proven-live-and-owned dashboard and polls briefly
+// until it stops answering with the marker header and releases its registry
+// entry (serve releases just before process exit), so a reported stop means
+// the slot is genuinely free for the next serve.
+func stopDashboardEntry(entry dashboard.RegistryEntry) error {
+	if err := signalDashboard(entry.PID); err != nil {
+		return fmt.Errorf("signal dashboard pid %d: %w", entry.PID, err)
+	}
+	deadline := time.Now().Add(dashboardStopWait)
+	for {
+		if dashboardEntryReleased(entry) && !dashboard.EntryLive(entry) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("dashboard for agent %q (pid %d) is still serving %s after SIGINT",
+				entry.AgentName, entry.PID, dashboardStopWait)
+		}
+		time.Sleep(dashboardStopPoll)
+	}
+}
+
+// dashboardEntryReleased reports whether the signaled serve's registry entry
+// is gone (graceful shutdown removes it) or already belongs to another PID.
+func dashboardEntryReleased(entry dashboard.RegistryEntry) bool {
+	current, err := dashboard.ReadRegistryEntry(entry.AgentID)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return current.PID != entry.PID
+}
+
 // dashboardServe resolves the agent connection and hands a bound loopback
 // listener to serveDashboard. It takes ctx so tests can drive the full flow
 // in-process against httptest backends and cancel instead of signaling.
@@ -113,6 +248,7 @@ func dashboardServe(ctx context.Context, args []string) int {
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	port := fs.Int("port", 0, "listen port on 127.0.0.1 (0 = derived from the agent id)")
 	poll := fs.Duration("poll", 2*time.Second, "cell poll interval for live updates")
+	open := fs.Bool("open", false, "open the tokened access URL in the OS browser once serving")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -170,13 +306,35 @@ func dashboardServe(ctx context.Context, args []string) int {
 		Account:   conn.AccountName,
 		Realm:     self.Identity.RealmName,
 	}
-	return serveDashboard(ctx, listener, cfg, entry)
+	return serveDashboard(ctx, listener, cfg, entry, *open)
+}
+
+// launchBrowser starts the OS default browser at url without waiting for it;
+// the reaper goroutine only prevents a zombie. A var so tests can stub the
+// launch, and it runs solely when --open was passed, so tests (and every
+// default serve) never spawn a browser.
+var launchBrowser = func(url string) error {
+	var opener string
+	switch runtime.GOOS {
+	case "darwin":
+		opener = "open"
+	case "linux":
+		opener = "xdg-open"
+	default:
+		return fmt.Errorf("no browser launcher for %s", runtime.GOOS)
+	}
+	command := exec.Command(opener, url)
+	if err := command.Start(); err != nil {
+		return err
+	}
+	go func() { _ = command.Wait() }()
+	return nil
 }
 
 // serveDashboard runs the dashboard HTTP lifecycle on an already-bound
 // loopback listener until ctx is canceled, registering the serve in
 // ~/.witself/dashboards for local discovery and removing it on shutdown.
-func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Config, entry dashboard.RegistryEntry) int {
+func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Config, entry dashboard.RegistryEntry, openBrowser bool) int {
 	port := listenerPort(listener)
 	entry.Port = port
 	entry.PID = os.Getpid()
@@ -234,6 +392,13 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 	}()
 	fmt.Fprintf(os.Stderr, "witself dashboard: serving agent %s on %s\n",
 		entry.AgentName, entry.AccessURL)
+	if openBrowser {
+		// Fire-and-forget: a launch failure only warns — the banner URL still
+		// works — and nothing waits on the browser process.
+		if err := launchBrowser(entry.AccessURL); err != nil {
+			fmt.Fprintf(os.Stderr, "witself dashboard: warning: open browser: %v\n", err)
+		}
+	}
 
 	select {
 	case <-ctx.Done():
