@@ -16,8 +16,8 @@ apps:
     chartVersion: 0.0.186
     imageTag: 0.0.186
     factDeletionEnabled: true
-    # Phase A: flip to true only in a separate config rollout after every
-    # schema-54-compatible v186 server pod has replaced the old writers.
+    # Phase B enabled compaction after every schema-54-compatible v186 server
+    # pod replaced the old writers.
     avatarPayloadCompactionEnabled: true
     backendKind: managed
     replicaCount: 2

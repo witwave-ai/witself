@@ -20,7 +20,8 @@ helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" >"$gcp_render"
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
-  --values "$apps_profile" >"$apps_render"
+  --values "$apps_profile" \
+  --set apps.witselfServer.avatarPayloadCompactionEnabled=false >"$apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set avatar.payloadCompaction.enabled=true >"$phase_b_gcp_render"
