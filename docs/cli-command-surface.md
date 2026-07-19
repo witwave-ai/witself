@@ -4361,7 +4361,15 @@ answering 501, which a memoized capability probe detects — the broad facts
 surface refuses with a clear 501 and history values stay locked; the one
 read that may record usage there is the eye-icon reveal itself, one
 legitimate delivery for an intentional per-fact lookup
-([ADR 0004](decisions/0004-local-agent-dashboard.md)). The listener binds
+([ADR 0004](decisions/0004-local-agent-dashboard.md)). Sealed secrets
+render as metadata only — names, field names and sensitivity flags,
+lifecycle, timestamps, and public vault-key binding identifiers from the
+two GET routes; there is no reveal by design (the vault key is client
+custody, the backend stores ciphertext only), the proxy rebuilds every
+secrets payload through an allow-list projection so ciphertext, wrapped
+DEKs, and field values of any kind never reach the browser, and a cell
+released before the sealed plane surfaces as a clean "not available on
+this cell" state. The listener binds
 `127.0.0.1` only, validates the
 `Host` header, and requires the per-process `?token=` URL printed at startup
 (exchanged once for a `SameSite=Strict` session cookie holding a distinct

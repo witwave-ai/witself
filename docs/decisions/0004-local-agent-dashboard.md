@@ -5,9 +5,9 @@ Status: accepted; implementation in progress (2026-07-19).
 ## Context
 
 Operators working next to a running agent want to watch it work: which
-transcripts are growing, which memories were captured or curated, and — once
-the sealed plane ships — which secrets the agent owns. Today the only live
-window is the CLI, one query at a time.
+transcripts are growing, which memories were captured or curated, and which
+sealed secrets the agent owns. Today the only live window is the CLI, one
+query at a time.
 
 [post-v0-roadmap.md](../post-v0-roadmap.md) defers a "Web Dashboard" and
 [requirements.md](../requirements.md) requires that managed-service
@@ -64,8 +64,26 @@ the registry, or logs — and the proxy strips sensitive values from broad
 payloads by construction, exactly as it strips message bodies, so even a
 misbehaving cell cannot leak them; assertion history stays locked for
 sensitive facts (no per-assertion reveal in v1).
-Sealed secret values are never rendered; when the sealed plane ships, the
-secrets pane shows sealed metadata only.
+Sealed secrets render as a sixth surface now that the sealed plane has
+landed: metadata only — names, field names and sensitivity flags, lifecycle,
+timestamps, counts, and the public vault-key binding identifiers — from the
+two public GET routes (never a lifecycle action or the field `:access`
+material read, which delivers ciphertext and records audit and usage; the
+list and get reads are pure metadata selects with no audit or usage side
+effect, so the pane may live-poll). Unlike facts there is no eye-icon reveal
+here by design: the vault key is client custody and the backend stores
+ciphertext only, so the only thing a reveal could fetch is encrypted
+material this dashboard must never ship to a browser. The proxy strips all
+cryptographic material by construction — every secrets payload is rebuilt
+through an allow-list projection, so ciphertext, sealed envelopes, wrapped
+DEKs, key bytes, and even explicitly public field values cannot transit,
+even from a misbehaving cell. Availability is feature-detected per cell: a
+cell released before the sealed plane has no `/v1/secrets` routes, and its
+404 surfaces as a clean "sealed plane not available on this cell" state
+rather than a generic error. That 404 is indistinguishable from one minted
+by fronting infrastructure mid-deploy, so the negative answer expires after
+about a minute and is re-proven rather than memoized for the life of the
+serve.
 
 ### Local-only by construction
 
@@ -128,7 +146,7 @@ discovery.
 
 ## Consequences
 
-- Operators get a live window into transcripts, memories, and (later) sealed
+- Operators get a live window into transcripts, memories, facts, and sealed
   secret metadata without any new server capability or privileged path.
 - Viewing the dashboard does not perturb the agent: observational and passive
   reads keep retrieval usage and read-state untouched. The one deliberate

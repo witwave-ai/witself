@@ -12,12 +12,14 @@
     sseMessages: false,  // whether the current EventSource polls the mailbox
     sseMemories: false,  // whether the current EventSource polls memories
     sseFacts: false,     // whether the current EventSource polls facts
+    sseSecrets: false,   // whether the current EventSource polls secrets
     seenSequences: {},   // transcript id -> highest rendered sequence
     messages: {},        // direction + " " + message id -> passive metadata
     facts: {},           // fact id -> redacted fact (never a revealed value)
     lastSelfData: null,     // last raw "self" frame, to skip no-op re-renders
     lastMemoriesData: null, // last raw "memories" frame, same reason
     lastFactsData: null,    // last raw "facts" frame, same reason
+    lastSecretsData: null,  // last raw "secrets" frame, same reason
     themes: ["console"],    // replaced by /api/themes (the embedded theme dir)
   };
 
@@ -67,7 +69,9 @@
     return fetch(path, { credentials: "same-origin" }).then(function (resp) {
       if (!resp.ok) {
         return resp.json().catch(function () { return {}; }).then(function (body) {
-          throw new Error(body.error || (path + ": HTTP " + resp.status));
+          var err = new Error(body.error || (path + ": HTTP " + resp.status));
+          err.status = resp.status;
+          throw err;
         });
       }
       return resp.json();
@@ -96,13 +100,14 @@
   }
 
   // --- server-sent events ----------------------------------------------
-  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts) {
+  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts, withSecrets) {
     withMessages = withMessages === true;
     withMemories = withMemories === true;
     withFacts = withFacts === true;
+    withSecrets = withSecrets === true;
     if (state.eventSource && state.sseTranscript === (transcriptID || null) &&
         state.sseMessages === withMessages && state.sseMemories === withMemories &&
-        state.sseFacts === withFacts) { return; }
+        state.sseFacts === withFacts && state.sseSecrets === withSecrets) { return; }
     if (state.eventSource) { state.eventSource.close(); }
     var params = [];
     if (transcriptID) {
@@ -114,12 +119,14 @@
     if (withMessages) { params.push("messages=true"); }
     if (withMemories) { params.push("memories=true"); }
     if (withFacts) { params.push("facts=true"); }
+    if (withSecrets) { params.push("secrets=true"); }
     var source = new EventSource("/api/events" + (params.length ? "?" + params.join("&") : ""));
     state.eventSource = source;
     state.sseTranscript = transcriptID || null;
     state.sseMessages = withMessages;
     state.sseMemories = withMemories;
     state.sseFacts = withFacts;
+    state.sseSecrets = withSecrets;
     source.onopen = function () { setSSEState(true); };
     source.onerror = function () { setSSEState(false); };
     source.addEventListener("self", function (event) {
@@ -153,6 +160,15 @@
       // Re-rendering the list also discards any value the user revealed:
       // revealed values live only in the replaced DOM.
       renderFactsList(body.facts || []);
+    });
+    source.addEventListener("secrets", function (event) {
+      if (event.data === state.lastSecretsData) { return; }
+      state.lastSecretsData = event.data;
+      var current = parseHash();
+      if (current.section !== "secrets" || current.id) { return; }
+      var body;
+      try { body = JSON.parse(event.data); } catch (_) { return; }
+      renderSecretsList(body.secrets || []);
     });
     source.addEventListener("transcript", function (event) {
       if (!transcriptID) { return; }
@@ -208,6 +224,8 @@
     if (route.section === "facts") { return viewFacts(); }
     if (route.section === "memories" && route.id) { return viewMemory(route.id); }
     if (route.section === "memories") { return viewMemories(); }
+    if (route.section === "secrets" && route.id) { return viewSecret(route.id); }
+    if (route.section === "secrets") { return viewSecrets(); }
     if (route.section === "conversations" && route.id) { return viewConversation(decodeURIComponent(route.id)); }
     if (route.section === "conversations") { return viewConversations(); }
     return viewOverview();
@@ -242,6 +260,7 @@
     var cards = Object.keys(counts).sort().map(function (key) {
       var card = '<div class="card"><div class="num">' + esc(counts[key]) + '</div><div class="label">' + esc(key) + "</div></div>";
       if (key === "facts") { return '<a class="card-link" href="#/facts">' + card + "</a>"; }
+      if (key === "secrets") { return '<a class="card-link" href="#/secrets">' + card + "</a>"; }
       return card;
     }).join("");
     var salient = (self.salient_memories || []).map(function (memory) {
@@ -579,6 +598,85 @@
         '<div class="panel"><h2>version history</h2><div class="list">' +
         (history || '<div class="empty">no versions</div>') + "</div></div>";
     }).catch(showError);
+  }
+
+  // --- secrets ----------------------------------------------------------
+  // The sealed plane, rendered strictly from proxy-sanitized metadata
+  // (/api/secrets). There is no eye icon and no copy here by design: the
+  // vault key is client custody, the backend stores ciphertext only, and
+  // the proxy strips every value slot — so unlike facts, there is nothing a
+  // reveal could fetch without shipping secret material to a browser.
+  var SECRETS_NOTE = '<div class="secret-note">sealed values are client-custodied; ' +
+    "the backend stores ciphertext only and this dashboard never renders secret material.</div>";
+
+  function renderSecretsUnavailable() {
+    $("view").innerHTML = '<div class="panel"><h2>secrets</h2>' +
+      '<div class="empty">sealed plane not available on this cell</div>' +
+      SECRETS_NOTE + "</div>";
+  }
+
+  function secretsError(err) {
+    if (err && err.status === 501) { renderSecretsUnavailable(); return; }
+    showError(err);
+  }
+
+  function secretFieldsLabel(secret) {
+    var total = secret.field_count != null ? secret.field_count : (secret.fields || []).length;
+    var sensitive = secret.sensitive_field_count || 0;
+    return total + " field" + (total === 1 ? "" : "s") + ", " + sensitive + " sensitive";
+  }
+
+  function renderSecretsList(secrets) {
+    var rows = (secrets || []).map(function (secret) {
+      return '<div class="row"><span class="grow"><a href="#/secrets/' + esc(secret.id) + '">' +
+        esc(secret.name || secret.id) + "</a></span>" +
+        '<span class="dim">' + esc(secretFieldsLabel(secret)) + "</span>" +
+        '<span class="dim">' + esc(secret.lifecycle || "") + "</span>" +
+        '<span class="dim">' + esc((secret.updated_at || "").slice(0, 19)) + "</span></div>";
+    }).join("");
+    $("view").innerHTML = '<div class="panel"><h2>secrets <span class="badge">metadata only</span></h2>' +
+      SECRETS_NOTE + '<div class="list">' +
+      (rows || '<div class="empty">no secrets</div>') + "</div></div>";
+  }
+
+  function viewSecrets() {
+    breadcrumb([{ label: "secrets" }]);
+    openEvents(null, 0, false, false, false, true);
+    fetchJSON("/api/secrets?limit=100").then(function (body) {
+      renderSecretsList(body.secrets || []);
+    }).catch(secretsError);
+  }
+
+  function secretFieldRow(field) {
+    return '<div class="row"><span class="grow">' + esc(field.name || field.id) + "</span>" +
+      '<span class="dim">' + esc(field.kind || "") + "</span>" +
+      (field.sensitive ? '<span class="lock-chip">sensitive</span>' : "") + "</div>";
+  }
+
+  function viewSecret(id) {
+    breadcrumb([{ label: "secrets", href: "#/secrets" }, { label: id }]);
+    openEvents(null);
+    fetchJSON("/api/secrets/" + encodeURIComponent(id)).then(function (body) {
+      var secret = body.secret || {};
+      var vaultKey = body.vault_key || {};
+      var fields = (secret.fields || []).map(secretFieldRow).join("");
+      var binding = vaultKey.id ?
+        vaultKey.id + (vaultKey.key_version != null ? " (v" + vaultKey.key_version + ")" : "") : "—";
+      $("view").innerHTML =
+        '<div class="panel"><h2>' + esc(secret.name || secret.id) + ' <span class="badge">metadata only</span></h2>' +
+        SECRETS_NOTE + "</div>" +
+        '<div class="panel"><h2>details</h2><dl class="kv">' +
+        "<dt>id</dt><dd>" + esc(secret.id) + "</dd>" +
+        "<dt>state</dt><dd>" + esc(secret.lifecycle || "") + "</dd>" +
+        "<dt>created</dt><dd>" + esc((secret.created_at || "").slice(0, 19)) + "</dd>" +
+        "<dt>updated</dt><dd>" + esc((secret.updated_at || "").slice(0, 19)) + "</dd>" +
+        "<dt>fields</dt><dd>" + esc(secret.field_count != null ? secret.field_count : "") + "</dd>" +
+        "<dt>sensitive fields</dt><dd>" + esc(secret.sensitive_field_count != null ? secret.sensitive_field_count : "") + "</dd>" +
+        "<dt>vault-key binding</dt><dd>" + esc(binding) + "</dd>" +
+        "</dl></div>" +
+        '<div class="panel"><h2>fields</h2><div class="list">' +
+        (fields || '<div class="empty">no fields</div>') + "</div></div>";
+    }).catch(secretsError);
   }
 
   // --- conversations ----------------------------------------------------

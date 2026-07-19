@@ -87,14 +87,13 @@ select {
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
 }
-.rail a, .nav-disabled {
+.rail a {
   padding: 0.35rem 0.6rem;
   border-radius: 3px;
   color: var(--fg-dim);
 }
 .rail a:hover { color: var(--fg); text-decoration: none; background: var(--bg); }
 .rail a.active { color: var(--accent); background: var(--bg); }
-.nav-disabled { cursor: not-allowed; }
 .badge {
   font-size: 0.65rem;
   border: 1px solid var(--border);
@@ -202,7 +201,7 @@ select {
 .eye-btn:hover { color: var(--accent); border-color: var(--accent); }
 .eye-btn svg { width: 14px; height: 14px; display: block; }
 .reveal-error { color: var(--danger); font-size: 0.75rem; }
-.fact-note { color: var(--fg-dim); font-style: italic; font-size: 0.8rem; margin-bottom: 0.6rem; }
+.fact-note, .secret-note { color: var(--fg-dim); font-style: italic; font-size: 0.8rem; margin-bottom: 0.6rem; }
 .copy-btn { margin-left: 0.35rem; }
 .toast {
   position: fixed;

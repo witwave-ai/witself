@@ -6,8 +6,12 @@
 // stay redacted (a sensitive fact value appears only in the single-fact
 // user-initiated reveal response), and the
 // avatar SVG passes the same canonical sanitizer-and-hash gate as
-// `witself self card`. The package mounts routes onto a caller-owned mux
-// (the cpserver.Register idiom); the binary owns the listener and lifecycle.
+// `witself self card`. Sealed secrets are metadata only: the proxy uses the
+// two public GET routes and rebuilds every payload as an allow-list
+// projection, so secret material — plaintext, ciphertext, wrapped DEKs, key
+// bytes — never reaches the browser. The package mounts routes onto a
+// caller-owned mux (the cpserver.Register idiom); the binary owns the
+// listener and lifecycle.
 package dashboard
 
 import (
@@ -82,6 +86,13 @@ const (
 	// matching the facts view's own fetch. Every tick re-reads the first
 	// page and the browser skips identical frames.
 	sseFactPageLimit = 100
+
+	// sseSecretPageLimit is the first-page size the secrets tick asks for
+	// (the server maximum), matching the secrets view's own fetch. The tick
+	// exists because the sealed plane's list and get reads are pure metadata
+	// SELECTs — unlike the field :access route, they write no audit event
+	// and no usage row — so polling cannot spam the value-free ledger.
+	sseSecretPageLimit = 100
 )
 
 // maxSSEConnections caps concurrent /api/events streams. A var only so tests
@@ -126,6 +137,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	}
 	sem := make(chan struct{}, maxSSEConnections)
 	factReads := &factReadCapability{}
+	secrets := &secretsCapability{}
 	mux.Handle("GET /{$}", secure(cfg, session, http.HandlerFunc(indexHandler)))
 	mux.Handle("GET /static/", secure(cfg, session, http.FileServerFS(staticFS)))
 	mux.Handle("GET /api/self", secure(cfg, session, selfHandler(cfg)))
@@ -145,7 +157,9 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	// fact whose predicate is the single segment "history", which the
 	// server's predicate grammar permits.
 	mux.Handle("GET /api/fact", secure(cfg, session, factRevealHandler(cfg)))
-	mux.Handle("GET /api/events", secure(cfg, session, eventsHandler(cfg, sem, factReads)))
+	mux.Handle("GET /api/secrets", secure(cfg, session, secretsHandler(cfg, secrets)))
+	mux.Handle("GET /api/secrets/{id}", secure(cfg, session, secretHandler(cfg, secrets)))
+	mux.Handle("GET /api/events", secure(cfg, session, eventsHandler(cfg, sem, factReads, secrets)))
 	mux.Handle("/", secure(cfg, session, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})))
@@ -727,12 +741,244 @@ func factProvenNonSensitive(ctx context.Context, cfg Config, factReads *factRead
 	return fact.ID == factID && !fact.Sensitive
 }
 
+// secretsUnavailableRecheck is how long one memoized /v1/secrets 404 keeps
+// the secrets surface in the unavailable state before the next read may
+// probe again. A var only so tests can lower it.
+var secretsUnavailableRecheck = time.Minute
+
+// secretsCapability memoizes whether this cell serves the sealed secrets
+// plane. Cells released before v0.0.187 have no /v1/secrets routes and
+// answer 404, which the UI must render as "sealed plane not available on
+// this cell" rather than a generic error. Any definitive secrets read
+// settles the answer; a transport failure is returned and the next caller
+// retries. A negative answer expires after secretsUnavailableRecheck: the
+// client maps every upstream 404 to ErrNotFound — including one minted by
+// fronting infrastructure mid-deploy — so "no sealed plane" is re-proven
+// once a window rather than disabling the pane for the process lifetime.
+type secretsCapability struct {
+	mu        sync.Mutex
+	resolved  bool
+	supported bool
+	deniedAt  time.Time
+}
+
+func (c *secretsCapability) note(supported bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resolved, c.supported = true, supported
+	if !supported {
+		c.deniedAt = time.Now()
+	}
+}
+
+// status reports the memoized answer; ok is false when no usable answer
+// exists — never resolved, or a negative past its recheck window.
+func (c *secretsCapability) status() (supported, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.resolved || (!c.supported && time.Since(c.deniedAt) >= secretsUnavailableRecheck) {
+		return false, false
+	}
+	return c.supported, true
+}
+
+// knownUnavailable reports a fresh memoized negative answer without probing,
+// so the SSE tick on a pre-sealed-plane cell polls once per recheck window
+// instead of every 2s.
+func (c *secretsCapability) knownUnavailable() bool {
+	supported, ok := c.status()
+	return ok && !supported
+}
+
+// available resolves cell support, probing with one bounded list read when
+// no usable memoized answer exists. The probe is side-effect-free — the
+// sealed plane's list is a pure metadata SELECT with no audit or usage row —
+// and runs outside the mutex: it may take the full client timeout, and
+// holding the lock would stall every SSE tick and secrets response behind
+// one slow upstream. Concurrent probes are harmless duplicates of the same
+// read.
+func (c *secretsCapability) available(ctx context.Context, cfg Config) (bool, error) {
+	if supported, ok := c.status(); ok {
+		return supported, nil
+	}
+	_, err := client.ListSecrets(ctx, cfg.Endpoint, cfg.BearerToken, client.SecretListOptions{Limit: 1})
+	if errors.Is(err, client.ErrNotFound) {
+		c.note(false)
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	c.note(true)
+	return true, nil
+}
+
+// writeSecretsUnavailable is the distinguishable pre-sealed-plane state the
+// UI renders as a clean note instead of an error.
+func writeSecretsUnavailable(w http.ResponseWriter) {
+	writeJSONError(w, http.StatusNotImplemented, "cell does not serve the sealed secrets plane")
+}
+
+// sanitizedSecret is the only secret shape this proxy ever writes to the
+// browser: sealed metadata, rebuilt field-by-field from the client
+// projection. The client type already excludes encrypted material, but the
+// proxy does not rely on that (a future client field or a misbehaving cell
+// could regress it): anything not named here — ciphertext, sealed field
+// payloads, wrapped DEKs, key bytes, nonces, AAD, and even explicitly
+// public field values, which a cell that mislabels a sensitive field could
+// leak through — is gone by construction, mirroring stripMessageBodies and
+// redactSensitiveFacts.
+type sanitizedSecret struct {
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	Description    string                 `json:"description,omitempty"`
+	Template       string                 `json:"template,omitempty"`
+	Tags           []string               `json:"tags"`
+	Lifecycle      string                 `json:"lifecycle"`
+	FieldCount     int                    `json:"field_count"`
+	SensitiveCount int                    `json:"sensitive_field_count"`
+	Fields         []sanitizedSecretField `json:"fields"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
+	ArchivedAt     *time.Time             `json:"archived_at,omitempty"`
+}
+
+// sanitizedSecretField is name, kind, and the sensitivity flag — never a
+// value slot of any kind.
+type sanitizedSecretField struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind,omitempty"`
+	Sensitive bool   `json:"sensitive"`
+}
+
+// sanitizedVaultKey carries public AVK-epoch identifiers only. The private
+// key is client custody and has no HTTP representation; the fingerprint and
+// version are public identity, not key material.
+type sanitizedVaultKey struct {
+	ID             string    `json:"id"`
+	KeyVersion     int64     `json:"key_version"`
+	Algorithm      string    `json:"algorithm,omitempty"`
+	Fingerprint    string    `json:"fingerprint,omitempty"`
+	LifecycleState string    `json:"lifecycle_state,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func sanitizeSecrets(secrets []client.Secret) []sanitizedSecret {
+	out := make([]sanitizedSecret, 0, len(secrets))
+	for _, secret := range secrets {
+		out = append(out, sanitizeSecret(secret))
+	}
+	return out
+}
+
+func sanitizeSecret(secret client.Secret) sanitizedSecret {
+	fields := make([]sanitizedSecretField, 0, len(secret.Fields))
+	for _, field := range secret.Fields {
+		fields = append(fields, sanitizedSecretField{
+			ID:        field.ID,
+			Name:      field.Name,
+			Kind:      field.Kind,
+			Sensitive: field.Sensitive,
+		})
+	}
+	tags := secret.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	return sanitizedSecret{
+		ID:             secret.ID,
+		Name:           secret.Name,
+		Description:    secret.Description,
+		Template:       secret.Template,
+		Tags:           tags,
+		Lifecycle:      secret.Lifecycle,
+		FieldCount:     len(fields),
+		SensitiveCount: secret.SensitiveCount,
+		Fields:         fields,
+		CreatedAt:      secret.CreatedAt,
+		UpdatedAt:      secret.UpdatedAt,
+		ArchivedAt:     secret.ArchivedAt,
+	}
+}
+
+// secretsHandler proxies the sealed-plane metadata list — one of exactly two
+// upstream secrets reads this dashboard performs (GET /v1/secrets and
+// GET /v1/secrets/{id}; never a POST, lifecycle :action, or field :access,
+// which delivers encrypted material and records audit/usage). Fields are
+// requested so the list can show counts, then rebuilt through the
+// allow-list projection.
+func secretsHandler(cfg Config, secrets *secretsCapability) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		opts := client.SecretListOptions{
+			Lifecycle:     query.Get("lifecycle"),
+			Cursor:        query.Get("cursor"),
+			IncludeFields: true,
+		}
+		if raw := query.Get("limit"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 0 {
+				writeJSONError(w, http.StatusBadRequest, "limit must be a non-negative integer")
+				return
+			}
+			opts.Limit = value
+		}
+		page, err := client.ListSecrets(r.Context(), cfg.Endpoint, cfg.BearerToken, opts)
+		if err != nil {
+			if errors.Is(err, client.ErrNotFound) {
+				secrets.note(false)
+				writeSecretsUnavailable(w)
+				return
+			}
+			writeUpstreamError(w, err)
+			return
+		}
+		secrets.note(true)
+		writeJSON(w, map[string]any{"secrets": sanitizeSecrets(page.Items), "next_cursor": page.NextCursor})
+	})
+}
+
+// secretHandler proxies one secret's sealed metadata plus the public
+// identifiers of the current vault-key binding (a pure read; absence or
+// failure just omits the binding). A 404 here is ambiguous — missing secret
+// or missing route — so the capability gate disambiguates: only a cell
+// proven to lack /v1/secrets entirely gets the unavailable state.
+func secretHandler(cfg Config, secrets *secretsCapability) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secret, err := client.GetSecret(r.Context(), cfg.Endpoint, cfg.BearerToken, r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, client.ErrNotFound) {
+				if supported, availErr := secrets.available(r.Context(), cfg); availErr == nil && !supported {
+					writeSecretsUnavailable(w)
+					return
+				}
+			}
+			writeUpstreamError(w, err)
+			return
+		}
+		secrets.note(true)
+		out := map[string]any{"secret": sanitizeSecret(*secret)}
+		if key, keyErr := client.GetCurrentVaultKey(r.Context(), cfg.Endpoint, cfg.BearerToken); keyErr == nil && key != nil {
+			out["vault_key"] = sanitizedVaultKey{
+				ID:             key.ID,
+				KeyVersion:     key.KeyVersion,
+				Algorithm:      key.Algorithm,
+				Fingerprint:    key.Fingerprint,
+				LifecycleState: key.LifecycleState,
+				CreatedAt:      key.CreatedAt,
+			}
+		}
+		writeJSON(w, out)
+	})
+}
+
 // eventsHandler streams server-sent events by cursor-polling the cell — the
 // backend has no push path (ADR 0004). Each connection owns only local state;
 // the shared semaphore bounds fan-out. The client seeds the transcript cursor
 // with after_sequence (its highest rendered entry) so the stream starts at
 // the live edge instead of replaying the whole transcript.
-func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability) http.Handler {
+func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability, secrets *secretsCapability) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		transcriptID := query.Get("transcript")
@@ -762,6 +1008,15 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability)
 				return
 			}
 			includeFacts = value
+		}
+		var includeSecrets bool
+		if raw := query.Get("secrets"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "secrets must be a boolean")
+				return
+			}
+			includeSecrets = value
 		}
 		var lastSeen int64
 		if raw := query.Get("after_sequence"); raw != "" {
@@ -801,7 +1056,7 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability)
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
-			lastSeen = emitEvents(ctx, cfg, factReads, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, lastSeen)
+			lastSeen = emitEvents(ctx, cfg, factReads, secrets, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, lastSeen)
 			select {
 			case <-ctx.Done():
 				return
@@ -817,7 +1072,7 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability)
 // until the live edge (bounded by maxSSEPagesPerTick) so an active transcript
 // is never rate-limited to one page per tick. Upstream failures end the tick;
 // the next tick retries from the same cursor.
-func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts bool, lastSeen int64) int64 {
+func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets bool, lastSeen int64) int64 {
 	if digest, observational, err := fetchSelf(ctx, cfg); err == nil {
 		writeSSE(w, flusher, "self", "", cfg.selfEnvelope(digest, observational))
 	}
@@ -829,6 +1084,9 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 	}
 	if includeFacts {
 		emitFactsEvent(ctx, cfg, factReads, w, flusher)
+	}
+	if includeSecrets {
+		emitSecretsEvent(ctx, cfg, secrets, w, flusher)
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -921,6 +1179,31 @@ func emitFactsEvent(ctx context.Context, cfg Config, factReads *factReadCapabili
 		return
 	}
 	writeSSE(w, flusher, "facts", "", map[string]any{"facts": redactSensitiveFacts(facts)})
+}
+
+// emitSecretsEvent polls the first page of the sealed-plane metadata list.
+// The tick is safe by determination: the sealed plane's list and get reads
+// are pure SELECTs — only the field :access POST (which this dashboard never
+// calls) records audit and usage — so a 2s poll writes nothing anywhere.
+// Every frame passes through the same allow-list projection as the list
+// route; a pre-sealed-plane cell 404s once, is memoized, and gets no
+// further tick until the negative answer's recheck window lapses.
+func emitSecretsEvent(ctx context.Context, cfg Config, secrets *secretsCapability, w io.Writer, flusher http.Flusher) {
+	if secrets.knownUnavailable() {
+		return
+	}
+	page, err := client.ListSecrets(ctx, cfg.Endpoint, cfg.BearerToken, client.SecretListOptions{
+		Limit:         sseSecretPageLimit,
+		IncludeFields: true,
+	})
+	if err != nil {
+		if errors.Is(err, client.ErrNotFound) {
+			secrets.note(false)
+		}
+		return
+	}
+	secrets.note(true)
+	writeSSE(w, flusher, "secrets", "", map[string]any{"secrets": sanitizeSecrets(page.Items), "next_cursor": page.NextCursor})
 }
 
 // writeSSE emits one server-sent event; a non-empty id becomes the SSE id

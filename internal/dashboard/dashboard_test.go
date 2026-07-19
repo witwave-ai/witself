@@ -830,7 +830,7 @@ func TestEventsStreamEmitsMessagesFromPassiveList(t *testing.T) {
 
 func TestEventsStreamRejectsInvalidMessagesFlag(t *testing.T) {
 	srv, cfg := newDashboard(t, selfBackend(t), nil)
-	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope"} {
+	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope", "/api/events?secrets=nope"} {
 		resp := authedGet(t, srv, cfg, path)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("%s: got %d, want 400", path, resp.StatusCode)
@@ -1343,6 +1343,414 @@ func TestEventsStreamEmitsFactsFromRedactedList(t *testing.T) {
 		t.Fatalf("stream ended early: event=%v item=%v (%v)", sawEvent, sawItem, scanner.Err())
 	}
 	cancel()
+}
+
+// rejectSecretMutations fails the test if the dashboard reaches the sealed
+// plane through anything but a plain GET: no POST, no lifecycle :action,
+// and never the field :access route, which delivers encrypted material and
+// records audit and usage.
+func rejectSecretMutations(t *testing.T, r *http.Request) {
+	t.Helper()
+	if r.Method != http.MethodGet {
+		t.Errorf("dashboard sent non-GET secrets request %s %s", r.Method, r.URL.Path)
+	}
+	if strings.Contains(r.URL.Path, ":") {
+		t.Errorf("dashboard touched secret action route %s %s (never :archive/:restore/:access)", r.Method, r.URL.Path)
+	}
+}
+
+// leakySecretJSON is a cell response that misbehaves in every way the proxy
+// must survive: cryptographic material and plaintext-like values embedded in
+// list and get payloads, including a public value on a field flagged
+// sensitive. None of these strings may reach the browser.
+func leakySecretJSON() map[string]any {
+	return map[string]any{
+		"id": "sec_1", "name": "prod-db", "template": "credential",
+		"tags": []string{"prod"}, "lifecycle": "active",
+		"sensitive_field_count": 1,
+		"created_at":            "2026-07-01T00:00:00Z",
+		"updated_at":            "2026-07-02T00:00:00Z",
+		"ciphertext":            "leaked-ciphertext",
+		"plaintext":             "leaked-plaintext",
+		"wrapped_dek":           "leaked-wrapped-dek",
+		"fields": []map[string]any{
+			{
+				"id": "fld_1", "name": "password", "kind": "password", "sensitive": true,
+				"public_value": "leaked-public-value",
+				"sealed": map[string]any{
+					"ciphertext": "leaked-ciphertext",
+					"aad":        "leaked-aad",
+					"nonce":      "leaked-nonce",
+					"dek":        map[string]any{"wrapped_dek": "leaked-wrapped-dek", "key_material": "leaked-key-material"},
+				},
+			},
+			{"id": "fld_2", "name": "username", "kind": "text", "sensitive": false,
+				"public_value": "leaked-public-value"},
+		},
+	}
+}
+
+// TestSecretsProxyListsMetadataOnly proves the secrets list proxy touches
+// only GET /v1/secrets, forwards safe list options, and — defense in depth,
+// mirroring stripMessageBodies — rebuilds every secret through the
+// allow-list projection so no ciphertext, wrapped DEK, plaintext-like
+// value, or even explicitly public field value a misbehaving cell embeds
+// can reach the browser.
+func TestSecretsProxyListsMetadataOnly(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		rejectSecretMutations(t, r)
+		if r.URL.Path != "/v1/secrets" {
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		query := r.URL.Query()
+		if query.Get("limit") != "25" || query.Get("include_fields") != "true" {
+			t.Errorf("unexpected query %s", r.URL.RawQuery)
+		}
+		writeTestJSON(t, w, map[string]any{"items": []map[string]any{leakySecretJSON()}})
+	}, nil)
+
+	resp := authedGet(t, srv, cfg, "/api/secrets?limit=25")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, want := range []string{"sec_1", "prod-db", "password", `"sensitive_field_count":1`, `"field_count":2`, "active"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("metadata %q missing from proxied list: %s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "leaked") {
+		t.Fatalf("secret material reached the browser: %s", raw)
+	}
+
+	bad := authedGet(t, srv, cfg, "/api/secrets?limit=nope")
+	defer func() { _ = bad.Body.Close() }()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid limit: got %d, want 400", bad.StatusCode)
+	}
+}
+
+// TestSecretProxyDetailMetadataOnly proves the detail proxy touches only
+// GET /v1/secrets/{id} plus the read-only vault-key binding GET, forwards
+// binding identifiers (never key material), and strips embedded
+// cryptographic material exactly like the list.
+func TestSecretProxyDetailMetadataOnly(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		rejectSecretMutations(t, r)
+		switch r.URL.Path {
+		case "/v1/secrets/sec_1":
+			writeTestJSON(t, w, map[string]any{"secret": leakySecretJSON()})
+		case "/v1/vault/key-epochs/current":
+			writeTestJSON(t, w, map[string]any{"key_epoch": map[string]any{
+				"id": "avk_1", "key_version": 3, "algorithm": "age-x25519",
+				"fingerprint": "fp-abc", "lifecycle_state": "current",
+				"private_key": "leaked-private-key",
+			}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}, nil)
+
+	resp := authedGet(t, srv, cfg, "/api/secrets/sec_1")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, want := range []string{"sec_1", "password", "username", "avk_1", `"key_version":3`, "fp-abc"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("metadata %q missing from proxied detail: %s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "leaked") {
+		t.Fatalf("secret material reached the browser: %s", raw)
+	}
+}
+
+// TestSecretsProxySurfacesPreSealedCellAsUnavailable proves a cell released
+// before the sealed plane — no /v1/secrets routes at all, so every read
+// 404s — surfaces as the distinguishable 501 state the UI renders as
+// "sealed plane not available on this cell", on both the list and the
+// detail route (where the capability probe disambiguates a missing route
+// from a missing secret).
+func TestSecretsProxySurfacesPreSealedCellAsUnavailable(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/secrets") {
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+		}
+		http.NotFound(w, r)
+	}, nil)
+
+	for _, path := range []string{"/api/secrets/sec_1", "/api/secrets"} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Fatalf("%s: got %d, want 501", path, resp.StatusCode)
+		}
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		if body.Error != "cell does not serve the sealed secrets plane" {
+			t.Fatalf("%s: error = %q", path, body.Error)
+		}
+	}
+}
+
+// TestSecretDetailMissingSecretStays404OnSupportingCell proves the
+// disambiguation cuts the other way too: on a cell that serves the sealed
+// plane, a genuinely missing secret is a plain 404, never the
+// unavailable-cell state.
+func TestSecretDetailMissingSecretStays404OnSupportingCell(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		rejectSecretMutations(t, r)
+		switch r.URL.Path {
+		case "/v1/secrets":
+			writeTestJSON(t, w, map[string]any{"items": []map[string]any{}})
+		case "/v1/secrets/sec_missing":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "secret resource not found"})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}, nil)
+
+	resp := authedGet(t, srv, cfg, "/api/secrets/sec_missing")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestEventsStreamEmitsSecretsFromMetadataList proves the opt-in secrets
+// tick polls only the side-effect-free metadata list (the sealed plane's
+// list and get reads write no audit or usage rows; only the field :access
+// POST does, and the dashboard never calls it) and that embedded secret
+// material never reaches an SSE frame.
+func TestEventsStreamEmitsSecretsFromMetadataList(t *testing.T) {
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/secrets":
+			rejectSecretMutations(t, r)
+			query := r.URL.Query()
+			if query.Get("limit") != strconv.Itoa(sseSecretPageLimit) {
+				t.Errorf("limit = %q, want %d", query.Get("limit"), sseSecretPageLimit)
+			}
+			if query.Get("include_fields") != "true" {
+				t.Errorf("include_fields = %q, want true", query.Get("include_fields"))
+			}
+			leaky := leakySecretJSON()
+			leaky["id"] = "sec_live"
+			writeTestJSON(t, w, map[string]any{"items": []map[string]any{leaky}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?secrets=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	sawEvent, sawItem := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawEvent || !sawItem) {
+		line := scanner.Text()
+		if line == "event: secrets" {
+			sawEvent = true
+		}
+		if strings.Contains(line, "leaked") {
+			t.Fatalf("secret material reached the SSE stream: %q", line)
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "sec_live") {
+			sawItem = true
+		}
+	}
+	if !sawEvent || !sawItem {
+		t.Fatalf("stream ended early: event=%v item=%v (%v)", sawEvent, sawItem, scanner.Err())
+	}
+	cancel()
+}
+
+// TestEventsStreamSkipsSecretsTickOnPreSealedCell proves the tick stops
+// after one 404 from a cell without the sealed plane: the negative answer
+// is memoized for the recheck window, no "secrets" event is ever emitted,
+// and the missing routes are not re-polled every tick.
+func TestEventsStreamSkipsSecretsTickOnPreSealedCell(t *testing.T) {
+	var mu sync.Mutex
+	secretPolls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/secrets":
+			mu.Lock()
+			secretPolls++
+			mu.Unlock()
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?secrets=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	selfFrames := 0
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && selfFrames < 3 {
+		line := scanner.Text()
+		if line == "event: secrets" {
+			t.Fatalf("pre-sealed cell must get no secrets tick, saw %q", line)
+		}
+		if line == "event: self" {
+			selfFrames++
+		}
+	}
+	if selfFrames < 3 {
+		t.Fatalf("stream ended early after %d self frames (%v)", selfFrames, scanner.Err())
+	}
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if secretPolls != 1 {
+		t.Fatalf("secret polls = %d, want 1 (memoized negative)", secretPolls)
+	}
+}
+
+// TestEventsStreamRecoversSecretsAfterTransientNotFound proves one 404 —
+// which the client cannot distinguish from a pre-sealed-plane cell when an
+// intermediary mints it mid-deploy — disables the tick only for the recheck
+// window, not the process lifetime: once upstream serves the list again the
+// stream resumes secrets frames without a restart.
+func TestEventsStreamRecoversSecretsAfterTransientNotFound(t *testing.T) {
+	previous := secretsUnavailableRecheck
+	secretsUnavailableRecheck = 30 * time.Millisecond
+	defer func() { secretsUnavailableRecheck = previous }()
+
+	var mu sync.Mutex
+	secretPolls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/secrets":
+			rejectSecretMutations(t, r)
+			mu.Lock()
+			secretPolls++
+			first := secretPolls == 1
+			mu.Unlock()
+			if first {
+				http.NotFound(w, r)
+				return
+			}
+			writeTestJSON(t, w, map[string]any{"items": []map[string]any{{
+				"id": "sec_back", "name": "prod-db", "lifecycle": "active",
+				"created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-02T00:00:00Z",
+			}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?secrets=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	sawItem := false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && !sawItem {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "sec_back") {
+			sawItem = true
+		}
+	}
+	if !sawItem {
+		t.Fatalf("stream never resumed secrets frames after the transient 404 (%v)", scanner.Err())
+	}
+	cancel()
+}
+
+// TestSecretsProbeDoesNotBlockMemoizedReads proves the capability probe
+// releases the mutex during its upstream read: while one probe is in flight
+// (up to the full client timeout), the SSE tick's knownUnavailable check and
+// the note calls on every secrets response must not queue behind it.
+func TestSecretsProbeDoesNotBlockMemoizedReads(t *testing.T) {
+	probeStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case probeStarted <- struct{}{}:
+		default:
+		}
+		<-release
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(cell.Close)
+
+	secrets := &secretsCapability{}
+	cfg := Config{Endpoint: cell.URL, BearerToken: testBearer}
+	probeDone := make(chan struct{})
+	go func() {
+		defer close(probeDone)
+		_, _ = secrets.available(t.Context(), cfg)
+	}()
+	<-probeStarted
+
+	answered := make(chan bool, 1)
+	go func() { answered <- secrets.knownUnavailable() }()
+	select {
+	case got := <-answered:
+		if got {
+			t.Error("knownUnavailable = true while the probe is unresolved")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("knownUnavailable blocked behind the in-flight probe")
+	}
+	close(release)
+	<-probeDone
 }
 
 // TestThemesEndpointListsEmbeddedPacks proves the theme picker's source of
