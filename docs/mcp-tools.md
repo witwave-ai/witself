@@ -198,20 +198,21 @@ Read-only mode:
 - Cross-agent reads and recalls remain policy-gated even in read-only mode: a
   read tool that targets another agent still requires a matching `read` policy
   (see [access-policy.md](access-policy.md)).
-- Sealed-plane `witself.secret.reveal`, `witself.totp.code`, and value-returning
-  `witself.reference.resolve` are non-mutating but high risk. They are reveal-gated
-  regardless of read-only mode: policy may still disable them even when read-only
-  mode would otherwise expose read tools, and `--no-value-tools` disables them
-  outright (see below).
+- Sealed-plane `witself.secret.reveal`, `witself.totp.code`, locally
+  value-generating `witself.password.generate`, and value-returning
+  `witself.reference.resolve` are non-mutating but high risk. Reveal operations
+  remain policy-gated regardless of read-only mode, and `--no-value-tools`
+  disables every listed value-returning tool outright (see below).
 
 No-value-tools mode:
 
-- `witself mcp serve --no-value-tools` disables the tools that can return sealed
-  values or generated one-time codes: `witself.secret.reveal`, `witself.totp.code`,
-  and value-returning `witself.reference.resolve` (a sealed `witself://secret/...`
-  reference). This mode is **distinct from `--read-only`**: `--read-only` disables
-  mutations, while `--no-value-tools` closes the sealed-plane value egress while
-  leaving mutations and open-plane reads intact. The two flags compose.
+- `witself mcp serve --no-value-tools` disables tools that return sealed or
+  locally generated credential values: `witself.secret.reveal`,
+  `witself.password.generate`, `witself.totp.code`, and value-returning
+  `witself.reference.resolve` (a sealed `witself://secret/...` reference). This
+  mode is **distinct from `--read-only`**: `--read-only` disables mutations,
+  while `--no-value-tools` closes the sealed-plane value egress while leaving
+  mutations and open-plane reads intact. The two flags compose.
 - This split applies only to the **sealed plane**. The open plane has no reveal
   operation: `sensitive` facts and memory content are redacted in list/scan output
   and returned in clear on an authorized single-record read, and are unaffected by
@@ -545,7 +546,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.transcript.tail` | yes | yes | Reads a bounded newest page, returned oldest-first. |
 | `witself.reference.parse` | yes | yes | Validates reference syntax only. |
 | `witself.reference.resolve` | yes | yes | Open-plane refs resolve under the same authz as a direct read; a sealed `witself://secret/...` ref is reveal-gated (policy) and disabled by `--no-value-tools`. |
-| `witself.password.generate` | yes | yes | Generates a value but does not store it; not a sealed read. |
+| `witself.password.generate` | yes | yes | Generates a value but does not store it; disabled by `--no-value-tools`. |
 | `witself.secret.create` | yes | no | Requires `secret:create`; sealed-plane mutation. |
 | `witself.secret.list` | yes | yes | Sealed summaries only; never returns values. |
 | `witself.secret.show` | yes | yes | Non-sensitive + redacted sensitive fields; never returns values. |

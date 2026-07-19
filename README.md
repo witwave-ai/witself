@@ -580,10 +580,12 @@ and billing apparatus — but take deliberately opposite postures on the payload
   of identity data: plaintext at rest, semantically indexed and recallable,
   cross-agent readable under policy, in the self-digest, and plaintext-exportable.
 - The **sealed plane** (secrets, TOTP) protects the *confidentiality* of
-  credential material: KMS-backed envelope encryption (CMK → per-realm KEK →
-  per-secret/field DEK) and reveal-gated access. Sealed-plane values are never
-  embedded, never returned by semantic recall, never in the self-digest, and
-  never plaintext-exported. They surface only through explicit, audited reveal.
+  credential material: the client-held agent vault key wraps per-field DEKs,
+  and each field value is encrypted before transport. The backend authorizes
+  access to one encrypted package at a time but has no decrypt key. Sealed-plane
+  values are never embedded, returned by semantic recall, placed in the
+  self-digest, or plaintext-exported. They surface only through explicit,
+  audited client-side use.
 
 Witself consolidates the former Witpass credential vault and authenticator into
 the sealed plane: one product, one `witself` CLI, one backend, one account and
@@ -600,11 +602,13 @@ The product goal is a CLI-first agent durable-state service spanning both planes
   ranking, optionally blended with client-supplied vectors.
 - Facts: deterministic name→value identity cards, with a `primary` flag for
   identity anchors.
-- A sealed credential plane: secrets and TOTP authenticators under KMS-backed
-  envelope encryption (CMK → per-realm KEK → per-secret/field DEK), with explicit,
-  audited, reveal-gated access and cross-agent grants. Sealed-plane values are
-  never embedded, never returned by semantic recall, never in the self-digest, and
-  never plaintext-exported.
+- A sealed credential plane: structured secrets and TOTP authenticators encrypted
+  by the active client under a separate, client-custodied agent vault key. The
+  backend stores and exports ciphertext, wrapped field keys, and public metadata
+  but cannot decrypt sensitive values. The initial agent-owned vertical provides
+  explicit one-field access; key transfer, rotation, runtime injection, and
+  cross-agent grants are follow-on slices. Sealed-plane values are never embedded,
+  returned by semantic recall, placed in the self-digest, or plaintext-exported.
 - Cross-agent access governed by evaluable, default-deny policy.
 - Security groups that act as both policy subjects and policy targets and can own
   group-scoped shared memories and facts.
@@ -649,6 +653,7 @@ workflows, and Pulumi-based `witself-infra` module are built in this repo.
 - [Narrative Memory](docs/narrative-memory-and-curation.md)
 - [Facts Model](docs/facts-model.md)
 - [Secret Model](docs/secret-model.md)
+- [Client-Custodied Agent Vault](docs/client-custodied-agent-vault.md)
 - [TOTP 2FA](docs/totp-2fa.md)
 - [Secret Size And Attachments](docs/secret-size-and-attachments.md)
 - [Encryption Model](docs/encryption-model.md)

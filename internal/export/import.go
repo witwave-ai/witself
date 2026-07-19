@@ -13,6 +13,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ErrArchiveTooNew is returned when the archive's schema version is newer
@@ -74,6 +75,9 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 	if err != nil {
 		return m, err
 	}
+	if err := rejectAmbiguousArchiveJSON(raw); err != nil {
+		return m, fmt.Errorf("%w: manifest: %v", ErrCorrupt, err)
+	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return m, fmt.Errorf("%w: manifest: %v", ErrCorrupt, err)
 	}
@@ -116,6 +120,9 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 				return m, err
 			}
 			sums = &Checksums{}
+			if err := rejectAmbiguousArchiveJSON(raw); err != nil {
+				return m, fmt.Errorf("%w: checksums: %v", ErrCorrupt, err)
+			}
 			if err := json.Unmarshal(raw, sums); err != nil {
 				return m, fmt.Errorf("%w: checksums: %v", ErrCorrupt, err)
 			}
@@ -244,6 +251,13 @@ func upgradeRow(table string, row []byte, from, to int) ([]byte, error) {
 	if !needed {
 		return row, nil
 	}
+	// An identity upgrader still decodes and re-encodes the row. Reject
+	// ambiguous JSON first so that process cannot erase duplicate member names
+	// or normalize invalid Unicode escapes before the store's hostile-content
+	// validator sees them.
+	if err := rejectAmbiguousArchiveJSON(row); err != nil {
+		return nil, fmt.Errorf("%w: %s row: %v", ErrCorrupt, table, err)
+	}
 	var obj map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(row))
 	decoder.UseNumber()
@@ -280,6 +294,143 @@ func requireJSONEOF(decoder *json.Decoder) error {
 			return errors.New("multiple JSON values")
 		}
 		return err
+	}
+	return nil
+}
+
+// rejectAmbiguousArchiveJSON rejects JSON spellings that encoding/json would
+// otherwise normalize while decoding. Archive control records and rows that
+// cross an upgrader must have one unambiguous interpretation before checksums
+// or semantic validation are trusted.
+func rejectAmbiguousArchiveJSON(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("invalid UTF-8 in JSON")
+	}
+	if err := rejectUnpairedArchiveJSONSurrogates(raw); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := consumeUniqueArchiveJSONValue(decoder); err != nil {
+		return err
+	}
+	return requireJSONEOF(decoder)
+}
+
+func rejectUnpairedArchiveJSONSurrogates(raw []byte) error {
+	for index := 0; index < len(raw); index++ {
+		if raw[index] != '"' {
+			continue
+		}
+		index++
+		for index < len(raw) && raw[index] != '"' {
+			if raw[index] != '\\' {
+				index++
+				continue
+			}
+			if index+1 >= len(raw) {
+				return errors.New("unterminated JSON escape")
+			}
+			if raw[index+1] != 'u' {
+				index += 2
+				continue
+			}
+			codeUnit, ok := parseArchiveJSONHexCodeUnit(raw, index+2)
+			if !ok {
+				return errors.New("invalid JSON Unicode escape")
+			}
+			switch {
+			case codeUnit >= 0xd800 && codeUnit <= 0xdbff:
+				if index+12 > len(raw) || raw[index+6] != '\\' || raw[index+7] != 'u' {
+					return errors.New("unpaired high surrogate escape")
+				}
+				low, validLow := parseArchiveJSONHexCodeUnit(raw, index+8)
+				if !validLow || low < 0xdc00 || low > 0xdfff {
+					return errors.New("unpaired high surrogate escape")
+				}
+				index += 12
+			case codeUnit >= 0xdc00 && codeUnit <= 0xdfff:
+				return errors.New("unpaired low surrogate escape")
+			default:
+				index += 6
+			}
+		}
+	}
+	return nil
+}
+
+func parseArchiveJSONHexCodeUnit(raw []byte, offset int) (uint16, bool) {
+	if offset < 0 || offset+4 > len(raw) {
+		return 0, false
+	}
+	var value uint16
+	for _, character := range raw[offset : offset+4] {
+		value <<= 4
+		switch {
+		case character >= '0' && character <= '9':
+			value |= uint16(character - '0')
+		case character >= 'a' && character <= 'f':
+			value |= uint16(character-'a') + 10
+		case character >= 'A' && character <= 'F':
+			value |= uint16(character-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func consumeUniqueArchiveJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object member name is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate object member %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueArchiveJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return errors.New("object did not terminate")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueArchiveJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return errors.New("array did not terminate")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
 	return nil
 }

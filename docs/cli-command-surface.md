@@ -5,8 +5,9 @@ Status: draft target contract with implemented slices labeled below.
 Sealed-plane implementation amendment (accepted 2026-07-18): the current
 client-custodied vertical implements `vault key init|status`, local `password
 generate`, `secret create|list|search|show|reveal|archive|restore`, and `totp
-show|code SECRET_ID FIELD_ID`. `secret create` consumes a strict JSON document
-from `--file` or `--stdin`; it does not yet implement the convenience flags
+show|code SECRET FIELD`. Secret and field selectors accept either the exact ID
+or an unambiguous human-readable name. `secret create` consumes a strict JSON
+document from `--file` or `--stdin`; it does not yet implement the convenience flags
 shown in the target sections below, and it requires an explicit
 `--idempotency-key KEY` so a lost-response retry can reuse its durable local
 exact-request journal. The MCP create tool requires the equivalent
@@ -25,6 +26,12 @@ select transport and authentication but do not replace the local account
 binding. Installed MCP integrations also require `account_id`. An integration
 created by an older version without it fails closed for agent-secret tools and
 must be refreshed with `witself install <runtime>`.
+
+The implemented password generator supports character-class controls,
+`--exclude-ambiguous` (with `--no-ambiguous` as a compatibility alias), and
+`--json`. Passphrase/word generation remains target behavior. Every command in
+this implemented sealed-plane slice accepts `-h` or `--help` as a successful,
+side-effect-free request.
 
 Narrative-memory amendment (accepted 2026-07-14): direct capture, lifecycle,
 supersede, evidence, delete, lexical/hybrid recall, migration-0032 vector, and
@@ -2241,11 +2248,12 @@ Flags:
 
 Manage stored secrets: the sealed plane of Witself. A secret can be a login, API
 key, token, private key, certificate bundle, connection string, or arbitrary
-structured secret. Secrets are envelope-encrypted (CMK → per-realm KEK →
-per-secret/field DEK); the encryption and key model are tracked in
-[encryption-model.md](encryption-model.md) and
-[key-hierarchy.md](key-hierarchy.md), and the secret data model and lifecycle in
-[secret-model.md](secret-model.md).
+structured secret. The active client encrypts every sensitive field under a
+per-field DEK and wraps that DEK with its separate agent vault key before
+transport; the backend has neither key. The current custody contract is tracked
+in [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault plan](client-custodied-agent-vault.md), and the broader
+secret data model and lifecycle in [secret-model.md](secret-model.md).
 
 Secrets are modeled as flat named fields. Each field is marked sensitive or
 non-sensitive. Secret templates (`login`, `api-key`, `ssh-key`, `certificate`,
@@ -2399,11 +2407,11 @@ Flags:
 
 Reveal one sensitive field. This is the explicit, audited reveal ceremony of the
 sealed plane; it is the only path (alongside `totp code` and `run`) that returns a
-sensitive value. Every reveal emits a `secret.reveal` audit event. Hybrid
-client-side / server-side decrypt is governed by the realm's
-`client_side_decrypt` / `server_side_decrypt` capability per
-[key-hierarchy.md](key-hierarchy.md); a server-mediated decrypt is flagged in the
-audit record.
+sensitive value. Every reveal emits a `secret.reveal` audit event. The authorized
+active client decrypts the returned encrypted field package under its local AVK;
+the backend has no server-mediated decrypt path. The initial vertical permits
+only the token-bound agent's own fields. Cross-agent grants remain a planned
+authorization layer and do not change client custody.
 
 ```sh
 ws secret reveal github/builder password
@@ -2654,7 +2662,8 @@ Flags:
 
 Generate the current TOTP code for a secret. This is a value-returning,
 reveal-gated sealed-plane command: it requires `totp:code`, emits a `totp.code`
-audit event, and is disabled by `mcp serve --no-value-tools`.
+audit event, and remains an explicit CLI operation. The corresponding MCP tool
+is disabled by `mcp serve --no-value-tools`.
 
 ```sh
 ws totp code github/builder
@@ -4004,11 +4013,13 @@ Network transports are a later, explicit deployment mode and must be
 authenticated, scoped, and documented as higher risk. MCP tools respect the same
 authorization checks as CLI commands, and agent-token MCP sessions act only as
 the token-bound agent. Open-plane tools (memories/facts) have no reveal ceremony;
-sealed-plane tools (`secret.reveal`, `totp.code`, and value-returning
-`reference.resolve`) do, and any tool that returns a secret value or one-time code
-may place that value in model-visible context. `--no-value-tools` disables those
-value-returning sealed-plane tools while leaving open-plane and metadata tools
-available; `--read-only` separately disables mutating tools.
+sealed-plane tools (`secret.reveal`, `totp.code`, and the planned value-returning
+`reference.resolve`) do, and local `password.generate` also returns a new private
+value that may enter model-visible context. `--no-value-tools` disables the
+implemented `secret.reveal`, `totp.code`, and `password.generate` tools while
+leaving redacted secret inventory, open-plane, and other metadata tools
+available; it must also cover `reference.resolve` when that tool is implemented.
+`--read-only` separately disables mutating tools.
 
 On connect, the server returns its `instructions` field carrying the canonical
 standing protocol. At the start of non-trivial work it teaches the active agent
@@ -4039,7 +4050,7 @@ Flags:
 | `--read-only` | Serve without create/update/forget/delete tools (inspection-only). |
 | `--profile full|read-only|curator-preview|curator-apply` | Select the exact MCP surface. Curator profiles require a token with the same authenticated access profile; preview exposes 10 curation-only tools and apply exposes 11. |
 | `--token-file PATH` | Override the installed token file, including when launching a short-lived restricted curator profile. |
-| `--no-value-tools` | Disable sealed-plane MCP tools that return a sensitive value or one-time code (`secret.reveal`, `totp.code`, value-returning `reference.resolve`). |
+| `--no-value-tools` | Disable implemented private-value MCP tools (`secret.reveal`, `totp.code`, `password.generate`); value-returning `reference.resolve` must join this gate when implemented. |
 | `--agent NAME_OR_ID` | Operator/admin only: bind the server to one agent principal. Agent tokens are already bound by identity. |
 
 ### `witself mcp tools`

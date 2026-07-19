@@ -291,7 +291,7 @@ The implemented command surface is:
 witself vault key init|status
 witself password generate
 witself secret create|list|search|show|reveal|archive|restore
-witself totp show|code SECRET_ID FIELD_ID
+witself totp show|code SECRET FIELD
 ```
 
 `secret create` accepts one strict JSON document through `--file` or `--stdin`
@@ -360,12 +360,22 @@ Initial tools:
   value-returning tools; and
 - `witself.password.generate`: local generation without backend storage.
 
-The read-only MCP profile retains only secret search and show. Update,
-lifecycle, references, a dedicated no-value full profile, and
-side-effect-oriented runtime injection are follow-on surfaces.
+The read-only MCP profile retains only secret search and show. The implemented
+`--no-value-tools` gate independently removes reveal, password-generation, and
+TOTP-code tools from a full profile. Update, lifecycle, references, and
+side-effect-oriented runtime injection are follow-on surfaces. Later filling
+should prefer a side-effect-oriented path where a runtime can consume a
+reference without putting plaintext in model context.
 
-- later side-effect-oriented filling is preferred where a runtime can consume a
-  reference without putting plaintext in model context.
+Witself-owned portable transcript capture holds each content-bearing turn in
+the owner-only local outbox until an agent response, stop/failure, session end,
+or following user prompt closes it. If the turn invokes `secret.create`,
+`secret.reveal`, `password.generate`, or `totp.code`, capture atomically replaces
+the still-local prompt and earlier event content with value-free markers and
+suppresses every later hook in that turn. This protects the portable Witself
+ledger; it cannot erase or attest to provider-native conversation history or
+telemetry that the provider may retain after receiving a value-returning tool
+result.
 
 Codex, Claude Code, Cursor, and Grok Build receive the same rules:
 
@@ -390,7 +400,11 @@ No source-cloud key call or re-wrap occurs.
 
 ## Implementation Slices
 
-### 0. Contract and collision control
+This is the complete product roadmap, not a list of claims about the current
+vertical. Each slice is labeled so implemented behavior cannot be confused
+with a follow-on release target.
+
+### 0. Contract and collision control — implemented
 
 - Land ADR 0003 and this plan.
 - Add supersession notices to conflicting KMS/server-decrypt drafts.
@@ -398,7 +412,7 @@ No source-cloud key call or re-wrap occurs.
 
 Exit: one authoritative decrypt owner and no migration collision.
 
-### 1. Local key and crypto foundation
+### 1. Local key and crypto foundation — implemented
 
 - Versioned AVK encoding, id/fingerprint, strict parse, generate/load/create.
 - Owner-only local path and concurrent-safe first creation.
@@ -409,7 +423,7 @@ Exit: one authoritative decrypt owner and no migration collision.
 
 Exit: sensitive bytes round-trip locally and no server component has a key.
 
-### 2. Schema and store
+### 2. Schema and store — implemented
 
 - Migration `0055`, constraints, search indexes, and migration tests.
 - Agent-scoped key registration plus secret create/query/lifecycle store
@@ -420,7 +434,7 @@ Exit: sensitive bytes round-trip locally and no server component has a key.
 
 Exit: PostgreSQL safely persists complete encrypted vault state.
 
-### 3. API and Go client
+### 3. API and Go client — implemented
 
 - Authenticated ciphertext-only routes and client types.
 - Envelope/size validation and `no-store` value-material responses.
@@ -428,7 +442,7 @@ Exit: PostgreSQL safely persists complete encrypted vault state.
 
 Exit: local clients manage envelopes through one portable API.
 
-### 4. CLI
+### 4. CLI — implemented
 
 - Key init/status, password generation, create/search/show/reveal, and
   archive/restore are implemented. Update is a follow-on.
@@ -439,19 +453,21 @@ Exit: an agent can create a GitHub login secret, find it by username, reveal one
 field locally, rotate its token without losing the vault, and use an imported
 archive in another cell.
 
-### 5. MCP and four runtime adapters
+### 5. MCP and four runtime adapters — implemented and contract-tested
 
 - Local MCP tools and provider-neutral routing instructions are implemented.
-  A dedicated full-profile value-tool gate is a follow-on; read-only mode
-  already removes all value-returning secret tools.
+  `--no-value-tools` removes value-returning secret tools independently of
+  read-only mode.
 - Contract tests for Codex, Claude Code, Cursor, and Grok Build.
 - Prove no AVK/value enters hydration, memory, messages, avatars, or transcript
-  capture through Witself-owned code.
+  capture through Witself-owned code. Content-bearing transcript turns remain
+  locally gated until their terminal fence, and sealed turns are persisted only
+  as value-free markers.
 
 Exit: every supported active client can search, create, and deliberately use
 the same vault without backend inference.
 
-### 6. TOTP and runtime injection
+### 6. TOTP and runtime injection — TOTP implemented; injection planned
 
 - Strict `otpauth://` parser, Base32 handling, SHA1/SHA256/SHA512 HOTP/TOTP,
   known RFC vectors, and local code generation.
@@ -461,7 +477,7 @@ the same vault without backend inference.
 Exit: an agent can store setup material, generate a valid code locally, and run
 a process with a secret without printing it.
 
-### 7. Archive and operations
+### 7. Archive and operations — archive implemented; operations evidence planned
 
 - Export/import streams and strict validators for every sealed table.
 - Ciphertext round-trip and wrong/missing-key tests.
@@ -470,7 +486,7 @@ a process with a secret without printing it.
 Exit: encrypted vault state moves losslessly among cells and remains operable
 without Witself decrypt access.
 
-### 8. Certification and release
+### 8. Certification and release — planned
 
 - Four-runtime acceptance using one shared synthetic agent.
 - AWS/GCP/Azure PostgreSQL conformance and directed account moves.
@@ -487,7 +503,11 @@ attachments, installation proof-of-possession, and browser-native filling each
 receive a separate threat model and acceptance suite. Versioned key epochs and
 immutable bindings keep them additive.
 
-## Done Means
+## Full Product Done Means
+
+These are completion criteria for the whole roadmap. The narrower current
+implementation boundary is stated above and does not claim the planned runtime
+injection or live runtime/cloud certification items below.
 
 - Backend, database, logs, audit, metrics, support data, and account archives
   contain no AVK or plaintext sealed value.

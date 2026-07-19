@@ -168,6 +168,31 @@ func TestMCPSecretToolsRespectProfilesNamesAndAnnotations(t *testing.T) {
 		}
 	}
 
+	for _, runtimeName := range []string{transcriptcapture.RuntimeCursor, transcriptcapture.RuntimeGrokBuild} {
+		noValue := listSecretMCPTools(t, newWitselfMCPServerForRuntimeOptions(
+			backend, runtimeName, mcpServerOptions{NoValueTools: true},
+		))
+		for _, dotted := range []string{"witself.secret.search", "witself.secret.show", "witself.secret.create"} {
+			name := mcpToolName(runtimeName, dotted)
+			if noValue[name] == nil {
+				t.Errorf("%s no-value MCP omitted safe tool %s", runtimeName, name)
+			}
+		}
+		for _, dotted := range []string{"witself.secret.reveal", "witself.password.generate", "witself.totp.code"} {
+			name := mcpToolName(runtimeName, dotted)
+			if noValue[name] != nil {
+				t.Errorf("%s no-value MCP advertised value-returning tool %s", runtimeName, name)
+			}
+			found := false
+			for _, registered := range mcpValueReturningSecretToolNames(runtimeName) {
+				found = found || registered == name
+			}
+			if !found {
+				t.Errorf("%s no-value registry omitted %s", runtimeName, name)
+			}
+		}
+	}
+
 	for _, profile := range []string{mcpProfileCuratorPreview, mcpProfileCuratorApply} {
 		tools := listSecretMCPTools(t, newWitselfMCPServerForRuntimeOptions(
 			backend, transcriptcapture.RuntimeCursor, mcpServerOptions{Profile: profile},
@@ -426,3 +451,47 @@ func assertMCPResultExcludes(t *testing.T, result *mcp.CallToolResult, forbidden
 		}
 	}
 }
+
+func TestMCPSecretPreflightBoundsHostileInputs(t *testing.T) {
+	valid := mcpSecretCreateInput{
+		Name: "GitHub", IdempotencyKey: "retry-1",
+		Fields: []mcpSecretCreateFieldInput{{
+			Name: "password", Kind: "password", Value: mcpSecretStringPtr("value"),
+		}},
+	}
+	if err := validateMCPSecretCreateBounds(valid); err != nil {
+		t.Fatalf("valid create bounds: %v", err)
+	}
+
+	tooManyFields := valid
+	tooManyFields.Fields = make([]mcpSecretCreateFieldInput, maxMCPSecretFields+1)
+	if err := validateMCPSecretCreateBounds(tooManyFields); err == nil {
+		t.Fatal("unbounded MCP field collection was accepted")
+	}
+	oversizedValue := valid
+	oversizedValue.Fields = []mcpSecretCreateFieldInput{{
+		Name: "password", Kind: "password", Value: mcpSecretStringPtr(strings.Repeat("x", sealed.MaxSensitiveValueBytes+1)),
+	}}
+	if err := validateMCPSecretCreateBounds(oversizedValue); err == nil {
+		t.Fatal("oversized MCP plaintext value was accepted")
+	}
+	if validMCPSecretRetryKey("retry\nkey") || validMCPSecretRetryKey(strings.Repeat("x", maxMCPSecretRetryKeyBytes+1)) {
+		t.Fatal("unsafe MCP retry key was accepted")
+	}
+	if err := validateMCPSecretSearchBounds(strings.Repeat("q", maxMCPSecretQueryBytes+1), "", "", nil); err == nil {
+		t.Fatal("oversized MCP search query was accepted")
+	}
+	if err := validateMCPSecretSearchBounds("", "", strings.Repeat("c", maxMCPSecretCursorBytes+1), nil); err == nil {
+		t.Fatal("oversized MCP cursor was accepted")
+	}
+	if err := validateMCPSecretSearchBounds("", "", "", make([]string, maxMCPSecretTags+1)); err == nil {
+		t.Fatal("unbounded MCP tag collection was accepted")
+	}
+	if !validMCPSecretResourceID("sec_aaaaaaaaaaaaaaaa", "sec") ||
+		validMCPSecretResourceID("sec_aaaaaaaaaaaaaaa1", "sec") ||
+		validMCPSecretResourceID("fld_aaaaaaaaaaaaaaaa", "sec") {
+		t.Fatal("MCP resource-id bound does not enforce exact prefix/base32 shape")
+	}
+}
+
+func mcpSecretStringPtr(value string) *string { return &value }

@@ -8,8 +8,9 @@
 
 > **Current implementation boundary:** enroll by including one sensitive
 > `kind: "totp"` field with `otpauth_uri` in `witself secret create --file` or
-> `--stdin`. Use `witself totp show SECRET_ID FIELD_ID` for seed-free metadata
-> and `witself totp code SECRET_ID FIELD_ID` for a current code. Both retrieve
+> `--stdin`. Use `witself totp show SECRET FIELD` for seed-free metadata and
+> `witself totp code SECRET FIELD` for a current code; each selector may be an
+> exact ID or an unambiguous human-readable name. Both retrieve
 > one encrypted field package and decrypt it locally; even `show` does not rely
 > on server-readable TOTP metadata. Dedicated `totp enroll`/`delete`, raw seed,
 > seed-file, and QR-image convenience inputs remain target behavior, not the

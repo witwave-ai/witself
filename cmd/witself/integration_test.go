@@ -1233,7 +1233,7 @@ func TestCaptureFlushActivityFailureDoesNotBlockTranscriptAndRetriesSameEvent(t 
 				return
 			}
 			if len(body) != 6 || body["runtime"] != "cursor" || body["location"] != "home" ||
-				body["event"] != "UserPromptSubmit" || body["location_id"] == "" ||
+				body["event"] != "SessionStart" || body["location_id"] == "" ||
 				body["event_id"] == "" || body["event_occurred_at"] == "" {
 				t.Errorf("activity body = %#v", body)
 			}
@@ -1278,7 +1278,7 @@ func TestCaptureFlushActivityFailureDoesNotBlockTranscriptAndRetriesSameEvent(t 
 		t.Fatal(err)
 	}
 	if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCursor, []byte(
-		`{"conversation_id":"conversation-1","generation_id":"generation-1","hook_event_name":"beforeSubmitPrompt","prompt":"private prompt","cwd":"/private/worktree"}`,
+		`{"conversation_id":"conversation-1","hook_event_name":"sessionStart","cwd":"/private/worktree"}`,
 	)); err != nil {
 		t.Fatal(err)
 	}
@@ -1361,7 +1361,7 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("flush did not start")
 	}
-	if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCodex, []byte(`{"session_id":"session-1","hook_event_name":"UserPromptSubmit","prompt":"queued during flush"}`)); err != nil {
+	if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCodex, []byte(`{"session_id":"session-2","hook_event_name":"SessionStart"}`)); err != nil {
 		t.Fatal(err)
 	}
 	close(resume)

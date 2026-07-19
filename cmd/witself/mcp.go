@@ -1054,12 +1054,19 @@ type mcpMessage struct {
 }
 
 func mcpCmd(args []string) int {
+	if commandHelpRequested(args) {
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		return 0
+	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 2
 	}
 	command, err := parseMCPServeCommandOptions(args[1:], os.Stderr)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	cfg, err := transcriptcapture.LoadConfig(command.Runtime)
@@ -1123,6 +1130,7 @@ type mcpServeCommandOptions struct {
 func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeCommandOptions, error) {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(output)
+	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
@@ -1131,6 +1139,7 @@ func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeComma
 	tokenFile := fs.String("token-file", "", "override the installed token file; required for a separate curator credential")
 	profile := fs.String("profile", mcpProfileFull, "tool/credential profile: full, read-only, curator-preview, or curator-apply")
 	readOnly := fs.Bool("read-only", false, "remove every state-mutating MCP tool from this server")
+	noValueTools := fs.Bool("no-value-tools", false, "remove MCP tools that return a secret value, generated password, or TOTP code")
 	if err := fs.Parse(args); err != nil {
 		return mcpServeCommandOptions{}, err
 	}
@@ -1147,7 +1156,10 @@ func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeComma
 	return mcpServeCommandOptions{
 		Runtime: *runtime, Account: *account, Realm: *realm,
 		Agent: *agent, Location: *location, TokenFile: *tokenFile,
-		Server: mcpServerOptions{ReadOnly: selectedProfile == mcpProfileReadOnly, Profile: selectedProfile},
+		Server: mcpServerOptions{
+			ReadOnly: selectedProfile == mcpProfileReadOnly, Profile: selectedProfile,
+			NoValueTools: *noValueTools,
+		},
 	}, nil
 }
 
@@ -1168,8 +1180,9 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 }
 
 type mcpServerOptions struct {
-	ReadOnly bool
-	Profile  string
+	ReadOnly     bool
+	Profile      string
+	NoValueTools bool
 }
 
 func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName string, opts mcpServerOptions) *mcp.Server {
@@ -1200,9 +1213,13 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	}
 	selfTool := mcpToolName(runtimeName, "witself.self.show")
 	messageListTool := mcpToolName(runtimeName, "witself.message.list")
+	instructions := mcpInstructionsForMode(runtimeName, selfTool, messageListTool, profile == mcpProfileReadOnly)
+	if opts.NoValueTools {
+		instructions += "\n\nThis MCP server has value-returning secret tools disabled. It may search, show, and create redacted secret records when the selected profile permits, but it cannot reveal a field, generate a password for model context, or calculate a TOTP code. Never use another Witself surface to bypass that value-egress boundary."
+	}
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "witself", Version: version.Version},
-		&mcp.ServerOptions{Instructions: mcpInstructionsForMode(runtimeName, selfTool, messageListTool, profile == mcpProfileReadOnly)},
+		&mcp.ServerOptions{Instructions: instructions},
 	)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        selfTool,
@@ -1785,6 +1802,9 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	if profile == mcpProfileReadOnly {
 		server.RemoveTools(mcpMutatingToolNames(runtimeName)...)
 	}
+	if opts.NoValueTools {
+		server.RemoveTools(mcpValueReturningSecretToolNames(runtimeName)...)
+	}
 	return server
 }
 
@@ -2221,6 +2241,18 @@ func mcpMutatingToolNames(runtimeName string) []string {
 	}
 	for i := range names {
 		names[i] = mcpToolName(runtimeName, names[i])
+	}
+	return names
+}
+
+func mcpValueReturningSecretToolNames(runtimeName string) []string {
+	names := []string{
+		"witself.secret.reveal",
+		"witself.password.generate",
+		"witself.totp.code",
+	}
+	for index := range names {
+		names[index] = mcpToolName(runtimeName, names[index])
 	}
 	return names
 }

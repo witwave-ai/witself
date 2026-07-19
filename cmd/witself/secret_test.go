@@ -67,6 +67,36 @@ func TestSecretCreateRequiresExplicitIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestSecretCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
+	commands := [][]string{
+		{"secret", "--help"},
+		{"secret", "create", "--help"},
+		{"secret", "list", "--help"},
+		{"secret", "search", "--help"},
+		{"secret", "show", "--help"},
+		{"secret", "reveal", "--help"},
+		{"secret", "archive", "--help"},
+		{"secret", "restore", "--help"},
+		{"vault", "--help"},
+		{"vault", "key", "--help"},
+		{"vault", "key", "init", "--help"},
+		{"vault", "key", "status", "--help"},
+		{"totp", "--help"},
+		{"totp", "show", "--help"},
+		{"totp", "code", "--help"},
+		{"password", "--help"},
+		{"password", "generate", "--help"},
+	}
+	for _, args := range commands {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+			if code != 0 || stdout != "" || !strings.Contains(strings.ToLower(stderr), "usage:") {
+				t.Fatalf("run(%q) = %d stdout=%q stderr=%q", args, code, stdout, stderr)
+			}
+		})
+	}
+}
+
 func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 	const (
 		accountID = "acc_abcdefghijklmnop"
@@ -118,7 +148,8 @@ func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 				t.Error(err)
 			}
 			rendered, _ := json.Marshal(created)
-			if strings.Contains(string(rendered), canary) {
+			if strings.Contains(string(rendered), canary) || strings.Contains(string(rendered), testTOTPSeed) ||
+				strings.Contains(string(rendered), "otpauth://") {
 				t.Error("plaintext crossed the HTTP boundary")
 			}
 			w.WriteHeader(http.StatusCreated)
@@ -130,15 +161,33 @@ func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.v0", "secret": testCreatedSecret(created, accountID, realmID, agentID),
 			})
-		case r.Method == http.MethodPost && len(created.Fields) == 2 &&
-			r.URL.Path == "/v1/secrets/"+created.ID+"/fields/"+created.Fields[1].ID+":access":
-			sealedField := created.Fields[1].Sealed
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/secrets":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"items":          []client.Secret{testCreatedSecret(created, accountID, realmID, agentID)},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/secrets/"+created.ID+"/fields/") &&
+			strings.HasSuffix(r.URL.Path, ":access"):
+			var selected *client.CreateSecretFieldInput
+			for index := range created.Fields {
+				path := "/v1/secrets/" + created.ID + "/fields/" + created.Fields[index].ID + ":access"
+				if r.URL.Path == path {
+					selected = &created.Fields[index]
+					break
+				}
+			}
+			if selected == nil || selected.Sealed == nil {
+				t.Errorf("unexpected field access: %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			sealedField := selected.Sealed
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.v0",
 				"material": client.SecretMaterial{
-					SecretID: created.ID, FieldID: created.Fields[1].ID,
-					FieldName: created.Fields[1].Name, FieldKind: created.Fields[1].Kind,
-					Encoding: created.Fields[1].Encoding, ValueVersion: created.Fields[1].ValueVersion,
+					SecretID: created.ID, FieldID: selected.ID,
+					FieldName: selected.Name, FieldKind: selected.Kind,
+					Encoding: selected.Encoding, ValueVersion: selected.ValueVersion,
 					EnvelopeVersion: sealedField.EnvelopeVersion, Ciphertext: sealedField.Ciphertext,
 					Algorithm: sealedField.Algorithm, AADVersion: sealedField.AADVersion,
 					DEK: sealedField.DEK, SecretRevision: 1, FieldRevision: 1,
@@ -161,11 +210,13 @@ func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 		t.Fatal(err)
 	}
 	public := false
+	otpauthURI := "otpauth://totp/GitHub:scott?secret=" + testTOTPSeed + "&issuer=GitHub"
 	document := secretCreateDocument{
 		Name: "GitHub", Template: "login", Tags: []string{"github"},
 		Fields: []secretCreateFieldDocument{
 			{Name: "username", Kind: "username", Sensitive: &public, Value: stringPointer("scott")},
 			{Name: "password", Kind: "password", Value: stringPointer(canary)},
+			{Name: "two_factor", Kind: "totp", OTPAuthURI: &otpauthURI},
 		},
 	}
 	raw, err := json.Marshal(document)
@@ -184,10 +235,12 @@ func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 			"--account", "default", "--realm", "default", "--agent", "scott",
 			"--endpoint", srv.URL, "--token-file", tokenFile})
 	})
-	if code != 0 || strings.Contains(stdout, canary) || strings.Contains(stderr, canary) {
+	if code != 0 || strings.Contains(stdout, canary) || strings.Contains(stderr, canary) ||
+		strings.Contains(stdout, testTOTPSeed) || strings.Contains(stderr, testTOTPSeed) ||
+		strings.Contains(stdout, "otpauth://") || strings.Contains(stderr, "otpauth://") {
 		t.Fatalf("create code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	if keyBinding == nil || len(created.Fields) != 2 || created.Fields[1].Sealed == nil {
+	if keyBinding == nil || len(created.Fields) != 3 || created.Fields[1].Sealed == nil || created.Fields[2].Sealed == nil {
 		t.Fatalf("key=%#v created=%#v", keyBinding, created)
 	}
 	keyPath, err := local.AgentVaultKeyPath("default", "default", "scott")
@@ -205,6 +258,19 @@ func TestSecretCLIEncryptsBeforeHTTPAndRevealsLocally(t *testing.T) {
 	})
 	if code != 0 || strings.TrimSpace(stdout) != canary || stderr != "" {
 		t.Fatalf("reveal code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int {
+		return run([]string{"totp", "show", "GitHub", "two_factor", "--json",
+			"--account", "default", "--realm", "default", "--agent", "scott",
+			"--endpoint", srv.URL, "--token-file", tokenFile})
+	})
+	if code != 0 || stderr != "" || strings.Contains(stdout, testTOTPSeed) || strings.Contains(stdout, otpauthURI) {
+		t.Fatalf("TOTP show code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	var metadata sealed.TOTPPayloadMetadata
+	if err := json.Unmarshal([]byte(stdout), &metadata); err != nil || metadata.Issuer != "GitHub" || metadata.Account != "scott" {
+		t.Fatalf("TOTP metadata = %+v / %v", metadata, err)
 	}
 }
 

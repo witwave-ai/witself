@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,6 +16,22 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/sealed"
 	"github.com/witwave-ai/witself/internal/secretclient"
+)
+
+const (
+	maxMCPSecretNameBytes        = 256
+	maxMCPSecretDescriptionBytes = 4096
+	maxMCPSecretTemplateBytes    = 128
+	maxMCPSecretTags             = 64
+	maxMCPSecretTagBytes         = 64
+	maxMCPSecretFields           = 64
+	maxMCPSecretFieldNameBytes   = 128
+	maxMCPSecretKindBytes        = 64
+	maxMCPSecretEncodingBytes    = 16
+	maxMCPSecretQueryBytes       = 512
+	maxMCPSecretCursorBytes      = 1024
+	maxMCPSecretRetryKeyBytes    = 512
+	maxMCPSecretMutationBytes    = 1 << 20
 )
 
 // mcpSecretBackend is the optional client-custodied secret extension. Keeping
@@ -206,9 +223,16 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		if in.Limit < 1 || in.Limit > 100 {
 			return nil, mcpSecretSearchOutput{}, fmt.Errorf("limit must be between 1 and 100")
 		}
+		if len(in.Tags) > maxMCPSecretTags {
+			return nil, mcpSecretSearchOutput{}, errors.New("secret search input exceeds the supported limit")
+		}
+		tags := normalizedMCPSecretTags(in.Tags)
+		if err := validateMCPSecretSearchBounds(in.Query, in.Template, in.Cursor, tags); err != nil {
+			return nil, mcpSecretSearchOutput{}, err
+		}
 		page, err := backend.SearchSecrets(ctx, client.SecretListOptions{
 			Query: strings.TrimSpace(in.Query), Lifecycle: lifecycle,
-			Template: strings.TrimSpace(in.Template), Tags: normalizedMCPSecretTags(in.Tags),
+			Template: strings.TrimSpace(in.Template), Tags: tags,
 			Limit: in.Limit, Cursor: strings.TrimSpace(in.Cursor), IncludeFields: in.IncludeFields,
 		})
 		if err != nil {
@@ -229,8 +253,8 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		Description: "Show one exact active secret's public metadata and field inventory for this authenticated agent. The result is redacted and never contains a sensitive value, ciphertext, wrapped key, AVK material, TOTP enrollment URI, or TOTP seed.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSecretShowInput) (*mcp.CallToolResult, mcpSecretOutput, error) {
-		if strings.TrimSpace(in.SecretID) == "" {
-			return nil, mcpSecretOutput{}, fmt.Errorf("secret_id is required")
+		if !validMCPSecretResourceID(strings.TrimSpace(in.SecretID), "sec") {
+			return nil, mcpSecretOutput{}, fmt.Errorf("secret_id is invalid")
 		}
 		secret, err := backend.ShowSecret(ctx, strings.TrimSpace(in.SecretID))
 		if err != nil {
@@ -247,8 +271,8 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		Description: "Create one structured secret for this authenticated agent. Sensitive values are encrypted in this active client under its local agent vault key; only ciphertext and public metadata reach Witself. A password policy generates and immediately seals a password locally, and otpauth_uri is parsed into a canonical encrypted TOTP payload locally. The result is always redacted and does not return a generated password, enrollment URI, TOTP seed, AVK bytes, or any other sensitive field value; use one exact authorized value-returning tool later when needed.",
 		Annotations: mcpWriteClosedWorldAnnotations(false, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSecretCreateInput) (*mcp.CallToolResult, mcpSecretCreateOutput, error) {
-		if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.IdempotencyKey) == "" || len(in.Fields) == 0 {
-			return nil, mcpSecretCreateOutput{}, fmt.Errorf("name, fields, and idempotency_key are required")
+		if err := validateMCPSecretCreateBounds(in); err != nil {
+			return nil, mcpSecretCreateOutput{}, err
 		}
 		documents := make([]secretCreateFieldDocument, len(in.Fields))
 		for index := range in.Fields {
@@ -281,8 +305,10 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		Description: fmt.Sprintf("Explicit value-returning operation. Reveal exactly one field from one active secret for the current authorized task. Sensitive material is decrypted only in this active client and the backend receives only an audited ciphertext-access request. The returned value is private. Raw TOTP enrollment material is categorically refused; use %s for a short-lived code.", totpCodeTool),
 		Annotations: mcpWriteClosedWorldAnnotations(false, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSecretRevealInput) (*mcp.CallToolResult, mcpSecretRevealOutput, error) {
-		if strings.TrimSpace(in.SecretID) == "" || strings.TrimSpace(in.FieldID) == "" || strings.TrimSpace(in.IdempotencyKey) == "" {
-			return nil, mcpSecretRevealOutput{}, fmt.Errorf("secret_id, field_id, and idempotency_key are required")
+		if !validMCPSecretResourceID(strings.TrimSpace(in.SecretID), "sec") ||
+			!validMCPSecretResourceID(strings.TrimSpace(in.FieldID), "fld") ||
+			!validMCPSecretRetryKey(in.IdempotencyKey) {
+			return nil, mcpSecretRevealOutput{}, fmt.Errorf("secret_id, field_id, or idempotency_key is invalid")
 		}
 		secret, field, err := exactMCPSecretField(ctx, backend, in.SecretID, in.FieldID)
 		if err != nil {
@@ -333,8 +359,10 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		Description: "Explicit value-returning operation. Retrieve exactly one encrypted TOTP field, decrypt and parse it in this active client, and return only the short-lived code and expiry timing. The backend never receives plaintext, and this tool never returns the enrollment URI, TOTP seed, decrypted payload, AVK bytes, or another field value.",
 		Annotations: mcpWriteClosedWorldAnnotations(false, false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpTOTPCodeInput) (*mcp.CallToolResult, mcpTOTPCodeOutput, error) {
-		if strings.TrimSpace(in.SecretID) == "" || strings.TrimSpace(in.FieldID) == "" || strings.TrimSpace(in.IdempotencyKey) == "" {
-			return nil, mcpTOTPCodeOutput{}, fmt.Errorf("secret_id, field_id, and idempotency_key are required")
+		if !validMCPSecretResourceID(strings.TrimSpace(in.SecretID), "sec") ||
+			!validMCPSecretResourceID(strings.TrimSpace(in.FieldID), "fld") ||
+			!validMCPSecretRetryKey(in.IdempotencyKey) {
+			return nil, mcpTOTPCodeOutput{}, fmt.Errorf("secret_id, field_id, or idempotency_key is invalid")
 		}
 		secret, field, err := exactMCPSecretField(ctx, backend, in.SecretID, in.FieldID)
 		if err != nil {
@@ -385,6 +413,88 @@ func (in mcpSecretPasswordPolicy) document() secretPasswordPolicyDocument {
 
 func (in mcpPasswordGenerateInput) document() secretPasswordPolicyDocument {
 	return secretPasswordPolicyDocument(in)
+}
+
+func validateMCPSecretSearchBounds(query, template, cursor string, tags []string) error {
+	if len(strings.TrimSpace(query)) > maxMCPSecretQueryBytes ||
+		len(strings.TrimSpace(template)) > maxMCPSecretTemplateBytes ||
+		len(strings.TrimSpace(cursor)) > maxMCPSecretCursorBytes || len(tags) > maxMCPSecretTags {
+		return errors.New("secret search input exceeds the supported limit")
+	}
+	for _, tag := range tags {
+		if len(tag) > maxMCPSecretTagBytes {
+			return errors.New("secret search input exceeds the supported limit")
+		}
+	}
+	return nil
+}
+
+func validateMCPSecretCreateBounds(in mcpSecretCreateInput) error {
+	if strings.TrimSpace(in.Name) == "" || len(in.Name) > maxMCPSecretNameBytes ||
+		len(in.Description) > maxMCPSecretDescriptionBytes || len(in.Template) > maxMCPSecretTemplateBytes ||
+		len(in.Tags) > maxMCPSecretTags || len(in.Fields) < 1 || len(in.Fields) > maxMCPSecretFields ||
+		!validMCPSecretRetryKey(in.IdempotencyKey) {
+		return errors.New("secret create input is missing or exceeds the supported limit")
+	}
+	totalBytes := len(in.Name) + len(in.Description) + len(in.Template)
+	for _, tag := range in.Tags {
+		if len(tag) > maxMCPSecretTagBytes {
+			return errors.New("secret create input is missing or exceeds the supported limit")
+		}
+		totalBytes += len(tag)
+	}
+	for _, field := range in.Fields {
+		if len(field.Name) < 1 || len(field.Name) > maxMCPSecretFieldNameBytes ||
+			len(field.Kind) > maxMCPSecretKindBytes || len(field.Encoding) > maxMCPSecretEncodingBytes {
+			return errors.New("secret create input is missing or exceeds the supported limit")
+		}
+		totalBytes += len(field.Name) + len(field.Kind) + len(field.Encoding)
+		if field.Value != nil {
+			if len(*field.Value) > sealed.MaxSensitiveValueBytes {
+				return errors.New("secret create input is missing or exceeds the supported limit")
+			}
+			totalBytes += len(*field.Value)
+		}
+		if field.OTPAuthURI != nil {
+			if len(*field.OTPAuthURI) > sealed.MaxOTPAuthURIBytes {
+				return errors.New("secret create input is missing or exceeds the supported limit")
+			}
+			totalBytes += len(*field.OTPAuthURI)
+		}
+		if field.PasswordPolicy != nil && (field.PasswordPolicy.Length < 0 || field.PasswordPolicy.Length > sealed.MaxPasswordLength) {
+			return errors.New("secret create input is missing or exceeds the supported limit")
+		}
+	}
+	if totalBytes > maxMCPSecretMutationBytes {
+		return errors.New("secret create input is missing or exceeds the supported limit")
+	}
+	return nil
+}
+
+func validMCPSecretRetryKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxMCPSecretRetryKeyBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPSecretResourceID(value, prefix string) bool {
+	body := strings.TrimPrefix(value, prefix+"_")
+	if body == value || len(body) != 16 {
+		return false
+	}
+	for _, character := range body {
+		if (character < 'a' || character > 'z') && (character < '2' || character > '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeMCPSecretLifecycle(raw string) (string, error) {

@@ -55,8 +55,9 @@ func TestCodexManagedHooksPreservePolicyAndAreIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = string(raw)
-	if strings.Contains(text, "[[hooks.PreToolUse]]") || strings.Count(text, codexManagedBlockBegin) != 1 {
-		t.Fatalf("mode update left stale or duplicate hooks:\n%s", text)
+	if !strings.Contains(text, "[[hooks.PreToolUse]]") || !strings.Contains(text, "[[hooks.PostToolUse]]") ||
+		strings.Count(text, codexManagedBlockBegin) != 1 {
+		t.Fatalf("messages mode lost privacy hooks or left duplicate hooks:\n%s", text)
 	}
 
 	if _, err := RemoveManagedHooks(opts); err != nil {
@@ -151,8 +152,9 @@ func TestClaudeManagedHooksUseIsolatedDropIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "PreToolUse") {
-		t.Fatalf("mode update left trace hooks:\n%s", raw)
+	if !strings.Contains(string(raw), "PreToolUse") || !strings.Contains(string(raw), "PostToolUse") ||
+		strings.Contains(string(raw), "Notification") {
+		t.Fatalf("messages mode privacy/trace hook split is invalid:\n%s", raw)
 	}
 	if _, err := RemoveManagedHooks(opts); err != nil {
 		t.Fatal(err)

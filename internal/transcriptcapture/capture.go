@@ -182,6 +182,7 @@ type hookInput struct {
 	Error                json.RawMessage `json:"error"`
 	NativeHookEvent      string          `json:"-"`
 	SensitiveToolEvent   bool            `json:"-"`
+	SensitiveTurnContent bool            `json:"-"`
 }
 
 type sessionState struct {
@@ -194,6 +195,7 @@ type sessionState struct {
 	ResponseCaptured     bool            `json:"response_captured,omitempty"`
 	SensitiveToolUseIDs  map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
 	RedactAllToolPayload bool            `json:"redact_all_tool_payload,omitempty"`
+	SensitiveTurn        bool            `json:"sensitive_turn,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -265,8 +267,17 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		state.RuntimeVersionSource = ""
 		state.SensitiveToolUseIDs = nil
 		state.RedactAllToolPayload = false
+		state.SensitiveTurn = false
+	}
+	// A new real user prompt is the only reliable cross-provider fence for a
+	// new turn. Clear the prior turn's sealed-content suppression before any
+	// tools for this turn can mark it again. Codex's nested approval review is
+	// normalized to a different event and therefore cannot reset this fence.
+	if input.HookEventName == "UserPromptSubmit" {
+		state.SensitiveTurn = false
 	}
 	protectSensitiveToolPayload(&input, &state)
+	protectSensitiveTurnContent(&input, &state)
 	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
@@ -297,6 +308,15 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact":
 		if turnID == "" {
 			turnID = state.TurnID
+		}
+	}
+	if state.SensitiveTurn && turnID != "" {
+		if err := RedactPendingTurn(cfg.Runtime, input.SessionID, turnID); err != nil {
+			// Preserve the fail-closed fence even if a local I/O problem prevents
+			// this hook from being queued. The next hook retries redaction, while
+			// turn-gated flushing keeps the unredacted prompt local.
+			_ = saveSessionState(cfg.Runtime, input.SessionID, state)
+			return Event{}, err
 		}
 	}
 
@@ -342,6 +362,7 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 	setEventContent(&event, input, raw)
 	if cfg.Runtime == RuntimeCursor && cfg.CaptureMode == ModeRaw && input.HookEventName == "SessionEnd" &&
+		!state.SensitiveTurn &&
 		!state.PromptCaptured && !state.ResponseCaptured && input.TranscriptPath != "" {
 		fallback, fallbackErr := cursorNativeTranscriptMessages(event, input.TranscriptPath)
 		if fallbackErr == nil {
@@ -358,6 +379,12 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 	if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
 		return Event{}, err
+	}
+	if cfg.CaptureMode == ModeMessages && isToolHookEvent(input.HookEventName) {
+		// Messages capture observes tool hooks only to maintain the sealed-turn
+		// privacy fence. Ordinary tool traffic remains excluded from this mode,
+		// and a sealed hook has already redacted queued content above.
+		return event, nil
 	}
 	if err := writeOutboxEvent(event); err != nil {
 		return Event{}, err
@@ -469,13 +496,18 @@ func protectSensitiveToolPayload(input *hookInput, state *sessionState) {
 		state.SensitiveToolUseIDs = nil
 		state.RedactAllToolPayload = true
 	}
-	input.SensitiveToolEvent = state.RedactAllToolPayload || sensitiveToolEvent(*input)
+	// After any sealed value-bearing operation, every later tool in the same
+	// turn is a possible exfiltration sink (browser typing, shell arguments,
+	// HTTP clients, and so on). Preserve only value-free tool identity until the
+	// next real user prompt resets SensitiveTurn.
+	input.SensitiveToolEvent = state.RedactAllToolPayload || state.SensitiveTurn || sensitiveToolEvent(*input)
 	if !input.SensitiveToolEvent && input.ToolUseID != "" && state.SensitiveToolUseIDs[input.ToolUseID] {
 		input.SensitiveToolEvent = true
 	}
 	if !input.SensitiveToolEvent {
 		return
 	}
+	state.SensitiveTurn = true
 	if input.ToolUseID != "" && !state.RedactAllToolPayload {
 		if !state.SensitiveToolUseIDs[input.ToolUseID] && len(state.SensitiveToolUseIDs) >= maxSensitiveToolUseFences {
 			// A pathological session must not grow the local state file without
@@ -490,6 +522,29 @@ func protectSensitiveToolPayload(input *hookInput, state *sessionState) {
 			state.SensitiveToolUseIDs[input.ToolUseID] = true
 		}
 	}
+	redactSensitiveToolPayload(input)
+}
+
+// protectSensitiveTurnContent prevents an authorized revealed value, generated
+// password, TOTP code, or create input from being copied back into Witself's
+// portable transcript by a later provider response hook. The user still sees
+// the provider's native response; only Witself capture is made value-free.
+// The fence is reset by the next real UserPromptSubmit in EnqueueHookForBinding.
+func protectSensitiveTurnContent(input *hookInput, state *sessionState) {
+	if input == nil || state == nil || !state.SensitiveTurn || isToolHookEvent(input.HookEventName) {
+		return
+	}
+	// Provider hook schemas evolve. Once a turn has handled sealed material,
+	// suppress every later non-tool hook instead of maintaining an allowlist
+	// that could let a newly introduced response-shaped event retain plaintext.
+	// SessionStart and the next real UserPromptSubmit reset the fence before this
+	// function runs; tool hooks take the correlated path above.
+	input.SensitiveTurnContent = true
+	input.Prompt = ""
+	input.LastAssistantMessage = ""
+	input.Text = ""
+	input.Reason = ""
+	input.ErrorMessage = ""
 	redactSensitiveToolPayload(input)
 }
 
@@ -1598,9 +1653,19 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 	case "UserPromptSubmit":
 		event.Kind, event.Role, event.Body = "message.user", "user", input.Prompt
 	case "AgentResponse":
-		event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
+		event.Kind, event.Role = "message.assistant", "assistant"
+		if input.SensitiveTurnContent {
+			event.Body = "response omitted from portable transcript because this turn used sealed secrets"
+		} else {
+			event.Body = input.LastAssistantMessage
+		}
 	case "AgentThought":
-		event.Kind, event.Role, event.Body = "agent.thought", "system", input.LastAssistantMessage
+		event.Kind, event.Role = "agent.thought", "system"
+		if input.SensitiveTurnContent {
+			event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
+		} else {
+			event.Body = input.LastAssistantMessage
+		}
 	case "Stop":
 		if input.LastAssistantMessage != "" {
 			event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
@@ -1647,12 +1712,20 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 		return
 	}
 	event.Data = structuredEventData(input)
-	if event.CaptureMode == ModeRaw && !input.SensitiveToolEvent {
+	if event.CaptureMode == ModeRaw && !input.SensitiveToolEvent && !input.SensitiveTurnContent {
 		event.Raw = append(json.RawMessage(nil), raw...)
 	}
 }
 
 func structuredEventData(input hookInput) json.RawMessage {
+	if input.SensitiveTurnContent {
+		data := map[string]any{"sealed_content_omitted": true}
+		if status := valueFreeToolStatus(input.Status); status != "" {
+			data["status"] = status
+		}
+		raw, _ := json.Marshal(data)
+		return raw
+	}
 	if input.SensitiveToolEvent {
 		data := map[string]any{}
 		if status := valueFreeToolStatus(input.Status); status != "" {
@@ -2076,6 +2149,79 @@ func Pending(runtime string) ([]PendingEvent, error) {
 	return out, nil
 }
 
+// RedactPendingTurn atomically replaces every still-local event body for one
+// provider turn with a value-free marker. Flushing is turn-gated, so a prompt
+// cannot be uploaded before a later sealed tool call has had this opportunity
+// to suppress plaintext that the user placed in that prompt.
+func RedactPendingTurn(runtime, sessionID, turnID string) error {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(turnID) == "" {
+		return errors.New("pending transcript turn identity is invalid")
+	}
+	pending, err := Pending(runtime)
+	if err != nil {
+		return err
+	}
+	for _, item := range pending {
+		event := item.Event
+		if event.Runtime != runtime || event.SessionID != sessionID || event.TurnID != turnID {
+			continue
+		}
+		switch event.Kind {
+		case "message.user":
+			event.Body = "prompt omitted from portable transcript because this turn used sealed secrets"
+		case "message.assistant":
+			event.Body = "response omitted from portable transcript because this turn used sealed secrets"
+		case "agent.thought":
+			event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
+		case "tool.call", "tool.result", "tool.error":
+			event.Body = "tool payload omitted from portable transcript because this turn used sealed secrets"
+		default:
+			event.Body = "event content omitted from portable transcript because this turn used sealed secrets"
+		}
+		event.Raw = nil
+		event.RecoveredMessages = nil
+		event.Data = json.RawMessage(`{"sealed_content_omitted":true}`)
+		if err := validatePendingRewritePath(item.Path, event); err != nil {
+			return err
+		}
+		if err := writeJSONAtomic(item.Path, event); err != nil {
+			return fmt.Errorf("redact pending sealed transcript turn: %w", err)
+		}
+	}
+	return nil
+}
+
+// PendingEventUploadReady reports whether enough of the local provider turn is
+// present to know whether its content must be suppressed. Turn content stays
+// local until AgentResponse, Stop/StopFailure, SessionEnd, or the next real
+// user prompt. This closes the prompt-enqueue versus later secret-tool race.
+func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
+	event := current.Event
+	if strings.TrimSpace(event.TurnID) == "" {
+		return true
+	}
+	transcriptID := event.TranscriptExternalID()
+	for _, candidate := range all {
+		other := candidate.Event
+		if other.TranscriptExternalID() != transcriptID || other.SessionID != event.SessionID ||
+			other.OccurredAt.Before(event.OccurredAt) {
+			continue
+		}
+		if other.HookEvent == "SessionEnd" {
+			return true
+		}
+		if other.TurnID == event.TurnID && (other.HookEvent == "AgentResponse" ||
+			other.HookEvent == "Stop" || other.HookEvent == "StopFailure") {
+			return true
+		}
+		if other.HookEvent == "UserPromptSubmit" && other.TurnID != event.TurnID &&
+			other.OccurredAt.After(event.OccurredAt) {
+			return true
+		}
+	}
+	return false
+}
+
 // FinalizePending prepares one locally durable event for upload. Grok writes
 // its final response only after the synchronous Stop hook returns, so an
 // unresolved Stop remains in the outbox until the trusted native transcript
@@ -2100,6 +2246,19 @@ func finalizePendingWithin(
 	}
 	if event.NativeTurnFinalized {
 		return pending, true, nil
+	}
+	if eventSealedContentOmitted(event.Data) {
+		// Never rehydrate a sealed turn from Grok's native transcript: its final
+		// assistant chunk may contain the authorized revealed value that the
+		// value-free Stop hook deliberately suppressed.
+		event.NativeTurnFinalized = true
+		if err := validatePendingRewritePath(pending.Path, event); err != nil {
+			return pending, false, err
+		}
+		if err := writeJSONAtomic(pending.Path, event); err != nil {
+			return pending, false, fmt.Errorf("persist suppressed grok Stop event: %w", err)
+		}
+		return PendingEvent{Path: pending.Path, Event: event}, true, nil
 	}
 	if strings.TrimSpace(event.SourceTranscriptPath) == "" {
 		return pending, false, errors.New("unresolved grok Stop event has no native transcript path")
@@ -2150,6 +2309,13 @@ func finalizePendingWithin(
 		return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
 	}
 	return PendingEvent{Path: pending.Path, Event: event}, true, nil
+}
+
+func eventSealedContentOmitted(raw json.RawMessage) bool {
+	var data struct {
+		Omitted bool `json:"sealed_content_omitted"`
+	}
+	return len(raw) != 0 && json.Unmarshal(raw, &data) == nil && data.Omitted
 }
 
 func validatePendingRewritePath(path string, event Event) error {

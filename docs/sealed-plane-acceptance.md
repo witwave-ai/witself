@@ -506,11 +506,14 @@ Every lane must report zero matches. A missing lane, unavailable transcript
 flush, truncated log window, uninspectable table, or unknown newly introduced
 payload column is a failure, not a zero.
 
-This claim covers Witself-owned capture and persistence. It does not attest
-undocumented telemetry retained inside an AI provider, operating system,
-shell, child process, or destination service. The live stages avoid putting
-plaintext in provider-visible results so that the observable Witself
-transcript can and must remain clean.
+This claim covers Witself-owned capture and persistence. Portable transcript
+events are held locally until a terminal turn fence; a sealed tool call causes
+the queued turn and every later hook in it to be replaced by value-free
+markers before upload. It does not attest undocumented telemetry retained
+inside an AI provider, operating system, shell, child process, or destination
+service. In particular, an explicit value-returning MCP call can expose its
+result to the active model/provider even though Witself's portable transcript
+must remain clean.
 
 ## Sanitized evidence
 
@@ -607,9 +610,9 @@ The verifier may emit `status: "pass"` only when all of these are true:
 8. Every move preserved encrypted bytes and public metadata, used the unchanged
    local AVK, and made zero post-fence source-cloud calls or Witself
    agent-vault KMS calls.
-9. Every runtime transcript is flushed and version-attributed, and no sealed
-   value or key material appears in memory, messaging, avatar, hydration, or
-   transcript surfaces.
+9. Every Witself-owned runtime transcript is flushed and version-attributed,
+   and no sealed value or key material appears in memory, messaging, avatar,
+   hydration, or portable transcript surfaces.
 10. The serialized evidence artifact passes its own forbidden-marker and
     closed-schema validation.
 

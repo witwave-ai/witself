@@ -366,7 +366,6 @@ func (s *Store) AccessSecretField(ctx context.Context, p Principal, secretID, fi
 		"wrapping_key_version": out.DEK.WrappingKeyVersion,
 		"secret_revision":      out.SecretRevision,
 		"field_revision":       out.FieldRevision,
-		"material_fingerprint": materialFingerprint,
 	})
 	if err != nil {
 		return SecretMaterial{}, err

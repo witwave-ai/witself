@@ -58,8 +58,20 @@ type secretPasswordPolicyDocument struct {
 }
 
 func secretCmd(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself secret create|list|search|show|reveal|archive|restore ...")
+	if len(args) == 0 || commandHelpRequested(args) {
+		printCommandGroupHelp(os.Stderr,
+			"usage: witself secret create|list|search|show|reveal|archive|restore ...",
+			"create   Create a structured secret from strict JSON",
+			"list     List redacted secret inventory",
+			"search   Search public secret metadata",
+			"show     Show one redacted secret and its field inventory",
+			"reveal   Return exactly one non-TOTP field",
+			"archive  Archive one active secret",
+			"restore  Restore one archived secret",
+		)
+		if commandHelpRequested(args) {
+			return 0
+		}
 		return 2
 	}
 	switch args[0] {
@@ -80,6 +92,15 @@ func secretCmd(args []string) int {
 }
 
 func vaultCmd(args []string) int {
+	keyHelp := len(args) == 2 && args[0] == "key" && commandHelpRequested(args[1:])
+	if commandHelpRequested(args) || keyHelp {
+		printCommandGroupHelp(os.Stderr,
+			"usage: witself vault key init|status [agent connection flags]",
+			"key init    Reconcile or initialize this installation's agent vault key",
+			"key status  Compare the local key with the backend's public binding",
+		)
+		return 0
+	}
 	if len(args) < 2 || args[0] != "key" || (args[1] != "init" && args[1] != "status") {
 		fmt.Fprintln(os.Stderr, "usage: witself vault key init|status [agent connection flags]")
 		return 2
@@ -90,10 +111,11 @@ func vaultCmd(args []string) int {
 func vaultKey(operation string, args []string) int {
 	fs := flag.NewFlagSet("vault key "+operation, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself vault key "+operation+" [agent connection flags]")
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	jsonOut := jsonFlag(fs)
-	if fs.Parse(args) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, args); !parsed {
+		return exitCode
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "witself: vault key accepts no positional arguments")
@@ -139,13 +161,14 @@ func vaultKey(operation string, args []string) int {
 func secretCreate(args []string) int {
 	fs := flag.NewFlagSet("secret create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself secret create (--file FILE|--stdin) --idempotency-key KEY [agent connection flags]")
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	file := fs.String("file", "", "read the plaintext secret document from FILE")
 	stdin := fs.Bool("stdin", false, "read the plaintext secret document from stdin")
-	idempotencyKey := fs.String("idempotency-key", "", "retry key for this exact create")
+	idempotencyKey := fs.String("idempotency-key", "", "required retry key; reuse only for this exact logical create")
 	jsonOut := jsonFlag(fs)
-	if fs.Parse(args) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, args); !parsed {
+		return exitCode
 	}
 	if fs.NArg() != 0 || ((*file == "") == !*stdin) || strings.TrimSpace(*idempotencyKey) == "" {
 		fmt.Fprintln(os.Stderr, "usage: witself secret create (--file FILE|--stdin) --idempotency-key KEY [agent connection flags]")
@@ -186,6 +209,11 @@ func secretCreate(args []string) int {
 func secretList(operation string, args []string) int {
 	fs := flag.NewFlagSet("secret "+operation, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	usage := "usage: witself secret list [filters] [agent connection flags]"
+	if operation == "search" {
+		usage = "usage: witself secret search QUERY [filters] [agent connection flags]"
+	}
+	configureCommandUsage(fs, usage)
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	query := fs.String("query", "", "public metadata search query")
 	lifecycle := fs.String("lifecycle", "active", "active or archived")
@@ -200,8 +228,8 @@ func secretList(operation string, args []string) int {
 	if operation == "search" {
 		parseArgs = secretFlagParseOrder(args, 1)
 	}
-	if fs.Parse(parseArgs) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, parseArgs); !parsed {
+		return exitCode
 	}
 	if operation == "search" {
 		if fs.NArg() == 1 && strings.TrimSpace(*query) == "" {
@@ -248,11 +276,12 @@ func secretList(operation string, args []string) int {
 func secretShow(args []string) int {
 	fs := flag.NewFlagSet("secret show", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself secret show [--lifecycle active|archived] SECRET [agent connection flags]")
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	lifecycle := fs.String("lifecycle", "active", "active or archived")
 	jsonOut := jsonFlag(fs)
-	if fs.Parse(secretFlagParseOrder(args, 1)) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, secretFlagParseOrder(args, 1)); !parsed {
+		return exitCode
 	}
 	if fs.NArg() != 1 || (*lifecycle != "active" && *lifecycle != "archived") {
 		fmt.Fprintln(os.Stderr, "usage: witself secret show [--lifecycle active|archived] SECRET [agent connection flags]")
@@ -276,11 +305,12 @@ func secretShow(args []string) int {
 func secretReveal(args []string) int {
 	fs := flag.NewFlagSet("secret reveal", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself secret reveal SECRET FIELD [--idempotency-key KEY] [agent connection flags]")
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	idempotencyKey := fs.String("idempotency-key", "", "retry key for this exact field access")
 	jsonOut := jsonFlag(fs)
-	if fs.Parse(secretFlagParseOrder(args, 2)) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, secretFlagParseOrder(args, 2)); !parsed {
+		return exitCode
 	}
 	if fs.NArg() != 2 {
 		fmt.Fprintln(os.Stderr, "usage: witself secret reveal SECRET FIELD [--idempotency-key KEY] [agent connection flags]")
@@ -325,12 +355,13 @@ func secretReveal(args []string) int {
 func secretLifecycle(operation string, args []string) int {
 	fs := flag.NewFlagSet("secret "+operation, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, fmt.Sprintf("usage: witself secret %s SECRET [--expected-row-version N] [--idempotency-key KEY] [agent connection flags]", operation))
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	expectedRevision := fs.Int64("expected-row-version", 0, "exact current secret row version (default: resolve current)")
 	idempotencyKey := fs.String("idempotency-key", "", "retry key for this exact lifecycle change")
 	jsonOut := jsonFlag(fs)
-	if fs.Parse(secretFlagParseOrder(args, 1)) != nil {
-		return 2
+	if parsed, exitCode := parseCommandFlags(fs, secretFlagParseOrder(args, 1)); !parsed {
+		return exitCode
 	}
 	if fs.NArg() != 1 || *expectedRevision < 0 {
 		fmt.Fprintf(os.Stderr, "usage: witself secret %s SECRET [--expected-row-version N] [--idempotency-key KEY] [agent connection flags]\n", operation)

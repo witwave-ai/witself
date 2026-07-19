@@ -1,6 +1,7 @@
 # ADR 0003: Agent Secrets Use Client-Custodied Vault Keys
 
-Status: accepted; implementation in progress (2026-07-18).
+Status: accepted; initial end-to-end vertical implemented, with the explicitly
+listed follow-on capabilities still planned (2026-07-18).
 
 ## Context
 

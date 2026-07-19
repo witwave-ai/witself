@@ -21,7 +21,28 @@ type fakeTOTPFieldRevealer struct {
 	value                    []byte
 	returned                 []byte
 	err                      error
+	resolvedSecretID         string
+	resolvedFieldID          string
+	resolveErr               error
+	secretSelector           string
+	fieldSelector            string
 	secretID, fieldID, retry string
+}
+
+func (f *fakeTOTPFieldRevealer) ResolveField(_ context.Context, secretSelector, fieldSelector string) (string, string, error) {
+	f.secretSelector, f.fieldSelector = secretSelector, fieldSelector
+	if f.resolveErr != nil {
+		return "", "", f.resolveErr
+	}
+	secretID := f.resolvedSecretID
+	if secretID == "" {
+		secretID = secretSelector
+	}
+	fieldID := f.resolvedFieldID
+	if fieldID == "" {
+		fieldID = fieldSelector
+	}
+	return secretID, fieldID, nil
 }
 
 func (f *fakeTOTPFieldRevealer) RevealField(_ context.Context, secretID, fieldID, retry string) ([]byte, error) {
@@ -134,6 +155,62 @@ func TestTOTPCodeCLIUsesInjectedCurrentTimeAndReturnsExpiry(t *testing.T) {
 		t.Fatalf("plain output = %q, want %q", stdout, wantPlain)
 	}
 	assertClearedTOTPBytes(t, fake.returned)
+}
+
+func TestTOTPCLIResolvesHumanFriendlySecretAndFieldNames(t *testing.T) {
+	payload, err := sealed.NewTOTPPayload(testTOTPSeed, sealed.TOTPOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := sealed.EncodeTOTPPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTOTPFieldRevealer{
+		value: encoded, resolvedSecretID: "sec_aaaaaaaaaaaaaaaa", resolvedFieldID: "fld_bbbbbbbbbbbbbbbb",
+	}
+	connection := installFakeTOTPCLI(t, fake)
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		args := append([]string{"totp", "show", "GitHub", "two_factor"}, connection...)
+		return run(args)
+	})
+	if code != 0 || stderr != "" || strings.Contains(stdout, testTOTPSeed) {
+		t.Fatalf("run = %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if fake.secretSelector != "GitHub" || fake.fieldSelector != "two_factor" {
+		t.Fatalf("selectors = %q / %q", fake.secretSelector, fake.fieldSelector)
+	}
+	if fake.secretID != "sec_aaaaaaaaaaaaaaaa" || fake.fieldID != "fld_bbbbbbbbbbbbbbbb" {
+		t.Fatalf("resolved access = %q / %q", fake.secretID, fake.fieldID)
+	}
+}
+
+func TestTOTPCLIStopsBeforeAccessWhenSelectorResolutionFails(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "invalid id", err: secretclient.ErrInvalidInput, want: "identifier is invalid"},
+		{name: "secret missing", err: errors.New("secret was not found"), want: "secret was not found"},
+		{name: "field missing", err: errors.New("secret field was not found"), want: "secret field was not found"},
+		{name: "wrong field kind", err: errors.New("the selected field is not a sensitive TOTP enrollment"), want: "not a sensitive TOTP enrollment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeTOTPFieldRevealer{resolveErr: test.err}
+			connection := installFakeTOTPCLI(t, fake)
+			stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+				args := append([]string{"totp", "code", "GitHub", "missing"}, connection...)
+				return run(args)
+			})
+			if code != 1 || stdout != "" || !strings.Contains(stderr, test.want) {
+				t.Fatalf("run = %d stdout=%q stderr=%q", code, stdout, stderr)
+			}
+			if fake.secretID != "" || fake.fieldID != "" {
+				t.Fatalf("failed resolution reached access: %q / %q", fake.secretID, fake.fieldID)
+			}
+		})
+	}
 }
 
 func TestTOTPCLIRejectsBadCommandsBeforeReveal(t *testing.T) {

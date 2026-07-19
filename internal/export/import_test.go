@@ -106,6 +106,48 @@ func TestReadDetectsTruncation(t *testing.T) {
 	}
 }
 
+func TestReadRejectsAmbiguousControlRecords(t *testing.T) {
+	validManifest, err := json.Marshal(Manifest{
+		FormatVersion: FormatVersion,
+		SchemaVersion: 54,
+		Tables:        []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validChecksums := []byte(`{"chunks":[],"table_rows":{}}`)
+	tests := []struct {
+		name      string
+		manifest  []byte
+		checksums []byte
+	}{
+		{
+			name:      "duplicate manifest member",
+			manifest:  []byte(`{"format_version":1,"format_version":1,"schema_version":54,"tables":[]}`),
+			checksums: validChecksums,
+		},
+		{
+			name:      "invalid UTF-8 manifest",
+			manifest:  append([]byte(`{"format_version":1,"schema_version":54,"account_id":"`), 0xff, '"', '}'),
+			checksums: validChecksums,
+		},
+		{
+			name:      "duplicate checksums member",
+			manifest:  validManifest,
+			checksums: []byte(`{"chunks":[],"chunks":[],"table_rows":{}}`),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := buildRawControlArchive(t, tc.manifest, tc.checksums)
+			_, err := Read(context.Background(), bytes.NewReader(archive), ImportOptions{CurrentSchema: 55})
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("ambiguous control record error = %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
 // TestReadRefusesNewerSchema — an archive from the future needs a newer cell,
 // not a lossy improvisation.
 func TestReadRefusesNewerSchema(t *testing.T) {
@@ -458,6 +500,22 @@ func buildHandArchive(t *testing.T, manifest Manifest, chunks []tarEntry, sums C
 	}
 	writeTarEntry(t, tw, "checksums.json", sumsJSON)
 
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func buildRawControlArchive(t *testing.T, manifestJSON, checksumsJSON []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	writeTarEntry(t, tw, "manifest.json", manifestJSON)
+	writeTarEntry(t, tw, "checksums.json", checksumsJSON)
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
