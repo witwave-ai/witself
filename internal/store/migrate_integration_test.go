@@ -19,6 +19,56 @@ import (
 
 var migrationTestSchemaSequence atomic.Uint64
 
+func TestMigration55AgentSecretsPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	assertSchema := func(want bool) {
+		t.Helper()
+		for _, table := range []string{
+			"agent_vault_keys", "secrets", "secret_fields", "secret_deks",
+			"secret_mutation_receipts",
+		} {
+			assertMigrationTestTable(t, st, table, want)
+		}
+		assertMigrationTestIndex(t, st, "realms", "realms_account_id_id_unique", want)
+		assertMigrationTestIndex(t, st, "agents", "agents_realm_id_id_unique", want)
+		if want {
+			assertMigrationTestForeignKeyDeferral(t, st, "secret_fields", "secret_deks",
+				"secret_fields_current_dek_fk", true, true)
+			assertMigrationTestForeignKeyDeferral(t, st, "secret_deks", "secret_fields",
+				"", true, true)
+			assertMigrationTestIndexShape(t, st, "secrets", "secrets_one_live_name_per_agent",
+				[]string{"account_id", "realm_id", "owner_agent_id", "name"},
+				[]string{"archived_at IS NULL", "deleted_at IS NULL"})
+			assertMigrationTestIndex(t, st, "secrets", "secrets_search_document", true)
+			assertMigrationTestIndex(t, st, "secret_fields", "secret_fields_public_search_document", true)
+			assertMigrationTestIndexMethod(t, st, "secrets", "secrets_search_document", "gin")
+			assertMigrationTestIndexMethod(t, st, "secret_fields", "secret_fields_public_search_document", "gin")
+		}
+	}
+
+	migrationTestUpTo(t, dsn, 54)
+	assertMigrationTestVersion(t, dsn, 54)
+	assertSchema(false)
+
+	migrationTestUpTo(t, dsn, 55)
+	assertMigrationTestVersion(t, dsn, 55)
+	assertSchema(true)
+
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 54)
+	assertSchema(false)
+
+	migrationTestUpTo(t, dsn, 55)
+	assertMigrationTestVersion(t, dsn, 55)
+	assertSchema(true)
+}
+
 func TestMigration37MessageAudiencePostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
@@ -1045,6 +1095,38 @@ func assertMigrationTestTableConstraint(t *testing.T, st *Store, table, name str
 	}
 }
 
+func assertMigrationTestForeignKeyDeferral(
+	t *testing.T,
+	st *Store,
+	table string,
+	referencedTable string,
+	name string,
+	wantDeferrable bool,
+	wantInitiallyDeferred bool,
+) {
+	t.Helper()
+	var count int
+	var deferrable, initiallyDeferred bool
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT count(*),
+		       COALESCE(bool_and(condeferrable), false),
+		       COALESCE(bool_and(condeferred), false)
+		  FROM pg_constraint
+		 WHERE conrelid=to_regclass($1)
+		   AND confrelid=to_regclass($2)
+		   AND contype='f'
+		   AND ($3='' OR conname=$3)`, table, referencedTable, name).Scan(
+		&count, &deferrable, &initiallyDeferred,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || deferrable != wantDeferrable || initiallyDeferred != wantInitiallyDeferred {
+		t.Fatalf("foreign key %s -> %s (%q) = count %d, deferrable %t, initially deferred %t; want 1, %t, %t",
+			table, referencedTable, name, count, deferrable, initiallyDeferred,
+			wantDeferrable, wantInitiallyDeferred)
+	}
+}
+
 func assertMigrationTestColumn(t *testing.T, st *Store, table, column string, want bool) {
 	t.Helper()
 	var got bool
@@ -1084,6 +1166,23 @@ func assertMigrationTestIndex(t *testing.T, st *Store, table, index string, want
 	}
 	if got != want {
 		t.Fatalf("index %s.%s exists = %t, want %t", table, index, got, want)
+	}
+}
+
+func assertMigrationTestIndexMethod(t *testing.T, st *Store, table, index, want string) {
+	t.Helper()
+	var got string
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT access_method.amname
+		  FROM pg_index index_row
+		  JOIN pg_class index_class ON index_class.oid=index_row.indexrelid
+		  JOIN pg_am access_method ON access_method.oid=index_class.relam
+		 WHERE index_row.indrelid=to_regclass($1)
+		   AND index_row.indexrelid=to_regclass($2)`, table, index).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("index %s.%s access method = %q, want %q", table, index, got, want)
 	}
 }
 

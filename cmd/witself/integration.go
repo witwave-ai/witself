@@ -914,6 +914,14 @@ func prepareTranscriptFlushEvents(
 		if _, exists := blocked[transcriptID]; exists {
 			continue
 		}
+		if !transcriptcapture.PendingEventUploadReady(pendingEvent, pending) {
+			// A prompt and its turn stay local until a terminal fence reveals
+			// whether a later sealed tool requires synchronous suppression.
+			// A later hook creates a new outbox path and reopens this retryable
+			// transcript through the normal background-flush logic.
+			blocked[transcriptID] = nil
+			continue
+		}
 		if err := captureEventBindingError(pendingEvent.Event, cfg); err != nil {
 			blocked[transcriptID] = err
 			if firstErr == nil {

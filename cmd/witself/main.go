@@ -83,6 +83,14 @@ func run(args []string) int {
 		return usageCmd(args[1:])
 	case "fact":
 		return factCmd(args[1:])
+	case "password":
+		return passwordCmd(args[1:])
+	case "secret":
+		return secretCmd(args[1:])
+	case "vault":
+		return vaultCmd(args[1:])
+	case "totp":
+		return totpCmd(args[1:])
 	case "memory":
 		return memoryCmd(args[1:])
 	case "avatar":
@@ -3911,6 +3919,10 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
 	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
+	usageLine(w, "  witself password generate    Generate a password locally with cryptographic randomness")
+	usageLine(w, "  witself vault key init|status  Manage this installation's client-held agent vault key")
+	usageLine(w, "  witself secret create|list|search|show|reveal|archive|restore  Manage agent-owned structured secrets")
+	usageLine(w, "  witself totp show|code       Inspect TOTP metadata or generate a code locally")
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
 	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
 	usageLine(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")

@@ -14,6 +14,15 @@ Migration `0032` implements optional immutable client-vector profiles, portable
 JSONB rows, and bounded deterministic hybrid recall. It requires no pgvector
 extension; any later pgvector/ANN projection is derived acceleration only.
 
+Sealed-plane amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault plan](client-custodied-agent-vault.md) replace KMS as
+the vault trust root. Sensitive fields are encrypted by an active client under
+a separate per-agent AVK; the backend stores and transports ciphertext but has
+no decrypt path. Earlier KMS, realm-KEK, server-decrypt, token-only reveal, and
+group-owned first-slice language below is superseded. The sealed-plane product
+scope and non-recall/non-hydration guarantees remain required.
+
 ## Product Summary
 
 Witself is the durable-self platform for agents AND the trust fabric agents
@@ -34,8 +43,8 @@ MCP, and API surface across two planes:
   recallable, cross-agent readable/curatable under declarative **policy**,
   organized into **security groups**, exchanged as durable **messages**, and
   plaintext-exportable. This is the identity store and the headline feature.
-- **Sealed plane** (secrets + TOTP): KMS-backed envelope-encrypted credential
-  material — passwords, API keys, SSH/TLS keys, TOTP seeds, recovery codes — that
+- **Sealed plane** (secrets + TOTP): client-custodied envelope-encrypted
+  credential material — passwords, API keys, SSH/TLS keys, TOTP seeds, recovery codes — that
   is reveal-gated and **never embedded, recalled, in the self-digest, ingested, or
   plaintext-exported**. This is the credential vault and authenticator, folded in
   from Witpass.
@@ -80,10 +89,9 @@ not the production model.
   prefix, `witself.v0` schema, and `witself.*` MCP tool names are likewise
   unchanged.
 - Environment prefix: `WITSELF_` (for example `WITSELF_TOKEN_FILE`,
-  `WITSELF_ENDPOINT`, `WITSELF_METRICS_ENABLED`). The sealed plane adds
-  `WITSELF_KMS_PROVIDER`, `WITSELF_KMS_KEY_ID`, and `WITSELF_PASSPHRASE_FILE` (the
-  local-dev passphrase that wraps the local KEK/DEK; see
-  [Encryption (Two-Tier)](#encryption-two-tier)).
+  `WITSELF_ENDPOINT`, `WITSELF_METRICS_ENABLED`). The implemented sealed plane
+  adds no KMS or passphrase environment variable: its AVK is a separate local
+  key file selected through the ordinary account, realm, and agent selectors.
 - JSON schema version string: `witself.v0` (the rename of the former
   `witpass.v0`).
 - Raw agent-token prefix: `witself_at_` (the rename of the former `wp_at_`).
@@ -178,15 +186,14 @@ client-supplied vectors are derived indexes, not a readiness gate or source of
 record.
 
 Sealed credential plane (a defined v0 slice, may stage after the core). The
-secret data model and lifecycle, secret references, TOTP/2FA, password generation,
-runtime injection (`witself run`), two-tier envelope encryption (CMK → per-realm
-KEK → per-secret/field DEK), the reveal ceremony, secret grants and realm roles,
-and the sealed-plane carve-outs. This slice adds a **KMS dependency** that is a
-readiness gate only when the sealed plane is enabled (see
-[Encryption (Two-Tier)](#encryption-two-tier) and
-[Sealed-Plane Invariants](#sealed-plane-invariants)). An open-plane-only
-deployment requires no KMS. The crypto subset for v0 is tracked in
-[key-hierarchy.md](key-hierarchy.md).
+implemented first vertical covers agent-owned structured secrets, password
+generation, local TOTP generation, client-held AVK envelope encryption, exact
+field reveal, lifecycle archive/restore, and encrypted account export/import.
+Secret references, runtime injection (`witself run`), updates and AVK rotation,
+secret grants, and realm roles remain staged follow-ons. Neither the open plane
+nor the client-custodied sealed plane adds a backend KMS dependency; the crypto
+subset and future slices are tracked in
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 Billing, support, payment, crypto payment, and broader managed-account operations
 may appear as command, API, and JSON contract shapes in v0, but they can be

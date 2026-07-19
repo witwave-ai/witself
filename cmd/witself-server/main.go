@@ -144,6 +144,7 @@ func serve() int {
 			return toServerPrincipal(p), true, nil
 		}
 		configureAvatar(&cfg, st)
+		configureSecrets(&cfg, st)
 		cfg.CreateTranscript = func(ctx context.Context, p server.DomainPrincipal, in server.CreateTranscriptRequest) (server.Transcript, error) {
 			tr, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID, store.CreateTranscriptInput{
 				ExternalID: in.ExternalID,

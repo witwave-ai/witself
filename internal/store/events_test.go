@@ -80,6 +80,9 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAvatarReset, VerbAvatarPolicyChanged, VerbAvatarStyleChanged,
 		VerbAvatarQuotaChanged, VerbAvatarPayloadCompacted,
 		VerbAvatarStyleRolloutCompleted, VerbAvatarStyleRolloutSuperseded,
+		VerbVaultKeyRegistered, VerbSecretCreated, VerbSecretUpdated,
+		VerbSecretArchived, VerbSecretRestored,
+		VerbSecretMaterialDelivered, VerbSecretDEKRewrapped,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
 		VerbSupportTicketStateChanged, VerbSupportTicketClosed,
@@ -103,6 +106,84 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		if !inList(k) {
 			t.Errorf("verbMetadataSchema has stale entry %q not in the verb-constant list", k)
 		}
+	}
+}
+
+func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
+	tests := []struct {
+		verb string
+		keys []string
+	}{
+		{VerbVaultKeyRegistered, []string{"agent_id", "key_id", "key_version", "algorithm"}},
+		{VerbSecretCreated, []string{"agent_id", "secret_id", "field_count", "sensitive_field_count"}},
+		{VerbSecretUpdated, []string{"agent_id", "secret_id", "secret_revision", "changed_field_count"}},
+		{VerbSecretArchived, []string{"agent_id", "secret_id", "secret_revision"}},
+		{VerbSecretRestored, []string{"agent_id", "secret_id", "secret_revision"}},
+		{VerbSecretMaterialDelivered, []string{
+			"agent_id", "secret_id", "field_id", "value_version", "key_version", "encrypted_bytes",
+		}},
+		{VerbSecretDEKRewrapped, []string{
+			"agent_id", "secret_id", "field_id", "dek_generation", "key_version", "wrap_revision",
+		}},
+	}
+	forbidden := []string{
+		"name", "secret_name", "field_name", "value", "public_value", "query",
+		"ciphertext", "nonce", "wrapped_dek", "fingerprint", "key_material",
+		"idempotency_key", "idempotency_key_hash", "request_hash", "token",
+		"password", "totp_seed", "totp_code",
+	}
+	valueFor := func(key string) string {
+		switch key {
+		case "agent_id":
+			return "agent_1"
+		case "key_id":
+			return "avk_aaaaaaaaaaaaaaaa"
+		case "secret_id":
+			return "sec_aaaaaaaaaaaaaaaa"
+		case "field_id":
+			return "fld_aaaaaaaaaaaaaaaa"
+		case "algorithm":
+			return SecretAEADAlgorithm
+		default:
+			return "1"
+		}
+	}
+	for _, tc := range tests {
+		t.Run(tc.verb, func(t *testing.T) {
+			spec := verbMetadataSchema[tc.verb]
+			if !reflect.DeepEqual(spec.requiredKeys, tc.keys) || !reflect.DeepEqual(spec.allowedKeys, tc.keys) {
+				t.Fatalf("schema = required %#v allowed %#v, want exact %#v",
+					spec.requiredKeys, spec.allowedKeys, tc.keys)
+			}
+			if !reflect.DeepEqual(spec.allowedActors, []string{ActorAgent}) {
+				t.Fatalf("allowed actors = %#v, want agent only", spec.allowedActors)
+			}
+			metadata := make(map[string]any, len(tc.keys))
+			for _, key := range tc.keys {
+				metadata[key] = valueFor(key)
+			}
+			input := EventInput{
+				AccountID: "acc_1", ActorKind: ActorAgent, ActorID: "agent_1",
+				Verb: tc.verb, Metadata: metadata,
+			}
+			if err := checkEventShape(input); err != nil {
+				t.Fatalf("valid value-free event: %v", err)
+			}
+			for _, key := range forbidden {
+				if slicesContains(spec.allowedKeys, key) {
+					t.Fatalf("schema allows forbidden key %q", key)
+				}
+			}
+			invalid := input
+			invalid.Metadata = make(map[string]any, len(metadata)+1)
+			for key, value := range metadata {
+				invalid.Metadata[key] = value
+			}
+			invalid.Metadata["ciphertext"] = "opaque"
+			if err := checkEventShape(invalid); err == nil || !strings.Contains(err.Error(), `unknown key "ciphertext"`) {
+				t.Fatalf("value-bearing metadata accepted: %v", err)
+			}
+		})
 	}
 }
 

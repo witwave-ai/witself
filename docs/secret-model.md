@@ -1,5 +1,13 @@
 # Witself Secret Model
 
+> **Custody amendment (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede this
+> document wherever it specifies KMS-rooted encryption, backend decryption,
+> token-only reveal, group ownership, or plaintext-capable operator access.
+> The structured secret, per-field sensitivity, redaction, and lifecycle ideas
+> remain applicable unless the new plan narrows them for v1.
+
 Status: draft. Decision: a secret is a first-class, agent- or group-owned
 **sealed-plane** payload — a named bundle of typed, per-field-sensitivity values,
 stored only as KMS-backed envelopes (never plaintext columns), revealed one

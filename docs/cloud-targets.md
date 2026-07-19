@@ -16,6 +16,14 @@ recall is required everywhere. Optional immutable client-supplied vector
 profiles and portable JSONB vector rows may add deterministic hybrid ranking;
 zero coverage falls back to lexical recall and requires no pgvector extension.
 
+Sealed-plane custody amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault contract](client-custodied-agent-vault.md) supersede
+KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+backend holds no AVK key material, calls no KMS for agent secrets, and exposes
+no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+storage-encryption references are unaffected.
+
 ## Decision
 
 Witself should certify and harden AWS first without making the application or

@@ -385,6 +385,21 @@ func TestSchema53AvatarRendererProfileUpgradeDefaultsLegacy(t *testing.T) {
 	}
 }
 
+func TestSchema54AgentSecretsUpgradePreservesExistingRows(t *testing.T) {
+	upgrade := UpgraderFor(54)
+	if upgrade == nil {
+		t.Fatal("schema 54 agent-secrets upgrader is not registered")
+	}
+	row := map[string]any{"id": "agent_1", "name": "atlas"}
+	got, err := upgrade("agents", row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, row) {
+		t.Fatalf("schema 54 identity upgrade changed an existing row: %#v", got)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)
@@ -413,5 +428,31 @@ func TestUpgradeRowRejectsNull(t *testing.T) {
 	_, err := upgradeRow("fact_assertions", []byte(`null`), 25, 26)
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("null row error = %v, want ErrCorrupt", err)
+	}
+}
+
+func TestUpgradeRowRejectsAmbiguousJSONBeforeIdentityUpgrade(t *testing.T) {
+	tests := []struct {
+		name string
+		row  string
+	}{
+		{name: "duplicate top-level member", row: `{"id":"agent_1","id":"agent_2"}`},
+		{name: "duplicate nested member", row: `{"metadata":{"state":"one","state":"two"}}`},
+		{name: "unpaired surrogate", row: `{"name":"\ud800"}`},
+		{name: "invalid UTF-8", row: "{\"name\":\"\xff\"}"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := upgradeRow("agents", []byte(tc.row), 54, 55)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("ambiguous upgraded row error = %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+func TestRejectAmbiguousArchiveJSONAcceptsPairedSurrogates(t *testing.T) {
+	if err := rejectAmbiguousArchiveJSON([]byte(`{"name":"\ud83d\ude00"}`)); err != nil {
+		t.Fatalf("valid surrogate pair rejected: %v", err)
 	}
 }

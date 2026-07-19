@@ -1,16 +1,33 @@
 # Witself TOTP and 2FA
 
+> **Custody amendment (accepted 2026-07-18):**
+> [the client-custodied vault plan](client-custodied-agent-vault.md) stores a
+> TOTP enrollment as a sensitive client-encrypted field. URI parsing and code
+> generation happen locally; KMS-backed or server-generated code paths below
+> are superseded.
+
+> **Current implementation boundary:** enroll by including one sensitive
+> `kind: "totp"` field with `otpauth_uri` in `witself secret create --file` or
+> `--stdin`. Use `witself totp show SECRET FIELD` for seed-free metadata and
+> `witself totp code SECRET FIELD` for a current code; each selector may be an
+> exact ID or an unambiguous human-readable name. Both retrieve
+> one encrypted field package and decrypt it locally; even `show` does not rely
+> on server-readable TOTP metadata. Dedicated `totp enroll`/`delete`, raw seed,
+> seed-file, and QR-image convenience inputs remain target behavior, not the
+> current command surface.
+
 Status: draft. Last reviewed 2026-06-26.
 
 Witself acts as the authenticator application for agents. When a service offers a
 QR code or setup secret that a human would normally enroll in an authenticator
 app, the agent or operator enrolls that material into Witself instead. Witself
-stores the setup seed, generates the current one-time code on request, and
-returns that code to the authorized agent at login time.
+stores only the client-encrypted setup payload. The active client generates the
+current one-time code on request and returns it to the authorized agent at login
+time.
 
 TOTP lives in the **sealed plane** alongside [secrets](secret-model.md). The
-underlying seed is high-value sealed material: it is stored only as a KMS-backed
-envelope and is **never embedded, never returned by semantic recall, never in the
+underlying seed is high-value sealed material: it is stored only in a
+client-authored envelope and is **never embedded, never returned by semantic recall, never in the
 self-digest, never ingested from `CLAUDE.md`/`AGENTS.md`, and never
 plaintext-exported**. The normal agent-facing surface returns generated codes,
 not the seed. This document pins the authenticator role, the enrollment inputs,

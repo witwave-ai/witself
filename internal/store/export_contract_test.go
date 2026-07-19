@@ -90,6 +90,12 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 		"memory_versions": {
 			"search_document": "generated full-text index is rebuilt from content on import",
 		},
+		"secrets": {
+			"search_document": "generated public metadata index is rebuilt on import",
+		},
+		"secret_fields": {
+			"public_search_document": "generated public-value index is rebuilt on import",
+		},
 	}
 
 	for table := range importColumns { // scope: tables the arc restores
@@ -137,11 +143,11 @@ func TestParseSchemaColumnsCoversMultiColumnAlter(t *testing.T) {
 //go:embed export.go
 var exportGoFS embed.FS
 
-// parseExportedColumns walks the jsonb_build_object(...) calls in
-// export.go and returns the set of column names emitted per table. It's
-// deliberately regex-based (not a full Go parser) so it catches the same
-// shape a human reviewer would look for, and stays robust as long as
-// export.go keeps the same idiom.
+// parseExportedColumns walks the jsonb_build_object(...) calls in export.go
+// and returns the set of top-level JSON keys emitted per table. Query blocks
+// are located with a regex, but SQL argument parsing is nesting- and
+// quote-aware so value expressions such as encode(ciphertext, 'hex') cannot be
+// mistaken for keys or truncate the function call.
 func parseExportedColumns() (map[string]map[string]bool, error) {
 	src, err := exportGoFS.ReadFile("export.go")
 	if err != nil {
@@ -149,22 +155,26 @@ func parseExportedColumns() (map[string]map[string]bool, error) {
 	}
 	text := string(src)
 
-	// Split into per-table blocks by finding each querySource entry.
-	// A block looks like:
-	//   &querySource{tx: tx, table: "accounts", q: `
-	//       SELECT jsonb_build_object(
-	//         'id', id, 'is_default', is_default, ...
-	//       ) FROM ...`, arg: accountID},
-	tableRe := regexp.MustCompile(`table:\s*"([a-z_]+)"[\s\S]*?jsonb_build_object\(([\s\S]*?)\)`)
-	quotedFieldRe := regexp.MustCompile(`'([a-z][a-z0-9_]*)'`)
+	tableRe := regexp.MustCompile(`&querySource\{tx:\s*tx,\s*table:\s*"([a-z_]+)",\s*q:\s*` + "`" + `([\s\S]*?)` + "`" + `,\s*arg:`)
+	quotedFieldRe := regexp.MustCompile(`^\s*'([a-z][a-z0-9_]*)'\s*$`)
 
 	out := map[string]map[string]bool{}
 	for _, m := range tableRe.FindAllStringSubmatch(text, -1) {
 		table := m[1]
-		body := m[2]
+		args, err := sqlFunctionArguments(m[2], "jsonb_build_object")
+		if err != nil {
+			return nil, notFoundError(table + ": " + err.Error())
+		}
+		if len(args)%2 != 0 {
+			return nil, notFoundError("odd jsonb_build_object argument count for " + table)
+		}
 		cols := map[string]bool{}
-		for _, mm := range quotedFieldRe.FindAllStringSubmatch(body, -1) {
-			cols[mm[1]] = true
+		for index := 0; index < len(args); index += 2 {
+			match := quotedFieldRe.FindStringSubmatch(args[index])
+			if match == nil {
+				return nil, notFoundError("non-literal JSON key for " + table)
+			}
+			cols[match[1]] = true
 		}
 		if len(cols) == 0 {
 			return nil, notFoundError("no columns parsed for " + table)
@@ -172,6 +182,47 @@ func parseExportedColumns() (map[string]map[string]bool, error) {
 		out[table] = cols
 	}
 	return out, nil
+}
+
+func sqlFunctionArguments(query, function string) ([]string, error) {
+	start := strings.Index(query, function+"(")
+	if start < 0 {
+		return nil, notFoundError("no " + function + " call")
+	}
+	start += len(function) + 1
+	depth := 0
+	inQuote := false
+	argumentStart := start
+	arguments := []string{}
+	for index := start; index < len(query); index++ {
+		switch query[index] {
+		case '\'':
+			if inQuote && index+1 < len(query) && query[index+1] == '\'' {
+				index++
+				continue
+			}
+			inQuote = !inQuote
+		case '(':
+			if !inQuote {
+				depth++
+			}
+		case ')':
+			if inQuote {
+				continue
+			}
+			if depth == 0 {
+				arguments = append(arguments, strings.TrimSpace(query[argumentStart:index]))
+				return arguments, nil
+			}
+			depth--
+		case ',':
+			if !inQuote && depth == 0 {
+				arguments = append(arguments, strings.TrimSpace(query[argumentStart:index]))
+				argumentStart = index + 1
+			}
+		}
+	}
+	return nil, notFoundError("unterminated " + function + " call")
 }
 
 //go:embed migrations

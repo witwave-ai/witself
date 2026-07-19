@@ -57,7 +57,8 @@ var codexMemoryRoutingBlock = []byte(
 	codexMemoryRoutingBeginMarker + "\n" +
 		codexMemoryRoutingInstructions + "\n\n" +
 		foregroundMessagingRoutingInstructions + "\n\n" +
-		avatarRoutingInstructions + "\n" +
+		avatarRoutingInstructions + "\n\n" +
+		secretRoutingInstructions + "\n" +
 		codexMemoryRoutingEndMarker,
 )
 

@@ -3,9 +3,12 @@
 #
 # SCOPE NOTE: this chart deploys witself-server as it exists today — the API,
 # health, and metrics listeners, backend.kind, and the optional Postgres DSN
-# secret reference. Embeddings, KMS/sealed-plane, and the migration Job are part
-# of the chart's target shape (docs/helm-chart.md) and are wired in as the server
-# consumes them, so no manifest here renders config the server would ignore.
+# secret reference. Agent secrets use the client-custodied AVK model and need
+# no backend KMS or sealed-plane switch: the authorized client holds the AVK
+# and the server stores ciphertext only.
+# There is no migration Job; `witself-server serve` applies embedded forward
+# Goose migrations before becoming Ready. No manifest here renders config the
+# server would ignore.
 
 replicaCount: 1
 

@@ -1,5 +1,11 @@
 # Witself API Contract
 
+> **Sealed-plane API amendment (accepted 2026-07-18):**
+> [the client-custodied vault plan](client-custodied-agent-vault.md) controls
+> secret routes and wire shapes. The backend authorizes and returns one sealed
+> field package at a time but never decrypts it; older server-side reveal and
+> KMS capability shapes below are superseded.
+
 Status: draft. This document defines the initial public HTTP API contract for
 managed Witself Cloud, self-hosted `witself-server`, and local development
 server mode.
@@ -44,11 +50,13 @@ Witself's API spans two planes. For the open plane (memories and facts) it
 guards the integrity and authenticity of identity data: there is no reveal
 ceremony and no encrypted-only export, but every cross-agent and destructive
 identity mutation is attributed, audited, and reversible by default. For the
-sealed plane (secrets and TOTP) it guards confidentiality the way the former
-Witpass API did: KMS-backed envelope encryption, reveal-gated value access, and
-encrypted-only secret backup, with secret material never embedded, recalled, in
-the self-digest, or in the plaintext identity export. The contract decisions
-below apply the posture appropriate to each plane.
+sealed plane (secrets and TOTP), clients encrypt under a client-custodied agent
+vault key and the backend stores and authorizes ciphertext-only field packages.
+Inventory is redacted, exact material delivery is audited, and encrypted vault
+state is included in account archives without the agent vault key. Secret
+material is never embedded, recalled, included in the self-digest, or written
+to a plaintext identity export. The amendment above controls wherever the
+older target sections below still describe a KMS-rooted or server-decrypt path.
 
 ## Transport Requirements
 

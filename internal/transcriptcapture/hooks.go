@@ -213,23 +213,35 @@ func hookEvents(runtime, mode string) []string {
 			"subagentStart", "subagentStop", "preCompact",
 		}
 	}
-	if mode != ModeTrace && mode != ModeRaw {
-		return events
-	}
+	// Messages mode still observes tool hooks as a privacy fence. Those hooks
+	// are not persisted as ordinary transcript entries, but they must be seen so
+	// a sealed tool can synchronously redact the queued prompt and suppress the
+	// rest of its turn. Trace/raw additionally retain ordinary tool/thought
+	// events.
+	trace := mode == ModeTrace || mode == ModeRaw
 	switch runtime {
 	case RuntimeCodex:
 		return append(events, "PreToolUse", "PermissionRequest", "PostToolUse")
 	case RuntimeClaudeCode:
-		return append(events,
+		events = append(events,
 			"PreToolUse", "PermissionRequest", "PermissionDenied",
-			"PostToolUse", "PostToolUseFailure", "Notification",
+			"PostToolUse", "PostToolUseFailure",
 		)
+		if trace {
+			events = append(events, "Notification")
+		}
+		return events
 	case RuntimeGrokBuild:
-		return append(events,
-			"PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "Notification",
-		)
+		events = append(events, "PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure")
+		if trace {
+			events = append(events, "Notification")
+		}
+		return events
 	case RuntimeCursor:
-		return append(events, "afterAgentThought", "preToolUse", "postToolUse", "postToolUseFailure")
+		if trace {
+			events = append(events, "afterAgentThought")
+		}
+		return append(events, "preToolUse", "postToolUse", "postToolUseFailure")
 	default:
 		return events
 	}

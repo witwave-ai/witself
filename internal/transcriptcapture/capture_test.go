@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,6 +265,619 @@ func TestToolFailureKeepsToolIdentityAndInput(t *testing.T) {
 	}
 }
 
+func TestSensitiveSealedToolHookPayloadsAreNeverCaptured(t *testing.T) {
+	const canary = "sealed-hook-plaintext-canary-714"
+	toolNames := map[string]string{
+		RuntimeCodex:      "mcp__witself__witself_secret_reveal",
+		RuntimeClaudeCode: "provider/mcp/witself.secret.create",
+		RuntimeGrokBuild:  "provider_witself_password_generate",
+		RuntimeCursor:     "CallMcpTool",
+	}
+	for _, runtimeName := range []string{RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor} {
+		for _, mode := range []string{ModeTrace, ModeRaw} {
+			for _, hookEvent := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+				t.Run(runtimeName+"/"+mode+"/"+hookEvent, func(t *testing.T) {
+					t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+					location, err := EnsureLocation("home")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := SaveConfig(Config{
+						Runtime: runtimeName, CaptureMode: mode,
+						Account: "default", Realm: "default", Agent: "scott",
+						AgentID: "agent_1", AgentName: "scott", Location: location,
+					}); err != nil {
+						t.Fatal(err)
+					}
+
+					toolInput := map[string]any{"value": canary}
+					if runtimeName == RuntimeCursor {
+						toolInput = map[string]any{
+							"toolName":  "unknown_prefix_witself_totp_code",
+							"arguments": map[string]any{"seed": canary},
+						}
+					}
+					raw := sensitiveToolHookJSON(t, runtimeName, hookEvent, toolNames[runtimeName], "tool-sensitive-1", toolInput, canary)
+					event := enqueueTestHook(t, runtimeName, raw)
+					assertSensitiveHookEventRedacted(t, event, toolNames[runtimeName], "tool-sensitive-1", canary)
+
+					pending, err := Pending(runtimeName)
+					if err != nil {
+						t.Fatal(err)
+					}
+					persisted, err := json.Marshal(pending)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Contains(persisted, []byte(canary)) {
+						t.Fatalf("persisted sensitive tool hook contains plaintext: %s", persisted)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSensitiveCLIHookPayloadsAreNeverCapturedAndCorrelate(t *testing.T) {
+	const canary = "sealed-cli-hook-canary-714"
+	cases := []struct {
+		runtimeName string
+		toolName    string
+		command     string
+	}{
+		{RuntimeCodex, "functions.exec_command", `/usr/local/bin/witself secret create --file -`},
+		{RuntimeClaudeCode, "Bash", `ws secret reveal github password`},
+		{RuntimeGrokBuild, "provider_shell_command", `env WITSELF_HOME=/safe /opt/witself password generate`},
+		{RuntimeCursor, "terminal", `/bin/zsh -lc '/usr/local/bin/ws totp code github otp'`},
+	}
+	for _, tc := range cases {
+		for _, mode := range []string{ModeTrace, ModeRaw} {
+			t.Run(tc.runtimeName+"/"+mode, func(t *testing.T) {
+				t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+				location, err := EnsureLocation("home")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := SaveConfig(Config{
+					Runtime: tc.runtimeName, CaptureMode: mode,
+					Account: "default", Realm: "default", Agent: "scott",
+					AgentID: "agent_1", AgentName: "scott", Location: location,
+				}); err != nil {
+					t.Fatal(err)
+				}
+
+				pre := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PreToolUse", tc.toolName, "tool-cli-1", map[string]any{"command": tc.command, "stdin": canary}, canary))
+				assertSensitiveHookEventRedacted(t, pre, tc.toolName, "tool-cli-1", canary)
+
+				// Terminal provider hooks do not all repeat shell input. The local
+				// session fence must carry the value-free tool-use classification.
+				post := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PostToolUse", tc.toolName, "tool-cli-1", nil, canary))
+				assertSensitiveHookEventRedacted(t, post, tc.toolName, "tool-cli-1", canary)
+				failure := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PostToolUseFailure", tc.toolName, "tool-cli-1", nil, canary))
+				assertSensitiveHookEventRedacted(t, failure, tc.toolName, "tool-cli-1", canary)
+			})
+		}
+	}
+}
+
+func TestSensitiveToolTurnSuppressesProviderResponseAndNextPromptResets(t *testing.T) {
+	const canary = "sealed-response-canary-714"
+	toolNames := map[string]string{
+		RuntimeCodex:      "mcp__witself__witself_secret_reveal",
+		RuntimeClaudeCode: "provider/mcp/witself.secret.create",
+		RuntimeGrokBuild:  "provider_witself_password_generate",
+		RuntimeCursor:     "CallMcpTool",
+	}
+	for _, runtimeName := range []string{RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor} {
+		t.Run(runtimeName, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+			location, err := EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(Config{
+				Runtime: runtimeName, CaptureMode: ModeRaw,
+				Account: "default", Realm: "default", Agent: "scott",
+				AgentID: "agent_1", AgentName: "scott", Location: location,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			promptPayload := map[string]any{"prompt": "store " + canary}
+			switch runtimeName {
+			case RuntimeGrokBuild:
+				promptPayload["sessionId"] = "session-sensitive"
+				promptPayload["hookEventName"] = "UserPromptSubmit"
+				promptPayload["promptId"] = "generation-sensitive"
+			case RuntimeCursor:
+				promptPayload["conversation_id"] = "session-sensitive"
+				promptPayload["generation_id"] = "generation-sensitive"
+				promptPayload["hook_event_name"] = "beforeSubmitPrompt"
+			default:
+				promptPayload["session_id"] = "session-sensitive"
+				promptPayload["turn_id"] = "generation-sensitive"
+				promptPayload["hook_event_name"] = "UserPromptSubmit"
+			}
+			rawPrompt, err := json.Marshal(promptPayload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enqueueTestHook(t, runtimeName, string(rawPrompt))
+
+			toolInput := map[string]any{"value": canary}
+			if runtimeName == RuntimeCursor {
+				toolInput = map[string]any{
+					"toolName":  "unknown_prefix_witself_totp_code",
+					"arguments": map[string]any{"seed": canary},
+				}
+			}
+			enqueueTestHook(t, runtimeName, sensitiveToolHookJSON(t, runtimeName,
+				"PreToolUse", toolNames[runtimeName], "tool-sensitive-turn", toolInput, canary))
+			ordinaryAfterReveal := enqueueTestHook(t, runtimeName, sensitiveToolHookJSON(t, runtimeName,
+				"PreToolUse", "ordinary_browser_tool", "tool-after-reveal", map[string]any{
+					"url": "https://example.test", "typed_value": canary,
+				}, canary))
+			assertSensitiveHookEventRedacted(t, ordinaryAfterReveal, "ordinary_browser_tool", "tool-after-reveal", canary)
+
+			responsePayload := map[string]any{"status": "success"}
+			switch runtimeName {
+			case RuntimeGrokBuild:
+				responsePayload["sessionId"] = "session-sensitive"
+				responsePayload["hookEventName"] = "AgentResponse"
+				responsePayload["lastAssistantMessage"] = canary
+			case RuntimeCursor:
+				responsePayload["conversation_id"] = "session-sensitive"
+				responsePayload["generation_id"] = "generation-sensitive"
+				responsePayload["hook_event_name"] = "afterAgentResponse"
+				responsePayload["text"] = canary
+			default:
+				responsePayload["session_id"] = "session-sensitive"
+				responsePayload["hook_event_name"] = "AgentResponse"
+				responsePayload["last_assistant_message"] = canary
+			}
+			rawResponse, err := json.Marshal(responsePayload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := enqueueTestHook(t, runtimeName, string(rawResponse))
+			if response.Body != "response omitted from portable transcript because this turn used sealed secrets" || len(response.Raw) != 0 {
+				t.Fatalf("sensitive turn response was not suppressed: %#v", response)
+			}
+			marshaled, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(marshaled, []byte(canary)) {
+				t.Fatalf("sensitive turn response retained plaintext: %s", marshaled)
+			}
+
+			pending, err := Pending(runtimeName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := json.Marshal(pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(persisted, []byte(canary)) {
+				t.Fatalf("sensitive prompt or later tool remained in local outbox: %s", persisted)
+			}
+
+			promptPayload = map[string]any{"prompt": "ordinary next turn"}
+			nextResponsePayload := map[string]any{"status": "success"}
+			switch runtimeName {
+			case RuntimeGrokBuild:
+				promptPayload["sessionId"] = "session-sensitive"
+				promptPayload["hookEventName"] = "UserPromptSubmit"
+				nextResponsePayload["sessionId"] = "session-sensitive"
+				nextResponsePayload["hookEventName"] = "AgentResponse"
+				nextResponsePayload["lastAssistantMessage"] = "ordinary response"
+			case RuntimeCursor:
+				promptPayload["conversation_id"] = "session-sensitive"
+				promptPayload["generation_id"] = "generation-next"
+				promptPayload["hook_event_name"] = "beforeSubmitPrompt"
+				nextResponsePayload["conversation_id"] = "session-sensitive"
+				nextResponsePayload["generation_id"] = "generation-next"
+				nextResponsePayload["hook_event_name"] = "afterAgentResponse"
+				nextResponsePayload["text"] = "ordinary response"
+			default:
+				promptPayload["session_id"] = "session-sensitive"
+				promptPayload["hook_event_name"] = "UserPromptSubmit"
+				nextResponsePayload["session_id"] = "session-sensitive"
+				nextResponsePayload["hook_event_name"] = "AgentResponse"
+				nextResponsePayload["last_assistant_message"] = "ordinary response"
+			}
+			rawPrompt, err = json.Marshal(promptPayload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enqueueTestHook(t, runtimeName, string(rawPrompt))
+			rawNextResponse, err := json.Marshal(nextResponsePayload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nextResponse := enqueueTestHook(t, runtimeName, string(rawNextResponse))
+			if nextResponse.Body != "ordinary response" || len(nextResponse.Raw) == 0 {
+				t.Fatalf("next user prompt did not reset sensitive-turn capture: %#v", nextResponse)
+			}
+		})
+	}
+}
+
+func TestMessagesModeObservesSealedToolsWithoutPersistingToolTraffic(t *testing.T) {
+	const canary = "messages-mode-sealed-canary-714"
+	toolNames := map[string]string{
+		RuntimeCodex:      "mcp__witself__witself_secret_reveal",
+		RuntimeClaudeCode: "provider/mcp/witself.secret.create",
+		RuntimeGrokBuild:  "provider_witself_password_generate",
+		RuntimeCursor:     "CallMcpTool",
+	}
+	for _, runtimeName := range []string{RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor} {
+		t.Run(runtimeName, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+			location, err := EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(Config{
+				Runtime: runtimeName, CaptureMode: ModeMessages,
+				Account: "default", Realm: "default", Agent: "scott",
+				AgentID: "agent_1", AgentName: "scott", Location: location,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			prompt := map[string]any{"prompt": "use " + canary}
+			switch runtimeName {
+			case RuntimeGrokBuild:
+				prompt["sessionId"] = "session-sensitive"
+				prompt["hookEventName"] = "UserPromptSubmit"
+				prompt["promptId"] = "generation-sensitive"
+			case RuntimeCursor:
+				prompt["conversation_id"] = "session-sensitive"
+				prompt["generation_id"] = "generation-sensitive"
+				prompt["hook_event_name"] = "beforeSubmitPrompt"
+			default:
+				prompt["session_id"] = "session-sensitive"
+				prompt["turn_id"] = "generation-sensitive"
+				prompt["hook_event_name"] = "UserPromptSubmit"
+			}
+			rawPrompt, _ := json.Marshal(prompt)
+			enqueueTestHook(t, runtimeName, string(rawPrompt))
+
+			ordinary := enqueueTestHook(t, runtimeName, sensitiveToolHookJSON(t, runtimeName,
+				"PreToolUse", "ordinary_browser_tool", "tool-ordinary", map[string]any{"url": "https://example.test"}, ""))
+			state, err := loadSessionState(runtimeName, "session-sensitive")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.SensitiveTurn {
+				t.Fatalf("ordinary tool unexpectedly marked its turn sensitive: %#v", ordinary)
+			}
+			pending, err := Pending(runtimeName)
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("messages mode persisted ordinary tool traffic: %d / %v", len(pending), err)
+			}
+
+			toolInput := map[string]any{"value": canary}
+			if runtimeName == RuntimeCursor {
+				toolInput = map[string]any{"toolName": "witself.totp.code", "arguments": map[string]any{"seed": canary}}
+			}
+			sensitive := enqueueTestHook(t, runtimeName, sensitiveToolHookJSON(t, runtimeName,
+				"PreToolUse", toolNames[runtimeName], "tool-sensitive", toolInput, canary))
+			state, err = loadSessionState(runtimeName, "session-sensitive")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.SensitiveTurn || bytes.Contains([]byte(sensitive.Body), []byte(canary)) {
+				t.Fatalf("messages mode missed or retained payload from sealed tool: %#v", sensitive)
+			}
+			pending, err = Pending(runtimeName)
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("messages mode persisted sealed tool traffic: %d / %v", len(pending), err)
+			}
+
+			response := map[string]any{"status": "success"}
+			switch runtimeName {
+			case RuntimeGrokBuild:
+				response["sessionId"] = "session-sensitive"
+				response["hookEventName"] = "AgentResponse"
+				response["lastAssistantMessage"] = canary
+			case RuntimeCursor:
+				response["conversation_id"] = "session-sensitive"
+				response["generation_id"] = "generation-sensitive"
+				response["hook_event_name"] = "afterAgentResponse"
+				response["text"] = canary
+			default:
+				response["session_id"] = "session-sensitive"
+				response["turn_id"] = "generation-sensitive"
+				response["hook_event_name"] = "AgentResponse"
+				response["last_assistant_message"] = canary
+			}
+			rawResponse, _ := json.Marshal(response)
+			enqueueTestHook(t, runtimeName, string(rawResponse))
+
+			pending, err = Pending(runtimeName)
+			if err != nil || len(pending) != 2 {
+				t.Fatalf("messages mode prompt/response outbox = %d / %v", len(pending), err)
+			}
+			persisted, err := json.Marshal(pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(persisted, []byte(canary)) || bytes.Contains(persisted, []byte("ordinary_browser_tool")) ||
+				!bytes.Contains(persisted, []byte(`"sealed_content_omitted":true`)) {
+				t.Fatalf("messages mode portable transcript fence failed: %s", persisted)
+			}
+		})
+	}
+}
+
+func TestSensitiveCLICommandRecognitionPreservesOrdinaryShellCapture(t *testing.T) {
+	if !rawContainsSensitiveToolName(json.RawMessage(`{"toolName":"secret.reveal"}`)) {
+		t.Fatal("bare sensitive tool name inside an MCP wrapper was not recognized")
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"create", "witself secret create --file value.json", true},
+		{"reveal alias", "/opt/bin/ws secret reveal github password", true},
+		{"generated password", "TOKEN=x env HOME=/tmp /opt/witself password generate", true},
+		{"nested totp", `bash -lc 'ws totp code github otp'`, true},
+		{"sudo reveal", "sudo -u scott /usr/local/bin/witself secret reveal github password", true},
+		{"ordinary list", "witself secret list", false},
+		{"ordinary password text", "echo witself password generate", false},
+		{"ordinary test", "go test ./...", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sensitiveCLICommand(tc.command, 0); got != tc.want {
+				t.Fatalf("sensitiveCLICommand(%q) = %t, want %t", tc.command, got, tc.want)
+			}
+		})
+	}
+
+	var ordinary Event
+	ordinary.CaptureMode = ModeRaw
+	raw := []byte(`{"tool_input":{"command":"go test ./...","canary":"ordinary-tool-canary"}}`)
+	setEventContent(&ordinary, hookInput{
+		HookEventName: "PreToolUse", ToolName: "Bash", ToolUseID: "tool-ordinary",
+		ToolInput: json.RawMessage(`{"command":"go test ./...","canary":"ordinary-tool-canary"}`),
+	}, raw)
+	marshaled, err := json.Marshal(ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(marshaled, []byte("ordinary-tool-canary")) || len(ordinary.Raw) == 0 {
+		t.Fatalf("ordinary raw/trace tool capture was weakened: %s", marshaled)
+	}
+}
+
+func TestSensitiveToolUseFenceIsBoundedAndFailsClosed(t *testing.T) {
+	state := sessionState{}
+	for index := 0; index <= maxSensitiveToolUseFences; index++ {
+		input := hookInput{
+			HookEventName: "PreToolUse",
+			ToolName:      "witself.secret.create",
+			ToolUseID:     fmt.Sprintf("tool-sensitive-%d", index),
+			ToolInput:     json.RawMessage(`{"value":"fence-canary"}`),
+		}
+		protectSensitiveToolPayload(&input, &state)
+		if len(input.ToolInput) != 0 || !input.SensitiveToolEvent {
+			t.Fatalf("sensitive input %d was not protected: %#v", index, input)
+		}
+		if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+			t.Fatalf("sensitive tool-use fence grew to %d", len(state.SensitiveToolUseIDs))
+		}
+	}
+	if !state.RedactAllToolPayload || len(state.SensitiveToolUseIDs) != 0 {
+		t.Fatalf("overflow state did not fail closed: %#v", state)
+	}
+
+	ordinary := hookInput{
+		HookEventName: "PostToolUse", ToolName: "Bash", ToolUseID: "ordinary-after-overflow",
+		ToolResponse: json.RawMessage(`{"value":"ordinary-output-canary"}`),
+	}
+	protectSensitiveToolPayload(&ordinary, &state)
+	if !ordinary.SensitiveToolEvent || len(ordinary.ToolResponse) != 0 {
+		t.Fatalf("overflow state allowed a later tool payload: %#v", ordinary)
+	}
+}
+
+func TestSensitiveTurnSuppressesUnknownFutureHookShape(t *testing.T) {
+	const canary = "future-hook-sealed-canary-714"
+	state := sessionState{SensitiveTurn: true}
+	input := hookInput{
+		HookEventName:        "FutureProviderResponse",
+		Prompt:               canary,
+		LastAssistantMessage: canary,
+		Text:                 canary,
+		Reason:               canary,
+		ErrorMessage:         canary,
+		ToolInput:            json.RawMessage(`{"value":"` + canary + `"}`),
+		Error:                json.RawMessage(`{"message":"` + canary + `"}`),
+	}
+	protectSensitiveTurnContent(&input, &state)
+	if !input.SensitiveTurnContent || input.Prompt != "" || input.LastAssistantMessage != "" ||
+		input.Text != "" || input.Reason != "" || input.ErrorMessage != "" ||
+		len(input.ToolInput) != 0 || len(input.Error) != 0 {
+		t.Fatalf("future hook shape retained sealed turn content: %#v", input)
+	}
+	var event Event
+	event.CaptureMode = ModeRaw
+	setEventContent(&event, input, []byte(`{"canary":"`+canary+`"}`))
+	persisted, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(canary)) || len(event.Raw) != 0 || !eventSealedContentOmitted(event.Data) {
+		t.Fatalf("future hook shape entered the portable transcript: %s", persisted)
+	}
+}
+
+func TestPendingTurnUploadWaitsForTerminalFence(t *testing.T) {
+	base := time.Unix(100, 0).UTC()
+	prompt := PendingEvent{Path: "prompt", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-1", HookEvent: "UserPromptSubmit", OccurredAt: base,
+	}}
+	tool := PendingEvent{Path: "tool", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-1", HookEvent: "PreToolUse", OccurredAt: base.Add(time.Second),
+	}}
+	if PendingEventUploadReady(prompt, []PendingEvent{prompt, tool}) ||
+		PendingEventUploadReady(tool, []PendingEvent{prompt, tool}) {
+		t.Fatal("open turn was eligible for transcript upload")
+	}
+	stop := PendingEvent{Path: "stop", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-1", HookEvent: "Stop", OccurredAt: base.Add(2 * time.Second),
+	}}
+	complete := []PendingEvent{prompt, tool, stop}
+	for _, event := range complete {
+		if !PendingEventUploadReady(event, complete) {
+			t.Fatalf("terminally fenced event remained blocked: %#v", event.Event)
+		}
+	}
+
+	nextPrompt := PendingEvent{Path: "next", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-2", HookEvent: "UserPromptSubmit", OccurredAt: base.Add(3 * time.Second),
+	}}
+	if !PendingEventUploadReady(prompt, []PendingEvent{prompt, nextPrompt}) {
+		t.Fatal("new user prompt did not close an omitted-terminal prior turn")
+	}
+	if PendingEventUploadReady(nextPrompt, []PendingEvent{prompt, nextPrompt}) {
+		t.Fatal("new current turn was uploaded before its own terminal fence")
+	}
+
+	response := PendingEvent{Path: "response", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-2", HookEvent: "AgentResponse", OccurredAt: base.Add(4 * time.Second),
+	}}
+	for _, event := range []PendingEvent{nextPrompt, response} {
+		if !PendingEventUploadReady(event, []PendingEvent{prompt, nextPrompt, response}) {
+			t.Fatalf("agent-response-fenced event remained blocked: %#v", event.Event)
+		}
+	}
+}
+
+func TestSessionStateReadIsBoundedAndOversizedFenceFailsClosed(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	path, err := sessionStatePath(RuntimeCodex, "bounded-state-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxSessionStateBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSessionState(RuntimeCodex, "bounded-state-session"); err == nil {
+		t.Fatal("oversized session state was accepted")
+	}
+
+	fences := make(map[string]bool, maxSensitiveToolUseFences+1)
+	for index := 0; index <= maxSensitiveToolUseFences; index++ {
+		fences[fmt.Sprintf("tool-%d", index)] = true
+	}
+	raw, err := json.Marshal(sessionState{RunID: "run_1", SensitiveToolUseIDs: fences})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadSessionState(RuntimeCodex, "bounded-state-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.RedactAllToolPayload || len(state.SensitiveToolUseIDs) != 0 {
+		t.Fatalf("oversized persisted fence did not fail closed: %#v", state)
+	}
+}
+
+func sensitiveToolHookJSON(t *testing.T, runtimeName, hookEvent, toolName, toolUseID string, toolInput map[string]any, canary string) string {
+	t.Helper()
+	nativeEvent := hookEvent
+	if runtimeName == RuntimeCursor {
+		nativeEvent = map[string]string{
+			"PreToolUse": "preToolUse", "PostToolUse": "postToolUse", "PostToolUseFailure": "postToolUseFailure",
+		}[hookEvent]
+	}
+	payload := map[string]any{
+		"status": "failed", "failure_type": canary, "reason": canary,
+		"error_message": canary,
+	}
+	if runtimeName == RuntimeGrokBuild {
+		payload["sessionId"] = "session-sensitive"
+		payload["hookEventName"] = nativeEvent
+		payload["toolName"] = toolName
+		payload["toolUseId"] = toolUseID
+		if toolInput != nil {
+			payload["toolInput"] = toolInput
+		}
+		payload["toolOutput"] = map[string]any{"value": canary}
+	} else {
+		if runtimeName == RuntimeCursor {
+			payload["conversation_id"] = "session-sensitive"
+			payload["generation_id"] = "generation-sensitive"
+		} else {
+			payload["session_id"] = "session-sensitive"
+		}
+		payload["hook_event_name"] = nativeEvent
+		payload["tool_name"] = toolName
+		payload["tool_use_id"] = toolUseID
+		if toolInput != nil {
+			payload["tool_input"] = toolInput
+		}
+		payload["tool_output"] = map[string]any{"value": canary}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func assertSensitiveHookEventRedacted(t *testing.T, event Event, toolName, toolUseID, canary string) {
+	t.Helper()
+	if !strings.Contains(event.Body, toolName) || !strings.Contains(event.Body, toolUseID) {
+		t.Fatalf("redacted tool event lost value-free identity: %#v", event)
+	}
+	if len(event.Raw) != 0 {
+		t.Fatalf("redacted tool event retained raw hook payload: %s", event.Raw)
+	}
+	marshaled, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := json.Marshal(event.Entries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(marshaled, []byte(canary)) || bytes.Contains(entries, []byte(canary)) {
+		t.Fatalf("redacted tool event contains plaintext: event=%s entries=%s", marshaled, entries)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := data["tool"].(map[string]any)
+	if !ok || tool["name"] != toolName || tool["use_id"] != toolUseID || len(tool) != 2 {
+		t.Fatalf("redacted tool metadata = %#v", data)
+	}
+	for _, forbidden := range []string{"input", "output", "error", "reason", "failure_type"} {
+		if _, ok := data[forbidden]; ok {
+			t.Fatalf("redacted tool metadata retained %s: %#v", forbidden, data)
+		}
+	}
+}
+
 func TestInstallHooksPreservesOthersAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -357,6 +971,33 @@ func TestRawHookCoverageByRuntime(t *testing.T) {
 			got := hookEvents(tc.runtime, ModeRaw)
 			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
 				t.Fatalf("hook events:\n got: %v\nwant: %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessagesHookCoverageIncludesPrivacyToolFences(t *testing.T) {
+	for _, tc := range []struct {
+		runtime string
+		want    []string
+		reject  []string
+	}{
+		{RuntimeCodex, []string{"PreToolUse", "PermissionRequest", "PostToolUse"}, nil},
+		{RuntimeClaudeCode, []string{"PreToolUse", "PermissionRequest", "PermissionDenied", "PostToolUse", "PostToolUseFailure"}, []string{"Notification"}},
+		{RuntimeGrokBuild, []string{"PreToolUse", "PermissionDenied", "PostToolUse", "PostToolUseFailure"}, []string{"Notification"}},
+		{RuntimeCursor, []string{"preToolUse", "postToolUse", "postToolUseFailure"}, []string{"afterAgentThought"}},
+	} {
+		t.Run(tc.runtime, func(t *testing.T) {
+			events := hookEvents(tc.runtime, ModeMessages)
+			for _, want := range tc.want {
+				if !slices.Contains(events, want) {
+					t.Errorf("messages hooks omitted privacy event %s: %v", want, events)
+				}
+			}
+			for _, reject := range tc.reject {
+				if slices.Contains(events, reject) {
+					t.Errorf("messages hooks retained trace-only event %s: %v", reject, events)
+				}
 			}
 		})
 	}
@@ -679,6 +1320,69 @@ func TestCursorHeadlessSessionEndBackfillsVisibleNativeMessages(t *testing.T) {
 			!bytes.Equal(retryEntries[i].Payload, entries[i].Payload) {
 			t.Fatalf("recovered entry %d changed across SessionEnd retry:\nfirst=%#v\nretry=%#v", i, entries[i], retryEntries[i])
 		}
+	}
+}
+
+func TestCursorSensitiveTurnNeverBackfillsNativeTranscript(t *testing.T) {
+	const canary = "cursor-native-sealed-canary-714"
+	home := t.TempDir()
+	cursorHome := filepath.Join(home, ".cursor")
+	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_DATA_DIR", cursorHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	location, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeCursor, RuntimeVersion: "3.12.10", CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: location,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionDir := filepath.Join(cursorHome, "projects", "workspace", "agent-transcripts", "session-sensitive")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(sessionDir, "session-sensitive.jsonl")
+	transcript := strings.Join([]string{
+		`{"role":"user","message":{"content":[{"type":"text","text":"store a generated credential"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"` + canary + `"}]}}`,
+		`{"type":"turn_ended","status":"success"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	enqueueTestHook(t, RuntimeCursor, `{"conversation_id":"session-sensitive","generation_id":"generation-sensitive","hook_event_name":"sessionStart","cursor_version":"3.12.10"}`)
+	enqueueTestHook(t, RuntimeCursor, sensitiveToolHookJSON(t, RuntimeCursor,
+		"PreToolUse", "CallMcpTool", "tool-sensitive-native", map[string]any{
+			"toolName": "witself.secret.reveal", "arguments": map[string]any{"canary": canary},
+		}, canary))
+	endRaw, err := json.Marshal(map[string]any{
+		"conversation_id": "session-sensitive", "generation_id": "generation-sensitive",
+		"hook_event_name": "sessionEnd", "cursor_version": "3.12.10",
+		"transcript_path": transcriptPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := enqueueTestHook(t, RuntimeCursor, string(endRaw))
+	if len(end.RecoveredMessages) != 0 || len(end.Raw) != 0 {
+		t.Fatalf("sensitive Cursor turn recovered native content: %#v", end)
+	}
+	pending, err := Pending(RuntimeCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(canary)) {
+		t.Fatalf("sensitive Cursor native transcript entered outbox: %s", persisted)
 	}
 }
 
@@ -1046,6 +1750,63 @@ func TestFinalizePendingGrokStopAfterHookReturns(t *testing.T) {
 	if retry.Event.ID != finalized.Event.ID || !bytes.Equal(persisted, retryPersisted) ||
 		fmt.Sprintf("%#v", retry.Event.Entries()) != fmt.Sprintf("%#v", finalized.Event.Entries()) {
 		t.Fatalf("finalized retry changed durable content:\nfirst=%#v\nretry=%#v", finalized.Event, retry.Event)
+	}
+}
+
+func TestFinalizePendingGrokSealedTurnNeverReadsNativeResponse(t *testing.T) {
+	const canary = "grok-native-secret-canary-714"
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	location, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: RuntimeGrokBuild, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: location,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	promptRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-sensitive", "hookEventName": "user_prompt_submit", "promptId": "generation-sensitive",
+		"prompt": "reveal " + canary,
+	})
+	enqueueTestHook(t, RuntimeGrokBuild, string(promptRaw))
+	enqueueTestHook(t, RuntimeGrokBuild, sensitiveToolHookJSON(t, RuntimeGrokBuild,
+		"PreToolUse", "provider_witself_secret_reveal", "tool-grok-sealed",
+		map[string]any{"value": canary}, canary))
+	stopRaw, _ := json.Marshal(map[string]any{
+		"sessionId": "session-sensitive", "hookEventName": "stop", "promptId": "generation-sensitive",
+		"reason": canary, "transcriptPath": filepath.Join(t.TempDir(), "does-not-exist.jsonl"),
+	})
+	stop := enqueueTestHook(t, RuntimeGrokBuild, string(stopRaw))
+	if stop.Kind != "turn.completed" || stop.Role != "system" || !eventSealedContentOmitted(stop.Data) {
+		t.Fatalf("sealed Grok Stop was not value-free: %#v", stop)
+	}
+	pending, err := Pending(RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pendingStop PendingEvent
+	for _, item := range pending {
+		if item.Event.ID == stop.ID {
+			pendingStop = item
+		}
+	}
+	if pendingStop.Path == "" {
+		t.Fatalf("sealed Grok Stop not found: %#v", pending)
+	}
+	finalized, ready, err := finalizePendingWithin(pendingStop, time.Millisecond, time.Millisecond)
+	if err != nil || !ready || !finalized.Event.NativeTurnFinalized ||
+		finalized.Event.Kind != "turn.completed" || finalized.Event.Role != "system" {
+		t.Fatalf("sealed Grok Stop tried to rehydrate native content: ready=%t err=%v event=%#v", ready, err, finalized.Event)
+	}
+	persisted, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(canary)) {
+		t.Fatalf("sealed Grok turn retained plaintext: %s", persisted)
 	}
 }
 

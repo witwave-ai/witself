@@ -825,9 +825,7 @@ func TestMigration54DownLocksBeforeRendererSafetyCheckPostgres(t *testing.T) {
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 41)
 	insertMigrationTestMemoryPrincipals(t, st)
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestUpTo(t, dsn, 54)
 
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
@@ -967,7 +965,14 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}
-	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()-1))
+	assertMigrationTestVersion(t, dsn, 54)
+	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", true)
+	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
+	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 53)
 	assertMigrationTestColumn(t, st, "agent_avatar_versions", "renderer_profile", false)
 	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
 	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
@@ -1097,9 +1102,7 @@ func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testin
 
 	t.Run("up after index build before version record", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 54)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -1128,9 +1131,7 @@ func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testin
 
 	t.Run("down after index already absent", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 54)
 		if _, err := st.pool.Exec(ctx, `DROP INDEX CONCURRENTLY agent_avatar_profiles_by_style_revision`); err != nil {
 			t.Fatal(err)
 		}
@@ -1153,9 +1154,7 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 
 	t.Run("open and mismatched terminal jobs refuse; aligned completed permits", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 54)
 		provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "down-open")
 		realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-open", 1)
 		publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "down-open-v2")
@@ -1200,9 +1199,7 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 
 	t.Run("aligned superseded history permits", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
-		if err := st.Migrate(); err != nil {
-			t.Fatal(err)
-		}
+		migrationTestUpTo(t, dsn, 54)
 		provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "down-superseded")
 		realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-superseded", 0)
 		publishAvatarStyleForTest(ctx, t, st, operator, realm.ID, 1, 2, "down-superseded-v2")
@@ -1236,9 +1233,7 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestUpTo(t, dsn, 54)
 	provisioned, _ := provisionActiveRolloutAccountForTest(ctx, t, st, "down-race")
 	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-race", 0)
 	if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance

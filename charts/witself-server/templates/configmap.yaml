@@ -6,8 +6,9 @@ metadata:
     {{- include "witself-server.labels" . | nindent 4 }}
 data:
   # Non-secret server config. Only values witself-server consumes today are set
-  # here; secret-bearing config (DB, embeddings, KMS) arrives via Secret refs
-  # when those subsystems land. See docs/helm-chart.md.
+  # here. Database/bootstrap/provision credentials arrive through explicit
+  # Secret refs. Agent-secret AVKs remain client-custodied, so the backend has
+  # no sealed-plane KMS or decrypt-key configuration. See ADR 0003.
   WITSELF_API_ADDR: ":{{ .Values.server.port }}"
   WITSELF_HEALTH_ADDR: ":{{ .Values.health.port }}"
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"

@@ -501,6 +501,10 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.avatar.rollback",
 		"witself.avatar.reset",
 		"witself.avatar.generation.fail",
+		"witself.secret.create",
+		"witself.secret.reveal",
+		"witself.password.generate",
+		"witself.totp.code",
 	}
 	readDotted := []string{
 		"witself.self.show",
@@ -647,7 +651,7 @@ func TestMCPServeReadOnlyFlagWiresServerOptions(t *testing.T) {
 	command, err := parseMCPServeCommandOptions([]string{
 		"--runtime", transcriptcapture.RuntimeGrokBuild,
 		"--account", "team", "--realm", "default", "--agent", "curator",
-		"--location", "home", "--read-only",
+		"--location", "home", "--read-only", "--no-value-tools",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -663,6 +667,9 @@ func TestMCPServeReadOnlyFlagWiresServerOptions(t *testing.T) {
 	if command.Server.Profile != mcpProfileReadOnly {
 		t.Fatalf("--read-only profile = %q", command.Server.Profile)
 	}
+	if !command.Server.NoValueTools {
+		t.Fatal("--no-value-tools did not reach mcpServerOptions")
+	}
 
 	defaults, err := parseMCPServeCommandOptions([]string{
 		"--runtime", transcriptcapture.RuntimeCursor,
@@ -672,6 +679,9 @@ func TestMCPServeReadOnlyFlagWiresServerOptions(t *testing.T) {
 	}
 	if defaults.Server.ReadOnly {
 		t.Fatal("MCP serve defaults to read-only without the flag")
+	}
+	if defaults.Server.NoValueTools {
+		t.Fatal("MCP serve disables value tools without the flag")
 	}
 	if defaults.Server.Profile != mcpProfileFull {
 		t.Fatalf("default profile = %q", defaults.Server.Profile)
@@ -695,6 +705,16 @@ func TestMCPServeReadOnlyFlagWiresServerOptions(t *testing.T) {
 	}
 	if _, err := parseMCPServeCommandOptions([]string{"--read-only", "--profile", mcpProfileCuratorApply}, io.Discard); err == nil {
 		t.Fatal("conflicting read-only and curator profile was accepted")
+	}
+}
+
+func TestMCPHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
+	for _, args := range [][]string{{"mcp", "--help"}, {"mcp", "serve", "--help"}} {
+		stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+		if code != 0 || stdout != "" || !strings.Contains(stderr, "usage: witself mcp serve") ||
+			!strings.Contains(stderr, "--no-value-tools") {
+			t.Fatalf("run(%v) = %d stdout=%q stderr=%q", args, code, stdout, stderr)
+		}
 	}
 }
 
@@ -1651,7 +1671,7 @@ func TestCodexMCPInstructionsLeadWithCanonicalMemoryRouting(t *testing.T) {
 			t.Errorf("first 512 Codex instruction bytes do not contain %q: %q", want, first)
 		}
 	}
-	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions {
+	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions+"\n\n"+secretRoutingInstructions {
 		t.Fatal("provider-specific Codex routing leaked into generic MCP instructions")
 	}
 }

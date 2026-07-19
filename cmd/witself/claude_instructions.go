@@ -35,7 +35,8 @@ var claudeMemoryRoutingBlock = []byte(
 	claudeMemoryRoutingBeginMarker + "\n" +
 		runtimeNeutralMemoryRoutingInstructions + "\n\n" +
 		foregroundMessagingRoutingInstructions + "\n\n" +
-		avatarRoutingInstructions + "\n" +
+		avatarRoutingInstructions + "\n\n" +
+		secretRoutingInstructions + "\n" +
 		claudeMemoryRoutingEndMarker,
 )
 

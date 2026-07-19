@@ -16,10 +16,13 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 This chart tracks what `witself-server` actually consumes today: the three
 listeners (API `:8080`, health `:8081`, metrics `:9090`), `backend.kind`, and an
 optional Postgres DSN from an existing Secret, and an optional first-operator
-bootstrap token mounted from an existing Secret. The broader production surface
-in [docs/helm-chart.md](../../docs/helm-chart.md) — embedding provider config,
-KMS for the sealed plane, and the migration `Job` — is wired in as the server
-gains those subsystems. Nothing here renders config the server would silently
+bootstrap token mounted from an existing Secret. Agent secrets use the
+client-custodied AVK design in
+[ADR 0003](../../docs/decisions/0003-client-custodied-agent-vault.md): this
+chart needs no sealed-plane feature flag, backend KMS setting, or decrypt-key
+Secret. The chart does not render a migration Job; when a database DSN is
+configured, `witself-server serve` applies its embedded forward Goose migrations
+before becoming Ready. Nothing here renders config the server would silently
 ignore.
 
 ## What it renders

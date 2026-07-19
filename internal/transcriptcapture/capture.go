@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/id"
@@ -29,6 +30,8 @@ const (
 	maxNativeTranscriptScanBytes = 64 * 1024 * 1024
 	maxNativeTranscriptLineBytes = 2 * 1024 * 1024
 	maxNativeTranscriptRecords   = 10_000
+	maxSessionStateBytes         = 256 * 1024
+	maxSensitiveToolUseFences    = 256
 	entryBodyChunkSize           = 60 * 1024
 	staleFlushLockAge            = 5 * time.Minute
 	grokTranscriptPollInterval   = 50 * time.Millisecond
@@ -178,16 +181,21 @@ type hookInput struct {
 	SubagentType         string          `json:"subagent_type"`
 	Error                json.RawMessage `json:"error"`
 	NativeHookEvent      string          `json:"-"`
+	SensitiveToolEvent   bool            `json:"-"`
+	SensitiveTurnContent bool            `json:"-"`
 }
 
 type sessionState struct {
-	RunID                string `json:"run_id"`
-	RuntimeVersion       string `json:"runtime_version,omitempty"`
-	RuntimeVersionSource string `json:"runtime_version_source,omitempty"`
-	TurnID               string `json:"turn_id,omitempty"`
-	PromptEventID        string `json:"prompt_event_id,omitempty"`
-	PromptCaptured       bool   `json:"prompt_captured,omitempty"`
-	ResponseCaptured     bool   `json:"response_captured,omitempty"`
+	RunID                string          `json:"run_id"`
+	RuntimeVersion       string          `json:"runtime_version,omitempty"`
+	RuntimeVersionSource string          `json:"runtime_version_source,omitempty"`
+	TurnID               string          `json:"turn_id,omitempty"`
+	PromptEventID        string          `json:"prompt_event_id,omitempty"`
+	PromptCaptured       bool            `json:"prompt_captured,omitempty"`
+	ResponseCaptured     bool            `json:"response_captured,omitempty"`
+	SensitiveToolUseIDs  map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
+	RedactAllToolPayload bool            `json:"redact_all_tool_payload,omitempty"`
+	SensitiveTurn        bool            `json:"sensitive_turn,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -257,7 +265,19 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		state.ResponseCaptured = false
 		state.RuntimeVersion = ""
 		state.RuntimeVersionSource = ""
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = false
+		state.SensitiveTurn = false
 	}
+	// A new real user prompt is the only reliable cross-provider fence for a
+	// new turn. Clear the prior turn's sealed-content suppression before any
+	// tools for this turn can mark it again. Codex's nested approval review is
+	// normalized to a different event and therefore cannot reset this fence.
+	if input.HookEventName == "UserPromptSubmit" {
+		state.SensitiveTurn = false
+	}
+	protectSensitiveToolPayload(&input, &state)
+	protectSensitiveTurnContent(&input, &state)
 	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
@@ -288,6 +308,15 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact":
 		if turnID == "" {
 			turnID = state.TurnID
+		}
+	}
+	if state.SensitiveTurn && turnID != "" {
+		if err := RedactPendingTurn(cfg.Runtime, input.SessionID, turnID); err != nil {
+			// Preserve the fail-closed fence even if a local I/O problem prevents
+			// this hook from being queued. The next hook retries redaction, while
+			// turn-gated flushing keeps the unredacted prompt local.
+			_ = saveSessionState(cfg.Runtime, input.SessionID, state)
+			return Event{}, err
 		}
 	}
 
@@ -333,6 +362,7 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 	setEventContent(&event, input, raw)
 	if cfg.Runtime == RuntimeCursor && cfg.CaptureMode == ModeRaw && input.HookEventName == "SessionEnd" &&
+		!state.SensitiveTurn &&
 		!state.PromptCaptured && !state.ResponseCaptured && input.TranscriptPath != "" {
 		fallback, fallbackErr := cursorNativeTranscriptMessages(event, input.TranscriptPath)
 		if fallbackErr == nil {
@@ -349,6 +379,12 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 	if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
 		return Event{}, err
+	}
+	if cfg.CaptureMode == ModeMessages && isToolHookEvent(input.HookEventName) {
+		// Messages capture observes tool hooks only to maintain the sealed-turn
+		// privacy fence. Ordinary tool traffic remains excluded from this mode,
+		// and a sealed hook has already redacted queued content above.
+		return event, nil
 	}
 	if err := writeOutboxEvent(event); err != nil {
 		return Event{}, err
@@ -433,6 +469,405 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		}
 	}
 	return nil
+}
+
+// sensitiveToolEvent identifies the sealed-plane tool calls whose hook payloads
+// may contain plaintext credentials, generated passwords, or one-time codes.
+// Tool names vary by provider, so matching is deliberately suffix-based over
+// normalized name tokens. Wrapper tools and shell tools are inspected only in
+// their recognized tool-name namespaces.
+func sensitiveToolEvent(input hookInput) bool {
+	if sensitiveSealedToolName(input.ToolName) {
+		return true
+	}
+	if mcpWrapperToolName(input.ToolName) &&
+		(rawContainsSensitiveToolName(input.ToolInput) || rawContainsSensitiveToolName(input.ToolResponse)) {
+		return true
+	}
+	return shellToolName(input.ToolName) &&
+		(rawContainsSensitiveCLICommand(input.ToolInput) || rawContainsSensitiveCLICommand(input.ToolResponse))
+}
+
+func protectSensitiveToolPayload(input *hookInput, state *sessionState) {
+	if input == nil || state == nil || !isToolHookEvent(input.HookEventName) {
+		return
+	}
+	if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = true
+	}
+	// After any sealed value-bearing operation, every later tool in the same
+	// turn is a possible exfiltration sink (browser typing, shell arguments,
+	// HTTP clients, and so on). Preserve only value-free tool identity until the
+	// next real user prompt resets SensitiveTurn.
+	input.SensitiveToolEvent = state.RedactAllToolPayload || state.SensitiveTurn || sensitiveToolEvent(*input)
+	if !input.SensitiveToolEvent && input.ToolUseID != "" && state.SensitiveToolUseIDs[input.ToolUseID] {
+		input.SensitiveToolEvent = true
+	}
+	if !input.SensitiveToolEvent {
+		return
+	}
+	state.SensitiveTurn = true
+	if input.ToolUseID != "" && !state.RedactAllToolPayload {
+		if !state.SensitiveToolUseIDs[input.ToolUseID] && len(state.SensitiveToolUseIDs) >= maxSensitiveToolUseFences {
+			// A pathological session must not grow the local state file without
+			// bound or lose the correlation that keeps terminal hook output safe.
+			// Fail closed for later tool payloads until SessionEnd resets state.
+			state.SensitiveToolUseIDs = nil
+			state.RedactAllToolPayload = true
+		} else {
+			if state.SensitiveToolUseIDs == nil {
+				state.SensitiveToolUseIDs = make(map[string]bool)
+			}
+			state.SensitiveToolUseIDs[input.ToolUseID] = true
+		}
+	}
+	redactSensitiveToolPayload(input)
+}
+
+// protectSensitiveTurnContent prevents an authorized revealed value, generated
+// password, TOTP code, or create input from being copied back into Witself's
+// portable transcript by a later provider response hook. The user still sees
+// the provider's native response; only Witself capture is made value-free.
+// The fence is reset by the next real UserPromptSubmit in EnqueueHookForBinding.
+func protectSensitiveTurnContent(input *hookInput, state *sessionState) {
+	if input == nil || state == nil || !state.SensitiveTurn || isToolHookEvent(input.HookEventName) {
+		return
+	}
+	// Provider hook schemas evolve. Once a turn has handled sealed material,
+	// suppress every later non-tool hook instead of maintaining an allowlist
+	// that could let a newly introduced response-shaped event retain plaintext.
+	// SessionStart and the next real UserPromptSubmit reset the fence before this
+	// function runs; tool hooks take the correlated path above.
+	input.SensitiveTurnContent = true
+	input.Prompt = ""
+	input.LastAssistantMessage = ""
+	input.Text = ""
+	input.Reason = ""
+	input.ErrorMessage = ""
+	redactSensitiveToolPayload(input)
+}
+
+func isToolHookEvent(event string) bool {
+	switch event {
+	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "PermissionDenied":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveSealedToolName(name string) bool {
+	compact := compactName(name)
+	for _, suffix := range []string{
+		"witselfsecretcreate",
+		"witselfsecretreveal",
+		"witselfpasswordgenerate",
+		"witselftotpcode",
+	} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func sensitiveWrappedToolName(name string) bool {
+	if sensitiveSealedToolName(name) {
+		return true
+	}
+	compact := compactName(name)
+	for _, suffix := range []string{"secretcreate", "secretreveal", "passwordgenerate", "totpcode"} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpWrapperToolName(name string) bool {
+	compact := compactName(name)
+	return strings.HasSuffix(compact, "callmcptool") ||
+		strings.HasSuffix(compact, "mcpcalltool") ||
+		strings.HasSuffix(compact, "invokemcptool")
+}
+
+func shellToolName(name string) bool {
+	compact := compactName(name)
+	for _, suffix := range []string{
+		"bash", "shell", "terminal", "execcommand", "runcommand", "shellcommand", "executecommand",
+	} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func compactName(value string) string {
+	var out strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func rawContainsSensitiveToolName(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return valueContainsSensitiveToolName(value)
+}
+
+func valueContainsSensitiveToolName(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch compactName(key) {
+			case "tool", "toolname", "mcptool", "mcptoolname", "function", "functionname", "method", "name":
+				if name, ok := item.(string); ok && sensitiveWrappedToolName(name) {
+					return true
+				}
+			}
+			if valueContainsSensitiveToolName(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if valueContainsSensitiveToolName(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func rawContainsSensitiveCLICommand(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return valueContainsSensitiveCLICommand(value)
+}
+
+func valueContainsSensitiveCLICommand(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch compactName(key) {
+			case "command", "cmd", "script", "shellcommand":
+				switch command := item.(type) {
+				case string:
+					if sensitiveCLICommand(command, 0) {
+						return true
+					}
+				case []any:
+					parts := make([]string, 0, len(command))
+					for _, part := range command {
+						text, ok := part.(string)
+						if !ok {
+							parts = nil
+							break
+						}
+						parts = append(parts, text)
+					}
+					if len(parts) != 0 && sensitiveCLICommand(strings.Join(parts, " "), 0) {
+						return true
+					}
+				}
+			}
+			if valueContainsSensitiveCLICommand(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if valueContainsSensitiveCLICommand(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sensitiveCLICommand(command string, depth int) bool {
+	if depth > 3 {
+		return false
+	}
+	for _, segment := range shellCommandSegments(command) {
+		if segmentInvokesSensitiveCLI(segment, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func segmentInvokesSensitiveCLI(words []string, depth int) bool {
+	i := 0
+	for i < len(words) && shellAssignment(words[i]) {
+		i++
+	}
+	for i < len(words) {
+		command := strings.ToLower(filepath.Base(words[i]))
+		switch command {
+		case "env":
+			i++
+			for i < len(words) {
+				if shellAssignment(words[i]) {
+					i++
+					continue
+				}
+				if words[i] == "-u" || words[i] == "--unset" || words[i] == "-C" || words[i] == "--chdir" {
+					i += min(2, len(words)-i)
+					continue
+				}
+				if strings.HasPrefix(words[i], "-") {
+					i++
+					continue
+				}
+				break
+			}
+		case "command", "builtin", "exec", "nohup":
+			i++
+			for i < len(words) && strings.HasPrefix(words[i], "-") {
+				i++
+			}
+		case "sudo":
+			i++
+			i = skipSudoOptions(words, i)
+		case "sh", "bash", "zsh", "dash", "ksh":
+			for option := i + 1; option+1 < len(words); option++ {
+				if strings.HasPrefix(words[option], "-") && strings.Contains(words[option], "c") {
+					return sensitiveCLICommand(words[option+1], depth+1)
+				}
+				if !strings.HasPrefix(words[option], "-") {
+					break
+				}
+			}
+			return false
+		default:
+			return sensitiveCLIAt(words, i)
+		}
+	}
+	return false
+}
+
+func skipSudoOptions(words []string, i int) int {
+	for i < len(words) && strings.HasPrefix(words[i], "-") {
+		option := words[i]
+		i++
+		switch option {
+		case "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--chdir", "-r", "--role", "-t", "--type":
+			if i < len(words) {
+				i++
+			}
+		}
+	}
+	return i
+}
+
+func sensitiveCLIAt(words []string, i int) bool {
+	if i+2 >= len(words) {
+		return false
+	}
+	command := strings.ToLower(filepath.Base(words[i]))
+	if command != "witself" && command != "ws" {
+		return false
+	}
+	group := strings.ToLower(words[i+1])
+	action := strings.ToLower(words[i+2])
+	return (group == "secret" && (action == "create" || action == "reveal")) ||
+		(group == "password" && action == "generate") ||
+		(group == "totp" && action == "code")
+}
+
+func shellAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for index, r := range name {
+		if r != '_' && !unicode.IsLetter(r) && (index == 0 || !unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
+}
+
+// shellCommandSegments is a deliberately small shell lexer. It recognizes the
+// control operators that start a new command, strips quotes, and preserves a
+// quoted `sh -c` body as one word for bounded recursive inspection.
+func shellCommandSegments(command string) [][]string {
+	var segments [][]string
+	var words []string
+	var word strings.Builder
+	var quote rune
+	escaped := false
+	flushWord := func() {
+		if word.Len() != 0 {
+			words = append(words, word.String())
+			word.Reset()
+		}
+	}
+	flushSegment := func() {
+		flushWord()
+		if len(words) != 0 {
+			segments = append(segments, words)
+			words = nil
+		}
+	}
+	for _, r := range command {
+		if escaped {
+			word.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		switch r {
+		case ' ', '\t', '\r':
+			flushWord()
+		case '\n', ';', '|', '&', '(', ')':
+			flushSegment()
+		default:
+			word.WriteRune(r)
+		}
+	}
+	if escaped {
+		word.WriteRune('\\')
+	}
+	flushSegment()
+	return segments
+}
+
+func redactSensitiveToolPayload(input *hookInput) {
+	for _, raw := range []*json.RawMessage{
+		&input.ToolInput, &input.ToolInputCamel, &input.ToolResponse,
+		&input.ToolOutput, &input.ToolOutputCamel, &input.Error,
+	} {
+		clear(*raw)
+		*raw = nil
+	}
+	input.ErrorMessage = ""
+	input.Reason = ""
 }
 
 // readCompleteGrokAssistantTurn accounts for Grok's Stop-hook ordering: the
@@ -1218,9 +1653,19 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 	case "UserPromptSubmit":
 		event.Kind, event.Role, event.Body = "message.user", "user", input.Prompt
 	case "AgentResponse":
-		event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
+		event.Kind, event.Role = "message.assistant", "assistant"
+		if input.SensitiveTurnContent {
+			event.Body = "response omitted from portable transcript because this turn used sealed secrets"
+		} else {
+			event.Body = input.LastAssistantMessage
+		}
 	case "AgentThought":
-		event.Kind, event.Role, event.Body = "agent.thought", "system", input.LastAssistantMessage
+		event.Kind, event.Role = "agent.thought", "system"
+		if input.SensitiveTurnContent {
+			event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
+		} else {
+			event.Body = input.LastAssistantMessage
+		}
 	case "Stop":
 		if input.LastAssistantMessage != "" {
 			event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
@@ -1267,12 +1712,32 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 		return
 	}
 	event.Data = structuredEventData(input)
-	if event.CaptureMode == ModeRaw {
+	if event.CaptureMode == ModeRaw && !input.SensitiveToolEvent && !input.SensitiveTurnContent {
 		event.Raw = append(json.RawMessage(nil), raw...)
 	}
 }
 
 func structuredEventData(input hookInput) json.RawMessage {
+	if input.SensitiveTurnContent {
+		data := map[string]any{"sealed_content_omitted": true}
+		if status := valueFreeToolStatus(input.Status); status != "" {
+			data["status"] = status
+		}
+		raw, _ := json.Marshal(data)
+		return raw
+	}
+	if input.SensitiveToolEvent {
+		data := map[string]any{}
+		if status := valueFreeToolStatus(input.Status); status != "" {
+			data["status"] = status
+		}
+		data["tool"] = compactMap(map[string]any{
+			"name":   input.ToolName,
+			"use_id": input.ToolUseID,
+		})
+		raw, _ := json.Marshal(data)
+		return raw
+	}
 	data := map[string]any{}
 	if input.PromptID != "" {
 		data["prompt_id"] = input.PromptID
@@ -1332,6 +1797,25 @@ func structuredEventData(input hookInput) json.RawMessage {
 	}
 	raw, _ := json.Marshal(data)
 	return raw
+}
+
+func valueFreeToolStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "success", "succeeded", "complete", "completed":
+		return "completed"
+	case "error", "failure", "failed":
+		return "failed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "denied":
+		return "denied"
+	case "timeout", "timed_out", "timedout":
+		return "timed_out"
+	case "pending", "running", "interrupted":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
 }
 
 func compactMap(value map[string]any) map[string]any {
@@ -1665,6 +2149,79 @@ func Pending(runtime string) ([]PendingEvent, error) {
 	return out, nil
 }
 
+// RedactPendingTurn atomically replaces every still-local event body for one
+// provider turn with a value-free marker. Flushing is turn-gated, so a prompt
+// cannot be uploaded before a later sealed tool call has had this opportunity
+// to suppress plaintext that the user placed in that prompt.
+func RedactPendingTurn(runtime, sessionID, turnID string) error {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(turnID) == "" {
+		return errors.New("pending transcript turn identity is invalid")
+	}
+	pending, err := Pending(runtime)
+	if err != nil {
+		return err
+	}
+	for _, item := range pending {
+		event := item.Event
+		if event.Runtime != runtime || event.SessionID != sessionID || event.TurnID != turnID {
+			continue
+		}
+		switch event.Kind {
+		case "message.user":
+			event.Body = "prompt omitted from portable transcript because this turn used sealed secrets"
+		case "message.assistant":
+			event.Body = "response omitted from portable transcript because this turn used sealed secrets"
+		case "agent.thought":
+			event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
+		case "tool.call", "tool.result", "tool.error":
+			event.Body = "tool payload omitted from portable transcript because this turn used sealed secrets"
+		default:
+			event.Body = "event content omitted from portable transcript because this turn used sealed secrets"
+		}
+		event.Raw = nil
+		event.RecoveredMessages = nil
+		event.Data = json.RawMessage(`{"sealed_content_omitted":true}`)
+		if err := validatePendingRewritePath(item.Path, event); err != nil {
+			return err
+		}
+		if err := writeJSONAtomic(item.Path, event); err != nil {
+			return fmt.Errorf("redact pending sealed transcript turn: %w", err)
+		}
+	}
+	return nil
+}
+
+// PendingEventUploadReady reports whether enough of the local provider turn is
+// present to know whether its content must be suppressed. Turn content stays
+// local until AgentResponse, Stop/StopFailure, SessionEnd, or the next real
+// user prompt. This closes the prompt-enqueue versus later secret-tool race.
+func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
+	event := current.Event
+	if strings.TrimSpace(event.TurnID) == "" {
+		return true
+	}
+	transcriptID := event.TranscriptExternalID()
+	for _, candidate := range all {
+		other := candidate.Event
+		if other.TranscriptExternalID() != transcriptID || other.SessionID != event.SessionID ||
+			other.OccurredAt.Before(event.OccurredAt) {
+			continue
+		}
+		if other.HookEvent == "SessionEnd" {
+			return true
+		}
+		if other.TurnID == event.TurnID && (other.HookEvent == "AgentResponse" ||
+			other.HookEvent == "Stop" || other.HookEvent == "StopFailure") {
+			return true
+		}
+		if other.HookEvent == "UserPromptSubmit" && other.TurnID != event.TurnID &&
+			other.OccurredAt.After(event.OccurredAt) {
+			return true
+		}
+	}
+	return false
+}
+
 // FinalizePending prepares one locally durable event for upload. Grok writes
 // its final response only after the synchronous Stop hook returns, so an
 // unresolved Stop remains in the outbox until the trusted native transcript
@@ -1689,6 +2246,19 @@ func finalizePendingWithin(
 	}
 	if event.NativeTurnFinalized {
 		return pending, true, nil
+	}
+	if eventSealedContentOmitted(event.Data) {
+		// Never rehydrate a sealed turn from Grok's native transcript: its final
+		// assistant chunk may contain the authorized revealed value that the
+		// value-free Stop hook deliberately suppressed.
+		event.NativeTurnFinalized = true
+		if err := validatePendingRewritePath(pending.Path, event); err != nil {
+			return pending, false, err
+		}
+		if err := writeJSONAtomic(pending.Path, event); err != nil {
+			return pending, false, fmt.Errorf("persist suppressed grok Stop event: %w", err)
+		}
+		return PendingEvent{Path: pending.Path, Event: event}, true, nil
 	}
 	if strings.TrimSpace(event.SourceTranscriptPath) == "" {
 		return pending, false, errors.New("unresolved grok Stop event has no native transcript path")
@@ -1739,6 +2309,13 @@ func finalizePendingWithin(
 		return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
 	}
 	return PendingEvent{Path: pending.Path, Event: event}, true, nil
+}
+
+func eventSealedContentOmitted(raw json.RawMessage) bool {
+	var data struct {
+		Omitted bool `json:"sealed_content_omitted"`
+	}
+	return len(raw) != 0 && json.Unmarshal(raw, &data) == nil && data.Omitted
 }
 
 func validatePendingRewritePath(path string, event Event) error {
@@ -1858,16 +2435,28 @@ func loadSessionState(runtime, sessionID string) (sessionState, error) {
 	if err != nil {
 		return sessionState{}, err
 	}
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return sessionState{}, nil
 	}
 	if err != nil {
 		return sessionState{}, err
 	}
+	defer func() { _ = file.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(file, maxSessionStateBytes+1))
+	if err != nil {
+		return sessionState{}, err
+	}
+	if len(raw) == 0 || len(raw) > maxSessionStateBytes {
+		return sessionState{}, errors.New("session state is invalid")
+	}
 	var state sessionState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return sessionState{}, fmt.Errorf("parse session state: %w", err)
+	}
+	if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = true
 	}
 	return state, nil
 }
