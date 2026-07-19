@@ -57,8 +57,8 @@ const (
 )
 
 var (
-	// ErrPerceptualContinuity marks a deterministic render comparison that
-	// exceeds a stable continuity limit.
+	// ErrPerceptualContinuity marks a bounded local-render comparison that
+	// exceeds a stable, cross-architecture decision limit.
 	ErrPerceptualContinuity = errors.New("avatar perceptual continuity violation")
 	// ErrPerceptualRender marks a fail-closed canonical render failure. A
 	// style-valid proposal must render safely before it can be compared.

@@ -48,16 +48,26 @@ func TestPerceptualContinuityFingerprintV1GoldenDurability(t *testing.T) {
 	if err := ValidatePerceptualContinuityFingerprintForStyle(historical, pack); err != nil {
 		t.Fatalf("decode historical WAPF v1: %v", err)
 	}
-	current, err := BuildPerceptualContinuityFingerprint([]byte(humanReferenceSVG), pack)
+	metrics, err := ComparePerceptualContinuityFromFingerprint(
+		historical, []byte(humanReferenceSVG), pack)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(current, historical) {
-		t.Fatal("current WAPF v1 builder differs from the durable historical fixture; introduce a new format version")
-	}
-	if err := ValidatePerceptualContinuityFromFingerprint(
-		historical, []byte(humanReferenceSVG), pack); err != nil {
 		t.Fatalf("historical WAPF v1 comparator rejected its unchanged child: %v", err)
+	}
+	if metrics.WholeChangedRatio != 0 || metrics.IdentityChangedRatio != 0 ||
+		metrics.FocusChangedRatio != 0 || metrics.AddedIdentityOcclusion != 0 ||
+		metrics.FocusAddedOcclusion != 0 {
+		t.Fatalf("historical WAPF v1 unchanged ratios crossed the portability envelope: %+v", metrics)
+	}
+	const portabilityMeanDeltaLimit = 0.0001
+	if metrics.WholeMeanDelta > portabilityMeanDeltaLimit ||
+		metrics.IdentityMeanDelta > portabilityMeanDeltaLimit ||
+		metrics.FocusMeanDelta > portabilityMeanDeltaLimit {
+		t.Fatalf("historical WAPF v1 unchanged mean delta crossed %g: %+v",
+			portabilityMeanDeltaLimit, metrics)
+	}
+	if metrics.IdentityMaskPixels != 3738 || metrics.FocusPixels != 1968 {
+		t.Fatalf("historical WAPF v1 mask/focus pixels = %d/%d, want 3738/1968",
+			metrics.IdentityMaskPixels, metrics.FocusPixels)
 	}
 	occluded := replacePerceptualTestLayer(t, humanReferenceSVG, "experience",
 		`<circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle>`)
@@ -163,30 +173,61 @@ func TestPerceptualContinuityFingerprintIdentityMaskBoundary(t *testing.T) {
 	}
 }
 
-func TestPerceptualContinuityFingerprintSpeciesAndPlaceholderGoldens(t *testing.T) {
+func TestPerceptualContinuityFingerprintSpeciesAndPlaceholderBehavior(t *testing.T) {
 	pack := BuiltInFlatVectorStylePack()
 	placeholder, err := GeneratePlaceholderSVGForStylePack("agent_golden", "Juniper", pack)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := map[string]struct {
-		svg    []byte
-		sha256 string
+	tests := []struct {
+		name string
+		svg  []byte
 	}{
-		"human":       {svg: []byte(humanReferenceSVG), sha256: "e9e92503ae73b318a2074712b1ed05066c3dc3caa7feb9f99edf27b2d4df96e3"},
-		"animal":      {svg: []byte(animalReferenceSVG), sha256: "4555628152f89d026a2594acfbb47ffab2b85eab60cae12851242b9133758880"},
-		"insect":      {svg: []byte(insectReferenceSVG), sha256: "083ef47412a4697dcfd95b73694c5cbf89e65bf484318335c4c6df0e96e681ae"},
-		"placeholder": {svg: placeholder, sha256: "68813f9e8ccce13a6d4adaf8fe7e922b2ebe20314b2e8326cc2b3610d483e5a2"},
+		{name: "human", svg: []byte(humanReferenceSVG)},
+		{name: "animal", svg: []byte(animalReferenceSVG)},
+		{name: "insect", svg: []byte(insectReferenceSVG)},
+		{name: "placeholder", svg: placeholder},
 	}
-	for name, test := range tests {
-		fingerprint, err := BuildPerceptualContinuityFingerprint(test.svg, pack)
-		if err != nil {
-			t.Fatalf("%s fingerprint: %v", name, err)
-		}
-		digest := sha256.Sum256(fingerprint)
-		if got := hex.EncodeToString(digest[:]); got != test.sha256 {
-			t.Fatalf("%s fingerprint digest = %s, want %s", name, got, test.sha256)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first, err := BuildPerceptualContinuityFingerprint(test.svg, pack)
+			if err != nil {
+				t.Fatalf("first fingerprint: %v", err)
+			}
+			second, err := BuildPerceptualContinuityFingerprint(test.svg, pack)
+			if err != nil {
+				t.Fatalf("second fingerprint: %v", err)
+			}
+			if !bytes.Equal(first, second) {
+				t.Fatal("same-process fingerprint construction is not deterministic")
+			}
+			if err := ValidatePerceptualContinuityFingerprint(first); err != nil {
+				t.Fatalf("strict fingerprint validation: %v", err)
+			}
+			if err := ValidatePerceptualContinuityFingerprintForStyle(first, pack); err != nil {
+				t.Fatalf("style-bound fingerprint validation: %v", err)
+			}
+			metrics, err := ComparePerceptualContinuityFromFingerprint(first, test.svg, pack)
+			if err != nil {
+				t.Fatalf("unchanged policy outcome: %v", err)
+			}
+			if metrics.WholeChangedRatio != 0 || metrics.WholeMeanDelta != 0 ||
+				metrics.IdentityChangedRatio != 0 || metrics.IdentityMeanDelta != 0 ||
+				metrics.AddedIdentityOcclusion != 0 || metrics.FocusChangedRatio != 0 ||
+				metrics.FocusMeanDelta != 0 || metrics.FocusAddedOcclusion != 0 {
+				t.Fatalf("unchanged same-process metrics are nonzero: %+v", metrics)
+			}
+			if metrics.IdentityMaskPixels < perceptualMinimumMaskPixels ||
+				metrics.IdentityMaskPixels > perceptualMaximumMaskPixels || metrics.FocusPixels != 1968 {
+				t.Fatalf("unchanged mask/focus pixels are invalid: %+v", metrics)
+			}
+			occluded := replacePerceptualTestLayer(t, string(test.svg), "experience",
+				`<circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle>`)
+			if err := ValidatePerceptualContinuityFromFingerprint(
+				first, []byte(occluded), pack); !errors.Is(err, ErrPerceptualContinuity) {
+				t.Fatalf("occluding policy outcome = %v, want ErrPerceptualContinuity", err)
+			}
+		})
 	}
 }
 

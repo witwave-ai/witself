@@ -29,10 +29,11 @@ creation always has a deterministic fallback.
   visual continuity. For self-authored evolution under the exact same style
   version, the server also preserves the subject form and normalized source of
   every `locked_by_default` layer. It also enforces semantic visual continuity
-  with deterministic `perceptual-v1` canonical renders: gross whole-portrait
-  replacement and unlocked artwork that visually covers too much locked
-  identity are rejected. This is bounded perceptual comparison, not a model,
-  embedding, or backend inference claim about the meaning of an image.
+  with bounded, decision-compatible `perceptual-v1` local renders: gross
+  whole-portrait replacement and unlocked artwork that visually covers too
+  much locked identity are rejected. This is bounded perceptual comparison,
+  not a model, embedding, or backend inference claim about the meaning of an
+  image.
 - Initial fitting belongs to the active agent. It creates and inspects its
   first draft from its own perspective and may make one to three substantial
   local revisions when it wants changes, including a different subject form,
@@ -52,8 +53,8 @@ creation always has a deterministic fallback.
   layers are the normal places for gradual change.
 - Each proposal creates a durable version record whose identity and lifecycle
   metadata are immutable. Its public, value-free `renderer_profile` records
-  the exact rendering contract as either `perceptual-v1` or `legacy`.
-  Activation changes the profile's active pointer;
+  the versioned rendering and decision contract as either `perceptual-v1` or
+  `legacy`. Activation changes the profile's active pointer;
   rollback points it to a prior full-payload version.
   Quota compaction may later remove only an eligible inactive version's SVG,
   description, and visual specification; it never rewrites that version's
@@ -210,7 +211,7 @@ paint-server URLs, or clipping outside their projection. Operators can
 deliberately override locked-layer and subject continuity, and a self-authored
 migration after an operator selects a new style version is exempt so the agent
 can adopt the new grammar. The client can additionally review higher-level
-recognizability. Witself's deterministic raster comparison is the enforced
+recognizability. Witself's bounded local-raster comparison is the enforced
 semantic visual-continuity boundary, but it is deliberately bounded: it does
 not infer image meaning or protect against every possible visual occlusion.
 
@@ -237,10 +238,15 @@ and its locked-only render, so opaque unlocked artwork hidden behind locked
 layers does not become a false occlusion. Calibration leaves
 ordinary expression, attire, and experience edits well below those limits
 while rejecting full-canvas replacement and a face-covering front overlay. The
-comparison is deterministic pure Go, and renderer failure is fail-closed. It
-applies only where structural continuity already applies: self-authored
-evolution under the same style version. Operator override and an
-operator-selected style migration retain their existing exemptions.
+local comparison uses fixed decision thresholds, and renderer failure is
+fail-closed. Raster antialiasing may differ by a few channel values across
+supported architectures; fingerprint bytes are therefore not required to be
+identical across builders. Those differences remain below the changed-pixel
+threshold, while unchanged comparisons, mask counts, and accept/reject policy
+outcomes are pinned by cross-architecture fixtures. It applies only where
+structural continuity already applies: self-authored evolution under the same
+style version. Operator override and an operator-selected style migration
+retain their existing exemptions.
 
 The pure avatar domain also exposes a versioned continuity fingerprint for a
 parent whose historical SVG will later be compacted. Version 1 is exactly
@@ -266,9 +272,12 @@ compaction prunes it as soon as no retained child needs it. Although smaller
 and readily TOAST-compressible, the projection still contains raster-derived
 avatar content. It is internal boundary evidence, is not returned by exact or
 history reads, and follows the SVG's access, identity-export, and deletion
-controls rather than value-free metadata controls. A checked-in compressed WAPF
-v1 fixture pins the exact binary hash, renderer output, decoder, and comparator;
-an intentional projection change requires a new format version rather than a
+controls rather than value-free metadata controls. Checked-in compressed WAPF
+v1 fixtures pin historical binary hashes, strict decoding, style binding, and
+decision compatibility across supported architectures. A stored fingerprint
+is always exact and checksummed, but separately built fingerprints need not be
+byte-identical when bounded antialiasing differs. An intentional layout or
+decision-semantics change still requires a new format version rather than a
 silent rewrite of historical boundaries.
 
 Raster previews are caches, not identity authority. For a `full` version, the

@@ -80,6 +80,30 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+  avatar-renderer-portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: renderer architecture
+        run: go env GOOS GOARCH
+
+      - name: avatar renderer portability goldens
+        run: >-
+          go test ./internal/avatar
+          -run
+          '^TestPerceptual(V1PolicyGolden|Continuity.*Golden.*|ContinuityFingerprintSpeciesAndPlaceholderBehavior)$'
+          -count=1
+
   helm:
     runs-on: ubuntu-latest
     steps:
