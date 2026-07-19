@@ -72,6 +72,12 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 		 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 		return fmt.Errorf("revoke account tokens: %w", err)
 	}
+	// Closed accounts are intentionally excluded from rollout discovery. Make
+	// every durable open job terminal in this same account-locked transaction
+	// so shutdown does not strand work or permanently block a safe schema down.
+	if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_closed"); err != nil {
+		return err
+	}
 	// Only record the audit event if this call was the one that actually
 	// closed the account (status != "closed" branch above). A no-op
 	// second close mustn't produce a fresh closure event.

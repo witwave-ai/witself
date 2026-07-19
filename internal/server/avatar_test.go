@@ -133,7 +133,10 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 	}
 	decodeAvatarTestJSON(t, body, &avatarEnvelope)
 	if avatarEnvelope.SchemaVersion != "witself.v0" || avatarEnvelope.Avatar.Profile.AgentID != "agent_self" ||
-		avatarEnvelope.Avatar.Profile.LineageGeneration != 1 || avatarEnvelope.Avatar.Active == nil || avatarEnvelope.Avatar.Active.LineageGeneration != 1 {
+		avatarEnvelope.Avatar.Profile.LineageGeneration != 1 || avatarEnvelope.Avatar.Active == nil ||
+		avatarEnvelope.Avatar.Active.LineageGeneration != 1 ||
+		avatarEnvelope.Avatar.Active.RendererProfile != avatar.RendererProfilePerceptualV1 ||
+		!strings.Contains(string(body), `"renderer_profile":"perceptual-v1"`) {
 		t.Fatalf("avatar envelope = %+v", avatarEnvelope)
 	}
 
@@ -143,7 +146,8 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 		Versions      []AvatarVersionSummary `json:"versions"`
 	}
 	decodeAvatarTestJSON(t, body, &history)
-	if history.SchemaVersion != "witself.v0" || len(history.Versions) != 1 || history.Versions[0].Version != 1 || history.Versions[0].LineageGeneration != 1 {
+	if history.SchemaVersion != "witself.v0" || len(history.Versions) != 1 || history.Versions[0].Version != 1 ||
+		history.Versions[0].LineageGeneration != 1 || history.Versions[0].RendererProfile != avatar.RendererProfilePerceptualV1 {
 		t.Fatalf("history = %+v", history)
 	}
 	for _, forbidden := range []string{"svg", "visual_spec", "description", "provenance"} {
@@ -156,11 +160,16 @@ func TestSelfAvatarHTTPRoutes(t *testing.T) {
 		Version AvatarVersion `json:"version"`
 	}
 	decodeAvatarTestJSON(t, body, &versionEnvelope)
-	if versionEnvelope.Version.Version != 1 || versionEnvelope.Version.LineageGeneration != 1 || versionEnvelope.Version.SVG == "" || len(versionEnvelope.Version.VisualSpec) == 0 {
+	if versionEnvelope.Version.Version != 1 || versionEnvelope.Version.LineageGeneration != 1 ||
+		versionEnvelope.Version.RendererProfile != avatar.RendererProfilePerceptualV1 ||
+		versionEnvelope.Version.SVG == "" || len(versionEnvelope.Version.VisualSpec) == 0 {
 		t.Fatalf("exact version = %+v", versionEnvelope.Version)
 	}
 
 	body = avatarRequest(t, srv.URL, http.MethodGet, "/v1/self/avatar/style", "agent-token", "", "", http.StatusOK)
+	if strings.Contains(string(body), `"rollout"`) {
+		t.Fatalf("self style leaked operator rollout progress: %s", body)
+	}
 	var styleEnvelope struct {
 		Style AvatarStyleView `json:"style"`
 	}
@@ -225,9 +234,51 @@ func TestAvatarHistoryHTTPPreservesLifecycleProjection(t *testing.T) {
 		!page.Versions[2].RollbackEligible || !page.Versions[3].Rejected || page.Versions[3].RejectedAt == nil {
 		t.Fatalf("history lifecycle projection = %+v", page.Versions)
 	}
-	for _, field := range []string{`"is_active"`, `"is_proposed"`, `"was_activated"`, `"rollback_eligible"`, `"rejected"`} {
+	for _, field := range []string{`"is_active"`, `"is_proposed"`, `"was_activated"`, `"rollback_eligible"`, `"rejected"`, `"payload_state"`, `"payload_bytes"`, `"locked_layers_sha256"`} {
 		if !bytes.Contains(body, []byte(field)) {
 			t.Errorf("history JSON omitted %s: %s", field, body)
+		}
+	}
+}
+
+func TestAvatarCompactedVersionHTTPRepresentation(t *testing.T) {
+	compactedAt := time.Date(2026, 7, 18, 9, 30, 0, 0, time.UTC)
+	version := *testServerAvatarView("agent_self").Active
+	version.Version = 2
+	version.SVG = ""
+	version.Description = ""
+	version.VisualSpec = nil
+	version.PayloadState = avatar.PayloadCompacted
+	version.PayloadCompactedAt = &compactedAt
+	version.PayloadCompactionReason = "quota"
+	version.IsActive = false
+	version.RollbackEligible = false
+
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: testAvatarPrincipalAuth,
+		GetSelfAvatarVersion: func(context.Context, DomainPrincipal, int64) (AvatarVersion, error) {
+			return version, nil
+		},
+	}))
+	defer srv.Close()
+	body := avatarRequest(t, srv.URL, http.MethodGet,
+		"/v1/self/avatar/versions/2", "agent-token", "", "", http.StatusOK)
+	var envelope struct {
+		Version map[string]json.RawMessage `json:"version"`
+	}
+	decodeAvatarTestJSON(t, body, &envelope)
+	for _, absent := range []string{"svg", "description", "visual_spec"} {
+		if _, exists := envelope.Version[absent]; exists {
+			t.Fatalf("compacted exact version retained %s: %s", absent, body)
+		}
+	}
+	for _, present := range []string{
+		"id", "svg_sha256", "locked_layers_sha256", "provenance",
+		"payload_state", "payload_bytes", "payload_compacted_at",
+		"payload_compaction_reason",
+	} {
+		if _, exists := envelope.Version[present]; !exists {
+			t.Fatalf("compacted exact version omitted %s: %s", present, body)
 		}
 	}
 }
@@ -354,6 +405,14 @@ func TestOperatorAvatarHTTPRoutesAreAccountScoped(t *testing.T) {
 			}
 			return result, nil
 		},
+		UpdateAgentAvatarQuota: func(_ context.Context, accountID, operatorID, agentID string, in UpdateAvatarQuotaRequest) (AvatarMutationResult, error) {
+			if err := check(accountID, operatorID, agentID); err != nil ||
+				in.RetainedPayloadCountLimit != 8 || in.RetainedPayloadByteLimit != 1_048_576 ||
+				in.ExpectedProfileRevision != 6 || in.IdempotencyKey != "quota-key" {
+				return AvatarMutationResult{}, ErrBadInput
+			}
+			return result, nil
+		},
 		GetRealmAvatarStyle: func(_ context.Context, accountID, operatorID, realmID string) (AvatarStyleView, error) {
 			if err := check(accountID, operatorID, realmID); err != nil || realmID != "realm_self" {
 				return AvatarStyleView{}, ErrBadInput
@@ -385,7 +444,15 @@ func TestOperatorAvatarHTTPRoutesAreAccountScoped(t *testing.T) {
 	avatarRequest(t, srv.URL, http.MethodPost, "/v1/agents/agent_target/avatar:rollback", "operator-token", "rollback-key", `{"version":1,"expected_profile_revision":5}`, http.StatusOK)
 	avatarRequest(t, srv.URL, http.MethodPost, "/v1/agents/agent_target/avatar:reset", "operator-token", "reset-key", `{"expected_profile_revision":6}`, http.StatusOK)
 	avatarRequest(t, srv.URL, http.MethodPatch, "/v1/agents/agent_target/avatar-policy", "operator-token", "policy-key", `{"policy":"operator_only","expected_profile_revision":6}`, http.StatusOK)
-	avatarRequest(t, srv.URL, http.MethodGet, "/v1/realms/realm_self/avatar-style", "operator-token", "", "", http.StatusOK)
+	avatarRequest(t, srv.URL, http.MethodPatch, "/v1/agents/agent_target/avatar-quota", "operator-token", "quota-key", `{"retained_payload_count_limit":8,"retained_payload_byte_limit":1048576,"expected_profile_revision":6}`, http.StatusOK)
+	operatorStyleBody := avatarRequest(t, srv.URL, http.MethodGet, "/v1/realms/realm_self/avatar-style", "operator-token", "", "", http.StatusOK)
+	var operatorStyleEnvelope struct {
+		Style AvatarStyleView `json:"style"`
+	}
+	decodeAvatarTestJSON(t, operatorStyleBody, &operatorStyleEnvelope)
+	if operatorStyleEnvelope.Style.Rollout == nil || operatorStyleEnvelope.Style.Rollout.Status != "running" {
+		t.Fatalf("operator style omitted rollout progress: %+v", operatorStyleEnvelope.Style)
+	}
 	styleRequest, _ := json.Marshal(CreateAvatarStyleVersionRequest{ExpectedStyleRevision: 2, StylePack: avatar.BuiltInFlatVectorStylePack()})
 	body := avatarRequest(t, srv.URL, http.MethodPost, "/v1/realms/realm_self/avatar-style/versions", "operator-token", "style-key", string(styleRequest), http.StatusCreated)
 	var styleMutation struct {
@@ -396,8 +463,8 @@ func TestOperatorAvatarHTTPRoutesAreAccountScoped(t *testing.T) {
 	if styleMutation.Style.RealmID != "realm_self" || styleMutation.Receipt.RequestHash == "" {
 		t.Fatalf("style mutation = %+v", styleMutation)
 	}
-	if got := calls.Load(); got != 11 {
-		t.Fatalf("callback calls = %d, want 11", got)
+	if got := calls.Load(); got != 12 {
+		t.Fatalf("callback calls = %d, want 12", got)
 	}
 }
 
@@ -540,6 +607,10 @@ func TestAvatarOperatorPolicyAndStyleValidation(t *testing.T) {
 			calls.Add(1)
 			return testServerAvatarMutation("policy", testServerAvatarView("agent_target")), nil
 		},
+		UpdateAgentAvatarQuota: func(context.Context, string, string, string, UpdateAvatarQuotaRequest) (AvatarMutationResult, error) {
+			calls.Add(1)
+			return testServerAvatarMutation("quota", testServerAvatarView("agent_target")), nil
+		},
 		CreateRealmAvatarStyleVersion: func(context.Context, string, string, string, CreateAvatarStyleVersionRequest) (AvatarStyleMutationResult, error) {
 			calls.Add(1)
 			return AvatarStyleMutationResult{Style: testServerAvatarStyle()}, nil
@@ -554,6 +625,9 @@ func TestAvatarOperatorPolicyAndStyleValidation(t *testing.T) {
 		{"missing policy revision", http.MethodPatch, "/v1/agents/agent_target/avatar-policy", "key", `{"policy":"operator_only"}`},
 		{"unknown policy field", http.MethodPatch, "/v1/agents/agent_target/avatar-policy", "key", `{"policy":"operator_only","expected_profile_revision":4,"agent_id":"other"}`},
 		{"missing policy key", http.MethodPatch, "/v1/agents/agent_target/avatar-policy", "", `{"policy":"operator_only","expected_profile_revision":4}`},
+		{"quota below count floor", http.MethodPatch, "/v1/agents/agent_target/avatar-quota", "key", `{"retained_payload_count_limit":3,"retained_payload_byte_limit":1048576,"expected_profile_revision":4}`},
+		{"quota below byte floor", http.MethodPatch, "/v1/agents/agent_target/avatar-quota", "key", `{"retained_payload_count_limit":4,"retained_payload_byte_limit":524287,"expected_profile_revision":4}`},
+		{"quota body idempotency", http.MethodPatch, "/v1/agents/agent_target/avatar-quota", "key", `{"retained_payload_count_limit":4,"retained_payload_byte_limit":524288,"expected_profile_revision":4,"idempotency_key":"body"}`},
 		{"invalid style", http.MethodPost, "/v1/realms/realm_self/avatar-style/versions", "key", `{"expected_style_revision":2,"style_pack":{}}`},
 		{"missing style revision", http.MethodPost, "/v1/realms/realm_self/avatar-style/versions", "key", `{"style_pack":{}}`},
 		{"unknown nested style field", http.MethodPost, "/v1/realms/realm_self/avatar-style/versions", "key", `{"expected_style_revision":2,"style_pack":{"id":"flat","version":1,"unknown":true}}`},
@@ -570,17 +644,22 @@ func TestAvatarOperatorPolicyAndStyleValidation(t *testing.T) {
 
 func TestAvatarErrorMapping(t *testing.T) {
 	tests := []struct {
-		name   string
-		err    error
-		status int
+		name      string
+		err       error
+		status    int
+		wantError string
 	}{
-		{"bad input", ErrBadInput, http.StatusBadRequest},
-		{"domain invalid", avatar.ErrInvalidSVG, http.StatusBadRequest},
-		{"forbidden", ErrForbidden, http.StatusForbidden},
-		{"not found", ErrNotFound, http.StatusNotFound},
-		{"revision conflict", ErrConflict, http.StatusConflict},
-		{"idempotency conflict", ErrIdempotencyConflict, http.StatusConflict},
-		{"internal", errors.New("database unavailable"), http.StatusInternalServerError},
+		{name: "bad input", err: ErrBadInput, status: http.StatusBadRequest},
+		{name: "domain invalid", err: avatar.ErrInvalidSVG, status: http.StatusBadRequest},
+		{name: "forbidden", err: ErrForbidden, status: http.StatusForbidden},
+		{name: "not found", err: ErrNotFound, status: http.StatusNotFound},
+		{name: "revision conflict", err: ErrConflict, status: http.StatusConflict},
+		{name: "idempotency conflict", err: ErrIdempotencyConflict, status: http.StatusConflict},
+		{name: "payload quota", err: ErrAvatarPayloadQuotaExceeded, status: http.StatusConflict,
+			wantError: "avatar_payload_quota_exceeded"},
+		{name: "payload compaction activation", err: ErrAvatarPayloadCompactionDisabled,
+			status: http.StatusConflict, wantError: "avatar_payload_compaction_not_active"},
+		{name: "internal", err: errors.New("database unavailable"), status: http.StatusInternalServerError},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -591,7 +670,14 @@ func TestAvatarErrorMapping(t *testing.T) {
 				},
 			}))
 			defer srv.Close()
-			avatarRequest(t, srv.URL, http.MethodGet, "/v1/self/avatar", "agent-token", "", "", test.status)
+			body := avatarRequest(t, srv.URL, http.MethodGet, "/v1/self/avatar", "agent-token", "", "", test.status)
+			if test.wantError != "" {
+				var response map[string]string
+				decodeAvatarTestJSON(t, body, &response)
+				if response["error"] != test.wantError {
+					t.Fatalf("error = %q, want %q", response["error"], test.wantError)
+				}
+			}
 		})
 	}
 }
@@ -692,9 +778,12 @@ func testServerAvatarView(agentID string) AvatarView {
 		Version: 1, LineageGeneration: 1, SubjectForm: avatar.SubjectHuman,
 		Description: "Calm human teammate.", VisualSpec: json.RawMessage(`{"expression":"calm"}`),
 		SVG: `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, SVGSHA256: strings.Repeat("a", 64),
-		Style:      avatar.StylePackRef{RealmID: "realm_self", StylePackID: avatar.DefaultStylePackID, Version: 1},
-		Provenance: AvatarClientProvenance{Runtime: "codex"},
-		ProposedBy: AvatarActor{Kind: PrincipalKindAgent, ID: agentID, Name: "Juniper"}, ProposedAt: now,
+		LockedLayersSHA256: strings.Repeat("b", 64), PayloadState: avatar.PayloadFull,
+		RendererProfile: avatar.RendererProfilePerceptualV1,
+		PayloadBytes:    128,
+		Style:           avatar.StylePackRef{RealmID: "realm_self", StylePackID: avatar.DefaultStylePackID, Version: 1},
+		Provenance:      AvatarClientProvenance{Runtime: "codex"},
+		ProposedBy:      AvatarActor{Kind: PrincipalKindAgent, ID: agentID, Name: "Juniper"}, ProposedAt: now,
 	}
 	return AvatarView{
 		Profile: AvatarProfile{
@@ -703,7 +792,10 @@ func testServerAvatarView(agentID string) AvatarView {
 			Status: avatar.StatusActive, LineageGeneration: 1,
 			Style:           avatar.StylePackRef{RealmID: "realm_self", StylePackID: avatar.DefaultStylePackID, Version: 1},
 			ProfileRevision: 4, LatestVersion: 1, ActiveVersion: 1, AttemptCount: 0,
-			FallbackSeed: "seed", CreatedAt: now, UpdatedAt: now,
+			FallbackSeed: "seed", RetainedPayloadCountLimit: 20,
+			RetainedPayloadByteLimit: 2 * 1024 * 1024, RetainedPayloadCount: 1,
+			RetainedPayloadBytes: 128, RollbackPayloadFloor: 2,
+			CreatedAt: now, UpdatedAt: now,
 		},
 		Active: &version,
 	}
@@ -714,11 +806,16 @@ func testServerAvatarSummary(version AvatarVersion) AvatarVersionSummary {
 		ID: version.ID, AccountID: version.AccountID, RealmID: version.RealmID,
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
-		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256, Style: version.Style,
+		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile, Style: version.Style,
 		ProposedBy: version.ProposedBy, ProposedAt: version.ProposedAt,
 		IsActive: version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,
 		Rejected: version.Rejected, LastActivatedAt: version.LastActivatedAt, RejectedAt: version.RejectedAt,
+		PayloadState: version.PayloadState, PayloadBytes: version.PayloadBytes,
+		PayloadCompactedAt:      version.PayloadCompactedAt,
+		PayloadCompactionReason: version.PayloadCompactionReason,
 	}
 }
 
@@ -726,7 +823,13 @@ func testServerAvatarStyle() AvatarStyleView {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	return AvatarStyleView{
 		RealmID: "realm_self", StyleRevision: 2,
-		StylePack: avatar.BuiltInFlatVectorStylePack(), CreatedAt: now, UpdatedAt: now,
+		StylePack: avatar.BuiltInFlatVectorStylePack(),
+		Rollout: &AvatarStyleRollout{
+			StyleRevision: 2, StylePackID: avatar.DefaultStylePackID, StylePackVersion: 1,
+			Status: "running", ProcessedProfileCount: 3,
+			BatchCount: 1, LastBatchSize: 3, CreatedAt: now, StartedAt: &now, UpdatedAt: now,
+		},
+		CreatedAt: now, UpdatedAt: now,
 	}
 }
 

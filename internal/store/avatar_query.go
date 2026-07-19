@@ -36,19 +36,20 @@ type SelfAvatarCheckpoint struct {
 func createAgentAvatarProfileTx(ctx context.Context, tx pgx.Tx, accountID, realmID, agentID string) error {
 	var stylePackID string
 	var stylePackVersion int
+	var styleRevision int64
 	if err := tx.QueryRow(ctx, `
-		SELECT style_pack_id, style_pack_version
+		SELECT style_pack_id, style_pack_version, revision
 		  FROM realm_avatar_styles
 		 WHERE account_id=$1 AND realm_id=$2`, accountID, realmID).Scan(
-		&stylePackID, &stylePackVersion); err != nil {
+		&stylePackID, &stylePackVersion, &styleRevision); err != nil {
 		return fmt.Errorf("resolve initial avatar style: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO agent_avatar_profiles
 		       (account_id, realm_id, agent_id, style_pack_id,
-		        style_pack_version, fallback_seed)
-		VALUES ($1,$2,$3,$4,$5,$3)`, accountID, realmID, agentID,
-		stylePackID, stylePackVersion); err != nil {
+		        style_pack_version, style_revision, fallback_seed)
+		VALUES ($1,$2,$3,$4,$5,$6,$3)`, accountID, realmID, agentID,
+		stylePackID, stylePackVersion, styleRevision); err != nil {
 		return fmt.Errorf("create agent avatar profile: %w", err)
 	}
 	return logEventTx(ctx, tx, EventInput{
@@ -237,6 +238,21 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 		       p.active_avatar_version, p.lineage_generation,
 		       p.subject_form, p.attempt_count,
 		       p.retry_after, p.fallback_seed, p.failure_code, p.revision,
+		       p.retained_payload_count_limit,
+		       p.retained_payload_byte_limit,
+		       (SELECT COUNT(*) FROM agent_avatar_versions retained
+		         WHERE retained.account_id=p.account_id
+		           AND retained.realm_id=p.realm_id
+		           AND retained.agent_id=p.agent_id
+		           AND retained.payload_state='full'),
+		       (SELECT COALESCE(SUM(
+		                 CASE WHEN retained.payload_state='full'
+		                      THEN retained.payload_bytes ELSE 0 END),0) +
+		               COALESCE(SUM(octet_length(retained.continuity_fingerprint)),0)
+		          FROM agent_avatar_versions retained
+		         WHERE retained.account_id=p.account_id
+		           AND retained.realm_id=p.realm_id
+		           AND retained.agent_id=p.agent_id),
 		       p.created_at, p.updated_at, a.name
 		  FROM agent_avatar_profiles p
 		  JOIN agents a ON a.id=p.agent_id AND a.realm_id=p.realm_id
@@ -250,6 +266,10 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 		&subjectForm,
 		&out.Profile.AttemptCount, &retryAfter, &out.Profile.FallbackSeed,
 		&out.Profile.FailureCode, &out.Profile.ProfileRevision,
+		&out.Profile.RetainedPayloadCountLimit,
+		&out.Profile.RetainedPayloadByteLimit,
+		&out.Profile.RetainedPayloadCount,
+		&out.Profile.RetainedPayloadBytes,
 		&out.Profile.CreatedAt, &out.Profile.UpdatedAt, &agentName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarView{}, ErrAvatarNotFound
@@ -265,6 +285,7 @@ func getAvatarView(ctx context.Context, q avatarRowQuerier, target avatarTarget)
 	out.Profile.SubjectForm = avatardomain.SubjectForm(subjectForm)
 	out.Profile.Style.RealmID = out.Profile.RealmID
 	out.Profile.Style.StylePackID = stylePackID
+	out.Profile.RollbackPayloadFloor = AvatarRollbackPayloadFloor
 	out.Profile.RetryAfter = retryAfter
 	if activeVersion != nil {
 		out.Profile.ActiveVersion = *activeVersion
@@ -318,7 +339,11 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		SELECT v.id, v.account_id, v.realm_id, v.agent_id, v.version,
 		       v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg_sha256, v.proposed_by_kind,
+		       v.subject_form, v.svg_sha256, v.locked_layers_sha256,
+		       CASE WHEN v.locked_layers_sha256 IS NULL THEN v.svg END,
+		       v.renderer_profile, v.payload_state,
+		       v.payload_bytes, v.payload_compacted_at,
+		       COALESCE(v.payload_compaction_reason,''), v.proposed_by_kind,
 		       v.proposed_by_id, v.proposed_at,
 		       COALESCE(v.version=p.active_avatar_version, FALSE),
 		       COALESCE(v.version=p.proposed_avatar_version, FALSE),
@@ -358,33 +383,92 @@ func getAvatarHistory(ctx context.Context, q avatarRowQuerier, target avatarTarg
 	if err != nil {
 		return AvatarHistoryPage{}, fmt.Errorf("list avatar history: %w", err)
 	}
-	defer rows.Close()
 	out := AvatarHistoryPage{Versions: make([]AvatarVersionSummary, 0, opts.Limit+1)}
+	type pendingLockedDigest struct {
+		index int
+		svg   string
+	}
+	pendingDigests := make([]pendingLockedDigest, 0)
 	for rows.Next() {
 		var version AvatarVersionSummary
 		var currentLineage int64
-		var subjectForm, actorKind string
+		var subjectForm, rendererProfile, actorKind, payloadState string
+		var lockedDigest, digestSVG *string
 		if err := rows.Scan(&version.ID, &version.AccountID,
 			&version.RealmID, &version.AgentID, &version.Version,
 			&version.ParentVersion, &version.LineageGeneration,
 			&version.Style.StylePackID,
 			&version.Style.Version, &subjectForm, &version.SVGSHA256,
+			&lockedDigest, &digestSVG, &rendererProfile,
+			&payloadState, &version.PayloadBytes, &version.PayloadCompactedAt,
+			&version.PayloadCompactionReason,
 			&actorKind, &version.ProposedBy.ID, &version.ProposedAt,
 			&version.IsActive, &version.IsProposed, &version.WasActivated,
 			&version.LastActivatedAt, &currentLineage,
 			&version.RejectedAt); err != nil {
+			rows.Close()
 			return AvatarHistoryPage{}, err
 		}
 		version.Style.RealmID = version.RealmID
 		version.SubjectForm = avatardomain.SubjectForm(subjectForm)
+		version.RendererProfile = avatardomain.RendererProfile(rendererProfile)
+		if err := version.RendererProfile.Validate(); err != nil {
+			rows.Close()
+			return AvatarHistoryPage{}, fmt.Errorf("validate avatar renderer profile: %w", err)
+		}
+		version.PayloadState = avatardomain.PayloadState(payloadState)
+		if lockedDigest != nil {
+			version.LockedLayersSHA256 = *lockedDigest
+		} else {
+			if version.PayloadState != avatardomain.PayloadFull || digestSVG == nil {
+				rows.Close()
+				return AvatarHistoryPage{}, fmt.Errorf(
+					"avatar version %d lacks a recoverable locked-layer digest",
+					version.Version)
+			}
+			pendingDigests = append(pendingDigests, pendingLockedDigest{
+				index: len(out.Versions), svg: *digestSVG,
+			})
+		}
 		version.ProposedBy.Kind = actorKind
 		version.Rejected = version.RejectedAt != nil
-		version.RollbackEligible = version.WasActivated && !version.IsActive &&
+		version.RollbackEligible = version.PayloadState == avatardomain.PayloadFull &&
+			version.WasActivated && !version.IsActive &&
 			!version.Rejected && version.LineageGeneration == currentLineage
 		out.Versions = append(out.Versions, version)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return AvatarHistoryPage{}, err
+	}
+	rows.Close()
+	type styleKey struct {
+		accountID string
+		realmID   string
+		packID    string
+		version   int
+	}
+	packs := make(map[styleKey]avatardomain.StylePack)
+	for _, pending := range pendingDigests {
+		version := &out.Versions[pending.index]
+		key := styleKey{version.AccountID, version.RealmID,
+			version.Style.StylePackID, version.Style.Version}
+		pack, ok := packs[key]
+		if !ok {
+			pack, err = loadAvatarStylePackVersion(ctx, q, key.accountID,
+				key.realmID, key.packID, key.version)
+			if err != nil {
+				return AvatarHistoryPage{}, err
+			}
+			packs[key] = pack
+		}
+		digest, err := avatardomain.LockedLayersSHA256([]byte(pending.svg), pack)
+		if err != nil {
+			return AvatarHistoryPage{}, fmt.Errorf(
+				"derive avatar version %d locked-layer digest: %w",
+				version.Version, err)
+		}
+		version.LockedLayersSHA256 = digest
 	}
 	if len(out.Versions) > opts.Limit {
 		out.Versions = out.Versions[:opts.Limit]
@@ -444,14 +528,19 @@ func queryAvatarRows(ctx context.Context, q avatarRowQuerier, sql string, args .
 func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarget, version int64, activeVersion, proposedVersion *int64, currentLineage int64) (AvatarVersion, error) {
 	var out AvatarVersion
 	var parentVersion *int64
-	var subjectForm, actorKind string
+	var lockedDigest *string
+	var subjectForm, rendererProfile, actorKind, payloadState string
 	var spec, provenance json.RawMessage
 	err := q.QueryRow(ctx, `
 		SELECT v.id, v.account_id, v.realm_id, v.agent_id, v.version,
 		       v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg, v.description, v.visual_spec,
-		       v.svg_sha256, v.provenance, v.proposed_by_kind,
+		       v.subject_form, COALESCE(v.svg,''), COALESCE(v.description,''),
+		       COALESCE(v.visual_spec,'null'::jsonb),
+		       v.svg_sha256, v.locked_layers_sha256, v.renderer_profile, v.provenance,
+		       v.payload_state, v.payload_bytes,
+		       v.payload_compacted_at, COALESCE(v.payload_compaction_reason,''),
+		       v.proposed_by_kind,
 		       v.proposed_by_id, v.proposed_at,
 		       EXISTS (
 		         SELECT 1 FROM agent_avatar_activations activation
@@ -481,7 +570,10 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 		&out.Version, &parentVersion, &out.LineageGeneration,
 		&out.Style.StylePackID,
 		&out.Style.Version, &subjectForm, &out.SVG, &out.Description, &spec,
-		&out.SVGSHA256, &provenance, &actorKind, &out.ProposedBy.ID,
+		&out.SVGSHA256, &lockedDigest, &rendererProfile, &provenance,
+		&payloadState, &out.PayloadBytes,
+		&out.PayloadCompactedAt, &out.PayloadCompactionReason,
+		&actorKind, &out.ProposedBy.ID,
 		&out.ProposedAt, &out.WasActivated, &out.LastActivatedAt,
 		&out.RejectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -494,10 +586,42 @@ func getAvatarVersion(ctx context.Context, q avatarRowQuerier, target avatarTarg
 	out.IsActive = activeVersion != nil && *activeVersion == out.Version
 	out.IsProposed = proposedVersion != nil && *proposedVersion == out.Version
 	out.Rejected = out.RejectedAt != nil
-	out.RollbackEligible = out.WasActivated && !out.IsActive && !out.Rejected &&
+	out.PayloadState = avatardomain.PayloadState(payloadState)
+	out.RollbackEligible = out.PayloadState == avatardomain.PayloadFull &&
+		out.WasActivated && !out.IsActive && !out.Rejected &&
 		out.LineageGeneration == currentLineage
 	out.SubjectForm = avatardomain.SubjectForm(subjectForm)
+	out.RendererProfile = avatardomain.RendererProfile(rendererProfile)
+	if err := out.RendererProfile.Validate(); err != nil {
+		return AvatarVersion{}, fmt.Errorf("validate avatar renderer profile: %w", err)
+	}
 	out.VisualSpec = append(json.RawMessage(nil), spec...)
+	if lockedDigest != nil {
+		out.LockedLayersSHA256 = *lockedDigest
+	} else {
+		if out.PayloadState != avatardomain.PayloadFull || out.SVG == "" {
+			return AvatarVersion{}, fmt.Errorf(
+				"avatar version %d lacks a recoverable locked-layer digest",
+				out.Version)
+		}
+		pack, err := loadAvatarStylePackVersion(ctx, q, out.AccountID,
+			out.RealmID, out.Style.StylePackID, out.Style.Version)
+		if err != nil {
+			return AvatarVersion{}, err
+		}
+		digest, err := avatardomain.LockedLayersSHA256([]byte(out.SVG), pack)
+		if err != nil {
+			return AvatarVersion{}, fmt.Errorf(
+				"derive avatar version %d locked-layer digest: %w",
+				out.Version, err)
+		}
+		out.LockedLayersSHA256 = digest
+	}
+	if out.PayloadState == avatardomain.PayloadCompacted {
+		out.SVG = ""
+		out.Description = ""
+		out.VisualSpec = nil
+	}
 	out.Style.RealmID = out.RealmID
 	out.ProposedBy.Kind = actorKind
 	if len(provenance) > 0 {
@@ -511,13 +635,28 @@ func deterministicAvatarPlaceholder(target avatarTarget, agentName string, style
 		return AvatarVersion{}, fmt.Errorf("generate avatar placeholder: style identity mismatch")
 	}
 	seedName := strings.TrimSpace(agentName)
-	svg, err := avatardomain.GeneratePlaceholderSVGForStylePack(target.agentID, seedName, pack)
+	generate := avatardomain.GeneratePlaceholderSVGForStylePack
+	rendererProfile := avatardomain.RendererProfilePerceptualV1
+	svg, err := generate(target.agentID, seedName, pack)
 	if errors.Is(err, avatardomain.ErrInvalidPlaceholderSeed) {
 		// Older creation surfaces could persist names outside the current seed
 		// contract. The stable agent ID remains a deterministic, non-secret seed
 		// name so those live agents still receive a placeholder.
 		seedName = strings.TrimSpace(target.agentID)
-		svg, err = avatardomain.GeneratePlaceholderSVGForStylePack(target.agentID, seedName, pack)
+		svg, err = generate(target.agentID, seedName, pack)
+	}
+	if errors.Is(err, avatardomain.ErrPerceptualProfile) || errors.Is(err, avatardomain.ErrPerceptualRender) {
+		// Existing pre-profile packs remain readable without silently claiming
+		// renderer compatibility. Rich self-card rendering independently rejects
+		// these exact bytes and falls back to the plain card.
+		generate = avatardomain.GenerateLegacyPlaceholderSVGForStylePack
+		rendererProfile = avatardomain.RendererProfileLegacy
+		seedName = strings.TrimSpace(agentName)
+		svg, err = generate(target.agentID, seedName, pack)
+		if errors.Is(err, avatardomain.ErrInvalidPlaceholderSeed) {
+			seedName = strings.TrimSpace(target.agentID)
+			svg, err = generate(target.agentID, seedName, pack)
+		}
 	}
 	if err != nil {
 		return AvatarVersion{}, fmt.Errorf("generate avatar placeholder: %w", err)
@@ -548,12 +687,20 @@ func deterministicAvatarPlaceholder(target avatarTarget, agentName string, style
 	for _, part := range []string{
 		strings.TrimSpace(target.agentID), seedName, style.RealmID,
 		style.StylePackID, strconv.Itoa(style.Version),
-		strconv.FormatInt(lineageGeneration, 10), digestText,
+		strconv.FormatInt(lineageGeneration, 10), digestText, string(rendererProfile),
 	} {
 		_, _ = idHash.Write([]byte(part))
 		_, _ = idHash.Write([]byte{0})
 	}
 	idDigestText := hex.EncodeToString(idHash.Sum(nil))
+	payloadBytes, err := avatarCreativePayloadBytes(string(svg), description, visualSpec)
+	if err != nil {
+		return AvatarVersion{}, fmt.Errorf("measure avatar placeholder: %w", err)
+	}
+	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(svg, pack)
+	if err != nil {
+		return AvatarVersion{}, fmt.Errorf("derive avatar placeholder locked-layer digest: %w", err)
+	}
 	return AvatarVersion{
 		ID: "placeholder-" + idDigestText[:16], AccountID: target.accountID,
 		RealmID: target.realmID, AgentID: target.agentID, Version: 0,
@@ -561,7 +708,9 @@ func deterministicAvatarPlaceholder(target avatarTarget, agentName string, style
 		SubjectForm:       avatardomain.SubjectHuman,
 		Description:       description,
 		VisualSpec:        visualSpec,
-		SVG:               string(svg), SVGSHA256: digestText, Style: style,
+		SVG:               string(svg), SVGSHA256: digestText,
+		LockedLayersSHA256: lockedLayersSHA256, RendererProfile: rendererProfile, Style: style,
+		PayloadState: avatardomain.PayloadFull, PayloadBytes: payloadBytes,
 		ProposedBy: AvatarActor{Kind: ActorSystem}, ProposedAt: createdAt,
 		IsActive: true,
 	}, nil

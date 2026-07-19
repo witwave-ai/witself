@@ -40,6 +40,10 @@ var (
 	ErrInvalidStatus = errors.New("invalid avatar status")
 	// ErrInvalidEventType marks an unsupported avatar lifecycle event.
 	ErrInvalidEventType = errors.New("invalid avatar event type")
+	// ErrInvalidPayloadState marks an unsupported creative-payload state.
+	ErrInvalidPayloadState = errors.New("invalid avatar payload state")
+	// ErrInvalidRendererProfile marks unsupported immutable renderer provenance.
+	ErrInvalidRendererProfile = errors.New("invalid avatar renderer profile")
 	// ErrInvalidDescription marks an invalid or over-limit avatar description.
 	ErrInvalidDescription = errors.New("invalid avatar description")
 	// ErrInvalidSpecJSON marks invalid or over-limit avatar visual-spec JSON.
@@ -214,6 +218,8 @@ const (
 	EventReset               EventType = "avatar.reset"
 	EventPolicyChanged       EventType = "avatar.policy.changed"
 	EventStyleChanged        EventType = "avatar.style.changed"
+	EventQuotaChanged        EventType = "avatar.quota.changed"
+	EventPayloadCompacted    EventType = "avatar.payload.compacted"
 )
 
 var eventTypes = []EventType{
@@ -227,6 +233,8 @@ var eventTypes = []EventType{
 	EventReset,
 	EventPolicyChanged,
 	EventStyleChanged,
+	EventQuotaChanged,
+	EventPayloadCompacted,
 }
 
 // EventTypes returns all supported lifecycle events.
@@ -248,6 +256,58 @@ func (e EventType) Valid() bool {
 func (e EventType) Validate() error {
 	if !e.Valid() {
 		return fmt.Errorf("%w: %q", ErrInvalidEventType, e)
+	}
+	return nil
+}
+
+// PayloadState distinguishes retained creative data from an irreversible,
+// metadata-only compacted version envelope.
+type PayloadState string
+
+const (
+	// PayloadFull means SVG, description, and visual specification are retained.
+	PayloadFull PayloadState = "full"
+	// PayloadCompacted means creative fields were removed under quota while the
+	// immutable hash, identity, provenance, and lifecycle metadata remain.
+	PayloadCompacted PayloadState = "compacted"
+)
+
+// Valid reports whether s is a supported payload state.
+func (s PayloadState) Valid() bool {
+	return s == PayloadFull || s == PayloadCompacted
+}
+
+// Validate returns an error when s is not a supported payload state.
+func (s PayloadState) Validate() error {
+	if !s.Valid() {
+		return fmt.Errorf("%w: %q", ErrInvalidPayloadState, s)
+	}
+	return nil
+}
+
+// RendererProfile records which exact renderer contract validated an
+// immutable avatar version. Legacy is deliberately not inferred upward from
+// the SVG bytes; only a new write that passed perceptual-v1 may claim it.
+type RendererProfile string
+
+const (
+	// RendererProfileLegacy identifies versions written before explicit
+	// renderer compatibility provenance existed.
+	RendererProfileLegacy RendererProfile = "legacy"
+	// RendererProfilePerceptualV1 identifies versions written only after the
+	// exact SVG passed the perceptual-v1 baseline checks.
+	RendererProfilePerceptualV1 RendererProfile = "perceptual-v1"
+)
+
+// Valid reports whether p is a supported renderer provenance value.
+func (p RendererProfile) Valid() bool {
+	return p == RendererProfileLegacy || p == RendererProfilePerceptualV1
+}
+
+// Validate returns an error when p is not a supported renderer provenance.
+func (p RendererProfile) Validate() error {
+	if !p.Valid() {
+		return fmt.Errorf("%w: %q", ErrInvalidRendererProfile, p)
 	}
 	return nil
 }

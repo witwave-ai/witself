@@ -34,6 +34,16 @@ apps:
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.
     factDeletionEnabled: false
+    # Expand/activate gate for irreversible avatar creative-payload cleanup.
+    # Keep false in the version rollout; flip only after all old writers drain.
+    avatarPayloadCompactionEnabled: false
+    # Pin the bounded style-rollout worker in every managed cell instead of
+    # inheriting mutable downstream chart defaults.
+    avatarStyleRollout:
+      enabled: true
+      batchSize: 100
+      interval: 2s
+      batchTimeout: 30s
     awsAlbIngress:
       enabled: false
       className: alb

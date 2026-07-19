@@ -133,6 +133,15 @@ func configureAvatar(cfg *server.Config, st *store.Store) {
 		})
 		return toServerAvatarMutation(result), mapAvatarError(err)
 	}
+	cfg.UpdateAgentAvatarQuota = func(ctx context.Context, accountID, operatorID, agentID string, in server.UpdateAvatarQuotaRequest) (server.AvatarMutationResult, error) {
+		result, err := st.SetAvatarQuota(ctx, operator(accountID, operatorID), agentID, store.UpdateAvatarQuotaInput{
+			RetainedPayloadCountLimit: in.RetainedPayloadCountLimit,
+			RetainedPayloadByteLimit:  in.RetainedPayloadByteLimit,
+			ExpectedProfileRevision:   in.ExpectedProfileRevision,
+			IdempotencyKey:            in.IdempotencyKey,
+		})
+		return toServerAvatarMutation(result), mapAvatarError(err)
+	}
 	cfg.GetRealmAvatarStyle = func(ctx context.Context, accountID, operatorID, realmID string) (server.AvatarStyleView, error) {
 		style, err := st.GetRealmAvatarStyle(ctx, operator(accountID, operatorID), realmID)
 		return toServerAvatarStyle(style), mapAvatarError(err)
@@ -198,6 +207,11 @@ func toServerAvatarProfile(profile store.AvatarProfile) server.AvatarProfile {
 		ProposedVersion: profile.ProposedVersion, AttemptCount: profile.AttemptCount,
 		RetryAfter: profile.RetryAfter, FallbackSeed: profile.FallbackSeed,
 		FailureCode: profile.FailureCode, CreatedAt: profile.CreatedAt, UpdatedAt: profile.UpdatedAt,
+		RetainedPayloadCountLimit: profile.RetainedPayloadCountLimit,
+		RetainedPayloadByteLimit:  profile.RetainedPayloadByteLimit,
+		RetainedPayloadCount:      profile.RetainedPayloadCount,
+		RetainedPayloadBytes:      profile.RetainedPayloadBytes,
+		RollbackPayloadFloor:      profile.RollbackPayloadFloor,
 	}
 }
 
@@ -208,7 +222,9 @@ func toServerAvatarVersion(version store.AvatarVersion) server.AvatarVersion {
 		LineageGeneration: version.LineageGeneration,
 		SubjectForm:       version.SubjectForm, Description: version.Description,
 		VisualSpec: version.VisualSpec, SVG: version.SVG, SVGSHA256: version.SVGSHA256,
-		Style: version.Style,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile,
+		Style:              version.Style,
 		Provenance: server.AvatarClientProvenance{
 			Runtime: version.Provenance.Runtime, Model: version.Provenance.Model,
 			Recipe: version.Provenance.Recipe, RecipeVersion: version.Provenance.RecipeVersion,
@@ -218,6 +234,9 @@ func toServerAvatarVersion(version store.AvatarVersion) server.AvatarVersion {
 		IsActive:   version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,
 		Rejected: version.Rejected, LastActivatedAt: version.LastActivatedAt, RejectedAt: version.RejectedAt,
+		PayloadState: version.PayloadState, PayloadBytes: version.PayloadBytes,
+		PayloadCompactedAt:      version.PayloadCompactedAt,
+		PayloadCompactionReason: version.PayloadCompactionReason,
 	}
 }
 
@@ -226,7 +245,9 @@ func toServerAvatarVersionSummary(version store.AvatarVersionSummary) server.Ava
 		ID: version.ID, AccountID: version.AccountID, RealmID: version.RealmID,
 		AgentID: version.AgentID, Version: version.Version, ParentVersion: version.ParentVersion,
 		LineageGeneration: version.LineageGeneration,
-		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256, Style: version.Style,
+		SubjectForm:       version.SubjectForm, SVGSHA256: version.SVGSHA256,
+		LockedLayersSHA256: version.LockedLayersSHA256,
+		RendererProfile:    version.RendererProfile, Style: version.Style,
 		ProposedBy: server.AvatarActor{
 			Kind: version.ProposedBy.Kind, ID: version.ProposedBy.ID, Name: version.ProposedBy.Name,
 		},
@@ -234,14 +255,38 @@ func toServerAvatarVersionSummary(version store.AvatarVersionSummary) server.Ava
 		IsActive:   version.IsActive, IsProposed: version.IsProposed,
 		WasActivated: version.WasActivated, RollbackEligible: version.RollbackEligible,
 		Rejected: version.Rejected, LastActivatedAt: version.LastActivatedAt, RejectedAt: version.RejectedAt,
+		PayloadState: version.PayloadState, PayloadBytes: version.PayloadBytes,
+		PayloadCompactedAt:      version.PayloadCompactedAt,
+		PayloadCompactionReason: version.PayloadCompactionReason,
 	}
 }
 
 func toServerAvatarStyle(style store.AvatarStyleView) server.AvatarStyleView {
-	return server.AvatarStyleView{
+	out := server.AvatarStyleView{
 		RealmID: style.RealmID, StyleRevision: style.StyleRevision, StylePack: style.StylePack,
 		CreatedAt: style.CreatedAt, UpdatedAt: style.UpdatedAt,
 	}
+	if style.Rollout != nil {
+		out.Rollout = &server.AvatarStyleRollout{
+			StyleRevision:         style.Rollout.StyleRevision,
+			StylePackID:           style.Rollout.StylePackID,
+			StylePackVersion:      style.Rollout.StylePackVersion,
+			Status:                style.Rollout.Status,
+			TargetProfileCount:    style.Rollout.TargetProfileCount,
+			ProcessedProfileCount: style.Rollout.ProcessedProfileCount,
+			BatchCount:            style.Rollout.BatchCount,
+			LastBatchSize:         style.Rollout.LastBatchSize,
+			FailureCount:          style.Rollout.FailureCount,
+			RetryAfter:            style.Rollout.RetryAfter,
+			LastFailureCode:       style.Rollout.LastFailureCode,
+			CreatedAt:             style.Rollout.CreatedAt,
+			StartedAt:             style.Rollout.StartedAt,
+			UpdatedAt:             style.Rollout.UpdatedAt,
+			CompletedAt:           style.Rollout.CompletedAt,
+			SupersededAt:          style.Rollout.SupersededAt,
+		}
+	}
+	return out
 }
 
 func toServerAvatarReceipt(receipt store.AvatarMutationReceipt) server.AvatarMutationReceipt {
@@ -274,6 +319,10 @@ func mapAvatarError(err error) error {
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrAvatarIdempotencyConflict):
 		return server.ErrIdempotencyConflict
+	case errors.Is(err, store.ErrAvatarPayloadQuotaExceeded):
+		return server.ErrAvatarPayloadQuotaExceeded
+	case errors.Is(err, store.ErrAvatarPayloadCompactionDisabled):
+		return server.ErrAvatarPayloadCompactionDisabled
 	case errors.Is(err, store.ErrAvatarConflict):
 		return server.ErrConflict
 	default:

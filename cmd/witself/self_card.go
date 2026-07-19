@@ -58,6 +58,7 @@ type selfCardAvatar struct {
 	Version         int64         `json:"version,omitempty"`
 	ProfileRevision int64         `json:"profile_revision"`
 	SubjectForm     string        `json:"subject_form"`
+	RendererProfile string        `json:"renderer_profile"`
 	Description     string        `json:"description"`
 	Style           selfCardStyle `json:"style"`
 	SVGSHA256       string        `json:"svg_sha256"`
@@ -188,6 +189,15 @@ func validateSelfCard(identity client.SelfIdentity, view *client.AvatarView) (va
 	if err := active.SubjectForm.Validate(); err != nil {
 		return validatedSelfCard{}, fmt.Errorf("validate active avatar subject: %w", err)
 	}
+	// A v186 CLI may briefly read a response from a v185 server that predates
+	// explicit renderer provenance. Missing wire metadata is quarantined as
+	// legacy and is never promoted or persisted by the client.
+	if active.RendererProfile == "" {
+		active.RendererProfile = avatardomain.RendererProfileLegacy
+	}
+	if err := active.RendererProfile.Validate(); err != nil {
+		return validatedSelfCard{}, fmt.Errorf("validate active avatar renderer profile: %w", err)
+	}
 	if err := profile.Style.Validate(); err != nil {
 		return validatedSelfCard{}, fmt.Errorf("validate avatar profile style: %w", err)
 	}
@@ -269,6 +279,7 @@ func validateSelfCard(identity client.SelfIdentity, view *client.AvatarView) (va
 			Version:         active.Version,
 			ProfileRevision: profile.ProfileRevision,
 			SubjectForm:     string(active.SubjectForm),
+			RendererProfile: string(active.RendererProfile),
 			Description:     boundedCardText(active.Description, 160),
 			Style: selfCardStyle{
 				ID:      boundedCardText(active.Style.StylePackID, avatardomain.MaxStylePackIDBytes),
@@ -493,8 +504,18 @@ func padCardText(value string, width int) string {
 	return value + strings.Repeat(" ", width-visible)
 }
 
-func rasterizeSelfCardAvatar(svg []byte) (*image.RGBA, error) {
-	icon, err := oksvg.ReadIconStream(bytes.NewReader(svg), oksvg.StrictErrorMode)
+func rasterizeSelfCardAvatar(svg []byte) (portrait *image.RGBA, err error) {
+	canonical, err := avatardomain.SanitizeSVGForPerceptualV1(svg)
+	if err != nil {
+		return nil, fmt.Errorf("avatar SVG is not compatible with canonical terminal rendering: %w", err)
+	}
+	defer func() {
+		if recover() != nil {
+			portrait = nil
+			err = errors.New("safe avatar SVG renderer rejected the input")
+		}
+	}()
+	icon, err := oksvg.ReadIconStream(bytes.NewReader(canonical), oksvg.StrictErrorMode)
 	if err != nil {
 		return nil, fmt.Errorf("parse safe avatar SVG for terminal display: %w", err)
 	}
@@ -506,18 +527,18 @@ func rasterizeSelfCardAvatar(svg []byte) (*image.RGBA, error) {
 		math.IsNaN(icon.ViewBox.W) || math.IsNaN(icon.ViewBox.H) {
 		return nil, errors.New("avatar SVG has an unsupported view box")
 	}
-	img := image.NewRGBA(image.Rect(0, 0, selfCardRasterSize, selfCardRasterSize))
+	portrait = image.NewRGBA(image.Rect(0, 0, selfCardRasterSize, selfCardRasterSize))
 	background := color.RGBA{R: 247, G: 250, B: 252, A: 255}
 	for y := 0; y < selfCardRasterSize; y++ {
 		for x := 0; x < selfCardRasterSize; x++ {
-			img.SetRGBA(x, y, background)
+			portrait.SetRGBA(x, y, background)
 		}
 	}
-	scanner := rasterx.NewScannerGV(selfCardRasterSize, selfCardRasterSize, img, img.Bounds())
+	scanner := rasterx.NewScannerGV(selfCardRasterSize, selfCardRasterSize, portrait, portrait.Bounds())
 	raster := rasterx.NewDasher(selfCardRasterSize, selfCardRasterSize, scanner)
 	icon.SetTarget(0, 0, selfCardRasterSize, selfCardRasterSize)
 	icon.Draw(raster, 1)
-	return img, nil
+	return portrait, nil
 }
 
 func selfCardANSIImage(img image.Image, profile termenv.Profile) ([]string, error) {

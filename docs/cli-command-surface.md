@@ -1358,8 +1358,9 @@ must not accept them as authentication, authorization, or a legal credential.
 The default output adapts to the destination:
 
 - On a sufficiently wide UTF-8 color terminal, the CLI revalidates the SVG,
-  verifies its SHA-256, renders it into a fixed 20x20 in-memory raster, and
-  shows the portrait as ANSI half-block cells beside the identity fields.
+  verifies its SHA-256, applies the strict deterministic `perceptual-v1`
+  renderer profile, renders it into a fixed 20x20 in-memory raster, and shows
+  the portrait as ANSI half-block cells beside the identity fields.
 - Pipes, redirected output, `NO_COLOR`, `TERM=dumb`, non-UTF-8 terminals, and
   unsupported renderings receive a deterministic text card. Narrow terminals
   receive a key/value form rather than a clipped box.
@@ -1372,6 +1373,12 @@ active pointers, unsafe or non-canonical SVG, and hash mismatches. It never
 emits SVG, `visual_spec`, facts, memories, checkpoints, or pending proposal
 content. Use `witself avatar show` or `witself avatar version` when the explicit
 creative payload is actually needed.
+
+The bounded JSON document includes the value-free `renderer_profile`. Current
+servers emit `perceptual-v1` or `legacy`; during a mixed-version rollout an
+omitted field from an older server is treated as legacy in memory only. Legacy
+SVG outside the strict profile receives the deterministic plain card rather
+than a best-effort raster.
 
 ```sh
 witself self card --account default --agent scott
@@ -2968,6 +2975,7 @@ witself install claude
 witself install grok
 witself install cursor
 witself install claude,codex,grok,cursor --agent scott --location home
+witself install claude,codex --routing-only
 ```
 
 The installer reuses an existing binding or the only local agent credential. If
@@ -2979,6 +2987,14 @@ with a stable generated local id. A supplied label is pinned in both commands;
 when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
+
+`--routing-only` atomically refreshes only the runtime's managed static
+instruction block. It does not resolve credentials, contact Witself, invoke a
+provider CLI, change the integration binding, register MCP, or install/remove
+hooks. It intentionally conflicts with every binding and hook flag. Use it
+when the installed binary contains newer routing policy but administrator-
+managed hooks and the existing MCP registration are already correct; restart
+the runtime or begin a new task afterward so it reloads the file.
 
 The installer also reports the runtime's automatic-hydration delivery modes.
 The transcript hook durably queues capture first, then uses the exact installed
@@ -4107,6 +4123,10 @@ witself avatar operator rollback --agent-id AGENT ...
 witself avatar operator reset --agent-id AGENT \
   --expected-profile-revision N [--reason-code CODE] --idempotency-key KEY
 witself avatar operator policy --agent-id AGENT ...
+witself avatar operator quota --agent-id AGENT \
+  --retained-payload-count-limit 20 \
+  --retained-payload-byte-limit 2097152 \
+  --expected-profile-revision N --idempotency-key KEY
 witself avatar operator style show --realm-id REALM
 witself avatar operator style version --realm-id REALM \
   --style-file style.json --expected-style-revision N --idempotency-key KEY
@@ -4116,12 +4136,53 @@ witself avatar operator style version --realm-id REALM \
 but both payloads cannot consume the same stdin stream. See
 [agent-avatars.md](agent-avatars.md).
 
+Realm operator style reads include a value-free `rollout` object after a style
+publish. Its `pending`, `running`, `completed`, or `superseded` status and
+bounded counters let automation observe large-realm propagation without
+reading any SVG or generation prompt. `target_profile_count` is absent while a
+job is open and finalized when it becomes terminal; retry timestamps and the
+last value-free failure class expose bounded worker backoff. Self-agent
+`avatar style show` does not expose this realm-wide operator telemetry.
+
 The self and operator `history` commands print payload-free metadata pages and
 preserve `next_before_version` plus the server lifecycle fields for each
 immutable version: `is_active`, `is_proposed`, `was_activated`,
 `rollback_eligible`, `rejected`, and the optional activation or rejection
-timestamps. Pass that cursor back as `--before-version`; use `avatar version`
-for the exact SVG, description, visual specification, and provenance.
+timestamps. They also include `payload_state`, original `payload_bytes`,
+`svg_sha256`, `locked_layers_sha256`, immutable value-free `renderer_profile`,
+and optional compaction timestamp/reason.
+Pass that cursor back as `--before-version`; use `avatar version` for an exact
+read. A `full` exact version includes SVG, description, visual specification,
+and provenance. A `compacted` exact version returns retained metadata and
+provenance but omits those three creative fields.
+
+New proposal commands always create a `perceptual-v1` version. A `legacy`
+active version stays readable but cannot parent same-style self evolution; use
+an operator replacement, an explicit reset followed by a parentless proposal,
+or a newly selected style to establish a strict baseline. Visual-continuity
+enforcement is deterministic canonical-render comparison, not a backend model
+or embedding call.
+
+`avatar show` and `avatar operator show` report the payload count/byte limits,
+the current full-row count, inclusive full-payload plus continuity-fingerprint
+byte usage, and the fixed rollback floor. Defaults are 20 full
+payloads and 2 MiB per agent. `avatar operator quota` is the only quota mutation
+surface; the count range is 4–1000 and the byte range is 524288–67108864. It is
+operator-only, revision-fenced, and idempotent. Lowering a limit immediately
+compacts eligible inactive payloads as needed in the same transaction. A raise
+does not restore compacted data. While server-side compaction is disabled, a
+proposal or quota change that already fits succeeds; one requiring cleanup
+fails without mutation as `avatar_payload_compaction_not_active` and is
+retryable after phase-B activation. If the requested state cannot preserve the
+active, proposed, and two most recently activated distinct inactive current-lineage
+payloads, the command fails closed with `avatar_payload_quota_exceeded` and
+leaves both limits and payloads unchanged.
+
+Proposal commands apply the same quota before inserting the new version.
+Eligible compaction order is retired lineage, rejected, other never-activated,
+then activated versions older than the two-version rollback floor; each class
+is oldest first. Compaction is irreversible and exact retry replays never run it
+again.
 
 `avatar reset` requires explicit fresh-start intent. It retires the current
 lineage without deleting history, returns the profile to its deterministic

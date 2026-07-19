@@ -67,6 +67,7 @@ func installCmd(args []string) int {
 	mode := fs.String("capture", transcriptcapture.ModeRaw, "messages|trace|raw")
 	managedHooks := fs.Bool("managed-hooks", supportsManagedHooks(runtime), "install administrator-managed hooks without per-hook runtime approval")
 	userHooks := fs.Bool("user-hooks", false, "install user-scoped hooks instead of requesting administrator access")
+	routingOnly := fs.Bool("routing-only", false, "refresh only managed static routing instructions; leave hooks, MCP, and the integration binding unchanged")
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing an agent token")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -81,6 +82,27 @@ func installCmd(args []string) int {
 	if *managedHooks && !supportsManagedHooks(runtime) {
 		fmt.Fprintf(os.Stderr, "witself: %s uses approval-free global user hooks; --managed-hooks is not supported\n", runtime)
 		return 2
+	}
+	if *routingOnly {
+		for name := range setFlags {
+			if name != "routing-only" {
+				fmt.Fprintf(os.Stderr, "witself: --routing-only conflicts with --%s\n", name)
+				return 2
+			}
+		}
+		routing, err := installRuntimeMemoryRoutingInstructions(runtime)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if !routing.managed {
+			fmt.Fprintf(os.Stderr, "witself: %s has no managed static routing instructions\n", runtime)
+			return 1
+		}
+		fmt.Printf("refreshed %s static routing instructions\n", routing.displayName)
+		fmt.Printf("memory routing: %s (managed)\n", routing.path)
+		fmt.Printf("next: restart %s or start a new task to load the refreshed instructions\n", routing.displayName)
+		return 0
 	}
 	useManagedHooks := *managedHooks && !*userHooks
 

@@ -69,6 +69,12 @@ Publish and verify the release before changing GitOps. The helper accepts the
 released version without the Git tag's `v` prefix and changes exactly the
 Witself server chart and image pins for one configured cell:
 
+Before a release that can advance the database schema, create and verify the
+cell's pre-migration database backup and record its identifier in the private
+rollout record. For managed GCP, follow the hard on-demand Cloud SQL gate in
+[`docs/backup-and-recovery.md`](../docs/backup-and-recovery.md#gcp-cloud-sql-pre-migration-backup);
+this is mandatory even when a scheduled backup appears recent.
+
 ```sh
 VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
 CELL="${ROLLOUT_CELL:?set ROLLOUT_CELL}"
@@ -89,6 +95,13 @@ migration failure prevents the replacement pod from becoming Ready. Complete
 release-specific API and client smoke tests before calling a feature
 operational. The full procedure is in
 [`docs/deployment-cells.md`](../docs/deployment-cells.md).
+
+Avatar creative-payload compaction uses two GitOps phases. Keep
+`apps.witselfServer.avatarPayloadCompactionEnabled: false` while rolling the
+new chart and image, freeze avatar mutation/import/export during writer
+convergence, and verify that every old writer has drained. Enable compaction
+only in a later config-only commit; the nested chart checksum must then restart
+every server pod. Do not combine that Phase-B flip with an image or chart pin.
 
 ## Notes
 

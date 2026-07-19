@@ -1,5 +1,10 @@
 package export
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // The upgrader chain is the schema-evolution contract for archives: an
 // archive written at schema version N restores into a cell at schema M > N
 // by lifting each row through the registered upgraders N -> N+1 -> ... -> M.
@@ -36,6 +41,80 @@ var upgraders = map[int]Upgrader{
 	35: addMessageFailureCountDefault,
 	36: addMessageAudienceDefaults,
 	49: preserveSchema49Rows,
+	50: addAvatarPayloadQuotaDefaults,
+	51: preserveSchema51Rows,
+	53: addAvatarRendererProfileDefault,
+}
+
+const (
+	legacyAvatarRetainedPayloadCountLimit = 20
+	legacyAvatarRetainedPayloadByteLimit  = 2 * 1024 * 1024
+	legacyAvatarMaximumPayloadBytes       = 128 * 1024
+)
+
+// addAvatarRendererProfileDefault lifts every schema-53 avatar version as
+// legacy. Older writers never performed the exact perceptual-v1 baseline
+// checks, so an upgrader must not infer or fabricate stronger provenance from
+// SVG bytes that happen to pass today's validator.
+func addAvatarRendererProfileDefault(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_avatar_versions" {
+		row["renderer_profile"] = "legacy"
+		// Pre-profile fingerprints cannot prove that their source SVG used the
+		// exact perceptual-v1 renderer contract. The locked-layer digest remains
+		// the portable continuity authority for quarantined compacted rows.
+		row["continuity_fingerprint"] = nil
+	}
+	return row, nil
+}
+
+// addAvatarPayloadQuotaDefaults lifts schema-50 avatar rows into the explicit
+// full-or-compacted payload representation introduced by migration 0051.
+// Every schema-50 version necessarily retained its complete creative payload,
+// so the upgrader can derive an exact byte count without inventing history.
+func addAvatarPayloadQuotaDefaults(table string, row map[string]any) (map[string]any, error) {
+	switch table {
+	case "agent_avatar_profiles":
+		row["retained_payload_count_limit"] = legacyAvatarRetainedPayloadCountLimit
+		row["retained_payload_byte_limit"] = legacyAvatarRetainedPayloadByteLimit
+		row["payload_quota_reconciliation_required"] = true
+	case "agent_avatar_versions":
+		svg, svgOK := row["svg"].(string)
+		description, descriptionOK := row["description"].(string)
+		visualSpec, specOK := row["visual_spec"]
+		if !svgOK || !descriptionOK || !specOK || visualSpec == nil {
+			return nil, fmt.Errorf("legacy avatar version payload is incomplete")
+		}
+		rawSpec, err := json.Marshal(visualSpec)
+		if err != nil {
+			return nil, fmt.Errorf("legacy avatar visual_spec is invalid: %w", err)
+		}
+		payloadBytes := len(svg) + len(description) + len(rawSpec)
+		if payloadBytes < 1 || payloadBytes > legacyAvatarMaximumPayloadBytes {
+			return nil, fmt.Errorf("legacy avatar payload byte count is invalid")
+		}
+		row["payload_state"] = "full"
+		row["payload_bytes"] = payloadBytes
+		row["payload_compacted_at"] = nil
+		row["payload_compaction_reason"] = nil
+		// Row-local archive upgrades cannot derive a locked-layer projection
+		// without the referenced style pack. The account importer derives and
+		// validates it after style rows have been loaded.
+		row["locked_layers_sha256"] = nil
+		row["continuity_fingerprint"] = nil
+	}
+	return row, nil
+}
+
+// preserveSchema51Rows acknowledges the one-open-avatar-style-rollout
+// uniqueness invariant introduced by migration 0052. A schema-51 archive has
+// no rollout-job stream, so there are no preexisting rows to reconcile.
+func preserveSchema51Rows(table string, row map[string]any) (map[string]any, error) {
+	if table == "agent_avatar_profiles" {
+		// Existing projections predate the durable selection-revision fence.
+		// NULL makes the first later rollout discover them lazily.
+		row["style_revision"] = nil
+	}
+	return row, nil
 }
 
 // preserveSchema49Rows acknowledges the avatar aggregate, deferred foreign

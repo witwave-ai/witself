@@ -18,16 +18,18 @@ import (
 )
 
 type avatarLockedProfile struct {
-	status            avatardomain.Status
-	policy            avatardomain.AutonomyPolicy
-	stylePackID       string
-	stylePackVersion  int
-	lineageGeneration int64
-	retryReady        bool
-	revision          int64
-	latestVersion     *int64
-	proposedVersion   *int64
-	activeVersion     *int64
+	status                    avatardomain.Status
+	policy                    avatardomain.AutonomyPolicy
+	stylePackID               string
+	stylePackVersion          int
+	lineageGeneration         int64
+	retryReady                bool
+	revision                  int64
+	latestVersion             *int64
+	proposedVersion           *int64
+	activeVersion             *int64
+	retainedPayloadCountLimit int
+	retainedPayloadByteLimit  int64
 }
 
 // ProposeAvatar stores an immutable avatar proposal for the authenticated agent.
@@ -100,12 +102,17 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	if !pack.HasSubjectForm(in.SubjectForm) {
 		return AvatarMutationResult{}, fmt.Errorf("%w: selected style does not support subject form", ErrAvatarInputInvalid)
 	}
-	sanitizedSVG, err := avatardomain.SanitizeSVGForStylePack([]byte(in.SVG), pack)
+	// Canonicalize with the released generic sanitizer before computing the
+	// request fingerprint. This preserves byte-for-byte idempotency semantics
+	// for receipts written by an older server during a mixed-version rollout.
+	// The stricter renderer gate is deliberately applied only after a replay
+	// miss so an already-committed legacy request can still be replayed.
+	canonicalSVG, err := avatardomain.SanitizeSVGForStylePack([]byte(in.SVG), pack)
 	if err != nil {
 		return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 	}
-	svgDigest := sha256.Sum256(sanitizedSVG)
-	svgSHA256 := hex.EncodeToString(svgDigest[:])
+	requestSVGDigest := sha256.Sum256(canonicalSVG)
+	requestSVGSHA256 := hex.EncodeToString(requestSVGDigest[:])
 	fingerprint, err := avatarFingerprint(struct {
 		ExpectedRevision int64                    `json:"expected_revision"`
 		ParentVersion    int64                    `json:"parent_version"`
@@ -117,7 +124,7 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		SVGSHA256        string                   `json:"svg_sha256"`
 		Provenance       AvatarClientProvenance   `json:"provenance"`
 	}{in.ExpectedProfileRevision, in.ParentVersion, stylePackID,
-		in.StylePackVersion, in.SubjectForm, description, visualSpec, svgSHA256,
+		in.StylePackVersion, in.SubjectForm, description, visualSpec, requestSVGSHA256,
 		provenance})
 	if err != nil {
 		return AvatarMutationResult{}, err
@@ -131,6 +138,20 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 			return AvatarMutationResult{}, err
 		}
 		return AvatarMutationResult{Avatar: view, Receipt: receipt}, nil
+	}
+	// Every newly persisted proposal becomes a renderer-compatible baseline,
+	// regardless of whether it was proposed by the agent or an operator. An
+	// operator may override similarity policy, but never renderer safety or the
+	// minimum locked-identity projection.
+	sanitizedSVG, err := avatardomain.SanitizePerceptualV1AvatarBaseline(canonicalSVG, pack)
+	if err != nil {
+		return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
+	}
+	svgDigest := sha256.Sum256(sanitizedSVG)
+	svgSHA256 := hex.EncodeToString(svgDigest[:])
+	lockedLayersSHA256, err := avatardomain.LockedLayersSHA256(sanitizedSVG, pack)
+	if err != nil {
+		return AvatarMutationResult{}, fmt.Errorf("%w: derive locked-layer digest: %v", ErrAvatarInputInvalid, err)
 	}
 	if !operator && profile.policy == avatardomain.AutonomyOperatorOnly {
 		return AvatarMutationResult{}, ErrAvatarForbidden
@@ -169,6 +190,9 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 			sameStyle := parentInfo.stylePackID == stylePackID &&
 				parentInfo.stylePackVersion == in.StylePackVersion
 			if sameStyle {
+				if parentInfo.rendererProfile != avatardomain.RendererProfilePerceptualV1 {
+					return AvatarMutationResult{}, fmt.Errorf("%w: active legacy avatar requires operator replacement, reset, or style migration before self evolution", ErrAvatarConflict)
+				}
 				if parentInfo.subjectForm != in.SubjectForm {
 					return AvatarMutationResult{}, fmt.Errorf("%w: same-style self evolution must preserve subject_form", ErrAvatarInputInvalid)
 				}
@@ -176,8 +200,23 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 					[]byte(parentInfo.svg), sanitizedSVG, pack); err != nil {
 					return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
 				}
+				if err := avatardomain.ValidatePerceptualContinuity(
+					[]byte(parentInfo.svg), sanitizedSVG, pack); err != nil {
+					return AvatarMutationResult{}, fmt.Errorf("%w: %v", ErrAvatarInputInvalid, err)
+				}
 			}
 		}
+	}
+	incomingPayloadBytes, err := avatarCreativePayloadBytes(
+		string(sanitizedSVG), description, visualSpec)
+	if err != nil {
+		return AvatarMutationResult{}, err
+	}
+	compaction, err := s.enforceAvatarPayloadQuotaTx(ctx, tx, target,
+		profile, 1, incomingPayloadBytes, profile.retainedPayloadCountLimit,
+		profile.retainedPayloadByteLimit)
+	if err != nil {
+		return AvatarMutationResult{}, err
 	}
 
 	version := int64(1)
@@ -200,15 +239,16 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		INSERT INTO agent_avatar_versions
 		       (account_id, realm_id, agent_id, id, version, parent_version,
 		        lineage_generation, style_pack_id, style_pack_version, subject_form, svg,
-		        description, visual_spec, svg_sha256, provenance,
-		        proposed_by_kind, proposed_by_id, proposed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-		        clock_timestamp())`,
+		        description, visual_spec, svg_sha256, locked_layers_sha256, renderer_profile, provenance,
+		        proposed_by_kind, proposed_by_id, proposed_at, payload_bytes)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+		        clock_timestamp(),$20)`,
 		target.accountID, target.realmID, target.agentID, versionID, version,
 		parent, profile.lineageGeneration, stylePackID, in.StylePackVersion,
 		string(in.SubjectForm),
-		string(sanitizedSVG), description, visualSpec, svgSHA256, provenanceJSON,
-		p.Kind, p.ID); err != nil {
+		string(sanitizedSVG), description, visualSpec, svgSHA256,
+		lockedLayersSHA256, string(avatardomain.RendererProfilePerceptualV1),
+		provenanceJSON, p.Kind, p.ID, incomingPayloadBytes); err != nil {
 		return AvatarMutationResult{}, fmt.Errorf("insert avatar version: %w", err)
 	}
 	var resultRevision int64
@@ -217,10 +257,13 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 		   SET latest_avatar_version=$4, proposed_avatar_version=$4,
 		       status='proposed', subject_form=$5, attempt_count=0,
 		       retry_after=NULL, failure_code='', revision=revision+1,
+		       payload_quota_reconciliation_required=
+		         CASE WHEN $7 THEN false ELSE payload_quota_reconciliation_required END,
 		       updated_at=clock_timestamp()
 		 WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3 AND revision=$6
 		 RETURNING revision`, target.accountID, target.realmID, target.agentID,
-		version, string(in.SubjectForm), in.ExpectedProfileRevision).Scan(&resultRevision)
+		version, string(in.SubjectForm), in.ExpectedProfileRevision,
+		s.avatarPayloadCompactionEnabled).Scan(&resultRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarMutationResult{}, ErrAvatarConflict
 	}
@@ -230,6 +273,10 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	receipt, err := insertAvatarMutationReceiptTx(ctx, tx, p, target, "avatar",
 		target.agentID, "propose", key, fingerprint, resultRevision, version)
 	if err != nil {
+		return AvatarMutationResult{}, err
+	}
+	if err := logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
+		profile.retainedPayloadCountLimit, profile.retainedPayloadByteLimit); err != nil {
 		return AvatarMutationResult{}, err
 	}
 	metadata := avatarVersionEventMetadata(target.agentID, version,
@@ -1023,7 +1070,8 @@ func lockAvatarProfileTx(ctx context.Context, tx pgx.Tx, target avatarTarget) (a
 		       p.style_pack_version, p.lineage_generation,
 		       (p.retry_after IS NULL OR p.retry_after <= clock_timestamp()),
 		       p.revision, p.latest_avatar_version,
-		       p.proposed_avatar_version, p.active_avatar_version
+		       p.proposed_avatar_version, p.active_avatar_version,
+		       p.retained_payload_count_limit, p.retained_payload_byte_limit
 		  FROM agent_avatar_profiles p
 		  JOIN agents a ON a.id=p.agent_id AND a.realm_id=p.realm_id
 		  JOIN realms r ON r.id=p.realm_id AND r.account_id=p.account_id
@@ -1033,7 +1081,8 @@ func lockAvatarProfileTx(ctx context.Context, tx pgx.Tx, target avatarTarget) (a
 		&status, &policy, &out.stylePackID, &out.stylePackVersion,
 		&out.lineageGeneration, &out.retryReady,
 		&out.revision, &out.latestVersion, &out.proposedVersion,
-		&out.activeVersion)
+		&out.activeVersion, &out.retainedPayloadCountLimit,
+		&out.retainedPayloadByteLimit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return avatarLockedProfile{}, ErrAvatarNotFound
 	}
@@ -1051,26 +1100,28 @@ type avatarVersionMutationInfo struct {
 	stylePackID       string
 	stylePackVersion  int
 	subjectForm       avatardomain.SubjectForm
+	rendererProfile   avatardomain.RendererProfile
 	svg               string
 }
 
 func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatarTarget, version int64) (avatarVersionMutationInfo, error) {
 	var out avatarVersionMutationInfo
 	var parent *int64
-	var subjectForm string
+	var subjectForm, rendererProfile string
 	err := tx.QueryRow(ctx, `
 		SELECT v.parent_version, v.lineage_generation,
 		       v.style_pack_id, v.style_pack_version,
-		       v.subject_form, v.svg
+		       v.subject_form, v.renderer_profile, v.svg
 		  FROM agent_avatar_versions v
 		  LEFT JOIN agent_avatar_rejections rejection
 		    ON rejection.account_id=v.account_id AND rejection.realm_id=v.realm_id
 		   AND rejection.agent_id=v.agent_id AND rejection.avatar_version=v.version
 		 WHERE v.account_id=$1 AND v.realm_id=$2 AND v.agent_id=$3
-		   AND v.version=$4 AND rejection.id IS NULL`, target.accountID,
+		   AND v.version=$4 AND v.payload_state='full'
+		   AND rejection.id IS NULL`, target.accountID,
 		target.realmID, target.agentID, version).Scan(&parent,
 		&out.lineageGeneration, &out.stylePackID,
-		&out.stylePackVersion, &subjectForm, &out.svg)
+		&out.stylePackVersion, &subjectForm, &rendererProfile, &out.svg)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return avatarVersionMutationInfo{}, ErrAvatarVersionNotFound
 	}
@@ -1081,6 +1132,10 @@ func getAvatarVersionForMutationTx(ctx context.Context, tx pgx.Tx, target avatar
 		out.parentVersion = *parent
 	}
 	out.subjectForm = avatardomain.SubjectForm(subjectForm)
+	out.rendererProfile = avatardomain.RendererProfile(rendererProfile)
+	if err := out.rendererProfile.Validate(); err != nil {
+		return avatarVersionMutationInfo{}, fmt.Errorf("get avatar mutation version: %w", err)
+	}
 	return out, nil
 }
 

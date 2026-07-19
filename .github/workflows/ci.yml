@@ -80,6 +80,30 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+  avatar-renderer-portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: renderer architecture
+        run: go env GOOS GOARCH
+
+      - name: avatar renderer portability goldens
+        run: >-
+          go test ./internal/avatar
+          -run
+          '^TestPerceptual(V1PolicyGolden|Continuity.*Golden.*|ContinuityFingerprintSpeciesAndPlaceholderBehavior)$'
+          -count=1
+
   helm:
     runs-on: ubuntu-latest
     steps:
@@ -90,12 +114,18 @@ jobs:
           version: v3.16.4
 
       - name: install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.8.0
+          KUBECONFORM_LINUX_AMD64_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
         run: |
-          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar -xz
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_LINUX_AMD64_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz
           sudo install kubeconform /usr/local/bin/
 
       - name: helm lint
         run: |
+          helm lint .gitops/charts/apps
           helm lint charts/witself-server
           helm lint charts/witself-server --values charts/witself-server/ci/cloud-values.yaml
           helm lint charts/witself-server --values charts/witself-server/ci/gcp-rollout-values.yaml

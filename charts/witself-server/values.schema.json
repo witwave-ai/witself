@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "witself chart values",
   "type": "object",
-  "required": ["image", "backend", "features", "server", "health", "metrics", "service"],
+  "required": ["image", "backend", "features", "avatar", "server", "health", "metrics", "service"],
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 0 },
     "minReadySeconds": { "type": "integer", "minimum": 0 },
@@ -68,6 +68,35 @@
           "required": ["enabled"],
           "properties": {
             "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "avatar": {
+      "type": "object",
+      "required": ["payloadCompaction", "styleRollout"],
+      "properties": {
+        "payloadCompaction": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "styleRollout": {
+          "type": "object",
+          "required": ["enabled", "batchSize", "interval", "batchTimeout"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "batchSize": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "interval": {
+              "type": "string",
+              "pattern": "^((1[0-9]{2}|[2-9][0-9]{2}|[1-9][0-9]{3,5}|[12][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|([1-9]|[1-9][0-9]|[1-9][0-9]{2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)s|([1-9]|[1-5][0-9]|60)m|1h)$"
+            },
+            "batchTimeout": {
+              "type": "string",
+              "pattern": "^(([1-9][0-9]{2,4}|[12][0-9]{5}|300000)ms|([1-9]|[1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
+            }
           }
         }
       }

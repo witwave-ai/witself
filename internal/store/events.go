@@ -140,16 +140,20 @@ const (
 	// description, visual specification, model prompt, provenance, hashes, and
 	// retry keys remain in the avatar tables and never enter the owner audit
 	// ledger.
-	VerbAvatarGenerationRequested = "avatar.generation.requested"
-	VerbAvatarProposed            = "avatar.proposed"
-	VerbAvatarActivated           = "avatar.activated"
-	VerbAvatarEvolved             = "avatar.evolved"
-	VerbAvatarRejected            = "avatar.rejected"
-	VerbAvatarGenerationFailed    = "avatar.generation.failed"
-	VerbAvatarRolledBack          = "avatar.rolled_back"
-	VerbAvatarReset               = "avatar.reset"
-	VerbAvatarPolicyChanged       = "avatar.policy.changed"
-	VerbAvatarStyleChanged        = "avatar.style.changed"
+	VerbAvatarGenerationRequested    = "avatar.generation.requested"
+	VerbAvatarProposed               = "avatar.proposed"
+	VerbAvatarActivated              = "avatar.activated"
+	VerbAvatarEvolved                = "avatar.evolved"
+	VerbAvatarRejected               = "avatar.rejected"
+	VerbAvatarGenerationFailed       = "avatar.generation.failed"
+	VerbAvatarRolledBack             = "avatar.rolled_back"
+	VerbAvatarReset                  = "avatar.reset"
+	VerbAvatarPolicyChanged          = "avatar.policy.changed"
+	VerbAvatarStyleChanged           = "avatar.style.changed"
+	VerbAvatarQuotaChanged           = "avatar.quota.changed"
+	VerbAvatarPayloadCompacted       = "avatar.payload.compacted"
+	VerbAvatarStyleRolloutCompleted  = "avatar.style.rollout.completed"
+	VerbAvatarStyleRolloutSuperseded = "avatar.style.rollout.superseded"
 
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
@@ -526,6 +530,28 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbAvatarStyleChanged: avatarEventSpec(
 		[]string{ActorOperator}, "realm_id", "style_pack_id", "style_pack_version", "style_revision",
 	),
+	VerbAvatarQuotaChanged: avatarEventSpec(
+		[]string{ActorOperator}, "agent_id", "count_limit_from", "count_limit_to",
+		"byte_limit_from", "byte_limit_to", "rollback_floor",
+	),
+	VerbAvatarPayloadCompacted: avatarEventSpec(
+		[]string{ActorSystem}, "agent_id", "compacted_versions", "compacted_count", "net_reclaimed_bytes",
+		"retained_payload_count", "retained_payload_bytes", "count_limit",
+		"byte_limit", "rollback_floor",
+	),
+	VerbAvatarStyleRolloutCompleted: avatarEventSpec(
+		[]string{ActorSystem}, "realm_id", "style_pack_id", "style_pack_version", "style_revision",
+	),
+	VerbAvatarStyleRolloutSuperseded: {
+		requiredKeys: []string{
+			"realm_id", "style_pack_id", "style_pack_version", "style_revision", "reason",
+		},
+		allowedKeys: []string{
+			"realm_id", "style_pack_id", "style_pack_version", "style_revision", "reason",
+			"superseded_by_style_revision",
+		},
+		allowedActors: []string{ActorSystem},
+	},
 
 	// Support-ticket verbs. ticket_id is required on all four so the
 	// owner can correlate an audit entry back to the ticket. subject

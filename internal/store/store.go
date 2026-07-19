@@ -13,18 +13,38 @@ import (
 
 // Store wraps a Postgres connection pool.
 type Store struct {
-	pool *pgxpool.Pool
-	dsn  string
+	pool                           *pgxpool.Pool
+	dsn                            string
+	avatarPayloadCompactionEnabled bool
+}
+
+// Option applies process-lifetime store behavior selected before the server
+// migrates or begins serving requests.
+type Option func(*Store)
+
+// WithAvatarPayloadCompactionEnabled activates irreversible avatar creative
+// payload cleanup. It defaults to false so a rolling schema-51 deployment can
+// first converge every writer before a later config-only restart enables it.
+func WithAvatarPayloadCompactionEnabled(enabled bool) Option {
+	return func(s *Store) {
+		s.avatarPayloadCompactionEnabled = enabled
+	}
 }
 
 // Open creates a connection pool from a Postgres DSN. The pool connects lazily,
 // so Open fails only on a malformed DSN — live connectivity is checked by Ping.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+func Open(ctx context.Context, dsn string, options ...Option) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	return &Store{pool: pool, dsn: dsn}, nil
+	store := &Store{pool: pool, dsn: dsn}
+	for _, option := range options {
+		if option != nil {
+			option(store)
+		}
+	}
+	return store, nil
 }
 
 // Ping verifies live connectivity to the database, with a short timeout. It is

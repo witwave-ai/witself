@@ -498,6 +498,15 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.fact.get` | yes | yes | Returns the one true value by name; cross-agent requires `read` policy. |
 | `witself.fact.list` | yes | yes | Redacts `sensitive` values; cross-agent/scan is policy/operator gated. |
 | `witself.fact.delete` | yes | no | Permanent own-fact content deletion; preview/apply, direct-user authority, expected-assertion and idempotency guards. |
+| `witself.avatar.show` | yes | yes | Exact self profile, active/proposed payloads, immutable renderer profile, and retained-payload quota/usage projection. |
+| `witself.avatar.history` | yes | yes | Payload-free paginated history with lifecycle, renderer profile, and explicit full/compacted state. |
+| `witself.avatar.version.show` | yes | yes | Exact full payload or explicit compacted metadata, including renderer profile; compacted creative fields are unavailable. |
+| `witself.avatar.style.show` | yes | yes | Token-bound realm style pack; examples are untrusted data. |
+| `witself.avatar.propose` | yes | no | Validated durable proposal; quota compaction is transactional and fail-closed. |
+| `witself.avatar.activate` | yes | no | Activate the exact pending self proposal under policy and revision fencing. |
+| `witself.avatar.rollback` | yes | no | Roll back only to an eligible full-payload version in the current lineage. |
+| `witself.avatar.reset` | yes | no | Non-purging fresh lineage; retired payloads become first-priority compaction candidates. |
+| `witself.avatar.generation.fail` | yes | no | Record one bounded client generation failure and server-controlled retry state. |
 | `witself.policy.test` | yes | yes | Evaluates an access decision; never mutates. |
 | `witself.group.list` | yes | yes | Lists groups visible to the session. |
 | `witself.group.show` | yes | yes | Shows group metadata and membership where visible. |
@@ -2496,19 +2505,53 @@ For broad fitting (`initial_avatar`, `avatar_reset`, `proposal_rejected`, or a
 active agent rather than the user or operator: it may make one to three
 substantial ephemeral revisions, keeps them out of repository and project files,
 cleans up temporary artifacts, and calls `witself.avatar.propose` only for its
-one chosen final candidate. An accepted proposal is immutable server state.
+one chosen final candidate. An accepted proposal's version identity and
+lifecycle metadata are immutable server state; eligible inactive creative
+fields may later be compacted under quota.
 Under `agent_self_managed`, activating that exact proposal records the agent's
 acceptance and settles the avatar. Under an operator-governed policy, the
 agent's creative selection is complete but identity remains unsettled until
 operator activation. A `retry_due` profile with an active version instead uses
 the bounded single-candidate evolution path.
+`witself.avatar.show` reports per-agent retained-payload count/byte limits, the
+current full-row count, inclusive full-payload plus continuity-fingerprint byte
+usage, and the fixed rollback floor. Quota configuration is
+operator-only through HTTP/CLI; there is no agent-self or operator MCP quota
+mutation tool.
+
 `witself.avatar.history` accepts bounded `limit` and exclusive
 `before_version`, returns `next_before_version`, and preserves the payload-free
 lifecycle projection on each version: `is_active`, `is_proposed`,
 `was_activated`, `rollback_eligible`, `rejected`, and optional
-`last_activated_at` or `rejected_at` timestamps. It omits creative payloads;
-`witself.avatar.version.show` reads one exact positive version when SVG,
-description, visual specification, or provenance is actually needed.
+`last_activated_at` or `rejected_at` timestamps. It also returns
+`payload_state`, original `payload_bytes`, `svg_sha256`,
+`locked_layers_sha256`, immutable value-free `renderer_profile`, and optional
+compaction timestamp/reason.
+`witself.avatar.version.show` reads one exact positive version. A `full` version
+includes SVG, description, visual specification, and provenance; a `compacted`
+version returns retained metadata, hashes, and provenance but omits the three
+creative fields and is never rollback-eligible.
+
+Current responses always identify each version as `perceptual-v1` or `legacy`.
+New proposals are strict `perceptual-v1` baselines. Legacy history remains
+readable but cannot seed deterministic perceptual continuity or parent a
+same-style self evolution; operator replacement, explicit reset, or selected
+style migration is the rebaseline path. Witself computes this semantic visual
+continuity with bounded canonical renders and fixed thresholds, never a backend
+model, embedding, or inference call.
+
+`witself.avatar.propose` transactionally compacts the oldest eligible inactive
+payloads before inserting its new full payload. It never compacts the active or
+proposed version or the two most recently activated distinct inactive versions
+in the current lineage. While server-side compaction is disabled, a proposal
+that already fits succeeds; one requiring cleanup fails without mutation as
+`avatar_payload_compaction_not_active` and is retryable after phase-B
+activation. If the protected payloads plus the incoming proposal
+still cannot fit, the proposal fails closed with the stable API error
+`avatar_payload_quota_exceeded`; no payload or profile change is committed. An
+exact idempotent replay returns the original receipt without re-running
+compaction. Compacted creative data is not reconstructable merely by raising a
+later quota.
 
 `witself.avatar.reset` is a destructive-hinted but non-purging mutation: it
 requires explicit fresh-start intent, retires the current lineage, and returns

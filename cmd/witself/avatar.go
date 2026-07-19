@@ -71,7 +71,7 @@ func avatarGenerationCmd(args []string) int {
 
 func avatarOperatorCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself avatar operator show|history|version|propose|activate|reject|rollback|reset|policy|style ...")
+		fmt.Fprintln(os.Stderr, "usage: witself avatar operator show|history|version|propose|activate|reject|rollback|reset|policy|quota|style ...")
 		return 2
 	}
 	switch args[0] {
@@ -93,6 +93,8 @@ func avatarOperatorCmd(args []string) int {
 		return avatarReset(args[1:], true)
 	case "policy":
 		return avatarPolicy(args[1:])
+	case "quota":
+		return avatarQuota(args[1:])
 	case "style":
 		return avatarOperatorStyleCmd(args[1:])
 	default:
@@ -620,6 +622,41 @@ func avatarPolicy(args []string) int {
 		Policy: policy, ExpectedProfileRevision: *expectedRevision,
 		IdempotencyKey: strings.TrimSpace(*idempotencyKey),
 	})
+	if err != nil {
+		return avatarCLIError(err)
+	}
+	return printJSON(result)
+}
+
+func avatarQuota(args []string) int {
+	fs := flag.NewFlagSet("avatar operator quota", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	connFlags := addAvatarOperatorConnectionFlags(fs, "agent")
+	countLimit := fs.Int("retained-payload-count-limit", 0, "retained full-payload count limit (4-1000)")
+	byteLimit := fs.Int64("retained-payload-byte-limit", 0, "retained payload plus continuity-fingerprint byte limit (524288-67108864)")
+	expectedRevision := fs.Int64("expected-profile-revision", 0, "exact current avatar profile revision")
+	idempotencyKey := fs.String("idempotency-key", "", "fresh retry key for this quota change")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || connFlags.agentID() == "" || *countLimit < 4 ||
+		*countLimit > 1000 || *byteLimit < 512*1024 || *byteLimit > 64*1024*1024 ||
+		*expectedRevision < 1 || strings.TrimSpace(*idempotencyKey) == "" {
+		fmt.Fprintln(os.Stderr, "usage: witself avatar operator quota --agent-id AGENT --retained-payload-count-limit 4-1000 --retained-payload-byte-limit 524288-67108864 --expected-profile-revision N --idempotency-key KEY")
+		return 2
+	}
+	ctx := context.Background()
+	endpoint, token, err := connFlags.connect(ctx)
+	if err != nil {
+		return avatarCLIError(err)
+	}
+	result, err := client.UpdateAgentAvatarQuota(ctx, endpoint, token,
+		connFlags.agentID(), client.UpdateAvatarQuotaInput{
+			RetainedPayloadCountLimit: *countLimit,
+			RetainedPayloadByteLimit:  *byteLimit,
+			ExpectedProfileRevision:   *expectedRevision,
+			IdempotencyKey:            strings.TrimSpace(*idempotencyKey),
+		})
 	if err != nil {
 		return avatarCLIError(err)
 	}

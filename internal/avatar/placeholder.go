@@ -56,6 +56,22 @@ func GeneratePlaceholderSVG(agentID, agentName string) ([]byte, error) {
 // used as the neutral fallback instead of falsely labeling the built-in art as
 // custom-style output.
 func GeneratePlaceholderSVGForStylePack(agentID, agentName string, pack StylePack) ([]byte, error) {
+	placeholder, err := generatePlaceholderSVGForStylePack(agentID, agentName, pack)
+	if err != nil {
+		return nil, err
+	}
+	return SanitizePerceptualV1AvatarBaseline(placeholder, pack)
+}
+
+// GenerateLegacyPlaceholderSVGForStylePack is a read-only compatibility path
+// for a style pack selected before perceptual-v1 existed. It never marks or
+// upgrades the returned bytes. New style publication and proposal paths must
+// use GeneratePlaceholderSVGForStylePack instead.
+func GenerateLegacyPlaceholderSVGForStylePack(agentID, agentName string, pack StylePack) ([]byte, error) {
+	return generatePlaceholderSVGForStylePack(agentID, agentName, pack)
+}
+
+func generatePlaceholderSVGForStylePack(agentID, agentName string, pack StylePack) ([]byte, error) {
 	if err := pack.Validate(); err != nil {
 		return nil, err
 	}

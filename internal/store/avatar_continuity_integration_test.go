@@ -141,6 +141,17 @@ func TestAvatarSameStyleSelfContinuityOperatorOverrideAndStyleMigrationPostgres(
 		t.Fatal(err)
 	}
 
+	occluded := pendingEvolution
+	occluded.ExpectedProfileRevision = rejected.Avatar.Profile.ProfileRevision
+	occluded.SVG = strings.Replace(expressionSVG,
+		`<g id="experience" data-layer="experience"></g>`,
+		`<g id="experience" data-layer="experience"><circle cx="256" cy="230" r="136" fill="#F7FAFC"></circle></g>`, 1)
+	occluded.IdempotencyKey = "continuity-identity-occlusion"
+	if _, err := st.ProposeAvatar(ctx, agentPrincipal, occluded); !errors.Is(err, ErrAvatarInputInvalid) ||
+		!strings.Contains(err.Error(), "perceptual continuity") {
+		t.Fatalf("same-style identity occlusion = %v, want perceptual ErrAvatarInputInvalid", err)
+	}
+
 	lockedChanged := pendingEvolution
 	lockedChanged.ExpectedProfileRevision = rejected.Avatar.Profile.ProfileRevision
 	lockedChanged.SVG = strings.Replace(humanSVG, `r="220" fill="#DCEAF5"`, `r="210" fill="#DCEAF5"`, 1)
@@ -174,6 +185,7 @@ func TestAvatarSameStyleSelfContinuityOperatorOverrideAndStyleMigrationPostgres(
 	if err != nil {
 		t.Fatal(err)
 	}
+	drainAvatarStyleRolloutsForTest(ctx, t, st, 10)
 	afterStyle, err := st.GetAvatar(ctx, agentPrincipal)
 	if err != nil {
 		t.Fatal(err)

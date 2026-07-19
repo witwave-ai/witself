@@ -24,9 +24,14 @@ import (
 )
 
 const (
-	defaultBootstrapTokenFile        = "/.witself/tokens/bootstrap.token"
-	factDeletionEnv                  = "WITSELF_FACT_DELETION_ENABLED"
-	factDeletionMinimumSchemaVersion = 28
+	defaultBootstrapTokenFile         = "/.witself/tokens/bootstrap.token"
+	factDeletionEnv                   = "WITSELF_FACT_DELETION_ENABLED"
+	factDeletionMinimumSchemaVersion  = 28
+	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
+	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
+	avatarStyleRolloutIntervalEnv     = "WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL"
+	avatarStyleRolloutBatchTimeoutEnv = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT"
+	avatarPayloadCompactionEnabledEnv = "WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED"
 )
 
 func main() {
@@ -64,13 +69,25 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	avatarRolloutEnabled, avatarRolloutConfig, err := avatarStyleRolloutConfigFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
+	avatarPayloadCompactionEnabled, err := avatarPayloadCompactionEnabledFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	cfg := server.ConfigFromEnv()
+	var stopAvatarRolloutWorker func()
 	if dsn := dbDSN(); dsn != "" {
-		st, err := store.Open(ctx, dsn)
+		st, err := store.Open(ctx, dsn,
+			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
@@ -1390,17 +1407,93 @@ func serve() int {
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
 		cfg.Ready = st.Ping
+		if avatarRolloutEnabled {
+			workerCtx, cancelWorker := context.WithCancel(ctx)
+			workerDone := make(chan error, 1)
+			go func() {
+				workerDone <- st.RunAvatarStyleRolloutWorker(workerCtx, avatarRolloutConfig, func(err error) {
+					fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout: %v\n", err)
+				})
+			}()
+			stopAvatarRolloutWorker = func() {
+				cancelWorker()
+				if err := <-workerDone; err != nil {
+					fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout stopped: %v\n", err)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout worker enabled (batch %d, interval %s)\n",
+				avatarRolloutConfig.BatchSize, avatarRolloutConfig.Interval)
+		}
+		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
+			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
 
-	if err := server.Run(ctx, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+	runErr := server.Run(ctx, cfg)
+	if stopAvatarRolloutWorker != nil {
+		stopAvatarRolloutWorker()
+	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", runErr)
 		return 1
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
+	raw, ok := os.LookupEnv(avatarPayloadCompactionEnabledEnv)
+	if !ok {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w",
+			avatarPayloadCompactionEnabledEnv, err)
+	}
+	return enabled, nil
+}
+
+func avatarStyleRolloutConfigFromEnv() (bool, store.AvatarStyleRolloutWorkerConfig, error) {
+	enabled := true
+	if raw, ok := os.LookupEnv(avatarStyleRolloutEnabledEnv); ok {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a boolean: %w", avatarStyleRolloutEnabledEnv, err)
+		}
+		enabled = parsed
+	}
+	cfg := store.DefaultAvatarStyleRolloutWorkerConfig()
+	if raw, ok := os.LookupEnv(avatarStyleRolloutBatchSizeEnv); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be an integer: %w", avatarStyleRolloutBatchSizeEnv, err)
+		}
+		cfg.BatchSize = parsed
+	}
+	if raw, ok := os.LookupEnv(avatarStyleRolloutIntervalEnv); ok {
+		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a duration: %w", avatarStyleRolloutIntervalEnv, err)
+		}
+		cfg.Interval = parsed
+	}
+	if raw, ok := os.LookupEnv(avatarStyleRolloutBatchTimeoutEnv); ok {
+		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a duration: %w", avatarStyleRolloutBatchTimeoutEnv, err)
+		}
+		cfg.BatchTimeout = parsed
+	}
+	if err := cfg.Validate(); err != nil {
+		return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf(
+			"%s/%s/%s avatar style rollout configuration: %w",
+			avatarStyleRolloutBatchSizeEnv, avatarStyleRolloutIntervalEnv,
+			avatarStyleRolloutBatchTimeoutEnv, err)
+	}
+	return enabled, cfg, nil
 }
 
 func factDeletionEnabledFromEnv() (bool, error) {

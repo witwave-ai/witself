@@ -19,14 +19,16 @@ permissions:
   packages: write # push container images to GHCR
 
 jobs:
-  # Re-run CI's go gates on the tagged commit before anything publishes.
+  # Re-run CI's Go and Helm gates on the tagged commit before anything publishes.
   # ci.yml only fires on PRs and pushes to main — a tag push skips it —
   # so without this gate a commit that never went green (or went red)
   # can ship as a release. That happened three times on 2026-07-04
   # (v0.0.91–v0.0.93 shipped from gofmt/lint-red commits); this job is
-  # the structural fix. Mirror of ci.yml's go job; keep them in sync.
+  # the structural fix. Mirror of ci.yml's Go and Helm jobs; keep them in sync.
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -53,6 +55,20 @@ jobs:
           cache-dependency-path: |
             go.sum
             infra/pulumi/go.sum
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.4
+
+      - name: install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.8.0
+          KUBECONFORM_LINUX_AMD64_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+        run: |
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_LINUX_AMD64_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz
+          sudo install kubeconform /usr/local/bin/
 
       - name: gofmt
         run: |
@@ -90,6 +106,26 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+      - name: helm lint
+        run: |
+          helm lint .gitops/charts/apps
+          helm lint charts/witself-server
+          helm lint charts/witself-server --values charts/witself-server/ci/cloud-values.yaml
+          helm lint charts/witself-server --values charts/witself-server/ci/gcp-rollout-values.yaml
+
+      - name: rollout rendering checks
+        run: bash scripts/test-helm-rollout.sh
+
+      - name: helm template + kubeconform
+        run: |
+          for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml" "ci/gcp-rollout-values.yaml"; do
+            args=(); label=default
+            if [ -n "$v" ]; then args=(--values "charts/witself-server/$v"); label="$v"; fi
+            echo "::group::$label"
+            helm template r charts/witself-server "${args[@]}" -n witself | kubeconform -strict -ignore-missing-schemas -summary
+            echo "::endgroup::"
+          done
+
   goreleaser:
     needs: verify
     runs-on: ubuntu-latest
@@ -120,7 +156,11 @@ jobs:
           restore-keys: |
             release-go-${{ runner.os }}-${{ runner.arch }}-
 
-      - uses: sigstore/cosign-installer@v3
+      # Installer v3 is limited to Cosign v2. Use the v4 installer for the
+      # bundle-first Cosign v3 release format configured in .goreleaser.yaml.
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.2
       - uses: anchore/sbom-action/download-syft@v0
       - uses: azure/setup-helm@v5
         with:
@@ -158,6 +198,9 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           install-only: true
+
+      - name: Test checksum signer integration
+        run: bash scripts/test-cosign-checksums.sh
 
       - name: Run GoReleaser
         env:

@@ -69,6 +69,15 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 	if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
 	}
+	// A schema-50 pod may have inserted a full avatar while schema 51 was
+	// already live. The frozen account cannot acquire another legitimate avatar
+	// write, so repair those nullable application-derived digests in bounded
+	// memory before streaming a current-schema portable archive. A compacted row
+	// without a digest is unrecoverable and fails the export closed.
+	if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
+		avatarLockedLayerDigestBackfillFilter{accountID: accountID}); err != nil {
+		return fmt.Errorf("repair avatar digests before export: %w", err)
+	}
 	// Export itself is a legitimate lazy-expiry touch. Materialize every due
 	// request and cancel its active fences before the snapshot streams, so an
 	// archive can never carry time-expired authority as state=open.
@@ -158,6 +167,22 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'updated_at', updated_at)
 			FROM realm_avatar_styles WHERE account_id = $1
 			ORDER BY realm_id`, arg: accountID},
+		&querySource{tx: tx, table: "avatar_style_rollout_jobs", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'style_revision', style_revision,
+			  'style_pack_id', style_pack_id,
+			  'style_pack_version', style_pack_version,
+			  'status', status, 'target_profile_count', target_profile_count,
+			  'processed_profile_count', processed_profile_count,
+			  'batch_count', batch_count, 'last_batch_size', last_batch_size,
+			  'failure_count', failure_count, 'retry_after', retry_after,
+			  'last_failure_code', last_failure_code,
+			  'created_at', created_at, 'started_at', started_at,
+			  'updated_at', updated_at, 'completed_at', completed_at,
+			  'superseded_at', superseded_at)
+			FROM avatar_style_rollout_jobs WHERE account_id = $1
+			ORDER BY realm_id, style_revision`, arg: accountID},
 		&querySource{tx: tx, table: "agents", q: `
 			SELECT jsonb_build_object(
 			  'id', a.id, 'realm_id', a.realm_id, 'name', a.name,
@@ -173,12 +198,18 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'autonomy_policy', autonomy_policy,
 			  'style_pack_id', style_pack_id,
 			  'style_pack_version', style_pack_version,
+			  'style_revision', style_revision,
 			  'latest_avatar_version', latest_avatar_version,
 			  'proposed_avatar_version', proposed_avatar_version,
 			  'active_avatar_version', active_avatar_version,
 			  'subject_form', subject_form, 'attempt_count', attempt_count,
 			  'retry_after', retry_after, 'fallback_seed', fallback_seed,
-			  'failure_code', failure_code, 'revision', revision,
+			  'failure_code', failure_code,
+			  'retained_payload_count_limit', retained_payload_count_limit,
+			  'retained_payload_byte_limit', retained_payload_byte_limit,
+			  'payload_quota_reconciliation_required',
+			    payload_quota_reconciliation_required,
+			  'revision', revision,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM agent_avatar_profiles WHERE account_id = $1
 			ORDER BY realm_id, agent_id`, arg: accountID},
@@ -192,7 +223,14 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'style_pack_version', style_pack_version,
 			  'subject_form', subject_form, 'svg', svg,
 			  'description', description, 'visual_spec', visual_spec,
-			  'svg_sha256', svg_sha256, 'provenance', provenance,
+			  'svg_sha256', svg_sha256,
+			  'locked_layers_sha256', locked_layers_sha256,
+			  'renderer_profile', renderer_profile,
+			  'continuity_fingerprint', continuity_fingerprint,
+			  'provenance', provenance,
+			  'payload_state', payload_state, 'payload_bytes', payload_bytes,
+			  'payload_compacted_at', payload_compacted_at,
+			  'payload_compaction_reason', payload_compaction_reason,
 			  'proposed_by_kind', proposed_by_kind,
 			  'proposed_by_id', proposed_by_id,
 			  'proposed_at', proposed_at)

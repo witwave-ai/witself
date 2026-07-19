@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\" width=\"32\" height=\"32\"><path d=\"M1 1 A0 4 0 0 1 20 20\" fill=\"none\" stroke=\"#203247\"></path></svg>")

@@ -979,32 +979,91 @@ POST  /v1/agents/{agent}/avatar:reject
 POST  /v1/agents/{agent}/avatar:rollback
 POST  /v1/agents/{agent}/avatar:reset
 PATCH /v1/agents/{agent}/avatar-policy
+PATCH /v1/agents/{agent}/avatar-quota
 GET   /v1/realms/{realm}/avatar-style
 POST  /v1/realms/{realm}/avatar-style/versions
 ```
 
-Both history routes return newest-first, payload-free immutable metadata. They
+Both history routes return newest-first, payload-free version metadata. They
 accept `limit` (default 20, maximum 100) and exclusive `before_version` (zero or
 omitted for newest), and return `next_before_version` only when another page
 exists. Summaries never include SVG, visual specifications, descriptions, or
-generation provenance. Use the positive-version detail routes for that exact
-immutable creative payload. History includes `svg_sha256`, style, subject,
-parent, `lineage_generation`, proposer, timestamps, and the lifecycle projection `is_active`,
-`is_proposed`, `was_activated`,
-`rollback_eligible`, and `rejected`. `last_activated_at` and `rejected_at` are
-included when the corresponding lifecycle record exists. These fields let a
-client choose valid actions without inferring state from version order.
+generation provenance. History includes `svg_sha256`,
+`locked_layers_sha256`, the value-free immutable `renderer_profile`, style,
+subject, parent, `lineage_generation`, proposer,
+timestamps, `payload_state`, original `payload_bytes`, optional
+`payload_compacted_at`, optional `payload_compaction_reason`, and the lifecycle
+projection `is_active`, `is_proposed`, `was_activated`, `rollback_eligible`, and
+`rejected`. `last_activated_at` and `rejected_at` are included when the
+corresponding lifecycle record exists.
+
+Use the positive-version detail routes for one exact version. A `full` version
+includes its canonical SVG, description, visual specification, and generation
+provenance. A `compacted` version still returns HTTP `200` with immutable
+metadata, hashes, provenance, payload accounting, and compaction metadata, but
+omits `svg`, `description`, and `visual_spec`; it is never rollback-eligible.
+These fields let a client choose valid actions without inferring lifecycle or
+payload state from version order.
+
+`renderer_profile` is always explicit in current server responses. New
+versions are `perceptual-v1`; `legacy` identifies readable, exportable history
+that predates the deterministic renderer contract or was written by an older
+server during rollout. Legacy is never promoted by inspecting SVG bytes, cannot
+seed perceptual continuity or parent same-style self evolution, and is
+rebaselined only by an operator replacement, a post-reset parentless proposal,
+or a proposal under a newly selected style. A mixed-version client treats a
+missing field from an older response as legacy in memory only.
+
+Avatar profile responses include the operator-configured
+`retained_payload_count_limit` and `retained_payload_byte_limit`, the current
+full-row count in `retained_payload_count`, inclusive full-payload plus retained
+continuity-fingerprint bytes in `retained_payload_bytes`, and
+`rollback_payload_floor=2`. Defaults are `20` full payloads and `2097152` bytes.
+Supported bounds are `4`–`1000` payloads and `524288`–`67108864` bytes.
+
+The operator-only quota route accepts:
+
+```json
+{
+  "retained_payload_count_limit": 20,
+  "retained_payload_byte_limit": 2097152,
+  "expected_profile_revision": 7
+}
+```
+
+It also requires `Idempotency-Key`. Lowering a limit compacts the oldest
+eligible inactive payloads in the same transaction before committing the new
+limits; an exact replay does not compact again. Proposal creation performs the
+same compaction check before inserting the new version. Active and proposed
+versions are always protected, as are the two most recently activated distinct
+inactive versions in the current lineage. Compaction considers retired
+lineages first, then rejected versions, other never-activated versions, and
+finally activated versions older than that rollback floor; each class is oldest
+version first.
+
+While `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED=false`, a proposal or quota
+change that already fits succeeds normally. One that would require cleanup
+returns HTTP `409` with `avatar_payload_compaction_not_active` and makes no
+mutation; this phase-A conflict is retryable after compaction is activated.
+
+If protected payloads plus an incoming proposal cannot fit after all eligible
+payloads are compacted, or a lowered quota cannot be satisfied, the mutation
+returns HTTP `409` with `avatar_payload_quota_exceeded`. The transaction leaves
+the prior limits and payloads unchanged and creates no proposal, receipt, or
+partial audit state.
 
 Reset accepts the exact profile revision, an optional bounded `reason_code`,
-and an `Idempotency-Key`. It preserves all immutable versions while advancing
-the profile to a fresh lineage and deterministic placeholder. Self reset is
+and an `Idempotency-Key`. It preserves all version identity/lifecycle records
+while advancing the profile to a fresh lineage and deterministic placeholder.
+Self reset is
 authorized only by `agent_self_managed`; other policies require the operator
 route. Reset is not permanent deletion and cannot be used on an empty lineage.
 
 Self routes derive account, realm, and agent only from the bearer token.
 Operator paths remain account-scoped. Mutations require an `Idempotency-Key`
 header and exact current revision; every response is `private, no-store`. See
-[agent-avatars.md](agent-avatars.md) for the lifecycle and SVG boundary.
+[agent-avatars.md](agent-avatars.md) for lifecycle, payload retention, archive,
+and SVG boundaries.
 
 ## Related Docs
 

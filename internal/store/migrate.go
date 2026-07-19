@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"errors"
@@ -78,6 +79,11 @@ func (s *Store) Migrate() error {
 			current,
 			state.TargetVersion,
 		)
+	}
+	if current >= 51 {
+		if _, err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
+			return fmt.Errorf("finalize avatar locked-layer digests: %w", err)
+		}
 	}
 	return nil
 }

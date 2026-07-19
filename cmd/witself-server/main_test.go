@@ -119,6 +119,128 @@ func TestValidateFactDeletionFeatureSchemaGate(t *testing.T) {
 	}
 }
 
+func TestAvatarPayloadCompactionEnabledFromEnv(t *testing.T) {
+	original, wasSet := os.LookupEnv(avatarPayloadCompactionEnabledEnv)
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv(avatarPayloadCompactionEnabledEnv, original)
+			return
+		}
+		_ = os.Unsetenv(avatarPayloadCompactionEnabledEnv)
+	})
+	if err := os.Unsetenv(avatarPayloadCompactionEnabledEnv); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := avatarPayloadCompactionEnabledFromEnv(); err != nil || enabled {
+		t.Fatalf("unset avatar compaction = (%t, %v), want (false, nil)", enabled, err)
+	}
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "false", want: false},
+		{value: "true", want: true},
+		{value: " TRUE ", want: true},
+	} {
+		if err := os.Setenv(avatarPayloadCompactionEnabledEnv, test.value); err != nil {
+			t.Fatal(err)
+		}
+		enabled, err := avatarPayloadCompactionEnabledFromEnv()
+		if err != nil || enabled != test.want {
+			t.Fatalf("avatar compaction %q = (%t, %v), want (%t, nil)",
+				test.value, enabled, err, test.want)
+		}
+	}
+	for _, value := range []string{"", "enabled", "later"} {
+		if err := os.Setenv(avatarPayloadCompactionEnabledEnv, value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := avatarPayloadCompactionEnabledFromEnv(); err == nil ||
+			!strings.Contains(err.Error(), avatarPayloadCompactionEnabledEnv) {
+			t.Fatalf("avatar compaction %q error = %v, want named validation error", value, err)
+		}
+	}
+}
+
+func TestAvatarStyleRolloutConfigFromEnv(t *testing.T) {
+	keys := []string{
+		avatarStyleRolloutEnabledEnv,
+		avatarStyleRolloutBatchSizeEnv,
+		avatarStyleRolloutIntervalEnv,
+		avatarStyleRolloutBatchTimeoutEnv,
+	}
+	type prior struct {
+		value string
+		set   bool
+	}
+	previous := map[string]prior{}
+	for _, key := range keys {
+		value, set := os.LookupEnv(key)
+		previous[key] = prior{value: value, set: set}
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, key := range keys {
+			if old := previous[key]; old.set {
+				_ = os.Setenv(key, old.value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}
+	})
+
+	enabled, cfg, err := avatarStyleRolloutConfigFromEnv()
+	if err != nil || !enabled || cfg.BatchSize != 100 || cfg.Interval != 2*time.Second ||
+		cfg.BatchTimeout != 30*time.Second {
+		t.Fatalf("defaults = %t / %#v / %v", enabled, cfg, err)
+	}
+	if err := os.Setenv(avatarStyleRolloutEnabledEnv, "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(avatarStyleRolloutBatchSizeEnv, "17"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(avatarStyleRolloutIntervalEnv, "750ms"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(avatarStyleRolloutBatchTimeoutEnv, "3s"); err != nil {
+		t.Fatal(err)
+	}
+	enabled, cfg, err = avatarStyleRolloutConfigFromEnv()
+	if err != nil || enabled || cfg.BatchSize != 17 || cfg.Interval != 750*time.Millisecond ||
+		cfg.BatchTimeout != 3*time.Second {
+		t.Fatalf("configured = %t / %#v / %v", enabled, cfg, err)
+	}
+
+	tests := []struct {
+		key, value string
+	}{
+		{avatarStyleRolloutEnabledEnv, "sometimes"},
+		{avatarStyleRolloutBatchSizeEnv, "0"},
+		{avatarStyleRolloutBatchSizeEnv, "1001"},
+		{avatarStyleRolloutIntervalEnv, "99ms"},
+		{avatarStyleRolloutIntervalEnv, "2 hours"},
+		{avatarStyleRolloutBatchTimeoutEnv, "99ms"},
+		{avatarStyleRolloutBatchTimeoutEnv, "6m"},
+	}
+	for _, test := range tests {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			for _, key := range keys {
+				_ = os.Unsetenv(key)
+			}
+			if err := os.Setenv(test.key, test.value); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := avatarStyleRolloutConfigFromEnv(); err == nil ||
+				!strings.Contains(err.Error(), test.key) {
+				t.Fatalf("invalid config error = %v", err)
+			}
+		})
+	}
+}
+
 func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	var disabled server.Config
 	configureFactMutations(&disabled, nil, false)
@@ -164,6 +286,35 @@ func TestPrincipalAdaptersPreserveCredentialAuthority(t *testing.T) {
 	roundTrip := toStorePrincipal(domain)
 	if roundTrip != stored {
 		t.Fatalf("principal round trip = %#v, want %#v", roundTrip, stored)
+	}
+}
+
+func TestAvatarStyleAdapterPreservesValueFreeRolloutProgress(t *testing.T) {
+	now := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
+	completed := now.Add(time.Second)
+	target := int64(9)
+	got := toServerAvatarStyle(store.AvatarStyleView{
+		RealmID: "realm_1", StyleRevision: 3,
+		Rollout: &store.AvatarStyleRollout{
+			StyleRevision: 3, StylePackID: "flat", StylePackVersion: 3,
+			Status: "completed", TargetProfileCount: &target, ProcessedProfileCount: 9,
+			BatchCount: 3, LastBatchSize: 1, CreatedAt: now, StartedAt: &now,
+			UpdatedAt: completed, CompletedAt: &completed,
+		},
+	})
+	if got.Rollout == nil || got.Rollout.Status != "completed" ||
+		got.Rollout.ProcessedProfileCount != 9 || got.Rollout.CompletedAt == nil ||
+		!got.Rollout.CompletedAt.Equal(completed) {
+		t.Fatalf("rollout adapter = %#v", got.Rollout)
+	}
+	raw, err := json.Marshal(got.Rollout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"svg", "description", "prompt", "visual_spec", "provenance"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("rollout adapter leaked %q: %s", forbidden, raw)
+		}
 	}
 }
 
