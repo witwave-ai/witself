@@ -398,9 +398,9 @@ land in the follow-up contract pass; the surface deltas are:
   [api-routes.md](api-routes.md), [cli-command-surface.md](cli-command-surface.md),
   and [mcp-tools.md](mcp-tools.md) on the follow-up pass.
 
-Naming note: the CLI command is `ws`. The backend binary stays `witself-server`,
-and the `witself://` reference scheme is unchanged. See
-[requirements.md](requirements.md).
+Naming note: the CLI command is `witself`, with `ws` kept as a permanent alias.
+The backend binary stays `witself-server`, and the `witself://` reference scheme
+is unchanged. See [requirements.md](requirements.md).
 
 ## Open decisions
 

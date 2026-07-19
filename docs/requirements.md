@@ -50,8 +50,8 @@ MCP, and API surface across two planes:
   from Witpass.
 
 Witself absorbs the former Witpass product. There is now ONE product, ONE CLI
-(`ws`), one backend, and one account/realm/agent/token model spanning both
-planes. The open plane protects the *integrity and authenticity* of identity
+(`witself`, aliased as `ws`), one backend, and one account/realm/agent/token
+model spanning both planes. The open plane protects the *integrity and authenticity* of identity
 data; the sealed plane protects the *confidentiality* of credential material. The
 two planes share the platform spine — one core domain service behind thin
 CLI/MCP/API adapters, the same tenancy and token model, the same
@@ -81,10 +81,11 @@ not the production model.
 - Product name: Witself.
 - Avoid spelling the product as WitSelf.
 - Module path: `github.com/witwave-ai/witself`.
-- Binaries: `ws` (CLI and `witself mcp serve`) and `witself-server` (backend
-  API). There is no `server` subcommand on the main CLI.
-- CLI command name: the invoked command is `ws`. The backend binary stays
-  `witself-server`. The `witself://` reference scheme is unaffected and never
+- Binaries: `witself` (CLI and `witself mcp serve`) and `witself-server`
+  (backend API). There is no `server` subcommand on the main CLI.
+- CLI command name: the invoked command is `witself`, with `ws` kept as a
+  permanent alias. The backend binary stays `witself-server`. The `witself://`
+  reference scheme is unaffected and never
   becomes `ws://` (which collides with the WebSocket scheme); the `WITSELF_` env
   prefix, `witself.v0` schema, and `witself.*` MCP tool names are likewise
   unchanged.
@@ -1537,7 +1538,7 @@ The backup, export, and recovery model is tracked in
 ### Realm And Agent Bootstrap
 
 Witself must include everything needed to set up a realm and give tokens to agents
-from the CLI. A fresh operator should be able to install `ws`, point it at
+from the CLI. A fresh operator should be able to install `witself`, point it at
 managed Witself Cloud or a self-hosted endpoint, create or connect an
 account/operator context, create a realm, create named agents, write agent token
 files, and hand those token files to agent runtimes without using a web dashboard.
@@ -2329,7 +2330,7 @@ Homebrew install path:
 - Expected install command: `brew install witwave-ai/tap/witself`.
 
 The universal installer should install the same release artifacts as Homebrew and
-verify checksums plus signatures where available before placing the `ws`
+verify checksums plus signatures where available before placing the `witself`
 binary on PATH.
 
 Container image requirements:
@@ -2344,7 +2345,7 @@ Container image requirements:
   must be reconciled from a monotonic completed-release pointer after immutable
   publication; an older-tag retry must not be able to roll back the channel.
 - Images should run as a non-root user where practical.
-- The CLI/MCP image entrypoint should be the `ws` binary so it can run both
+- The CLI/MCP image entrypoint should be the `witself` binary so it can run both
   normal CLI commands and `witself mcp serve`.
 - The backend image entrypoint should be the separate `witself-server` process.
 - Image builds must not require private base images or private package registries.

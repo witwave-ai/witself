@@ -371,7 +371,7 @@ stanza must express the same contract:
 ```markdown
 ## Self / Memory (Witself)
 
-You have a persistent self/identity store reached through the `ws` MCP
+You have a persistent self/identity store reached through the `witself.*` MCP
 tools (or the `witself` CLI). Use it:
 
 - **Recall before acting.** At the start of a non-trivial task, call

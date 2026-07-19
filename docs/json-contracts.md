@@ -1845,7 +1845,7 @@ Limit summary:
       "resets_at": "2026-07-01T00:00:00Z"
     }
   ],
-  "next_command": "ws billing usage --realm prod --show-limits"
+  "next_command": "witself billing usage --realm prod --show-limits"
 }
 ```
 
@@ -1890,7 +1890,7 @@ approval session.
   "status": "open",
   "url": "https://payments.example/checkout/hps_123",
   "expires_at": "2026-06-26T18:15:00Z",
-  "next_command": "ws billing crypto status hps_123 --watch",
+  "next_command": "witself billing crypto status hps_123 --watch",
   "metadata": {
     "invoice_id": "inv_123",
     "promo_code": "FOUNDERS25",
@@ -1933,7 +1933,7 @@ Crypto payment quote:
   "settlement_currency": "usd",
   "checkout_url": "https://payments.example/checkout/cpq_123",
   "expires_at": "2026-06-26T18:15:00Z",
-  "next_command": "ws billing crypto status hps_123 --watch"
+  "next_command": "witself billing crypto status hps_123 --watch"
 }
 ```
 

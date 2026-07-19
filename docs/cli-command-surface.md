@@ -51,9 +51,8 @@ command spelling is frozen with the first public memory schema.
 The implemented CLI command is `witself`. The backend binary stays
 `witself-server`; the
 `witself://` reference scheme, `WITSELF_` environment variables, and the
-`witself.*` MCP tool names are unchanged. Older target-only examples below may
-still use the proposed `ws` shorthand; use `witself` for every implemented
-command.
+`witself.*` MCP tool names are unchanged. Every example below uses `witself`;
+`ws` remains available as a permanent alias.
 
 ## Design Goals
 
@@ -290,9 +289,9 @@ The current self-hosted implementation includes the first operator lifecycle
 commands:
 
 ```sh
-ws operator list --endpoint URL --token-file OPERATOR_TOKEN
-ws operator create --endpoint URL --token-file OPERATOR_TOKEN --name "Deploy bot" --token-name "Deploy token" --out ./deploy.token
-ws operator delete --endpoint URL --token-file OPERATOR_TOKEN --yes OPERATOR_ID
+witself operator list --endpoint URL --token-file OPERATOR_TOKEN
+witself operator create --endpoint URL --token-file OPERATOR_TOKEN --name "Deploy bot" --token-name "Deploy token" --out ./deploy.token
+witself operator delete --endpoint URL --token-file OPERATOR_TOKEN --yes OPERATOR_ID
 ```
 
 `witself operator create` creates a new operator principal and returns that
@@ -323,9 +322,9 @@ tool list.
 Destructive commands are explicit and guarded:
 
 ```sh
-ws realm delete --endpoint URL --token-file OPERATOR_TOKEN --yes REALM_ID
-ws agent delete --endpoint URL --token-file OPERATOR_TOKEN --realm REALM_ID --yes AGENT_ID
-ws token revoke --endpoint URL --token-file OPERATOR_TOKEN --token TOKEN_ID --yes
+witself realm delete --endpoint URL --token-file OPERATOR_TOKEN --yes REALM_ID
+witself agent delete --endpoint URL --token-file OPERATOR_TOKEN --realm REALM_ID --yes AGENT_ID
+witself token revoke --endpoint URL --token-file OPERATOR_TOKEN --token TOKEN_ID --yes
 ```
 
 The create/delete/revoke policy for currently implemented resources is tracked
@@ -336,8 +335,8 @@ in [resource-lifecycle.md](resource-lifecycle.md).
 Print the CLI version and build metadata.
 
 ```sh
-ws version
-ws version --json
+witself version
+witself version --json
 ```
 
 Flags:
@@ -358,11 +357,11 @@ memory/recall/delete support, curation automation, or local-development-only
 behavior before running a command.
 
 ```sh
-ws capabilities
-ws capabilities --endpoint https://witself.internal.example.com
-ws capabilities --feature messaging --include-reasons
-ws capabilities --feature memory_supersede --include-reasons
-ws capabilities --feature scheduled_curation --include-reasons
+witself capabilities
+witself capabilities --endpoint https://witself.internal.example.com
+witself capabilities --feature messaging --include-reasons
+witself capabilities --feature memory_supersede --include-reasons
+witself capabilities --feature scheduled_curation --include-reasons
 ```
 
 Flags:
@@ -410,13 +409,13 @@ Manage authentication to the managed service or active local profile.
 Authenticate a human or configure an unattended token.
 
 ```sh
-ws auth login
-ws auth login --device-code
-ws auth login --no-browser
-ws auth login --token-file /run/secrets/witself-token
-ws auth login --token-file ~/.config/witself/tokens/browser-agent.token
-ws auth login --endpoint https://api.witself.com
-ws auth login --endpoint https://witself.internal.example.com --bootstrap-token-file ./bootstrap.token
+witself auth login
+witself auth login --device-code
+witself auth login --no-browser
+witself auth login --token-file /run/secrets/witself-token
+witself auth login --token-file ~/.config/witself/tokens/browser-agent.token
+witself auth login --endpoint https://api.witself.com
+witself auth login --endpoint https://witself.internal.example.com --bootstrap-token-file ./bootstrap.token
 ```
 
 Flags:
@@ -526,7 +525,7 @@ Expected outcomes:
 - The command verifies that each token authenticates as the expected agent.
 
 ```sh
-ws setup \
+witself setup \
   --account "Acme Agents" \
   --email ops@example.com \
   --realm prod \
@@ -540,7 +539,7 @@ tests, but it is not the production deployment path. Its memory path uses the
 same model-free lexical contract as deployed cells:
 
 ```sh
-ws setup --local \
+witself setup --local \
   --realm dev \
   --store-file ./witself.store.json \
   --agent browser-agent \
@@ -551,7 +550,7 @@ Managed-service setup can also emit runtime delivery artifacts such as
 Kubernetes Secret manifests:
 
 ```sh
-ws setup \
+witself setup \
   --realm prod \
   --agent browser-agent \
   --token-out browser-agent=./tokens/browser-agent.token \
@@ -873,9 +872,9 @@ When the store is empty, this also creates the first local operator/admin
 context. The local backend uses the same model-free lexical recall contract.
 
 ```sh
-ws realm init
-ws realm init --store-file ~/.witself/store.json
-ws realm init --operator ops
+witself realm init
+witself realm init --store-file ~/.witself/store.json
+witself realm init --operator ops
 ```
 
 Flags:
@@ -1102,8 +1101,8 @@ payment-method setup, identity verification, crypto payment, or another provider
 approval flow.
 
 ```sh
-ws billing sessions show hps_123
-ws billing sessions show hps_123 --watch --timeout 5m
+witself billing sessions show hps_123
+witself billing sessions show hps_123 --watch --timeout 5m
 ```
 
 Flags:
@@ -1364,9 +1363,9 @@ via `--max-bytes`). When capped, output sets `elided=true` and points to
 `memory recall`; it is never silently truncated.
 
 ```sh
-ws self show --account default --agent scott
-ws self show --salient-limit 5 --json
-ws self show --no-salient --max-bytes 4096
+witself self show --account default --agent scott
+witself self show --salient-limit 5 --json
+witself self show --no-salient --max-bytes 4096
 
 # Run the current source tree without waiting for a CLI release.
 go run ./cmd/witself self show --account default --agent scott
@@ -1489,8 +1488,8 @@ Hydrate identity, open goals, and last progress for a new working session in one
 call. Reads only; it never invokes a model provider.
 
 ```sh
-ws session start
-ws session start --json
+witself session start
+witself session start --json
 ```
 
 Flags:
@@ -1504,7 +1503,7 @@ Flags:
 Persist a session progress memory (kind `session`) and update open goals.
 
 ```sh
-ws session end --summary "Shipped v0.3; rollback documented." \
+witself session end --summary "Shipped v0.3; rollback documented." \
   --open-goals "write release notes,monitor error rate"
 ```
 
@@ -1572,10 +1571,10 @@ Memory targeting rules:
 Operator/cross-agent examples:
 
 ```sh
-ws memory list --all-agents
-ws memory recall "incident postmortem" --owner-agent archivist
-ws memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --reason "operator cleanup"
-ws memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
+witself memory list --all-agents
+witself memory recall "incident postmortem" --owner-agent archivist
+witself memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --reason "operator cleanup"
+witself memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
 ```
 
 ### `witself memory capture`
@@ -2020,9 +2019,9 @@ formats and provenance markers are tracked in
 emit a `self.digest.emitted` audit event.
 
 ```sh
-ws digest emit --format agents-md -o ./AGENTS.md
-ws digest emit --format claude-md --max-bytes 4096
-ws digest emit --format markdown
+witself digest emit --format agents-md -o ./AGENTS.md
+witself digest emit --format claude-md --max-bytes 4096
+witself digest emit --format markdown
 ```
 
 Flags:
@@ -2046,8 +2045,8 @@ memory create paths and adds no new resource. The parser rules are tracked in
 [context-hydration.md](context-hydration.md).
 
 ```sh
-ws ingest ./AGENTS.md ./CLAUDE.md
-ws ingest ./docs/GEMINI.md --source-label legacy --dry-run
+witself ingest ./AGENTS.md ./CLAUDE.md
+witself ingest ./docs/GEMINI.md --source-label legacy --dry-run
 ```
 
 Flags:
@@ -2072,9 +2071,9 @@ canonical stanza is pinned in
 [context-hydration.md](context-hydration.md).
 
 ```sh
-ws bootstrap-instructions
-ws bootstrap-instructions --format agents-md
-ws bootstrap-instructions --format text
+witself bootstrap-instructions
+witself bootstrap-instructions --format agents-md
+witself bootstrap-instructions --format text
 ```
 
 Flags:
@@ -2115,10 +2114,10 @@ primary of the same kind for the same owner. Value may also be supplied from a
 file or stdin.
 
 ```sh
-ws fact set display-name "Browser Agent"
-ws fact set email builder@example.com --primary --format email
-ws fact set aws/account-id 123456789012 --format string
-ws fact set notes --value-file ./notes.txt
+witself fact set display-name "Browser Agent"
+witself fact set email builder@example.com --primary --format email
+witself fact set aws/account-id 123456789012 --format string
+witself fact set notes --value-file ./notes.txt
 ```
 
 Flags:
@@ -2146,8 +2145,8 @@ Get one fact deterministically by name. An authorized read returns the value,
 including for `sensitive` facts; there is no reveal ceremony.
 
 ```sh
-ws fact get email
-ws fact get email --owner-agent archivist --reason "operator lookup"
+witself fact get email
+witself fact get email --owner-agent archivist --reason "operator lookup"
 ```
 
 Flags:
@@ -2165,10 +2164,10 @@ List facts visible to the current principal. `primary` facts are surfaced first
 as identity anchors. `sensitive` values are redacted by default.
 
 ```sh
-ws fact list
-ws fact list --primary-only
-ws fact list --all-agents
-ws fact list --owner-group shared-context
+witself fact list
+witself fact list --primary-only
+witself fact list --all-agents
+witself fact list --owner-group shared-context
 ```
 
 Flags:
@@ -2195,9 +2194,9 @@ rollups, and a value-free tombstone/receipt. It never rolls resolution back to
 an older assertion and cannot be undone.
 
 ```sh
-ws fact delete --subject person_spouse --dry-run identity/name
-ws fact delete --subject person_spouse --yes identity/name
-ws fact delete --yes --fact-id fact_01... --expected-assertion-id fas_01... \
+witself fact delete --subject person_spouse --dry-run identity/name
+witself fact delete --subject person_spouse --yes identity/name
+witself fact delete --yes --fact-id fact_01... --expected-assertion-id fas_01... \
   --expected-candidate-revision 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --idempotency-key fact_delete_01...
 ```
@@ -2331,9 +2330,9 @@ but it also works standalone. Generated values are returned to the caller and ar
 not stored unless written into a secret.
 
 ```sh
-ws password generate
-ws password generate --length 40 --no-ambiguous
-ws password generate --words 5
+witself password generate
+witself password generate --length 40 --no-ambiguous
+witself password generate --words 5
 ```
 
 Flags:
@@ -2392,11 +2391,11 @@ Secret targeting rules:
 Operator/admin multi-agent examples:
 
 ```sh
-ws secret scan --all-agents
-ws secret show github/builder --owner-agent browser-agent
-ws secret update github/builder --owner-agent browser-agent --field url=https://github.com/login
-ws secret grant github/builder --owner-agent browser-agent --agent release-agent --read --reveal password
-ws totp code github/builder --owner-agent browser-agent --reason "operator recovery"
+witself secret scan --all-agents
+witself secret show github/builder --owner-agent browser-agent
+witself secret update github/builder --owner-agent browser-agent --field url=https://github.com/login
+witself secret grant github/builder --owner-agent browser-agent --agent release-agent --read --reveal password
+witself totp code github/builder --owner-agent browser-agent --reason "operator recovery"
 ```
 
 ### `witself secret create NAME`
@@ -2405,19 +2404,19 @@ Create a secret. `NAME` must be unique for the owning agent (or group) inside th
 current realm. Different agents may use the same `NAME`.
 
 ```sh
-ws secret create github/builder \
+witself secret create github/builder \
   --description "GitHub login for browser-agent" \
   --template login \
   --field username=builder@example.com \
   --field url=https://github.com/login \
   --generate-sensitive password
 
-ws secret create stripe/test \
+witself secret create stripe/test \
   --description "Stripe test API key" \
   --template api-key \
   --sensitive-stdin api-key
 
-ws secret create deploy/tls \
+witself secret create deploy/tls \
   --description "TLS certificate bundle for deploy agent" \
   --template certificate \
   --field-file cert=./tls.crt \
@@ -2465,10 +2464,10 @@ List secrets visible to the current principal. Sensitive values are never
 included.
 
 ```sh
-ws secret list
-ws secret list --all-agents
-ws secret list --owner-agent builder-agent
-ws secret list --group shared-context
+witself secret list
+witself secret list --all-agents
+witself secret list --owner-agent builder-agent
+witself secret list --group shared-context
 ```
 
 Flags:
@@ -2492,9 +2491,9 @@ Scan visible secrets and produce a redacted inventory. Operator/admin callers ca
 scan across all agents in the realm without revealing sensitive values.
 
 ```sh
-ws secret scan
-ws secret scan --all-agents
-ws secret scan --owner-agent builder-agent
+witself secret scan
+witself secret scan --all-agents
+witself secret scan --owner-agent builder-agent
 ```
 
 Flags:
@@ -2524,9 +2523,9 @@ only the token-bound agent's own fields. Cross-agent grants remain a planned
 authorization layer and do not change client custody.
 
 ```sh
-ws secret reveal github/builder password
-ws secret reveal github/builder password --json
-ws secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
+witself secret reveal github/builder password
+witself secret reveal github/builder password --json
+witself secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
 ```
 
 Flags:
@@ -2715,8 +2714,8 @@ CLI tool, test suite, deploy script, or MCP server without printing the values.
 It is a sealed-plane, value-returning command and is audited.
 
 ```sh
-ws run --env GITHUB_TOKEN=witself://secret/github/builder/token -- gh repo view
-ws run --env-file .env.witself -- npm test
+witself run --env GITHUB_TOKEN=witself://secret/github/builder/token -- gh repo view
+witself run --env-file .env.witself -- npm test
 ```
 
 Flags:
@@ -2744,10 +2743,10 @@ plaintext-exported, and is revealed only through the guarded `totp show
 Enroll TOTP setup material into an existing or new secret.
 
 ```sh
-ws totp enroll github/builder --otpauth 'otpauth://totp/...'
-ws totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
-ws totp enroll github/builder --secret-file ./github-seed.txt
-ws totp enroll github/builder --qr ./github-2fa.png
+witself totp enroll github/builder --otpauth 'otpauth://totp/...'
+witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+witself totp enroll github/builder --secret-file ./github-seed.txt
+witself totp enroll github/builder --qr ./github-2fa.png
 ```
 
 Flags:
@@ -2776,8 +2775,8 @@ audit event, and remains an explicit CLI operation. The corresponding MCP tool
 is disabled by `mcp serve --no-value-tools`.
 
 ```sh
-ws totp code github/builder
-ws totp code github/builder --json
+witself totp code github/builder
+witself totp code github/builder --json
 ```
 
 Flags:
@@ -2840,14 +2839,14 @@ Operators can always manage and access identity data within their realm
 Create an `allow` policy.
 
 ```sh
-ws policy create \
+witself policy create \
   --subject-agent coordinator \
   --permission read \
   --target-agent archivist \
   --scope memory \
   --description "Coordinator may read archivist memories"
 
-ws policy create \
+witself policy create \
   --subject-group analysts \
   --permission contribute \
   --target-group shared-context \
@@ -2923,13 +2922,13 @@ the deciding policy id or a deny reason. Available via CLI and MCP
 (`witself.policy.test`).
 
 ```sh
-ws policy test \
+witself policy test \
   --subject-agent coordinator \
   --permission read \
   --target-agent archivist \
   --scope memory
 
-ws policy test \
+witself policy test \
   --subject-agent coordinator \
   --permission forget \
   --target-agent archivist \
@@ -2964,8 +2963,8 @@ and by agents holding `group:manage`. Security groups are tracked in
 Create a security group. `NAME` is unique within the realm.
 
 ```sh
-ws group create analysts --description "Read-only analysis agents"
-ws group create shared-context --admin coordinator
+witself group create analysts --description "Read-only analysis agents"
+witself group create shared-context --admin coordinator
 ```
 
 Flags:
@@ -3050,23 +3049,23 @@ is the token-derived recorder; `role` is recorded data. Account operator tokens
 may list/show for audit but cannot create or append.
 
 ```sh
-ws transcript create \
+witself transcript create \
   --endpoint https://cell.example.com \
   --token-file ./agent.token \
   --title "Deployment review" \
   --external-id vendor-thread-42
 
-ws transcript append trn_123 --endpoint https://cell.example.com \
+witself transcript append trn_123 --endpoint https://cell.example.com \
   --token-file ./agent.token --role user --body "Is the rollout healthy?"
 
-ws transcript append trn_123 --endpoint https://cell.example.com \
+witself transcript append trn_123 --endpoint https://cell.example.com \
   --token-file ./agent.token --role assistant --body-file ./answer.txt \
   --reply-to ent_123 --model model-version
 
-ws transcript list --account default
-ws transcript show trn_123 --account default --json
-ws transcript tail trn_123 --account default --agent scott --limit 20
-ws transcript flush --runtime codex
+witself transcript list --account default
+witself transcript show trn_123 --account default --json
+witself transcript tail trn_123 --account default --agent scott --limit 20
+witself transcript flush --runtime codex
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
@@ -3248,20 +3247,20 @@ Realm-qualified agents, groups, and dry-run are target extensions tracked in
 cross-realm routing.
 
 ```sh
-ws message send --to archivist \
+witself message send --to archivist \
   --subject "handoff" \
   --body "Postmortem stored as mem_01H...; please review."
 
-ws message send --to coordinator \
+witself message send --to coordinator \
   --thread thr_01H... \
   --kind note \
   --body "Acknowledged; proceeding." \
   --payload-file ./status.json
 
-ws message send --to-agents archivist,reviewer \
+witself message send --to-agents archivist,reviewer \
   --kind note --body "The release candidate is ready."
 
-ws message send --to-realm \
+witself message send --to-realm \
   --kind note --body "The maintenance window starts now."
 ```
 
@@ -3311,7 +3310,7 @@ The command intentionally has no `--to`, `--thread`, or depth flag. Raw
 `thread_id` remains correlation only.
 
 ```sh
-ws message reply msg_01H... \
+witself message reply msg_01H... \
   --body "Which environment should I use?" \
   --idempotency-key reply-01
 ```
@@ -3339,10 +3338,10 @@ token-bound agent. The mailbox selector maps to the canonical `direction` set in
 `--sent` selects `outbox`.
 
 ```sh
-ws message list
-ws message list --unread
-ws message list --from coordinator --thread thr_01H...
-ws message list --sent
+witself message list
+witself message list --unread
+witself message list --from coordinator --thread thr_01H...
+witself message list --sent
 ```
 
 Flags:
@@ -3413,9 +3412,9 @@ cleanup suppresses the next startup-wide pass. An exact legacy
 tombstone so a still-loaded unit can disable itself; it cannot execute messages.
 
 ```sh
-ws message listen
-ws message listen --timeout 20 --json
-ws message listen --conversation thr_01H... --timeout 10
+witself message listen
+witself message listen --timeout 20 --json
+witself message listen --conversation thr_01H... --timeout 10
 ```
 
 Flags:
@@ -3445,7 +3444,7 @@ fence. Generation is only the stale-writer fence. The separate backend-owned
 deterministic message failures.
 
 ```sh
-ws message claim msg_01H... \
+witself message claim msg_01H... \
   --lease 2m \
   --idempotency-key foreground-claim-msg-01H
 ```
@@ -3468,7 +3467,7 @@ Renew one exact, still-live claim using the claim id and generation returned by
 not read, complete, or acknowledge the message.
 
 ```sh
-ws message renew msg_01H... \
+witself message renew msg_01H... \
   --claim mcl_01H... \
   --generation 1 \
   --lease 2m
@@ -3493,7 +3492,7 @@ maintenance failure. The flag atomically increments the backend-owned
 `failure_count`.
 
 ```sh
-ws message release msg_01H... --claim mcl_01H... --generation 1
+witself message release msg_01H... --claim mcl_01H... --generation 1
 ```
 
 Flags:
@@ -3514,7 +3513,7 @@ never acknowledges the parent; call `message ack` only after observing the
 durable completion.
 
 ```sh
-ws message complete msg_01H... \
+witself message complete msg_01H... \
   --claim mcl_01H... \
   --generation 1 \
   --kind result \
@@ -3547,7 +3546,7 @@ agent IDs; PostgreSQL validates capacity and creates exact fenced reservations
 but never ranks or selects an agent.
 
 ```sh
-ws message request open \
+witself message request open \
   --subject "Investigate rollout" \
   --body "Find the cause of the failed GCP rollout." \
   --offer-window 30s \
@@ -3555,22 +3554,22 @@ ws message request open \
   --max-assignees 1 \
   --idempotency-key rollout-investigation
 
-ws message request list --role candidate --state open
-ws message request offer mrq_01H... \
+witself message request list --role candidate --state open
+witself message request offer mrq_01H... \
   --body "I can inspect GKE and PostgreSQL." \
   --idempotency-key offer-mrq-01H
 
 # The coordinator ranks the returned offers locally.
-ws message request show mrq_01H... --json
-ws message request select mrq_01H... \
+witself message request show mrq_01H... --json
+witself message request select mrq_01H... \
   --selected-agent agent_01H... \
   --reservation 2m \
   --idempotency-key select-mrq-01H
 
-ws message request claim mrq_01H... \
+witself message request claim mrq_01H... \
   --lease 2m --idempotency-key claim-mrq-01H
 # Use the returned mrc_ claim id and generation.
-ws message request complete mrq_01H... \
+witself message request complete mrq_01H... \
   --claim mrc_01H... --generation 1 \
   --body "The rollout failed because ..." \
   --idempotency-key complete-mrq-01H-1
@@ -3619,9 +3618,9 @@ Manage the realm's accepted-peer allow-list. Removing a peer from the allow-list
 is a deny; federation does not happen by default.
 
 ```sh
-ws federation peers list
-ws federation peers allow acme-research --reason "joint research program"
-ws federation peers remove acme-research --reason "engagement ended"
+witself federation peers list
+witself federation peers allow acme-research --reason "joint research program"
+witself federation peers remove acme-research --reason "engagement ended"
 ```
 
 #### `witself federation peers list`
@@ -3669,8 +3668,8 @@ public signing key; it is signed by the realm and served for peer discovery and
 verification. Card signing is mandatory.
 
 ```sh
-ws federation card publish
-ws federation card rotate --reason "scheduled key rotation"
+witself federation card publish
+witself federation card rotate --reason "scheduled key rotation"
 ```
 
 #### `witself federation card publish`
@@ -3735,8 +3734,8 @@ leaf kind, leaf) without resolving it. Does not require authorization to the
 target, because nothing is read.
 
 ```sh
-ws reference parse witself://agent/archivist/fact/home-region
-ws reference parse witself://memory/mem_01H... --json
+witself reference parse witself://agent/archivist/fact/home-region
+witself reference parse witself://memory/mem_01H... --json
 ```
 
 Flags:
@@ -3752,8 +3751,8 @@ authorized read. Cross-agent and group references are policy-gated; resolution
 enforces the same authorization as `memory read`/`fact get`.
 
 ```sh
-ws reference resolve witself://fact/email
-ws reference resolve witself://agent/archivist/memory/mem_01H... --reason "operator lookup"
+witself reference resolve witself://fact/email
+witself reference resolve witself://agent/archivist/memory/mem_01H... --reason "operator lookup"
 ```
 
 Flags:
@@ -3779,7 +3778,7 @@ For ephemeral runtimes, the normal bootstrap path is to create the named agent
 and write its durable token directly to a token file:
 
 ```sh
-ws agent create browser-agent --token-out /run/secrets/witself-agent-token
+witself agent create browser-agent --token-out /run/secrets/witself-agent-token
 ```
 
 Flags:
@@ -3950,9 +3949,9 @@ has no default expiration in v0. The full scope list is defined in
 The current implemented self-hosted slice supports:
 
 ```sh
-ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --agent AGENT_ID
-ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator
-ws token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator --name "deploy bot" --ttl 24h --out ./operator.token
+witself token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --agent AGENT_ID
+witself token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator
+witself token create --endpoint URL --token-file OPERATOR_TOKEN_FILE --operator --name "deploy bot" --ttl 24h --out ./operator.token
 ```
 
 `--operator` mints another token for the authenticated operator record. It does
@@ -4052,9 +4051,9 @@ preserved on export and re-resolved on import; dangling references are reported,
 not silently dropped.
 
 ```sh
-ws export --out ./self.json
-ws export --agent archivist --out ./archivist-self/ --format dir
-ws export --no-sensitive --out ./self-public.json
+witself export --out ./self.json
+witself export --agent archivist --out ./archivist-self/ --format dir
+witself export --no-sensitive --out ./self-public.json
 ```
 
 Flags:
@@ -4078,8 +4077,8 @@ rename/remap mode when importing into a different agent. Import is audited and
 supports `--dry-run`.
 
 ```sh
-ws import --in ./self.json
-ws import --in ./archivist-self/ --remap-agent archivist=archivist-copy --dry-run
+witself import --in ./self.json
+witself import --in ./archivist-self/ --remap-agent archivist=archivist-copy --dry-run
 ```
 
 Flags:
@@ -4226,10 +4225,10 @@ Flags:
 Generate shell completion scripts.
 
 ```sh
-ws completion bash
-ws completion zsh
-ws completion fish
-ws completion powershell
+witself completion bash
+witself completion zsh
+witself completion fish
+witself completion powershell
 ```
 
 Flags:
@@ -4391,10 +4390,10 @@ size-capped, strictly validated UI preferences row (the theme choice) via
 the theme follows the agent across machines.
 
 ```sh
-ws dashboard serve --agent scout
-ws dashboard serve --agent scout --open
-ws dashboard serve --agent scout --port 51234 --poll 5s
-ws dashboard serve --endpoint https://cell.example --token-file ./scout.token --agent scout
+witself dashboard serve --agent scout
+witself dashboard serve --agent scout --open
+witself dashboard serve --agent scout --port 51234 --poll 5s
+witself dashboard serve --endpoint https://cell.example --token-file ./scout.token --agent scout
 ```
 
 Flags:
@@ -4424,8 +4423,8 @@ emits a `dashboards` array carrying every registry field plus a `live`
 bool. Exit code 0 means the scan succeeded, even with zero entries.
 
 ```sh
-ws dashboard status
-ws dashboard status --agent scout --json
+witself dashboard status
+witself dashboard status --agent scout --json
 ```
 
 Flags:
@@ -4459,8 +4458,8 @@ registry entry plus `live` (the pre-signal live-and-owned verdict) and
 `stopped` bools.
 
 ```sh
-ws dashboard stop --agent scout
-ws dashboard stop --json
+witself dashboard stop --agent scout
+witself dashboard stop --json
 ```
 
 Flags:

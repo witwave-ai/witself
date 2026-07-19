@@ -24,7 +24,7 @@ carve-out is the other (see [memory-model.md](memory-model.md) and
 [context-hydration.md](context-hydration.md)).
 
 Witself uses a hybrid encryption model for the sealed plane. Client-side decrypt
-is the default for clients that can hold or derive key material (the `ws`
+is the default for clients that can hold or derive key material (the `witself`
 CLI, local `witself mcp serve`, `witself run`, local dev, and self-hosted/BYOK).
 Managed token-only ephemeral pods hold only a bearer token and cannot unwrap a key
 locally, so their reveal/TOTP path runs over the capability-gated

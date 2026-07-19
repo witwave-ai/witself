@@ -29,7 +29,7 @@ data residency, compliance boundaries, client-inference choice, or internal
 review of identity data.
 
 The self-hosted backend runs as the separate `witself-server` binary. The
-customer/operator CLI remains `ws`; production service management remains
+customer/operator CLI remains `witself`; production service management remains
 `witself-server`. There is no `server` subcommand on the main CLI.
 
 The first self-hosting deployment artifact should be a Helm chart, not Docker
@@ -71,7 +71,7 @@ support model is tracked in [self-host-support.md](self-host-support.md).
 ```mermaid
 flowchart LR
   CLI["witself CLI"] --> API["witself-server API"]
-  MCP["ws mcp serve"] --> API
+  MCP["witself mcp serve"] --> API
   API --> Core["Core service"]
   Core --> Policy["Policy engine"]
   Core --> Audit["Audit sink"]
@@ -315,7 +315,7 @@ witself-server bootstrap token \
   --config /etc/witself/server.toml \
   --out ./bootstrap.token
 
-ws setup \
+witself setup \
   --endpoint https://witself.internal.example.com \
   --bootstrap-token-file ./bootstrap.token \
   --account "Acme Agents" \

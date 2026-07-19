@@ -80,7 +80,7 @@ Starting internal layout. Names will evolve during implementation, but the
 boundaries are frozen:
 
 ```text
-cmd/ws/                  # CLI, including mcp serve
+cmd/witself/                  # CLI, including mcp serve
 cmd/witself-server/           # Backend API server (serve, migrate, serve --dev)
 internal/core/                # Domain service and use cases (memory/fact/policy/group/message + secret/totp/grant)
 internal/api/                 # HTTP handlers and request/response adapters
@@ -188,7 +188,7 @@ Notes on the domain-specific packages:
 ## Images
 
 - `images/witself/Dockerfile` → `ghcr.io/witwave-ai/images/witself`. Entrypoint
-  is the `ws` binary so the image runs both CLI commands and
+  is the `witself` binary so the image runs both CLI commands and
   `witself mcp serve`.
 - `images/witself-server/Dockerfile` →
   `ghcr.io/witwave-ai/images/witself-server`. Entrypoint is the separate
