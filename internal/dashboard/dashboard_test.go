@@ -1,0 +1,1102 @@
+package dashboard
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/client"
+)
+
+var testIdentity = client.SelfIdentity{
+	AccountID: "acc_1",
+	AgentID:   "agt_dash",
+	AgentName: "dash",
+	RealmID:   "rlm_1",
+	RealmName: "default",
+}
+
+const testBearer = "witself_agt_dash"
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("encode fake response: %v", err)
+	}
+}
+
+func testSelfDigest() client.SelfDigest {
+	return client.SelfDigest{SchemaVersion: "witself.v0", Identity: testIdentity}
+}
+
+// newDashboard mounts Register onto an httptest server backed by the given
+// cell handler and returns the server plus its Config.
+func newDashboard(t *testing.T, backend http.HandlerFunc, mutate func(*Config)) (*httptest.Server, Config) {
+	t.Helper()
+	cell := httptest.NewServer(backend)
+	t.Cleanup(cell.Close)
+	cfg := Config{
+		Endpoint:     cell.URL,
+		BearerToken:  testBearer,
+		AccessToken:  "0123456789abcdef0123456789abcdef",
+		Identity:     testIdentity,
+		Version:      "test",
+		PollInterval: 20 * time.Millisecond,
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	mux := http.NewServeMux()
+	if err := Register(mux, cfg); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, cfg
+}
+
+func noRedirectClient() *http.Client {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+}
+
+func serverPort(srv *httptest.Server) string {
+	return srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+}
+
+// sessionCookie performs the one-time ?token= exchange and returns the
+// per-port session cookie a browser would hold afterwards.
+func sessionCookie(t *testing.T, srv *httptest.Server, cfg Config) *http.Cookie {
+	t.Helper()
+	resp, err := noRedirectClient().Get(srv.URL + "/?token=" + cfg.AccessToken)
+	if err != nil {
+		t.Fatalf("token exchange: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("token exchange: got %d, want 303", resp.StatusCode)
+	}
+	for _, cookie := range resp.Cookies() {
+		if strings.HasPrefix(cookie.Name, accessCookiePrefix) {
+			return cookie
+		}
+	}
+	t.Fatal("token exchange set no session cookie")
+	return nil
+}
+
+func authedRequest(t *testing.T, srv *httptest.Server, cfg Config, path string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(sessionCookie(t, srv, cfg))
+	return req
+}
+
+func authedGet(t *testing.T, srv *httptest.Server, cfg Config, path string) *http.Response {
+	t.Helper()
+	resp, err := srv.Client().Do(authedRequest(t, srv, cfg, path))
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return resp
+}
+
+func selfBackend(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET /v1/self" {
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		writeTestJSON(t, w, testSelfDigest())
+	}
+}
+
+func TestRegisterRequiresEndpointAndAccessToken(t *testing.T) {
+	if err := Register(http.NewServeMux(), Config{Endpoint: "http://127.0.0.1:1"}); err == nil {
+		t.Fatal("Register accepted an empty access token")
+	}
+	if err := Register(http.NewServeMux(), Config{AccessToken: "tok"}); err == nil {
+		t.Fatal("Register accepted an empty endpoint")
+	}
+}
+
+func TestHostHeaderPinnedToLoopbackListener(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+
+	cases := []struct {
+		name string
+		host string
+		want int
+	}{
+		{"rebound name", "evil.example:" + port, http.StatusForbidden},
+		{"wrong port", "127.0.0.1:1", http.StatusForbidden},
+		{"portless host", "127.0.0.1", http.StatusForbidden},
+		{"loopback ip", "127.0.0.1:" + port, http.StatusOK},
+		{"localhost", "localhost:" + port, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := authedRequest(t, srv, cfg, "/api/self")
+			req.Host = tc.host
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("Host %q: got %d, want %d", tc.host, resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+func TestAccessTokenFlow(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	noRedirect := noRedirectClient()
+
+	t.Run("bare request is unauthorized", func(t *testing.T) {
+		resp, err := noRedirect.Get(srv.URL + "/api/self")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("query token sets session cookie and redirects tokenless", func(t *testing.T) {
+		resp, err := noRedirect.Get(srv.URL + "/api/self?token=" + cfg.AccessToken)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("got %d, want 303", resp.StatusCode)
+		}
+		if location := resp.Header.Get("Location"); location != "/api/self" {
+			t.Fatalf("Location = %q, want /api/self", location)
+		}
+		var cookie *http.Cookie
+		for _, c := range resp.Cookies() {
+			if strings.HasPrefix(c.Name, accessCookiePrefix) {
+				cookie = c
+			}
+		}
+		if cookie == nil {
+			t.Fatal("no access cookie set")
+		}
+		if want := accessCookiePrefix + serverPort(srv); cookie.Name != want {
+			t.Fatalf("cookie name = %q, want port-scoped %q", cookie.Name, want)
+		}
+		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" {
+			t.Fatalf("cookie attributes not hardened: %+v", cookie)
+		}
+		if cookie.Value == "" || cookie.Value == cfg.AccessToken {
+			t.Fatalf("cookie must hold a session value distinct from the URL token")
+		}
+	})
+
+	t.Run("wrong query token is unauthorized", func(t *testing.T) {
+		resp, err := noRedirect.Get(srv.URL + "/api/self?token=" + strings.Repeat("f", 32))
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("valid session cookie is accepted", func(t *testing.T) {
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d, want 200", resp.StatusCode)
+		}
+	})
+
+	t.Run("wrong cookie is unauthorized", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/self", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.AddCookie(&http.Cookie{Name: accessCookiePrefix + serverPort(srv), Value: strings.Repeat("0", 32)})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("url token replayed as a cookie is rejected", func(t *testing.T) {
+		// The printed ?token= credential must never be a valid cookie: a
+		// hostile loopback listener that reads leaked cookies must not be
+		// able to mint sessions from them.
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/self", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.AddCookie(&http.Cookie{Name: accessCookiePrefix + serverPort(srv), Value: cfg.AccessToken})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("session cookie minted for another port is rejected", func(t *testing.T) {
+		cookie := sessionCookie(t, srv, cfg)
+		cookie.Name = accessCookiePrefix + "1"
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/self", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.AddCookie(cookie)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", resp.StatusCode)
+		}
+	})
+}
+
+// TestFetchMetadataRefusesCrossSiteRequests proves pages on other origins —
+// including other loopback ports, which SameSite=Strict treats as same-site
+// (port-blind, RFC 6265) and therefore sends the session cookie to — cannot
+// issue credentialed requests: any browser-tagged cross-origin fetch is
+// refused before the handler runs, so a hostile local page can neither hold
+// SSE slots nor drive authenticated upstream polling.
+func TestFetchMetadataRefusesCrossSiteRequests(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+
+	cases := []struct {
+		site string
+		want int
+	}{
+		{"", http.StatusOK}, // non-browser clients send no fetch metadata
+		{"same-origin", http.StatusOK},
+		{"none", http.StatusOK}, // address-bar and bookmark navigations
+		{"same-site", http.StatusForbidden},
+		{"cross-site", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		name := tc.site
+		if name == "" {
+			name = "absent"
+		}
+		t.Run(name, func(t *testing.T) {
+			req := authedRequest(t, srv, cfg, "/api/self")
+			if tc.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.site)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("Sec-Fetch-Site %q: got %d, want %d", tc.site, resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// TestConcurrentDashboardsUseDistinctCookies proves two dashboards on
+// different loopback ports can be used from one browser: RFC 6265 cookies
+// are host-scoped only, so the browser sends both cookies everywhere, and
+// each dashboard must pick out its own port-scoped session.
+func TestConcurrentDashboardsUseDistinctCookies(t *testing.T) {
+	srvA, cfgA := newDashboard(t, selfBackend(t), nil)
+	srvB, cfgB := newDashboard(t, selfBackend(t), func(cfg *Config) {
+		cfg.AccessToken = "fedcba9876543210fedcba9876543210"
+	})
+	cookieA := sessionCookie(t, srvA, cfgA)
+	cookieB := sessionCookie(t, srvB, cfgB)
+	if cookieA.Name == cookieB.Name {
+		t.Fatalf("both dashboards used cookie name %q; sessions would clobber", cookieA.Name)
+	}
+
+	// A browser sends every 127.0.0.1 cookie to both servers.
+	req, err := http.NewRequest(http.MethodGet, srvA.URL+"/api/self", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(cookieA)
+	req.AddCookie(cookieB)
+	resp, err := srvA.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard A with both cookies: got %d, want 200", resp.StatusCode)
+	}
+
+	// The other dashboard's session alone must not grant access.
+	cross, err := http.NewRequest(http.MethodGet, srvA.URL+"/api/self", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	cross.AddCookie(cookieB)
+	crossResp, err := srvA.Client().Do(cross)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = crossResp.Body.Close() }()
+	if crossResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("dashboard A with only B's cookie: got %d, want 401", crossResp.StatusCode)
+	}
+}
+
+func TestStaticIndexServedWithSecurityHeaders(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	resp := authedGet(t, srv, cfg, "/")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	wantCSP := "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
+	if got := resp.Header.Get("Content-Security-Policy"); got != wantCSP {
+		t.Fatalf("CSP = %q, want %q", got, wantCSP)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "witself dashboard") {
+		t.Fatal("index body missing title")
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("Content-Type = %q", resp.Header.Get("Content-Type"))
+	}
+
+	theme := authedGet(t, srv, cfg, "/static/themes/console.css")
+	defer func() { _ = theme.Body.Close() }()
+	if theme.StatusCode != http.StatusOK {
+		t.Fatalf("theme css: got %d, want 200", theme.StatusCode)
+	}
+	if got := theme.Header.Get("Content-Security-Policy"); got != wantCSP {
+		t.Fatalf("theme CSP = %q", got)
+	}
+}
+
+func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
+	t.Run("observational round trip", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/self" {
+				t.Errorf("unexpected path %s", r.URL.Path)
+			}
+			query := r.URL.Query()
+			if query.Get("observational") != "true" {
+				t.Errorf("observational = %q, want true", query.Get("observational"))
+			}
+			if query.Get("include_facts") != "false" || query.Get("include_salient") != "true" ||
+				query.Get("include_counts") != "true" || query.Get("include_checkpoint") != "true" ||
+				query.Get("include_message_checkpoint") != "true" || query.Get("include_avatar_checkpoint") != "true" {
+				t.Errorf("unexpected include flags: %s", r.URL.RawQuery)
+			}
+			if query.Get("include_sensitive") != "false" {
+				t.Errorf("include_sensitive = %q, want false", query.Get("include_sensitive"))
+			}
+			writeTestJSON(t, w, testSelfDigest())
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		var envelope struct {
+			Identity      client.SelfIdentity `json:"identity"`
+			Observational bool                `json:"observational"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !envelope.Observational {
+			t.Fatal("observational should be true")
+		}
+		if envelope.Identity != testIdentity {
+			t.Fatalf("identity = %+v", envelope.Identity)
+		}
+	})
+
+	t.Run("degrades once on 501", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("observational") == "true" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotImplemented)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "observational fact hydration is unavailable"})
+				return
+			}
+			writeTestJSON(t, w, testSelfDigest())
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d, want 200", resp.StatusCode)
+		}
+		var envelope struct {
+			Observational bool `json:"observational"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if envelope.Observational {
+			t.Fatal("observational should be false after the 501 degrade")
+		}
+	})
+}
+
+func TestAvatarServesOnlyCanonicalHashVerifiedSVG(t *testing.T) {
+	canonical, err := avatar.GeneratePlaceholderSVG(testIdentity.AgentID, testIdentity.AgentName)
+	if err != nil {
+		t.Fatalf("placeholder: %v", err)
+	}
+	sum := sha256.Sum256(canonical)
+	goodHash := hex.EncodeToString(sum[:])
+
+	serveAvatar := func(view *client.AvatarView) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method+" "+r.URL.Path != "GET /v1/self/avatar" {
+				t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			}
+			writeTestJSON(t, w, map[string]any{"avatar": view})
+		}
+	}
+	version := func(svg, hash string) *client.AvatarView {
+		return &client.AvatarView{Active: &client.AvatarVersion{SVG: svg, SVGSHA256: hash}}
+	}
+
+	t.Run("canonical payload served", func(t *testing.T) {
+		srv, cfg := newDashboard(t, serveAvatar(version(string(canonical), goodHash)), nil)
+		resp := authedGet(t, srv, cfg, "/api/avatar.svg")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+			t.Fatalf("Content-Type = %q", got)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != string(canonical) {
+			t.Fatal("served bytes are not the sanitized canonical payload")
+		}
+	})
+
+	t.Run("non-canonical payload rejected", func(t *testing.T) {
+		mutated := strings.Replace(string(canonical), "<svg", "<!-- injected --><svg", 1)
+		mutatedSum := sha256.Sum256([]byte(mutated))
+		srv, cfg := newDashboard(t, serveAvatar(version(mutated, hex.EncodeToString(mutatedSum[:]))), nil)
+		resp := authedGet(t, srv, cfg, "/api/avatar.svg")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("got %d, want 502", resp.StatusCode)
+		}
+	})
+
+	t.Run("unsafe payload rejected", func(t *testing.T) {
+		unsafe := `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`
+		unsafeSum := sha256.Sum256([]byte(unsafe))
+		srv, cfg := newDashboard(t, serveAvatar(version(unsafe, hex.EncodeToString(unsafeSum[:]))), nil)
+		resp := authedGet(t, srv, cfg, "/api/avatar.svg")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("got %d, want 502", resp.StatusCode)
+		}
+	})
+
+	t.Run("hash mismatch rejected", func(t *testing.T) {
+		wrong := sha256.Sum256([]byte("something else"))
+		srv, cfg := newDashboard(t, serveAvatar(version(string(canonical), hex.EncodeToString(wrong[:]))), nil)
+		resp := authedGet(t, srv, cfg, "/api/avatar.svg")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("got %d, want 502", resp.StatusCode)
+		}
+	})
+
+	t.Run("missing active payload is 404", func(t *testing.T) {
+		srv, cfg := newDashboard(t, serveAvatar(&client.AvatarView{}), nil)
+		resp := authedGet(t, srv, cfg, "/api/avatar.svg")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("got %d, want 404", resp.StatusCode)
+		}
+	})
+}
+
+func TestTranscriptProxyUsesObservationalReads(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/transcripts" && r.Method == http.MethodGet:
+			writeTestJSON(t, w, map[string]any{"transcripts": []client.Transcript{{ID: "tr_1"}}})
+		case r.URL.Path == "/v1/transcripts/tr_1" && r.Method == http.MethodGet:
+			query := r.URL.Query()
+			if query.Get("observational") != "true" {
+				t.Errorf("observational = %q, want true", query.Get("observational"))
+			}
+			if query.Get("after_sequence") != "5" || query.Get("limit") != "10" {
+				t.Errorf("unexpected query %s", r.URL.RawQuery)
+			}
+			writeTestJSON(t, w, client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}, nil)
+
+	list := authedGet(t, srv, cfg, "/api/transcripts")
+	defer func() { _ = list.Body.Close() }()
+	if list.StatusCode != http.StatusOK {
+		t.Fatalf("list: got %d", list.StatusCode)
+	}
+
+	page := authedGet(t, srv, cfg, "/api/transcripts/tr_1?after_sequence=5&limit=10")
+	defer func() { _ = page.Body.Close() }()
+	if page.StatusCode != http.StatusOK {
+		t.Fatalf("page: got %d", page.StatusCode)
+	}
+
+	bad := authedGet(t, srv, cfg, "/api/transcripts/tr_1?after_sequence=nope")
+	defer func() { _ = bad.Body.Close() }()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid after_sequence: got %d, want 400", bad.StatusCode)
+	}
+}
+
+func TestMemoriesProxyNeverRequestsSensitiveValues(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected method %s", r.Method)
+		}
+		if r.URL.Query().Has("include_sensitive") {
+			t.Errorf("include_sensitive must never be sent, got query %s", r.URL.RawQuery)
+		}
+		switch r.URL.Path {
+		case "/v1/memories":
+			query := r.URL.Query()
+			if query.Get("state") != "active" || query.Get("kind") != "note" ||
+				query.Get("limit") != "5" || query.Get("cursor") != "c7" {
+				t.Errorf("unexpected query %s", r.URL.RawQuery)
+			}
+			if tags := query["tag"]; len(tags) != 2 || tags[0] != "a" || tags[1] != "b" {
+				t.Errorf("tags = %v", query["tag"])
+			}
+			writeTestJSON(t, w, client.MemoryPage{Items: []client.Memory{{ID: "mem_1"}}})
+		case "/v1/memories/mem_1":
+			writeTestJSON(t, w, map[string]any{"memory": client.Memory{ID: "mem_1"}})
+		case "/v1/memories/mem_1/history":
+			writeTestJSON(t, w, client.MemoryHistoryPage{})
+		default:
+			t.Errorf("unexpected backend path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}, nil)
+
+	for _, path := range []string{
+		"/api/memories?limit=5&state=active&kind=note&tag=a&tag=b&cursor=c7",
+		"/api/memories/mem_1",
+		"/api/memories/mem_1/history?limit=50",
+	} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d, want 200", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+func TestMessagesProxyOnlyTouchesPassiveList(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, ":") {
+			t.Errorf("dashboard touched mutating message action %s %s (never :read/:listen/:claim)", r.Method, r.URL.Path)
+		}
+		if r.Method+" "+r.URL.Path != "GET /v1/messages" {
+			t.Errorf("dashboard must only use GET /v1/messages, got %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if query := r.URL.Query(); query.Get("direction") != "inbox" || query.Get("limit") != "3" {
+			t.Errorf("unexpected query %s", r.URL.RawQuery)
+		}
+		// A misbehaving cell that leaks bodies from the passive list: the
+		// proxy must strip them rather than trust server-side redaction.
+		writeTestJSON(t, w, client.MessagePage{Messages: []client.Message{{
+			ID:      "msg_1",
+			Subject: "greetings",
+			Body:    "leaked-body-text",
+			Payload: json.RawMessage(`{"leaked":"payload"}`),
+		}}})
+	}, nil)
+	resp := authedGet(t, srv, cfg, "/api/messages?direction=inbox&limit=3")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(raw), "msg_1") || !strings.Contains(string(raw), "greetings") {
+		t.Fatalf("metadata missing from proxied page: %s", raw)
+	}
+	if strings.Contains(string(raw), "leaked") {
+		t.Fatalf("message body/payload reached the browser: %s", raw)
+	}
+}
+
+func TestEventsStreamEmitsSelfAndTranscript(t *testing.T) {
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/transcripts/tr_1":
+			if r.URL.Query().Get("observational") != "true" {
+				t.Errorf("transcript poll must be observational, got %s", r.URL.RawQuery)
+			}
+			if r.URL.Query().Get("after_sequence") == "" {
+				writeTestJSON(t, w, client.TranscriptDetail{
+					Transcript: client.Transcript{ID: "tr_1"},
+					Entries: []client.TranscriptEntry{
+						{Sequence: 1, Role: "user", Body: "hello"},
+						{Sequence: 2, Role: "assistant", Body: "hi"},
+					},
+				})
+				return
+			}
+			writeTestJSON(t, w, client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}})
+		default:
+			t.Errorf("unexpected backend path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?transcript=tr_1").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+
+	sawSelf, sawTranscript := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawSelf || !sawTranscript) {
+		line := scanner.Text()
+		if line == "event: self" {
+			sawSelf = true
+		}
+		if line == "event: transcript" {
+			sawTranscript = true
+		}
+	}
+	if !sawSelf || !sawTranscript {
+		t.Fatalf("stream ended early: self=%v transcript=%v (%v)", sawSelf, sawTranscript, scanner.Err())
+	}
+	cancel() // disconnect; srv.Close in cleanup hangs if the handler leaks
+}
+
+// TestEventsStreamEmitsMessagesFromPassiveList proves the opt-in messages
+// tick polls only the passive metadata-only mailbox list — one GET
+// /v1/messages page per direction, never :read, :listen, or claim — and
+// emits both pages as one "messages" event.
+func TestEventsStreamEmitsMessagesFromPassiveList(t *testing.T) {
+	var mu sync.Mutex
+	directions := map[string]bool{}
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, ":") {
+			t.Errorf("messages tick touched mutating action %s %s (never :read/:listen/:claim)", r.Method, r.URL.Path)
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/messages":
+			query := r.URL.Query()
+			direction := query.Get("direction")
+			if direction != "inbox" && direction != "outbox" {
+				t.Errorf("direction = %q, want inbox or outbox", direction)
+			}
+			if query.Get("limit") != strconv.Itoa(sseMessagePageLimit) {
+				t.Errorf("limit = %q, want %d", query.Get("limit"), sseMessagePageLimit)
+			}
+			mu.Lock()
+			directions[direction] = true
+			mu.Unlock()
+			if direction == "inbox" {
+				writeTestJSON(t, w, client.MessagePage{Messages: []client.Message{{
+					ID:        "msg_in",
+					From:      client.MessageAgent{Kind: "agent", AgentID: "agt_peer", AgentName: "peer"},
+					To:        client.MessageRecipient{Kind: "agent", AgentID: testIdentity.AgentID},
+					Body:      "leaked-body-text",
+					ReadState: client.MessageReadState{State: "unread"},
+				}}})
+				return
+			}
+			writeTestJSON(t, w, client.MessagePage{Messages: []client.Message{{ID: "msg_out"}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?messages=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	sawEvent, sawInbox, sawOutbox := false, false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawEvent || !sawInbox || !sawOutbox) {
+		line := scanner.Text()
+		if line == "event: messages" {
+			sawEvent = true
+		}
+		if strings.Contains(line, "leaked-body-text") {
+			t.Fatalf("message body reached the SSE stream: %q", line)
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "msg_in") {
+			sawInbox = true
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "msg_out") {
+			sawOutbox = true
+		}
+	}
+	if !sawEvent || !sawInbox || !sawOutbox {
+		t.Fatalf("stream ended early: event=%v inbox=%v outbox=%v (%v)", sawEvent, sawInbox, sawOutbox, scanner.Err())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !directions["inbox"] || !directions["outbox"] {
+		t.Fatalf("messages tick polled directions %v, want both inbox and outbox", directions)
+	}
+	cancel()
+}
+
+func TestEventsStreamRejectsInvalidMessagesFlag(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope"} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s: got %d, want 400", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// TestEventsStreamEmitsMemoriesFromRedactedList proves the opt-in memories
+// tick polls the redacted-by-default broad list (never include_sensitive)
+// and emits it as a "memories" event, so the memories surface live-updates
+// like the others.
+func TestEventsStreamEmitsMemoriesFromRedactedList(t *testing.T) {
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/memories":
+			query := r.URL.Query()
+			if query.Has("include_sensitive") {
+				t.Errorf("include_sensitive must never be sent, got query %s", r.URL.RawQuery)
+			}
+			if query.Get("limit") != strconv.Itoa(sseMemoryPageLimit) {
+				t.Errorf("limit = %q, want %d", query.Get("limit"), sseMemoryPageLimit)
+			}
+			writeTestJSON(t, w, client.MemoryPage{Items: []client.Memory{{ID: "mem_live"}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?memories=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	sawEvent, sawItem := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawEvent || !sawItem) {
+		line := scanner.Text()
+		if line == "event: memories" {
+			sawEvent = true
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "mem_live") {
+			sawItem = true
+		}
+	}
+	if !sawEvent || !sawItem {
+		t.Fatalf("stream ended early: event=%v item=%v (%v)", sawEvent, sawItem, scanner.Err())
+	}
+	cancel()
+}
+
+// TestThemesEndpointListsEmbeddedPacks proves the theme picker's source of
+// truth is the embedded theme directory: dropping a CSS file into
+// static/themes is the whole change (ADR 0004).
+func TestThemesEndpointListsEmbeddedPacks(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	resp := authedGet(t, srv, cfg, "/api/themes")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Themes []string `json:"themes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Themes) != 2 || body.Themes[0] != "console" || body.Themes[1] != "paper" {
+		t.Fatalf("themes = %v, want [console paper]", body.Themes)
+	}
+}
+
+// TestEventsStreamSeedsCursorAndDrainsPages proves /api/events starts the
+// transcript cursor at the client-supplied after_sequence (no full replay)
+// and drains more than one upstream page inside a single poll tick.
+func TestEventsStreamSeedsCursorAndDrainsPages(t *testing.T) {
+	entriesFrom := func(first, count int) []client.TranscriptEntry {
+		entries := make([]client.TranscriptEntry, count)
+		for i := range entries {
+			entries[i] = client.TranscriptEntry{
+				Sequence: int64(first + i),
+				Role:     "assistant",
+				Body:     "b-" + strconv.Itoa(first+i),
+			}
+		}
+		return entries
+	}
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/transcripts/tr_1":
+			query := r.URL.Query()
+			if query.Get("limit") != strconv.Itoa(sseTranscriptPageLimit) {
+				t.Errorf("limit = %q, want %d", query.Get("limit"), sseTranscriptPageLimit)
+			}
+			after, err := strconv.ParseInt(query.Get("after_sequence"), 10, 64)
+			if err != nil || after < 7 {
+				// The stream must never restart from zero: the browser
+				// seeded after_sequence=7 and the cursor only advances.
+				t.Errorf("after_sequence = %q, want >= 7", query.Get("after_sequence"))
+				writeTestJSON(t, w, client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}})
+				return
+			}
+			detail := client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}}
+			switch after {
+			case 7:
+				// One full page: the handler must keep draining this tick.
+				detail.Entries = entriesFrom(8, sseTranscriptPageLimit)
+				detail.NextAfterSequence = 7 + int64(sseTranscriptPageLimit)
+			case 7 + int64(sseTranscriptPageLimit):
+				detail.Entries = entriesFrom(8+sseTranscriptPageLimit, 2)
+			}
+			writeTestJSON(t, w, detail)
+		default:
+			t.Errorf("unexpected backend path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?transcript=tr_1&after_sequence=7").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	wantLast := "b-" + strconv.Itoa(7+sseTranscriptPageLimit+2)
+	wantID := "id: " + strconv.Itoa(7+sseTranscriptPageLimit+2)
+	sawLast, sawID := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && !sawLast {
+		line := scanner.Text()
+		if line == wantID {
+			sawID = true
+		}
+		if strings.Contains(line, wantLast) {
+			sawLast = true
+		}
+	}
+	if !sawLast {
+		t.Fatalf("stream ended before draining to %s (%v)", wantLast, scanner.Err())
+	}
+	if !sawID {
+		t.Fatalf("transcript events carry no %q line for reconnect resumption", wantID)
+	}
+	cancel()
+}
+
+// TestEventsStreamHonorsLastEventID proves an EventSource auto-reconnect
+// (browser sends Last-Event-ID) resumes from the last delivered cursor, not
+// from the originally seeded after_sequence.
+func TestEventsStreamHonorsLastEventID(t *testing.T) {
+	polled := make(chan string, 8)
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/transcripts/tr_1":
+			select {
+			case polled <- r.URL.Query().Get("after_sequence"):
+			default:
+			}
+			writeTestJSON(t, w, client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}})
+		default:
+			t.Errorf("unexpected backend path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?transcript=tr_1&after_sequence=3").WithContext(ctx)
+	req.Header.Set("Last-Event-ID", "9")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	select {
+	case after := <-polled:
+		if after != "9" {
+			t.Fatalf("first poll after_sequence = %q, want 9 (Last-Event-ID wins over the stale seed)", after)
+		}
+	case <-ctx.Done():
+		t.Fatal("no transcript poll observed")
+	}
+	cancel()
+}
+
+func TestEventsStreamRejectsInvalidAfterSequence(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	for _, raw := range []string{"nope", "-3"} {
+		resp := authedGet(t, srv, cfg, "/api/events?transcript=tr_1&after_sequence="+raw)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("after_sequence=%s: got %d, want 400", raw, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// TestUpstreamBadRequestSurfacesAsBadRequest proves browser-supplied params
+// the proxy forwards but the cell rejects come back as a client error, not a
+// bad gateway.
+func TestUpstreamBadRequestSurfacesAsBadRequest(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "limit must be between 1 and 500"})
+	}, nil)
+	resp := authedGet(t, srv, cfg, "/api/transcripts/tr_1?limit=501")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", resp.StatusCode)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body.Error, "limit must be between 1 and 500") {
+		t.Fatalf("error = %q, want the upstream validation text", body.Error)
+	}
+}
+
+func TestEventsStreamCapsConcurrentConnections(t *testing.T) {
+	previous := maxSSEConnections
+	maxSSEConnections = 1
+	defer func() { maxSSEConnections = previous }()
+
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first, err := srv.Client().Do(authedRequest(t, srv, cfg, "/api/events").WithContext(ctx))
+	if err != nil {
+		t.Fatalf("open first stream: %v", err)
+	}
+	defer func() { _ = first.Body.Close() }()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first stream: got %d", first.StatusCode)
+	}
+	// Ensure the handler is running (headers already flushed on Do return).
+	second := authedGet(t, srv, cfg, "/api/events")
+	defer func() { _ = second.Body.Close() }()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second stream: got %d, want 429", second.StatusCode)
+	}
+}

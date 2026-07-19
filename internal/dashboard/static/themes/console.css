@@ -1,0 +1,13 @@
+/* console — dark monospace terminal look (default theme). */
+:root {
+  --bg: #0c1117;
+  --bg-panel: #101823;
+  --fg: #c9d6e2;
+  --fg-dim: #66788c;
+  --accent: #3ddc84;   /* green */
+  --accent-2: #4dd7e8; /* cyan */
+  --danger: #e0596a;
+  --border: #1f2a36;
+  --font-ui: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

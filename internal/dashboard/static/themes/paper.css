@@ -1,0 +1,13 @@
+/* paper — simple light variant. */
+:root {
+  --bg: #f6f4ef;
+  --bg-panel: #fffdf8;
+  --fg: #2b2b28;
+  --fg-dim: #77756c;
+  --accent: #1d7a4f;
+  --accent-2: #0f6f8f;
+  --danger: #b3364a;
+  --border: #dcd8cd;
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

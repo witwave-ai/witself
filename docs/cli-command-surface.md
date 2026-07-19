@@ -279,6 +279,7 @@ witself
   export
   import
   mcp serve|tools
+  dashboard serve|status
   config get|set|list|unset
   completion
 ```
@@ -4337,6 +4338,81 @@ variants may change form, palette, and defining details, but only the one
 agent-chosen final candidate is submitted. It is available to a self token only
 under `agent_self_managed`; otherwise an account operator uses `avatar operator
 reset`. It is not a permanent purge command.
+
+## `witself dashboard`
+
+Serve local, read-only web views over the agent's own `/v1` read surface.
+
+### `witself dashboard serve`
+
+Serve a loopback-only, read-only, live-updating dashboard for exactly one
+agent ([ADR 0004](decisions/0004-local-agent-dashboard.md)).
+
+The process is a foreground thin proxy over the public read API using the
+agent's own token: self digests and transcripts use `observational=true`
+reads, messages use the passive metadata-only list, broad memory reads stay
+redacted by default, and the avatar SVG is re-run through the canonical
+sanitizer with its hash verified before it is served — the same gate as
+`witself self card`. The listener binds `127.0.0.1` only, validates the
+`Host` header, and requires the per-process `?token=` URL printed at startup
+(exchanged once for a `SameSite=Strict` session cookie holding a distinct
+per-process value, name-scoped to the listener port so concurrent per-agent
+dashboards coexist in one browser). Each serve registers itself in
+`~/.witself/dashboards/<agentID>.json` for local discovery — the 0600 entry
+records the tokened open URL, a same-user exposure identical to the agent
+token file — and refuses to
+start while a live dashboard already serves the same agent (PID liveness
+plus a probe of the recorded port, so a crash-stale entry never wedges the
+slot; the claim itself is lock-serialized, so racing serves resolve to
+exactly one registered winner). Live updates are
+cursor polls of the cell fanned out to the browser over server-sent events;
+the dashboard never calls `message:read` or `message:listen`, and message
+body fields are stripped by the proxy before anything reaches the browser.
+
+```sh
+ws dashboard serve --agent scout
+ws dashboard serve --agent scout --port 51234 --poll 5s
+ws dashboard serve --endpoint https://cell.example --token-file ./scout.token --agent scout
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--account` | Local account name (default: `WITSELF_ACCOUNT` or `"default"`). |
+| `--realm` | Local realm name (default: `WITSELF_REALM` or `"default"`). |
+| `--agent` | Local agent name (default: `WITSELF_AGENT`). |
+| `--endpoint` | witself-server endpoint URL. |
+| `--token-file` | File containing an agent token (requires `--endpoint`). |
+| `--port` | Listen port on 127.0.0.1. `0` (default) derives a stable port in 50000-59999 from the agent id, with next-free fallback. |
+| `--poll` | Cell poll interval for live updates (default `2s`). |
+
+### `witself dashboard status`
+
+List the dashboards registered in `~/.witself/dashboards/`, one row per
+entry with the same liveness verdict `serve` uses (PID liveness plus the
+marker-header probe of the recorded port). The command is purely local — no
+cell round-trip, no token file — so an AI runtime can check for a running
+dashboard before starting one itself ([ADR
+0004](decisions/0004-local-agent-dashboard.md)). Live entries print the
+tokened open URL; stale entries (dead PID, or nothing answering on the
+recorded port) stay listed until the next serve reclaims the slot. `--json`
+emits a `dashboards` array carrying every registry field plus a `live`
+bool. Exit code 0 means the scan succeeded, even with zero entries.
+
+```sh
+ws dashboard status
+ws dashboard status --agent scout --json
+```
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--agent` | Only dashboards serving this agent name. |
+| `--account` | Only dashboards under this local account name. |
+| `--realm` | Only dashboards in this realm. |
+| `--json` | Print JSON instead of columns. |
 
 ## First Implementation Slice
 

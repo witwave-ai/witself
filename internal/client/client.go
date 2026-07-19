@@ -37,6 +37,16 @@ type notFoundError struct{ cause error }
 func (e notFoundError) Error() string { return e.cause.Error() }
 func (e notFoundError) Unwrap() error { return ErrNotFound }
 
+// ErrBadRequest wraps 400 responses while preserving the server's existing
+// human-readable error text. Proxies (the local dashboard) use it to surface
+// upstream input validation as a client error instead of a gateway fault.
+var ErrBadRequest = errors.New("bad request")
+
+type badRequestError struct{ cause error }
+
+func (e badRequestError) Error() string { return e.cause.Error() }
+func (e badRequestError) Unwrap() error { return ErrBadRequest }
+
 // BootstrapResult is the outcome of a bootstrap login.
 type BootstrapResult struct {
 	OperatorToken string
@@ -194,6 +204,8 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 		return responseError(resp, "conflict")
 	case resp.StatusCode == http.StatusNotFound:
 		return notFoundError{cause: responseError(resp, "not found")}
+	case resp.StatusCode == http.StatusBadRequest:
+		return badRequestError{cause: responseError(resp, "bad request")}
 	case resp.StatusCode >= 300:
 		return responseError(resp, "request failed: "+resp.Status)
 	}

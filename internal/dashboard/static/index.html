@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>witself dashboard</title>
+<link rel="stylesheet" href="/static/base.css">
+<link id="theme-css" rel="stylesheet" href="/static/themes/console.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="identity">
+    <span class="avatar-box"><img id="avatar" src="/api/avatar.svg" alt="agent avatar"></span>
+    <div class="identity-text">
+      <div id="agent-name" class="agent-name">&hellip;</div>
+      <div class="agent-meta"><span id="realm-name"></span><span class="sep">&middot;</span><span id="agent-id" class="mono"></span></div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="live"><span id="live-dot" class="dot"></span><span id="live-label">connecting</span></span>
+    <span id="version" class="version"></span>
+    <label class="theme-label">theme
+      <!-- options are the embedded theme packs, filled from /api/themes -->
+      <select id="theme-select"></select>
+    </label>
+  </div>
+</header>
+<div class="frame">
+  <nav class="rail">
+    <a href="#/overview" data-nav="overview">overview</a>
+    <a href="#/transcripts" data-nav="transcripts">transcripts</a>
+    <a href="#/memories" data-nav="memories">memories</a>
+    <a href="#/conversations" data-nav="conversations">conversations</a>
+    <span class="nav-disabled">secrets <span class="badge">soon</span></span>
+  </nav>
+  <main class="main">
+    <div id="breadcrumb" class="breadcrumb"></div>
+    <div id="view" class="view"></div>
+  </main>
+</div>
+<footer class="statusbar">
+  <span id="status-poll">poll &mdash;</span>
+  <span id="status-sse">sse idle</span>
+  <span>observational reads only</span>
+  <span id="status-addr" class="mono"></span>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
