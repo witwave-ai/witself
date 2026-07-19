@@ -9,6 +9,19 @@ the deterministic PostgreSQL memory path, not a backend embedding provider.
 Client curation and optional client-supplied vectors follow
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+> **Sealed-plane custody amendment (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+> KMS prerequisites below. Self-hosted and managed servers use the same
+> ciphertext-only backend: the AVK remains in the authorized client, and the
+> backend has no decrypt key or server-decrypt route. No
+> `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`, or
+> `WITSELF_KMS_KEY_ID` configuration is implemented or required for secrets.
+> KMS/realm-KEK readiness, rotation, and cross-cloud re-wrap sections below are
+> retained only as superseded support-design history. Operators still own
+> ordinary infrastructure encryption, database backups, and separate custody
+> of client AVKs.
+
 ## Decision
 
 Managed Witself Cloud is the default supported product.

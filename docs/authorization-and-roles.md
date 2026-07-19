@@ -12,6 +12,14 @@ The `realm_members.scopes[]` composability hook exists in the schema but is
 **reserved/frozen-empty** for v0; custom per-member scopes, `denied_scopes[]`,
 fine-grained scope editing, and SCIM are deferred to v1.
 
+Sealed-plane custody amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault contract](client-custodied-agent-vault.md) supersede
+KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+backend holds no AVK key material, calls no KMS for agent secrets, and exposes
+no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+storage-encryption references are unaffected.
+
 This is the consolidated authorization model for **both planes** of Witself:
 
 - **Open plane** (memories + facts) — integrity/authenticity of identity data,

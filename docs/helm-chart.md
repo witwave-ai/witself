@@ -3,6 +3,20 @@
 Status: draft. This document describes the first self-hosting deployment
 artifact for Witself.
 
+> **Current sealed-plane boundary (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+> KMS-rooted chart target below. The current backend stores ciphertext and
+> public AVK metadata but has no decrypt key or server-decrypt path. The chart
+> implements no `sealedPlane`/`kms` values and the server implements no
+> `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`, or
+> `WITSELF_KMS_KEY_ID` setting. No backend KMS configuration is required for
+> agent secrets. The current chart also has no migration Job:
+> `witself-server serve` applies embedded forward Goose migrations before
+> becoming Ready.
+> Sections below that prescribe KMS, a sealed-plane feature switch, or an
+> explicit migration command/Job are retained only as superseded target history.
+
 Narrative-memory decision (accepted 2026-07-14): the chart does not configure a
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
 required deterministic lexical baseline. Optional client-supplied vector

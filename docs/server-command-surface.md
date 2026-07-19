@@ -3,6 +3,18 @@
 Status: draft. This document describes the separate `witself-server` binary for
 managed and self-hosted backend API deployments.
 
+> **Current implementation boundary (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+> KMS-rooted and server-decrypt target below. Agent secrets use a
+> client-custodied AVK; the backend stores ciphertext and public key metadata
+> and cannot decrypt. `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`,
+> and `WITSELF_KMS_KEY_ID` are not implemented or required. The current binary
+> exposes `version` and `serve`; `serve` applies embedded forward Goose
+> migrations before listening. Later sections describing KMS configuration,
+> sealed-plane readiness, or separate `migrate`/`config` commands are
+> superseded target history, not current operational instructions.
+
 Narrative-memory decision (accepted 2026-07-14): the server never invokes an LLM
 or embedding provider. PostgreSQL is the canonical store and provides the
 deterministic lexical recall baseline. Inference and any vector generation are

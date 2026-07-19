@@ -9,6 +9,17 @@ inference provider. Account movement uses source freeze or placement-epoch
 fencing, clears imported leases, and rebuilds derived indexes under
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+> **Sealed-plane custody amendment (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+> cell-rooted KMS design below. Cells store ciphertext, wrapped per-field DEKs,
+> and public AVK metadata in PostgreSQL; they hold no agent AVK and expose no
+> server-decrypt path. Moving an account copies the encrypted vault unchanged
+> and requires no source/destination KMS re-wrap. An authorized client must
+> separately possess the matching AVK. References below to a sealed-plane KMS,
+> cloud-rooted secret key material, or cross-cloud KMS re-wrap are retained only
+> as superseded design history.
+
 ## Decision
 
 Witself deploys as a fleet of independent cells. A cell is one complete, isolated

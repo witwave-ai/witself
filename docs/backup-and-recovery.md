@@ -7,6 +7,19 @@ plane (secrets + TOTP) is backed up **encrypted-only** — envelope ciphertext
 plus KMS key identity and rotation metadata, never plaintext, never key
 material — and is **excluded from the plaintext identity export** entirely.
 
+> **Sealed-plane custody amendment (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+> KMS-dependent backup and recovery design below. Schema-55 account archives
+> carry the public AVK binding, secret metadata, sensitive-field ciphertext,
+> wrapped per-field DEKs, and value-free mutation receipts. They never carry
+> the AVK or plaintext sensitive values. The encrypted streams copy unchanged
+> between cells and require no KMS identity, source-cloud unwrap, or destination
+> re-wrap. An authorized client must separately retain and possess the matching
+> AVK to use the restored vault. Later KMS-loss, realm-KEK, and cross-cloud KMS
+> sections are superseded history. The provider-native pre-migration database
+> backup procedures remain current and mandatory where stated.
+
 Visible transcript conversations and entries are account-owned open-plane data.
 They travel in the logical account export/import stream in conversation then
 entry order. When file artifacts land, an export is complete only when its blob

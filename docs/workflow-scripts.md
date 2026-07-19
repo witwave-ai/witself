@@ -13,6 +13,14 @@ lexical recall is the baseline, Witself never calls a backend model, optional
 vectors are client-supplied, and provider-native memory is used only when the
 user explicitly selects it.
 
+Sealed-plane custody amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault contract](client-custodied-agent-vault.md) supersede
+KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+backend holds no AVK key material, calls no KMS for agent secrets, and exposes
+no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+storage-encryption references are unaffected.
+
 Witself is one product with two data planes. These walkthroughs cover both. The
 **open plane** is the Witself identity payload: adding and recalling memories,
 setting and reading facts, granting cross-agent access through policy, organizing

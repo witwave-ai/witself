@@ -9,6 +9,14 @@ below now follows client-authored capture and curation plans. Autonomous
 `memory.consolidated` and server-routed `remember` behavior are retired; see
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Sealed-plane custody amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault contract](client-custodied-agent-vault.md) supersede
+KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+backend holds no AVK key material, calls no KMS for agent secrets, and exposes
+no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+storage-encryption references are unaffected.
+
 Witself audit answers a different question than Witpass audit. Witpass audit
 exists mostly to prove who *read* secret material (confidentiality). Witself
 audit exists to prove who *changed*, *recalled*, *forgot*, or *messaged* identity
