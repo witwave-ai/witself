@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,53 @@ func TestFactRetrievalClients(t *testing.T) {
 		if seen[mode] != 1 {
 			t.Errorf("%s calls = %d", mode, seen[mode])
 		}
+	}
+}
+
+// TestProbeObservationalFactReads proves the capability probe distinguishes
+// cells that parse the observational parameter from released cells that
+// predate it, and that the probe request itself can never execute a read on
+// either vintage: both its observational value and its limit are unparseable,
+// so each side 400s before touching the store.
+func TestProbeObservationalFactReads(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		want    bool
+		wantErr bool
+	}{
+		{"parses the parameter", http.StatusBadRequest, `{"error":"observational must be true or false"}`, true, false},
+		{"predates the parameter", http.StatusBadRequest, `{"error":"limit must be an integer"}`, false, false},
+		{"accepts anything", http.StatusOK, `{"facts":[]}`, false, false},
+		{"no fact service", http.StatusNotFound, `{"error":"not found"}`, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method+" "+r.URL.Path != "GET /v1/facts" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if _, err := strconv.ParseBool(r.URL.Query().Get("observational")); err == nil {
+					t.Errorf("probe sent a parseable observational value: %s", r.URL.RawQuery)
+				}
+				if _, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+					t.Errorf("probe sent a parseable limit: %s", r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			supported, err := ProbeObservationalFactReads(context.Background(), srv.URL, "agent-token")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if supported != tc.want {
+				t.Fatalf("supported = %v, want %v", supported, tc.want)
+			}
+		})
 	}
 }
 

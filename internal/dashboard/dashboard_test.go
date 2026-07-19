@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -829,7 +830,7 @@ func TestEventsStreamEmitsMessagesFromPassiveList(t *testing.T) {
 
 func TestEventsStreamRejectsInvalidMessagesFlag(t *testing.T) {
 	srv, cfg := newDashboard(t, selfBackend(t), nil)
-	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope"} {
+	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope"} {
 		resp := authedGet(t, srv, cfg, path)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("%s: got %d, want 400", path, resp.StatusCode)
@@ -884,6 +885,457 @@ func TestEventsStreamEmitsMemoriesFromRedactedList(t *testing.T) {
 			sawEvent = true
 		}
 		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "mem_live") {
+			sawItem = true
+		}
+	}
+	if !sawEvent || !sawItem {
+		t.Fatalf("stream ended early: event=%v item=%v (%v)", sawEvent, sawItem, scanner.Err())
+	}
+	cancel()
+}
+
+// answerFactReadProbe replies to the one-time observational capability probe
+// (client.ProbeObservationalFactReads) the way every cell that parses the
+// parameter does — 400 before any read — and reports whether it handled the
+// request. The probe is recognizable by its deliberately unparseable
+// observational value.
+func answerFactReadProbe(w http.ResponseWriter, r *http.Request) bool {
+	raw := r.URL.Query().Get("observational")
+	if raw == "" {
+		return false
+	}
+	if _, err := strconv.ParseBool(raw); err == nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "observational must be true or false"})
+	return true
+}
+
+// TestFactsProxyListsObservationalAndRedacts proves the facts list proxy is
+// an observational read that never requests sensitive values, forwards the
+// browser's filters, and — defense in depth, mirroring stripMessageBodies —
+// zeroes any sensitive value a misbehaving cell leaks into the list.
+func TestFactsProxyListsObservationalAndRedacts(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET /v1/facts" {
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if answerFactReadProbe(w, r) {
+			return
+		}
+		query := r.URL.Query()
+		if query.Get("observational") != "true" {
+			t.Errorf("observational = %q, want true", query.Get("observational"))
+		}
+		if query.Has("include_sensitive") {
+			t.Errorf("include_sensitive must never be sent, got query %s", r.URL.RawQuery)
+		}
+		if query.Get("subject") != "self" || query.Get("predicate_prefix") != "identity" || query.Get("limit") != "25" {
+			t.Errorf("unexpected query %s", r.URL.RawQuery)
+		}
+		// A misbehaving cell that leaks a sensitive value from the broad
+		// list: the proxy must strip it rather than trust upstream redaction.
+		writeTestJSON(t, w, map[string]any{"facts": []client.Fact{
+			{ID: "fact_1", Subject: "self", Predicate: "identity/name", Value: json.RawMessage(`"Scott"`)},
+			{ID: "fact_2", Subject: "self", Predicate: "identity/ssn", Sensitive: true,
+				Value: json.RawMessage(`"leaked-fact-value"`), SourceRef: "leaked-source-ref"},
+		}})
+	}, nil)
+
+	resp := authedGet(t, srv, cfg, "/api/facts?subject=self&predicate_prefix=identity&limit=25")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(raw), "fact_1") || !strings.Contains(string(raw), "Scott") {
+		t.Fatalf("non-sensitive fact missing from proxied list: %s", raw)
+	}
+	if strings.Contains(string(raw), "leaked") {
+		t.Fatalf("sensitive fact value/source ref reached the browser: %s", raw)
+	}
+
+	bad := authedGet(t, srv, cfg, "/api/facts?limit=nope")
+	defer func() { _ = bad.Body.Close() }()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid limit: got %d, want 400", bad.StatusCode)
+	}
+}
+
+// TestFactsProxyDoesNotDegradeOn501 proves the list proxy never falls back to
+// the plain fact list on a cell that knows the observational parameter but
+// has no observational hooks wired: unlike the self digest, the plain list
+// records ranking-eligible search usage, so the 501 surfaces as a clear 501
+// the UI renders instead of a silently perturbing degrade.
+func TestFactsProxyDoesNotDegradeOn501(t *testing.T) {
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		if answerFactReadProbe(w, r) {
+			return
+		}
+		if r.URL.Query().Get("observational") != "true" {
+			t.Errorf("proxy fell back to the plain usage-recording list: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "observational fact reads are unavailable"})
+	}, nil)
+	resp := authedGet(t, srv, cfg, "/api/facts")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("got %d, want 501", resp.StatusCode)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error != "cell does not support observational fact reads" {
+		t.Fatalf("error = %q", body.Error)
+	}
+}
+
+// TestFactsSurfacesRefuseCellsThatIgnoreObservational proves the capability
+// probe closes the released-cell gap (v0.0.152-v0.0.168): those cells ignore
+// the observational parameter entirely and silently run the plain
+// usage-recording read path instead of answering 501, so the broad list, the
+// SSE facts tick, and the history sensitivity probe must all refuse to read
+// rather than perturb usage ranking on every render. The probe itself pairs
+// an unparseable observational value with an unparseable limit, which such a
+// cell rejects before any read, and its answer is memoized.
+func TestFactsSurfacesRefuseCellsThatIgnoreObservational(t *testing.T) {
+	var mu sync.Mutex
+	var plainReads, probes int
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/facts/fact_1/history":
+			writeTestJSON(t, w, map[string]any{"assertions": []client.FactAssertion{
+				{ID: "fas_1", FactID: "fact_1", Value: json.RawMessage(`"history-value"`), SourceRef: "history-ref"},
+			}})
+		case "GET /v1/facts":
+			// The v0.0.168 factsReadHandler: the observational parameter did
+			// not exist, so it is ignored and only an invalid limit stops
+			// the plain read.
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				if _, err := strconv.Atoi(raw); err != nil {
+					mu.Lock()
+					probes++
+					mu.Unlock()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "limit must be an integer"})
+					return
+				}
+			}
+			mu.Lock()
+			plainReads++
+			mu.Unlock()
+			writeTestJSON(t, w, map[string]any{"facts": []client.Fact{{ID: "fact_1"}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	for range 2 {
+		resp := authedGet(t, srv, cfg, "/api/facts")
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Fatalf("list on an old cell: got %d, want 501", resp.StatusCode)
+		}
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		if body.Error != "cell does not support observational fact reads" {
+			t.Fatalf("error = %q", body.Error)
+		}
+	}
+
+	hist := authedGet(t, srv, cfg, "/api/facts/fact_1/history?subject=self&predicate=identity%2Fname")
+	defer func() { _ = hist.Body.Close() }()
+	if hist.StatusCode != http.StatusOK {
+		t.Fatalf("history on an old cell: got %d, want 200", hist.StatusCode)
+	}
+	raw, err := io.ReadAll(hist.Body)
+	if err != nil {
+		t.Fatalf("read history body: %v", err)
+	}
+	if !strings.Contains(string(raw), "fas_1") {
+		t.Fatalf("assertion metadata missing: %s", raw)
+	}
+	if strings.Contains(string(raw), "history-value") || strings.Contains(string(raw), "history-ref") {
+		t.Fatalf("history values must stay locked without a usage-free sensitivity probe: %s", raw)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?facts=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	selfFrames := 0
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && selfFrames < 3 {
+		line := scanner.Text()
+		if line == "event: facts" {
+			t.Fatalf("old cell must get no facts tick, saw %q", line)
+		}
+		if line == "event: self" {
+			selfFrames++
+		}
+	}
+	if selfFrames < 3 {
+		t.Fatalf("stream ended early after %d self frames (%v)", selfFrames, scanner.Err())
+	}
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if plainReads != 0 {
+		t.Fatalf("plain usage-recording reads = %d, want 0", plainReads)
+	}
+	if probes != 1 {
+		t.Fatalf("capability probes = %d, want 1 (memoized)", probes)
+	}
+}
+
+// TestFactRevealUsesObservationalExactRead proves the user-initiated reveal
+// endpoint is one exact observational read (skipping usage recording) that
+// returns the sensitive value. The reveal is query-addressed like the
+// upstream exact read — a /api/facts/{subject}/{predicate} path shape would
+// let the literal /api/facts/{id}/history pattern shadow any fact whose
+// predicate is the single segment "history", which the server's predicate
+// grammar permits — so a "history" predicate stays revealable.
+func TestFactRevealUsesObservationalExactRead(t *testing.T) {
+	for _, predicate := range []string{"identity/ssn", "history"} {
+		t.Run(predicate, func(t *testing.T) {
+			srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method+" "+r.URL.Path != "GET /v1/facts" {
+					t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				query := r.URL.Query()
+				if query.Get("observational") != "true" {
+					t.Errorf("observational = %q, want true", query.Get("observational"))
+				}
+				if query.Get("subject") != "self" || query.Get("predicate") != predicate {
+					t.Errorf("unexpected exact read query %s", r.URL.RawQuery)
+				}
+				writeTestJSON(t, w, map[string]any{"fact": client.Fact{
+					ID: "fact_2", Subject: "self", Predicate: predicate, Sensitive: true,
+					Value: json.RawMessage(`"s3cret-value"`),
+				}})
+			}, nil)
+			resp := authedGet(t, srv, cfg, "/api/fact?subject=self&predicate="+url.QueryEscape(predicate))
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("got %d, want 200", resp.StatusCode)
+			}
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if !strings.Contains(string(raw), "s3cret-value") {
+				t.Fatalf("reveal response must carry the value: %s", raw)
+			}
+
+			missing := authedGet(t, srv, cfg, "/api/fact?subject=self")
+			defer func() { _ = missing.Body.Close() }()
+			if missing.StatusCode != http.StatusBadRequest {
+				t.Fatalf("missing predicate: got %d, want 400", missing.StatusCode)
+			}
+		})
+	}
+}
+
+// TestFactRevealFallsBackToPlainReadOn501 proves the reveal — and only the
+// reveal — degrades to the plain exact read on a cell without observational
+// fact reads: a user-initiated reveal is an intentional exact lookup, so
+// recording one legitimate delivery usage there is acceptable.
+func TestFactRevealFallsBackToPlainReadOn501(t *testing.T) {
+	var mu sync.Mutex
+	var observational, plain bool
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("predicate") != "identity/ssn" {
+			t.Errorf("unexpected backend request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		if query.Get("observational") == "true" {
+			mu.Lock()
+			observational = true
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "observational fact reads are unavailable"})
+			return
+		}
+		mu.Lock()
+		plain = true
+		mu.Unlock()
+		writeTestJSON(t, w, map[string]any{"fact": client.Fact{
+			ID: "fact_2", Subject: "self", Predicate: "identity/ssn", Sensitive: true,
+			Value: json.RawMessage(`"s3cret-value"`),
+		}})
+	}, nil)
+	resp := authedGet(t, srv, cfg, "/api/fact?subject=self&predicate=identity%2Fssn")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(raw), "s3cret-value") {
+		t.Fatalf("fallback reveal must carry the value: %s", raw)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !observational || !plain {
+		t.Fatalf("observational=%v plain=%v, want the observational attempt then the plain fallback", observational, plain)
+	}
+}
+
+// TestFactHistoryProxyLocksValuesUnlessProvenNonSensitive proves the drill-in
+// history forwards assertion values only when an exact observational read
+// proves the fact non-sensitive; sensitive, unproven, or mismatched facts get
+// value-free history (no per-assertion reveal in v1).
+func TestFactHistoryProxyLocksValuesUnlessProvenNonSensitive(t *testing.T) {
+	backend := func(sensitive bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/facts/fact_1/history":
+				writeTestJSON(t, w, map[string]any{"assertions": []client.FactAssertion{
+					{ID: "fas_1", FactID: "fact_1", Value: json.RawMessage(`"history-value"`), SourceRef: "history-ref"},
+				}})
+			case "/v1/facts":
+				if answerFactReadProbe(w, r) {
+					return
+				}
+				if r.URL.Query().Get("observational") != "true" {
+					t.Errorf("sensitivity probe must be observational: %s", r.URL.RawQuery)
+				}
+				writeTestJSON(t, w, map[string]any{"fact": client.Fact{
+					ID: "fact_1", Subject: "self", Predicate: "identity/name", Sensitive: sensitive,
+				}})
+			default:
+				t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}
+	}
+
+	cases := []struct {
+		name      string
+		sensitive bool
+		path      string
+		wantValue bool
+	}{
+		{"non-sensitive proven", false, "/api/facts/fact_1/history?subject=self&predicate=identity%2Fname", true},
+		{"sensitive fact locked", true, "/api/facts/fact_1/history?subject=self&predicate=identity%2Fname", false},
+		{"missing address locked", false, "/api/facts/fact_1/history", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cfg := newDashboard(t, backend(tc.sensitive), nil)
+			resp := authedGet(t, srv, cfg, tc.path)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("got %d, want 200", resp.StatusCode)
+			}
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if !strings.Contains(string(raw), "fas_1") {
+				t.Fatalf("assertion metadata missing: %s", raw)
+			}
+			if got := strings.Contains(string(raw), "history-value"); got != tc.wantValue {
+				t.Fatalf("history value present = %v, want %v: %s", got, tc.wantValue, raw)
+			}
+			if !tc.wantValue && strings.Contains(string(raw), "history-ref") {
+				t.Fatalf("locked history leaked source ref: %s", raw)
+			}
+		})
+	}
+}
+
+// TestEventsStreamEmitsFactsFromRedactedList proves the opt-in facts tick
+// polls the observational list (never include_sensitive, never the plain
+// usage-recording list) and that a leaked sensitive value never reaches an
+// SSE frame.
+func TestEventsStreamEmitsFactsFromRedactedList(t *testing.T) {
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "GET /v1/facts":
+			if answerFactReadProbe(w, r) {
+				return
+			}
+			query := r.URL.Query()
+			if query.Get("observational") != "true" {
+				t.Errorf("facts tick must be observational, got %s", r.URL.RawQuery)
+			}
+			if query.Has("include_sensitive") {
+				t.Errorf("include_sensitive must never be sent, got query %s", r.URL.RawQuery)
+			}
+			if query.Get("limit") != strconv.Itoa(sseFactPageLimit) {
+				t.Errorf("limit = %q, want %d", query.Get("limit"), sseFactPageLimit)
+			}
+			writeTestJSON(t, w, map[string]any{"facts": []client.Fact{
+				{ID: "fact_live", Subject: "self", Predicate: "identity/name", Value: json.RawMessage(`"Scott"`)},
+				{ID: "fact_hot", Subject: "self", Predicate: "identity/ssn", Sensitive: true,
+					Value: json.RawMessage(`"leaked-fact-value"`)},
+			}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?facts=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	sawEvent, sawItem := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawEvent || !sawItem) {
+		line := scanner.Text()
+		if line == "event: facts" {
+			sawEvent = true
+		}
+		if strings.Contains(line, "leaked-fact-value") {
+			t.Fatalf("sensitive fact value reached the SSE stream: %q", line)
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "fact_live") {
 			sawItem = true
 		}
 	}

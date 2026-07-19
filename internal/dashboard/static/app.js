@@ -11,10 +11,13 @@
     sseTranscript: null, // transcript id the current EventSource tails
     sseMessages: false,  // whether the current EventSource polls the mailbox
     sseMemories: false,  // whether the current EventSource polls memories
+    sseFacts: false,     // whether the current EventSource polls facts
     seenSequences: {},   // transcript id -> highest rendered sequence
     messages: {},        // direction + " " + message id -> passive metadata
+    facts: {},           // fact id -> redacted fact (never a revealed value)
     lastSelfData: null,     // last raw "self" frame, to skip no-op re-renders
     lastMemoriesData: null, // last raw "memories" frame, same reason
+    lastFactsData: null,    // last raw "facts" frame, same reason
     themes: ["console"],    // replaced by /api/themes (the embedded theme dir)
   };
 
@@ -93,11 +96,13 @@
   }
 
   // --- server-sent events ----------------------------------------------
-  function openEvents(transcriptID, afterSequence, withMessages, withMemories) {
+  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts) {
     withMessages = withMessages === true;
     withMemories = withMemories === true;
+    withFacts = withFacts === true;
     if (state.eventSource && state.sseTranscript === (transcriptID || null) &&
-        state.sseMessages === withMessages && state.sseMemories === withMemories) { return; }
+        state.sseMessages === withMessages && state.sseMemories === withMemories &&
+        state.sseFacts === withFacts) { return; }
     if (state.eventSource) { state.eventSource.close(); }
     var params = [];
     if (transcriptID) {
@@ -108,11 +113,13 @@
     }
     if (withMessages) { params.push("messages=true"); }
     if (withMemories) { params.push("memories=true"); }
+    if (withFacts) { params.push("facts=true"); }
     var source = new EventSource("/api/events" + (params.length ? "?" + params.join("&") : ""));
     state.eventSource = source;
     state.sseTranscript = transcriptID || null;
     state.sseMessages = withMessages;
     state.sseMemories = withMemories;
+    state.sseFacts = withFacts;
     source.onopen = function () { setSSEState(true); };
     source.onerror = function () { setSSEState(false); };
     source.addEventListener("self", function (event) {
@@ -134,6 +141,18 @@
       var page;
       try { page = JSON.parse(event.data); } catch (_) { return; }
       renderMemoriesList(page);
+    });
+    source.addEventListener("facts", function (event) {
+      if (event.data === state.lastFactsData) { return; }
+      state.lastFactsData = event.data;
+      var body;
+      try { body = JSON.parse(event.data); } catch (_) { return; }
+      mergeFacts(body.facts);
+      var current = parseHash();
+      if (current.section !== "facts" || current.id) { return; }
+      // Re-rendering the list also discards any value the user revealed:
+      // revealed values live only in the replaced DOM.
+      renderFactsList(body.facts || []);
     });
     source.addEventListener("transcript", function (event) {
       if (!transcriptID) { return; }
@@ -185,6 +204,8 @@
     setNav(route.section);
     if (route.section === "transcripts" && route.id) { return viewTranscript(route.id, route.query); }
     if (route.section === "transcripts") { return viewTranscripts(); }
+    if (route.section === "facts" && route.id) { return viewFact(route.id); }
+    if (route.section === "facts") { return viewFacts(); }
     if (route.section === "memories" && route.id) { return viewMemory(route.id); }
     if (route.section === "memories") { return viewMemories(); }
     if (route.section === "conversations" && route.id) { return viewConversation(decodeURIComponent(route.id)); }
@@ -196,11 +217,32 @@
     $("view").innerHTML = '<div class="error">' + esc(err.message || err) + "</div>";
   }
 
+  var toastTimer = null;
+
+  function toast(message) {
+    var node = document.getElementById("toast");
+    if (!node) {
+      node = document.createElement("div");
+      node.id = "toast";
+      node.className = "toast";
+      document.body.appendChild(node);
+    }
+    node.textContent = message;
+    node.classList.add("show");
+    if (toastTimer) { clearTimeout(toastTimer); }
+    toastTimer = setTimeout(function () {
+      toastTimer = null;
+      node.classList.remove("show");
+    }, 3500);
+  }
+
   // --- views ------------------------------------------------------------
   function renderOverview(self) {
     var counts = (self.index && self.index.counts) || {};
     var cards = Object.keys(counts).sort().map(function (key) {
-      return '<div class="card"><div class="num">' + esc(counts[key]) + '</div><div class="label">' + esc(key) + "</div></div>";
+      var card = '<div class="card"><div class="num">' + esc(counts[key]) + '</div><div class="label">' + esc(key) + "</div></div>";
+      if (key === "facts") { return '<a class="card-link" href="#/facts">' + card + "</a>"; }
+      return card;
     }).join("");
     var salient = (self.salient_memories || []).map(function (memory) {
       return '<div class="row"><span class="grow"><a href="#/memories/' + esc(memory.id) + '">' + esc(memory.snippet || memory.id) + "</a></span>" +
@@ -290,6 +332,184 @@
       if (anchor) { anchor.scrollIntoView({ block: "center" }); }
       openEvents(id, highest);
     }).catch(showError);
+  }
+
+  // --- facts ------------------------------------------------------------
+  // The atomic/semantic plane, rendered from the redacted observational list
+  // (/api/facts). Sensitive rows show a lock plus an eye button; clicking the
+  // eye fetches the single-fact reveal endpoint — the only response that may
+  // carry a sensitive value. Revealed values live only in the replaced DOM
+  // subtree: never in state.facts, localStorage, or sessionStorage, and any
+  // re-render, navigation, or SSE-driven list refresh discards them.
+  var EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var EYE_SLASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>' +
+    '<line x1="4" y1="20" x2="20" y2="4"/></svg>';
+  var COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="9" y="9" width="12" height="12" rx="2"/>' +
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
+  function mergeFacts(list) {
+    state.facts = {};
+    (list || []).forEach(function (fact) {
+      if (fact && fact.id) { state.facts[fact.id] = fact; }
+    });
+  }
+
+  function factValueText(value) {
+    if (value == null) { return ""; }
+    return typeof value === "string" ? value : JSON.stringify(value);
+  }
+
+  function copyButtonHTML(subject, predicate) {
+    return '<button class="eye-btn copy-btn" type="button" title="copy value without revealing"' +
+      ' aria-label="copy value without revealing"' +
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + COPY_SVG + "</button>";
+  }
+
+  function lockedValueHTML(subject, predicate) {
+    return '<span class="lock-chip">locked</span>' +
+      '<button class="eye-btn" type="button" title="reveal sensitive value" aria-label="reveal sensitive value"' +
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SVG + "</button>" +
+      copyButtonHTML(subject, predicate);
+  }
+
+  function revealedValueHTML(subject, predicate, value) {
+    return '<span class="value">' + esc(factValueText(value)) + "</span>" +
+      '<button class="eye-btn" type="button" title="hide value" aria-label="hide value" data-shown="true"' +
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SLASH_SVG + "</button>" +
+      copyButtonHTML(subject, predicate);
+  }
+
+  function factValueHTML(fact) {
+    if (fact.sensitive) { return lockedValueHTML(fact.subject, fact.predicate); }
+    return '<span class="value">' + esc(factValueText(fact.value)) + "</span>";
+  }
+
+  function renderFactsList(facts) {
+    var rows = (facts || []).map(function (fact) {
+      return '<div class="row"><span class="grow"><a href="#/facts/' + esc(fact.id) + '">' +
+        esc(fact.subject) + " \u00b7 " + esc(fact.predicate) + "</a></span>" +
+        '<span class="fact-value mono">' + factValueHTML(fact) + "</span>" +
+        '<span class="dim">' + esc(fact.source_kind || "") + "</span>" +
+        '<span class="dim">' + esc((fact.updated_at || "").slice(0, 19)) + "</span></div>";
+    }).join("");
+    $("view").innerHTML = '<div class="panel"><h2>facts</h2><div class="list">' +
+      (rows || '<div class="empty">no facts</div>') + "</div></div>";
+  }
+
+  function viewFacts() {
+    breadcrumb([{ label: "facts" }]);
+    openEvents(null, 0, false, false, true);
+    fetchJSON("/api/facts?limit=100").then(function (body) {
+      mergeFacts(body.facts);
+      renderFactsList(body.facts || []);
+    }).catch(showError);
+  }
+
+  function viewFact(id) {
+    breadcrumb([{ label: "facts", href: "#/facts" }, { label: id }]);
+    openEvents(null);
+    var load = state.facts[id] ? Promise.resolve() :
+      fetchJSON("/api/facts?limit=100").then(function (body) { mergeFacts(body.facts); });
+    load.then(function () {
+      var fact = state.facts[id];
+      if (!fact) { throw new Error("fact " + id + " is not in the redacted inventory"); }
+      // subject/predicate let the proxy prove the fact non-sensitive before
+      // forwarding assertion values; without proof it locks the history.
+      return fetchJSON("/api/facts/" + encodeURIComponent(id) + "/history?subject=" +
+        encodeURIComponent(fact.subject) + "&predicate=" + encodeURIComponent(fact.predicate))
+        .then(function (body) { renderFact(fact, body.assertions || []); });
+    }).catch(showError);
+  }
+
+  function renderFact(fact, assertions) {
+    var history = assertions.map(function (assertion) {
+      var value = fact.sensitive ? '<span class="lock-chip">locked</span>' :
+        '<span class="mono">' + esc(factValueText(assertion.value)) + "</span>";
+      return '<div class="row"><span class="grow">' + value + "</span>" +
+        '<span class="dim">' + esc(assertion.source_kind || "") + "</span>" +
+        '<span class="dim mono">' + esc(assertion.confidence != null ? assertion.confidence.toFixed(2) : "") + "</span>" +
+        '<span class="dim">' + esc((assertion.observed_at || "").slice(0, 19)) + "</span></div>";
+    }).join("");
+    $("view").innerHTML =
+      '<div class="panel"><h2>' + esc(fact.subject) + " \u00b7 " + esc(fact.predicate) + "</h2>" +
+      '<div class="fact-value mono">' + factValueHTML(fact) + "</div></div>" +
+      '<div class="panel"><h2>details</h2><dl class="kv">' +
+      "<dt>id</dt><dd>" + esc(fact.id) + "</dd>" +
+      "<dt>value type</dt><dd>" + esc(fact.value_type || "") + "</dd>" +
+      "<dt>cardinality</dt><dd>" + esc(fact.cardinality || "") + "</dd>" +
+      "<dt>source</dt><dd>" + esc(fact.source_kind || "") + (fact.source_ref ? " (" + esc(fact.source_ref) + ")" : "") + "</dd>" +
+      "<dt>confidence</dt><dd>" + esc(fact.confidence != null ? fact.confidence.toFixed(2) : "") + "</dd>" +
+      "<dt>sensitive</dt><dd>" + esc(fact.sensitive ? "yes" : "no") + "</dd>" +
+      "<dt>usage</dt><dd>" + esc(fact.usage_count != null ? fact.usage_count : "") + "</dd>" +
+      "<dt>updated</dt><dd>" + esc((fact.updated_at || "").slice(0, 19)) + "</dd>" +
+      "</dl></div>" +
+      '<div class="panel"><h2>assertion history</h2>' +
+      (fact.sensitive ? '<div class="fact-note">sensitive history values stay locked in v1 &mdash; no per-assertion reveal.</div>' : "") +
+      '<div class="list">' + (history || '<div class="empty">no assertions</div>') + "</div></div>";
+  }
+
+  // Copy-without-reveal: the value goes fetch response -> clipboard and is
+  // dropped; it never enters the DOM. The system clipboard is a wider surface
+  // than this page (other apps, history tools, Universal Clipboard sync), so
+  // a best-effort timed clear follows — blind overwrite, Chromium-only in
+  // practice, since checking first would need a clipboard-read prompt.
+  var copyClearTimer = null;
+
+  function copyFactValue(subject, predicate) {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      toast("clipboard unavailable in this browser");
+      return;
+    }
+    fetchJSON("/api/fact?subject=" + encodeURIComponent(subject) + "&predicate=" + encodeURIComponent(predicate))
+      .then(function (body) {
+        return navigator.clipboard.writeText(factValueText((body.fact || {}).value));
+      })
+      .then(function () {
+        toast("copied — clipboard may sync to other devices; best-effort clear in 45s");
+        if (copyClearTimer) { clearTimeout(copyClearTimer); }
+        copyClearTimer = setTimeout(function () {
+          copyClearTimer = null;
+          navigator.clipboard.writeText("").catch(function () {});
+        }, 45000);
+      })
+      .catch(function (err) { toast("copy failed: " + (err.message || err)); });
+  }
+
+  // Delegated eye/copy handler: reveal fetches the single-fact endpoint on
+  // the user's click and swaps the value into this DOM subtree only; hide
+  // swaps the lock back, dropping the value with the replaced nodes.
+  function onRevealClick(event) {
+    var target = event.target;
+    var button = target && target.closest ? target.closest(".eye-btn") : null;
+    if (!button) { return; }
+    var subject = button.getAttribute("data-subject");
+    var predicate = button.getAttribute("data-predicate");
+    if (button.classList.contains("copy-btn")) {
+      copyFactValue(subject, predicate);
+      return;
+    }
+    var holder = button.closest(".fact-value");
+    if (!holder) { return; }
+    if (button.getAttribute("data-shown") === "true") {
+      holder.innerHTML = lockedValueHTML(subject, predicate);
+      return;
+    }
+    // Query-addressed like the upstream exact read: a path shape would let
+    // the /api/facts/{id}/history route shadow a predicate named "history".
+    fetchJSON("/api/fact?subject=" + encodeURIComponent(subject) + "&predicate=" + encodeURIComponent(predicate))
+      .then(function (body) {
+        holder.innerHTML = revealedValueHTML(subject, predicate, (body.fact || {}).value);
+      })
+      .catch(function (err) {
+        holder.innerHTML = lockedValueHTML(subject, predicate) +
+          '<span class="reveal-error">' + esc(err.message || err) + "</span>";
+      });
   }
 
   function renderMemoriesList(page) {
@@ -493,6 +713,7 @@
   // --- boot -------------------------------------------------------------
   initTheme();
   $("status-addr").textContent = window.location.host;
+  $("view").addEventListener("click", onRevealClick);
   window.addEventListener("hashchange", route);
   route();
 })();

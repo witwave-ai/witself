@@ -44,6 +44,26 @@ metadata-only guarantee holds even against a cell that returns them. Showing
 bodies is a
 deliberate follow-up: a server-side observational message body read in the
 public API, consistent with the existing observational read family.
+Facts render as a fifth surface from the redacted `observational=true` fact
+list (never `include_sensitive`; the plain list records ranking-eligible
+search usage, so a cell without observational fact reads gets a clear 501
+rather than a silently perturbing fallback). Cells released before the
+observational parameter existed ignore it and silently run the plain
+usage-recording read instead of answering 501, so the proxy memoizes one
+capability probe per serve — an unexecutable read pairing an unparseable
+`observational` value with an unparseable `limit`, which either vintage
+rejects with 400 before touching the store — and refuses every broad fact
+read (the list, the SSE facts tick, and the history sensitivity check)
+unless the cell proves it parses the parameter. The eye-icon reveal is a
+deliberate, user-initiated per-fact observational exact read; on older cells
+the plain exact read runs instead — via the 501 fallback, or directly where
+the ignored parameter makes the first read plain — and recording one
+legitimate delivery usage for an intentional lookup is acceptable. Sensitive
+values appear only in that single reveal response — never in lists, SSE frames,
+the registry, or logs — and the proxy strips sensitive values from broad
+payloads by construction, exactly as it strips message bodies, so even a
+misbehaving cell cannot leak them; assertion history stays locked for
+sensitive facts (no per-assertion reveal in v1).
 Sealed secret values are never rendered; when the sealed plane ships, the
 secrets pane shows sealed metadata only.
 
@@ -111,7 +131,13 @@ discovery.
 - Operators get a live window into transcripts, memories, and (later) sealed
   secret metadata without any new server capability or privileged path.
 - Viewing the dashboard does not perturb the agent: observational and passive
-  reads keep retrieval usage and read-state untouched.
+  reads keep retrieval usage and read-state untouched. The one deliberate
+  exception is the eye-icon reveal on a cell without observational fact
+  reads, where the plain exact read records a single legitimate delivery
+  usage for a lookup the user explicitly clicked for; broad fact reads never
+  take that fallback — the memoized capability probe refuses them on cells
+  that would silently ignore `observational=true`, and such cells also keep
+  assertion-history values locked.
 - The UI is themeable via embedded CSS-variable theme packs (default: dark
   console look); adding a theme is a drop-in CSS file, not a build change —
   the picker enumerates the embedded theme directory at runtime, so no JS or

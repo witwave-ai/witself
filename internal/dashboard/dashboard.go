@@ -1,8 +1,10 @@
 // Package dashboard serves the local, read-only, per-agent web dashboard
 // mounted by `witself dashboard serve` (ADR 0004). Every route is a thin
 // authenticated proxy over the public /v1 read API using the agent's own
-// token: self digests and transcripts use observational reads, messages use
-// the passive metadata-only list, broad memory reads stay redacted, and the
+// token: self digests, transcripts, and fact lists use observational reads,
+// messages use the passive metadata-only list, broad memory and fact reads
+// stay redacted (a sensitive fact value appears only in the single-fact
+// user-initiated reveal response), and the
 // avatar SVG passes the same canonical sanitizer-and-hash gate as
 // `witself self card`. The package mounts routes onto a caller-owned mux
 // (the cpserver.Register idiom); the binary owns the listener and lifecycle.
@@ -24,6 +26,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/avatar"
@@ -74,6 +77,11 @@ const (
 	// matching the memories view's own fetch. Every tick re-reads the first
 	// page and the browser skips identical frames.
 	sseMemoryPageLimit = 100
+
+	// sseFactPageLimit is the first-page size the facts tick asks for,
+	// matching the facts view's own fetch. Every tick re-reads the first
+	// page and the browser skips identical frames.
+	sseFactPageLimit = 100
 )
 
 // maxSSEConnections caps concurrent /api/events streams. A var only so tests
@@ -117,6 +125,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 		return err
 	}
 	sem := make(chan struct{}, maxSSEConnections)
+	factReads := &factReadCapability{}
 	mux.Handle("GET /{$}", secure(cfg, session, http.HandlerFunc(indexHandler)))
 	mux.Handle("GET /static/", secure(cfg, session, http.FileServerFS(staticFS)))
 	mux.Handle("GET /api/self", secure(cfg, session, selfHandler(cfg)))
@@ -128,7 +137,15 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /api/memories/{id}", secure(cfg, session, memoryHandler(cfg)))
 	mux.Handle("GET /api/memories/{id}/history", secure(cfg, session, memoryHistoryHandler(cfg)))
 	mux.Handle("GET /api/messages", secure(cfg, session, messagesHandler(cfg)))
-	mux.Handle("GET /api/events", secure(cfg, session, eventsHandler(cfg, sem)))
+	mux.Handle("GET /api/facts", secure(cfg, session, factsHandler(cfg, factReads)))
+	mux.Handle("GET /api/facts/{id}/history", secure(cfg, session, factHistoryHandler(cfg, factReads)))
+	// The reveal is query-addressed like the upstream exact read
+	// (GET /v1/facts?subject&predicate): a /api/facts/{subject}/{predicate}
+	// path shape would let the literal /history pattern above shadow any
+	// fact whose predicate is the single segment "history", which the
+	// server's predicate grammar permits.
+	mux.Handle("GET /api/fact", secure(cfg, session, factRevealHandler(cfg)))
+	mux.Handle("GET /api/events", secure(cfg, session, eventsHandler(cfg, sem, factReads)))
 	mux.Handle("/", secure(cfg, session, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})))
@@ -543,12 +560,179 @@ func stripMessageBodies(messages []client.Message) []client.Message {
 	return messages
 }
 
+// factReadCapability memoizes one client.ProbeObservationalFactReads answer
+// per serve. Cells released before the observational fact-read parameter
+// ignore it and silently run the plain usage-recording read path instead of
+// answering 501, so every broad fact surface — the list, the SSE facts tick,
+// and the history sensitivity probe — asks this gate before its first read.
+// Only a definitive answer is cached; a probe failure is returned and the
+// next caller retries.
+type factReadCapability struct {
+	mu        sync.Mutex
+	resolved  bool
+	supported bool
+}
+
+func (c *factReadCapability) observationalSupported(ctx context.Context, cfg Config) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resolved {
+		return c.supported, nil
+	}
+	supported, err := client.ProbeObservationalFactReads(ctx, cfg.Endpoint, cfg.BearerToken)
+	if err != nil {
+		return false, err
+	}
+	c.resolved, c.supported = true, supported
+	return supported, nil
+}
+
+// factsHandler proxies the broad fact inventory as an observational read and
+// never sets include_sensitive. The plain (non-observational) list records
+// ranking-eligible search usage on every returned fact (store.ListFacts), so
+// a cell without observational fact reads is NOT degraded the way fetchSelf
+// degrades: silently perturbing usage ranking on every render would break
+// the "viewing does not perturb the agent" rule. The UI renders a clear 501
+// instead, whether the cell reports one itself (parameter known, hooks
+// unwired) or predates the parameter entirely and would have ignored it (the
+// capability gate).
+func factsHandler(cfg Config, factReads *factReadCapability) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		opts := client.FactListOptions{
+			Subject:         query.Get("subject"),
+			PredicatePrefix: query.Get("predicate_prefix"),
+			Observational:   true,
+		}
+		if raw := query.Get("limit"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 0 {
+				writeJSONError(w, http.StatusBadRequest, "limit must be a non-negative integer")
+				return
+			}
+			opts.Limit = value
+		}
+		supported, err := factReads.observationalSupported(r.Context(), cfg)
+		if err != nil {
+			writeUpstreamError(w, err)
+			return
+		}
+		if !supported {
+			writeJSONError(w, http.StatusNotImplemented, "cell does not support observational fact reads")
+			return
+		}
+		facts, err := client.ListFacts(r.Context(), cfg.Endpoint, cfg.BearerToken, opts)
+		if err != nil {
+			if isObservationalUnavailable(err) {
+				writeJSONError(w, http.StatusNotImplemented, "cell does not support observational fact reads")
+				return
+			}
+			writeUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"facts": redactSensitiveFacts(facts)})
+	})
+}
+
+// redactSensitiveFacts enforces the sensitive-value redaction locally,
+// mirroring stripMessageBodies: the redacted upstream list should already
+// carry null values for sensitive facts, but the proxy does not rely on
+// server-side redaction (another cell version could regress it) and zeroes
+// every sensitive value and source ref before a broad payload — list
+// responses and SSE frames — reaches the browser. The single-fact reveal
+// endpoint is the only response that may carry a sensitive value.
+func redactSensitiveFacts(facts []client.Fact) []client.Fact {
+	if facts == nil {
+		facts = []client.Fact{}
+	}
+	for i := range facts {
+		if facts[i].Sensitive {
+			facts[i].Value = json.RawMessage(`null`)
+			facts[i].SourceRef = ""
+		}
+	}
+	return facts
+}
+
+// factRevealHandler is the user-initiated eye-icon reveal: one exact
+// observational read that returns the value (sensitive included — this is
+// the one response that may carry it) without recording delivery usage. On
+// cells that answer the observational read with 501 it falls back to the
+// plain exact read, and a cell that predates the parameter ignores it and
+// runs that plain read directly: either way a reveal is an intentional,
+// per-fact exact lookup the user clicked for, so recording one legitimate
+// delivery usage is acceptable there — unlike the broad list, which re-polls
+// on every render.
+func factRevealHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		subject, predicate := query.Get("subject"), query.Get("predicate")
+		if subject == "" || predicate == "" {
+			writeJSONError(w, http.StatusBadRequest, "subject and predicate are required")
+			return
+		}
+		fact, err := client.GetFactObservational(r.Context(), cfg.Endpoint, cfg.BearerToken, subject, predicate)
+		if err != nil && isObservationalUnavailable(err) {
+			fact, err = client.GetFact(r.Context(), cfg.Endpoint, cfg.BearerToken, subject, predicate)
+		}
+		if err != nil {
+			writeUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"fact": fact})
+	})
+}
+
+// factHistoryHandler serves the drill-in assertion history. The upstream
+// history read records no usage but does NOT redact sensitive assertion
+// values, so the proxy forwards values only after proving the fact is
+// non-sensitive: an exact observational read (usage-free) of the
+// subject/predicate the browser names for this id. On any doubt — missing
+// params, a cell without observational fact reads (which would record a
+// delivery on the probe), an id mismatch, or a sensitive fact — every
+// assertion value is zeroed; v1 has no per-assertion reveal.
+func factHistoryHandler(cfg Config, factReads *factReadCapability) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		factID := r.PathValue("id")
+		assertions, err := client.GetFactHistory(r.Context(), cfg.Endpoint, cfg.BearerToken, factID)
+		if err != nil {
+			writeUpstreamError(w, err)
+			return
+		}
+		if assertions == nil {
+			assertions = []client.FactAssertion{}
+		}
+		query := r.URL.Query()
+		if !factProvenNonSensitive(r.Context(), cfg, factReads, factID, query.Get("subject"), query.Get("predicate")) {
+			for i := range assertions {
+				assertions[i].Value = json.RawMessage(`null`)
+				assertions[i].SourceRef = ""
+			}
+		}
+		writeJSON(w, map[string]any{"assertions": assertions})
+	})
+}
+
+func factProvenNonSensitive(ctx context.Context, cfg Config, factReads *factReadCapability, factID, subject, predicate string) bool {
+	if subject == "" || predicate == "" {
+		return false
+	}
+	if supported, err := factReads.observationalSupported(ctx, cfg); err != nil || !supported {
+		return false
+	}
+	fact, err := client.GetFactObservational(ctx, cfg.Endpoint, cfg.BearerToken, subject, predicate)
+	if err != nil || fact == nil {
+		return false
+	}
+	return fact.ID == factID && !fact.Sensitive
+}
+
 // eventsHandler streams server-sent events by cursor-polling the cell — the
 // backend has no push path (ADR 0004). Each connection owns only local state;
 // the shared semaphore bounds fan-out. The client seeds the transcript cursor
 // with after_sequence (its highest rendered entry) so the stream starts at
 // the live edge instead of replaying the whole transcript.
-func eventsHandler(cfg Config, sem chan struct{}) http.Handler {
+func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		transcriptID := query.Get("transcript")
@@ -569,6 +753,15 @@ func eventsHandler(cfg Config, sem chan struct{}) http.Handler {
 				return
 			}
 			includeMemories = value
+		}
+		var includeFacts bool
+		if raw := query.Get("facts"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "facts must be a boolean")
+				return
+			}
+			includeFacts = value
 		}
 		var lastSeen int64
 		if raw := query.Get("after_sequence"); raw != "" {
@@ -608,7 +801,7 @@ func eventsHandler(cfg Config, sem chan struct{}) http.Handler {
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
-			lastSeen = emitEvents(ctx, cfg, w, flusher, transcriptID, includeMessages, includeMemories, lastSeen)
+			lastSeen = emitEvents(ctx, cfg, factReads, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, lastSeen)
 			select {
 			case <-ctx.Done():
 				return
@@ -619,12 +812,12 @@ func eventsHandler(cfg Config, sem chan struct{}) http.Handler {
 }
 
 // emitEvents sends one poll tick: the observational self digest, the passive
-// mailbox pages and the redacted memory page when requested, then every
-// transcript entry after lastSeen, draining full-size upstream pages until
-// the live edge (bounded by maxSSEPagesPerTick) so an active transcript is
-// never rate-limited to one page per tick. Upstream failures end the tick;
+// mailbox pages and the redacted memory and fact pages when requested, then
+// every transcript entry after lastSeen, draining full-size upstream pages
+// until the live edge (bounded by maxSSEPagesPerTick) so an active transcript
+// is never rate-limited to one page per tick. Upstream failures end the tick;
 // the next tick retries from the same cursor.
-func emitEvents(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories bool, lastSeen int64) int64 {
+func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts bool, lastSeen int64) int64 {
 	if digest, observational, err := fetchSelf(ctx, cfg); err == nil {
 		writeSSE(w, flusher, "self", "", cfg.selfEnvelope(digest, observational))
 	}
@@ -633,6 +826,9 @@ func emitEvents(ctx context.Context, cfg Config, w io.Writer, flusher http.Flush
 	}
 	if includeMemories {
 		emitMemoriesEvent(ctx, cfg, w, flusher)
+	}
+	if includeFacts {
+		emitFactsEvent(ctx, cfg, factReads, w, flusher)
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -703,6 +899,28 @@ func emitMemoriesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 		page.Items = []client.Memory{}
 	}
 	writeSSE(w, flusher, "memories", "", page)
+}
+
+// emitFactsEvent polls the first page of the observational fact list — never
+// include_sensitive, and never the plain list, whose search deliveries are
+// ranking-eligible. The capability gate keeps that guarantee on cells that
+// predate the observational parameter and would silently run the plain list;
+// such a cell — like one that 501s — simply gets no facts tick rather than a
+// silently perturbing fallback. Sensitive values are zeroed before the
+// frame; the browser skips identical frames, and an upstream failure skips
+// the event so the next tick retries.
+func emitFactsEvent(ctx context.Context, cfg Config, factReads *factReadCapability, w io.Writer, flusher http.Flusher) {
+	if supported, err := factReads.observationalSupported(ctx, cfg); err != nil || !supported {
+		return
+	}
+	facts, err := client.ListFacts(ctx, cfg.Endpoint, cfg.BearerToken, client.FactListOptions{
+		Limit:         sseFactPageLimit,
+		Observational: true,
+	})
+	if err != nil {
+		return
+	}
+	writeSSE(w, flusher, "facts", "", map[string]any{"facts": redactSensitiveFacts(facts)})
 }
 
 // writeSSE emits one server-sent event; a non-empty id becomes the SSE id

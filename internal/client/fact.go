@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -297,6 +298,28 @@ func ListFacts(ctx context.Context, endpoint, token string, opts FactListOptions
 		return nil, err
 	}
 	return out.Facts, nil
+}
+
+// ProbeObservationalFactReads reports whether the cell parses the
+// observational fact-read parameter at all. Cells released before the
+// parameter existed ignore it and silently run the plain usage-recording
+// read path instead of answering the documented 501, so a caller that must
+// never perturb usage cannot trust observational=true alone. The probe pairs
+// an unparseable observational value with an unparseable limit: a cell that
+// knows the parameter rejects it first, an older cell rejects the limit
+// instead, and neither ever executes a read, so probing records no usage.
+func ProbeObservationalFactReads(ctx context.Context, endpoint, token string) (bool, error) {
+	query := url.Values{"observational": {"probe"}, "limit": {"probe"}}
+	err := doJSON(ctx, http.MethodGet, factsURL(endpoint)+"?"+query.Encode(), token, nil, nil)
+	if err == nil {
+		// No known cell accepts two invalid parameters; whatever answered
+		// may have executed a plain read, so refuse further broad reads.
+		return false, nil
+	}
+	if !errors.Is(err, ErrBadRequest) {
+		return false, err
+	}
+	return strings.Contains(err.Error(), "observational"), nil
 }
 
 // GetFactHistory retrieves immutable assertions newest first.

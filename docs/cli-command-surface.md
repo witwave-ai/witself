@@ -4349,11 +4349,20 @@ Serve a loopback-only, read-only, live-updating dashboard for exactly one
 agent ([ADR 0004](decisions/0004-local-agent-dashboard.md)).
 
 The process is a foreground thin proxy over the public read API using the
-agent's own token: self digests and transcripts use `observational=true`
-reads, messages use the passive metadata-only list, broad memory reads stay
-redacted by default, and the avatar SVG is re-run through the canonical
-sanitizer with its hash verified before it is served — the same gate as
-`witself self card`. The listener binds `127.0.0.1` only, validates the
+agent's own token: self digests, transcripts, and fact lists use
+`observational=true` reads, messages use the passive metadata-only list,
+broad memory and fact reads stay redacted by default (a sensitive fact value
+appears only in the single-fact eye-icon reveal the user clicks for), and
+the avatar SVG is re-run through the canonical sanitizer with its hash
+verified before it is served — the same gate as `witself self card`. On a
+cell without observational fact reads — including released cells that
+predate the parameter and would silently record search usage instead of
+answering 501, which a memoized capability probe detects — the broad facts
+surface refuses with a clear 501 and history values stay locked; the one
+read that may record usage there is the eye-icon reveal itself, one
+legitimate delivery for an intentional per-fact lookup
+([ADR 0004](decisions/0004-local-agent-dashboard.md)). The listener binds
+`127.0.0.1` only, validates the
 `Host` header, and requires the per-process `?token=` URL printed at startup
 (exchanged once for a `SameSite=Strict` session cookie holding a distinct
 per-process value, name-scoped to the listener port so concurrent per-agent
