@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.185
-    imageTag: 0.0.185
+    chartVersion: 0.0.186
+    imageTag: 0.0.186
     factDeletionEnabled: true
     # Phase A: flip to true only in a separate config rollout after every
     # schema-54-compatible v186 server pod has replaced the old writers.
