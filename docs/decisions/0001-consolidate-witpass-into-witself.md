@@ -2,6 +2,11 @@
 
 Status: accepted (2026-06-26). Supersedes the standalone Witpass product.
 
+Sealed-custody amendment (2026-07-18): ADR 0003 supersedes the KMS-rooted key
+hierarchy and server-mediated decrypt portions of this decision. Consolidation
+into Witself, the two-plane model, structured secrets, and shared identity
+remain accepted.
+
 ## Context
 
 Witpass (agent secrets vault + authenticator) and Witself (agent self/identity store —

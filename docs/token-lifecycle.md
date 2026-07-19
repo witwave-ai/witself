@@ -1,5 +1,10 @@
 # Witself Token Lifecycle
 
+> **Sealed-plane amendment (accepted 2026-07-18):** a token authenticates the
+> named agent but is never a vault encryption key. The separate client-held AVK
+> described by [ADR 0003](decisions/0003-client-custodied-agent-vault.md) stays
+> stable across token issuance, rotation, and revocation.
+
 Status: draft. Decision: v0 agent tokens are durable by default, revocable,
 rotatable bearer credentials bound server-side to one realm and one named agent.
 

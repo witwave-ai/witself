@@ -1779,6 +1779,9 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	if avatars, ok := backend.(mcpAvatarBackend); ok {
 		registerAvatarMCPTools(server, runtimeName, avatars)
 	}
+	if secrets, ok := backend.(mcpSecretBackend); ok {
+		registerSecretMCPTools(server, runtimeName, secrets)
+	}
 	if profile == mcpProfileReadOnly {
 		server.RemoveTools(mcpMutatingToolNames(runtimeName)...)
 	}
@@ -2211,6 +2214,10 @@ func mcpMutatingToolNames(runtimeName string) []string {
 		"witself.avatar.rollback",
 		"witself.avatar.reset",
 		"witself.avatar.generation.fail",
+		"witself.secret.create",
+		"witself.secret.reveal",
+		"witself.password.generate",
+		"witself.totp.code",
 	}
 	for i := range names {
 		names[i] = mcpToolName(runtimeName, names[i])
@@ -2234,13 +2241,13 @@ func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
 
 func mcpInstructionsForMode(runtimeName, selfTool, messageListTool string, readOnly bool) string {
 	if readOnly {
-		instructions := readOnlyWitselfMCPInstructions + " " + readOnlyAvatarMCPInstructions
+		instructions := readOnlyWitselfMCPInstructions + " " + readOnlyAvatarMCPInstructions + " " + readOnlySecretRoutingInstructions
 		if runtimeName == transcriptcapture.RuntimeGrokBuild {
 			return grokPortableMCPInstructions(instructions, selfTool, messageListTool)
 		}
 		return instructions
 	}
-	instructions := witselfMCPInstructions + "\n\n" + genericMemoryCheckpointBranchInstructions + "\n\n" + avatarRoutingInstructions
+	instructions := witselfMCPInstructions + "\n\n" + genericMemoryCheckpointBranchInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions
 	switch runtimeName {
 	case transcriptcapture.RuntimeCodex:
 		// Codex asks MCP servers to keep their first 512 instruction characters
@@ -2254,9 +2261,9 @@ func mcpInstructionsForMode(runtimeName, selfTool, messageListTool string, readO
 		// at tool-connect time and leaves room for the operational suffix.
 		instructions = claudeMCPMemoryRoutingSynopsis + "\n\n" + claudeRuntimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeGrokBuild:
-		instructions = grokMemoryRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+		instructions = grokMemoryRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeCursor:
-		instructions = cursorMemoryRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+		instructions = cursorMemoryRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	}
 	if runtimeName != transcriptcapture.RuntimeGrokBuild {
 		return instructions

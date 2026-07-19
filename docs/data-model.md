@@ -1,5 +1,10 @@
 # Witself Data Model (Postgres Schema)
 
+> **Sealed-plane schema amendment (accepted 2026-07-18):** migration `0055`
+> and [the client-custodied vault plan](client-custodied-agent-vault.md) control
+> the secrets schema. Earlier `realm_keys`, KMS-rooted DEKs, group-owned v0
+> secrets, and server-decrypt columns below are superseded for this slice.
+
 Status: draft. Last reviewed 2026-07-14. Decision: Witself uses a single
 multi-tenant PostgreSQL schema as the system of
 record, scoped on every row by `account_id` / `realm_id`, spanning **two

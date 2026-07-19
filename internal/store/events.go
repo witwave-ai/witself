@@ -155,6 +155,17 @@ const (
 	VerbAvatarStyleRolloutCompleted  = "avatar.style.rollout.completed"
 	VerbAvatarStyleRolloutSuperseded = "avatar.style.rollout.superseded"
 
+	// Sealed-plane events are deliberately value-free. Secret names, field
+	// values, public search queries, ciphertext, nonces, wrapped DEKs, key
+	// fingerprints, and retry keys never enter the account ledger.
+	VerbVaultKeyRegistered      = "vault.key.registered"
+	VerbSecretCreated           = "secret.created"
+	VerbSecretUpdated           = "secret.updated"
+	VerbSecretArchived          = "secret.archived"
+	VerbSecretRestored          = "secret.restored"
+	VerbSecretMaterialDelivered = "secret.material.delivered"
+	VerbSecretDEKRewrapped      = "secret.dek.rewrapped"
+
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
 	// owner's audit ledger surfaces "you filed a ticket / support
@@ -553,6 +564,32 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedActors: []string{ActorSystem},
 	},
 
+	VerbVaultKeyRegistered: {
+		requiredKeys:  []string{"agent_id", "key_id", "key_version", "algorithm"},
+		allowedKeys:   []string{"agent_id", "key_id", "key_version", "algorithm"},
+		allowedActors: []string{ActorAgent},
+	},
+	VerbSecretCreated: secretEventSpec(
+		"agent_id", "secret_id", "field_count", "sensitive_field_count",
+	),
+	VerbSecretUpdated: secretEventSpec(
+		"agent_id", "secret_id", "secret_revision", "changed_field_count",
+	),
+	VerbSecretArchived: secretEventSpec(
+		"agent_id", "secret_id", "secret_revision",
+	),
+	VerbSecretRestored: secretEventSpec(
+		"agent_id", "secret_id", "secret_revision",
+	),
+	VerbSecretMaterialDelivered: secretEventSpec(
+		"agent_id", "secret_id", "field_id", "value_version",
+		"key_version", "encrypted_bytes",
+	),
+	VerbSecretDEKRewrapped: secretEventSpec(
+		"agent_id", "secret_id", "field_id", "dek_generation",
+		"key_version", "wrap_revision",
+	),
+
 	// Support-ticket verbs. ticket_id is required on all four so the
 	// owner can correlate an audit entry back to the ticket. subject
 	// is a short human string carried on opened/closed so the audit
@@ -615,6 +652,14 @@ func avatarEventSpec(actors []string, required ...string) verbSpec {
 		allowed = append(allowed, "reason_code")
 	}
 	return verbSpec{requiredKeys: required, allowedKeys: allowed, allowedActors: actors}
+}
+
+func secretEventSpec(required ...string) verbSpec {
+	return verbSpec{
+		requiredKeys:  required,
+		allowedKeys:   required,
+		allowedActors: []string{ActorAgent},
+	}
 }
 
 func messageProcessingEventSpec(completed bool) verbSpec {

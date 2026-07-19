@@ -18,6 +18,14 @@ historical context. It is not a current requirement. Migration `0032` instead
 implements optional client-authored profiles/JSONB rows and bounded hybrid
 recall on ordinary PostgreSQL; pgvector/ANN can only be a future accelerator.
 
+Sealed-plan amendment (accepted 2026-07-18): milestone M6 and every KMS,
+realm-KEK, server-decrypt, token-only reveal, group-owned first-slice, or
+plaintext-capable operator item below is historical. Implement the sealed plane
+in the slices defined by
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md), beginning at
+migration `0055`. ADR 0003 makes the active client the only decrypt owner and
+keeps the backend ciphertext-only across AWS, Google Cloud, and Azure.
+
 Witself reuses the Witpass platform spine and folds the former Witpass secret
 payload back in as one of two planes of agent durable state. Witself runs an
 **open plane** (memories + facts: plaintext at rest, indexed, recallable,

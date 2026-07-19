@@ -1,5 +1,10 @@
 # Witself JSON Contracts
 
+> **Sealed-plane JSON amendment (accepted 2026-07-18):** secret envelope,
+> redaction, and value-material responses are governed by
+> [the client-custodied vault plan](client-custodied-agent-vault.md). Sensitive
+> plaintext and agent vault keys are never server response fields.
+
 Status: evolving contract. This document defines JSON shared by CLI `--json`,
 MCP tool results, managed API responses, self-hosted API responses, and local
 development responses; implementation-backed amendments override older target
@@ -37,11 +42,13 @@ boundary. Installed owner-authenticated hydration and MCP recall explicitly opt
 in while retaining the marker.
 Memory redaction includes content/hash, tags, links, reasons, occurrence bounds,
 client provenance, and evidence. The **sealed plane** (secrets + TOTP) protects
-the *confidentiality* of secret
-material: values are KMS-backed envelope-encrypted, redacted by default, and
-returned only through the explicit, audited reveal / TOTP-code ceremony (see the
-[Sealed-Plane Shapes](#sealed-plane-shapes)). Sealed material is never embedded,
-recalled, in the self-digest, or plaintext-exported.
+the *confidentiality* of secret material: active clients encrypt values under a
+client-custodied agent vault key, the backend returns only encrypted one-field
+material, and local clients perform deliberate reveal or TOTP generation.
+Inventory is redacted by default. Sealed material is never embedded, recalled,
+included in the self-digest, or plaintext-exported. The amendment above controls
+wherever older target examples below still show KMS-rooted or server-decrypt
+shapes.
 
 Once implementation starts, exact JSON Schemas should be generated from the Go
 contract structs used by the shared core. This keeps CLI, MCP, managed API,

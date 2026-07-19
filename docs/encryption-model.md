@@ -1,5 +1,12 @@
 # Encryption model (sealed plane)
 
+> **Superseded custody model (2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) replace the
+> KMS-rooted and server-mediated decrypt design below. Cloud KMS may protect
+> infrastructure at rest, but it is not the agent-vault trust root and Witself
+> has no backend decrypt path.
+
 Status: draft. Decision: this document specifies confidentiality for the **sealed
 plane** only — secrets and TOTP enrollments. The **open plane** (memories and
 facts) is ordinary application data-at-rest: stored in PostgreSQL and on disk

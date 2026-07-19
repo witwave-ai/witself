@@ -56,6 +56,13 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 		return fmt.Errorf("begin export snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// PostgreSQL's bytea_output setting is role/session configurable. Archives
+	// are a portable wire format, so force the canonical hex representation
+	// instead of allowing a role configured for legacy escape output to produce
+	// an archive that another cell cannot validate.
+	if _, err := tx.Exec(ctx, `SET LOCAL bytea_output = 'hex'`); err != nil {
+		return fmt.Errorf("set canonical export bytea encoding: %w", err)
+	}
 
 	var status string
 	err = tx.QueryRow(ctx,
@@ -190,6 +197,71 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		// The AVK itself is never exported. These streams preserve only its
+		// public binding plus byte-identical ciphertext and wrapped DEKs so the
+		// same client-held key can reopen the vault after a cell move.
+		&querySource{tx: tx, table: "agent_vault_keys", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'key_version', key_version,
+			  'algorithm', algorithm, 'fingerprint', fingerprint,
+			  'lifecycle_state', lifecycle_state, 'row_version', row_version,
+			  'created_at', created_at, 'retired_at', retired_at)
+			FROM agent_vault_keys WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, key_version, id`, arg: accountID},
+		&querySource{tx: tx, table: "secrets", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'name', name,
+			  'description', description, 'template', template, 'tags', tags,
+			  'row_version', row_version, 'created_at', created_at,
+			  'updated_at', updated_at, 'archived_at', archived_at,
+			  'deleted_at', deleted_at)
+			FROM secrets WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "secret_fields", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'secret_id', secret_id,
+			  'name', name, 'field_kind', field_kind, 'sensitive', sensitive,
+			  'value_encoding', value_encoding, 'value_version', value_version,
+			  'public_value', public_value, 'envelope_version', envelope_version,
+			  'ciphertext', CASE WHEN ciphertext IS NULL THEN NULL
+			                     ELSE E'\\x' || encode(ciphertext, 'hex') END,
+			  'aead_algorithm', aead_algorithm, 'aad_version', aad_version,
+			  'dek_id', dek_id, 'dek_generation', dek_generation,
+			  'row_version', row_version, 'created_at', created_at,
+			  'updated_at', updated_at)
+			FROM secret_fields WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, secret_id, name, id`, arg: accountID},
+		&querySource{tx: tx, table: "secret_deks", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'secret_id', secret_id,
+			  'field_id', field_id, 'dek_generation', dek_generation,
+			  'wrapped_dek', E'\\x' || encode(wrapped_dek, 'hex'),
+			  'wrap_algorithm', wrap_algorithm,
+			  'aad_version', aad_version, 'wrap_revision', wrap_revision,
+			  'wrapping_key_id', wrapping_key_id,
+			  'wrapping_key_version', wrapping_key_version,
+			  'row_version', row_version, 'created_at', created_at,
+			  'retired_at', retired_at)
+			FROM secret_deks WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, secret_id, field_id,
+			         dek_generation, id`, arg: accountID},
+		&querySource{tx: tx, table: "secret_mutation_receipts", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'actor_kind', actor_kind,
+			  'actor_id', actor_id, 'operation', operation,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'request_hash', request_hash, 'target_kind', target_kind,
+			  'target_id', target_id, 'result_revision', result_revision,
+			  'result_value_version', result_value_version,
+			  'created_at', created_at)
+			FROM secret_mutation_receipts WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, actor_kind, actor_id,
+			         operation, idempotency_key_hash`, arg: accountID},
 		&querySource{tx: tx, table: "agent_avatar_profiles", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,

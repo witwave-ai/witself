@@ -15,6 +15,15 @@ intelligent server-side `memory.consolidate(scope, dry_run)` design and all
 backend embedding inference. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Client-custodied sealed-plane amendment (accepted 2026-07-18): an installed MCP
+runtime binding must contain the account's immutable `account_id`. Before any
+local Agent Vault Key path is accessed, the client authenticates the token and
+requires the returned account id to match that binding. Older integrations that
+lack `account_id` fail closed for agent-secret tools and must be refreshed with
+`witself install <runtime>`. The current custody and tool boundary is
+authoritative in [the implementation plan](client-custodied-agent-vault.md);
+older KMS and server-decrypt target text below is superseded.
+
 The implemented direct narrative-memory slice currently exposes
 `witself.memory.capture`, `read`, `list`, `history`, `recall`, `adjust`,
 `supersede`, `forget`, `restore`, `reactivate`, `evidence.resolve`, `delete`,

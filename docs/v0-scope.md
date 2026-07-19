@@ -25,6 +25,14 @@ production gates in issues
 [#45](https://github.com/witwave-ai/witself/issues/45), and
 [#46](https://github.com/witwave-ai/witself/issues/46).
 
+Sealed-plane amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault plan](client-custodied-agent-vault.md) control the v0
+secrets slice. The readiness dependency is a client-custodied AVK plus the
+portable ciphertext schema, not a cloud KMS. V1 is agent-owned; grants and
+cross-agent/group wrapping are deferred until cryptographic possession can
+match authorization.
+
 ## Sequencing
 
 Decision: v0 ships in two sequenced slices on one platform. The **open-plane core
@@ -44,16 +52,13 @@ store can prove itself without blocking on KMS. This mirrors
   gate and optional client-vector indexes are derived, rebuildable data.
 - **Sealed credential plane (a defined v0 slice, may stage after the core).** The
   secret data model and lifecycle, secret references, TOTP/2FA, password
-  generation, runtime injection (`witself run`), two-tier envelope encryption
-  (CMK → per-realm KEK → per-secret/field DEK), the reveal ceremony, secret
-  grants and realm roles, and the sealed-plane carve-outs. This slice adds a
-  **KMS dependency** that is a readiness gate **only when the sealed plane is
-  enabled**; an open-plane-only deployment requires no KMS. Sealed-plane carve-out: secrets and
+  generation, runtime injection (`witself run`), client-side envelope encryption
+  (per-agent AVK → per-sensitive-field DEK), the local reveal ceremony, and the
+  sealed-plane carve-outs. This slice adds no vault KMS dependency. Sealed-plane carve-out: secrets and
   TOTP seeds are never embedded, recalled, in the self-digest, or
   plaintext-exported, and are reachable only through the audited reveal ceremony.
   See [secret-model.md](secret-model.md), [totp-2fa.md](totp-2fa.md),
-  [encryption-model.md](encryption-model.md), and
-  [key-hierarchy.md](key-hierarchy.md).
+  [client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ## Decision
 

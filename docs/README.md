@@ -41,7 +41,11 @@ plane.
 - [agent-memory-routing.md](agent-memory-routing.md): the implemented Codex,
   Claude Code, Grok Build, and Cursor portable fact-and-narrative-memory routing
   policies and explicitly selected provider-native coexistence contract.
-- [secret-model.md](secret-model.md): the sealed-plane secret data model and
+- [client-custodied-agent-vault.md](client-custodied-agent-vault.md): the
+  authoritative secrets implementation plan: client-held per-agent vault key,
+  ciphertext-only backend, local password/TOTP/use paths, archive portability,
+  fail-closed bootstrap, and four-runtime/three-cloud delivery slices.
+- [secret-model.md](secret-model.md): the earlier sealed-plane secret data model and
   lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
   templates, references, password generation, runtime injection, and the
   carve-outs (secrets are never embedded, recalled, in the digest, or
@@ -114,11 +118,10 @@ plane.
 - [storage.md](storage.md): authoritative PostgreSQL storage, deterministic
   full-text retrieval, optional client-supplied vectors, object/blob usage, KMS
   plus realm_keys and secret_deks for the sealed plane, and Goose migrations.
-- [encryption-model.md](encryption-model.md): the sealed-plane confidentiality
-  model — envelope encryption, per-realm KEK, hybrid client-side/server-side
-  decrypt, and the reveal posture (scoped to the sealed plane only).
-- [key-hierarchy.md](key-hierarchy.md): the CMK → per-realm KEK → per-secret/field
-  DEK key hierarchy, KMS providers, rotation, and the crypto-shred posture.
+- [encryption-model.md](encryption-model.md): the earlier KMS-rooted sealed-plane
+  confidentiality draft, superseded for vault custody by ADR 0003.
+- [key-hierarchy.md](key-hierarchy.md): the earlier CMK/realm-KEK hierarchy,
+  superseded for vault custody by ADR 0003.
 - [cloud-targets.md](cloud-targets.md): AWS-first managed cloud and
   self-hosted Terraform target decision.
 - [memory-cloud-conformance.md](memory-cloud-conformance.md): the executable
@@ -191,3 +194,6 @@ plane.
 - [ADR 0002](decisions/0002-client-side-narrative-memory.md):
   making Witself the portable narrative-memory system of record while keeping
   all semantic inference and optional embedding generation in clients.
+- [ADR 0003](decisions/0003-client-custodied-agent-vault.md): making each named
+  agent's separate client-held AVK the sealed-plane decrypt root while the
+  backend remains a portable ciphertext store.

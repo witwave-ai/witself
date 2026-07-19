@@ -1,6 +1,13 @@
 # Key hierarchy and decrypt trust boundary
 
-Status: draft. Decision: the Witself sealed plane adopts a single KMS-rooted three-layer
+> **Superseded custody model (2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) replaces the
+> CMK/realm-KEK hierarchy and both server-decrypt modes below with a
+> client-custodied per-agent AVK that wraps per-sensitive-field DEKs. The
+> backend stores ciphertext and public key metadata only.
+
+Status: superseded historical design; retained only as decision history. The
+former decision was that the Witself sealed plane adopts a single KMS-rooted three-layer
 envelope (CMK -> per-realm KEK -> per-secret/per-field DEK) with two custody modes behind
 one capability switch. Client-held decrypt stays the default where a client can hold key
 material (`client_side_decrypt`); server-mediated decrypt is the capability-gated path for

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/id"
@@ -29,6 +30,8 @@ const (
 	maxNativeTranscriptScanBytes = 64 * 1024 * 1024
 	maxNativeTranscriptLineBytes = 2 * 1024 * 1024
 	maxNativeTranscriptRecords   = 10_000
+	maxSessionStateBytes         = 256 * 1024
+	maxSensitiveToolUseFences    = 256
 	entryBodyChunkSize           = 60 * 1024
 	staleFlushLockAge            = 5 * time.Minute
 	grokTranscriptPollInterval   = 50 * time.Millisecond
@@ -178,16 +181,19 @@ type hookInput struct {
 	SubagentType         string          `json:"subagent_type"`
 	Error                json.RawMessage `json:"error"`
 	NativeHookEvent      string          `json:"-"`
+	SensitiveToolEvent   bool            `json:"-"`
 }
 
 type sessionState struct {
-	RunID                string `json:"run_id"`
-	RuntimeVersion       string `json:"runtime_version,omitempty"`
-	RuntimeVersionSource string `json:"runtime_version_source,omitempty"`
-	TurnID               string `json:"turn_id,omitempty"`
-	PromptEventID        string `json:"prompt_event_id,omitempty"`
-	PromptCaptured       bool   `json:"prompt_captured,omitempty"`
-	ResponseCaptured     bool   `json:"response_captured,omitempty"`
+	RunID                string          `json:"run_id"`
+	RuntimeVersion       string          `json:"runtime_version,omitempty"`
+	RuntimeVersionSource string          `json:"runtime_version_source,omitempty"`
+	TurnID               string          `json:"turn_id,omitempty"`
+	PromptEventID        string          `json:"prompt_event_id,omitempty"`
+	PromptCaptured       bool            `json:"prompt_captured,omitempty"`
+	ResponseCaptured     bool            `json:"response_captured,omitempty"`
+	SensitiveToolUseIDs  map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
+	RedactAllToolPayload bool            `json:"redact_all_tool_payload,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -257,7 +263,10 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		state.ResponseCaptured = false
 		state.RuntimeVersion = ""
 		state.RuntimeVersionSource = ""
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = false
 	}
+	protectSensitiveToolPayload(&input, &state)
 	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
@@ -433,6 +442,377 @@ func normalizeHookInput(runtime string, input *hookInput) error {
 		}
 	}
 	return nil
+}
+
+// sensitiveToolEvent identifies the sealed-plane tool calls whose hook payloads
+// may contain plaintext credentials, generated passwords, or one-time codes.
+// Tool names vary by provider, so matching is deliberately suffix-based over
+// normalized name tokens. Wrapper tools and shell tools are inspected only in
+// their recognized tool-name namespaces.
+func sensitiveToolEvent(input hookInput) bool {
+	if sensitiveSealedToolName(input.ToolName) {
+		return true
+	}
+	if mcpWrapperToolName(input.ToolName) &&
+		(rawContainsSensitiveToolName(input.ToolInput) || rawContainsSensitiveToolName(input.ToolResponse)) {
+		return true
+	}
+	return shellToolName(input.ToolName) &&
+		(rawContainsSensitiveCLICommand(input.ToolInput) || rawContainsSensitiveCLICommand(input.ToolResponse))
+}
+
+func protectSensitiveToolPayload(input *hookInput, state *sessionState) {
+	if input == nil || state == nil || !isToolHookEvent(input.HookEventName) {
+		return
+	}
+	if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = true
+	}
+	input.SensitiveToolEvent = state.RedactAllToolPayload || sensitiveToolEvent(*input)
+	if !input.SensitiveToolEvent && input.ToolUseID != "" && state.SensitiveToolUseIDs[input.ToolUseID] {
+		input.SensitiveToolEvent = true
+	}
+	if !input.SensitiveToolEvent {
+		return
+	}
+	if input.ToolUseID != "" && !state.RedactAllToolPayload {
+		if !state.SensitiveToolUseIDs[input.ToolUseID] && len(state.SensitiveToolUseIDs) >= maxSensitiveToolUseFences {
+			// A pathological session must not grow the local state file without
+			// bound or lose the correlation that keeps terminal hook output safe.
+			// Fail closed for later tool payloads until SessionEnd resets state.
+			state.SensitiveToolUseIDs = nil
+			state.RedactAllToolPayload = true
+		} else {
+			if state.SensitiveToolUseIDs == nil {
+				state.SensitiveToolUseIDs = make(map[string]bool)
+			}
+			state.SensitiveToolUseIDs[input.ToolUseID] = true
+		}
+	}
+	redactSensitiveToolPayload(input)
+}
+
+func isToolHookEvent(event string) bool {
+	switch event {
+	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "PermissionDenied":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveSealedToolName(name string) bool {
+	compact := compactName(name)
+	for _, suffix := range []string{
+		"witselfsecretcreate",
+		"witselfsecretreveal",
+		"witselfpasswordgenerate",
+		"witselftotpcode",
+	} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func sensitiveWrappedToolName(name string) bool {
+	if sensitiveSealedToolName(name) {
+		return true
+	}
+	compact := compactName(name)
+	for _, suffix := range []string{"secretcreate", "secretreveal", "passwordgenerate", "totpcode"} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpWrapperToolName(name string) bool {
+	compact := compactName(name)
+	return strings.HasSuffix(compact, "callmcptool") ||
+		strings.HasSuffix(compact, "mcpcalltool") ||
+		strings.HasSuffix(compact, "invokemcptool")
+}
+
+func shellToolName(name string) bool {
+	compact := compactName(name)
+	for _, suffix := range []string{
+		"bash", "shell", "terminal", "execcommand", "runcommand", "shellcommand", "executecommand",
+	} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func compactName(value string) string {
+	var out strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func rawContainsSensitiveToolName(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return valueContainsSensitiveToolName(value)
+}
+
+func valueContainsSensitiveToolName(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch compactName(key) {
+			case "tool", "toolname", "mcptool", "mcptoolname", "function", "functionname", "method", "name":
+				if name, ok := item.(string); ok && sensitiveWrappedToolName(name) {
+					return true
+				}
+			}
+			if valueContainsSensitiveToolName(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if valueContainsSensitiveToolName(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func rawContainsSensitiveCLICommand(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return valueContainsSensitiveCLICommand(value)
+}
+
+func valueContainsSensitiveCLICommand(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch compactName(key) {
+			case "command", "cmd", "script", "shellcommand":
+				switch command := item.(type) {
+				case string:
+					if sensitiveCLICommand(command, 0) {
+						return true
+					}
+				case []any:
+					parts := make([]string, 0, len(command))
+					for _, part := range command {
+						text, ok := part.(string)
+						if !ok {
+							parts = nil
+							break
+						}
+						parts = append(parts, text)
+					}
+					if len(parts) != 0 && sensitiveCLICommand(strings.Join(parts, " "), 0) {
+						return true
+					}
+				}
+			}
+			if valueContainsSensitiveCLICommand(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if valueContainsSensitiveCLICommand(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sensitiveCLICommand(command string, depth int) bool {
+	if depth > 3 {
+		return false
+	}
+	for _, segment := range shellCommandSegments(command) {
+		if segmentInvokesSensitiveCLI(segment, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func segmentInvokesSensitiveCLI(words []string, depth int) bool {
+	i := 0
+	for i < len(words) && shellAssignment(words[i]) {
+		i++
+	}
+	for i < len(words) {
+		command := strings.ToLower(filepath.Base(words[i]))
+		switch command {
+		case "env":
+			i++
+			for i < len(words) {
+				if shellAssignment(words[i]) {
+					i++
+					continue
+				}
+				if words[i] == "-u" || words[i] == "--unset" || words[i] == "-C" || words[i] == "--chdir" {
+					i += min(2, len(words)-i)
+					continue
+				}
+				if strings.HasPrefix(words[i], "-") {
+					i++
+					continue
+				}
+				break
+			}
+		case "command", "builtin", "exec", "nohup":
+			i++
+			for i < len(words) && strings.HasPrefix(words[i], "-") {
+				i++
+			}
+		case "sudo":
+			i++
+			i = skipSudoOptions(words, i)
+		case "sh", "bash", "zsh", "dash", "ksh":
+			for option := i + 1; option+1 < len(words); option++ {
+				if strings.HasPrefix(words[option], "-") && strings.Contains(words[option], "c") {
+					return sensitiveCLICommand(words[option+1], depth+1)
+				}
+				if !strings.HasPrefix(words[option], "-") {
+					break
+				}
+			}
+			return false
+		default:
+			return sensitiveCLIAt(words, i)
+		}
+	}
+	return false
+}
+
+func skipSudoOptions(words []string, i int) int {
+	for i < len(words) && strings.HasPrefix(words[i], "-") {
+		option := words[i]
+		i++
+		switch option {
+		case "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--chdir", "-r", "--role", "-t", "--type":
+			if i < len(words) {
+				i++
+			}
+		}
+	}
+	return i
+}
+
+func sensitiveCLIAt(words []string, i int) bool {
+	if i+2 >= len(words) {
+		return false
+	}
+	command := strings.ToLower(filepath.Base(words[i]))
+	if command != "witself" && command != "ws" {
+		return false
+	}
+	group := strings.ToLower(words[i+1])
+	action := strings.ToLower(words[i+2])
+	return (group == "secret" && (action == "create" || action == "reveal")) ||
+		(group == "password" && action == "generate") ||
+		(group == "totp" && action == "code")
+}
+
+func shellAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for index, r := range name {
+		if r != '_' && !unicode.IsLetter(r) && (index == 0 || !unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
+}
+
+// shellCommandSegments is a deliberately small shell lexer. It recognizes the
+// control operators that start a new command, strips quotes, and preserves a
+// quoted `sh -c` body as one word for bounded recursive inspection.
+func shellCommandSegments(command string) [][]string {
+	var segments [][]string
+	var words []string
+	var word strings.Builder
+	var quote rune
+	escaped := false
+	flushWord := func() {
+		if word.Len() != 0 {
+			words = append(words, word.String())
+			word.Reset()
+		}
+	}
+	flushSegment := func() {
+		flushWord()
+		if len(words) != 0 {
+			segments = append(segments, words)
+			words = nil
+		}
+	}
+	for _, r := range command {
+		if escaped {
+			word.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		switch r {
+		case ' ', '\t', '\r':
+			flushWord()
+		case '\n', ';', '|', '&', '(', ')':
+			flushSegment()
+		default:
+			word.WriteRune(r)
+		}
+	}
+	if escaped {
+		word.WriteRune('\\')
+	}
+	flushSegment()
+	return segments
+}
+
+func redactSensitiveToolPayload(input *hookInput) {
+	for _, raw := range []*json.RawMessage{
+		&input.ToolInput, &input.ToolInputCamel, &input.ToolResponse,
+		&input.ToolOutput, &input.ToolOutputCamel, &input.Error,
+	} {
+		clear(*raw)
+		*raw = nil
+	}
+	input.ErrorMessage = ""
+	input.Reason = ""
 }
 
 // readCompleteGrokAssistantTurn accounts for Grok's Stop-hook ordering: the
@@ -1267,12 +1647,24 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 		return
 	}
 	event.Data = structuredEventData(input)
-	if event.CaptureMode == ModeRaw {
+	if event.CaptureMode == ModeRaw && !input.SensitiveToolEvent {
 		event.Raw = append(json.RawMessage(nil), raw...)
 	}
 }
 
 func structuredEventData(input hookInput) json.RawMessage {
+	if input.SensitiveToolEvent {
+		data := map[string]any{}
+		if status := valueFreeToolStatus(input.Status); status != "" {
+			data["status"] = status
+		}
+		data["tool"] = compactMap(map[string]any{
+			"name":   input.ToolName,
+			"use_id": input.ToolUseID,
+		})
+		raw, _ := json.Marshal(data)
+		return raw
+	}
 	data := map[string]any{}
 	if input.PromptID != "" {
 		data["prompt_id"] = input.PromptID
@@ -1332,6 +1724,25 @@ func structuredEventData(input hookInput) json.RawMessage {
 	}
 	raw, _ := json.Marshal(data)
 	return raw
+}
+
+func valueFreeToolStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "success", "succeeded", "complete", "completed":
+		return "completed"
+	case "error", "failure", "failed":
+		return "failed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "denied":
+		return "denied"
+	case "timeout", "timed_out", "timedout":
+		return "timed_out"
+	case "pending", "running", "interrupted":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
 }
 
 func compactMap(value map[string]any) map[string]any {
@@ -1858,16 +2269,28 @@ func loadSessionState(runtime, sessionID string) (sessionState, error) {
 	if err != nil {
 		return sessionState{}, err
 	}
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return sessionState{}, nil
 	}
 	if err != nil {
 		return sessionState{}, err
 	}
+	defer func() { _ = file.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(file, maxSessionStateBytes+1))
+	if err != nil {
+		return sessionState{}, err
+	}
+	if len(raw) == 0 || len(raw) > maxSessionStateBytes {
+		return sessionState{}, errors.New("session state is invalid")
+	}
 	var state sessionState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return sessionState{}, fmt.Errorf("parse session state: %w", err)
+	}
+	if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+		state.SensitiveToolUseIDs = nil
+		state.RedactAllToolPayload = true
 	}
 	return state, nil
 }

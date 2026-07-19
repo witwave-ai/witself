@@ -106,6 +106,46 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
 	},
+	"agent_vault_keys": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "key_version": true, "algorithm": true,
+		"fingerprint": true, "lifecycle_state": true, "row_version": true,
+		"created_at": true, "retired_at": true,
+	},
+	"secrets": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "name": true, "description": true,
+		"template": true, "tags": true, "row_version": true,
+		"created_at": true, "updated_at": true,
+		"archived_at": true, "deleted_at": true,
+	},
+	"secret_fields": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "secret_id": true, "name": true,
+		"field_kind": true, "sensitive": true,
+		"value_encoding": true, "value_version": true,
+		"public_value": true, "envelope_version": true, "ciphertext": true,
+		"aead_algorithm": true, "aad_version": true,
+		"dek_id": true, "dek_generation": true, "row_version": true,
+		"created_at": true, "updated_at": true,
+	},
+	"secret_deks": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "secret_id": true, "field_id": true,
+		"dek_generation": true, "wrapped_dek": true,
+		"wrap_algorithm": true, "aad_version": true,
+		"wrap_revision": true, "wrapping_key_id": true,
+		"wrapping_key_version": true, "row_version": true,
+		"created_at": true, "retired_at": true,
+	},
+	"secret_mutation_receipts": {
+		"account_id": true, "realm_id": true, "owner_agent_id": true,
+		"actor_kind": true, "actor_id": true, "operation": true,
+		"idempotency_key_hash": true, "request_hash": true,
+		"target_kind": true, "target_id": true,
+		"result_revision": true, "result_value_version": true,
+		"created_at": true,
+	},
 	"agent_avatar_profiles": {
 		"account_id": true, "realm_id": true, "agent_id": true,
 		"status": true, "lineage_generation": true, "autonomy_policy": true,
@@ -735,6 +775,20 @@ type importCtx struct {
 	liveAgents                   map[string]bool
 	agentRealms                  map[string]string
 	agentActivity                map[agentActivityImportKey]bool
+	vaultKeys                    map[string]secretVaultKeyImportScope
+	vaultKeyVersions             map[secretVaultKeyVersionImportKey]string
+	vaultCurrentKeys             map[string]int
+	vaultFingerprints            map[string]bool
+	secrets                      map[string]secretImportScope
+	secretNames                  map[string]map[string]string
+	secretFields                 map[string]secretFieldImportScope
+	secretFieldNames             map[string]map[string]bool
+	secretFieldCounts            map[string]int
+	secretMaxValueVersions       map[string]int64
+	secretDEKs                   map[string]secretDEKImportScope
+	secretDEKGenerations         map[secretDEKGenerationImportKey]bool
+	secretCurrentDEKs            map[string]int
+	secretReceipts               map[string]bool
 	avatarStyleHeads             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
 	avatarStyleVersions          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
 	realmAvatarStyles            map[string]realmAvatarStyleImportScope
@@ -801,6 +855,20 @@ func newImportCtx(accountID string) *importCtx {
 		liveAgents:                   map[string]bool{},
 		agentRealms:                  map[string]string{},
 		agentActivity:                map[agentActivityImportKey]bool{},
+		vaultKeys:                    map[string]secretVaultKeyImportScope{},
+		vaultKeyVersions:             map[secretVaultKeyVersionImportKey]string{},
+		vaultCurrentKeys:             map[string]int{},
+		vaultFingerprints:            map[string]bool{},
+		secrets:                      map[string]secretImportScope{},
+		secretNames:                  map[string]map[string]string{},
+		secretFields:                 map[string]secretFieldImportScope{},
+		secretFieldNames:             map[string]map[string]bool{},
+		secretFieldCounts:            map[string]int{},
+		secretMaxValueVersions:       map[string]int64{},
+		secretDEKs:                   map[string]secretDEKImportScope{},
+		secretDEKGenerations:         map[secretDEKGenerationImportKey]bool{},
+		secretCurrentDEKs:            map[string]int{},
+		secretReceipts:               map[string]bool{},
 		avatarStyleHeads:             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
 		avatarStyleVersions:          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
 		realmAvatarStyles:            map[string]realmAvatarStyleImportScope{},
@@ -1044,6 +1112,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
+		"agent_vault_keys", "secrets", "secret_fields", "secret_deks",
+		"secret_mutation_receipts",
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
 		"avatar_style_rollout_jobs",
 		"agent_avatar_profiles", "agent_avatar_versions",
@@ -1195,6 +1265,101 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
 		}
+	case "agent_vault_keys":
+		scope, err := ic.validateImportedVaultKey(obj)
+		if err != nil {
+			return badf("agent_vault_keys row %v", err)
+		}
+		versionKey := secretVaultKeyVersionImportKey{agentID: scope.agentID, version: scope.version}
+		if _, duplicateID := ic.vaultKeys[scope.id]; duplicateID || ic.vaultKeyVersions[versionKey] != "" {
+			return badf("agent_vault_keys row duplicates id or agent key version")
+		}
+		if ic.vaultFingerprints[scope.fingerprint] {
+			return badf("agent_vault_keys row reuses a key fingerprint")
+		}
+		if scope.state == "current" {
+			ic.vaultCurrentKeys[scope.agentID]++
+			if ic.vaultCurrentKeys[scope.agentID] > 1 {
+				return badf("agent_vault_keys has multiple current keys for one agent")
+			}
+		}
+		ic.vaultKeys[scope.id] = scope
+		ic.vaultKeyVersions[versionKey] = scope.id
+		ic.vaultFingerprints[scope.fingerprint] = true
+	case "secrets":
+		scope, normalizedName, err := ic.validateImportedSecret(obj)
+		if err != nil {
+			return badf("secrets row %v", err)
+		}
+		id, _ := requireStringField(obj, "id")
+		if _, duplicate := ic.secrets[id]; duplicate {
+			return badf("secrets row duplicates id")
+		}
+		if !scope.archived && !scope.deleted {
+			names := ic.secretNames[scope.agentID]
+			if names == nil {
+				names = map[string]string{}
+				ic.secretNames[scope.agentID] = names
+			}
+			if previous := names[normalizedName]; previous != "" {
+				return badf("secrets row duplicates a live name")
+			}
+			names[normalizedName] = id
+		}
+		ic.secrets[id] = scope
+	case "secret_fields":
+		scope, name, err := ic.validateImportedSecretField(obj)
+		if err != nil {
+			return badf("secret_fields row %v", err)
+		}
+		id, _ := requireStringField(obj, "id")
+		if _, duplicate := ic.secretFields[id]; duplicate {
+			return badf("secret_fields row duplicates id")
+		}
+		names := ic.secretFieldNames[scope.secretID]
+		if names == nil {
+			names = map[string]bool{}
+			ic.secretFieldNames[scope.secretID] = names
+		}
+		if names[name] {
+			return badf("secret_fields row duplicates a field name")
+		}
+		names[name] = true
+		ic.secretFieldCounts[scope.secretID]++
+		if ic.secretFieldCounts[scope.secretID] > maxSecretFields {
+			return badf("secrets row has more than %d fields", maxSecretFields)
+		}
+		if scope.valueVersion > ic.secretMaxValueVersions[scope.secretID] {
+			ic.secretMaxValueVersions[scope.secretID] = scope.valueVersion
+		}
+		ic.secretFields[id] = scope
+	case "secret_deks":
+		scope, err := ic.validateImportedSecretDEK(obj)
+		if err != nil {
+			return badf("secret_deks row %v", err)
+		}
+		id, _ := requireStringField(obj, "id")
+		generationKey := secretDEKGenerationImportKey{fieldID: scope.fieldID, generation: scope.generation}
+		if _, duplicate := ic.secretDEKs[id]; duplicate || ic.secretDEKGenerations[generationKey] {
+			return badf("secret_deks row duplicates id or field generation")
+		}
+		if !scope.retired {
+			ic.secretCurrentDEKs[scope.fieldID]++
+			if ic.secretCurrentDEKs[scope.fieldID] > 1 {
+				return badf("secret_deks has multiple current DEKs for one field")
+			}
+		}
+		ic.secretDEKs[id] = scope
+		ic.secretDEKGenerations[generationKey] = true
+	case "secret_mutation_receipts":
+		key, err := ic.validateImportedSecretReceipt(obj)
+		if err != nil {
+			return badf("secret_mutation_receipts row %v", err)
+		}
+		if ic.secretReceipts[key] {
+			return badf("secret_mutation_receipts row duplicates its retry fence")
+		}
+		ic.secretReceipts[key] = true
 	case "agent_avatar_profiles":
 		scope, err := ic.validateImportedAvatarProfile(obj)
 		if err != nil {
@@ -3701,6 +3866,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		if err := ic.validateImportedAvatarGraph(); err != nil {
 			return export.Manifest{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
 		}
+	}
+	if err := ic.validateImportedSecretGraph(); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: secret graph: %v", ErrArchiveContent, err)
 	}
 	if m.SchemaVersion < 35 {
 		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {

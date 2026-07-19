@@ -1,5 +1,17 @@
 # Witself API Routes
 
+> **Sealed-plane implementation amendment (accepted 2026-07-18):** the current
+> agent-owned ciphertext API is `GET /v1/vault/key-epochs/current`, `POST
+> /v1/vault/key-epochs`, `GET|POST /v1/secrets`, `GET
+> /v1/secrets/{secret_id}`, `POST /v1/secrets/{secret_id}:archive`, `POST
+> /v1/secrets/{secret_id}:restore`, and `POST
+> /v1/secrets/{secret_id}/fields/{field_id}:access`. The access route returns
+> exactly one ciphertext plus wrapped-DEK package; it never reveals plaintext.
+> Secret update/rotation/delete/grants, server-side reveal, password generation,
+> and server-side TOTP routes described in target sections below are not
+> implemented and are superseded where they conflict with
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
+
 Status: draft. Decision: Witself uses resource-oriented `/v1` routes with
 explicit action subroutes for sensitive, integrity-impacting, or workflow
 operations.

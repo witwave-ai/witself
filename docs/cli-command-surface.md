@@ -2,6 +2,30 @@
 
 Status: draft target contract with implemented slices labeled below.
 
+Sealed-plane implementation amendment (accepted 2026-07-18): the current
+client-custodied vertical implements `vault key init|status`, local `password
+generate`, `secret create|list|search|show|reveal|archive|restore`, and `totp
+show|code SECRET_ID FIELD_ID`. `secret create` consumes a strict JSON document
+from `--file` or `--stdin`; it does not yet implement the convenience flags
+shown in the target sections below, and it requires an explicit
+`--idempotency-key KEY` so a lost-response retry can reuse its durable local
+exact-request journal. The MCP create tool requires the equivalent
+`idempotency_key`. Secret update/rename/copy/delete/grants,
+group/operator ownership, TOTP enroll/delete convenience commands, references,
+and runtime injection remain planned. Encryption and TOTP calculation are
+client-side under the separate AVK; every KMS/server-decrypt description below
+is superseded by [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and
+[the implementation plan](client-custodied-agent-vault.md).
+
+Every CLI operation that can access a local AVK requires the selected installed
+local account binding to contain the account's immutable `AccountID`. The
+authenticated self identity must match it before the local key path is read.
+This remains required with explicit `--endpoint` and `--token-file`; those flags
+select transport and authentication but do not replace the local account
+binding. Installed MCP integrations also require `account_id`. An integration
+created by an older version without it fails closed for agent-secret tools and
+must be refreshed with `witself install <runtime>`.
+
 Narrative-memory amendment (accepted 2026-07-14): direct capture, lifecycle,
 supersede, evidence, delete, lexical/hybrid recall, migration-0032 vector, and
 `memory curate` commands below are implemented. The `memory curate auto service`

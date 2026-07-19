@@ -44,6 +44,7 @@ var upgraders = map[int]Upgrader{
 	50: addAvatarPayloadQuotaDefaults,
 	51: preserveSchema51Rows,
 	53: addAvatarRendererProfileDefault,
+	54: preserveSchema54Rows,
 }
 
 const (
@@ -51,6 +52,14 @@ const (
 	legacyAvatarRetainedPayloadByteLimit  = 2 * 1024 * 1024
 	legacyAvatarMaximumPayloadBytes       = 128 * 1024
 )
+
+// preserveSchema54Rows acknowledges the tenant-scope uniqueness keys added
+// alongside the new schema-55 sealed tables. Schema-54 archives already use
+// globally unique realm and agent ids and contain no sealed streams, so their
+// existing rows need no transformation.
+func preserveSchema54Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
 
 // addAvatarRendererProfileDefault lifts every schema-53 avatar version as
 // legacy. Older writers never performed the exact perceptual-v1 baseline

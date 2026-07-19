@@ -264,6 +264,288 @@ func TestToolFailureKeepsToolIdentityAndInput(t *testing.T) {
 	}
 }
 
+func TestSensitiveSealedToolHookPayloadsAreNeverCaptured(t *testing.T) {
+	const canary = "sealed-hook-plaintext-canary-714"
+	toolNames := map[string]string{
+		RuntimeCodex:      "mcp__witself__witself_secret_reveal",
+		RuntimeClaudeCode: "provider/mcp/witself.secret.create",
+		RuntimeGrokBuild:  "provider_witself_password_generate",
+		RuntimeCursor:     "CallMcpTool",
+	}
+	for _, runtimeName := range []string{RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor} {
+		for _, mode := range []string{ModeTrace, ModeRaw} {
+			for _, hookEvent := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+				t.Run(runtimeName+"/"+mode+"/"+hookEvent, func(t *testing.T) {
+					t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+					location, err := EnsureLocation("home")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := SaveConfig(Config{
+						Runtime: runtimeName, CaptureMode: mode,
+						Account: "default", Realm: "default", Agent: "scott",
+						AgentID: "agent_1", AgentName: "scott", Location: location,
+					}); err != nil {
+						t.Fatal(err)
+					}
+
+					toolInput := map[string]any{"value": canary}
+					if runtimeName == RuntimeCursor {
+						toolInput = map[string]any{
+							"toolName":  "unknown_prefix_witself_totp_code",
+							"arguments": map[string]any{"seed": canary},
+						}
+					}
+					raw := sensitiveToolHookJSON(t, runtimeName, hookEvent, toolNames[runtimeName], "tool-sensitive-1", toolInput, canary)
+					event := enqueueTestHook(t, runtimeName, raw)
+					assertSensitiveHookEventRedacted(t, event, toolNames[runtimeName], "tool-sensitive-1", canary)
+
+					pending, err := Pending(runtimeName)
+					if err != nil {
+						t.Fatal(err)
+					}
+					persisted, err := json.Marshal(pending)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Contains(persisted, []byte(canary)) {
+						t.Fatalf("persisted sensitive tool hook contains plaintext: %s", persisted)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSensitiveCLIHookPayloadsAreNeverCapturedAndCorrelate(t *testing.T) {
+	const canary = "sealed-cli-hook-canary-714"
+	cases := []struct {
+		runtimeName string
+		toolName    string
+		command     string
+	}{
+		{RuntimeCodex, "functions.exec_command", `/usr/local/bin/witself secret create --file -`},
+		{RuntimeClaudeCode, "Bash", `ws secret reveal github password`},
+		{RuntimeGrokBuild, "provider_shell_command", `env WITSELF_HOME=/safe /opt/witself password generate`},
+		{RuntimeCursor, "terminal", `/bin/zsh -lc '/usr/local/bin/ws totp code github otp'`},
+	}
+	for _, tc := range cases {
+		for _, mode := range []string{ModeTrace, ModeRaw} {
+			t.Run(tc.runtimeName+"/"+mode, func(t *testing.T) {
+				t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+				location, err := EnsureLocation("home")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := SaveConfig(Config{
+					Runtime: tc.runtimeName, CaptureMode: mode,
+					Account: "default", Realm: "default", Agent: "scott",
+					AgentID: "agent_1", AgentName: "scott", Location: location,
+				}); err != nil {
+					t.Fatal(err)
+				}
+
+				pre := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PreToolUse", tc.toolName, "tool-cli-1", map[string]any{"command": tc.command, "stdin": canary}, canary))
+				assertSensitiveHookEventRedacted(t, pre, tc.toolName, "tool-cli-1", canary)
+
+				// Terminal provider hooks do not all repeat shell input. The local
+				// session fence must carry the value-free tool-use classification.
+				post := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PostToolUse", tc.toolName, "tool-cli-1", nil, canary))
+				assertSensitiveHookEventRedacted(t, post, tc.toolName, "tool-cli-1", canary)
+				failure := enqueueTestHook(t, tc.runtimeName, sensitiveToolHookJSON(t, tc.runtimeName,
+					"PostToolUseFailure", tc.toolName, "tool-cli-1", nil, canary))
+				assertSensitiveHookEventRedacted(t, failure, tc.toolName, "tool-cli-1", canary)
+			})
+		}
+	}
+}
+
+func TestSensitiveCLICommandRecognitionPreservesOrdinaryShellCapture(t *testing.T) {
+	if !rawContainsSensitiveToolName(json.RawMessage(`{"toolName":"secret.reveal"}`)) {
+		t.Fatal("bare sensitive tool name inside an MCP wrapper was not recognized")
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"create", "witself secret create --file value.json", true},
+		{"reveal alias", "/opt/bin/ws secret reveal github password", true},
+		{"generated password", "TOKEN=x env HOME=/tmp /opt/witself password generate", true},
+		{"nested totp", `bash -lc 'ws totp code github otp'`, true},
+		{"sudo reveal", "sudo -u scott /usr/local/bin/witself secret reveal github password", true},
+		{"ordinary list", "witself secret list", false},
+		{"ordinary password text", "echo witself password generate", false},
+		{"ordinary test", "go test ./...", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sensitiveCLICommand(tc.command, 0); got != tc.want {
+				t.Fatalf("sensitiveCLICommand(%q) = %t, want %t", tc.command, got, tc.want)
+			}
+		})
+	}
+
+	var ordinary Event
+	ordinary.CaptureMode = ModeRaw
+	raw := []byte(`{"tool_input":{"command":"go test ./...","canary":"ordinary-tool-canary"}}`)
+	setEventContent(&ordinary, hookInput{
+		HookEventName: "PreToolUse", ToolName: "Bash", ToolUseID: "tool-ordinary",
+		ToolInput: json.RawMessage(`{"command":"go test ./...","canary":"ordinary-tool-canary"}`),
+	}, raw)
+	marshaled, err := json.Marshal(ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(marshaled, []byte("ordinary-tool-canary")) || len(ordinary.Raw) == 0 {
+		t.Fatalf("ordinary raw/trace tool capture was weakened: %s", marshaled)
+	}
+}
+
+func TestSensitiveToolUseFenceIsBoundedAndFailsClosed(t *testing.T) {
+	state := sessionState{}
+	for index := 0; index <= maxSensitiveToolUseFences; index++ {
+		input := hookInput{
+			HookEventName: "PreToolUse",
+			ToolName:      "witself.secret.create",
+			ToolUseID:     fmt.Sprintf("tool-sensitive-%d", index),
+			ToolInput:     json.RawMessage(`{"value":"fence-canary"}`),
+		}
+		protectSensitiveToolPayload(&input, &state)
+		if len(input.ToolInput) != 0 || !input.SensitiveToolEvent {
+			t.Fatalf("sensitive input %d was not protected: %#v", index, input)
+		}
+		if len(state.SensitiveToolUseIDs) > maxSensitiveToolUseFences {
+			t.Fatalf("sensitive tool-use fence grew to %d", len(state.SensitiveToolUseIDs))
+		}
+	}
+	if !state.RedactAllToolPayload || len(state.SensitiveToolUseIDs) != 0 {
+		t.Fatalf("overflow state did not fail closed: %#v", state)
+	}
+
+	ordinary := hookInput{
+		HookEventName: "PostToolUse", ToolName: "Bash", ToolUseID: "ordinary-after-overflow",
+		ToolResponse: json.RawMessage(`{"value":"ordinary-output-canary"}`),
+	}
+	protectSensitiveToolPayload(&ordinary, &state)
+	if !ordinary.SensitiveToolEvent || len(ordinary.ToolResponse) != 0 {
+		t.Fatalf("overflow state allowed a later tool payload: %#v", ordinary)
+	}
+}
+
+func TestSessionStateReadIsBoundedAndOversizedFenceFailsClosed(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	path, err := sessionStatePath(RuntimeCodex, "bounded-state-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxSessionStateBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSessionState(RuntimeCodex, "bounded-state-session"); err == nil {
+		t.Fatal("oversized session state was accepted")
+	}
+
+	fences := make(map[string]bool, maxSensitiveToolUseFences+1)
+	for index := 0; index <= maxSensitiveToolUseFences; index++ {
+		fences[fmt.Sprintf("tool-%d", index)] = true
+	}
+	raw, err := json.Marshal(sessionState{RunID: "run_1", SensitiveToolUseIDs: fences})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadSessionState(RuntimeCodex, "bounded-state-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.RedactAllToolPayload || len(state.SensitiveToolUseIDs) != 0 {
+		t.Fatalf("oversized persisted fence did not fail closed: %#v", state)
+	}
+}
+
+func sensitiveToolHookJSON(t *testing.T, runtimeName, hookEvent, toolName, toolUseID string, toolInput map[string]any, canary string) string {
+	t.Helper()
+	nativeEvent := hookEvent
+	if runtimeName == RuntimeCursor {
+		nativeEvent = map[string]string{
+			"PreToolUse": "preToolUse", "PostToolUse": "postToolUse", "PostToolUseFailure": "postToolUseFailure",
+		}[hookEvent]
+	}
+	payload := map[string]any{
+		"status": "failed", "failure_type": canary, "reason": canary,
+		"error_message": canary,
+	}
+	if runtimeName == RuntimeGrokBuild {
+		payload["sessionId"] = "session-sensitive"
+		payload["hookEventName"] = nativeEvent
+		payload["toolName"] = toolName
+		payload["toolUseId"] = toolUseID
+		if toolInput != nil {
+			payload["toolInput"] = toolInput
+		}
+		payload["toolOutput"] = map[string]any{"value": canary}
+	} else {
+		if runtimeName == RuntimeCursor {
+			payload["conversation_id"] = "session-sensitive"
+			payload["generation_id"] = "generation-sensitive"
+		} else {
+			payload["session_id"] = "session-sensitive"
+		}
+		payload["hook_event_name"] = nativeEvent
+		payload["tool_name"] = toolName
+		payload["tool_use_id"] = toolUseID
+		if toolInput != nil {
+			payload["tool_input"] = toolInput
+		}
+		payload["tool_output"] = map[string]any{"value": canary}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func assertSensitiveHookEventRedacted(t *testing.T, event Event, toolName, toolUseID, canary string) {
+	t.Helper()
+	if !strings.Contains(event.Body, toolName) || !strings.Contains(event.Body, toolUseID) {
+		t.Fatalf("redacted tool event lost value-free identity: %#v", event)
+	}
+	if len(event.Raw) != 0 {
+		t.Fatalf("redacted tool event retained raw hook payload: %s", event.Raw)
+	}
+	marshaled, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := json.Marshal(event.Entries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(marshaled, []byte(canary)) || bytes.Contains(entries, []byte(canary)) {
+		t.Fatalf("redacted tool event contains plaintext: event=%s entries=%s", marshaled, entries)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := data["tool"].(map[string]any)
+	if !ok || tool["name"] != toolName || tool["use_id"] != toolUseID || len(tool) != 2 {
+		t.Fatalf("redacted tool metadata = %#v", data)
+	}
+	for _, forbidden := range []string{"input", "output", "error", "reason", "failure_type"} {
+		if _, ok := data[forbidden]; ok {
+			t.Fatalf("redacted tool metadata retained %s: %#v", forbidden, data)
+		}
+	}
+}
+
 func TestInstallHooksPreservesOthersAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

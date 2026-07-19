@@ -1,6 +1,14 @@
 # Witself Storage
 
-Status: draft. Last reviewed 2026-07-14. Decision: production Witself starts
+> **Sealed-plane custody amendment (accepted 2026-07-18):**
+> [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+> [client-custodied vault plan](client-custodied-agent-vault.md) supersede KMS
+> as the sealed-plane root. PostgreSQL remains authoritative for ciphertext,
+> wrapped DEKs, public metadata, receipts, usage, and audit; it never stores the
+> agent vault key or a sensitive plaintext value.
+
+Status: evolving; the sealed-plane sections below the amendment are historical
+until rewritten against ADR 0003. Last reviewed 2026-07-18. Production Witself starts
 with PostgreSQL as the system of record for both planes, universal full-text
 retrieval, optional portable JSONB storage for client-supplied vectors, an
 object/blob adapter added on demand, Goose for database migrations, and a
