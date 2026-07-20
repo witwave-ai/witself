@@ -28,6 +28,59 @@ func configureSecrets(cfg *server.Config, st *store.Store) {
 			KeyEpoch: toServerVaultKey(binding), Receipt: toServerSecretReceipt(receipt),
 		}, mapSecretError(err)
 	}
+	cfg.CreateVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, in server.CreateVaultKeyEnrollmentRequest) (server.VaultKeyEnrollment, error) {
+		value, err := st.CreateVaultKeyEnrollment(ctx, toStorePrincipal(p), store.CreateVaultKeyEnrollmentInput{
+			ID: in.ID, TargetLocationID: in.TargetLocationID, TargetLocationName: in.TargetLocationName,
+			TargetPublicKey: in.TargetPublicKey, TargetKeyAlgorithm: in.TargetKeyAlgorithm,
+			PairingCommitment: in.PairingCommitment, ExpiresAt: in.ExpiresAt, IdempotencyKey: in.IdempotencyKey,
+		})
+		return toServerVaultKeyEnrollment(value), mapSecretError(err)
+	}
+	cfg.ListVaultKeyEnrollments = func(ctx context.Context, p server.DomainPrincipal, opts server.VaultKeyEnrollmentListOptions) ([]server.VaultKeyEnrollment, error) {
+		values, err := st.ListVaultKeyEnrollments(ctx, toStorePrincipal(p), store.VaultKeyEnrollmentListOptions{State: opts.State, Limit: opts.Limit})
+		if err != nil {
+			return nil, mapSecretError(err)
+		}
+		out := make([]server.VaultKeyEnrollment, len(values))
+		for index := range values {
+			out[index] = toServerVaultKeyEnrollment(values[index])
+		}
+		return out, nil
+	}
+	cfg.GetVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, enrollmentID string) (server.VaultKeyEnrollment, error) {
+		value, err := st.GetVaultKeyEnrollment(ctx, toStorePrincipal(p), enrollmentID)
+		return toServerVaultKeyEnrollment(value), mapSecretError(err)
+	}
+	cfg.ApproveVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, enrollmentID string, in server.ApproveVaultKeyEnrollmentRequest) (server.VaultKeyEnrollment, error) {
+		value, err := st.ApproveVaultKeyEnrollment(ctx, toStorePrincipal(p), enrollmentID, store.ApproveVaultKeyEnrollmentInput{
+			ExpectedRowVersion: in.ExpectedRowVersion, SourceLocationID: in.SourceLocationID,
+			SourceEphemeralPublicKey: in.SourceEphemeralPublicKey, TransferCiphertext: in.TransferCiphertext,
+			TransferAlgorithm: in.TransferAlgorithm, ConsumeCommitment: in.ConsumeCommitment,
+			IdempotencyKey: in.IdempotencyKey,
+		})
+		return toServerVaultKeyEnrollment(value), mapSecretError(err)
+	}
+	cfg.ReceiveVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, enrollmentID, targetLocationID string) (server.VaultKeyEnrollmentTransfer, error) {
+		value, err := st.AccessVaultKeyEnrollmentTransfer(ctx, toStorePrincipal(p), enrollmentID, targetLocationID)
+		return server.VaultKeyEnrollmentTransfer{
+			Enrollment:               toServerVaultKeyEnrollment(value.Enrollment),
+			SourceEphemeralPublicKey: value.SourceEphemeralPublicKey,
+			Ciphertext:               value.Ciphertext, ConsumeCommitment: value.ConsumeCommitment,
+		}, mapSecretError(err)
+	}
+	cfg.ConsumeVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, enrollmentID string, in server.ConsumeVaultKeyEnrollmentRequest) (server.VaultKeyEnrollment, error) {
+		value, err := st.ConsumeVaultKeyEnrollment(ctx, toStorePrincipal(p), enrollmentID, store.ConsumeVaultKeyEnrollmentInput{
+			ExpectedRowVersion: in.ExpectedRowVersion, TargetLocationID: in.TargetLocationID,
+			ConsumeProof: in.ConsumeProof, IdempotencyKey: in.IdempotencyKey,
+		})
+		return toServerVaultKeyEnrollment(value), mapSecretError(err)
+	}
+	cfg.CancelVaultKeyEnrollment = func(ctx context.Context, p server.DomainPrincipal, enrollmentID string, in server.CancelVaultKeyEnrollmentRequest) (server.VaultKeyEnrollment, error) {
+		value, err := st.CancelVaultKeyEnrollment(ctx, toStorePrincipal(p), enrollmentID, store.CancelVaultKeyEnrollmentInput{
+			ExpectedRowVersion: in.ExpectedRowVersion, IdempotencyKey: in.IdempotencyKey,
+		})
+		return toServerVaultKeyEnrollment(value), mapSecretError(err)
+	}
 	cfg.CreateSecret = func(ctx context.Context, p server.DomainPrincipal, in server.CreateSecretRequest) (server.SecretMutationResult, error) {
 		fields := make([]store.CreateSecretFieldInput, len(in.Fields))
 		for index := range in.Fields {
@@ -81,6 +134,7 @@ func configureSecrets(cfg *server.Config, st *store.Store) {
 		})
 		return toServerSecretMaterial(material), mapSecretError(err)
 	}
+	configureVaultKeyRotations(cfg, st)
 }
 
 func toStoreCreateSecretField(in server.CreateSecretFieldRequest) store.CreateSecretFieldInput {
@@ -111,6 +165,21 @@ func toServerVaultKey(value store.VaultKeyBinding) server.VaultKeyBinding {
 		Algorithm: value.Algorithm, Fingerprint: value.Fingerprint,
 		LifecycleState: value.LifecycleState, RowVersion: value.RowVersion,
 		CreatedAt: value.CreatedAt, RetiredAt: value.RetiredAt,
+	}
+}
+
+func toServerVaultKeyEnrollment(value store.VaultKeyEnrollment) server.VaultKeyEnrollment {
+	return server.VaultKeyEnrollment{
+		ID: value.ID, AccountID: value.AccountID, RealmID: value.RealmID,
+		OwnerAgentID: value.OwnerAgentID, VaultKeyID: value.VaultKeyID,
+		VaultKeyVersion: value.VaultKeyVersion, VaultKeyAlgorithm: value.VaultKeyAlgorithm,
+		VaultKeyFingerprint: value.VaultKeyFingerprint, TargetLocationID: value.TargetLocationID,
+		TargetLocationName: value.TargetLocationName, TargetPublicKey: value.TargetPublicKey,
+		TargetKeyAlgorithm: value.TargetKeyAlgorithm, PairingCommitment: value.PairingCommitment,
+		LifecycleState: value.LifecycleState, SourceLocationID: value.SourceLocationID,
+		TransferAlgorithm: value.TransferAlgorithm, RowVersion: value.RowVersion,
+		CreatedAt: value.CreatedAt, ExpiresAt: value.ExpiresAt, ApprovedAt: value.ApprovedAt,
+		ConsumedAt: value.ConsumedAt, CancelledAt: value.CancelledAt, ExpiredAt: value.ExpiredAt,
 	}
 }
 
@@ -170,13 +239,20 @@ func mapSecretError(err error) error {
 		return server.ErrForbidden
 	case errors.Is(err, store.ErrSecretNotFound), errors.Is(err, store.ErrSecretFieldNotFound), errors.Is(err, store.ErrAccountNotFound):
 		return server.ErrNotFound
+	case errors.Is(err, store.ErrVaultEnrollmentNotFound), errors.Is(err, store.ErrVaultKeyRotationNotFound):
+		return server.ErrNotFound
 	case errors.Is(err, store.ErrSecretIdempotencyConflict):
 		return server.ErrIdempotencyConflict
 	case errors.Is(err, store.ErrVaultKeyUnavailable):
 		return server.ErrSecretVaultKeyUnavailable
 	case errors.Is(err, store.ErrVaultKeyMismatch):
 		return server.ErrSecretVaultKeyMismatch
-	case errors.Is(err, store.ErrSecretConflict), errors.Is(err, store.ErrVaultKeyConflict):
+	case errors.Is(err, store.ErrSecretConflict), errors.Is(err, store.ErrVaultKeyConflict),
+		errors.Is(err, store.ErrVaultEnrollmentConflict), errors.Is(err, store.ErrVaultEnrollmentExpired),
+		errors.Is(err, store.ErrVaultEnrollmentLimit), errors.Is(err, store.ErrVaultEnrollmentProof),
+		errors.Is(err, store.ErrVaultLifecycleInProgress),
+		errors.Is(err, store.ErrVaultKeyRotationInProgress), errors.Is(err, store.ErrVaultKeyRotationConflict),
+		errors.Is(err, store.ErrVaultKeyRotationIncomplete):
 		return server.ErrConflict
 	default:
 		return err

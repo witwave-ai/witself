@@ -21,6 +21,12 @@ import (
 // discrimination via errors.Is — status-based, not message-based.
 var ErrUnauthorized = errors.New("unauthorized")
 
+// ErrSecretVaultKeyMismatch identifies the one deterministic create failure
+// that is safe for the sealed-secret client to use as proof that the exact
+// idempotent request has no canonical receipt and targets a retired AVK epoch.
+// Other 409 responses deliberately remain untyped.
+var ErrSecretVaultKeyMismatch = errors.New("agent vault key mismatch")
+
 // ErrNotFound wraps 404 responses while preserving the server's existing
 // human-readable error text. Callers use it for capability-compatible
 // fallbacks, such as a new client talking to a pre-activity server.
@@ -202,8 +208,12 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 func responseError(resp *http.Response, fallback string) error {
 	var out struct {
 		Error string `json:"error"`
+		Code  string `json:"code"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
+		if resp.StatusCode == http.StatusConflict && out.Code == "secret_vault_key_mismatch" {
+			return fmt.Errorf("%w", ErrSecretVaultKeyMismatch)
+		}
 		return fmt.Errorf("%s", out.Error)
 	}
 	return fmt.Errorf("%s", fallback)

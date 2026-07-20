@@ -1,8 +1,9 @@
 # Client-Custodied Agent Vault
 
-Status: authoritative implementation plan. ADR 0003 is accepted. The initial
-end-to-end agent-owned vertical is implemented; the explicitly listed follow-on
-slices remain planned. Last reviewed 2026-07-18.
+Status: authoritative implementation and release plan. ADR 0003 is accepted.
+The agent-owned vertical, multi-installation enrollment, offline recovery, and
+crash-resumable AVK rotation are implemented through schema `0056`; only the
+explicitly listed follow-on slices remain planned. Last reviewed 2026-07-19.
 
 This document turns Witself's agent-secrets product into buildable slices. It is
 the authoritative custody and delivery contract wherever an older sealed-plane
@@ -22,25 +23,30 @@ same on AWS, Google Cloud, and Azure.
 
 ## Current Implementation Boundary
 
-The first working vertical includes:
+The implemented vertical includes:
 
-- migration 0055 with agent vault-key bindings, structured secrets, fields,
-  wrapped DEKs, and idempotency receipts;
+- migrations `0055` and `0056` with agent vault-key bindings, structured
+  secrets, fields, wrapped DEKs, enrollment and rotation lifecycles, and
+  idempotency receipts;
 - client-only AVK generation, owner-only local key files, AES-256-GCM field
   envelopes, password generation, TOTP parsing, and TOTP calculation;
 - agent-token HTTP routes for current-key status/registration, create,
   redacted list/search/show, one-field encrypted material access, archive, and
   restore;
-- CLI and MCP access to that same client-side custody path; and
-- account export/import of public key metadata and byte-identical encrypted
-  vault state, never the AVK.
+- short-lived recipient-bound installation enrollment, passphrase-encrypted
+  offline recovery artifacts, and client-driven, crash-resumable AVK rotation;
+- CLI access to the complete client-custody path and MCP access to the ordinary
+  secret/TOTP path (key lifecycle credentials remain CLI/TTY-only); and
+- account export/import of public key metadata, terminal lifecycle history,
+  and byte-identical encrypted vault state, never the AVK or a recovery
+  artifact.
 
-The following are deliberately not claims of this vertical: AVK transfer to a
-second installation, AVK rotation/DEK rewrap, secret update, dedicated TOTP
-enroll/delete convenience commands, runtime injection, cross-agent grants or
-group ownership, permanent secret deletion, and the live four-runtime by
-three-cloud certification matrix. Those are follow-on slices and must not be
-inferred from older target-contract documents.
+The following are deliberately not claims of this vertical: secret update,
+dedicated TOTP enroll/delete convenience commands, runtime injection,
+cross-agent grants or group ownership, permanent secret deletion,
+installation proof-of-possession beyond the implemented pairing ceremony, and
+the live four-runtime by three-cloud certification matrix. Those are follow-on
+slices and must not be inferred from older target-contract documents.
 
 ## Frozen Boundaries
 
@@ -59,8 +65,10 @@ inferred from older target-contract documents.
 9. Automatic behavior is foreground-client behavior. Hooks and routing rules
    may teach an active client to search or use a reference; they do not wake a
    provider, run a background model, or put plaintext in hydration.
-10. Multi-machine AVK enrollment is required, but its transport ceremony is a
-    separate slice. The envelope and schema must not assume one installation.
+10. Multi-machine enrollment uses a short-lived, recipient-bound ciphertext
+    relay. Pairing secrets and recovery passphrases are accepted only on the
+    controlling TTY, never through argv, environment variables, stdin/pipes,
+    JSON, MCP, messages, or transcripts.
 
 ## Threat Boundary
 
@@ -113,28 +121,58 @@ The client reconstructs AAD from immutable returned columns and rejects an
 unexpected key id/version or any authentication failure with one generic,
 value-free integrity error.
 
-### Planned rotation
+### Implemented rotation
 
-This contract is reserved for the follow-on rotation slice; the initial
-vertical does not expose update, rotation, or re-wrap operations. Updating a
-sensitive value will create a new DEK generation and ciphertext. AVK rotation
-will create a new AVK version and locally unwrap/re-wrap current DEKs without
-decrypting field values. The backend will swap wrapped-DEK material under exact
-row versions and flip the current key epoch only after the complete set
-validates. Previous local AVK material remains available until verification.
+`witself vault key rotate` starts or resumes the authenticated agent's one open
+rotation. The target is exactly `source_version + 1`. The client creates and
+durably stores that target epoch locally, unwraps each current DEK with the
+source AVK, re-wraps it with the target AVK, and stages only encrypted wrappers
+on the backend. Sensitive secret creation is blocked while the rotation is
+open; public-only secret creation remains allowed.
+
+Before commit, the client reloads every deterministic item page and validates
+the complete staged plan independently. It then requires exactly one custody
+disposition: durably publish, read back, inspect, and decrypt an offline
+recovery artifact for the exact target epoch, or explicitly accept permanent
+key-loss risk. Artifact-backed rotation binds the commit to the artifact's
+SHA-256 digest; the backend receives only the value-free mode and digest. It
+never receives the artifact, its path, passphrase, or AVK.
+
+Commit atomically updates all live `secret_deks` wrappers and flips the current
+public key epoch under exact row, item-count, plan-hash, and recovery-disposition
+fences. An interrupted command discovers the open rotation and resumes from the
+durable target epoch rather than starting a new one. A pre-existing recovery
+file is accepted only when it decrypts under the supplied passphrase and exactly
+matches the stable owner scope and target key metadata. The old local epoch is
+retained after commit. Other installations still holding only the old epoch
+fail closed and must enroll again. Cancelling retires the candidate while
+permitting a fresh candidate id to retry the same logical `source + 1` version.
+Any artifact already published for the cancelled candidate remains an inert,
+client-owned file: it is never deleted or overwritten automatically and cannot
+restore a later current binding. A retry with a fresh candidate must use a new
+output path unless its selected destination is empty.
 
 ## Local Custody
 
 ```text
 ~/.witself/
   tokens/accounts/<account>/realms/<realm>/agents/<agent>.token
-  keys/accounts/<account>/realms/<realm>/agents/<agent>.key
+  keys/accounts/<account>/realms/<realm>/agents/<agent>.key  # legacy v1
+  keys/accounts/<account>/realms/<realm>/agents/<agent>/epochs/<version>-<avk_id>.key
+  keys/accounts/<account>/realms/<realm>/agents/<agent>/enrollments/<enrollment_id>/...
+  keys/accounts/<account>/realms/<realm>/agents/<agent>/rotation/intent.state
+  keys/accounts/<account>/realms/<realm>/agents/<agent>/rotation/.intent.lock
+  journal/accounts/<account>/realms/<realm>/agents/<agent>/secret-create/<operation_hash>.json
+  journal/accounts/<account>/realms/<realm>/agents/<agent>/secret-create/.lock
 ```
 
 `WITSELF_HOME` overrides the root. The key file contains a versioned opaque
 record with schema, random `avk_` id, key version, algorithm, and 32-byte key.
-It is portable enough for an eventual keyboard enrollment flow but ordinary
-commands print only id, fingerprint, algorithm, and version.
+The immutable epoch path lets old/current/candidate epochs coexist without
+replacement; a matching legacy v1 file remains readable and can be published
+to its epoch path. Enrollment preflight state is request-scoped and owner-only.
+Ordinary commands print only id, fingerprint, algorithm, version, and value-free
+lifecycle state.
 
 Every local AVK operation first requires an installed local account binding
 that pins the account's immutable `AccountID`. The account name remains only a
@@ -150,6 +188,54 @@ and verifies it against the server binding before proceeding.
 Directories are `0700`, the file is `0600`, writes are flushed, and neither
 read nor creation follows a final-path symlink. A pre-existing malformed,
 non-regular, or overly permissive key file fails closed and is never replaced.
+
+Rotation writes its value-free, checksummed `intent.state` after the target
+epoch is durable and before remote Start. The stable owner-only `.intent.lock`
+fences all create, exact replacement/retirement, and acknowledgement deletion
+across local processes. The intent contains source/target public metadata and
+the Start retry fence, never AVK/DEK bytes, a recovery artifact/passphrase,
+token, or secret value. A CLI terminal result is printed first and then
+explicitly acknowledged; only that acknowledgement deletes the exact terminal
+intent. A crash before acknowledgement therefore replays the same
+committed/cancelled record and cannot silently start another rotation.
+
+If two installations prepare different candidates concurrently, the backend's
+one-open invariant chooses the canonical rotation. A losing pristine intent may
+be atomically replaced only by an authenticated canonical open record in the
+same owner scope whose source is the same or strictly newer. When the exact
+loser id is absent, no rotation is open, and the authenticated current binding
+has strictly advanced, the client atomically retires only that exact pristine
+intent and then fails with the normal missing/mismatched-key result. An adopted
+or otherwise non-pristine intent is never deleted by this convergence path.
+
+Sensitive create publishes its complete sealed request to the private local
+journal before the backend mutation. Every retry authenticates that exact
+request with the retained AVK epoch named by its wrappers and submits it before
+consulting the current epoch. Backend receipt replay is ordered before
+rotation/current-key validation, so an accepted request whose response was
+lost still replays after any later rotation.
+
+Only HTTP `409` carrying the exact machine code
+`secret_vault_key_mismatch` proves that the exact journal has no canonical
+receipt and targets a retired epoch. After that proof, the client reconciles
+the authenticated current AVK, re-wraps only the existing field DEKs, preserves
+the ciphertext and secret/field/DEK identities, increments each wrap revision,
+and durably compare-and-swaps the journal before sending the replacement. The
+stable owner-only `.lock`, exact-byte fence, synced temporary file, atomic
+rename, and directory sync make concurrent clients converge on one exact
+replacement. A stale contender authenticates and retries the durable winner;
+it never sends its losing random wrapper.
+
+Open-rotation conflicts, idempotency conflicts, transport failures, timeouts,
+generic errors, and the mismatch text without both the exact `409` status and
+machine code never authorize journal replacement. A crash before the CAS leaves
+the old request authoritative; a crash or lost response after the CAS retries
+the exact replacement. Successive uncommitted epochs can repeat this narrow
+transition with monotonically increasing wrap revisions. Retired AVK absence,
+corrupt state, wrap-revision overflow, or failed durable publication stops
+before a rebased request is sent. Older clients do not understand a rebased
+create journal and therefore reject it safely rather than regenerating or
+overwriting the protected value.
 
 First sensitive write:
 
@@ -172,9 +258,9 @@ valid only after the authenticated backend binding has been checked.
 
 ## Relational Model
 
-Avatar migrations now occupy `0050` through `0054`. The vault begins at
-`0055`; no lower-numbered migration may be introduced after deployed cells have
-advanced to schema 54.
+Avatar migrations occupy `0050` through `0054`. The vault begins at `0055`, and
+the AVK lifecycle is schema `0056`; no lower-numbered migration may be
+introduced after deployed cells have advanced.
 
 ### `agent_vault_keys`
 
@@ -185,8 +271,12 @@ One public row per agent key epoch:
 - `created_at`, `retired_at`, and `row_version`.
 
 There is no key-material or wrapped-key column. Exactly one current epoch is
-allowed per live agent. Registration is idempotent and rejects a different id
-or fingerprint for an already-current version.
+allowed per live agent. Migration `0056` replaces the historical all-row key
+version uniqueness constraint with `agent_vault_keys_one_live_version`, a
+partial unique index over `pending` and `current` rows. Registration is
+idempotent and rejects a different id or fingerprint for an already-current
+version; a cancelled rotation may therefore retain its retired candidate while
+a fresh id retries that same logical version.
 
 ### `secrets`
 
@@ -225,6 +315,33 @@ One row per sensitive field generation:
 There is no plaintext DEK or server root. Composite scope keys prevent moving a
 ciphertext or wrapped DEK between accounts, realms, agents, secrets, or fields.
 
+### `agent_vault_key_enrollments` and receipts
+
+One short-lived request records the exact account, realm, owner agent, current
+AVK id/version, target installation id/name, X25519 public key, pairing
+commitment, lifecycle, revision, and timestamps. The only live transfer fields
+are a source installation id, ephemeral public key, recipient-bound ciphertext,
+transfer algorithm, and consume commitment. States are `pending`, `approved`,
+`consumed`, `cancelled`, and `expired`; terminal transitions clear the transfer
+capsule. `vault_key_enrollment_receipts` stores value-free request hashes and
+result revisions for create, approve, consume, and cancel retries. The exact
+public labels are `X25519_RAW_32_BASE64URL_V1` for the target key and
+`X25519_HKDF_SHA256_AES_256_GCM_V1` for the transfer.
+
+### `agent_vault_key_rotations`, items, and receipts
+
+One `open` rotation per agent binds exact source and target AVK identities,
+logical versions, item/staged counts, lifecycle, row version, and timestamps.
+A committed row also durably records `recovery_artifact` plus the exact
+artifact SHA-256, or `risk_accepted` with no digest. Open and cancelled rows
+carry neither disposition field.
+`agent_vault_key_rotation_items` freezes each source `secret_deks` wrapper and
+stores its optional staged target wrapper plus exact revisions and a digest;
+it never stores a DEK or plaintext field value. `vault_key_rotation_receipts`
+provides value-free start, stage, commit, and cancel retry shields. A committed
+or cancelled rotation is terminal, and terminal archive rows contain no live
+staging material.
+
 ### TOTP
 
 TOTP uses one `field_kind=totp` sensitive field whose plaintext is a versioned
@@ -254,15 +371,31 @@ make an otherwise successful read unavailable.
 
 ## Backend API
 
-The unmarked routes below are implemented in the initial vertical. Routes
-marked **planned** freeze the intended shape for a later slice and are not
-registered by the current server.
+The unmarked routes below are implemented. Routes marked **planned** freeze the
+intended shape for a later slice and are not registered by the current server.
 
 All agent routes derive account, realm, and owner agent from the bearer token.
 The first slice accepts no caller-supplied owner override.
 
 - `POST /v1/vault/key-epochs` registers public current-key metadata.
 - `GET /v1/vault/key-epochs/current` returns public key status.
+- `POST /v1/vault/enrollments` creates a short-lived target request.
+- `GET /v1/vault/enrollments` and
+  `GET /v1/vault/enrollments/{enrollment}` return value-free lifecycle state.
+- `POST /v1/vault/enrollments/{enrollment}:approve` stores one
+  recipient-bound transfer capsule; `:receive` returns that opaque capsule only
+  to the target; `:consume` proves durable receipt and clears it; `:cancel`
+  terminates pending or approved work.
+- `POST /v1/vault/rotations` starts one exact source-to-target rotation.
+- `GET /v1/vault/rotations/open` discovers crash-resumable work;
+  `GET /v1/vault/rotations/{rotation}` returns one lifecycle record; and
+  `GET /v1/vault/rotations/{rotation}/items` pages its deterministic wrapper
+  plan.
+- `POST /v1/vault/rotations/{rotation}:stage`, `:commit`, and `:cancel`
+  mutate that plan under exact revisions and idempotency receipts. Commit
+  requires either `{mode: "recovery_artifact", artifact_sha256: "..."}` or
+  `{mode: "risk_accepted"}`; the choice participates in request hashing and is
+  retained on the terminal lifecycle row and value-free audit event.
 - `POST /v1/secrets` creates public fields and client-encrypted envelopes in one
   transaction. Clients generate immutable `sec_`, `fld_`, and `dek_` ids before
   AAD construction.
@@ -275,8 +408,6 @@ The first slice accepts no caller-supplied owner override.
 - `POST /v1/secrets/{id}/fields/{field_id}:access` authorizes and returns exactly
   one ciphertext plus wrapped-DEK package with `Cache-Control: no-store`. It
   never returns plaintext.
-- **Planned:** `POST /v1/vault/key-epochs/{version}:rewrap` atomically replaces
-  a bounded batch of wrapped DEKs under exact guards.
 
 Every mutation requires `Idempotency-Key`. Bodies use the `witself.v0` contract
 and carry explicit algorithms and versions. The server validates size, ids,
@@ -289,10 +420,50 @@ The implemented command surface is:
 
 ```text
 witself vault key init|status
+witself vault key enroll begin|approve|complete|list|status|cancel
+witself vault key recovery export|inspect|import
+witself vault key rotate (--recovery-out FILE|--accept-unrecoverable-key-loss)
+witself vault key rotation status|cancel
 witself password generate
 witself secret create|list|search|show|reveal|archive|restore
 witself totp show|code SECRET FIELD
 ```
+
+Exact lifecycle forms are:
+
+```text
+witself vault key enroll begin [--location NAME] [--ttl DURATION] [agent connection flags]
+witself vault key enroll approve ENROLLMENT_ID [--location NAME] [agent connection flags]
+witself vault key enroll complete ENROLLMENT_ID [--location NAME] [agent connection flags]
+witself vault key enroll list [--state STATE] [--limit N] [agent connection flags]
+witself vault key enroll status ENROLLMENT_ID [agent connection flags]
+witself vault key enroll cancel ENROLLMENT_ID [agent connection flags]
+witself vault key recovery export --out FILE [agent connection flags]
+witself vault key recovery inspect --file FILE
+witself vault key recovery import --file FILE [agent connection flags]
+witself vault key rotate (--recovery-out FILE|--accept-unrecoverable-key-loss) [agent connection flags]
+witself vault key rotation status|cancel [ROTATION_ID] [agent connection flags]
+```
+
+`enroll begin` displays its one-time pairing secret only on `/dev/tty`, and
+`enroll approve` reads it there with hidden input. Recovery export/import and
+artifact-backed rotation read the passphrase with hidden TTY input; export and
+rotation require confirmation. `inspect`
+is offline and returns public artifact metadata without decrypting or
+connecting. No pairing secret or passphrase is accepted through argv,
+environment variables, stdin/pipes, JSON, or MCP. The recovery artifact is
+never overwritten, is scoped to stable account/realm/agent ids and one exact
+AVK identity, and uses fixed Argon2id v1 parameters plus AES-256-GCM. The
+parameters are time cost 3, memory 32,768 KiB, parallelism 1, and a fresh
+16-byte salt; passphrases are 12 through 1,024 bytes and artifacts are capped at
+4 KiB. The backend never receives the artifact, passphrase, path, derived key,
+or AVK. `--recovery-out` is the production default: its destination must be an
+external or synchronously replicated failure domain before commit. A file on
+the same disk is durably written but does not protect against loss of that disk.
+`--accept-unrecoverable-key-loss` is a deliberate automation/test escape hatch,
+not a production backup policy. Trusted unattended clients use the typed local
+recovery-sink service interface and obtain passphrases from their own credential
+source; key lifecycle credentials remain absent from MCP and the backend.
 
 `secret create` accepts one strict JSON document through `--file` or `--stdin`
 and requires `--idempotency-key KEY`. Reuse that exact key only to retry the
@@ -336,8 +507,8 @@ character from every enabled class, a 32-character default, and optional
 ambiguous-character exclusion. Passphrases require a vendored, versioned word
 list and are not made from an ad-hoc dictionary.
 
-The planned `update`, TOTP enrollment/removal convenience commands, and
-`witself run` reference injection surface are not part of the initial vertical.
+Secret `update`, TOTP enrollment/removal convenience commands, and the
+`witself run` reference injection surface remain deferred.
 
 ## MCP and Provider Routing
 
@@ -362,10 +533,13 @@ Initial tools:
 
 The read-only MCP profile retains only secret search and show. The implemented
 `--no-value-tools` gate independently removes reveal, password-generation, and
-TOTP-code tools from a full profile. Update, lifecycle, references, and
-side-effect-oriented runtime injection are follow-on surfaces. Later filling
-should prefer a side-effect-oriented path where a runtime can consume a
-reference without putting plaintext in model context.
+TOTP-code tools from a full profile. AVK enrollment, recovery, and rotation are
+intentionally not MCP tools: the CLI keeps pairing secrets and passphrases on
+the controlling TTY and keeps lifecycle credentials out of model-visible tool
+arguments and results. Secret update, references, and side-effect-oriented
+runtime injection are follow-on surfaces. Later filling should prefer a
+side-effect-oriented path where a runtime can consume a reference without
+putting plaintext in model context.
 
 Witself-owned portable transcript capture holds each content-bearing turn in
 the owner-only local outbox until an agent response, stop/failure, session end,
@@ -389,14 +563,31 @@ Codex, Claude Code, Cursor, and Grok Build receive the same rules:
 
 ## Export and Cloud Portability
 
-The archive adds key metadata, secrets, fields, DEKs, and mutation receipts in
-foreign-key order. It carries ciphertext byte-for-byte and never local AVK
-material. The manifest and import allowlist require every introduced table,
-even when empty.
+The schema-56 archive adds public key metadata, terminal enrollment/rotation
+history and receipts, secrets, fields, wrapped DEKs, and secret mutation
+receipts in foreign-key order. Export fails while any enrollment is `pending`
+or `approved` or any rotation is `open`; it never freezes or serializes an
+in-flight transfer/staging capsule. Terminal enrollment transfer fields are
+purged, terminal rotation item staging rows are absent, and import rejects a
+terminal lifecycle that carries either form of live state.
 
-After import into an AWS, GCP, or Azure cell, an installation holding the same
-AVK can decrypt unchanged envelopes. Full-text indexes are derived and rebuilt.
-No source-cloud key call or re-wrap occurs.
+Irreversible account close and deletion of the affected agent use the same
+active-lifecycle conflict fence because either operation revokes the tokens
+needed to finish or cancel the work. Realm deletion already requires no live
+agents. Enrollment and rotation cancellation remain available while an account
+is suspended, so cancel first and then retry export, agent deletion, or close.
+
+The archive carries ciphertext and wrapped DEKs byte-for-byte. It never carries
+a local `.key`, raw AVK, target private key, pairing secret, recovery
+passphrase, or recovery artifact. The manifest and import allowlist require
+every introduced stream, even when empty. The offline recovery artifact is a
+separate client-owned file and must be transferred independently.
+
+After import into an AWS, GCP, or Azure cell, an installation must separately
+provide the matching AVK by moving its protected local key, importing its
+offline recovery artifact, or enrolling from another active installation.
+Then it can decrypt unchanged envelopes. Full-text indexes are derived and
+rebuilt. No source-cloud key call or re-wrap occurs.
 
 ## Implementation Slices
 
@@ -423,9 +614,10 @@ Exit: one authoritative decrypt owner and no migration collision.
 
 Exit: sensitive bytes round-trip locally and no server component has a key.
 
-### 2. Schema and store — implemented
+### 2. Schema and store — implemented through `0056`
 
-- Migration `0055`, constraints, search indexes, and migration tests.
+- Migrations `0055` and `0056`, constraints, search indexes, lifecycle tables,
+  and migration tests.
 - Agent-scoped key registration plus secret create/query/lifecycle store
   methods.
 - Idempotency, optimistic concurrency, lifecycle, audit, and usage.
@@ -446,6 +638,9 @@ Exit: local clients manage envelopes through one portable API.
 
 - Key init/status, password generation, create/search/show/reveal, and
   archive/restore are implemented. Update is a follow-on.
+- Enrollment begin/approve/complete/list/status/cancel, offline recovery
+  export/inspect/import, and recovery-gated rotation/start-resume/status/cancel
+  are implemented with the controlling-TTY credential boundary.
 - Safe stdin/file inputs, JSON redaction, and actionable missing/wrong-key
   errors are implemented. References are a follow-on.
 
@@ -471,16 +666,21 @@ the same vault without backend inference.
 
 - Strict `otpauth://` parser, Base32 handling, SHA1/SHA256/SHA512 HOTP/TOTP,
   known RFC vectors, and local code generation.
-- `witself run` reference resolution and child-only environment injection.
+- **Planned:** `witself run` reference resolution and child-only environment
+  injection.
 - QR decoding remains optional after URI/seed enrollment works.
 
 Exit: an agent can store setup material, generate a valid code locally, and run
 a process with a secret without printing it.
 
-### 7. Archive and operations — archive implemented; operations evidence planned
+### 7. Lifecycle, archive, and operations — lifecycle/archive implemented;
+operations evidence planned
 
-- Export/import streams and strict validators for every sealed table.
-- Ciphertext round-trip and wrong/missing-key tests.
+- Short-lived enrollment relay, client-only offline recovery, and crash-resumable
+  client-driven rotation.
+- Export/import streams and strict validators for every sealed and schema-56
+  lifecycle table, including active-work export blocking.
+- Ciphertext round-trip, wrong/missing-key, cancel/retry, and migration tests.
 - Audit query, usage, metrics, retention, backup, and key-loss runbooks.
 
 Exit: encrypted vault state moves losslessly among cells and remains operable
@@ -498,10 +698,14 @@ Exit: release evidence covers all 12 runtime/cloud combinations.
 
 ## Deferred Slices
 
-Multi-device enrollment, recovery packages, group/cross-agent sharing,
-attachments, installation proof-of-possession, and browser-native filling each
-receive a separate threat model and acceptance suite. Versioned key epochs and
-immutable bindings keep them additive.
+Secret update/replacement, grants and group/cross-agent sharing, runtime
+reference injection, dedicated TOTP enrollment/removal commands, permanent
+secret deletion, attachments, OS keychain/secure-enclave integration,
+additional installation proof-of-possession, and browser-native filling remain
+separate slices. Versioned key epochs and immutable bindings keep them
+additive. Gemini and GitHub Copilot adapters and the live four-runtime by
+three-cloud certification matrix also remain release work, not backend schema
+variants.
 
 ## Full Product Done Means
 

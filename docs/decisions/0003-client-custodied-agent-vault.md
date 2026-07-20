@@ -1,7 +1,8 @@
 # ADR 0003: Agent Secrets Use Client-Custodied Vault Keys
 
-Status: accepted; initial end-to-end vertical implemented, with the explicitly
-listed follow-on capabilities still planned (2026-07-18).
+Status: accepted; end-to-end vertical plus multi-installation enrollment,
+offline recovery, and crash-resumable rotation implemented through schema
+`0056`, with the explicitly listed follow-ons still planned (2026-07-19).
 
 ## Context
 
@@ -83,15 +84,18 @@ format:
 
 ```text
 ~/.witself/tokens/accounts/<account>/realms/<realm>/agents/<agent>.token
-~/.witself/keys/accounts/<account>/realms/<realm>/agents/<agent>.key
+~/.witself/keys/accounts/<account>/realms/<realm>/agents/<agent>.key  # legacy v1
+~/.witself/keys/accounts/<account>/realms/<realm>/agents/<agent>/epochs/<version>-<avk_id>.key
 ```
 
 `WITSELF_HOME` overrides the root. The key file is versioned, created once with
 exclusive creation, owner-only directories, mode `0600`, an atomic durable
 write, regular-file checks, and no silent overwrite. Ordinary output exposes
-only the key id/fingerprint. The initial file may be protected by host
-permissions; OS keychain and passphrase-protected capsules are additive
-hardening, not a backend recovery path.
+only the key id/fingerprint. Immutable epoch files allow a rotation source and
+target to coexist; a matching legacy v1 file remains supported. Local files may
+be protected by host permissions; OS keychain/secure-enclave integration is
+additive hardening, while the implemented offline recovery artifact remains a
+separate client-owned recovery path.
 
 Access to that path requires a trusted local account binding containing the
 account's immutable `AccountID`; the account name is only a local path alias.
@@ -116,17 +120,58 @@ authorized redacted inventory but cannot create, reveal, update, generate TOTP
 from, or inject sensitive values.
 
 Account export includes all public metadata, ciphertext, wrapped DEKs, key ids,
-and value-free history so import into another cell is lossless. The AVK travels
-separately with the client. An archive without the matching AVK remains a
-complete encrypted archive but cannot yield plaintext. Loss of every AVK copy
-is deliberately unrecoverable.
+and terminal value-free lifecycle history so import into another cell is
+lossless. Export is rejected while an enrollment is pending/approved or a
+rotation is open. The archive never contains an AVK, local key file, enrollment
+private key, pairing secret, recovery passphrase, or recovery artifact. One of
+those client-owned key paths must travel separately. An archive without the
+matching AVK remains a complete encrypted archive but cannot yield plaintext.
+Loss of every AVK copy and every usable recovery artifact is deliberately
+unrecoverable.
 
-Multiple-machine enrollment is required but its exact transfer ceremony is a
-follow-on. Explicitly paired installations will end with the same AVK or a
-successor version. The flow must support two laptops without a QR code, require
-human confirmation by default, and allow an AI to orchestrate opaque local
-steps without exposing raw key bytes to the model, MCP, messages, or
-transcripts. Versioned AVK ids and wrappers make that additive.
+Multi-installation enrollment is an implemented, short-lived relay. The target
+creates an X25519 key pair and pairing commitment locally; the backend stores
+only the target public key and commitment. An already-enrolled installation
+authenticates the pairing secret, seals the exact AVK to that recipient, and
+uploads only an ephemeral public key and recipient-bound ciphertext. The target
+durably installs the AVK, proves consumption, and the backend purges the live
+transfer capsule. The pairing secret is displayed/read only on the controlling
+TTY and is never accepted through argv, environment variables, stdin/pipes,
+JSON, MCP, messages, or transcripts.
+
+Offline recovery is also implemented entirely client-side. Export writes a
+new, never-overwritten artifact containing the exact AVK encrypted with fixed
+Argon2id-v1 parameters and AES-256-GCM, authenticated to stable account, realm,
+agent, and key identity. Import succeeds only when that identity matches the
+backend's current public binding. Recovery passphrases are read with hidden
+controlling-TTY input and never sent to Witself. Public artifact inspection
+requires neither a passphrase nor a backend connection.
+
+AVK rotation is client-driven and crash-resumable. It creates exactly
+`source_version + 1`, persists that candidate locally, stages only newly wrapped
+DEKs, verifies the complete deterministic plan, and atomically flips every
+wrapper and the current public epoch under exact fences. Immediately before
+commit, the client must either durably publish and read-back/decrypt-verify a
+passphrase recovery artifact for the exact target, or explicitly accept
+permanent key-loss risk. The committed lifecycle row records only the
+`recovery_artifact` mode and artifact SHA-256, or `risk_accepted`; the backend
+never receives the artifact, path, passphrase, or AVK. Sensitive secret creation
+is blocked while a rotation is open. The old local epoch is retained; other
+installations must enroll again after commit. Cancelling retires the candidate
+while allowing a fresh id to retry the same logical target version.
+
+Production recovery output must be external or synchronously replicated before
+the sink acknowledges durability. A recovery file on the same physical disk is
+useful for process-level recovery but is not an independent device-loss copy.
+The typed sink remains entirely client-side so trusted automation can supply its
+own storage and credential source without adding provider-specific backend
+custody or exposing key lifecycle credentials through MCP.
+
+Account export, irreversible account close, and deletion of an agent are fenced
+while that agent has pending/approved enrollment or an open rotation. Those
+operations would otherwise revoke tokens or move state needed to settle the
+lifecycle. Cancellation remains available on a suspended account; cancel first
+and then retry the export or destructive operation.
 
 Bearer tokens continue to govern integrity and authorization in the first
 slice, as they do for the rest of Witself. A stolen token can attempt destructive
@@ -140,10 +185,11 @@ rather than implying that client custody replaces token security.
 - Secret name, description, template, tags, field names, and fields explicitly
   marked non-sensitive can be indexed and searched in PostgreSQL. Sensitive
   values cannot be searched by the backend.
-- `secret list`, `secret search`, and `secret show` are redacted. `secret
-  reveal`, `totp code`, reference resolution, and `witself run` decrypt locally.
-- `witself run` and reference-based injection are preferred to printing a
-  value. Deliberately value-returning CLI/MCP operations may place plaintext
+- `secret list`, `secret search`, and `secret show` are redacted. Implemented
+  `secret reveal` and `totp code` decrypt locally; reference resolution and
+  `witself run` remain planned.
+- Once implemented, `witself run` and reference-based injection are preferred
+  to printing a value. Deliberately value-returning CLI/MCP operations may place plaintext
   inside the invoking provider's client boundary and must be explicit,
   auditable, and disableable with `--no-value-tools`.
 - TOTP seeds use the same sealed envelope. Parsing `otpauth://` input and
@@ -159,14 +205,14 @@ rather than implying that client custody replaces token security.
 
 ## Deferred Without Blocking the Core
 
-- installation-to-installation AVK enrollment and lost-device handling;
-- optional OS keychain, secure enclave, or passphrase capsule protection;
-- user-controlled encrypted recovery packages;
+- secret update/replacement and dedicated TOTP enrollment/removal commands;
+- runtime reference resolution and side-effect-oriented injection;
+- optional OS keychain or secure enclave protection;
 - installation proof-of-possession and signed mutation intents;
 - agent-to-agent or group sharing using recipient-specific key wrappers;
 - encrypted attachments and large-object streaming;
 - browser-specific filling that keeps values out of model context;
-- polished AVK rotation orchestration beyond versioned DEK re-wrap primitives.
+- permanent secret deletion and its recovery/retention policy.
 
 None of these may introduce a backend-held plaintext or master-key path.
 

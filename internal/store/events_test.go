@@ -80,7 +80,13 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAvatarReset, VerbAvatarPolicyChanged, VerbAvatarStyleChanged,
 		VerbAvatarQuotaChanged, VerbAvatarPayloadCompacted,
 		VerbAvatarStyleRolloutCompleted, VerbAvatarStyleRolloutSuperseded,
-		VerbVaultKeyRegistered, VerbSecretCreated, VerbSecretUpdated,
+		VerbVaultKeyRegistered,
+		VerbVaultEnrollmentRequested, VerbVaultEnrollmentApproved,
+		VerbVaultEnrollmentConsumed, VerbVaultEnrollmentCancelled,
+		VerbVaultEnrollmentExpired,
+		VerbVaultKeyRotationStarted, VerbVaultKeyRotationStaged,
+		VerbVaultKeyRotationCommitted, VerbVaultKeyRotationCancelled,
+		VerbSecretCreated, VerbSecretUpdated,
 		VerbSecretArchived, VerbSecretRestored,
 		VerbSecretMaterialDelivered, VerbSecretDEKRewrapped,
 
@@ -115,6 +121,22 @@ func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
 		keys []string
 	}{
 		{VerbVaultKeyRegistered, []string{"agent_id", "key_id", "key_version", "algorithm"}},
+		{VerbVaultKeyRotationStarted, []string{
+			"agent_id", "rotation_id", "source_key_id", "source_key_version",
+			"target_key_id", "target_key_version", "item_count",
+		}},
+		{VerbVaultKeyRotationStaged, []string{
+			"agent_id", "rotation_id", "staged_batch_count", "staged_count",
+			"item_count", "rotation_revision",
+		}},
+		{VerbVaultKeyRotationCommitted, []string{
+			"agent_id", "rotation_id", "source_key_id", "source_key_version",
+			"target_key_id", "target_key_version", "item_count", "recovery_disposition_mode",
+		}},
+		{VerbVaultKeyRotationCancelled, []string{
+			"agent_id", "rotation_id", "source_key_id", "source_key_version",
+			"target_key_id", "target_key_version", "item_count", "staged_count",
+		}},
 		{VerbSecretCreated, []string{"agent_id", "secret_id", "field_count", "sensitive_field_count"}},
 		{VerbSecretUpdated, []string{"agent_id", "secret_id", "secret_revision", "changed_field_count"}},
 		{VerbSecretArchived, []string{"agent_id", "secret_id", "secret_revision"}},
@@ -138,12 +160,20 @@ func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
 			return "agent_1"
 		case "key_id":
 			return "avk_aaaaaaaaaaaaaaaa"
+		case "source_key_id":
+			return "avk_aaaaaaaaaaaaaaaa"
+		case "target_key_id":
+			return "avk_bbbbbbbbbbbbbbbb"
+		case "rotation_id":
+			return "vkr_aaaaaaaaaaaaaaaa"
 		case "secret_id":
 			return "sec_aaaaaaaaaaaaaaaa"
 		case "field_id":
 			return "fld_aaaaaaaaaaaaaaaa"
 		case "algorithm":
 			return SecretAEADAlgorithm
+		case "recovery_disposition_mode":
+			return VaultKeyRotationRiskAccepted
 		default:
 			return "1"
 		}
@@ -151,9 +181,13 @@ func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.verb, func(t *testing.T) {
 			spec := verbMetadataSchema[tc.verb]
-			if !reflect.DeepEqual(spec.requiredKeys, tc.keys) || !reflect.DeepEqual(spec.allowedKeys, tc.keys) {
-				t.Fatalf("schema = required %#v allowed %#v, want exact %#v",
-					spec.requiredKeys, spec.allowedKeys, tc.keys)
+			allowed := append([]string(nil), tc.keys...)
+			if tc.verb == VerbVaultKeyRotationCommitted {
+				allowed = append(allowed, "recovery_artifact_sha256")
+			}
+			if !reflect.DeepEqual(spec.requiredKeys, tc.keys) || !reflect.DeepEqual(spec.allowedKeys, allowed) {
+				t.Fatalf("schema = required %#v allowed %#v, want %#v / %#v",
+					spec.requiredKeys, spec.allowedKeys, tc.keys, allowed)
 			}
 			if !reflect.DeepEqual(spec.allowedActors, []string{ActorAgent}) {
 				t.Fatalf("allowed actors = %#v, want agent only", spec.allowedActors)
@@ -168,6 +202,12 @@ func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
 			}
 			if err := checkEventShape(input); err != nil {
 				t.Fatalf("valid value-free event: %v", err)
+			}
+			if tc.verb == VerbVaultKeyRotationCommitted {
+				input.Metadata["recovery_artifact_sha256"] = strings.Repeat("a", 64)
+				if err := checkEventShape(input); err != nil {
+					t.Fatalf("valid event with optional value-free metadata: %v", err)
+				}
 			}
 			for _, key := range forbidden {
 				if slicesContains(spec.allowedKeys, key) {

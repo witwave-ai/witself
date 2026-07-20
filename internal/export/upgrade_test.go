@@ -2,6 +2,7 @@ package export
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -397,6 +398,122 @@ func TestSchema54AgentSecretsUpgradePreservesExistingRows(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, row) {
 		t.Fatalf("schema 54 identity upgrade changed an existing row: %#v", got)
+	}
+}
+
+func TestSchema55VaultKeyLifecycleUpgradeRetiresLegacyPending(t *testing.T) {
+	upgrade := UpgraderFor(55)
+	if upgrade == nil {
+		t.Fatal("schema 55 vault-key lifecycle upgrader is not registered")
+	}
+	const createdAt = "2026-07-19T12:34:56.123456Z"
+	row := map[string]any{
+		"id":              "avk_aaaaaaaaaaaaaaaa",
+		"lifecycle_state": "pending",
+		"row_version":     json.Number("9007199254740993"),
+		"created_at":      createdAt,
+		"retired_at":      nil,
+	}
+	upgraded, err := upgrade("agent_vault_keys", row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded["lifecycle_state"] != "retired" || upgraded["retired_at"] != createdAt {
+		t.Fatalf("legacy pending vault key = %#v", upgraded)
+	}
+	if got := upgraded["row_version"]; got != json.Number("9007199254740993") {
+		t.Fatalf("legacy pending row_version = %#v, want unchanged", got)
+	}
+
+	current := map[string]any{
+		"id": "avk_bbbbbbbbbbbbbbbb", "lifecycle_state": "current",
+	}
+	got, err := upgrade("agent_vault_keys", current)
+	if err != nil || !reflect.DeepEqual(got, current) {
+		t.Fatalf("legacy current vault key changed: %#v / %v", got, err)
+	}
+	other := map[string]any{"id": "agent_1"}
+	got, err = upgrade("agents", other)
+	if err != nil || !reflect.DeepEqual(got, other) {
+		t.Fatalf("unrelated schema 55 row changed: %#v / %v", got, err)
+	}
+}
+
+func TestSchema55VaultKeyLifecycleUpgradeRejectsMalformedPending(t *testing.T) {
+	upgrade := UpgraderFor(55)
+	valid := func() map[string]any {
+		return map[string]any{
+			"lifecycle_state": "pending",
+			"row_version":     json.Number("7"),
+			"created_at":      "2026-07-19T12:34:56Z",
+			"retired_at":      nil,
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "missing lifecycle state", mutate: func(row map[string]any) { delete(row, "lifecycle_state") }},
+		{name: "non-string lifecycle state", mutate: func(row map[string]any) { row["lifecycle_state"] = true }},
+		{name: "unknown lifecycle state", mutate: func(row map[string]any) { row["lifecycle_state"] = "staged" }},
+		{name: "missing created timestamp", mutate: func(row map[string]any) { delete(row, "created_at") }},
+		{name: "non-string created timestamp", mutate: func(row map[string]any) { row["created_at"] = json.Number("1") }},
+		{name: "invalid created timestamp", mutate: func(row map[string]any) { row["created_at"] = "not-a-timestamp" }},
+		{name: "missing retired timestamp", mutate: func(row map[string]any) { delete(row, "retired_at") }},
+		{name: "non-null retired timestamp", mutate: func(row map[string]any) { row["retired_at"] = "2026-07-19T12:34:56Z" }},
+		{name: "missing row version", mutate: func(row map[string]any) { delete(row, "row_version") }},
+		{name: "wrong row version type", mutate: func(row map[string]any) { row["row_version"] = int64(7) }},
+		{name: "fractional row version", mutate: func(row map[string]any) { row["row_version"] = json.Number("1.5") }},
+		{name: "zero row version", mutate: func(row map[string]any) { row["row_version"] = json.Number("0") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := valid()
+			tc.mutate(row)
+			if _, err := upgrade("agent_vault_keys", row); err == nil {
+				t.Fatal("malformed legacy pending vault key was accepted")
+			}
+		})
+	}
+}
+
+func TestSchema55VaultKeyLifecycleArchiveUpgradeRoundTrip(t *testing.T) {
+	const createdAt = "2026-07-19T12:34:56.123456Z"
+	source := &fixtureSource{table: "agent_vault_keys", rows: []map[string]any{{
+		"id":              "avk_aaaaaaaaaaaaaaaa",
+		"lifecycle_state": "pending",
+		"row_version":     json.Number("9007199254740993"),
+		"created_at":      createdAt,
+		"retired_at":      nil,
+	}}}
+	var archive bytes.Buffer
+	if err := Write(context.Background(), &archive, Manifest{
+		SchemaVersion: 55,
+		AccountID:     "acc_schema55",
+		Status:        "suspended",
+	}, []RowSource{source}); err != nil {
+		t.Fatal(err)
+	}
+
+	var restored map[string]any
+	if _, err := Read(context.Background(), &archive, ImportOptions{
+		CurrentSchema: 56,
+		Row: func(table string, raw []byte) error {
+			if table != "agent_vault_keys" {
+				return errors.New("unexpected archive table")
+			}
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber()
+			return decoder.Decode(&restored)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if restored["lifecycle_state"] != "retired" || restored["retired_at"] != createdAt {
+		t.Fatalf("round-tripped legacy pending vault key = %#v", restored)
+	}
+	if got := restored["row_version"]; got != json.Number("9007199254740993") {
+		t.Fatalf("round-tripped row_version = %#v, want unchanged", got)
 	}
 }
 

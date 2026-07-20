@@ -1,15 +1,15 @@
 # Witself API Routes
 
-> **Sealed-plane implementation amendment (accepted 2026-07-18):** the current
-> agent-owned ciphertext API is `GET /v1/vault/key-epochs/current`, `POST
-> /v1/vault/key-epochs`, `GET|POST /v1/secrets`, `GET
-> /v1/secrets/{secret_id}`, `POST /v1/secrets/{secret_id}:archive`, `POST
-> /v1/secrets/{secret_id}:restore`, and `POST
-> /v1/secrets/{secret_id}/fields/{field_id}:access`. The access route returns
-> exactly one ciphertext plus wrapped-DEK package; it never reveals plaintext.
-> Secret update/rotation/delete/grants, server-side reveal, password generation,
-> and server-side TOTP routes described in target sections below are not
-> implemented and are superseded where they conflict with
+> **Sealed-plane implementation amendment (accepted 2026-07-19):** schema 56
+> adds multi-installation AVK enrollment and crash-resumable AVK rotation to the
+> current agent-owned ciphertext API. The exact implemented routes are listed in
+> [Implemented sealed-plane routes](#implemented-sealed-plane-routes). They
+> return public metadata, ciphertext, and wrapped DEKs only; the server never
+> receives an AVK, pairing secret, enrollment private key, recovery artifact or
+> passphrase, plaintext secret value, TOTP seed/code, or AI/model inference.
+> Secret update/delete/grants, group ownership, runtime injection, and
+> server-side reveal/TOTP routes described in target sections below remain
+> unregistered and are superseded wherever they conflict with
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
 
 Status: draft. Decision: Witself uses resource-oriented `/v1` routes with
@@ -33,6 +33,57 @@ per-recipient delivery snapshots. Direct message actions include `:claim`,
 `:renew`, `:release`, and atomic `:complete`. `/v1/message-requests` adds
 message-backed open jobs, client-ranked selection, and separate exact claim
 fences. This is not a deployment or release statement.
+
+## Implemented sealed-plane routes
+
+```text
+POST /v1/vault/key-epochs
+GET  /v1/vault/key-epochs/current
+
+POST /v1/vault/enrollments
+GET  /v1/vault/enrollments
+GET  /v1/vault/enrollments/{enrollment}
+POST /v1/vault/enrollments/{enrollment}:approve
+POST /v1/vault/enrollments/{enrollment}:receive
+POST /v1/vault/enrollments/{enrollment}:consume
+POST /v1/vault/enrollments/{enrollment}:cancel
+
+POST /v1/vault/rotations
+GET  /v1/vault/rotations/open
+GET  /v1/vault/rotations/{rotation}
+GET  /v1/vault/rotations/{rotation}/items
+POST /v1/vault/rotations/{rotation}:stage
+POST /v1/vault/rotations/{rotation}:commit
+POST /v1/vault/rotations/{rotation}:cancel
+
+GET  /v1/secrets
+POST /v1/secrets
+GET  /v1/secrets/{secret_id}
+POST /v1/secrets/{secret_id}:archive
+POST /v1/secrets/{secret_id}:restore
+POST /v1/secrets/{secret_id}/fields/{field_id}:access
+```
+
+Every route derives account, realm, and owner agent from the full bearer token;
+there is no caller-supplied agent scope. Mutations require `Idempotency-Key`
+and exact optimistic guards. `:access` returns one ciphertext/wrapped-DEK
+package with `Cache-Control: no-store`, never plaintext. Enrollment transfer
+data is recipient-bound, short-lived, and purged at a terminal transition.
+Rotation stages replacement wrappers away from live `secret_deks`, exposes one
+open run for crash recovery, and commits the fully verified plan atomically.
+Sensitive secret create is rejected while a rotation is open. When an account
+is suspended, value-free enrollment list/exact reads and rotation open/exact
+reads remain available, as do the safety-only enrollment and rotation cancel
+operations. Enrollment receive and rotation item pages can expose opaque sealed
+material and remain active-only; all other lifecycle mutations also require an
+active account. Account export,
+irreversible account close, and deletion of the affected agent return conflict
+while pending/approved enrollment or open rotation work exists; cancel first.
+
+Offline recovery has no HTTP route. Export, inspect, and import operate on a
+client-owned artifact; passphrases and AVKs never cross the API. Enrollment,
+recovery, and rotation likewise have no MCP tools because their credentials and
+ceremonies are intentionally confined to the CLI and controlling TTY.
 
 ## Decision
 
@@ -270,32 +321,28 @@ POST /v1/agents/{agent_id}/facts
 GET  /v1/groups/{group_id}/facts
 POST /v1/groups/{group_id}/facts
 
-# Sealed plane: secrets + TOTP. Reveal-gated; never embedded, recalled,
-# in the self-digest, or in the plaintext export.
-GET  /v1/secrets             # metadata only; ?all_agents=true is operator/admin-only
+# Implemented sealed plane: agent-owned, ciphertext-only API.
+# See the authoritative route list above for key enrollment and rotation.
+GET  /v1/secrets
 POST /v1/secrets
-GET  /v1/secrets/{secret_id} # metadata only; values require :reveal
-PATCH /v1/secrets/{secret_id}
-POST /v1/secrets/{secret_id}:reveal
-POST /v1/secrets/{secret_id}:rotate
-POST /v1/secrets/{secret_id}:copy
+GET  /v1/secrets/{secret_id}
 POST /v1/secrets/{secret_id}:archive
 POST /v1/secrets/{secret_id}:restore
+POST /v1/secrets/{secret_id}/fields/{field_id}:access
+
+# Target-only sealed routes; not registered in schema 56.
+PATCH  /v1/secrets/{secret_id}
 DELETE /v1/secrets/{secret_id}
-POST /v1/secrets/{secret_id}:grant
-POST /v1/secrets/{secret_id}:revoke
-
-GET  /v1/agents/{agent_id}/secrets
-POST /v1/agents/{agent_id}/secrets
-GET  /v1/groups/{group_id}/secrets
-POST /v1/groups/{group_id}/secrets
-
-POST /v1/totp/{secret_id}:enroll
-GET  /v1/totp/{secret_id}    # enrollment metadata only; seed requires :reveal
-POST /v1/totp/{secret_id}:code
+POST   /v1/secrets/{secret_id}:copy
+POST   /v1/secrets/{secret_id}:grant
+POST   /v1/secrets/{secret_id}:revoke
+GET    /v1/agents/{agent_id}/secrets
+POST   /v1/agents/{agent_id}/secrets
+GET    /v1/groups/{group_id}/secrets
+POST   /v1/groups/{group_id}/secrets
+POST   /v1/totp/{secret_id}:enroll
+GET    /v1/totp/{secret_id}
 DELETE /v1/totp/{secret_id}
-
-POST /v1/password:generate
 
 POST /v1/sessions:start      # target; not implemented
 POST /v1/sessions:end        # target; not implemented
@@ -642,42 +689,32 @@ audit events; read-only recall does neither:
   value is returned once.
 - `POST /v1/tokens/{token_id}:revoke` immediately invalidates a live operator
   or agent token by token ID. It never requires or returns the raw token value.
-- `POST /v1/secrets/{secret_id}:reveal` is the explicit, audited value-returning
-  op (`witself secret reveal`). It runs the reveal ceremony, requires the
-  `secret:reveal` scope, and is audited as `secret.reveal`. The field selector
-  and audit reason travel in the request body, never the path. The response is
-  either the client-decryptable envelope or, for token-only pods, the
-  server-mediated plaintext behind the `server_side_decrypt` capability — see
-  [key-hierarchy.md](key-hierarchy.md) for the two shapes; the chosen path is
-  recorded on the audit event. This route is disabled by the MCP
-  `--no-value-tools` switch. It has no `GET` equivalent: secret values are never
-  reachable by a plain read.
-- `POST /v1/secrets/{secret_id}:rotate` replaces secret field values (or
-  re-generates them) and re-wraps the per-secret/field DEK, audited as
-  `secret.updated`/`key.rotated` as applicable. It does not return plaintext;
-  callers reveal separately.
+- `POST /v1/secrets/{secret_id}/fields/{field_id}:access` is the implemented
+  explicit material-delivery route. It returns exactly one client-decryptable
+  ciphertext and wrapped-DEK package with `Cache-Control: no-store`; local CLI
+  or MCP code performs the reveal. There is no server-side decrypt or plaintext
+  response shape.
 - `POST /v1/secrets/{secret_id}:archive` is the reversible soft-retire path and
   `POST /v1/secrets/{secret_id}:restore` reverses it within the retention
-  window; `DELETE /v1/secrets/{secret_id}` is the guarded hard delete that
-  crypto-shreds the DEK. They are audited as `secret.archived`/`secret.restored`/
-  `secret.deleted`.
-- `POST /v1/secrets/{secret_id}:grant` and `POST /v1/secrets/{secret_id}:revoke`
-  manage cross-agent and group access to a sealed secret (`secret:grant` scope),
-  audited as `secret.grant`/`secret.revoke`. Sealed-plane access is governed by
-  grants plus realm roles in
-  [authorization-and-roles.md](authorization-and-roles.md), not by the open
-  cross-agent read/curate/forget policy engine; secrets are not subject to those
-  verbs. The grantee, target, and audit reason travel in the body.
-- `POST /v1/totp/{secret_id}:code` returns a current TOTP code for an enrolled
-  secret (`totp:code` scope), audited as `totp.code`. The seed itself is
-  high-value sealed material revealed only through `:reveal`; the code is a
-  short-lived value-returning op disabled by `--no-value-tools`. See
-  [totp-2fa.md](totp-2fa.md).
-- `POST /v1/password:generate` returns a generated password under a requested
-  policy (length, character classes, passphrase mode). The policy travels in the
-  body and the generated value in the response only; it is never persisted by
-  this route and never placed in a URL. Storing it as a secret is a separate
-  `POST /v1/secrets` call.
+  window. Permanent `DELETE`, `PATCH` update, copy, grants/group ownership, and
+  server-side TOTP routes are target-only and are not registered in schema 56.
+- `/v1/vault/enrollments` implements the five-state, short-lived transfer
+  lifecycle. `:receive` is an opaque target read; `:consume` proves durable
+  local receipt before terminal capsule purge. Collection/exact lifecycle reads
+  remain available while suspended, but `:receive` and non-cancel mutations are
+  active-only; `:cancel` is the suspended-account safety path.
+- `/v1/vault/rotations` implements an `open|committed|cancelled` wrapper
+  lifecycle. `GET .../open` is the crash-resume discovery route, item pages are
+  deterministic, and `:commit` atomically flips a fully staged plan. Commit
+  requires a value-free `recovery_disposition`: either
+  `{"mode":"recovery_artifact","artifact_sha256":"<64 lowercase hex>"}` or
+  `{"mode":"risk_accepted"}`. The disposition participates in the request
+  hash and retry fence and remains visible on the committed rotation and its
+  audit event; artifacts, paths, passphrases, and key material never cross the
+  API boundary. Open/exact lifecycle reads remain available while suspended;
+  item pages and every mutation except `:cancel` remain active-only.
+- Password generation and TOTP calculation are implemented locally. There is
+  no `/v1/password:generate` or `/v1/totp/{secret_id}:code` server route.
 
 Cross-agent and operator-override mutations over `:forget`, `DELETE`, and the
 `curate`-style `PATCH` routes require an audit reason in the request body and
@@ -864,7 +901,10 @@ POST /v1/accounts/{account_id}:close
   `POST /v1/accounts/{account_id}/members/{principal}:set-role` changes a
   member's account-level role (`witself account set-role`).
 - `POST /v1/accounts/{account_id}:close` closes the account
-  (`witself account close`). It is audited and supports `dry_run`.
+  (`witself account close`). It is audited and supports `dry_run`. It returns
+  conflict while any pending/approved enrollment or open rotation exists;
+  cancellation remains available while suspended so the work can be settled
+  before close.
 
 `witself account export` is an account-scoped export job served by the
 `/v1/exports` resource, not a dedicated account route.
@@ -901,9 +941,9 @@ GET  /v1/groups/{group_id}/facts
 POST /v1/groups/{group_id}/facts
 ```
 
-Sealed-plane secrets use the same ownership model — every secret is owned by an
-agent or a group, the same `owner ∈ {agent, group}` rule that governs memories
-and facts (there is no separate "shared" scope):
+The implemented sealed-plane vertical is agent-owned and derives that owner
+from the bearer token. The following nested group/operator secret routes are
+target-only for the deferred grants/group-sharing slice:
 
 ```text
 GET  /v1/agents/{agent_id}/secrets
@@ -912,8 +952,9 @@ GET  /v1/groups/{group_id}/secrets
 POST /v1/groups/{group_id}/secrets
 ```
 
-These nested routes are the HTTP surface for operator and group targeting. The
-CLI `--owner-agent <agent>` flag targets `/v1/agents/{agent_id}/secrets` (and
+In the target contract, these nested routes are the HTTP surface for operator
+and group targeting. The CLI `--owner-agent <agent>` flag targets
+`/v1/agents/{agent_id}/secrets` (and
 the agent-scoped `:reveal`/`:grant`/etc. via the bare `/v1/secrets/{secret_id}`
 once the secret is resolved), and `--group <name>` targets
 `/v1/groups/{group_id}/secrets` for group-owned secrets. They mirror the secret
@@ -923,6 +964,9 @@ reference forms `witself://agent/<agent>/secret/<path>/<field>` and
 `--owner-agent` is an operator/admin or policy-granted action; resolving or
 revealing another agent's or a group's secret requires a grant (`secret:grant`
 issued via `:grant`) or a realm role, never the open cross-agent read policy.
+They are not registered in schema 56. `DELETE /v1/agents/{agent_id}` also
+returns conflict while that agent has pending/approved enrollment or an open
+rotation, because deletion would revoke the tokens needed to settle the work.
 
 Group membership is managed through nested member routes:
 
@@ -942,10 +986,13 @@ evaluates it.
 
 Identity export and import are first-class Witself resources: the open plane
 (memories and facts) exports as plaintext, the headline durable-state feature.
-The sealed plane is carved out — `POST /v1/exports` never includes secret values
-or TOTP seeds; secret backup is encrypted-only (envelope plus KMS key identity)
-behind an explicit, separate, audited flag, and is never part of the plaintext
-identity export. The routes back `witself export` and `witself import`:
+The sealed plane participates only as its client-encrypted state: schema-56
+archives include public AVK bindings, terminal enrollment/rotation history,
+ciphertext, wrapped DEKs, and value-free receipts, never plaintext values, TOTP
+seeds, AVKs, local key files, pairing/passphrase material, or recovery
+artifacts. Export rejects active enrollment or rotation work. The client must
+move or recover the matching AVK separately after import. The routes back
+`witself export` and `witself import`:
 
 - `POST /v1/exports` starts a structured/plaintext identity export (memories
   with edit history, facts with primary and sensitive flags, and, for

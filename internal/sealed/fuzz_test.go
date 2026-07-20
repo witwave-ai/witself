@@ -40,6 +40,136 @@ func FuzzParseAgentVaultKey(f *testing.F) {
 	})
 }
 
+func FuzzParseAVKEnrollmentRecipientKey(f *testing.F) {
+	key, err := GenerateAVKEnrollmentRecipientKey()
+	if err != nil {
+		f.Fatal(err)
+	}
+	encoded, err := EncodeAVKEnrollmentRecipientKey(key)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encoded)
+	f.Add(append(append([]byte(nil), encoded...), '\n'))
+	f.Add([]byte(avkEnrollmentRecipientRecordPrefix))
+	f.Add([]byte("not-an-enrollment-key"))
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 4096 {
+			return
+		}
+		parsed, err := ParseAVKEnrollmentRecipientKey(input)
+		if err != nil {
+			if !errors.Is(err, ErrInvalidEnrollment) {
+				t.Fatalf("unexpected recipient parse error: %v", err)
+			}
+			return
+		}
+		reencoded, err := EncodeAVKEnrollmentRecipientKey(parsed)
+		if err != nil {
+			t.Fatalf("successful recipient parse did not re-encode: %v", err)
+		}
+		canonicalInput := bytes.TrimSuffix(input, []byte{'\n'})
+		if !bytes.Equal(reencoded, canonicalInput) {
+			t.Fatal("successful recipient parse was not canonical")
+		}
+	})
+}
+
+func FuzzParseAVKEnrollmentPairingSecret(f *testing.F) {
+	secret, err := GenerateAVKEnrollmentPairingSecret()
+	if err != nil {
+		f.Fatal(err)
+	}
+	encoded, err := EncodeAVKEnrollmentPairingSecret(secret)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encoded)
+	f.Add(avkEnrollmentPairingSecretPrefix)
+	f.Add("not-a-pairing-secret")
+
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 4096 {
+			return
+		}
+		parsed, err := ParseAVKEnrollmentPairingSecret(input)
+		if err != nil {
+			if !errors.Is(err, ErrInvalidEnrollment) {
+				t.Fatalf("unexpected pairing parse error: %v", err)
+			}
+			return
+		}
+		reencoded, err := EncodeAVKEnrollmentPairingSecret(parsed)
+		if err != nil || reencoded != input {
+			t.Fatalf("accepted pairing secret was not canonical: %v", err)
+		}
+	})
+}
+
+func FuzzInspectAgentVaultKeyRecoveryNeverPanics(f *testing.F) {
+	key := mustAgentVaultKey(f, 1)
+	artifact, err := ExportAgentVaultKeyRecovery(key, []byte("fuzz recovery passphrase"), testAVKRecoveryScope())
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(artifact)
+	f.Add(append(append([]byte(nil), artifact...), '\n'))
+	f.Add([]byte(agentVaultKeyRecoveryPrefix))
+	f.Add([]byte("not-a-recovery-package"))
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > MaxAVKRecoveryPackageBytes+1024 {
+			return
+		}
+		metadata, err := InspectAgentVaultKeyRecovery(input)
+		if err != nil {
+			if !errors.Is(err, ErrInvalidRecovery) {
+				t.Fatalf("unexpected recovery parse error: %v", err)
+			}
+			return
+		}
+		if metadata.FormatVersion != AVKRecoveryFormatVersionV1 || metadata.Scope != testAVKRecoveryScope() && bytes.Equal(input, artifact) {
+			t.Fatalf("accepted recovery metadata is inconsistent: %#v", metadata)
+		}
+	})
+}
+
+func FuzzOpenAVKEnrollmentPackageNeverPanics(f *testing.F) {
+	avk := mustAgentVaultKey(f, 1)
+	recipient, pairing, request := testAVKEnrollmentRequest(f)
+	packageValue, err := SealAVKEnrollmentPackage(avk, pairing, request, testEnrollmentSourceInstallationID)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(packageValue.Ciphertext, packageValue.SourceEphemeralPublicKey, packageValue.ConsumeCommitment, request.ExpiresAt, byte(0))
+	f.Add([]byte{}, "", "", int64(0), byte(1))
+
+	f.Fuzz(func(t *testing.T, ciphertext []byte, sourcePublic, consumeCommitment string, expiresAt int64, selector byte) {
+		if len(ciphertext) > AVKEnrollmentCiphertextBytes+1024 || len(sourcePublic) > 4096 || len(consumeCommitment) > 4096 {
+			return
+		}
+		candidate := cloneAVKEnrollmentPackage(packageValue)
+		candidate.Ciphertext = append([]byte(nil), ciphertext...)
+		candidate.SourceEphemeralPublicKey = sourcePublic
+		candidate.ConsumeCommitment = consumeCommitment
+		candidate.Request.ExpiresAt = expiresAt
+		expected := request
+		if selector&1 != 0 {
+			expected.EnrollmentRequestID = "enr_bbbbbbbbbbbbbbbb"
+		}
+		key, proof, err := OpenAVKEnrollmentPackage(recipient, pairing, expected, candidate)
+		if err != nil {
+			if !errors.Is(err, ErrEnrollmentIntegrity) {
+				t.Fatalf("unexpected enrollment open error: %v", err)
+			}
+			return
+		}
+		key.Clear()
+		proof.Clear()
+	})
+}
+
 func FuzzCanonicalAADNeverPanics(f *testing.F) {
 	base := testValueBinding()
 	f.Add(base.AccountID, base.RealmID, base.OwnerAgentID, base.SecretID, base.FieldID, base.DEKID, base.ValueVersion, base.DEKGeneration, base.ValueEncoding)

@@ -152,6 +152,29 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 	if err := cancelMessageRequestsForDeletedAgentTx(ctx, tx, accountID, realmID, agentID); err != nil {
 		return err
 	}
+	// Deletion revokes the last credentials capable of completing or cancelling
+	// this agent's key lifecycle. Refuse to create an unrepairable export fence;
+	// the lifecycle must first be cancelled by the agent while it is active.
+	var activeVaultLifecycle bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_vault_key_enrollments
+		   WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		     AND lifecycle_state IN ('pending','approved')
+		) OR EXISTS (
+		  SELECT 1 FROM agent_vault_key_rotations
+		   WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		     AND lifecycle_state='open'
+		) OR EXISTS (
+		  SELECT 1 FROM agent_vault_keys
+		   WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		     AND lifecycle_state='pending'
+		)`, accountID, realmID, agentID).Scan(&activeVaultLifecycle); err != nil {
+		return fmt.Errorf("check vault key lifecycle before agent deletion: %w", err)
+	}
+	if activeVaultLifecycle {
+		return ErrVaultLifecycleInProgress
+	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE tokens SET consumed_at = now()

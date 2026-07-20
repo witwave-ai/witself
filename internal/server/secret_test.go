@@ -271,6 +271,28 @@ func TestSecretRoutesAuthorizationStrictnessAndErrors(t *testing.T) {
 	}
 }
 
+func TestSecretVaultKeyMismatchHasStableMachineCode(t *testing.T) {
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: secretTestAuth,
+		CreateSecret: func(context.Context, DomainPrincipal, CreateSecretRequest) (SecretMutationResult, error) {
+			return SecretMutationResult{}, ErrSecretVaultKeyMismatch
+		},
+	}))
+	defer srv.Close()
+	resp := secretTestRequest(t, srv.URL, http.MethodPost, "/v1/secrets", "agent-token", `{}`, "create-mismatch")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != "secret_vault_key_mismatch" || body["error"] != ErrSecretVaultKeyMismatch.Error() {
+		t.Fatalf("error body = %#v", body)
+	}
+}
+
 func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
 	auth := secretTestAuth
 	complete := Config{

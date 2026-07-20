@@ -422,7 +422,7 @@ func normalizeCreateSecretField(field CreateSecretFieldInput) (CreateSecretField
 		!validSecretGeneratedID(sealed.DEK.ID, "dek") || sealed.DEK.Generation != 1 ||
 		len(sealed.DEK.WrappedDEK) != secretWrappedDEKBytes ||
 		sealed.DEK.WrapAlgorithm != SecretAEADAlgorithm || sealed.DEK.AADVersion != SecretAADVersion ||
-		sealed.DEK.WrapRevision != 1 || !validSecretGeneratedID(sealed.DEK.WrappingKeyID, "avk") ||
+		sealed.DEK.WrapRevision < 1 || !validSecretGeneratedID(sealed.DEK.WrappingKeyID, "avk") ||
 		sealed.DEK.WrappingKeyVersion < 1 {
 		return CreateSecretFieldInput{}, ErrSecretInputInvalid
 	}

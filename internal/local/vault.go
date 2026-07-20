@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/witwave-ai/witself/internal/sealed"
@@ -46,6 +47,24 @@ func AgentVaultKeyPath(account, realm, agent string) (string, error) {
 	return path, err
 }
 
+// AgentVaultKeyEpochPath returns the immutable path for one exact AVK epoch.
+// The legacy AgentVaultKeyPath remains stable for v1 callers; new callers that
+// have reconciled the backend's current public binding should use this path so
+// multiple key epochs can coexist without replacement.
+func AgentVaultKeyEpochPath(account, realm, agent, keyID string, keyVersion uint64) (string, error) {
+	_, legacyPath, err := agentVaultKeyLocation(account, realm, agent)
+	if err != nil {
+		return "", err
+	}
+	if !validAgentVaultKeyEpoch(keyID, keyVersion) {
+		return "", ErrAgentVaultKeyScope
+	}
+	return filepath.Join(
+		filepath.Dir(legacyPath), agent, "epochs",
+		strconv.FormatUint(keyVersion, 10)+"-"+keyID+".key",
+	), nil
+}
+
 // ReadAgentVaultKey reads one existing, private AVK record. It never generates
 // or replaces a key. Callers own server-binding reconciliation.
 func ReadAgentVaultKey(account, realm, agent string) (*sealed.AgentVaultKey, error) {
@@ -53,6 +72,46 @@ func ReadAgentVaultKey(account, realm, agent string) (*sealed.AgentVaultKey, err
 	if err != nil {
 		return nil, err
 	}
+	return readAgentVaultKeyFile(home, path)
+}
+
+// ReadAgentVaultKeyEpoch reads the exact AVK selected by a reconciled backend
+// binding. The immutable epoch path wins. When it is absent, a matching v1
+// legacy record is accepted in place without copying, deleting, or rewriting
+// that record. A malformed or unsafe epoch path never falls back.
+func ReadAgentVaultKeyEpoch(account, realm, agent, keyID string, keyVersion uint64) (*sealed.AgentVaultKey, error) {
+	home, _, err := agentVaultKeyLocation(account, realm, agent)
+	if err != nil {
+		return nil, err
+	}
+	path, err := AgentVaultKeyEpochPath(account, realm, agent, keyID, keyVersion)
+	if err != nil {
+		return nil, err
+	}
+	key, err := readAgentVaultKeyFile(home, path)
+	if err == nil {
+		if key.ID() != keyID || key.Version() != keyVersion {
+			key.Clear()
+			return nil, ErrAgentVaultKeyInvalid
+		}
+		return key, nil
+	}
+	if !errors.Is(err, ErrAgentVaultKeyUnavailable) {
+		return nil, err
+	}
+
+	legacy, legacyErr := ReadAgentVaultKey(account, realm, agent)
+	if legacyErr != nil {
+		return nil, legacyErr
+	}
+	if legacy.ID() != keyID || legacy.Version() != keyVersion {
+		legacy.Clear()
+		return nil, ErrAgentVaultKeyUnavailable
+	}
+	return legacy, nil
+}
+
+func readAgentVaultKeyFile(home, path string) (*sealed.AgentVaultKey, error) {
 	if err := validateAgentVaultKeyDirectories(home, filepath.Dir(path)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrAgentVaultKeyUnavailable
@@ -130,6 +189,41 @@ func CreateAgentVaultKey(account, realm, agent string, key *sealed.AgentVaultKey
 	if err != nil {
 		return err
 	}
+	return createAgentVaultKeyFile(home, path, key)
+}
+
+// CreateAgentVaultKeyEpoch durably publishes one exact immutable AVK epoch. A
+// safe legacy record, including an exact match used for crash-safe bootstrap
+// staging, remains untouched while the canonical no-replace epoch is added.
+// A different legacy epoch may coexist with the new canonical record.
+func CreateAgentVaultKeyEpoch(account, realm, agent string, key *sealed.AgentVaultKey) error {
+	if key == nil {
+		return ErrAgentVaultKeyInvalid
+	}
+	home, _, err := agentVaultKeyLocation(account, realm, agent)
+	if err != nil {
+		return err
+	}
+	path, err := AgentVaultKeyEpochPath(account, realm, agent, key.ID(), key.Version())
+	if err != nil {
+		return err
+	}
+
+	legacy, legacyErr := ReadAgentVaultKey(account, realm, agent)
+	switch {
+	case legacyErr == nil:
+		legacy.Clear()
+	case errors.Is(legacyErr, ErrAgentVaultKeyUnavailable):
+		// No legacy record participates in this epoch.
+	default:
+		// Unsafe or malformed legacy custody state is never ignored while adding
+		// another private key beneath the same agent scope.
+		return legacyErr
+	}
+	return createAgentVaultKeyFile(home, path, key)
+}
+
+func createAgentVaultKeyFile(home, path string, key *sealed.AgentVaultKey) error {
 	raw, err := sealed.EncodeAgentVaultKey(key)
 	if err != nil || len(raw) == 0 || len(raw) > maxAgentVaultKeyFileBytes {
 		clear(raw)
@@ -150,19 +244,18 @@ func CreateAgentVaultKey(account, realm, agent string, key *sealed.AgentVaultKey
 		return ErrAgentVaultKeyStorage
 	}
 
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Build and sync the complete record under an unguessable owner-only name,
+	// then publish it with a same-directory hard link. Link is an atomic,
+	// no-replace operation: the canonical name is never visible with a partial
+	// record, and concurrent creators cannot replace one another.
+	file, err := os.CreateTemp(directory, ".avk-write-*.tmp")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return classifyAgentVaultKeyCollision(path)
-		}
 		return ErrAgentVaultKeyStorage
 	}
-	keep := false
+	temporaryPath := file.Name()
 	defer func() {
 		_ = file.Close()
-		if !keep {
-			_ = os.Remove(path)
-		}
+		_ = os.Remove(temporaryPath)
 	}()
 
 	if err := file.Chmod(0o600); err != nil {
@@ -182,10 +275,30 @@ func CreateAgentVaultKey(account, realm, agent string, key *sealed.AgentVaultKey
 	if err := file.Close(); err != nil {
 		return ErrAgentVaultKeyStorage
 	}
+	if err := os.Link(temporaryPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return classifyAgentVaultKeyCollision(path)
+		}
+		return ErrAgentVaultKeyStorage
+	}
+	temporaryInfo, temporaryErr := os.Lstat(temporaryPath)
+	finalInfo, finalErr := os.Lstat(path)
+	if temporaryErr != nil || finalErr != nil || !os.SameFile(temporaryInfo, finalInfo) ||
+		!privateRegularAgentVaultKeyFile(temporaryInfo) || !privateRegularAgentVaultKeyFile(finalInfo) {
+		return ErrAgentVaultKeyStorage
+	}
+	// First make the completed canonical link durable. Only then remove the
+	// temporary link and sync that directory change. A crash at any point leaves
+	// either no canonical file or one complete, parseable record.
 	if err := syncAgentVaultKeyDirectory(directory); err != nil {
 		return ErrAgentVaultKeyStorage
 	}
-	keep = true
+	if err := os.Remove(temporaryPath); err != nil {
+		return ErrAgentVaultKeyStorage
+	}
+	if err := syncAgentVaultKeyDirectory(directory); err != nil {
+		return ErrAgentVaultKeyStorage
+	}
 	return nil
 }
 
@@ -200,6 +313,18 @@ func agentVaultKeyLocation(account, realm, agent string) (home, path string, err
 		return "", "", ErrAgentVaultKeyStorage
 	}
 	return home, filepath.Join(home, "keys", "accounts", account, "realms", realm, "agents", agent+".key"), nil
+}
+
+func validAgentVaultKeyEpoch(keyID string, keyVersion uint64) bool {
+	if keyVersion == 0 || len(keyID) != len("avk_")+16 || !strings.HasPrefix(keyID, "avk_") {
+		return false
+	}
+	for _, character := range keyID[len("avk_"):] {
+		if (character < 'a' || character > 'z') && (character < '2' || character > '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func ensureAgentVaultKeyDirectories(home, directory string) error {

@@ -18,6 +18,11 @@ type secretVaultKeyVersionImportKey struct {
 	version int64
 }
 
+type secretVaultKeyIdentityImportKey struct {
+	id      string
+	version int64
+}
+
 type secretVaultKeyImportScope struct {
 	id          string
 	realmID     string
@@ -88,7 +93,11 @@ func (ic *importCtx) validateImportedVaultKey(obj map[string]any) (secretVaultKe
 		return secretVaultKeyImportScope{}, fmt.Errorf("fingerprint is invalid")
 	}
 	state, err := requireStringField(obj, "lifecycle_state")
-	if err != nil || (state != "pending" && state != "current" && state != "retired") {
+	// Portable archives are frozen snapshots. A pending AVK is authority owned
+	// by an open rotation, and ExportAccount refuses every open rotation. Accepting
+	// an orphan pending row would import an unusable live-version fence with no
+	// lifecycle operation capable of completing or cancelling it.
+	if err != nil || (state != "current" && state != "retired") {
 		return secretVaultKeyImportScope{}, fmt.Errorf("lifecycle_state is invalid")
 	}
 	revision, ok := importedPositiveInteger(obj["row_version"])
@@ -110,6 +119,11 @@ func (ic *importCtx) validateImportedVaultKey(obj map[string]any) (secretVaultKe
 		id: id, realmID: realmID, agentID: agentID, version: version, rowVersion: revision,
 		state: state, fingerprint: fingerprint,
 	}, nil
+}
+
+func (ic *importCtx) importedVaultKey(id string, version int64) (secretVaultKeyImportScope, bool) {
+	key, exists := ic.vaultKeyIdentities[secretVaultKeyIdentityImportKey{id: id, version: version}]
+	return key, exists
 }
 
 func (ic *importCtx) validateImportedSecret(obj map[string]any) (secretImportScope, string, error) {
@@ -284,7 +298,7 @@ func (ic *importCtx) validateImportedSecretDEK(obj map[string]any) (secretDEKImp
 	}
 	keyID, err := requireStringField(obj, "wrapping_key_id")
 	keyVersion, versionOK := importedPositiveInteger(obj["wrapping_key_version"])
-	key, keyExists := ic.vaultKeys[keyID]
+	key, keyExists := ic.importedVaultKey(keyID, keyVersion)
 	if err != nil || !versionOK || !keyExists || key.version != keyVersion || key.realmID != realmID || key.agentID != agentID {
 		return secretDEKImportScope{}, fmt.Errorf("wrapping key is outside field scope")
 	}
@@ -403,8 +417,8 @@ func (ic *importCtx) validateImportedSecretGraph() error {
 		if !ok || dek.fieldID != fieldID || dek.generation != field.dekGeneration || dek.retired {
 			return fmt.Errorf("sensitive field %q does not reference its current DEK", fieldID)
 		}
-		if key, ok := ic.vaultKeys[dek.wrappingKeyID]; !ok ||
-			key.version != dek.wrappingVersion || key.state != "current" {
+		if key, ok := ic.importedVaultKey(dek.wrappingKeyID, dek.wrappingVersion); !ok ||
+			key.state != "current" {
 			return fmt.Errorf("sensitive field %q is not wrapped by the current vault key", fieldID)
 		}
 		if ic.secretCurrentDEKs[fieldID] != 1 {

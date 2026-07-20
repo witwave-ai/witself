@@ -3,6 +3,7 @@ package export
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // The upgrader chain is the schema-evolution contract for archives: an
@@ -45,6 +46,7 @@ var upgraders = map[int]Upgrader{
 	51: preserveSchema51Rows,
 	53: addAvatarRendererProfileDefault,
 	54: preserveSchema54Rows,
+	55: preserveSchema55Rows,
 }
 
 const (
@@ -58,6 +60,69 @@ const (
 // globally unique realm and agent ids and contain no sealed streams, so their
 // existing rows need no transformation.
 func preserveSchema54Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema55Rows lifts the only ambiguous schema-55 AVK state. Schema
+// 55 permitted pending keys but had no rotation aggregate that could own or
+// complete them, so migration 56 deterministically retires those orphan
+// candidates at their creation timestamp. Archive upgrades must perform the
+// identical normalization before the schema-56 importer validates the row.
+func preserveSchema55Rows(table string, row map[string]any) (map[string]any, error) {
+	if table != "agent_vault_keys" {
+		return row, nil
+	}
+
+	stateValue, exists := row["lifecycle_state"]
+	if !exists {
+		return nil, fmt.Errorf("legacy vault key lifecycle_state is missing")
+	}
+	state, ok := stateValue.(string)
+	if !ok {
+		return nil, fmt.Errorf("legacy vault key lifecycle_state must be a string")
+	}
+	switch state {
+	case "current", "retired":
+		return row, nil
+	case "pending":
+		// Continue below: only pending rows need normalization.
+	default:
+		return nil, fmt.Errorf("legacy vault key lifecycle_state is invalid")
+	}
+
+	createdValue, exists := row["created_at"]
+	if !exists {
+		return nil, fmt.Errorf("legacy pending vault key created_at is missing")
+	}
+	createdAt, ok := createdValue.(string)
+	if !ok {
+		return nil, fmt.Errorf("legacy pending vault key created_at must be a string")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return nil, fmt.Errorf("legacy pending vault key created_at is invalid: %w", err)
+	}
+	retiredAt, exists := row["retired_at"]
+	if !exists {
+		return nil, fmt.Errorf("legacy pending vault key retired_at is missing")
+	}
+	if retiredAt != nil {
+		return nil, fmt.Errorf("legacy pending vault key retired_at must be null")
+	}
+	revisionValue, exists := row["row_version"]
+	if !exists {
+		return nil, fmt.Errorf("legacy pending vault key row_version is missing")
+	}
+	revision, ok := revisionValue.(json.Number)
+	if !ok {
+		return nil, fmt.Errorf("legacy pending vault key row_version must be an integer")
+	}
+	parsedRevision, err := revision.Int64()
+	if err != nil || parsedRevision < 1 {
+		return nil, fmt.Errorf("legacy pending vault key row_version is invalid")
+	}
+
+	row["lifecycle_state"] = "retired"
+	row["retired_at"] = createdAt
 	return row, nil
 }
 

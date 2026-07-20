@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // MaxSecretCreateJournalBytes bounds one serialized secret-create request.
@@ -25,6 +27,11 @@ var (
 	// ErrSecretCreateJournalExists means exclusive publication found an
 	// existing private regular entry. Existing bytes are never replaced.
 	ErrSecretCreateJournalExists = errors.New("secret create journal entry already exists")
+
+	// ErrSecretCreateJournalConflict means a compare-and-swap replacement did
+	// not find the exact journal bytes its caller had authenticated. The current
+	// entry is left untouched.
+	ErrSecretCreateJournalConflict = errors.New("secret create journal entry changed")
 
 	// ErrSecretCreateJournalUnsafe means a journal path is not an owner-only
 	// regular file rooted below owner-only directories.
@@ -44,6 +51,8 @@ var (
 )
 
 var secretCreateJournalHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+const secretCreateJournalLockFile = ".lock"
 
 // SecretCreateJournalPath returns the canonical path for one serialized
 // secret-create request. Scope components are local selectors; scopedHash is
@@ -232,6 +241,185 @@ func CreateSecretCreateJournal(account, realm, agent, scopedHash string, raw []b
 	}
 	published = false
 	return nil
+}
+
+// ReplaceSecretCreateJournalAfterVaultKeyAdvance durably replaces one exact
+// serialized request after its wrapping-key epoch has advanced. The caller
+// must supply the precise bytes it previously authenticated. A stable
+// owner-only advisory lock serializes cooperating replacers, and the old
+// request remains authoritative unless a complete replacement has been
+// written and synced before the atomic rename.
+func ReplaceSecretCreateJournalAfterVaultKeyAdvance(account, realm, agent, scopedHash string, expectedRaw, replacementRaw []byte) error {
+	if !validSecretCreateJournalRaw(expectedRaw) || !validSecretCreateJournalRaw(replacementRaw) {
+		return ErrSecretCreateJournalInvalid
+	}
+	home, path, err := secretCreateJournalLocation(account, realm, agent, scopedHash)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(path)
+	if err := validateSecretCreateJournalDirectories(home, directory); err != nil {
+		return classifySecretCreateJournalDirectoryError(err)
+	}
+	lock, err := acquireSecretCreateJournalLock(home, directory)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+
+	current, err := ReadSecretCreateJournal(account, realm, agent, scopedHash)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(current, expectedRaw)
+	clear(current)
+	if !match {
+		return ErrSecretCreateJournalConflict
+	}
+
+	directoryBefore, err := os.Lstat(directory)
+	if err != nil || !privateSecretCreateJournalDirectory(directoryBefore) {
+		return ErrSecretCreateJournalUnsafe
+	}
+	file, err := os.CreateTemp(directory, ".secret-create-replace-*.tmp")
+	if err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+	temporaryPath := file.Name()
+	temporaryExists := true
+	defer func() {
+		_ = file.Close()
+		if temporaryExists {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+	temporaryInfo, err := file.Stat()
+	if err != nil || !privateRegularSecretCreateJournalFile(temporaryInfo) {
+		return ErrSecretCreateJournalUnsafe
+	}
+	written, err := io.Copy(file, bytes.NewReader(replacementRaw))
+	if err != nil || written != int64(len(replacementRaw)) {
+		return ErrSecretCreateJournalStorage
+	}
+	if err := file.Sync(); err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+	if err := file.Close(); err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+
+	// Re-read under the stable lock immediately before publication. This exact
+	// fence also detects a non-cooperating local writer instead of overwriting
+	// bytes the caller did not authenticate.
+	current, err = ReadSecretCreateJournal(account, realm, agent, scopedHash)
+	if err != nil {
+		return err
+	}
+	match = bytes.Equal(current, expectedRaw)
+	clear(current)
+	if !match {
+		return ErrSecretCreateJournalConflict
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+	temporaryExists = false
+
+	finalInfo, finalErr := os.Lstat(path)
+	directoryAfter, directoryErr := os.Lstat(directory)
+	if finalErr != nil || directoryErr != nil || !os.SameFile(temporaryInfo, finalInfo) ||
+		!privateRegularSecretCreateJournalFile(finalInfo) || !os.SameFile(directoryBefore, directoryAfter) ||
+		!privateSecretCreateJournalDirectory(directoryAfter) {
+		return ErrSecretCreateJournalUnsafe
+	}
+	if err := validateSecretCreateJournalDirectories(home, directory); err != nil {
+		return classifySecretCreateJournalDirectoryError(err)
+	}
+	if err := syncSecretCreateJournalDirectory(directory); err != nil {
+		return ErrSecretCreateJournalStorage
+	}
+	return nil
+}
+
+type secretCreateJournalLock struct {
+	file *os.File
+}
+
+func acquireSecretCreateJournalLock(home, directory string) (*secretCreateJournalLock, error) {
+	if err := validateSecretCreateJournalDirectories(home, directory); err != nil {
+		return nil, classifySecretCreateJournalDirectoryError(err)
+	}
+	path := filepath.Join(directory, secretCreateJournalLockFile)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_EXCL, 0o600)
+	created := err == nil
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	}
+	if err != nil {
+		return nil, ErrSecretCreateJournalUnsafe
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, ErrSecretCreateJournalStorage
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = file.Close()
+		}
+	}()
+	opened, statErr := file.Stat()
+	linked, linkErr := os.Lstat(path)
+	if statErr != nil || linkErr != nil || !os.SameFile(opened, linked) ||
+		!privateRegularSecretCreateJournalFile(opened) || !privateRegularSecretCreateJournalFile(linked) {
+		return nil, ErrSecretCreateJournalUnsafe
+	}
+	if created {
+		if err := file.Sync(); err != nil {
+			return nil, ErrSecretCreateJournalStorage
+		}
+		if err := syncSecretCreateJournalDirectory(directory); err != nil {
+			return nil, ErrSecretCreateJournalStorage
+		}
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		return nil, ErrSecretCreateJournalStorage
+	}
+	linked, linkErr = os.Lstat(path)
+	if linkErr != nil || !os.SameFile(opened, linked) || !privateRegularSecretCreateJournalFile(linked) {
+		_ = unix.Flock(fd, unix.LOCK_UN)
+		return nil, ErrSecretCreateJournalUnsafe
+	}
+	if err := validateSecretCreateJournalDirectories(home, directory); err != nil {
+		_ = unix.Flock(fd, unix.LOCK_UN)
+		return nil, classifySecretCreateJournalDirectoryError(err)
+	}
+	cleanup = false
+	return &secretCreateJournalLock{file: file}, nil
+}
+
+func (lock *secretCreateJournalLock) release() {
+	if lock == nil || lock.file == nil {
+		return
+	}
+	_ = unix.Flock(int(lock.file.Fd()), unix.LOCK_UN)
+	_ = lock.file.Close()
+	lock.file = nil
+}
+
+func classifySecretCreateJournalDirectoryError(err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return ErrSecretCreateJournalUnavailable
+	case errors.Is(err, ErrSecretCreateJournalUnsafe):
+		return ErrSecretCreateJournalUnsafe
+	default:
+		return ErrSecretCreateJournalStorage
+	}
 }
 
 func secretCreateJournalLocation(account, realm, agent, scopedHash string) (home, path string, err error) {
