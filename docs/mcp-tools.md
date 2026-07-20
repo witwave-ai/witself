@@ -772,6 +772,14 @@ Read one forward page from a transcript. `after_sequence` is exclusive, `limit`
 is 1-500 and defaults to 100, and `next_after_sequence` is returned when another
 page exists.
 
+Transcript pages observe a server byte budget: an oversized entry body,
+payload, or artifact list is elided in band with a `witself:elided` note
+carrying the omitted byte count. The stored entry is unchanged — re-read it
+alone with `after_sequence` and a small `limit`, or use the witself CLI for
+full fidelity. A separate last-resort guard converts any tool result that
+would still exceed the transport budget into an in-band tool error instead of
+letting the client connection drop on an oversized frame.
+
 Input:
 
 ```json
@@ -785,7 +793,8 @@ Input:
 ### `witself.transcript.tail`
 
 Read the newest bounded page from a transcript, ordered oldest-first. `limit`
-is 1-500 and defaults to 20.
+is 1-500 and defaults to 20. The same page byte budget and in-band
+`witself:elided` notes as `witself.transcript.get` apply.
 
 Input:
 

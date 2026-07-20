@@ -1199,6 +1199,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 			&mcp.Implementation{Name: "witself", Version: version.Version},
 			&mcp.ServerOptions{Instructions: instructions},
 		)
+		server.AddReceivingMiddleware(mcpResultSizeGuard())
 		registerMemoryCurationMCPTools(server, runtimeName, backend)
 		remove := []string{
 			mcpToolName(runtimeName, "witself.memory.curation.request"),
@@ -1221,6 +1222,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		&mcp.Implementation{Name: "witself", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions},
 	)
+	server.AddReceivingMiddleware(mcpResultSizeGuard())
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        selfTool,
 		Description: "Return the authenticated Witself agent identity, bounded self digest, and value-free memory, message, and avatar lifecycle checkpoints. Authorized sensitive owner facts and memories are included by default, retain sensitive=true, and must remain private to the current task; sealed secrets and TOTP are never included. A pending avatar_checkpoint offers at most one bounded foreground avatar lifecycle attempt after an explicit avatar or pending self-maintenance request, or near the end of eligible non-trivial work; it never contains SVG or prompt content and must not displace the user's task or self-contained answer. A tiny read-only, lookup, or status turn may defer avatar work with the checkpoint pending and attempt count unchanged; deferral is not a generation failure. Inspect memory_checkpoint near the end of non-trivial foreground work; its exact request_id/run_id is the sole selector for that curation lane. Never replace it with unscoped curation.status. Use this for the Witself side of identity recall; broad memory retrieval must also consult any requested available runtime-native memory and report partial coverage.",
@@ -1523,7 +1525,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.transcript.get"),
-		Description: "Read one bounded forward page from a captured transcript.",
+		Description: "Read one bounded forward page from a captured transcript. A server byte budget may elide an oversized entry body, payload, or artifact list with an in-band witself:elided note; the stored entry is unchanged, so re-read it alone with after_sequence and a smaller limit or use the witself CLI for full fidelity.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpTranscriptReadInput) (*mcp.CallToolResult, mcpTranscriptReadOutput, error) {
 		if in.TranscriptID == "" {
@@ -1539,6 +1541,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		if err != nil {
 			return nil, mcpTranscriptReadOutput{}, err
 		}
+		boundMCPTranscriptEntries(page.Entries)
 		return nil, mcpTranscriptReadOutput{
 			Transcript:        toMCPTranscript(page.Transcript),
 			Entries:           toMCPTranscriptEntries(page.Entries),
@@ -1547,7 +1550,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.transcript.tail"),
-		Description: "Read the newest entries from a captured transcript, ordered oldest-first.",
+		Description: "Read the newest entries from a captured transcript, ordered oldest-first. A server byte budget may elide an oversized entry body, payload, or artifact list with an in-band witself:elided note; the stored entry is unchanged, so re-read it alone with witself.transcript.get or use the witself CLI for full fidelity.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpTranscriptTailInput) (*mcp.CallToolResult, mcpTranscriptReadOutput, error) {
 		if in.TranscriptID == "" {
@@ -1563,6 +1566,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		if err != nil {
 			return nil, mcpTranscriptReadOutput{}, err
 		}
+		boundMCPTranscriptEntries(page.Entries)
 		return nil, mcpTranscriptReadOutput{
 			Transcript: toMCPTranscript(page.Transcript),
 			Entries:    toMCPTranscriptEntries(page.Entries),

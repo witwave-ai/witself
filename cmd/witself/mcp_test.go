@@ -313,6 +313,7 @@ type fakeMCPBackend struct {
 	lastSelfOptions     client.SelfOptions
 	lastTranscriptID    string
 	lastOptions         client.TranscriptPageOptions
+	transcriptEntries   []client.TranscriptEntry
 	lastMessageSend     client.SendMessageInput
 	lastMessageReply    client.ReplyMessageInput
 	replyParentID       string
@@ -1292,16 +1293,20 @@ func (b *fakeMCPBackend) ListTranscripts(context.Context) ([]client.Transcript, 
 func (b *fakeMCPBackend) GetTranscriptPage(_ context.Context, transcriptID string, opts client.TranscriptPageOptions) (client.TranscriptDetail, error) {
 	b.lastTranscriptID = transcriptID
 	b.lastOptions = opts
+	entries := b.transcriptEntries
+	if entries == nil {
+		entries = []client.TranscriptEntry{{
+			ID: "ent_1", TranscriptID: transcriptID, Sequence: 1, Role: "user", Body: "hello",
+			Payload: json.RawMessage(`{"kind":"message.user"}`), Artifacts: json.RawMessage(`[]`),
+			CreatedAt: time.Date(2026, 7, 12, 17, 30, 0, 0, time.UTC),
+		}}
+	}
 	return client.TranscriptDetail{
 		Transcript: client.Transcript{
 			ID:       transcriptID,
 			Metadata: json.RawMessage(`{"source_session_id":"session-1"}`),
 		},
-		Entries: []client.TranscriptEntry{{
-			ID: "ent_1", TranscriptID: transcriptID, Sequence: 1, Role: "user", Body: "hello",
-			Payload: json.RawMessage(`{"kind":"message.user"}`), Artifacts: json.RawMessage(`[]`),
-			CreatedAt: time.Date(2026, 7, 12, 17, 30, 0, 0, time.UTC),
-		}},
+		Entries: entries,
 	}, nil
 }
 
