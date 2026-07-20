@@ -354,7 +354,7 @@ process's environment or argv **without printing it to stdout**, so an agent can
 use a credential without ever surfacing it in context, memory, or logs:
 
 ```
-ws run --env GITHUB_TOKEN=witself://secret/github/builder/password -- ./deploy.sh
+witself run --env GITHUB_TOKEN=witself://secret/github/builder/password -- ./deploy.sh
 ```
 
 Injection rules:

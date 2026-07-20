@@ -10,7 +10,7 @@ accounts, add `--name NAME` at create and `--account NAME` everywhere after.
 Requires an invite code.
 
 ```sh
-ws account create --email scott@witwave.ai --invite friends-2026
+witself account create --email scott@witwave.ai --invite friends-2026
 ```
 
 The account is remembered locally as `default` (binding in
@@ -23,7 +23,7 @@ link is clicked (`witself account resend-verification` sends a fresh one). Watch
 for it to flip to `active`:
 
 ```sh
-ws account status
+witself account status
 ```
 
 ## Create a realm and an agent
@@ -33,9 +33,9 @@ realm, and an agent token is the credential your agent actually runs with.
 The ids come from each command's output.
 
 ```sh
-ws realm create prod
-ws agent create --realm realm_01xyz my-agent
-ws token create --agent agt_01xyz
+witself realm create prod
+witself agent create --realm realm_01xyz my-agent
+witself token create --agent agt_01xyz
 ```
 
 The agent token is written to
@@ -49,7 +49,7 @@ Every account is born with one root operator, `owner` — the identity your
 local token authenticates as. Operators you add later appear alongside it:
 
 ```sh
-ws operator list
+witself operator list
 ```
 
 ## Create a backup operator token
@@ -58,7 +58,7 @@ A second credential for the same operator, so losing `owner.token` doesn't
 lock you out:
 
 ```sh
-ws token create --operator --name backup
+witself token create --operator --name backup
 ```
 
 The token is written to
@@ -73,7 +73,7 @@ instead, or `--out FILE` for a path of your choosing.
 Each token dies independently — revoking one never touches the others:
 
 ```sh
-ws token revoke --operator --name backup --yes
+witself token revoke --operator --name backup --yes
 ```
 
 Revoking by name also removes the managed token file (revoking by id leaves
@@ -88,9 +88,9 @@ redeeming it rotates the owner's credentials — the old tokens die, agents and
 other operators are untouched. Requesting a code changes nothing by itself.
 
 ```sh
-ws account recover
+witself account recover
 # check the account's email for the code (valid ~15 minutes), then:
-ws account recover --code 123-456-789
+witself account recover --code 123-456-789
 ```
 
 `witself account list` shows this machine's local names and account ids — handy
@@ -113,7 +113,7 @@ operator token, the token predates local names (a pre-v0.0.63 `--out` file),
 or this is a second machine for an account created elsewhere.
 
 ```sh
-ws account adopt --id acc_01xyz --token-file teammate.token --name shared-account
+witself account adopt --id acc_01xyz --token-file teammate.token --name shared-account
 ```
 
 The token is verified against the account's cell first — it must authenticate
@@ -137,9 +137,9 @@ working. Three emails tell the story:
    changed again legitimately.
 
 ```sh
-ws account change-email --new-email new@example.com
+witself account change-email --new-email new@example.com
 # check the new address for the code, then:
-ws account change-email --new-email new@example.com --code 123-456-789
+witself account change-email --new-email new@example.com --code 123-456-789
 ```
 
 ## Add a second operator
@@ -148,14 +148,14 @@ For a teammate (or automation that must survive an owner recovery). Your side:
 create the operator with a short-lived transfer token —
 
 ```sh
-ws operator create --name "Alice" --token-name alice-bootstrap --ttl 24h --out alice.token
+witself operator create --name "Alice" --token-name alice-bootstrap --ttl 24h --out alice.token
 ```
 
 — then send Alice two things over a channel you trust: the `alice.token` file
 and this command (fill in your account id from `witself account list`):
 
 ```sh
-ws account adopt --id acc_01xyz --token-file alice.token --name work
+witself account adopt --id acc_01xyz --token-file alice.token --name work
 ```
 
 Her side: the adopt binds the account on her machine, then
@@ -174,7 +174,7 @@ and `witself account close` can no longer authenticate to clean it up. Drop the
 local binding only (this never contacts the server):
 
 ```sh
-ws account forget --account default --yes
+witself account forget --account default --yes
 ```
 
 ## Suspend and resume an account
@@ -183,12 +183,12 @@ Suspend freezes every write on the account while keeping reads and credentials
 alive — a reversible pause for time off, an audit, or a planned migration.
 
 ```sh
-ws account suspend --yes                       # optionally --reason "on vacation"
+witself account suspend --yes                       # optionally --reason "on vacation"
 # every domain command now refuses:
-#   ws: account is suspended — this action requires an active account
+#   witself: account is suspended — this action requires an active account
 # status still works, and shows why:
-ws account status
-ws account resume
+witself account status
+witself account resume
 ```
 
 Only the owner can suspend or resume their own suspension. Future non-owner
@@ -201,7 +201,7 @@ Closing is permanent: every credential is revoked and the account is retired
 (its record remains as a tombstone). On success the local name is removed too.
 
 ```sh
-ws account close --yes
+witself account close --yes
 ```
 
 Add `--reason TEXT` to record why.
@@ -236,7 +236,7 @@ that every account on the cell dies with it — no restore is possible.
 While the archives sit in R2 you can verify state at any time:
 
 ```sh
-ws account status --account <name>          # says "archived — awaiting placement"
+witself account status --account <name>          # says "archived — awaiting placement"
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
@@ -327,7 +327,7 @@ COMMIT;
 Confirm the account still routes correctly at the winning cell:
 
 ```sh
-ws account status --account <local-name>          # should show "active" via the winner
+witself account status --account <local-name>          # should show "active" via the winner
 ```
 
 The ghost is now gone; the winning cell continues serving the account

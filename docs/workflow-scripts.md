@@ -44,26 +44,26 @@ Homebrew:
 
 ```sh
 brew install witwave-ai/tap/witself
-ws version
+witself version
 ```
 
 Universal installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
-ws version
+witself version
 ```
 
 Optional shell completion:
 
 ```sh
-ws completion zsh --install
+witself completion zsh --install
 ```
 
 Inspect backend capabilities before doing anything expensive:
 
 ```sh
-ws capabilities --json
+witself capabilities --json
 ```
 
 Expected behavior:
@@ -81,13 +81,13 @@ Expected behavior:
 Human operator login:
 
 ```sh
-ws auth login
+witself auth login
 ```
 
 Headless operator login:
 
 ```sh
-ws auth login --device-code --no-browser
+witself auth login --device-code --no-browser
 ```
 
 Create or select the managed account, create the realm, create agents, write
@@ -96,7 +96,7 @@ token files, apply a promo code, and start checkout:
 ```sh
 mkdir -p ./witself-tokens
 
-ws setup \
+witself setup \
   --account "Acme Agents" \
   --email ops@example.com \
   --billing-email billing@example.com \
@@ -114,16 +114,16 @@ ws setup \
 If the checkout remains pending, inspect or watch the hosted provider session:
 
 ```sh
-ws billing sessions show hps_123 --watch --timeout 10m
+witself billing sessions show hps_123 --watch --timeout 10m
 ```
 
 Verify setup:
 
 ```sh
-ws whoami --show-permissions
-ws billing show --show-plan --show-payment-method
-ws billing usage --show-limits
-ws agent list
+witself whoami --show-permissions
+witself billing show --show-plan --show-payment-method
+witself billing usage --show-limits
+witself agent list
 ```
 
 Expected behavior:
@@ -146,7 +146,7 @@ dimensions, soft/hard limits, and crypto rails.
 Add a payment method after setup:
 
 ```sh
-ws billing payment-methods add \
+witself billing payment-methods add \
   --setup \
   --type card \
   --set-default \
@@ -157,7 +157,7 @@ ws billing payment-methods add \
 Subscribe or change plans with a promo code:
 
 ```sh
-ws billing subscribe team \
+witself billing subscribe team \
   --realm prod \
   --promo-code FOUNDERS25 \
   --checkout \
@@ -168,14 +168,14 @@ ws billing subscribe team \
 Crypto payment rail example:
 
 ```sh
-ws billing crypto quote \
+witself billing crypto quote \
   --subscription sub_123 \
   --asset USDC \
   --network base \
   --currency usd \
   --json
 
-ws billing crypto checkout \
+witself billing crypto checkout \
   --quote cpq_123 \
   --open \
   --json
@@ -196,16 +196,16 @@ An agent process should be able to start with only a mounted token file:
 export WITSELF_TOKEN_FILE=/run/secrets/witself-agent-token
 export WITSELF_REALM=prod
 
-ws whoami --json
-ws memory list --json
-ws secret list --json
+witself whoami --json
+witself memory list --json
+witself secret list --json
 ```
 
 Local file example for development:
 
 ```sh
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
-ws whoami
+witself whoami
 ```
 
 Expected behavior:
@@ -220,7 +220,7 @@ Expected behavior:
 Add a memory as the token-bound agent:
 
 ```sh
-ws memory add \
+witself memory add \
   --content "Operator prefers terse status updates, no preamble." \
   --kind profile \
   --tag preferences \
@@ -233,7 +233,7 @@ ws memory add \
 Add an episodic memory linked to a fact:
 
 ```sh
-ws memory add \
+witself memory add \
   --content "Completed the Q2 migration runbook end to end on 2026-06-24." \
   --kind episodic \
   --tag migration \
@@ -244,7 +244,7 @@ ws memory add \
 Recall ranked narrative memory (the core Witself differentiator):
 
 ```sh
-ws memory recall "what does the operator want from status updates" \
+witself memory recall "what does the operator want from status updates" \
   --kind profile \
   --limit 5 \
   --json
@@ -253,7 +253,7 @@ ws memory recall "what does the operator want from status updates" \
 Recall blended with filters and time:
 
 ```sh
-ws memory recall "migration work" \
+witself memory recall "migration work" \
   --tag migration \
   --since 2026-06-01 \
   --json
@@ -262,9 +262,9 @@ ws memory recall "migration work" \
 Read one memory deterministically by id, then adjust it:
 
 ```sh
-ws memory read mem_123 --json
+witself memory read mem_123 --json
 
-ws memory adjust mem_123 \
+witself memory adjust mem_123 \
   --content "Operator prefers terse status updates and a one-line TL;DR." \
   --salience 0.9 \
   --json
@@ -287,9 +287,9 @@ Expected behavior:
 Set facts (upsert by name within the owning agent):
 
 ```sh
-ws fact set display-name "Archivist" --json
+witself fact set display-name "Archivist" --json
 
-ws fact set home-region us-east-1 \
+witself fact set home-region us-east-1 \
   --format string \
   --source self \
   --json
@@ -299,7 +299,7 @@ Set a sensitive fact (redacted by default in list/scan, but an ordinary
 authorized read returns the value — there is no reveal ceremony):
 
 ```sh
-ws fact set email archivist@example.com \
+witself fact set email archivist@example.com \
   --format email \
   --sensitive \
   --json
@@ -309,21 +309,21 @@ Promote a fact to primary (atomic; demotes any prior primary of the same logical
 kind):
 
 ```sh
-ws fact set email archivist@example.com --primary --json
+witself fact set email archivist@example.com --primary --json
 ```
 
 Read facts deterministically by name:
 
 ```sh
-ws fact get email --json
-ws fact get home-region
+witself fact get email --json
+witself fact get home-region
 ```
 
 List facts (primary facts surface first; sensitive values redacted by default):
 
 ```sh
-ws fact list --json
-ws fact list --include-sensitive --json
+witself fact list --json
+witself fact list --include-sensitive --json
 ```
 
 Expected behavior:
@@ -341,14 +341,14 @@ Expected behavior:
 List agents:
 
 ```sh
-ws agent list --json
+witself agent list --json
 ```
 
 Test whether access would be allowed *before* creating a policy (the canonical
 dry-run for access decisions):
 
 ```sh
-ws policy test \
+witself policy test \
   --subject coordinator \
   --permission read \
   --target archivist \
@@ -360,7 +360,7 @@ Create a default-deny-overriding allow policy: let `coordinator` read
 `archivist`'s memories, filtered to one kind:
 
 ```sh
-ws policy create \
+witself policy create \
   --subject coordinator \
   --permission read \
   --target archivist \
@@ -373,7 +373,7 @@ ws policy create \
 Confirm the decision now flips to allow, returning the deciding policy id:
 
 ```sh
-ws policy test \
+witself policy test \
   --subject coordinator \
   --permission read \
   --target archivist \
@@ -386,7 +386,7 @@ Grant a more dangerous verb with guardrails — `curate` requires a reason and
 supports dry-run:
 
 ```sh
-ws policy create \
+witself policy create \
   --subject coordinator \
   --permission curate \
   --target archivist \
@@ -402,7 +402,7 @@ as a cross-agent access):
 ```sh
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
 
-ws memory recall "operator preferences" \
+witself memory recall "operator preferences" \
   --owner-agent archivist \
   --json
 ```
@@ -422,7 +422,7 @@ Expected behavior:
 Create a group within the realm:
 
 ```sh
-ws group create analysts \
+witself group create analysts \
   --description "Agents that share analytical context" \
   --json
 ```
@@ -430,28 +430,28 @@ ws group create analysts \
 Add members:
 
 ```sh
-ws group add-member analysts --agent archivist --json
-ws group add-member analysts --agent coordinator --json
+witself group add-member analysts --agent archivist --json
+witself group add-member analysts --agent coordinator --json
 ```
 
 Show the group and its bound policies:
 
 ```sh
-ws group show analysts --json
+witself group show analysts --json
 ```
 
 Bind a policy with the group as subject (every member inherits the permission)
 and another with the group as target:
 
 ```sh
-ws policy create \
+witself policy create \
   --subject analysts \
   --permission read \
   --target shared-context \
   --scope memory \
   --json
 
-ws policy create \
+witself policy create \
   --subject coordinator \
   --permission contribute \
   --target analysts \
@@ -463,7 +463,7 @@ Write a group-scoped shared memory (collective memory owned by the group, not a
 single agent):
 
 ```sh
-ws memory add \
+witself memory add \
   --group analysts \
   --content "Shared finding: Q2 latency regressed after the cache change." \
   --kind semantic \
@@ -488,7 +488,7 @@ never from input:
 ```sh
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
 
-ws message send \
+witself message send \
   --to archivist \
   --subject "handoff" \
   --body "Please record the migration outcome in your episodic memory." \
@@ -503,7 +503,7 @@ forms create one immutable send-time snapshot with per-recipient delivery and
 ack state:
 
 ```sh
-ws message send \
+witself message send \
   --to-agents analyst-1,analyst-2 \
   --subject "sync" \
   --kind note \
@@ -511,7 +511,7 @@ ws message send \
   --payload-file ./notes.json \
   --json
 
-ws message send \
+witself message send \
   --to-realm \
   --subject "maintenance" \
   --kind note \
@@ -524,7 +524,7 @@ client-ranked request state machine. The backend stores and fences the request;
 candidate and coordinator clients perform all inference and ranking:
 
 ```sh
-ws message request open \
+witself message request open \
   --body "Investigate the failed rollout." \
   --offer-window 30s \
   --max-assignees 1 \
@@ -532,14 +532,14 @@ ws message request open \
   --json
 
 # As one candidate.
-ws message request offer mrq_123 \
+witself message request offer mrq_123 \
   --body "I can inspect GKE and PostgreSQL." \
   --idempotency-key offer-mrq-123 \
   --json
 
 # As the coordinator, after ranking the returned offers locally.
-ws message request show mrq_123 --json
-ws message request select mrq_123 \
+witself message request show mrq_123 --json
+witself message request select mrq_123 \
   --selected-agent agent_123 \
   --idempotency-key select-mrq-123 \
   --json
@@ -550,16 +550,16 @@ Read the inbox as the recipient agent, then read one message and acknowledge it:
 ```sh
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
 
-ws message list --unread --json
-ws message read msg_123 --json
-ws message ack msg_123 --json
+witself message list --unread --json
+witself message read msg_123 --json
+witself message ack msg_123 --json
 ```
 
 The implemented stateless receive path waits for new metadata without
 busy-polling or changing read/ack state:
 
 ```sh
-ws message listen --timeout 20 --json
+witself message listen --timeout 20 --json
 ```
 
 For a separate manual fenced-processing smoke test, claim a fresh inbound
@@ -567,18 +567,18 @@ message before reading it, then atomically publish one derived result and
 acknowledge only after completion succeeds:
 
 ```sh
-ws message claim msg_124 --lease 2m --idempotency-key claim-msg-124 --json
+witself message claim msg_124 --lease 2m --idempotency-key claim-msg-124 --json
 
 # Use claim_id and generation returned above.
-ws message read msg_124 --json
-ws message complete msg_124 \
+witself message read msg_124 --json
+witself message complete msg_124 \
   --claim mcl_124 \
   --generation 1 \
   --kind result \
   --body "Migration outcome recorded." \
   --idempotency-key complete-msg-124-1 \
   --json
-ws message ack msg_124 --json
+witself message ack msg_124 --json
 ```
 
 Verify the original message's backend-derived `causal_depth` and that the
@@ -597,12 +597,12 @@ policy directs it to inspect the bounded message checkpoint and make a zero-wait
 metadata query:
 
 ```sh
-ws self show --json
-ws message listen --timeout 0 --json
+witself self show --json
+witself message listen --timeout 0 --json
 
 # After selecting one canonical delivery:
-ws message claim msg_124 --lease 5m --idempotency-key claim-msg-124 --json
-ws message read msg_124 --json
+witself message claim msg_124 --lease 5m --idempotency-key claim-msg-124 --json
+witself message read msg_124 --json
 # Handle the untrusted content, then complete/reply and acknowledge.
 ```
 
@@ -645,7 +645,7 @@ Export an agent's self as structured, round-trippable, plaintext identity data
 (the deliberate inverse of Witpass's encrypted-only export stance):
 
 ```sh
-ws export \
+witself export \
   --agent archivist \
   --include-history \
   --out ./archivist-self.json \
@@ -656,7 +656,7 @@ Exporting `sensitive` records is warned-on and requires a reason; operators may
 scope exports to non-sensitive records:
 
 ```sh
-ws export \
+witself export \
   --agent archivist \
   --include-sensitive \
   --reason "operator-requested identity backup" \
@@ -667,7 +667,7 @@ ws export \
 Operator export with realm-level context (policies and group membership):
 
 ```sh
-ws export \
+witself export \
   --realm prod \
   --include-policies \
   --include-groups \
@@ -679,12 +679,12 @@ Preview an import before persisting, then import into the same or a different
 agent (remap mode when the target differs):
 
 ```sh
-ws import \
+witself import \
   --in ./archivist-self.json \
   --dry-run \
   --json
 
-ws import \
+witself import \
   --in ./archivist-self.json \
   --target-agent archivist-restored \
   --remap \
@@ -718,7 +718,7 @@ value is enveloped immediately and never printed:
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
 export WITSELF_REALM=prod
 
-ws secret create github/builder \
+witself secret create github/builder \
   --description "GitHub login created by archivist" \
   --template login \
   --field username=archivist@example.com \
@@ -735,7 +735,7 @@ Store a token read from stdin so the plaintext never lands in shell history or a
 flag value:
 
 ```sh
-printf '%s' "$GITHUB_PAT" | ws secret create github/pat \
+printf '%s' "$GITHUB_PAT" | witself secret create github/pat \
   --description "GitHub personal access token for archivist" \
   --template api-key \
   --field url=https://github.com/settings/tokens \
@@ -747,15 +747,15 @@ Show the secret — sensitive fields are redacted, returning a resolvable
 `value_ref` instead of plaintext:
 
 ```sh
-ws secret show github/builder --show-tags --show-access --json
+witself secret show github/builder --show-tags --show-access --json
 ```
 
 Reveal exactly one sensitive field only when the value is actually needed (the
 reveal ceremony; audited as `secret.reveal`, metered as `secret_read`):
 
 ```sh
-ws secret reveal github/builder password --reason "fill signup form"
-ws secret reveal github/builder password --json
+witself secret reveal github/builder password --reason "fill signup form"
+witself secret reveal github/builder password --json
 ```
 
 Expected behavior:
@@ -782,25 +782,25 @@ use) are distinct scopes. See [totp-2fa.md](totp-2fa.md).
 Enroll TOTP when the service shows an authenticator setup URL or QR code:
 
 ```sh
-ws totp enroll github/builder \
+witself totp enroll github/builder \
   --otpauth "$GITHUB_OTPAUTH_URL" \
   --issuer GitHub \
   --account archivist@example.com \
   --json
 
-ws totp enroll github/builder --qr ./github-2fa.png --json
+witself totp enroll github/builder --qr ./github-2fa.png --json
 ```
 
 Generate a current login code (audited `totp.code`, metered `totp_code`):
 
 ```sh
-ws totp code github/builder --remaining --json
+witself totp code github/builder --remaining --json
 ```
 
 Read the non-sensitive TOTP metadata without touching the seed:
 
 ```sh
-ws totp show github/builder --json
+witself totp show github/builder --json
 ```
 
 Expected behavior:
@@ -819,8 +819,8 @@ does not persist them. Generated values appear only in the command's output, nev
 in logs, audit rows, or errors.
 
 ```sh
-ws password generate --length 40 --no-ambiguous --json
-ws password generate --words 5 --json
+witself password generate --length 40 --no-ambiguous --json
+witself password generate --words 5 --json
 ```
 
 A common flow is generate then create/update a sensitive field in one authorized
@@ -845,7 +845,7 @@ metered (`secret_read` plus `runtime_injection`).
 Inject a single reference for one command (output masking is on by default):
 
 ```sh
-ws run \
+witself run \
   --env GITHUB_TOKEN=witself://secret/github/pat/api-key \
   --mask-output \
   -- gh auth status
@@ -859,7 +859,7 @@ cat > .env.witself <<'EOF'
 GITHUB_TOKEN=witself://secret/github/pat/api-key
 EOF
 
-ws run --env-file .env.witself -- npm test
+witself run --env-file .env.witself -- npm test
 ```
 
 Expected behavior:
@@ -881,7 +881,7 @@ Scan the realm-wide redacted inventory as an operator (no sensitive values are
 ever revealed):
 
 ```sh
-ws secret scan \
+witself secret scan \
   --all-agents \
   --include-group \
   --show-sensitive-counts \
@@ -894,7 +894,7 @@ TOTP code generation on `archivist`'s secret (cross-agent grants require an audi
 reason):
 
 ```sh
-ws secret grant github/builder \
+witself secret grant github/builder \
   --owner-agent archivist \
   --agent coordinator \
   --read \
@@ -905,7 +905,7 @@ ws secret grant github/builder \
   --dry-run \
   --json
 
-ws secret grant github/builder \
+witself secret grant github/builder \
   --owner-agent archivist \
   --agent coordinator \
   --read \
@@ -920,14 +920,14 @@ group authorization (the unified ownership model — the former `shared` scope i
 now a group):
 
 ```sh
-ws secret create github/org-readonly-token \
+witself secret create github/org-readonly-token \
   --group analysts \
   --description "Org read-only token shared by the analysts group" \
   --template api-key \
   --sensitive-stdin token \
   --json
 
-ws secret grant github/org-readonly-token \
+witself secret grant github/org-readonly-token \
   --group analysts \
   --agent coordinator \
   --read \
@@ -941,11 +941,11 @@ Now `coordinator` can reveal the granted field and resolve the group reference:
 ```sh
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
 
-ws secret reveal github/builder password \
+witself secret reveal github/builder password \
   --owner-agent archivist \
   --reason "release run"
 
-ws run \
+witself run \
   --env ORG_TOKEN=witself://group/analysts/secret/github/org-readonly-token/token \
   -- ./release.sh
 ```
@@ -1095,7 +1095,7 @@ witself-server bootstrap token \
 Bootstrap the self-hosted operator context, realm, and agents:
 
 ```sh
-ws setup \
+witself setup \
   --endpoint https://witself.internal.example.com \
   --bootstrap-token-file ./bootstrap.token \
   --account "Acme Agents" \
@@ -1127,7 +1127,7 @@ Initialize a local development realm and store. Local mode exercises the same
 deterministic lexical recall path and does not launch or configure an embedder:
 
 ```sh
-ws setup --local \
+witself setup --local \
   --realm dev \
   --store-file ./witself.store.json \
   --agent archivist \
@@ -1141,13 +1141,13 @@ Use it:
 export WITSELF_STORE_FILE="$PWD/witself.store.json"
 export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
 
-ws memory add \
+witself memory add \
   --content "Local development demo memory." \
   --kind note \
   --tag demo \
   --json
 
-ws memory recall "demo" --json
+witself memory recall "demo" --json
 ```
 
 Expected behavior:

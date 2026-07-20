@@ -31,7 +31,7 @@ their own cloud, network, or compliance boundary.
 The backend API server should ship as a separate `witself-server` binary, not as
 a public `witself server` subcommand. Keeping the server process separate makes
 production and self-hosted deployment packaging, container entrypoints, service
-permissions, and operational docs clearer while leaving `ws` focused on
+permissions, and operational docs clearer while leaving `witself` focused on
 human, agent, and MCP workflows.
 
 ## Deployment Modes
@@ -52,7 +52,7 @@ vectors, so development does not need model credentials or model egress; see
 Initial target layout once code starts:
 
 ```text
-cmd/ws/                  # CLI, including mcp serve
+cmd/witself/                  # CLI, including mcp serve
 cmd/witself-server/           # Backend API server
 internal/core/                # Domain service and use cases
 internal/api/                 # HTTP handlers and request/response adapters
@@ -81,7 +81,7 @@ The important boundary is one core domain service with multiple adapters.
 
 Witself should have these public entrypoints:
 
-- `ws`: human and agent CLI.
+- `witself`: human and agent CLI (`ws` is a permanent alias).
 - `witself mcp serve`: local-first MCP adapter over the same core behavior.
 - `witself-server`: separate backend API server for managed and self-hosted
   deployments.
@@ -119,9 +119,9 @@ the source of truth, so offline recipients are the default: a send never require
 the recipient to be online, and pending work remains unacknowledged until the
 next foreground client turn.
 
-The CLI command is `ws`; the backend binary is `witself-server`. The `witself://`
-reference scheme, `WITSELF_` environment variables, and the `witself.*` MCP tool
-names are unchanged.
+The CLI command is `witself`, with `ws` as a permanent alias; the backend binary
+is `witself-server`. The `witself://` reference scheme, `WITSELF_` environment
+variables, and the `witself.*` MCP tool names are unchanged.
 
 ## Core Boundary
 

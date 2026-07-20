@@ -933,7 +933,7 @@ Exit criteria:
 - Release dry run builds the CLI, server, archives, checksums, images, and
   installer artifacts.
 - Image smoke tests can run `witself version` and `witself-server version`.
-- The CLI/MCP image entrypoint is `ws` (CLI and `witself mcp serve`); the
+- The CLI/MCP image entrypoint is `witself` (CLI and `witself mcp serve`); the
   backend image entrypoint is `witself-server`.
 - The build model matches [release-and-build.md](release-and-build.md).
 
@@ -1052,7 +1052,7 @@ Deliverables:
 
 Exit criteria:
 
-- A fresh operator can install `ws`, create or connect a managed account,
+- A fresh operator can install `witself`, create or connect a managed account,
   create a realm, create named agents, write token files, and verify agents can
   immediately authenticate through `WITSELF_TOKEN_FILE`.
 - Billing and support commands either work or return precise

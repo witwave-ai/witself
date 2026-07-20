@@ -64,7 +64,7 @@ before any future explicit migration Job is introduced.
 - Start from the scaffold boundary in [docs/scaffold-readiness.md](scaffold-readiness.md).
 - Keep the project on the latest stable Go release that is practical at the time
   implementation or release work happens.
-- Ship the `ws` binary with CLI commands and `witself mcp serve`.
+- Ship the `witself` binary with CLI commands and `witself mcp serve`.
 - Ship a separate `witself-server` binary from the same public repository once
   backend implementation starts.
 - Support Homebrew and universal `curl | sh` installation from the beginning.
@@ -521,8 +521,8 @@ Homebrew release smoke tests should verify:
 - `witself-admin version`
 
 The default CLI install should stay lean. Operators who provision cells install
-`witself-infra` explicitly; most `ws` users should not receive the infrastructure
-provisioner or its Pulumi dependency.
+`witself-infra` explicitly; most `witself` users should not receive the
+infrastructure provisioner or its Pulumi dependency.
 
 ## Universal Installer
 

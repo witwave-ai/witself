@@ -78,10 +78,10 @@ secret. Enrollment is the **privileged seed path** and requires the `totp:enroll
 scope.
 
 ```sh
-ws totp enroll github/builder --otpauth 'otpauth://totp/...'
-ws totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
-ws totp enroll github/builder --secret-file ./github-seed.txt
-ws totp enroll github/builder --qr ./github-2fa.png
+witself totp enroll github/builder --otpauth 'otpauth://totp/...'
+witself totp enroll github/builder --secret JBSWY3DPEHPK3PXP --issuer GitHub --account builder
+witself totp enroll github/builder --secret-file ./github-seed.txt
+witself totp enroll github/builder --qr ./github-2fa.png
 ```
 
 Enrollment accepts the seed from any of four inputs:
@@ -123,8 +123,8 @@ The non-sensitive metadata is stored as ordinary columns. Enrollment emits
 explicit, audited, value-returning op gated by the `totp:code` scope.
 
 ```sh
-ws totp code github/builder
-ws totp code github/builder --remaining --json
+witself totp code github/builder
+witself totp code github/builder --remaining --json
 ```
 
 Flags:

@@ -64,7 +64,7 @@ store can prove itself without blocking on KMS. This mirrors
 
 V0 should prove the end-to-end product boundary:
 
-- A human or AI agent can install `ws`.
+- A human or AI agent can install `witself`.
 - A human operator can authenticate through a CLI-initiated browser or
   device-code flow without giving the CLI a raw account password.
 - An operator can bootstrap a realm and named agents.
