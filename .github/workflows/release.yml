@@ -175,12 +175,22 @@ jobs:
       # This no-publish pass deliberately uses the real GoReleaser archive
       # pipeline. It catches archive-name or target drift before the release job
       # publishes any GitHub or GHCR artifact.
+      #
+      # --parallelism 2, not the default (=vCPUs): four concurrent
+      # witself-infra cross-compiles of the Pulumi provider graph peak past
+      # the 16GB ubuntu runner and the OOM reaper SIGTERMs the job (v0.0.191
+      # first attempt: exit 143 mid-build). Two keeps peak memory inside the
+      # runner while the 2h ceiling stays comfortable (~10m per infra target
+      # cold; the shared release cache makes warm runs near-instant — note
+      # actions/cache only SAVES on job success, so a failing job never warms
+      # its own retry).
       - name: Build Homebrew archive contract
         run: >-
           goreleaser release
           --snapshot
           --clean
           --skip=docker,sbom,sign
+          --parallelism 2
           --timeout 2h
 
       - name: Render and audit actual Homebrew archives
