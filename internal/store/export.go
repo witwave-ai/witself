@@ -521,6 +521,15 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1
 			ORDER BY aa.agent_id, aa.runtime, aa.location_id`, arg: accountID},
+		// Dashboard UI preferences are agent-owned account data: the theme
+		// choice follows the agent across cells, so the strictly validated
+		// prefs document rides the archive like every other per-agent row.
+		&querySource{tx: tx, table: "agent_dashboard_preferences", q: `
+			SELECT jsonb_build_object(
+			  'agent_id', agent_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'prefs', prefs, 'updated_at', updated_at)
+			FROM agent_dashboard_preferences WHERE account_id = $1
+			ORDER BY agent_id`, arg: accountID},
 		&querySource{tx: tx, table: "fact_subjects", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,

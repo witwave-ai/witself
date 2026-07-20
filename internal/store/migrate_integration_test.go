@@ -21,6 +21,35 @@ import (
 
 var migrationTestSchemaSequence atomic.Uint64
 
+func TestMigration57DashboardPreferencesPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+
+	migrationTestUpTo(t, dsn, 56)
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestTable(t, st, "agent_dashboard_preferences", false)
+
+	migrationTestUpTo(t, dsn, 57)
+	assertMigrationTestVersion(t, dsn, 57)
+	assertMigrationTestTable(t, st, "agent_dashboard_preferences", true)
+	assertMigrationTestColumn(t, st, "agent_dashboard_preferences", "prefs", true)
+	assertMigrationTestColumn(t, st, "agent_dashboard_preferences", "updated_at", true)
+
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestTable(t, st, "agent_dashboard_preferences", false)
+	assertMigrationTestTable(t, st, "secrets", true)
+
+	migrationTestUpTo(t, dsn, 57)
+	assertMigrationTestVersion(t, dsn, 57)
+	assertMigrationTestTable(t, st, "agent_dashboard_preferences", true)
+}
+
 func TestMigration55AgentSecretsPostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {

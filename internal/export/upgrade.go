@@ -47,6 +47,7 @@ var upgraders = map[int]Upgrader{
 	53: addAvatarRendererProfileDefault,
 	54: preserveSchema54Rows,
 	55: preserveSchema55Rows,
+	56: preserveSchema56Rows,
 }
 
 const (
@@ -54,6 +55,15 @@ const (
 	legacyAvatarRetainedPayloadByteLimit  = 2 * 1024 * 1024
 	legacyAvatarMaximumPayloadBytes       = 128 * 1024
 )
+
+// preserveSchema56Rows acknowledges the agent_dashboard_preferences table
+// added by migration 0057. A schema-56 archive carries no dashboard
+// preference stream and none of its existing rows change shape, so every row
+// passes through unchanged; the destination simply imports the new table as
+// an empty stream.
+func preserveSchema56Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
 
 // preserveSchema54Rows acknowledges the tenant-scope uniqueness keys added
 // alongside the new schema-55 sealed tables. Schema-54 archives already use

@@ -31,7 +31,7 @@ read-only, live-updating HTTP dashboard for exactly one agent.
 The dashboard process is a thin proxy over the existing `/v1` read API using
 the agent's own token via the standard connection resolution
 (`-account`/`-realm`/`-agent`/`-endpoint`/`-token-file`, defaulting like every
-other agent command). No new server routes, no widened reads: transcripts and
+other agent command). No widened reads: transcripts and
 self digests use `observational=true` reads, messages use the passive
 metadata-only list (never `:read`), broad memory reads stay redacted by
 default, and the avatar SVG is re-run through the canonical sanitizer with its
@@ -84,6 +84,24 @@ rather than a generic error. That 404 is indistinguishable from one minted
 by fronting infrastructure mid-deploy, so the negative answer expires after
 about a minute and is re-proven rather than memoized for the life of the
 serve.
+
+Read-only means the dashboard writes no agent content: no memories, facts,
+messages, secrets, usage, or rankings. Its sole, deliberate write is its own
+namespaced UI preferences row — today just the theme choice — behind a
+dedicated pair of self endpoints (`GET`/`PUT
+/v1/self/dashboard-preferences`), agent-token-only and own-row-only. The row
+is a size-capped (4 KiB), strictly validated flat document
+(`{"schema":"witself.dashboard-prefs.v1","theme":...}`, unknown keys
+refused), last-write-wins with no revision machinery, readable with no usage
+recording, and carries no audit verb by the ledger's own bar (the value-free
+`agent_activity` precedent: a theme flip is not something owners need to
+see, and would spam the ledger on every toggle). On the proxy, `PUT
+/api/prefs` is the single mutating route: every other method is refused, the
+body is size-capped before it is decoded, and only the validated
+`{"schema","theme"}` shape is ever forwarded upstream. The stored theme name
+is still validated against the embedded theme list in the browser before it
+can become a stylesheet URL, so a tampered row can only ever select an
+embedded pack.
 
 ### Local-only by construction
 
@@ -156,7 +174,13 @@ discovery.
 ## Consequences
 
 - Operators get a live window into transcripts, memories, facts, and sealed
-  secret metadata without any new server capability or privileged path.
+  secret metadata without any widened read capability or privileged path.
+- Read-only means the dashboard writes no agent content. Its sole write is
+  its own size-capped, strictly-validated, agent-scoped UI preferences row
+  via a dedicated endpoint (`PUT /v1/self/dashboard-preferences`, proxied as
+  the guarded `PUT /api/prefs`) — no content mutation, no ranking effects —
+  and the preferences ride account export/import, so the theme choice
+  follows the agent across machines and cells.
 - Viewing the dashboard does not perturb the agent: observational and passive
   reads keep retrieval usage and read-state untouched. The one deliberate
   exception is the eye-icon reveal on a cell without observational fact

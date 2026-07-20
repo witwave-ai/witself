@@ -9,7 +9,11 @@
 // `witself self card`. Sealed secrets are metadata only: the proxy uses the
 // two public GET routes and rebuilds every payload as an allow-list
 // projection, so secret material — plaintext, ciphertext, wrapped DEKs, key
-// bytes — never reaches the browser. The package mounts routes onto a
+// bytes — never reaches the browser. The dashboard writes no agent content;
+// its single deliberate write exception is PUT /api/prefs, which stores the
+// agent's own size-capped, strictly validated dashboard UI preferences row
+// (the theme choice) through the dedicated /v1/self/dashboard-preferences
+// endpoint. The package mounts routes onto a
 // caller-owned mux (the cpserver.Register idiom); the binary owns the
 // listener and lifecycle.
 package dashboard
@@ -28,6 +32,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,6 +147,14 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /static/", secure(cfg, session, http.FileServerFS(staticFS)))
 	mux.Handle("GET /api/self", secure(cfg, session, selfHandler(cfg)))
 	mux.Handle("GET /api/themes", secure(cfg, session, http.HandlerFunc(themesHandler)))
+	// THE SOLE WRITE EXCEPTION (ADR 0004): /api/prefs is the only route on
+	// this proxy that has ever forwarded a mutation, and PUT here reaches
+	// exactly one upstream write — the agent's own namespaced UI preferences
+	// row (PUT /v1/self/dashboard-preferences). It never touches agent
+	// content: no memories, facts, messages, secrets, usage, or rankings.
+	// The handler itself guards the method set, size-caps the body before
+	// decoding, and forwards only the validated {"schema","theme"} shape.
+	mux.Handle("/api/prefs", secure(cfg, session, prefsHandler(cfg)))
 	mux.Handle("GET /api/avatar.svg", secure(cfg, session, avatarHandler(cfg)))
 	mux.Handle("GET /api/transcripts", secure(cfg, session, transcriptsHandler(cfg)))
 	mux.Handle("GET /api/transcripts/{id}", secure(cfg, session, transcriptPageHandler(cfg)))
@@ -299,6 +312,101 @@ func themesHandler(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"themes": names})
+}
+
+const (
+	// prefsSchema is the exact schema marker of the strict v1 dashboard
+	// preferences document; the store refuses anything else.
+	prefsSchema = "witself.dashboard-prefs.v1"
+	// maxPrefsRequestBytes caps the PUT /api/prefs body BEFORE decoding —
+	// the canonical document is at most a few dozen bytes, so anything near
+	// this bound is garbage and never reaches the cell.
+	maxPrefsRequestBytes = 8 * 1024
+	// maxPrefsThemeBytes matches the store's theme-name bound.
+	maxPrefsThemeBytes = 64
+)
+
+// prefsThemePattern mirrors the UI's theme-name whitelist (static/app.js)
+// and the store's own pattern: a theme is a clean name, never a path or URL.
+var prefsThemePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// prefsDocument is the only prefs shape this proxy forwards upstream. The
+// PUT handler rebuilds the outgoing document from these validated fields —
+// an allow-list projection in the write direction, mirroring the read-side
+// sanitizers — so nothing beyond the schema marker and theme name can
+// transit even if the decode path regresses.
+type prefsDocument struct {
+	Schema string `json:"schema"`
+	Theme  string `json:"theme"`
+}
+
+// prefsHandler serves /api/prefs — the single mutating route this proxy has
+// ever had (see the Register comment and the package doc). GET proxies the
+// agent's own preferences row (or its null default); PUT is explicitly
+// guarded: every other method is refused, the body is size-capped before it
+// is read, the envelope is decoded strictly (unknown keys refused), and only
+// the validated shape is forwarded to PUT /v1/self/dashboard-preferences.
+func prefsHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			prefs, err := client.GetDashboardPreferences(r.Context(), cfg.Endpoint, cfg.BearerToken)
+			if err != nil {
+				writeUpstreamError(w, err)
+				return
+			}
+			writeJSON(w, map[string]any{"preferences": prefs})
+		case http.MethodPut:
+			doc, ok := decodePrefsPut(w, r)
+			if !ok {
+				return
+			}
+			forward, err := json.Marshal(doc)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not encode prefs")
+				return
+			}
+			prefs, err := client.PutDashboardPreferences(r.Context(), cfg.Endpoint, cfg.BearerToken, forward)
+			if err != nil {
+				writeUpstreamError(w, err)
+				return
+			}
+			writeJSON(w, map[string]any{"preferences": prefs})
+		default:
+			w.Header().Set("Allow", "GET, PUT")
+			writeJSONError(w, http.StatusMethodNotAllowed, "only GET and PUT are supported on /api/prefs")
+		}
+	})
+}
+
+// decodePrefsPut applies the local write guard: bounded read, strict decode,
+// and full shape validation before anything can leave for the cell. Every
+// violation is answered locally — an invalid or oversized body never causes
+// an upstream request.
+func decodePrefsPut(w http.ResponseWriter, r *http.Request) (prefsDocument, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxPrefsRequestBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var in struct {
+		Prefs *prefsDocument `json:"prefs"`
+	}
+	if err := decoder.Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid prefs body")
+		return prefsDocument{}, false
+	}
+	if extraErr := decoder.Decode(new(any)); !errors.Is(extraErr, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid prefs body")
+		return prefsDocument{}, false
+	}
+	if in.Prefs == nil || in.Prefs.Schema != prefsSchema {
+		writeJSONError(w, http.StatusBadRequest, "prefs schema must be "+prefsSchema)
+		return prefsDocument{}, false
+	}
+	if len(in.Prefs.Theme) > maxPrefsThemeBytes || !prefsThemePattern.MatchString(in.Prefs.Theme) {
+		writeJSONError(w, http.StatusBadRequest, "theme must be a clean name of at most 64 bytes")
+		return prefsDocument{}, false
+	}
+	return *in.Prefs, true
 }
 
 // selfEnvelope is the observational self digest plus dashboard metadata for

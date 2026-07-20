@@ -1864,8 +1864,19 @@ func TestThemesEndpointListsEmbeddedPacks(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Themes) != 2 || body.Themes[0] != "console" || body.Themes[1] != "paper" {
-		t.Fatalf("themes = %v, want [console paper]", body.Themes)
+	want := []string{"amber", "console", "high-contrast", "midnight", "paper"}
+	if len(body.Themes) != len(want) {
+		t.Fatalf("themes = %v, want %v", body.Themes, want)
+	}
+	for i, name := range want {
+		if body.Themes[i] != name {
+			t.Fatalf("themes = %v, want %v", body.Themes, want)
+		}
+	}
+	for _, name := range body.Themes {
+		if name == "auto" {
+			t.Fatal("\"auto\" is a client-side picker entry and must never be an embedded pack")
+		}
 	}
 }
 

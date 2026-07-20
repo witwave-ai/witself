@@ -36,34 +36,88 @@
   // --- theme ------------------------------------------------------------
   // Themes come from /api/themes (the embedded static/themes directory), so
   // shipping a new theme is dropping a CSS file there — never a JS or HTML
-  // edit (ADR 0004). Unknown names fall back to the default.
-  function applyTheme(name) {
-    if (state.themes.indexOf(name) < 0) {
-      name = state.themes.indexOf("console") >= 0 ? "console" : state.themes[0];
-    }
-    $("theme-css").setAttribute("href", "/static/themes/" + encodeURIComponent(name) + ".css");
+  // edit (ADR 0004). "auto" is a client-side picker entry (never a file):
+  // it resolves to paper when the OS prefers light and console when dark,
+  // re-resolving live on scheme changes. Unknown names fall back to the
+  // default, and every stylesheet URL still passes the file-backed theme
+  // whitelist — a tampered server pref or localStorage value can only select
+  // an embedded pack, never become an arbitrary URL.
+  var AUTO_THEME = "auto";
+  var PREFS_SCHEMA = "witself.dashboard-prefs.v1";
+  var prefersLight = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+  function pickerThemes() { return [AUTO_THEME].concat(state.themes); }
+
+  function defaultTheme() {
+    return state.themes.indexOf("console") >= 0 ? "console" : state.themes[0];
+  }
+
+  function resolveTheme(name) {
+    if (name !== AUTO_THEME) { return name; }
+    var preferred = prefersLight && prefersLight.matches ? "paper" : "console";
+    return state.themes.indexOf(preferred) >= 0 ? preferred : defaultTheme();
+  }
+
+  function applyTheme(name, persist) {
+    if (pickerThemes().indexOf(name) < 0) { name = defaultTheme(); }
+    // The resolver's output goes back through the file-backed whitelist:
+    // only an embedded pack name may become a stylesheet URL.
+    var resolved = resolveTheme(name);
+    if (state.themes.indexOf(resolved) < 0) { resolved = defaultTheme(); }
+    $("theme-css").setAttribute("href", "/static/themes/" + encodeURIComponent(resolved) + ".css");
     $("theme-select").value = name;
     try { localStorage.setItem(THEME_KEY, name); } catch (_) { /* private mode */ }
+    if (persist === true) { putThemePref(name); }
+  }
+
+  // Fire-and-forget persistence: the cell row is the durable copy (it follows
+  // the agent across machines and rides account export/import), while
+  // localStorage stays the offline fallback when the PUT cannot land.
+  function putThemePref(name) {
+    fetch("/api/prefs", {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefs: { schema: PREFS_SCHEMA, theme: name } }),
+    }).then(function (resp) {
+      if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+    }).catch(function (err) {
+      toast("theme kept locally; saving to cell failed: " + (err.message || err));
+    });
   }
 
   function initTheme() {
     var fromQuery = new URLSearchParams(window.location.search).get("theme");
     var stored = null;
     try { stored = localStorage.getItem(THEME_KEY); } catch (_) { /* private mode */ }
-    fetchJSON("/api/themes").then(function (body) {
-      var names = (body.themes || []).filter(function (name) {
+    Promise.all([
+      fetchJSON("/api/themes").catch(function () { return null; }),
+      fetchJSON("/api/prefs").catch(function () { return null; }),
+    ]).then(function (results) {
+      var names = (((results[0] || {}).themes) || []).filter(function (name) {
         return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name);
       });
       if (names.length) { state.themes = names; }
-    }).catch(function () { /* keep the built-in default */ }).then(function () {
-      $("theme-select").innerHTML = state.themes.map(function (name) {
+      var row = (results[1] || {}).preferences;
+      var serverTheme = row && row.prefs && typeof row.prefs.theme === "string" ? row.prefs.theme : null;
+      $("theme-select").innerHTML = pickerThemes().map(function (name) {
         return '<option value="' + esc(name) + '">' + esc(name) + "</option>";
       }).join("");
-      applyTheme(fromQuery || stored || "console");
+      // Precedence: explicit ?theme= > the agent's stored server pref >
+      // this browser's localStorage > the default; whatever wins is still
+      // validated by applyTheme's whitelist before any stylesheet loads.
+      applyTheme(fromQuery || serverTheme || stored || "console");
     });
     $("theme-select").addEventListener("change", function (event) {
-      applyTheme(event.target.value);
+      applyTheme(event.target.value, true);
     });
+    if (prefersLight) {
+      var reResolve = function () {
+        if ($("theme-select").value === AUTO_THEME) { applyTheme(AUTO_THEME); }
+      };
+      if (prefersLight.addEventListener) { prefersLight.addEventListener("change", reResolve); }
+      else if (prefersLight.addListener) { prefersLight.addListener(reResolve); }
+    }
   }
 
   // --- data -------------------------------------------------------------

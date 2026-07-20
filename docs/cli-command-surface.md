@@ -4385,6 +4385,10 @@ exactly one registered winner). Live updates are
 cursor polls of the cell fanned out to the browser over server-sent events;
 the dashboard never calls `message:read` or `message:listen`, and message
 body fields are stripped by the proxy before anything reaches the browser.
+The dashboard writes no agent content; its sole write is the agent's own
+size-capped, strictly validated UI preferences row (the theme choice) via
+`PUT /v1/self/dashboard-preferences`, which rides account export/import so
+the theme follows the agent across machines.
 
 ```sh
 ws dashboard serve --agent scout

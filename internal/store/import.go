@@ -258,6 +258,10 @@ var importColumns = map[string]map[string]bool{
 		"last_event": true, "last_event_id": true,
 		"last_event_occurred_at": true, "last_activity_at": true,
 	},
+	"agent_dashboard_preferences": {
+		"agent_id": true, "account_id": true, "realm_id": true,
+		"prefs": true, "updated_at": true,
+	},
 	"tokens": {
 		"id": true, "account_id": true, "operator_id": true, "agent_id": true,
 		"kind": true, "token_hash": true, "display_name": true,
@@ -821,6 +825,7 @@ type importCtx struct {
 	liveAgents                   map[string]bool
 	agentRealms                  map[string]string
 	agentActivity                map[agentActivityImportKey]bool
+	dashboardPreferences         map[string]bool
 	vaultKeys                    map[string]secretVaultKeyImportScope
 	vaultKeyIdentities           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
 	vaultLiveKeyVersions         map[secretVaultKeyVersionImportKey]string
@@ -906,6 +911,7 @@ func newImportCtx(accountID string) *importCtx {
 		liveAgents:                   map[string]bool{},
 		agentRealms:                  map[string]string{},
 		agentActivity:                map[agentActivityImportKey]bool{},
+		dashboardPreferences:         map[string]bool{},
 		vaultKeys:                    map[string]secretVaultKeyImportScope{},
 		vaultKeyIdentities:           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
 		vaultLiveKeyVersions:         map[secretVaultKeyVersionImportKey]string{},
@@ -1172,7 +1178,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		"vault_key_enrollment_receipts", "secrets", "secret_fields", "secret_deks",
 		"agent_vault_key_rotations", "agent_vault_key_rotation_items",
 		"vault_key_rotation_receipts",
-		"secret_mutation_receipts",
+		"secret_mutation_receipts", "agent_dashboard_preferences",
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
 		"avatar_style_rollout_jobs",
 		"agent_avatar_profiles", "agent_avatar_versions",
@@ -1561,6 +1567,37 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_activity row duplicates an agent/runtime/location projection")
 		}
 		ic.agentActivity[key] = true
+	case "agent_dashboard_preferences":
+		agentID, err := requireStringField(obj, "agent_id")
+		if err != nil || !ic.agents[agentID] {
+			return badf("agent_dashboard_preferences row references agent %q not present in this archive", agentID)
+		}
+		realmID, err := requireStringField(obj, "realm_id")
+		if err != nil || ic.agentRealms[agentID] != realmID {
+			return badf("agent_dashboard_preferences row agent %q is outside realm %q", agentID, realmID)
+		}
+		// The prefs document must satisfy the same strict v1 contract the
+		// write path enforces, so a content-hostile archive cannot smuggle an
+		// unvalidated document into the row. jsonb round-trips may reorder
+		// keys, so this is a semantic check, never a byte comparison.
+		rawPrefs, err := json.Marshal(obj["prefs"])
+		if err != nil {
+			return badf("agent_dashboard_preferences row prefs is not JSON")
+		}
+		if _, err := validateDashboardPreferences(rawPrefs); err != nil {
+			return badf("agent_dashboard_preferences row prefs is invalid: %v", err)
+		}
+		updatedAt, err := requireImportedTimestamp(obj, "updated_at")
+		if err != nil {
+			return badf("agent_dashboard_preferences row updated_at is invalid")
+		}
+		if err := ic.requireTimestampAtOrBeforeExport("updated_at", *updatedAt); err != nil {
+			return badf("agent_dashboard_preferences row %v", err)
+		}
+		if ic.dashboardPreferences[agentID] {
+			return badf("agent_dashboard_preferences row duplicates agent %q", agentID)
+		}
+		ic.dashboardPreferences[agentID] = true
 	case "tokens":
 		kind, kindErr := requireStringField(obj, "kind")
 		accessProfile, profileErr := requireStringField(obj, "access_profile")
