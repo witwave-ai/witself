@@ -605,10 +605,12 @@ The product goal is a CLI-first agent durable-state service spanning both planes
 - A sealed credential plane: structured secrets and TOTP authenticators encrypted
   by the active client under a separate, client-custodied agent vault key. The
   backend stores and exports ciphertext, wrapped field keys, and public metadata
-  but cannot decrypt sensitive values. The initial agent-owned vertical provides
-  explicit one-field access; key transfer, rotation, runtime injection, and
-  cross-agent grants are follow-on slices. Sealed-plane values are never embedded,
-  returned by semantic recall, placed in the self-digest, or plaintext-exported.
+  but cannot decrypt sensitive values. The agent-owned vertical provides
+  explicit one-field access, short-lived multi-installation key enrollment,
+  passphrase-encrypted offline recovery, and crash-resumable client-side AVK
+  rotation. Secret update, runtime injection, and cross-agent grants remain
+  follow-on slices. Sealed-plane values are never embedded, returned by semantic
+  recall, placed in the self-digest, or plaintext-exported.
 - Cross-agent access governed by evaluable, default-deny policy.
 - Security groups that act as both policy subjects and policy targets and can own
   group-scoped shared memories and facts.
@@ -631,6 +633,22 @@ The product goal is a CLI-first agent durable-state service spanning both planes
   own tenants, so a cell outage stays contained.
 - Public backend code and first-class self-hosting for operators who want to run
   Witself in their own cloud.
+
+The implemented AVK lifecycle is available through `witself vault key enroll
+begin|approve|complete|list|status|cancel`, `vault key recovery
+export|inspect|import`, `vault key rotate
+(--recovery-out FILE|--accept-unrecoverable-key-loss)`, and `vault key rotation
+status|cancel`. Artifact-backed rotation durably writes and decrypt-verifies the
+exact target recovery copy before commit; production output must be external or
+synchronously replicated rather than only another file on the same disk.
+Pairing secrets and recovery passphrases use the controlling TTY only; there is
+no argv, environment, stdin/pipe, JSON, or MCP credential path.
+Account archives contain ciphertext, wrapped DEKs, public AVK bindings, and
+terminal lifecycle history, but never the AVK or recovery artifact. Active
+enrollment/rotation work must be cancelled before account export, agent
+deletion, or irreversible account close. The matching AVK moves separately
+after a cell import. See
+[Client-Custodied Agent Vault](docs/client-custodied-agent-vault.md).
 
 Managed Witself Cloud is the default supported product. Self-hosting is available
 from the public repo, while production self-host support is a paid or contracted

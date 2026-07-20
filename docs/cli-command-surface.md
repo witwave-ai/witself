@@ -2,10 +2,12 @@
 
 Status: draft target contract with implemented slices labeled below.
 
-Sealed-plane implementation amendment (accepted 2026-07-18): the current
-client-custodied vertical implements `vault key init|status`, local `password
-generate`, `secret create|list|search|show|reveal|archive|restore`, and `totp
-show|code SECRET FIELD`. Secret and field selectors accept either the exact ID
+Sealed-plane implementation amendment (accepted 2026-07-19): the current
+client-custodied vertical implements `vault key init|status`, `vault key enroll
+begin|approve|complete|list|status|cancel`, `vault key recovery
+export|inspect|import`, `vault key rotate`, `vault key rotation status|cancel`,
+local `password generate`, `secret create|list|search|show|reveal|archive|restore`,
+and `totp show|code SECRET FIELD`. Secret and field selectors accept either the exact ID
 or an unambiguous human-readable name. `secret create` consumes a strict JSON
 document from `--file` or `--stdin`; it does not yet implement the convenience flags
 shown in the target sections below, and it requires an explicit
@@ -13,8 +15,9 @@ shown in the target sections below, and it requires an explicit
 exact-request journal. The MCP create tool requires the equivalent
 `idempotency_key`. Secret update/rename/copy/delete/grants,
 group/operator ownership, TOTP enroll/delete convenience commands, references,
-and runtime injection remain planned. Encryption and TOTP calculation are
-client-side under the separate AVK; every KMS/server-decrypt description below
+and runtime injection remain planned. Encryption, TOTP calculation, AVK
+enrollment/recovery, and rotation are client-side under the separate AVK; every
+KMS/server-decrypt description below
 is superseded by [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and
 [the implementation plan](client-custodied-agent-vault.md).
 
@@ -45,9 +48,12 @@ superseded. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md). Exact
 command spelling is frozen with the first public memory schema.
 
-The CLI command is `ws`. The backend binary stays `witself-server`; the
+The implemented CLI command is `witself`. The backend binary stays
+`witself-server`; the
 `witself://` reference scheme, `WITSELF_` environment variables, and the
-`witself.*` MCP tool names are unchanged.
+`witself.*` MCP tool names are unchanged. Older target-only examples below may
+still use the proposed `ws` shorthand; use `witself` for every implemented
+command.
 
 ## Design Goals
 
@@ -702,7 +708,10 @@ Flags:
 
 ### `witself account export`
 
-Export managed-service account metadata when policy allows.
+Export managed-service account metadata when policy allows. The command fails
+with conflict while any agent has a pending/approved vault-key enrollment or an
+open rotation. Expired enrollment requests are settled first; cancel remaining
+work before retrying.
 
 Flags:
 
@@ -715,7 +724,10 @@ Flags:
 
 ### `witself account close`
 
-Close the managed-service customer account when policy allows.
+Close the managed-service customer account when policy allows. Close is fenced
+by the same active vault-key lifecycle check as export because it revokes the
+tokens needed to settle that work. Cancellation remains available while the
+account is suspended.
 
 Flags:
 
@@ -2212,6 +2224,103 @@ direct-write/proposal retry keys cannot resurrect deleted content. `fact set
 --recreate-deleted` is the explicit path to create a new fact id at that
 address; it requires a fresh mutation key and does not inherit the old usage
 rank.
+
+## `witself vault key` (implemented)
+
+The key lifecycle remains a local-client ceremony. It is intentionally CLI-only
+and is not exposed over MCP. Pairing secrets and recovery passphrases use the
+controlling terminal (`/dev/tty`) with hidden input where applicable. They have
+no argv flag, environment variable, stdin/pipe, JSON, or MCP representation.
+An unattended or model-only process without a controlling TTY fails closed.
+
+The exact command surface is:
+
+```text
+witself vault key init [agent connection flags]
+witself vault key status [agent connection flags]
+witself vault key enroll begin [--location NAME] [--ttl DURATION] [agent connection flags]
+witself vault key enroll approve ENROLLMENT_ID [--location NAME] [agent connection flags]
+witself vault key enroll complete ENROLLMENT_ID [--location NAME] [agent connection flags]
+witself vault key enroll list [--state STATE] [--limit N] [agent connection flags]
+witself vault key enroll status ENROLLMENT_ID [agent connection flags]
+witself vault key enroll cancel ENROLLMENT_ID [agent connection flags]
+witself vault key recovery export --out FILE [agent connection flags]
+witself vault key recovery inspect --file FILE
+witself vault key recovery import --file FILE [agent connection flags]
+witself vault key rotate (--recovery-out FILE|--accept-unrecoverable-key-loss) [agent connection flags]
+witself vault key rotation status [ROTATION_ID] [agent connection flags]
+witself vault key rotation cancel [ROTATION_ID] [agent connection flags]
+```
+
+Enrollment is a three-installation-step flow:
+
+1. On the installation that needs the AVK, run `enroll begin`. Its TTL defaults
+   to 10 minutes and must be from 1 minute through 1 hour. The public enrollment
+   id and verification code may appear in ordinary/JSON output; the pairing
+   secret is displayed only on the controlling TTY.
+2. On an installation already holding the exact current AVK, run `enroll
+   approve ENROLLMENT_ID` and enter that pairing secret at the hidden TTY
+   prompt. The backend receives only an ephemeral public key and
+   recipient-bound ciphertext.
+3. Back on the target, run `enroll complete ENROLLMENT_ID`. It durably installs
+   the exact AVK before consumption and then causes the backend transfer capsule
+   to be irreversibly cleared.
+
+`enroll list` accepts states `pending`, `approved`, `consumed`, `cancelled`, or
+`expired`; `--limit` is 1 through 100. Status and cancel require an enrollment
+id. Cancellation is allowed while the account is suspended so stranded work
+can be closed safely.
+
+Recovery export writes a new passphrase-encrypted file and refuses to overwrite
+an existing path. It prompts twice on the controlling TTY. `inspect` is an
+offline public-metadata operation and does not connect or ask for a passphrase.
+Import prompts once, authenticates the stable account/realm/agent scope and
+exact backend AVK binding, then installs the key only if all identities match.
+The artifact uses one fixed Argon2id-v1/AES-256-GCM format; there is no weak
+mode and the backend never receives the artifact or passphrase.
+
+`vault key rotate` starts or resumes the one open rotation. Exactly one recovery
+decision is required. `--recovery-out FILE` prompts twice on the controlling
+TTY, creates a never-overwritten passphrase artifact for the exact target epoch,
+durably writes it, reads it back, and both inspects and decrypts it before
+commit. An existing path is an idempotent resume only when that full check
+matches the stable account/realm/agent scope and exact target key.
+`--accept-unrecoverable-key-loss` instead records an explicit `risk_accepted`
+disposition and is intended only for disposable/test vaults or a separately
+governed automation policy. The two flags are mutually exclusive; omitting both
+fails before identity lookup, target creation, or remote mutation.
+
+The command generates exactly `source_version + 1`, stores the target epoch
+locally, stages client-rewrapped DEKs, independently verifies the complete plan,
+passes the recovery gate, and commits the epoch flip atomically. The lifecycle
+row, status output, account archive, receipt hash, and audit retain the
+value-free disposition mode and artifact SHA-256 when applicable. The backend
+never receives a path, artifact, passphrase, or key. Sensitive secret create is
+blocked while the rotation is open. Re-running the command discovers and
+resumes the open rotation after a crash; a terminal replay reports the stored
+disposition rather than trusting newly supplied flags. The old local epoch
+remains after commit; every other installation must enroll again. Status/cancel
+may omit the id to select the one open rotation, and cancel is available while
+the account is suspended.
+
+If an artifact was published and the rotation is then cancelled, that file is
+an inert copy of the retired candidate. Witself never deletes or overwrites it,
+and recovery import will not accept it against a later current binding. A fresh
+rotation candidate therefore needs a fresh output path; remove or archive the
+old file only under the operator's own retention policy.
+
+For production, `--recovery-out` must name an external or synchronously
+replicated destination that has completed its durable write before returning.
+A same-disk file survives process crashes but is not an independent copy for
+machine or disk loss. Trusted unattended clients may implement the typed local
+recovery-sink interface and source the passphrase within their own process; the
+CLI deliberately provides no argv, environment, stdin/pipe, JSON, or MCP
+passphrase path.
+
+Account export, irreversible account close, and deletion of the affected agent
+return conflict while that agent has a pending/approved enrollment or open
+rotation. Cancel the lifecycle work first; cancellation remains available on a
+suspended account. Realm deletion already requires its agents to be removed.
 
 ## `witself password generate`
 
@@ -3791,7 +3900,8 @@ Flags:
 ### `witself agent delete NAME_OR_ID`
 
 Delete an agent principal when allowed. Operator/admin by default. Agent deletion
-invalidates that agent's tokens.
+invalidates that agent's tokens, so it returns conflict while that agent has a
+pending/approved vault-key enrollment or open rotation. Cancel first.
 
 Flags:
 

@@ -1,24 +1,74 @@
 # Witself Backup And Recovery
 
-Status: draft. Decision: v0 backup/export carries a **dual posture**, one per
-plane. The OPEN plane (memories + facts) supports first-class
-structured/plaintext identity export and round-trippable import. The SEALED
-plane (secrets + TOTP) is backed up **encrypted-only** — envelope ciphertext
-plus KMS key identity and rotation metadata, never plaintext, never key
-material — and is **excluded from the plaintext identity export** entirely.
+Status: draft with an implementation-backed sealed-plane amendment. Decision:
+v0 backup/export carries a **dual posture**, one per plane. The OPEN plane
+(memories + facts) supports first-class structured/plaintext identity export
+and round-trippable import. The SEALED plane (secrets + TOTP) travels only as
+client-encrypted ciphertext, wrapped DEKs, public AVK bindings, and value-free
+lifecycle history, never plaintext and never client key material.
 
-> **Sealed-plane custody amendment (accepted 2026-07-18):**
+> **Sealed-plane custody amendment (accepted 2026-07-19):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
 > [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> KMS-dependent backup and recovery design below. Schema-55 account archives
-> carry the public AVK binding, secret metadata, sensitive-field ciphertext,
-> wrapped per-field DEKs, and value-free mutation receipts. They never carry
-> the AVK or plaintext sensitive values. The encrypted streams copy unchanged
-> between cells and require no KMS identity, source-cloud unwrap, or destination
-> re-wrap. An authorized client must separately retain and possess the matching
-> AVK to use the restored vault. Later KMS-loss, realm-KEK, and cross-cloud KMS
-> sections are superseded history. The provider-native pre-migration database
-> backup procedures remain current and mandatory where stated.
+> KMS-dependent backup and recovery design below. Schema-56 account archives
+> carry public AVK bindings, secret metadata, sensitive-field ciphertext,
+> wrapped per-field DEKs, terminal enrollment/rotation history and receipts,
+> and value-free secret mutation receipts. They never carry an AVK, local key
+> file, enrollment private key, pairing secret, recovery passphrase/artifact,
+> or plaintext sensitive value. The encrypted streams copy unchanged between
+> cells and require no KMS identity, source-cloud unwrap, or destination
+> re-wrap. An authorized client must separately provide the matching AVK after
+> import by protected local-key transfer, recovery-artifact import, or
+> enrollment from another active installation. Later KMS-loss, realm-KEK, and
+> cross-cloud KMS sections are superseded history. The provider-native
+> pre-migration database backup procedures remain current and mandatory where
+> stated.
+
+### Schema-56 lifecycle and archive fence
+
+Account export first expires due enrollment requests, then fails with conflict
+while any enrollment remains `pending`/`approved` or any rotation remains
+`open`, and also rejects any pending AVK not owned as the exact target of that
+open rotation. It does not attempt to migrate live transfer ciphertext,
+target-private state, or a partially staged rotation. Irreversible account close
+and deletion of the affected agent treat any pending AVK as lifecycle work
+because those operations revoke the tokens needed to finish, cancel, or repair
+it. Realm deletion already requires no live agents. Enrollment and rotation
+cancellation remain available while an account is suspended, so the operator
+can cancel first and retry export, agent deletion, or account close.
+
+Terminal enrollment transfer capsules are purged, and terminal rotation item
+staging rows are absent. Before writing any archive bytes, export fails closed
+if a terminal rotation still has staging items or has a source pending, a
+committed target pending or unequal staged/item counts, or a cancelled target
+that is not retired. Export/import preserves the remaining public/value-free
+lifecycle records and receipts in foreign-key order; import rejects live
+authority or terminal records carrying forbidden capsule/staging data. A
+schema-55 pending AVK has no rotation parent, so schema-56 database migration
+and schema-55 archive upgrade both normalize it to `retired` with
+`retired_at = created_at` without changing `row_version`. The offline recovery
+artifact is deliberately outside the account archive. Move it through a
+separate protected channel and run `witself vault key recovery import --file
+FILE` only after the account is present in the destination cell.
+
+AVK rotation cannot rely on a post-commit reminder: once every DEK wrapper and
+the current binding move to the target epoch, recovery artifacts and other
+installations holding only the source epoch cannot restore current access.
+Accordingly, the production rotation path durably writes, reads back, inspects,
+and decrypt-verifies an exact target recovery artifact before commit. The
+terminal rotation row and archive retain only its value-free disposition and
+SHA-256 digest; the artifact, path, passphrase, and AVK remain client-custodied.
+An explicit `risk_accepted` branch exists for disposable/test or separately
+governed automation, but it is not a backup. Production recovery destinations
+must be external or synchronously replicated; a same-disk file is not an
+independent machine-loss copy.
+
+The sealed/lifecycle portion of canonical archive order is
+`agent_vault_keys`, `agent_vault_key_enrollments`,
+`vault_key_enrollment_receipts`, `secrets`, `secret_fields`, `secret_deks`,
+`agent_vault_key_rotations`, `agent_vault_key_rotation_items`,
+`vault_key_rotation_receipts`, then `secret_mutation_receipts`. All streams are
+required at their introduced schema version even when they contain zero rows.
 
 Visible transcript conversations and entries are account-owned open-plane data.
 They travel in the logical account export/import stream in conversation then

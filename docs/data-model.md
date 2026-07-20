@@ -1,11 +1,14 @@
 # Witself Data Model (Postgres Schema)
 
-> **Sealed-plane schema amendment (accepted 2026-07-18):** migration `0055`
-> and [the client-custodied vault plan](client-custodied-agent-vault.md) control
-> the secrets schema. Earlier `realm_keys`, KMS-rooted DEKs, group-owned v0
-> secrets, and server-decrypt columns below are superseded for this slice.
+> **Sealed-plane schema amendment (accepted 2026-07-19):** migrations `0055`
+> and `0056`, together with
+> [the client-custodied vault plan](client-custodied-agent-vault.md), are the
+> authoritative implemented secrets schema. Earlier `realm_keys`, KMS-rooted
+> DEKs, group-owned v0 secrets, and server-decrypt columns below are historical
+> target design and are superseded for the implemented slice.
 
-Status: draft. Last reviewed 2026-07-14. Decision: Witself uses a single
+Status: draft with implementation-backed amendments. Last reviewed 2026-07-19.
+Decision: Witself uses a single
 multi-tenant PostgreSQL schema as the system of
 record, scoped on every row by `account_id` / `realm_id`, spanning **two
 planes** — the **open plane** (memories + facts, stored as ordinary identity
@@ -52,13 +55,14 @@ recall/digest rule:
   [policy](access-policy.md), in the self-digest, and plaintext-exportable. There
   is **no reveal ceremony**; `sensitive` is a PII/redaction display flag, not an
   encryption boundary.
-- **Sealed plane** (`secrets`, `secret_fields`, `totp_enrollments`,
-  `secret_grants`, `realm_keys`, `secret_deks`, `attachments`): sensitive values
-  and TOTP seeds live **only in envelope columns** (CMK → per-realm KEK →
-  per-secret/field DEK; see [key-hierarchy.md](key-hierarchy.md)). Sealed-plane
-  material is reveal-gated and is **never embedded, never returned by semantic
-  recall, never in the self-digest, never plaintext-exported, and never ingested
-  from CLAUDE.md/AGENTS.md** (the sealed-plane carve-out; see
+- **Sealed plane** (`agent_vault_keys`, `secrets`, `secret_fields`,
+  `secret_deks`, and schema-56 enrollment/rotation lifecycle tables): sensitive
+  values and TOTP payloads live **only in client-created envelope columns**. A
+  client-held AVK wraps each field-generation DEK; no cloud KMS or server key is
+  in the decrypt path. Sealed-plane material is reveal-gated and is **never
+  embedded, never returned by semantic recall, never in the self-digest, never
+  plaintext-exported, and never ingested from CLAUDE.md/AGENTS.md** (the
+  sealed-plane carve-out; see
   [memory-model.md](memory-model.md), [context-hydration.md](context-hydration.md),
   and [backup-and-recovery.md](backup-and-recovery.md)).
 - **Shared spine** (`accounts`, `operators`, `realms`, `realm_members`, `agents`,
@@ -66,12 +70,13 @@ recall/digest rule:
   account/realm/agent model, token = identity, audit, metering, and idempotency
   across both planes.
 
-Sealed-plane envelope columns and `realm_keys` / `secret_deks` are needed only
-when the sealed plane is enabled. An **open-plane-only** deployment runs without
-KMS; the sealed plane re-introduces KMS as a required dependency when enabled.
+Sealed-plane tables are needed only when the sealed plane is enabled. Neither
+plane requires cloud KMS for agent-vault custody; provider-native encryption may
+still protect volumes, backups, and deployment credentials as defense in depth.
 PostgreSQL and its full-text facilities are the open-plane storage and recall
 gate. Migration-0032 vectors use JSONB, so pgvector is not a dependency, and
-there is no backend embedding provider (see [storage.md](storage.md)).
+there is no backend embedding provider or any other backend AI/model inference
+(see [storage.md](storage.md)).
 
 **This schema is the per-cell schema.** Under the go-forward fleet of
 independent cells, each cell runs one instance of this schema and is the single
@@ -86,26 +91,116 @@ directory is what routes a client (or the relay) to the realm's home cell. See
 [deployment-cells.md](deployment-cells.md) and
 [agent-collaboration.md](agent-collaboration.md).
 
+## Authoritative Sealed Schema Through `0056`
+
+This section is the implemented column/table contract. All sealed rows are
+fully scoped by `account_id`, `realm_id`, and `owner_agent_id`; composite
+foreign keys prevent ciphertext, wrappers, lifecycle records, or receipts from
+crossing that scope. No table has a plaintext AVK, plaintext DEK, enrollment
+private key, pairing secret, recovery passphrase/artifact, or plaintext
+sensitive-value column.
+
+Migration `0055` adds:
+
+- `agent_vault_keys`: `id`, scope, `key_version`, `algorithm`, `fingerprint`,
+  `lifecycle_state`, `row_version`, `created_at`, and `retired_at`. Algorithm is
+  exactly `AES_256_GCM_RANDOM_NONCE_V1`; lifecycle is
+  `pending|current|retired`.
+- `secrets`: `id`, scope, public `name`, `description`, `template`, JSON `tags`,
+  `row_version`, timestamps, archive/delete timestamps, and the generated public
+  `search_document`.
+- `secret_fields`: `id`, scope and `secret_id`, public `name`/`field_kind`,
+  `sensitive`, encoding/value/revision metadata, timestamps, and the generated
+  public search document. A check enforces exactly one branch: non-sensitive
+  `public_value`, or sensitive `ciphertext` plus algorithm/AAD/DEK coordinates.
+- `secret_deks`: `id`, full field scope, generation, `wrapped_dek`, wrap
+  algorithm/AAD/revision, wrapping AVK id/version, row version, and timestamps.
+  The 60-byte wrapper is client-created; there is no plaintext DEK or server
+  root.
+- `secret_mutation_receipts`: fully scoped actor/operation, hashed idempotency
+  and request keys, value-free target/result coordinates, and `created_at`.
+
+Migration `0056` adds:
+
+- `agent_vault_key_enrollments`: exact AVK identity, target installation
+  id/name, target X25519 public key, pairing commitment, lifecycle/revision and
+  timestamps, plus the optional approved transfer capsule. Lifecycle is
+  `pending|approved|consumed|cancelled|expired`; terminal checks require the
+  ephemeral public key, ciphertext, transfer algorithm, and consume commitment
+  to be cleared.
+- `vault_key_enrollment_receipts`: value-free, scoped retry/request hashes,
+  enrollment id, result revision, and timestamp for request, approve, consume,
+  and cancel operations. A scoped parent FK deletes receipts with their
+  enrollment.
+- `agent_vault_key_rotations`: exact source/target AVK ids and versions,
+  `open|committed|cancelled` lifecycle, item/staged counts, row version,
+  timestamps, `recovery_disposition_mode`, and optional
+  `recovery_artifact_sha256`. There is at most one open rotation per agent, and
+  the application requires target version exactly `source + 1`. Only committed
+  rows carry a disposition: `recovery_artifact` requires one lowercase SHA-256,
+  while `risk_accepted` forbids it; open and cancelled rows carry neither.
+- `agent_vault_key_rotation_items`: one frozen source-wrapper row per DEK plus
+  an optional staged target wrapper/revision/digest and timestamp. It contains
+  encrypted wrappers only and is keyed by `(rotation_id, dek_id)`.
+- `vault_key_rotation_receipts`: value-free, scoped retry/request hashes,
+  rotation id, result revision, and timestamp for start, stage, commit, and
+  cancel operations. A scoped parent FK deletes receipts with their rotation.
+
+Schema 56 drops schema 55's all-history unique key-version constraint and adds
+the partial unique index `agent_vault_keys_one_live_version` over
+`(account_id, realm_id, owner_agent_id, key_version)` where lifecycle is
+`pending` or `current`. `agent_vault_keys_one_current` still permits only one
+current epoch, and `agent_vault_key_rotations_one_open` permits only one open
+rotation. This preserves a cancelled target as retired history while allowing a
+fresh AVK id to retry the same logical `source + 1` version. Because schema 55
+permitted `pending` AVKs without a rotation parent, schema-56 Up deterministically
+normalizes every such legacy orphan to `retired` with
+`retired_at = created_at` and leaves `row_version` unchanged. The schema-55
+archive upgrader applies the identical transform before current import.
+
+Account archives include these tables in foreign-key order and require every
+stream, even when empty. Export first expires due enrollments and then rejects
+any remaining pending/approved enrollment, open rotation, or orphan pending AVK.
+Before writing archive bytes it also rejects leftover rotation-item staging
+rows and terminal rotation/key combinations the importer cannot accept: a
+pending source, a committed target still pending or with unequal staged/item
+counts, and a cancelled target that is not retired. Irreversible account close
+and agent deletion treat any pending AVK as lifecycle work because those
+operations revoke the tokens needed to repair or finish it. A suspended account
+may still cancel enrollment or rotation work; cancel it before export or close.
+Only terminal, value-free lifecycle history is portable; a recovery artifact
+and AVK remain separate client-owned data.
+
+The guarded schema-56 Down migration first takes `ACCESS EXCLUSIVE` locks over
+the complete key/enrollment/rotation/DEK downgrade surface. It refuses to run
+with pending/approved enrollment, an open rotation, an orphan pending key epoch,
+or any duplicate retired epoch that is still referenced by a DEK. Only after
+those checks does it drop lifecycle tables and deterministically compact
+unreferenced duplicate retired candidates, preferring the current epoch, then a
+referenced epoch, then the newest `(created_at, id)` row before restoring schema
+55's all-history version uniqueness. Committed recovery-disposition metadata is
+terminal lifecycle history and is intentionally lost only as part of that
+explicit guarded downgrade to a schema that cannot represent it.
+
 ## Scope And Conventions
 
 The schema covers exactly the storage responsibilities enumerated in
 [storage.md](storage.md) and [backend-architecture.md](backend-architecture.md):
 account/realm/agent metadata, operator principals and memberships, token hashes
 and metadata, the open-plane memory/fact/policy/group/message tables, the
-sealed-plane secret/TOTP/grant/key tables, audit events, usage counters and
-rate-limit state, idempotency records, and deferred-but-stubbed attachment
-metadata. Managed (multi-tenant) and self-hosted (typically single-tenant)
-deployments share the **same** data model; only key custody, the sealed-plane
-toggle, and tenancy density differ.
+sealed-plane secret/key/lifecycle tables, audit events, usage counters and
+rate-limit state, idempotency records, and future attachment metadata. Managed
+(multi-tenant) and self-hosted (typically single-tenant) deployments share the
+**same** data model and client-custody boundary; only the sealed-plane toggle
+and tenancy density differ.
 
-V0 sequencing: the open plane (memories, facts, policies, groups, messages)
-ships first as the product core; the sealed credential plane is a defined v0
-slice that MAY be staged after the core (see [v0-scope.md](v0-scope.md) and
-[implementation-plan.md](implementation-plan.md)). The at-rest schema below is
-defined in full; sealed-plane deferrals — `attachments` (deferred-but-stubbed),
-a dedicated `secret_versions` history table (an [Open Decision](#open-decisions)),
-and opt-in per-field DEKs (v0 uses a per-secret DEK) — do not change the table
-definitions.
+The open-plane core and the schema-55/56 agent-owned sealed vertical are both
+implemented slices (see [v0-scope.md](v0-scope.md) and
+[implementation-plan.md](implementation-plan.md)). Group ownership/grants,
+secret update, runtime injection, attachments, and a dedicated
+`secret_versions` history table remain deferred. The authoritative sealed
+schema is the amendment above; the older target model later in this file does
+not override it.
 
 Conventions that apply to every table unless stated otherwise:
 
@@ -162,13 +257,17 @@ generate stable local ids.
 | `msg_` | message | open | `messages` |
 | `thr_` | message thread / cross-realm conversation | open | (`messages.thread_id`); `conversations` |
 | `fpr_` | federation peer (allow-listed realm handle + key) | spine | `federation_peers` |
+| `loc_` | stable client installation/location id | spine | `agent_activity` / lifecycle coordinates |
+| `avk_` | public agent vault-key epoch identity | sealed | `agent_vault_keys` |
+| `enr_` | vault-key enrollment request | sealed | `agent_vault_key_enrollments` |
+| `vkr_` | vault-key rotation | sealed | `agent_vault_key_rotations` |
 | `sec_` | secret | sealed | `secrets` |
 | `fld_` | secret field | sealed | `secret_fields` |
-| `grt_` | secret grant | sealed | `secret_grants` |
-| `totp_` | TOTP enrollment | sealed | `totp_enrollments` |
-| `kek_` | per-realm key-encryption key | sealed | `realm_keys` |
 | `dek_` | per-secret/per-field data-encryption key | sealed | `secret_deks` |
-| `att_` | attachment metadata (deferred-but-stubbed) | sealed | `attachments` |
+| `grt_` | target-only secret grant | sealed | future `secret_grants` |
+| `totp_` | target-only standalone TOTP enrollment | sealed | future `totp_enrollments` |
+| `kek_` | superseded KMS-rooted key identity | sealed | historical `realm_keys` target |
+| `att_` | target-only attachment metadata | sealed | future `attachments` |
 | `aud_` | audit event | spine | `audit_events` |
 | `usg_` | immutable usage event | spine | `usage_events` |
 | `idem_` | idempotency record | spine | `idempotency_keys` |
@@ -1153,6 +1252,12 @@ The state machine and budgets are authoritative on the home cell; any live strea
 is a latency accelerator only.
 
 ## Sealed-Plane Tables
+
+> **Historical target section:** the KMS-rooted, group/grant, standalone TOTP,
+> and attachment model below predates ADR 0003. It is retained only as future
+> product-shape context. The implemented column contract is
+> [Authoritative Sealed Schema Through `0056`](#authoritative-sealed-schema-through-0056);
+> where the two differ, the schema-55/56 migrations and that section win.
 
 Sealed-plane sensitive values and TOTP seeds live **only** in envelope columns
 (CMK → per-realm KEK → per-secret/field DEK; see [key-hierarchy.md](key-hierarchy.md)).

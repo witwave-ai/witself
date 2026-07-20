@@ -1,15 +1,99 @@
 # Sealed-Plane Acceptance
 
-Status: executable acceptance specification. The harness and product surface are
-implemented incrementally; a release is certified only when the commands and
-evidence contract below exist in that release and every required case passes
-against the named live runtimes and managed-cloud cells.
+Status: executable acceptance specification. The schema-56 vault-key lifecycle
+has an implemented code/database gate below. The larger 21-case live
+runtime/cloud certification remains a release target and cannot be claimed
+until its harness, deferred runtime injection, and every named live case pass.
 
 This is the release gate for the client-custodied agent vault defined by
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
 [Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. Where an
 older sealed-plane document still describes a cloud-KMS vault root or
 server-side decryption, ADR 0003 and this gate take precedence.
+
+## Implemented schema-56 lifecycle gate
+
+Run these repository checks from the root of the checkout. The PostgreSQL
+command targets a disposable local database and specifically proves both the
+schema-55-to-56 constraint transition and the atomic staged rotation flip:
+
+```sh
+go test ./...
+go vet ./internal/store ./internal/client ./internal/server \
+  ./cmd/witself-server ./internal/secretclient
+WITSELF_TEST_DATABASE_URL='postgres://witself:witself@localhost:5432/witself?sslmode=disable' \
+  go test ./internal/store \
+  -run '^(TestMigration56ReplacesHistoricalVaultKeyVersionConstraintPostgres|TestVaultKeyRotationStagesAndFlipsAtomically|TestSensitiveCreateReplayPrecedesVaultKeyMismatchAcrossRotation)$' \
+  -count=1 -v
+```
+
+Release review must also cover the implemented lifecycle contract:
+
+1. On a clean target installation, run `witself vault key enroll begin`; on an
+   installation that already has the matching AVK, run `witself vault key
+   enroll approve ENROLLMENT_ID`; then finish on the target with `witself vault
+   key enroll complete ENROLLMENT_ID`. Verify both installations can reveal the
+   same synthetic field and that the transfer capsule is cleared after
+   consumption.
+2. Verify `enroll list`, `enroll status`, expiry, and `enroll cancel` expose
+   only value-free lifecycle state. Pairing material must use the controlling
+   TTY; attempts through argv, environment variables, stdin/pipes, JSON, or MCP
+   must have no supported input path.
+3. Run `witself vault key recovery export --out FILE`, inspect it offline with
+   `witself vault key recovery inspect --file FILE`, and restore it in a clean
+   matching installation with `witself vault key recovery import --file FILE`.
+   Verify the output path is never overwritten, wrong passphrases/scopes fail
+   closed, and passphrases use hidden controlling-TTY input only.
+4. Run `witself vault key rotate --recovery-out FILE`, interrupt and re-run it
+   during a disposable fixture to prove open-run discovery/resume, then verify
+   `witself vault key rotation status [ROTATION_ID]` reports the exact
+   `source + 1` epoch, full item count, `recovery_artifact` disposition, and
+   artifact SHA-256. Verify the artifact was durably written, read back,
+   inspected, and decrypted against the exact target/scope before commit; an
+   exact existing artifact resumes idempotently, while wrong passphrase, scope,
+   target, malformed bytes, or unavailable storage prevents commit. Also verify
+   zero/both recovery choices fail before remote work and that
+   `--accept-unrecoverable-key-loss` records only `risk_accepted`. Sensitive
+   create remains blocked while open, commit is atomic, the old local epoch
+   remains, and another installation must enroll again.
+5. Exercise `witself vault key rotation cancel [ROTATION_ID]`, then retry the
+   rotation. The retired candidate must remain as history while a fresh key id
+   may reuse the same logical target version. Any recovery artifact already
+   published for the retired candidate remains inert and never overwritten or
+   deleted automatically; it must fail recovery against the later binding, and
+   the retry must select a fresh output path.
+6. Verify account export, irreversible account close, and deletion of the
+   affected agent are rejected while an enrollment is pending/approved or a
+   rotation is open. Suspend the account, cancel the work through the safety
+   path, and verify on disposable clones that those operations are unblocked.
+   A terminal schema-56
+   archive must contain public AVK bindings, ciphertext/wrapped DEKs, terminal
+   lifecycle history, and receipts,
+   but no AVK, local key file, live transfer/staging capsule, pairing secret,
+   passphrase, or recovery artifact. After cell import, supply the AVK
+   separately by protected key transfer, recovery import, or enrollment.
+7. Race one journaled sensitive create against an open rotation. Verify the
+   open conflict does not change the journal or create a receipt. After commit,
+   verify the client submits and authenticates the exact old request first,
+   accepts only HTTP `409` plus `secret_vault_key_mismatch` as rebase authority,
+   DEK-rewraps without changing ciphertext or generated ids/value, durably CAS
+   publishes before send, and can decrypt the result under the target AVK.
+   Also prove accepted-before-rotation response loss replays exactly, response
+   loss after CAS replays the replacement after a later rotation, successive
+   uncommitted epochs advance each wrap revision, concurrent CAS contenders
+   send one winner, and generic/idempotency/transport failures never mutate the
+   journal. Missing retired keys, overflow, unsafe storage, and failed CAS must
+   fail closed. An old client must leave the journal intact and fail safely.
+
+All of these checks are provider-neutral. AWS, Google Cloud, and Azure run the
+same binary, schema, wire algorithms, and archive format; cloud KMS is not an
+agent-vault dependency. The Witself backend performs no AI/model inference and
+never receives an AVK, enrollment private key, pairing secret, recovery
+passphrase, or plaintext sealed value.
+
+The rest of this document defines the larger certification target. Passing the
+schema-56 lifecycle gate alone is not a claim that the 21 live cases below have
+run.
 
 ## Certification claim
 
@@ -115,10 +199,12 @@ Public fixture values are not forbidden markers because the product
 intentionally indexes and returns them. The sanitized evidence nevertheless
 records only counts and case identifiers, not the public fixture values.
 
-The trusted preparation controller may copy the already-created opaque `.key`
-file into isolated test homes to configure the same AVK for all 12 cases. This
-is test setup, not the deferred installation-enrollment product flow. The
-bytes must never pass through a prompt, MCP argument/result, message,
+The certifying preparation flow uses the implemented `vault key enroll
+begin|approve|complete` ceremony to provision each durable installation. A
+trusted controller may copy an already-created opaque `.key` into throwaway
+isolated homes only as a non-certifying fixture shortcut for tests whose subject
+is not enrollment. Such copying does not satisfy the lifecycle gate. In either
+case, AVK bytes must never pass through a prompt, MCP argument/result, message,
 transcript, shell argument, or account archive.
 
 ## Required environment
@@ -350,7 +436,9 @@ runs this exact sequence:
 
 1. On the source, verify redacted inventory, direct CLI reveal, local TOTP, and
    runtime injection with the matching AVK.
-2. Suspend the source account and export one logical snapshot.
+2. Confirm no enrollment is pending/approved and no rotation is open, suspend
+   the source account, and export one logical snapshot. A separate recovery
+   artifact may be prepared before suspension but is not placed in the archive.
 3. Expand and validate the archive in the protected runner. Record private
    per-stream row counts and byte digests for key metadata, secrets, fields,
    wrapped DEKs, mutation receipts, audit, and usage.
@@ -360,7 +448,8 @@ runs this exact sequence:
    observe zero source API connections for the remainder of the case. Revoke
    source test tokens when the source and destination use independent
    authorization stores.
-6. Point the client at the destination without modifying its `.key` file.
+6. Point an installation already holding the matching `.key` at the destination,
+   or separately restore the exact matching AVK from the recovery artifact.
 7. Repeat redacted search by public username/URL, one-field direct reveal,
    local TOTP verification, and runtime injection.
 8. Export the destination and privately compare every canonical encrypted
@@ -370,13 +459,14 @@ runs this exact sequence:
 
 A move case passes only when:
 
-- the source and destination archive manifests are complete for the schema and
-  contain every sealed-plane stream, including empty streams;
+- the source and destination archive manifests are complete for schema 56 and
+  contain every sealed-plane and lifecycle stream, including empty streams;
 - row counts and immutable ids match, and all ciphertext, wrapped DEKs,
   algorithms, versions, AAD-binding columns, and public key metadata are
   byte-for-byte unchanged;
-- the archive contains no AVK, token, plaintext sensitive value, TOTP seed, or
-  generated TOTP code;
+- the archive contains no AVK, local key file, enrollment private key, live
+  transfer/staging capsule, recovery artifact/passphrase, token, plaintext
+  sensitive value, TOTP seed, or generated TOTP code;
 - destination search/redaction results match the source;
 - destination reveal, TOTP, and injection succeed with the unchanged local
   AVK;
@@ -429,9 +519,10 @@ value-free classes.
 ### Account archive
 
 Scan compressed bytes and every expanded manifest/stream, then structurally
-validate dependency order and columns. The archive is complete and
-ciphertext-only, with no local key material, plaintext, unrecognized stream, or
-omitted sealed stream.
+validate dependency order and columns. The schema-56 archive is complete and
+ciphertext-only, with public AVK bindings and terminal enrollment/rotation
+history but no local key material, recovery artifact, live lifecycle capsule,
+plaintext, unrecognized stream, or omitted sealed/lifecycle stream.
 
 ### Audit and usage
 
@@ -533,8 +624,8 @@ shape:
   "witself": {
     "version": "0.0.0",
     "commit": "abcdef1",
-    "schema_version": 55,
-    "archive_schema_version": 55
+    "schema_version": 56,
+    "archive_schema_version": 56
   },
   "runtimes": [
     {"name": "codex", "client_version": "...", "case_count": 3}
@@ -624,11 +715,18 @@ not silently retried into a pass. Rehearsals use `pass_rehearsal` or
 
 ## Deferred and out of scope
 
-This gate does not certify multi-machine enrollment UX, lost-device recovery,
-OS keychains or secure enclaves, passphrase recovery packages, group or
-cross-agent sharing, encrypted attachments, browser-native filling,
-installation proof-of-possession, or polished AVK rotation. Those features
-require separate threat models and acceptance suites.
+The schema-56 gate above covers multi-installation enrollment, client-side
+passphrase recovery artifacts, and recovery-gated crash-resumable AVK rotation.
+Production certification uses an external or synchronously replicated recovery
+destination; a same-disk artifact is not accepted as an independent device-loss
+copy. The larger
+21-case certification still depends on the live harness and deferred runtime
+injection. Neither gate certifies secret update/replacement, grants or
+group/cross-agent sharing, dedicated TOTP enrollment/removal commands,
+permanent secret deletion, OS keychains or secure enclaves, encrypted
+attachments, browser-native filling, or additional installation
+proof-of-possession. Those features require separate threat models and
+acceptance suites.
 
 Cloud KMS may protect database volumes, backups, deployment credentials, and
 infrastructure state. The gate forbids only using cloud KMS as the agent-vault

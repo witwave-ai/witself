@@ -1,9 +1,13 @@
 # Witself JSON Contracts
 
-> **Sealed-plane JSON amendment (accepted 2026-07-18):** secret envelope,
-> redaction, and value-material responses are governed by
-> [the client-custodied vault plan](client-custodied-agent-vault.md). Sensitive
-> plaintext and agent vault keys are never server response fields.
+> **Sealed-plane JSON amendment (accepted 2026-07-19):** schema-55 secret
+> envelopes and schema-56 enrollment/rotation projections are governed by
+> [the client-custodied vault plan](client-custodied-agent-vault.md) and the
+> current Go transport structs. Sensitive plaintext, AVKs, enrollment private
+> keys, pairing secrets, recovery passphrases/artifacts, and backend inference
+> are never server response fields. The authoritative implemented shapes are in
+> [Current Client-Custodied Shapes](#current-client-custodied-shapes); older
+> KMS/server-decrypt examples are historical target-only material.
 
 Status: evolving contract. This document defines JSON shared by CLI `--json`,
 MCP tool results, managed API responses, self-hosted API responses, and local
@@ -173,8 +177,9 @@ Identifiers:
 
 - IDs are strings with stable prefixes: `realm_`, `agent_`, `opr_`, `mem_`,
   `fact_`, `grp_`, `pol_`, `msg_`, `tok_`, `aud_`, and the sealed-plane prefixes
-  `acct_`, `sec_`, `fld_`, `grt_`, `totp_`, `kek_`, `dek_`, `att_`, `usg_`, and
-  `idem_`.
+  `acct_`, `loc_`, `avk_`, `enr_`, `vkr_`, `sec_`, `fld_`, `dek_`, `usg_`, and
+  `idem_`. Older target-only contracts also reserve `grt_`, `totp_`, `kek_`,
+  and `att_`.
 - Names are user-visible strings.
 - Local-file mode may generate stable local IDs, but callers should not parse ID
   internals.
@@ -394,12 +399,11 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
       "supported": true
     },
     "client_side_decrypt": {
-      "supported": false,
-      "reason": "byok_post_v0"
+      "supported": true
     },
     "server_side_decrypt": {
-      "supported": true,
-      "kms_provider": "aws-kms"
+      "supported": false,
+      "reason": "client_custodied"
     },
     "billing": {
       "supported": false,
@@ -482,14 +486,11 @@ Rules:
   defined v0 slice that may be staged after the open-plane core; an
   open-plane-only deployment reports `supported: false` with a stable `reason`
   (see [v0-scope.md](v0-scope.md)).
-- `client_side_decrypt` and `server_side_decrypt` advertise the two sealed-plane
-  custody modes (see [key-hierarchy.md](key-hierarchy.md)). Clients use them to
-  pick the [Secret Reveal Result](#secret-reveal-result) shape they receive
-  rather than probing. Per the v0 crypto subset, remote backends advertise
-  `client_side_decrypt: false` and `server_side_decrypt: true`; client-held
-  decrypt over the wire (BYOK) is post-v0. `server_side_decrypt` carries the
-  active `kms_provider` (`aws-kms` | `gcp-kms` | `azure-key-vault` | `local-dev`)
-  so callers can see which root key custody is in force.
+- `client_side_decrypt` is the only agent-vault custody mode. Implementations
+  that expose these target capability names report it supported and report
+  `server_side_decrypt` unsupported with a stable `client_custodied` reason.
+  No agent-vault `kms_provider` is returned because cloud KMS is not in this
+  decrypt path.
 - Capability responses never include secret values, TOTP seeds, TOTP codes,
   passphrases, private keys, key material, or wrapped key blobs. The sealed plane
   is never embedded, recalled, in the self-digest, or plaintext-exported.
@@ -2297,15 +2298,227 @@ Rules:
 ## Sealed-Plane Shapes
 
 The shapes below cover the **sealed plane** (secrets and TOTP), the
-confidentiality counterpart to the open plane's memories and facts. Unlike the
-open plane, sealed material is KMS-backed envelope-encrypted, reveal-gated, and
-**never embedded, never returned by semantic recall, never in the self-digest,
-and never plaintext-exported or ingested** from CLAUDE.md/AGENTS.md. The only
-value-returning paths are the audited reveal / TOTP-code ceremonies. The data
-model and lifecycle live in [secret-model.md](secret-model.md) and
-[totp-2fa.md](totp-2fa.md); the crypto envelope and custody modes live in
-[encryption-model.md](encryption-model.md) and
-[key-hierarchy.md](key-hierarchy.md).
+confidentiality counterpart to the open plane's memories and facts. Sensitive
+material is encrypted by the active client under a client-held AVK and is
+**never embedded, returned by semantic recall, placed in the self-digest,
+plaintext-exported, or ingested** from CLAUDE.md/AGENTS.md. The backend returns
+only redacted metadata or one encrypted field package; local clients perform
+deliberate reveal and TOTP calculation.
+
+Implemented sealed HTTP responses use a flat `schema_version: "witself.v0"`
+plus the named resource (`key_epoch`, `secret`, `material`, `enrollment`,
+`transfer`, `rotation`, `items`, or `receipt`). They do not use the aspirational
+generic `ok/data` wrapper at the top of this document.
+
+### Current Client-Custodied Shapes
+
+Public AVK identity is represented as:
+
+```json
+{
+  "id": "avk_aaaaaaaaaaaaaaaa",
+  "account_id": "acct_...",
+  "realm_id": "realm_...",
+  "owner_agent_id": "agent_...",
+  "key_version": 1,
+  "algorithm": "AES_256_GCM_RANDOM_NONCE_V1",
+  "fingerprint": "<64 lowercase hex characters>",
+  "lifecycle_state": "current",
+  "row_version": 1,
+  "created_at": "2026-07-19T00:00:00Z"
+}
+```
+
+There is no JSON field capable of carrying AVK bytes. Ordinary secret
+list/show responses use the current `Secret`/`SecretField` projection:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "secret": {
+    "id": "sec_aaaaaaaaaaaaaaaa",
+    "account_id": "acct_...",
+    "realm_id": "realm_...",
+    "owner_agent_id": "agent_...",
+    "name": "github",
+    "template": "login",
+    "tags": ["github"],
+    "fields": [
+      {
+        "id": "fld_aaaaaaaaaaaaaaaa",
+        "name": "username",
+        "kind": "username",
+        "sensitive": false,
+        "encoding": "utf8",
+        "value_version": 1,
+        "public_value": "agent-name",
+        "redacted": false,
+        "row_version": 1
+      },
+      {
+        "id": "fld_bbbbbbbbbbbbbbbb",
+        "name": "password",
+        "kind": "password",
+        "sensitive": true,
+        "encoding": "utf8",
+        "value_version": 1,
+        "redacted": true,
+        "row_version": 1,
+        "dek_generation": 1
+      }
+    ],
+    "lifecycle": "active",
+    "row_version": 1,
+    "created_at": "2026-07-19T00:00:00Z",
+    "updated_at": "2026-07-19T00:00:00Z",
+    "sensitive_field_count": 1
+  }
+}
+```
+
+`POST /v1/secrets/{secret_id}/fields/{field_id}:access` returns exactly one
+`material` object containing field identity/encoding/version, envelope
+version, base64 JSON ciphertext, `AES_256_GCM_RANDOM_NONCE_V1`, AAD version,
+secret/field revisions, and one `dek` object. That DEK object contains id,
+generation, base64 wrapped DEK, wrap algorithm/AAD/revision, and wrapping AVK
+id/version. It never contains plaintext, a plaintext DEK, or a server key.
+
+A sensitive create sealed under a retired AVK, with no canonical receipt for
+that exact idempotent request, returns the only client-authoritative rebase
+error shape:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "secret_vault_key_mismatch",
+  "error": "agent vault key mismatch"
+}
+```
+
+The HTTP status is `409`. Both the exact status and exact `code` are required;
+the human-readable `error` text alone is never a rebase fence. The store checks
+for an exact idempotency receipt before it checks the current wrapping key, so
+this response also proves that the submitted journal bytes did not commit.
+Generic `409`, idempotency conflict, open-rotation conflict, other status,
+transport failure, and malformed response remain non-authoritative. New
+clients may then DEK-rewrap and durably CAS their local request journal before
+retrying. Old clients treat this as an ordinary failed create and leave their
+journal/value intact.
+
+Freshly sealed fields begin at `dek.wrap_revision: 1`. A never-committed create
+may carry a higher positive revision after one or more client-side AVK rebases;
+all other envelope validation remains unchanged. Each rebase preserves value
+ciphertext, secret/field/DEK ids, DEK generation, value version, and logical
+metadata and increments the prior wrap revision exactly once.
+
+Enrollment list/show/mutations return this value-free projection under
+`enrollment`; list uses `items`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "enrollment": {
+    "id": "enr_aaaaaaaaaaaaaaaa",
+    "account_id": "acct_...",
+    "realm_id": "realm_...",
+    "owner_agent_id": "agent_...",
+    "vault_key_id": "avk_aaaaaaaaaaaaaaaa",
+    "vault_key_version": 1,
+    "vault_key_algorithm": "AES_256_GCM_RANDOM_NONCE_V1",
+    "vault_key_fingerprint": "<64 lowercase hex characters>",
+    "target_location_id": "loc_aaaaaaaaaaaaaaaa",
+    "target_location_name": "work-laptop",
+    "target_public_key": "<43-character base64url value>",
+    "target_key_algorithm": "X25519_RAW_32_BASE64URL_V1",
+    "pairing_commitment": "<64 lowercase hex characters>",
+    "lifecycle_state": "pending",
+    "row_version": 1,
+    "created_at": "2026-07-19T00:00:00Z",
+    "expires_at": "2026-07-19T00:10:00Z"
+  }
+}
+```
+
+Only the target-only `:receive` response adds a `transfer` wrapper with the
+same enrollment, `source_ephemeral_public_key`, base64 `ciphertext`, and
+`consume_commitment`. The public enrollment projection never includes the
+pairing secret, target private key, consume proof, or AVK. Terminal projections
+omit transfer material. CLI `enroll begin --json` returns `enrollment`, a public
+SAS, and `pairing_secret_delivery: "controlling_terminal"`; it never serializes
+the pairing secret.
+
+Rotation status uses `rotation`; start/stage/commit/cancel HTTP mutations also
+include a value-free `receipt`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "rotation": {
+    "id": "vkr_aaaaaaaaaaaaaaaa",
+    "account_id": "acct_...",
+    "realm_id": "realm_...",
+    "owner_agent_id": "agent_...",
+    "source_key_id": "avk_aaaaaaaaaaaaaaaa",
+    "source_key_version": 1,
+    "source_key_algorithm": "AES_256_GCM_RANDOM_NONCE_V1",
+    "source_key_fingerprint": "<64 lowercase hex characters>",
+    "target_key_id": "avk_bbbbbbbbbbbbbbbb",
+    "target_key_version": 2,
+    "target_key_algorithm": "AES_256_GCM_RANDOM_NONCE_V1",
+    "target_key_fingerprint": "<64 lowercase hex characters>",
+    "lifecycle_state": "open",
+    "item_count": 3,
+    "staged_count": 2,
+    "row_version": 3,
+    "created_at": "2026-07-19T00:00:00Z",
+    "updated_at": "2026-07-19T00:00:02Z"
+  }
+}
+```
+
+The optional `staged_plan_hash` appears only for a fully staged open plan.
+Every commit request requires exactly one value-free recovery disposition:
+
+```json
+{
+  "expected_rotation_row_version": 4,
+  "expected_item_count": 3,
+  "expected_plan_hash": "<64 lowercase hex characters>",
+  "recovery_disposition": {
+    "mode": "recovery_artifact",
+    "artifact_sha256": "<64 lowercase hex characters>"
+  }
+}
+```
+
+The alternative is `"recovery_disposition":{"mode":"risk_accepted"}` and
+must omit `artifact_sha256`. A committed rotation reports
+`recovery_disposition_mode` and reports `recovery_artifact_sha256` only for the
+artifact-backed mode. Open and cancelled rotations report neither. The exact
+disposition is covered by the mutation request hash and idempotency receipt.
+The digest identifies a client-created and client-verified artifact; the
+artifact, path, passphrase, and AVK never enter the request.
+
+Rotation item pages use `items` plus `next_cursor` and contain only exact source
+wrapper coordinates and optional staged target wrappers; they never contain
+DEKs or field plaintext. `GET /v1/vault/rotations/open` returns
+`"rotation": null` when no open work exists. CLI rotation JSON returns
+`operation` and `rotation` and omits HTTP-only mutation receipts.
+
+Recovery is a client-only CLI artifact, not an HTTP/MCP response. Its safe
+metadata contains `format_version`, `aad_version`, `kdf_algorithm`, fixed
+Argon2 time/memory/parallelism, public salt, `aead_algorithm`, stable
+account/realm/owner scope, public AVK metadata, and `ciphertext_bytes`.
+`recovery export --json` returns `path` and `metadata`; `inspect --json` returns
+`state: "inspected"` and `metadata`; `import --json` returns
+`state: "restored"` and public `key` metadata. No JSON shape accepts or emits a
+recovery passphrase or AVK bytes.
+
+### Historical Target-Only Sealed Shapes
+
+The KMS-rooted summaries, server-side reveal/TOTP, grants, and password API
+examples below predate ADR 0003. They are not emitted by the schema-56 server;
+the current shapes above are authoritative.
 
 ### Secret Summary
 
