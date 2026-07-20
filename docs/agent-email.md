@@ -26,6 +26,27 @@ Scoped by the operator at kickoff (2026-07-20):
   (IMAP/Gmail/M365 adapters) is deliberately deferred; self-hosted cells bring
   their own domain to the same pipeline.
 
+A second requirements pass later the same day settled more:
+
+- **Cloudflare is the inbound edge.** Cloudflare's email stack (Email Routing
+  plus Email Workers) receives mail for the managed zones and relays each
+  message to the owning cell's signature-verified ingestion endpoint. The
+  current focus is receiving mail addressed to a specific agent.
+- **Domain plan.** Interim: `witmail.witwave.ai`, a subdomain of the existing
+  estate. Target: acquire and provision `witmail.ai`. Each realm gets its own
+  subdomain derived from the realm's unique identifier, and the local part is
+  the agent name: `scott@<realm-label>.witmail.ai`.
+- **Send is confirmed but later.** Agents will eventually send — verification
+  flows may force it sooner than correspondence does — and the design
+  documents it now, but receive ships first and nothing in v1 depends on send.
+- **Email is a billing point in both directions.** Sent and received mail are
+  metered per period; sending stops hard at a per-period threshold; email is
+  switchable on and off per agent and per realm; agent-originated spam
+  prevention is a first-class requirement, not a slice-3 afterthought.
+- **Attachments stay in Postgres.** V1 stores raw MIME, attachments included,
+  directly in the database under hard size caps — no object store or
+  file-management layer in this epic.
+
 ## Goal
 
 Every named agent already has a durable, attributable self: memories, facts,
@@ -93,11 +114,15 @@ deliberately sidesteps it.
 
 ## Addressing And Domain Model
 
-Agents receive addresses on a Witwave-operated domain, provisionally shaped as
-`<agent>@<realm-slug>.<email-base-domain>` so the realm anchors the address the
-same way it anchors identity, avatars, and published signing keys. The exact
-format, the email base domain itself, and whether the agent local part is the
-agent name or a sanitized derivative are open questions below.
+Agents receive addresses shaped `<agent-name>@<realm-label>.<base-domain>`, so
+the realm anchors the address the same way it anchors identity, avatars, and
+published signing keys. The base domain is `witmail.witwave.ai` in the interim
+and `witmail.ai` once acquired and provisioned; both are Cloudflare-fronted
+zones. `<realm-label>` is a DNS hostname label derived deterministically from
+the realm's unique identifier — the derivation rule is an open question
+because raw realm ids (`realm_...`) contain characters that are not valid in
+MX-resolvable hostname labels. The local part is the agent name, subject to
+the sanitization rules below.
 
 Requirements regardless of format:
 
@@ -114,24 +139,43 @@ Requirements regardless of format:
 - Sending reputation must be isolatable per subdomain so a future outbound
   slice cannot poison inbound routing, and a noisy realm cannot poison the
   base domain.
+- The interim-to-target domain cutover is a real migration: external services
+  will hold `witmail.witwave.ai` addresses on file, so the interim domain must
+  keep receiving (dual-domain routing) for a long deprecation window after
+  `witmail.ai` activates. Every address a third party ever saw must keep
+  working until its agent is done with the accounts behind it.
 
 ## Inbound Pipeline
 
-Witself cells do not terminate SMTP. A managed inbound provider (candidate
-adapters: SES inbound, Cloudflare Email Routing, Postmark inbound — selection
-is an open question) receives mail for the managed domain and delivers it to
-the owning cell over a signed webhook. MX and routing configuration follow the
-cell topology in [deployment-cells.md](deployment-cells.md); the control plane
-stays thin and never handles message content, consistent with the
-control-plane-only provider-adapter precedent from billing.
+Witself cells do not terminate SMTP. Cloudflare is the selected inbound edge:
+Email Routing accepts mail for the managed zones, and an Email Worker relays
+each message to the owning cell's signature-verified ingestion endpoint.
+Cloudflare evaluates SPF/DKIM/DMARC at the edge and enforces a provider
+message-size cap; both are recorded with the stored message. MX and routing
+configuration follow the cell topology in
+[deployment-cells.md](deployment-cells.md); the control plane stays thin and
+never handles message content, consistent with the control-plane-only
+provider-adapter precedent from billing.
+
+Two Cloudflare constraints need verification during implementation: per-realm
+*subdomain* routing must be confirmed against the zone plan (catch-all plus
+Worker-side recipient parsing is the fallback), and Cloudflare's email stack
+is receive-oriented — a future send slice needs a separate outbound provider,
+and that dependency must not leak into the inbound design. The Email Worker
+also needs a realm-to-cell routing map so mail lands in the owning cell; how
+that map is published to and refreshed at the edge is an open question.
 
 Pipeline contract:
 
 - **Idempotent ingestion.** At-least-once webhook delivery deduplicated on the
   provider message id; replays are harmless.
-- **Raw preservation.** The raw MIME message is stored through the blob
-  adapter with a hard size cap; parsing failures preserve the raw bytes and
-  record a parse-error state rather than dropping mail.
+- **Raw preservation.** The raw MIME message — attachments included — is
+  stored directly in Postgres under a hard size cap aligned with the edge
+  provider's message limit; parsing failures preserve the raw bytes and
+  record a parse-error state rather than dropping mail. No object store or
+  file-management layer is introduced in this epic: retention windows are the
+  pressure valve on table growth, and an object-storage adapter is revisited
+  only if measured volume demands it.
 - **Parsed metadata.** From, to, subject, date, provider spam verdict, and
   SPF/DKIM/DMARC authentication results land as structured columns in
   Postgres alongside the immutable message row.
@@ -142,8 +186,8 @@ Pipeline contract:
   flagged for messaging attachments in
   [post-v0-roadmap.md](post-v0-roadmap.md) — size limits, metering, diagnostic
   redaction, and an explicit injection and memory-poisoning review. V1 stores
-  attachment metadata and bytes under the same blob cap but may gate retrieval
-  until that review lands (open question).
+  attachment bytes inline with the raw message in Postgres under the same cap
+  but may gate retrieval until that review lands (open question).
 
 ## Trust Model
 
@@ -226,9 +270,18 @@ Receive-only still carries real obligations:
 
 - Per-mailbox inbound rate and size caps enforced at ingestion; overflow is
   rejected at the provider boundary, not silently dropped after storage.
-- Plan-gated address counts, stored bytes, and inbound message counts metered
-  through the existing value-free usage-telemetry patterns; platform
-  notifications are cost of service and not user-metered.
+- Sent and received message counts are billing points, metered per period
+  through the existing value-free usage-telemetry patterns, alongside
+  plan-gated address counts and stored bytes; platform notifications are cost
+  of service and not user-metered.
+- Email is switchable per agent and per realm: an operator or plan
+  enforcement can turn receive — and later send — off independently without
+  deprovisioning addresses.
+- Sending, when it ships, stops hard at a per-period threshold. The cap is a
+  backend-enforced gate, not client-side advice, because agent-originated
+  spam is a first-class threat to the shared domain's reputation and to the
+  platform; threshold accounting exists per agent and per realm from the
+  first send slice.
 - Content never appears in logs, metrics, or diagnostics; audit events for
   provision/ingest/read/ack/purge are content-free, matching messaging.
 - Mailbox deletion purges content and attachments from live storage while
@@ -256,22 +309,30 @@ Receive-only still carries real obligations:
 
 ## Open Questions
 
-1. Exact address format and the email base domain; agent-name sanitization
-   rules and realm-slug collision policy.
-2. Inbound provider selection (SES inbound vs Cloudflare Email Routing vs
-   Postmark) and whether one adapter must be certified per cloud target for
-   parity with [cloud-targets.md](cloud-targets.md).
+1. Realm-label derivation: the deterministic, hostname-safe, collision-free
+   rule mapping a realm's unique identifier to its DNS label, and the
+   agent-name-to-local-part sanitization rules.
+2. Cloudflare verification items: subdomain routing support on the zone plan
+   (vs catch-all plus Worker-side parsing), the Email-Worker-to-cell
+   authentication shape, and how the realm-to-cell routing map is published
+   to and refreshed at the edge.
 3. `email_checkpoint` as a separate self.show lane vs a fold into
    `message_checkpoint`.
 4. OTP extraction ceremony: reveal-gated like sealed-plane material vs
    ordinary gated read; audit shape either way.
 5. Attachment exposure in v1: metadata-only vs gated retrieval, pending the
-   injection review.
-6. Retention windows per plan tier, and the quarantine window.
+   injection review (storage itself is settled: inline in Postgres).
+6. Retention windows per plan tier, the quarantine window, and the Postgres
+   growth watermarks that would trigger revisiting object storage.
 7. Platform-notification templating, locale posture, and which events email
    operators at all.
 8. Whether slice 2 reply-only send needs per-thread human approval policy
    (operator-configurable) before an agent can reply to a human.
+9. Outbound provider selection for the send slices (Cloudflare's stack does
+   not cover arbitrary outbound); deferred until a send slice is scheduled.
+10. Interim-to-target domain migration mechanics: the dual-domain receive
+    window, address rewriting policy, and how long `witmail.witwave.ai`
+    addresses must survive after `witmail.ai` activates.
 
 ## Relationship To Existing Docs
 
