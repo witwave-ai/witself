@@ -801,8 +801,9 @@ as documented here.
 
 ## Self-Management And Hydration Routes
 
-These routes back the agent self-managed memory, hydration, and observational
-activity surfaces; see [context-hydration.md](context-hydration.md). User-
+These routes back the agent self-managed memory, hydration, observational
+activity, and dashboard-preference surfaces; see
+[context-hydration.md](context-hydration.md). User-
 authored memory mutations return the deterministic `echo` string and any
 `warnings[]` (e.g. `memory_duplicate`) described in
 [api-contract.md](api-contract.md); the internal activity touch returns the
@@ -812,6 +813,8 @@ projection contract documented below.
 GET  /v1/self                # implemented JSON digest; no formatted emit response yet
 GET  /v1/self/peers
 POST /v1/self/activity       # authenticated runtime-hook activity projection
+GET  /v1/self/dashboard-preferences
+PUT  /v1/self/dashboard-preferences
 POST /v1/remember            # target; not implemented
 POST /v1/sessions:start      # target; not implemented
 POST /v1/sessions:end        # target; not implemented
@@ -851,6 +854,17 @@ POST /v1/memories:consolidate # superseded target; not implemented
   local event queued so the touch can retry; only an older server's bare
   route-missing `404` is treated as permanently unsupported, allowing the event
   to be removed after its transcript upload succeeds.
+- `GET`/`PUT /v1/self/dashboard-preferences` read and upsert the authenticated
+  agent's own dashboard UI preferences row — the local dashboard's sole write
+  surface (see
+  [ADR 0004](decisions/0004-local-agent-dashboard.md)). Both routes are
+  agent-token-only and own-row-only, accept no query parameters, and carry the
+  strict v1 document contract:
+  `{"schema":"witself.dashboard-prefs.v1","theme":<string<=64>}`, unknown keys
+  refused, 4 KiB cap. The upsert is last-write-wins with no revision machinery;
+  `GET` returns a `null` preferences default when no row was ever stored.
+  Reads record no usage and writes emit no audit event (the value-free
+  `agent_activity` precedent: a theme flip is not owner-facing).
 - `POST /v1/remember` is deferred. If implemented, invoking it is an explicit
   choice of Witself: a clear name→value assertion may upsert a fact and other
   text may add Witself memory with dedup/supersede. It never bypasses validation

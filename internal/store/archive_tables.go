@@ -50,6 +50,7 @@ var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "agent_avatar_resets", introducedSchema: 50},
 	{name: "avatar_mutation_receipts", introducedSchema: 50},
 	{name: "agent_activity", introducedSchema: 39},
+	{name: "agent_dashboard_preferences", introducedSchema: 57},
 	{name: "fact_subjects", introducedSchema: 22},
 	{name: "facts", introducedSchema: 22},
 	{name: "fact_mutation_tombstones", introducedSchema: 27},

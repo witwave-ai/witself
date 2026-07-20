@@ -1,0 +1,13 @@
+/* midnight — deep navy dark, softer than console, with blue/cyan accents. */
+:root {
+  --bg: #0b1220;
+  --bg-panel: #111a2e;
+  --fg: #d7e1f2;
+  --fg-dim: #8fa1bd;
+  --accent: #7fb1ff;   /* blue */
+  --accent-2: #5bd6ea; /* cyan */
+  --danger: #f2708a;
+  --border: #22304a;
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

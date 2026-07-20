@@ -197,3 +197,7 @@ plane.
 - [ADR 0003](decisions/0003-client-custodied-agent-vault.md): making each named
   agent's separate client-held AVK the sealed-plane decrypt root while the
   backend remains a portable ciphertext store.
+- [ADR 0004](decisions/0004-local-agent-dashboard.md):
+  serving a loopback-only, read-only, live per-agent dashboard from the CLI
+  over the same public API, authorization, and redaction rules as every other
+  client — distinct from the deferred operator/admin web dashboard.

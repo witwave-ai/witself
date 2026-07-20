@@ -310,6 +310,12 @@ type Config struct {
 	GetSelfMessageCheckpoint       func(ctx context.Context, p DomainPrincipal) (*SelfMessageCheckpoint, error)
 	GetSelfAvatarCheckpoint        func(ctx context.Context, p DomainPrincipal) (*SelfAvatarCheckpoint, error)
 
+	// Per-agent dashboard UI preferences: the local dashboard's single write
+	// surface. Both callbacks receive only the exact bearer-token-derived
+	// agent principal; the row is namespaced UI state, never agent content.
+	GetDashboardPreferences func(ctx context.Context, p DomainPrincipal) (*DashboardPreferences, error)
+	PutDashboardPreferences func(ctx context.Context, p DomainPrincipal, in PutDashboardPreferencesRequest) (DashboardPreferences, error)
+
 	// Client-custodied agent secrets. Every callback receives only the exact
 	// bearer-token-derived agent principal. The backend stores public metadata,
 	// ciphertext, and wrapped DEKs; it never receives an AVK or plaintext
@@ -1715,6 +1721,12 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.TouchAgentActivity != nil {
 			mux.HandleFunc("POST /v1/self/activity", touchAgentActivityHandler(cfg.AuthenticatePrincipal, cfg.TouchAgentActivity))
+		}
+		if cfg.GetDashboardPreferences != nil {
+			mux.HandleFunc("GET /v1/self/dashboard-preferences", getDashboardPreferencesHandler(cfg.AuthenticatePrincipal, cfg.GetDashboardPreferences))
+		}
+		if cfg.PutDashboardPreferences != nil {
+			mux.HandleFunc("PUT /v1/self/dashboard-preferences", putDashboardPreferencesHandler(cfg.AuthenticatePrincipal, cfg.PutDashboardPreferences))
 		}
 		if cfg.RegisterVaultKey != nil {
 			mux.HandleFunc("POST /v1/vault/key-epochs", registerVaultKeyHandler(cfg.AuthenticatePrincipal, cfg.RegisterVaultKey))

@@ -1,0 +1,13 @@
+/* amber — retro phosphor terminal: warm near-black glass, amber glow. */
+:root {
+  --bg: #0a0700;
+  --bg-panel: #140e02;
+  --fg: #ffb000;
+  --fg-dim: #b08830;
+  --accent: #ffd75e;   /* bright phosphor highlight */
+  --accent-2: #ff9430; /* warm orange */
+  --danger: #ff6b52;
+  --border: #3a2a08;
+  --font-ui: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

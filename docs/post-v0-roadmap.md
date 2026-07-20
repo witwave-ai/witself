@@ -314,6 +314,11 @@ must not require it, and it must reuse the same public API, authorization,
 audit, and redaction rules as the CLI rather than adding a privileged web-only
 path.
 
+A strictly local, read-only, per-agent dashboard served by `witself dashboard
+serve` already exists under exactly those reuse rules
+([ADR 0004](decisions/0004-local-agent-dashboard.md)); the operator/admin web
+dashboard this section defers remains deferred.
+
 ### Private Witself Admin CLI
 
 A private internal Witself admin CLI is post-v0. It should be a separate tool

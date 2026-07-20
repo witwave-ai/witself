@@ -1,0 +1,16 @@
+/* high-contrast — accessibility theme: pure black, pure white, vivid
+   accents, strong borders. Every foreground/background pairing measures
+   >= 7:1 (WCAG AAA): fg 21.0, fg-dim 12.5, accent 15.0, accent-2 13.7,
+   danger 8.9 against --bg, and --bg text on --accent chips 15.0. */
+:root {
+  --bg: #000000;
+  --bg-panel: #101010;
+  --fg: #ffffff;
+  --fg-dim: #c8c8c8;
+  --accent: #ffd700;   /* vivid yellow */
+  --accent-2: #00e5ff; /* vivid cyan */
+  --danger: #ff8389;
+  --border: #ffffff;
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

@@ -107,6 +107,8 @@ func run(args []string) int {
 		return managedHooksCmd(args[1:])
 	case "mcp":
 		return mcpCmd(args[1:])
+	case "dashboard":
+		return dashboardCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -3931,6 +3933,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]  Install transcript hooks and MCP access")
 	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
+	usageLine(w, "  witself dashboard serve|status|stop  Serve a local read-only live agent dashboard, list registered ones, or stop one")
 	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)
 	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")
