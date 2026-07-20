@@ -176,21 +176,22 @@ jobs:
       # pipeline. It catches archive-name or target drift before the release job
       # publishes any GitHub or GHCR artifact.
       #
-      # --parallelism 2, not the default (=vCPUs): four concurrent
-      # witself-infra cross-compiles of the Pulumi provider graph peak past
-      # the 16GB ubuntu runner and the OOM reaper SIGTERMs the job (v0.0.191
-      # first attempt: exit 143 mid-build). Two keeps peak memory inside the
-      # runner while the 2h ceiling stays comfortable (~10m per infra target
-      # cold; the shared release cache makes warm runs near-instant — note
-      # actions/cache only SAVES on job success, so a failing job never warms
-      # its own retry).
+      # --parallelism 1: a SINGLE witself-infra cross-compile of the Pulumi
+      # provider graph peaks near 10GB; two concurrently OOM'd the 16GB
+      # runner (exit 143, v0.0.191 attempts one and two — attempt one at
+      # default parallelism, attempt two at 2). Sequential builds fit in
+      # memory and land well inside the 2h ceiling on ubuntu (~5-8m per
+      # infra target cold, small binaries in seconds). Cold pain is paid
+      # exactly once: actions/cache saves only on job SUCCESS, and the
+      # publish job (needs: homebrew-verify) shares this cache key family,
+      # so the first green verify warms every later verify AND publish.
       - name: Build Homebrew archive contract
         run: >-
           goreleaser release
           --snapshot
           --clean
           --skip=docker,sbom,sign
-          --parallelism 2
+          --parallelism 1
           --timeout 2h
 
       - name: Render and audit actual Homebrew archives
