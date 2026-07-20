@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -42,7 +43,9 @@ func TestReconcileVaultKeyStateMachine(t *testing.T) {
 		service := newTestService(t, remote)
 		localExistedAtRegistration := false
 		remote.registerCheck = func(in client.RegisterVaultKeyInput) error {
-			key, err := local.ReadAgentVaultKey(testAccountName, testRealmName, testAgentName)
+			key, err := local.ReadAgentVaultKeyEpoch(
+				testAccountName, testRealmName, testAgentName, in.ID, uint64(in.KeyVersion),
+			)
 			if err == nil && key.ID() == in.ID && key.Fingerprint() == in.Fingerprint {
 				localExistedAtRegistration = true
 			}
@@ -62,7 +65,7 @@ func TestReconcileVaultKeyStateMachine(t *testing.T) {
 		if remote.registered.ID != key.ID() || remote.registered.Fingerprint != key.Fingerprint() {
 			t.Fatal("registered metadata does not describe returned local key")
 		}
-		stored := readLocalKey(t)
+		stored := readLocalKeyEpoch(t, key.ID(), key.Version())
 		if stored.ID() != key.ID() || stored.Fingerprint() != key.Fingerprint() {
 			t.Fatal("registered key was not durably created locally")
 		}
@@ -384,7 +387,9 @@ func TestCreateRetryReusesDurableExactSealedRequest(t *testing.T) {
 	if bytes.Contains(journalRaw, want) || bytes.Contains(journalRaw, []byte(retryKey)) {
 		t.Fatal("journal contains sensitive plaintext or the raw idempotency key")
 	}
-	encodedAVK, err := sealed.EncodeAgentVaultKey(readLocalKey(t))
+	encodedAVK, err := sealed.EncodeAgentVaultKey(readLocalKeyEpoch(
+		t, remote.current.ID, uint64(remote.current.KeyVersion),
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +437,515 @@ func TestCreateRetryReusesDurableExactSealedRequest(t *testing.T) {
 		t.Fatalf("retried envelope revealed %q, %v; want original value", plaintext, err)
 	}
 	clear(plaintext)
+}
+
+func TestCreateJournalRebasesOnlyAfterCommittedRotationMismatch(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	remote.current = bindingFor(source, remote.identity)
+
+	retryKey := "create-across-committed-rotation"
+	want := []byte("generated-password-survives-rotation")
+	firstValue := append([]byte(nil), want...)
+	var requests []client.CreateSecretInput
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		requests = append(requests, cloneCreateRequest(in))
+		return nil, errors.New("secret state conflict") // open rotation: never rebase
+	}
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "Rotation-raced account", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: firstValue}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatalf("create while rotation open error = %v, want ErrOperation", err)
+	}
+	if !allZero(firstValue) || len(requests) != 1 {
+		t.Fatal("open-rotation create did not journal once and clear its plaintext")
+	}
+	sourceRequest := cloneCreateRequest(requests[0])
+
+	target, err := sealed.GenerateAgentVaultKey(source.Version() + 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target, remote.identity)
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		requests = append(requests, cloneCreateRequest(in))
+		keyID, _, ok := createRequestWrappingEpoch(requestWithoutIdempotency(in))
+		if !ok {
+			return nil, errors.New("missing wrapping epoch")
+		}
+		if keyID == source.ID() {
+			return nil, client.ErrSecretVaultKeyMismatch
+		}
+		if keyID != target.ID() {
+			return nil, errors.New("unexpected wrapping epoch")
+		}
+		return createResultForInput(in, remote.identity), nil
+	}
+	retryValue := []byte("must be ignored")
+	result, err := service.Create(context.Background(), CreateInput{
+		Name: "Different retry input", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: retryValue}},
+	})
+	if err != nil || result == nil {
+		t.Fatalf("create after rotation = %#v, %v", result, err)
+	}
+	if !allZero(retryValue) || len(requests) != 3 {
+		t.Fatalf("retry input/calls = cleared:%v calls:%d, want true/3", allZero(retryValue), len(requests))
+	}
+	if !reflect.DeepEqual(sourceRequest, requests[1]) {
+		t.Fatal("retry did not submit the exact old-epoch journal before rebasing")
+	}
+	rebased := requests[2]
+	if !sameCreateRequestLogicalValue(sourceRequest, rebased) ||
+		!bytes.Equal(sourceRequest.Fields[0].Sealed.Ciphertext, rebased.Fields[0].Sealed.Ciphertext) ||
+		sourceRequest.ID != rebased.ID || sourceRequest.Fields[0].ID != rebased.Fields[0].ID ||
+		sourceRequest.Fields[0].Sealed.DEK.ID != rebased.Fields[0].Sealed.DEK.ID ||
+		rebased.Fields[0].Sealed.DEK.WrapRevision != sourceRequest.Fields[0].Sealed.DEK.WrapRevision+1 ||
+		rebased.Fields[0].Sealed.DEK.WrappingKeyID != target.ID() ||
+		bytes.Equal(sourceRequest.Fields[0].Sealed.DEK.WrappedDEK, rebased.Fields[0].Sealed.DEK.WrappedDEK) {
+		t.Fatalf("rebase changed logical value or failed to advance only wrapper: %#v", rebased.Fields[0])
+	}
+	assertCreateFieldOpens(t, rebased, 0, remote.identity, target, want)
+	journalHash := createJournalHash(remote.identity, retryKey)
+	durable, found, err := service.readCreateJournal(remote.identity, journalHash, retryKey)
+	if err != nil || !found || !reflect.DeepEqual(durable, requestWithoutIdempotency(rebased)) {
+		t.Fatalf("durable rebased journal = %#v, %v, %v", durable, found, err)
+	}
+}
+
+func TestCreateJournalExactCommittedReplayWinsAfterRotation(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	remote.current = bindingFor(source, remote.identity)
+	retryKey := "committed-before-rotation-response-lost"
+	want := []byte("already-committed-generated-password")
+	var committed client.CreateSecretInput
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		committed = cloneCreateRequest(in)
+		return nil, errors.New("response lost after commit")
+	}
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "Committed account", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: append([]byte(nil), want...)}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatalf("first create error = %v", err)
+	}
+	hash := createJournalHash(remote.identity, retryKey)
+	before, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(before)
+	target, err := sealed.GenerateAgentVaultKey(source.Version() + 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target, remote.identity)
+	currentCalls := remote.currentCalls
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		if !reflect.DeepEqual(committed, in) {
+			return nil, errors.New("retry changed committed request")
+		}
+		return createResultForInput(in, remote.identity), nil // canonical receipt replay
+	}
+	result, err := service.Create(context.Background(), CreateInput{
+		Name: "ignored", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+	})
+	if err != nil || result == nil {
+		t.Fatalf("exact replay after rotation = %#v, %v", result, err)
+	}
+	if remote.currentCalls != currentCalls {
+		t.Fatal("exact committed replay unnecessarily reconciled or rebased to current key")
+	}
+	after, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(after)
+	if !bytes.Equal(before, after) {
+		t.Fatal("committed exact replay replaced its journal")
+	}
+	assertCreateFieldOpens(t, committed, 0, remote.identity, source, want)
+}
+
+func TestCreateJournalDoesNotRebaseOnUnprovenFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "open rotation conflict", err: errors.New("secret state conflict")},
+		{name: "transport", err: errors.New("connection reset")},
+		{name: "idempotency conflict", err: errors.New("idempotency key was reused")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := newFakeRemote()
+			service := newTestService(t, remote)
+			source := generateKey(t)
+			defer source.Clear()
+			createLocalKey(t, source)
+			remote.current = bindingFor(source, remote.identity)
+			remote.createErr = errors.New("initial open rotation conflict")
+			retryKey := "no-rebase-" + strings.ReplaceAll(test.name, " ", "-")
+			if _, err := service.Create(context.Background(), CreateInput{
+				Name: "No unsafe rebase", IdempotencyKey: retryKey,
+				Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("preserved")}},
+			}); !errors.Is(err, ErrOperation) {
+				t.Fatalf("initial create error = %v", err)
+			}
+			hash := createJournalHash(remote.identity, retryKey)
+			before, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clear(before)
+			target, err := sealed.GenerateAgentVaultKey(source.Version() + 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer target.Clear()
+			if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+				t.Fatal(err)
+			}
+			remote.current = bindingFor(target, remote.identity)
+			remote.createErr = test.err
+			currentCalls := remote.currentCalls
+			if _, err := service.Create(context.Background(), CreateInput{
+				Name: "ignored", IdempotencyKey: retryKey,
+				Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+			}); !errors.Is(err, ErrOperation) {
+				t.Fatalf("retry error = %v, want ErrOperation", err)
+			}
+			if remote.currentCalls != currentCalls {
+				t.Fatal("unproven failure reached current-key reconciliation")
+			}
+			after, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clear(after)
+			if !bytes.Equal(before, after) {
+				t.Fatal("unproven failure mutated durable journal")
+			}
+		})
+	}
+}
+
+func TestCreatePreservesRemoteResultIdentityMismatch(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		result := createResultForInput(in, remote.identity)
+		result.Secret.OwnerAgentID = "agent_dddddddddddddddd"
+		return result, nil
+	}
+	result, err := service.Create(context.Background(), CreateInput{
+		Name: "Wrong response owner", IdempotencyKey: "identity-mismatch-create",
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("cleared")}},
+	})
+	if result != nil || !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("result/error = %#v/%v, want nil ErrIdentityMismatch", result, err)
+	}
+}
+
+func TestCreateJournalRebasedLostResponseReplaysBeforeLaterRotation(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	remote.current = bindingFor(source, remote.identity)
+	retryKey := "rebased-commit-response-lost"
+	remote.createErr = errors.New("rotation open")
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "Lost rebase response", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("durable-generated-value")}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatalf("initial create error = %v", err)
+	}
+
+	target2, err := sealed.GenerateAgentVaultKey(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target2.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target2); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target2, remote.identity)
+	var committedV2 client.CreateSecretInput
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		keyID, _, _ := createRequestWrappingEpoch(requestWithoutIdempotency(in))
+		if keyID == source.ID() {
+			return nil, client.ErrSecretVaultKeyMismatch
+		}
+		if keyID == target2.ID() {
+			committedV2 = cloneCreateRequest(in)
+			return nil, errors.New("response lost after rebased commit")
+		}
+		return nil, errors.New("unexpected epoch")
+	}
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "ignored", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+	}); !errors.Is(err, ErrOperation) || committedV2.ID == "" {
+		t.Fatalf("rebased lost-response create = %#v, %v", committedV2, err)
+	}
+	hash := createJournalHash(remote.identity, retryKey)
+	before, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(before)
+
+	target3, err := sealed.GenerateAgentVaultKey(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target3.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target3); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target3, remote.identity)
+	currentCalls := remote.currentCalls
+	remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		if !reflect.DeepEqual(committedV2, in) {
+			return nil, errors.New("did not retry exact committed v2 request")
+		}
+		return createResultForInput(in, remote.identity), nil
+	}
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "ignored again", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored again")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if remote.currentCalls != currentCalls {
+		t.Fatal("committed v2 receipt replay attempted a v3 rebase")
+	}
+	after, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(after)
+	if !bytes.Equal(before, after) {
+		t.Fatal("exact committed v2 replay changed journal after v3 rotation")
+	}
+}
+
+func TestCreateJournalCanRebaseAcrossSuccessiveUncommittedEpochs(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	remote.current = bindingFor(source, remote.identity)
+	retryKey := "successive-uncommitted-rebases"
+	remote.createErr = errors.New("rotation open")
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "Repeated rebase", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("repeat-preserved")}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatal(err)
+	}
+
+	keys := []*sealed.AgentVaultKey{source}
+	for version := uint64(2); version <= 3; version++ {
+		target, err := sealed.GenerateAgentVaultKey(version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer target.Clear()
+		if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+			t.Fatal(err)
+		}
+		remote.current = bindingFor(target, remote.identity)
+		previous := keys[len(keys)-1]
+		final := version == 3
+		remote.createFunc = func(in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+			keyID, _, _ := createRequestWrappingEpoch(requestWithoutIdempotency(in))
+			switch keyID {
+			case previous.ID():
+				return nil, client.ErrSecretVaultKeyMismatch
+			case target.ID():
+				if final {
+					return createResultForInput(in, remote.identity), nil
+				}
+				return nil, errors.New("definitive response absent; request did not commit")
+			default:
+				return nil, errors.New("unexpected epoch")
+			}
+		}
+		result, err := service.Create(context.Background(), CreateInput{
+			Name: "ignored", IdempotencyKey: retryKey,
+			Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+		})
+		if final && (err != nil || result == nil) {
+			t.Fatalf("final v%d rebase = %#v, %v", version, result, err)
+		}
+		if !final && !errors.Is(err, ErrOperation) {
+			t.Fatalf("intermediate v%d rebase error = %v", version, err)
+		}
+		keys = append(keys, target)
+	}
+	durable, found, err := service.readCreateJournal(remote.identity, createJournalHash(remote.identity, retryKey), retryKey)
+	if err != nil || !found {
+		t.Fatalf("durable final journal = %#v, %v, %v", durable, found, err)
+	}
+	field := durable.Fields[0]
+	if field.Sealed.DEK.WrappingKeyVersion != 3 || field.Sealed.DEK.WrapRevision != 3 {
+		t.Fatalf("final epoch/revision = %d/%d, want 3/3", field.Sealed.DEK.WrappingKeyVersion, field.Sealed.DEK.WrapRevision)
+	}
+	assertCreateFieldOpens(t, durable, 0, remote.identity, keys[len(keys)-1], []byte("repeat-preserved"))
+}
+
+func TestCreateJournalMissingRetiredSourceKeyFailsWithoutMutation(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	createLocalKey(t, source)
+	remote.current = bindingFor(source, remote.identity)
+	retryKey := "missing-retired-create-source"
+	remote.createErr = errors.New("rotation open")
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "Missing source", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("preserve-me")}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatal(err)
+	}
+	hash := createJournalHash(remote.identity, retryKey)
+	before, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(before)
+	target, err := sealed.GenerateAgentVaultKey(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target, remote.identity)
+	epochPath, err := local.AgentVaultKeyEpochPath(testAccountName, testRealmName, testAgentName, source.ID(), source.Version())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath, err := local.AgentVaultKeyPath(testAccountName, testRealmName, testAgentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Clear()
+	for _, path := range []string{epochPath, legacyPath} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	createCalls := remote.createCalls
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "ignored", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+	}); !errors.Is(err, ErrKeyUnavailable) {
+		t.Fatalf("retry error = %v, want ErrKeyUnavailable", err)
+	}
+	if remote.createCalls != createCalls {
+		t.Fatal("missing retired source reached backend create")
+	}
+	after, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(after)
+	if !bytes.Equal(before, after) {
+		t.Fatal("missing retired source changed journal")
+	}
+}
+
+func TestCreateJournalWrapRevisionOverflowFailsBeforeCAS(t *testing.T) {
+	remote := newFakeRemote()
+	service := newTestService(t, remote)
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	target, err := sealed.GenerateAgentVaultKey(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+		t.Fatal(err)
+	}
+	remote.current = bindingFor(target, remote.identity)
+	const secretID = "sec_dddddddddddddddd"
+	const fieldID = "fld_eeeeeeeeeeeeeeee"
+	envelope, err := sealed.SealSensitiveField(source, []byte("overflow-preserved"), sealed.SensitiveFieldOptions{
+		Scope: sealed.FieldScope{
+			Domain: sealed.FieldValueDomain, AccountID: testAccountID, RealmID: testRealmID,
+			OwnerAgentID: testAgentID, SecretID: secretID, FieldID: fieldID,
+		},
+		ValueVersion: 1, DEKGeneration: 1, ValueEncoding: sealed.ValueEncodingUTF8,
+		WrapRevision: uint64(1<<63 - 1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedField, err := toClientSealedField(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := client.CreateSecretInput{
+		ID: secretID, Name: "Overflow fence", Template: "generic",
+		Fields: []client.CreateSecretFieldInput{{
+			ID: fieldID, Name: "password", Kind: "password", Sensitive: true,
+			Encoding: sealed.ValueEncodingUTF8, ValueVersion: 1, Sealed: &sealedField,
+		}},
+	}
+	retryKey := "overflow-rebase-fence"
+	hash := createJournalHash(remote.identity, retryKey)
+	if _, err := service.publishCreateJournal(remote.identity, hash, retryKey, request); err != nil {
+		t.Fatal(err)
+	}
+	before, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(before)
+	remote.createFunc = func(client.CreateSecretInput) (*client.SecretMutationResult, error) {
+		return nil, client.ErrSecretVaultKeyMismatch
+	}
+	if _, err := service.Create(context.Background(), CreateInput{
+		Name: "ignored", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: []byte("ignored")}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatalf("overflow retry error = %v, want ErrOperation", err)
+	}
+	if remote.createCalls != 1 {
+		t.Fatalf("create calls = %d, want exact old request only", remote.createCalls)
+	}
+	after, err := local.ReadSecretCreateJournal(testAccountName, testRealmName, testAgentName, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(after)
+	if !bytes.Equal(before, after) {
+		t.Fatal("overflow changed durable journal")
+	}
 }
 
 func TestCreateJournalCorruptionFailsClosed(t *testing.T) {
@@ -697,6 +1211,73 @@ func TestConcurrentCreateWithSameKeyPublishesOneExactRequest(t *testing.T) {
 	}
 }
 
+func TestConcurrentCreateRebaseCASContendersConvergeOnWinner(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	source := generateKey(t)
+	defer source.Clear()
+	createLocalKey(t, source)
+	initial := newFakeRemote()
+	initial.current = bindingFor(source, initial.identity)
+	initial.createErr = errors.New("rotation open")
+	initialService := &Service{remote: initial, accountID: testAccountID, accountName: testAccountName, realmName: testRealmName, agentName: testAgentName}
+	const retryKey = "concurrent-rebase-cas"
+	if _, err := initialService.Create(context.Background(), CreateInput{
+		Name: "Concurrent rebase", IdempotencyKey: retryKey,
+		Fields: []FieldInput{{Name: "password", Kind: "password", Sensitive: true, Value: []byte("one durable generated value")}},
+	}); !errors.Is(err, ErrOperation) {
+		t.Fatalf("initial create error = %v", err)
+	}
+	target, err := sealed.GenerateAgentVaultKey(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Clear()
+	if err := local.CreateAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, target); err != nil {
+		t.Fatal(err)
+	}
+	remote := newConcurrentRebaseRemote(source, target)
+	services := []*Service{
+		{remote: remote, accountID: testAccountID, accountName: testAccountName, realmName: testRealmName, agentName: testAgentName},
+		{remote: remote, accountID: testAccountID, accountName: testAccountName, realmName: testRealmName, agentName: testAgentName},
+	}
+	values := [][]byte{[]byte("ignored contender one"), []byte("ignored contender two")}
+	results := make([]*client.SecretMutationResult, len(services))
+	errs := make([]error, len(services))
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for index := range services {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			results[index], errs[index] = services[index].Create(context.Background(), CreateInput{
+				Name: "ignored", IdempotencyKey: retryKey,
+				Fields: []FieldInput{{Name: "token", Kind: "token", Sensitive: true, Value: values[index]}},
+			})
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	for index := range services {
+		if errs[index] != nil || results[index] == nil {
+			t.Fatalf("contender %d result/error = %#v/%v", index, results[index], errs[index])
+		}
+		if !allZero(values[index]) {
+			t.Fatalf("contender %d did not clear retry plaintext", index)
+		}
+	}
+	sourceRequests, targetRequests := remote.requestsByEpoch()
+	if len(sourceRequests) != 2 || len(targetRequests) != 2 ||
+		!sameCreateRequestExact(sourceRequests[0], sourceRequests[1]) ||
+		!sameCreateRequestExact(targetRequests[0], targetRequests[1]) {
+		t.Fatalf("requests did not converge: source=%d target=%d", len(sourceRequests), len(targetRequests))
+	}
+	if results[0].Secret.ID != results[1].Secret.ID {
+		t.Fatalf("result IDs differ: %s / %s", results[0].Secret.ID, results[1].Secret.ID)
+	}
+	assertCreateFieldOpens(t, targetRequests[0], 0, testIdentity, target, []byte("one durable generated value"))
+}
+
 func TestRevealRejectsTamperAndScopeMismatch(t *testing.T) {
 	remote := newFakeRemote()
 	service := newTestService(t, remote)
@@ -873,6 +1454,7 @@ type fakeRemote struct {
 
 	current       *client.VaultKeyBinding
 	registerCheck func(client.RegisterVaultKeyInput) error
+	createFunc    func(client.CreateSecretInput) (*client.SecretMutationResult, error)
 	registered    client.RegisterVaultKeyInput
 	created       client.CreateSecretInput
 	page          *client.SecretPage
@@ -928,9 +1510,40 @@ func (f *fakeRemote) registerVaultKey(_ context.Context, in client.RegisterVault
 	return &client.VaultKeyMutationResult{KeyEpoch: binding}, nil
 }
 
+func (f *fakeRemote) createVaultKeyEnrollment(context.Context, client.CreateVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment create")
+}
+
+func (f *fakeRemote) listVaultKeyEnrollments(context.Context, client.VaultKeyEnrollmentListOptions) ([]client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment list")
+}
+
+func (f *fakeRemote) getVaultKeyEnrollment(context.Context, string) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment get")
+}
+
+func (f *fakeRemote) approveVaultKeyEnrollment(context.Context, string, client.ApproveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment approve")
+}
+
+func (f *fakeRemote) receiveVaultKeyEnrollment(context.Context, string, client.ReceiveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollmentTransfer, error) {
+	return nil, errors.New("unexpected enrollment receive")
+}
+
+func (f *fakeRemote) consumeVaultKeyEnrollment(context.Context, string, client.ConsumeVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment consume")
+}
+
+func (f *fakeRemote) cancelVaultKeyEnrollment(context.Context, string, client.CancelVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment cancel")
+}
+
 func (f *fakeRemote) createSecret(_ context.Context, in client.CreateSecretInput) (*client.SecretMutationResult, error) {
 	f.createCalls++
 	f.created = in
+	if f.createFunc != nil {
+		return f.createFunc(in)
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -988,6 +1601,87 @@ type concurrentCreateRemote struct {
 	requests [][]byte
 }
 
+type concurrentRebaseRemote struct {
+	*fakeRemote
+	sourceID string
+	targetID string
+	target   *client.VaultKeyBinding
+
+	mu            sync.Mutex
+	requests      []client.CreateSecretInput
+	canonical     *client.CreateSecretInput
+	sourceSeen    int
+	sourceBarrier chan struct{}
+}
+
+func newConcurrentRebaseRemote(source, target *sealed.AgentVaultKey) *concurrentRebaseRemote {
+	base := newFakeRemote()
+	return &concurrentRebaseRemote{
+		fakeRemote: base, sourceID: source.ID(), targetID: target.ID(),
+		target: bindingFor(target, base.identity), sourceBarrier: make(chan struct{}),
+	}
+}
+
+func (f *concurrentRebaseRemote) self(context.Context) (client.SelfDigest, error) {
+	return client.SelfDigest{Identity: f.identity}, nil
+}
+
+func (f *concurrentRebaseRemote) currentVaultKey(context.Context) (*client.VaultKeyBinding, error) {
+	value := *f.target
+	return &value, nil
+}
+
+func (f *concurrentRebaseRemote) createSecret(_ context.Context, in client.CreateSecretInput) (*client.SecretMutationResult, error) {
+	keyID, _, ok := createRequestWrappingEpoch(requestWithoutIdempotency(in))
+	if !ok {
+		return nil, errors.New("invalid request epoch")
+	}
+	f.mu.Lock()
+	f.requests = append(f.requests, cloneCreateRequest(in))
+	if f.canonical != nil {
+		canonical := cloneCreateRequest(*f.canonical)
+		f.mu.Unlock()
+		if sameCreateRequestExact(canonical, in) {
+			return createResultForInput(in, f.identity), nil
+		}
+		return nil, errors.New("idempotency key was reused")
+	}
+	if keyID == f.sourceID {
+		f.sourceSeen++
+		if f.sourceSeen == 2 {
+			close(f.sourceBarrier)
+		}
+		barrier := f.sourceBarrier
+		f.mu.Unlock()
+		<-barrier
+		return nil, client.ErrSecretVaultKeyMismatch
+	}
+	if keyID != f.targetID {
+		f.mu.Unlock()
+		return nil, errors.New("unexpected rebase epoch")
+	}
+	canonical := cloneCreateRequest(in)
+	f.canonical = &canonical
+	f.mu.Unlock()
+	return createResultForInput(in, f.identity), nil
+}
+
+func (f *concurrentRebaseRemote) requestsByEpoch() ([]client.CreateSecretInput, []client.CreateSecretInput) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var source, target []client.CreateSecretInput
+	for _, request := range f.requests {
+		keyID, _, _ := createRequestWrappingEpoch(requestWithoutIdempotency(request))
+		switch keyID {
+		case f.sourceID:
+			source = append(source, cloneCreateRequest(request))
+		case f.targetID:
+			target = append(target, cloneCreateRequest(request))
+		}
+	}
+	return source, target
+}
+
 func (f *concurrentCreateRemote) self(context.Context) (client.SelfDigest, error) {
 	return client.SelfDigest{Identity: f.identity}, nil
 }
@@ -999,6 +1693,34 @@ func (f *concurrentCreateRemote) currentVaultKey(context.Context) (*client.Vault
 
 func (f *concurrentCreateRemote) registerVaultKey(context.Context, client.RegisterVaultKeyInput) (*client.VaultKeyMutationResult, error) {
 	return nil, errors.New("unexpected key registration")
+}
+
+func (f *concurrentCreateRemote) createVaultKeyEnrollment(context.Context, client.CreateVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment create")
+}
+
+func (f *concurrentCreateRemote) listVaultKeyEnrollments(context.Context, client.VaultKeyEnrollmentListOptions) ([]client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment list")
+}
+
+func (f *concurrentCreateRemote) getVaultKeyEnrollment(context.Context, string) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment get")
+}
+
+func (f *concurrentCreateRemote) approveVaultKeyEnrollment(context.Context, string, client.ApproveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment approve")
+}
+
+func (f *concurrentCreateRemote) receiveVaultKeyEnrollment(context.Context, string, client.ReceiveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollmentTransfer, error) {
+	return nil, errors.New("unexpected enrollment receive")
+}
+
+func (f *concurrentCreateRemote) consumeVaultKeyEnrollment(context.Context, string, client.ConsumeVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment consume")
+}
+
+func (f *concurrentCreateRemote) cancelVaultKeyEnrollment(context.Context, string, client.CancelVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return nil, errors.New("unexpected enrollment cancel")
 }
 
 func (f *concurrentCreateRemote) createSecret(_ context.Context, in client.CreateSecretInput) (*client.SecretMutationResult, error) {
@@ -1076,6 +1798,15 @@ func readLocalKey(t *testing.T) *sealed.AgentVaultKey {
 	return key
 }
 
+func readLocalKeyEpoch(t *testing.T, keyID string, keyVersion uint64) *sealed.AgentVaultKey {
+	t.Helper()
+	key, err := local.ReadAgentVaultKeyEpoch(testAccountName, testRealmName, testAgentName, keyID, keyVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 func assertNoLocalKey(t *testing.T) {
 	t.Helper()
 	if _, err := local.ReadAgentVaultKey(testAccountName, testRealmName, testAgentName); !errors.Is(err, local.ErrAgentVaultKeyUnavailable) {
@@ -1098,6 +1829,36 @@ func materialFromCreate(in client.CreateSecretInput, fieldIndex int) *client.Sec
 			WrapRevision: field.Sealed.DEK.WrapRevision, WrappingKeyID: field.Sealed.DEK.WrappingKeyID,
 			WrappingKeyVersion: field.Sealed.DEK.WrappingKeyVersion,
 		},
+	}
+}
+
+func requestWithoutIdempotency(in client.CreateSecretInput) client.CreateSecretInput {
+	out := cloneCreateRequest(in)
+	out.IdempotencyKey = ""
+	return out
+}
+
+func assertCreateFieldOpens(t *testing.T, in client.CreateSecretInput, fieldIndex int, identity client.SelfIdentity, key *sealed.AgentVaultKey, want []byte) {
+	t.Helper()
+	field := in.Fields[fieldIndex]
+	envelope, err := fromClientSecretMaterial(*materialFromCreate(in, fieldIndex))
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, ok := fieldDomain(field.Kind)
+	if !ok {
+		t.Fatal("invalid field domain")
+	}
+	plaintext, err := sealed.OpenSensitiveField(key, sealed.FieldScope{
+		Domain: domain, AccountID: identity.AccountID, RealmID: identity.RealmID,
+		OwnerAgentID: identity.AgentID, SecretID: in.ID, FieldID: field.ID,
+	}, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(plaintext)
+	if !bytes.Equal(plaintext, want) {
+		t.Fatalf("opened create field = %q, want %q", plaintext, want)
 	}
 }
 

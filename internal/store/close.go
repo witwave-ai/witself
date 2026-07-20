@@ -56,6 +56,27 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 		return ErrNotAccountOwner
 	}
 	if status != "closed" {
+		// Closing revokes every agent token and is irreversible. Refuse to strand
+		// an enrollment transfer or open rotation that could then neither finish
+		// nor cancel. The owner can cancel it while active or suspended and retry
+		// the close; ExportAccount enforces the same lifecycle fence.
+		var activeVaultLifecycle bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM agent_vault_key_enrollments
+			   WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')
+			) OR EXISTS (
+			  SELECT 1 FROM agent_vault_key_rotations
+			   WHERE account_id=$1 AND lifecycle_state='open'
+			) OR EXISTS (
+			  SELECT 1 FROM agent_vault_keys
+			   WHERE account_id=$1 AND lifecycle_state='pending'
+			)`, accountID).Scan(&activeVaultLifecycle); err != nil {
+			return fmt.Errorf("check vault key lifecycle before close: %w", err)
+		}
+		if activeVaultLifecycle {
+			return ErrVaultLifecycleInProgress
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE accounts SET status = 'closed', closed_at = now(), closed_reason = $2
 			 WHERE id = $1`, accountID, reason); err != nil {

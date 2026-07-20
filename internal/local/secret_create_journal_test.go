@@ -156,6 +156,302 @@ func TestCreateSecretCreateJournalConcurrentExclusive(t *testing.T) {
 	}
 }
 
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceDurablySwapsExactBytes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", home)
+	original := []byte("{\n  \"request\": \"old-wrapped-dek\"\n}\n")
+	replacement := []byte("{\n  \"request\": \"new-wrapped-dek\"\n}\n")
+	if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+		t.Fatal(err)
+	}
+	path, err := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash, original, replacement,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement bytes = %q, want exact %q", got, replacement)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("replacement file mode = %v, want regular 0600", info.Mode())
+	}
+	lockPath := filepath.Join(filepath.Dir(path), secretCreateJournalLockFile)
+	lockInfo, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !privateRegularSecretCreateJournalFile(lockInfo) {
+		t.Fatalf("lock file mode = %v, want regular 0600", lockInfo.Mode())
+	}
+	assertSecretCreateJournalDirectoriesPrivate(t, home, filepath.Dir(path))
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEntries := []string{secretCreateJournalLockFile, filepath.Base(path)}
+	if gotEntries := entryNames(entries); fmt.Sprint(gotEntries) != fmt.Sprint(wantEntries) {
+		t.Fatalf("journal directory entries = %v, want %v", gotEntries, wantEntries)
+	}
+}
+
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceRequiresExactExpectedBytes(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	original := []byte(`{"request":"original-private-marker"}`)
+	replacement := []byte(`{"request":"replacement-private-marker"}`)
+	if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+		t.Fatal(err)
+	}
+	err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash,
+		[]byte(`{"request":"stale-private-marker"}`), replacement,
+	)
+	if !errors.Is(err, ErrSecretCreateJournalConflict) {
+		t.Fatalf("stale replace error = %v, want ErrSecretCreateJournalConflict", err)
+	}
+	if strings.Contains(err.Error(), "stale-private-marker") || strings.Contains(err.Error(), testSecretCreateJournalHash) {
+		t.Fatal("conflict error exposed request bytes or scoped hash")
+	}
+	got, readErr := ReadSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("conflicting replace changed entry: got %q, want %q", got, original)
+	}
+}
+
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceSerializesContenders(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	original := []byte(`{"request":"original"}`)
+	if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+		t.Fatal(err)
+	}
+	const contenders = 32
+	replacements := make([][]byte, contenders)
+	errs := make([]error, contenders)
+	for i := range replacements {
+		replacements[i] = []byte(fmt.Sprintf(`{"replacement":%d}`, i))
+	}
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(contenders)
+	for i := range replacements {
+		go func() {
+			defer wait.Done()
+			<-start
+			errs[i] = ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+				"default", "default", "scott", testSecretCreateJournalHash, original, replacements[i],
+			)
+		}()
+	}
+	close(start)
+	wait.Wait()
+
+	winner := -1
+	for i, err := range errs {
+		if err == nil {
+			if winner >= 0 {
+				t.Fatalf("multiple CAS contenders succeeded: %d and %d", winner, i)
+			}
+			winner = i
+			continue
+		}
+		if !errors.Is(err, ErrSecretCreateJournalConflict) {
+			t.Fatalf("contender %d error = %v, want conflict", i, err)
+		}
+	}
+	if winner < 0 {
+		t.Fatal("no CAS contender succeeded")
+	}
+	got, err := ReadSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, replacements[winner]) {
+		t.Fatalf("stored replacement = %q, want winner %q", got, replacements[winner])
+	}
+	path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".secret-create-replace-") {
+			t.Fatalf("temporary replacement survived: %q", entry.Name())
+		}
+	}
+}
+
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceSupportsSuccessiveEpochs(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	first := []byte(`{"epoch":1}`)
+	second := []byte(`{"epoch":2}`)
+	third := []byte(`{"epoch":3}`)
+	if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash, first, second,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash, first, third,
+	); !errors.Is(err, ErrSecretCreateJournalConflict) {
+		t.Fatalf("stale second advance error = %v, want conflict", err)
+	}
+	path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+	lockBefore, err := os.Lstat(filepath.Join(filepath.Dir(path), secretCreateJournalLockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash, second, third,
+	); err != nil {
+		t.Fatal(err)
+	}
+	lockAfter, err := os.Lstat(filepath.Join(filepath.Dir(path), secretCreateJournalLockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(lockBefore, lockAfter) {
+		t.Fatal("successive replacements did not use the stable lock inode")
+	}
+	got, err := ReadSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash)
+	if err != nil || !bytes.Equal(got, third) {
+		t.Fatalf("third epoch = %q / %v, want %q", got, err, third)
+	}
+}
+
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceRejectsInvalidAndMissingState(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	valid := []byte(`{"request":"valid"}`)
+	for name, test := range map[string]struct {
+		expected    []byte
+		replacement []byte
+	}{
+		"invalid expected":    {[]byte(`{"request":`), valid},
+		"invalid replacement": {valid, []byte(`{"request":`)},
+		"empty expected":      {nil, valid},
+		"empty replacement":   {valid, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+				"default", "default", "scott", testSecretCreateJournalHash, test.expected, test.replacement,
+			)
+			if !errors.Is(err, ErrSecretCreateJournalInvalid) {
+				t.Fatalf("replace error = %v, want invalid", err)
+			}
+		})
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"default", "default", "scott", testSecretCreateJournalHash, valid, []byte(`{"request":"next"}`),
+	); !errors.Is(err, ErrSecretCreateJournalUnavailable) {
+		t.Fatalf("missing replace error = %v, want unavailable", err)
+	}
+	if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		"../other", "default", "scott", testSecretCreateJournalHash, valid, valid,
+	); !errors.Is(err, ErrSecretCreateJournalScope) {
+		t.Fatalf("invalid scope error = %v, want scope", err)
+	}
+}
+
+func TestReplaceSecretCreateJournalAfterVaultKeyAdvanceRejectsUnsafeState(t *testing.T) {
+	t.Run("journal permissions", func(t *testing.T) {
+		t.Setenv("WITSELF_HOME", t.TempDir())
+		original := []byte(`{"request":"original"}`)
+		if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+			t.Fatal(err)
+		}
+		path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+			"default", "default", "scott", testSecretCreateJournalHash, original, []byte(`{"request":"next"}`),
+		); !errors.Is(err, ErrSecretCreateJournalUnsafe) {
+			t.Fatalf("unsafe journal replace error = %v, want unsafe", err)
+		}
+	})
+
+	t.Run("directory permissions", func(t *testing.T) {
+		t.Setenv("WITSELF_HOME", t.TempDir())
+		original := []byte(`{"request":"original"}`)
+		if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+			t.Fatal(err)
+		}
+		path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+		if err := os.Chmod(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+			"default", "default", "scott", testSecretCreateJournalHash, original, []byte(`{"request":"next"}`),
+		); !errors.Is(err, ErrSecretCreateJournalUnsafe) {
+			t.Fatalf("unsafe directory replace error = %v, want unsafe", err)
+		}
+	})
+
+	t.Run("symlink lock", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("WITSELF_HOME", home)
+		original := []byte(`{"request":"original"}`)
+		if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+			t.Fatal(err)
+		}
+		path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+		target := filepath.Join(home, "lock-target")
+		if err := os.WriteFile(target, []byte("must-not-change"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(filepath.Dir(path), secretCreateJournalLockFile)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+			"default", "default", "scott", testSecretCreateJournalHash, original, []byte(`{"request":"next"}`),
+		); !errors.Is(err, ErrSecretCreateJournalUnsafe) {
+			t.Fatalf("symlink-lock replace error = %v, want unsafe", err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != "must-not-change" {
+			t.Fatalf("lock symlink target = %q / %v", got, err)
+		}
+		journal, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(journal, original) {
+			t.Fatalf("journal changed through unsafe lock = %q / %v", journal, err)
+		}
+	})
+
+	t.Run("public lock permissions", func(t *testing.T) {
+		t.Setenv("WITSELF_HOME", t.TempDir())
+		original := []byte(`{"request":"original"}`)
+		if err := CreateSecretCreateJournal("default", "default", "scott", testSecretCreateJournalHash, original); err != nil {
+			t.Fatal(err)
+		}
+		path, _ := SecretCreateJournalPath("default", "default", "scott", testSecretCreateJournalHash)
+		lockPath := filepath.Join(filepath.Dir(path), secretCreateJournalLockFile)
+		if err := os.WriteFile(lockPath, nil, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+			"default", "default", "scott", testSecretCreateJournalHash, original, []byte(`{"request":"next"}`),
+		); !errors.Is(err, ErrSecretCreateJournalUnsafe) {
+			t.Fatalf("public-lock replace error = %v, want unsafe", err)
+		}
+	})
+}
+
 func TestSecretCreateJournalRejectsInvalidRequestBytes(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	validAtLimit := append([]byte{'"'}, bytes.Repeat([]byte{'x'}, MaxSecretCreateJournalBytes-2)...)

@@ -208,14 +208,14 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*client.SecretMut
 		return nil, err
 	}
 
-	var avk *sealed.AgentVaultKey
-	defer func() { avk.Clear() }()
 	if !found {
+		var avk *sealed.AgentVaultKey
 		if hasSensitiveFields(normalized.Fields) {
 			avk, err = s.reconcileVaultKey(ctx, identity)
 			if err != nil {
 				return nil, err
 			}
+			defer avk.Clear()
 		}
 		request, err = buildCreateRequest(normalized, identity, avk)
 		if err != nil {
@@ -226,21 +226,139 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*client.SecretMut
 			return nil, err
 		}
 	}
-	if createRequestHasSensitiveFields(request) {
-		if avk == nil {
-			avk, err = s.reconcileVaultKey(ctx, identity)
-			if err != nil {
-				return nil, err
-			}
+	return s.submitJournaledCreate(ctx, identity, journalHash, idempotencyKey, request)
+}
+
+// submitJournaledCreate always authenticates and submits the exact durable
+// request before considering an AVK rebase. The store performs idempotency
+// receipt replay before its current-key check, so only the stable typed
+// vault-key-mismatch response proves that this exact request did not commit.
+func (s *Service) submitJournaledCreate(ctx context.Context, identity client.SelfIdentity, journalHash, idempotencyKey string, request client.CreateSecretInput) (*client.SecretMutationResult, error) {
+	if !createRequestHasSensitiveFields(request) {
+		result, err := s.sendCreateRequest(ctx, identity, idempotencyKey, request)
+		if errors.Is(err, ErrIdentityMismatch) {
+			return nil, err
 		}
-		if !authenticateCreateRequest(request, identity, avk) {
-			return nil, ErrIntegrity
+		if err != nil {
+			return nil, ErrOperation
 		}
+		return result, nil
 	}
-	request.IdempotencyKey = idempotencyKey
-	result, err := s.remote.createSecret(ctx, request)
+
+	source, err := s.loadCreateRequestVaultKey(request)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Clear()
+	if !authenticateCreateRequest(request, identity, source) {
+		return nil, ErrIntegrity
+	}
+
+	result, err := s.sendCreateRequest(ctx, identity, idempotencyKey, request)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrIdentityMismatch) {
+		return nil, err
+	}
+	if !errors.Is(err, client.ErrSecretVaultKeyMismatch) {
+		// Another local process may have won the authenticated CAS and committed
+		// its exact replacement while this process's now-stale request was in
+		// flight. An untyped error never authorizes mutation, but an already
+		// advanced durable journal is safe to authenticate and retry once.
+		if recovered, advanced, recoverErr := s.retryAdvancedCreateJournal(
+			ctx, identity, journalHash, idempotencyKey, request,
+		); advanced || recoverErr != nil {
+			return recovered, recoverErr
+		}
+		return nil, ErrOperation
+	}
+
+	// A machine-coded key mismatch is emitted only after the backend has
+	// serialized this idempotency key and found no matching receipt. Reconcile
+	// the authenticated current binding now; no transport or generic conflict
+	// is allowed to reach journal replacement.
+	target, err := s.reconcileVaultKey(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	defer target.Clear()
+	if target.ID() == source.ID() || target.Version() <= source.Version() {
+		return nil, ErrIntegrity
+	}
+	rebased, err := rewrapUncommittedCreateRequest(request, identity, source, target)
+	if err != nil {
+		return nil, err
+	}
+	if !sameCreateRequestLogicalValue(request, rebased) || !authenticateCreateRequest(rebased, identity, target) {
+		return nil, ErrIntegrity
+	}
+
+	winner, err := s.replaceCreateJournalAfterVaultKeyAdvance(
+		identity, journalHash, idempotencyKey, request, rebased,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !sameCreateRequestLogicalValue(request, winner) {
+		return nil, ErrIntegrity
+	}
+	winnerKey, err := s.loadCreateRequestVaultKey(winner)
+	if err != nil {
+		return nil, err
+	}
+	defer winnerKey.Clear()
+	if winnerKey.Version() <= source.Version() || !authenticateCreateRequest(winner, identity, winnerKey) {
+		return nil, ErrIntegrity
+	}
+	result, err = s.sendCreateRequest(ctx, identity, idempotencyKey, winner)
+	if errors.Is(err, ErrIdentityMismatch) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, ErrOperation
+	}
+	return result, nil
+}
+
+func (s *Service) retryAdvancedCreateJournal(ctx context.Context, identity client.SelfIdentity, journalHash, idempotencyKey string, stale client.CreateSecretInput) (*client.SecretMutationResult, bool, error) {
+	current, found, err := s.readCreateJournal(identity, journalHash, idempotencyKey)
+	if err != nil {
+		return nil, true, err
+	}
+	if !found {
+		return nil, true, ErrOperation
+	}
+	if sameCreateRequestExact(stale, current) {
+		return nil, false, nil
+	}
+	if !sameCreateRequestLogicalValue(stale, current) {
+		return nil, true, ErrIntegrity
+	}
+	key, err := s.loadCreateRequestVaultKey(current)
+	if err != nil {
+		return nil, true, err
+	}
+	defer key.Clear()
+	if !authenticateCreateRequest(current, identity, key) {
+		return nil, true, ErrIntegrity
+	}
+	result, err := s.sendCreateRequest(ctx, identity, idempotencyKey, current)
+	if errors.Is(err, ErrIdentityMismatch) {
+		return nil, true, err
+	}
+	if err != nil {
+		return nil, true, ErrOperation
+	}
+	return result, true, nil
+}
+
+func (s *Service) sendCreateRequest(ctx context.Context, identity client.SelfIdentity, idempotencyKey string, request client.CreateSecretInput) (*client.SecretMutationResult, error) {
+	wire := cloneCreateRequest(request)
+	wire.IdempotencyKey = idempotencyKey
+	result, err := s.remote.createSecret(ctx, wire)
+	if err != nil {
+		return nil, err
 	}
 	if result == nil || !secretMatchesIdentity(result.Secret, identity) || result.Secret.ID != request.ID {
 		return nil, ErrIdentityMismatch
@@ -342,26 +460,9 @@ func (s *Service) readCreateJournal(identity client.SelfIdentity, operationHash,
 }
 
 func (s *Service) publishCreateJournal(identity client.SelfIdentity, operationHash, idempotencyKey string, request client.CreateSecretInput) (client.CreateSecretInput, error) {
-	if !validCachedCreateRequest(request) {
-		return client.CreateSecretInput{}, ErrOperation
-	}
-	requestMAC, err := createRequestMAC(identity, operationHash, idempotencyKey, request)
+	raw, err := marshalCreateJournal(identity, operationHash, idempotencyKey, request)
 	if err != nil {
-		return client.CreateSecretInput{}, ErrOperation
-	}
-	record := createJournalRecord{
-		SchemaVersion: createJournalSchema,
-		OperationHash: operationHash,
-		RequestMAC:    requestMAC,
-		AccountID:     identity.AccountID,
-		RealmID:       identity.RealmID,
-		OwnerAgentID:  identity.AgentID,
-		Request:       request,
-	}
-	raw, err := json.Marshal(record)
-	if err != nil || len(raw) == 0 || len(raw) > local.MaxSecretCreateJournalBytes {
-		clear(raw)
-		return client.CreateSecretInput{}, ErrOperation
+		return client.CreateSecretInput{}, err
 	}
 	defer clear(raw)
 	if err := local.CreateSecretCreateJournal(s.accountName, s.realmName, s.agentName, operationHash, raw); err != nil {
@@ -378,6 +479,66 @@ func (s *Service) publishCreateJournal(identity client.SelfIdentity, operationHa
 		return winner, nil
 	}
 	return request, nil
+}
+
+func (s *Service) replaceCreateJournalAfterVaultKeyAdvance(identity client.SelfIdentity, operationHash, idempotencyKey string, expected, replacement client.CreateSecretInput) (client.CreateSecretInput, error) {
+	expectedRaw, err := marshalCreateJournal(identity, operationHash, idempotencyKey, expected)
+	if err != nil {
+		return client.CreateSecretInput{}, err
+	}
+	defer clear(expectedRaw)
+	replacementRaw, err := marshalCreateJournal(identity, operationHash, idempotencyKey, replacement)
+	if err != nil {
+		return client.CreateSecretInput{}, err
+	}
+	defer clear(replacementRaw)
+	err = local.ReplaceSecretCreateJournalAfterVaultKeyAdvance(
+		s.accountName, s.realmName, s.agentName, operationHash, expectedRaw, replacementRaw,
+	)
+	if err == nil {
+		return replacement, nil
+	}
+	if !errors.Is(err, local.ErrSecretCreateJournalConflict) {
+		if errors.Is(err, local.ErrSecretCreateJournalInvalid) {
+			return client.CreateSecretInput{}, ErrIntegrity
+		}
+		return client.CreateSecretInput{}, ErrOperation
+	}
+	// A cooperating contender won the exact CAS. Parse and authenticate its
+	// durable bytes rather than sending this process's losing random wrapper.
+	winner, found, readErr := s.readCreateJournal(identity, operationHash, idempotencyKey)
+	if readErr != nil {
+		return client.CreateSecretInput{}, readErr
+	}
+	if !found {
+		return client.CreateSecretInput{}, ErrOperation
+	}
+	return winner, nil
+}
+
+func marshalCreateJournal(identity client.SelfIdentity, operationHash, idempotencyKey string, request client.CreateSecretInput) ([]byte, error) {
+	if !validCachedCreateRequest(request) {
+		return nil, ErrOperation
+	}
+	requestMAC, err := createRequestMAC(identity, operationHash, idempotencyKey, request)
+	if err != nil {
+		return nil, ErrOperation
+	}
+	record := createJournalRecord{
+		SchemaVersion: createJournalSchema,
+		OperationHash: operationHash,
+		RequestMAC:    requestMAC,
+		AccountID:     identity.AccountID,
+		RealmID:       identity.RealmID,
+		OwnerAgentID:  identity.AgentID,
+		Request:       request,
+	}
+	raw, err := json.Marshal(record)
+	if err != nil || len(raw) == 0 || len(raw) > local.MaxSecretCreateJournalBytes {
+		clear(raw)
+		return nil, ErrOperation
+	}
+	return raw, nil
 }
 
 func parseCreateJournal(raw []byte, identity client.SelfIdentity, operationHash, idempotencyKey string) (client.CreateSecretInput, error) {
@@ -480,7 +641,7 @@ func validCachedCreateRequest(in client.CreateSecretInput) bool {
 			value.Algorithm != sealed.AES256GCMAlgorithm || value.AADVersion != int64(sealed.AADVersionV1) ||
 			!validGeneratedID(value.DEK.ID, "dek") || dekIDs[value.DEK.ID] || value.DEK.Generation != int64(initialDEKGeneration) ||
 			len(value.DEK.WrappedDEK) != sealed.WrappedDEKBytes || value.DEK.WrapAlgorithm != sealed.AES256GCMAlgorithm ||
-			value.DEK.AADVersion != int64(sealed.AADVersionV1) || value.DEK.WrapRevision != int64(initialWrapRevision) ||
+			value.DEK.AADVersion != int64(sealed.AADVersionV1) || value.DEK.WrapRevision < int64(initialWrapRevision) ||
 			!validGeneratedID(value.DEK.WrappingKeyID, "avk") || value.DEK.WrappingKeyVersion < 1 {
 			return false
 		}
@@ -544,6 +705,155 @@ func authenticateCreateRequest(in client.CreateSecretInput, identity client.Self
 		clear(plaintext)
 	}
 	return true
+}
+
+func (s *Service) loadCreateRequestVaultKey(in client.CreateSecretInput) (*sealed.AgentVaultKey, error) {
+	keyID, keyVersion, ok := createRequestWrappingEpoch(in)
+	if !ok {
+		return nil, ErrIntegrity
+	}
+	key, err := local.ReadAgentVaultKeyEpoch(
+		s.accountName, s.realmName, s.agentName, keyID, keyVersion,
+	)
+	if errors.Is(err, local.ErrAgentVaultKeyUnavailable) {
+		return nil, ErrKeyUnavailable
+	}
+	if err != nil {
+		return nil, ErrOperation
+	}
+	if key.ID() != keyID || key.Version() != keyVersion {
+		key.Clear()
+		return nil, ErrIntegrity
+	}
+	return key, nil
+}
+
+func createRequestWrappingEpoch(in client.CreateSecretInput) (string, uint64, bool) {
+	if !validCachedCreateRequest(in) || !createRequestHasSensitiveFields(in) {
+		return "", 0, false
+	}
+	for _, field := range in.Fields {
+		if !field.Sensitive || field.Sealed == nil {
+			continue
+		}
+		return field.Sealed.DEK.WrappingKeyID, uint64(field.Sealed.DEK.WrappingKeyVersion), true
+	}
+	return "", 0, false
+}
+
+// rewrapUncommittedCreateRequest changes only each DEK's AVK wrapper. The
+// value ciphertext, generated ids, logical metadata, and therefore any
+// one-time generated password remain byte-for-byte unchanged.
+func rewrapUncommittedCreateRequest(in client.CreateSecretInput, identity client.SelfIdentity, source, target *sealed.AgentVaultKey) (client.CreateSecretInput, error) {
+	if source == nil || target == nil || target.ID() == source.ID() || target.Version() <= source.Version() {
+		return client.CreateSecretInput{}, ErrIntegrity
+	}
+	out := cloneCreateRequest(in)
+	for index := range out.Fields {
+		field := &out.Fields[index]
+		if !field.Sensitive || field.Sealed == nil {
+			continue
+		}
+		domain, ok := fieldDomain(field.Kind)
+		if !ok {
+			return client.CreateSecretInput{}, ErrIntegrity
+		}
+		envelope, err := fromClientSecretMaterial(client.SecretMaterial{
+			Encoding: field.Encoding, ValueVersion: field.ValueVersion,
+			EnvelopeVersion: field.Sealed.EnvelopeVersion,
+			Ciphertext:      field.Sealed.Ciphertext,
+			Algorithm:       field.Sealed.Algorithm,
+			AADVersion:      field.Sealed.AADVersion,
+			DEK:             field.Sealed.DEK,
+		})
+		if err != nil {
+			return client.CreateSecretInput{}, ErrIntegrity
+		}
+		if envelope.WrapRevision >= uint64(1<<63-1) {
+			return client.CreateSecretInput{}, ErrOperation
+		}
+		rewrapped, err := sealed.RewrapSensitiveFieldDEK(source, target, sealed.FieldScope{
+			Domain: domain, AccountID: identity.AccountID, RealmID: identity.RealmID,
+			OwnerAgentID: identity.AgentID, SecretID: in.ID, FieldID: field.ID,
+		}, envelope, envelope.WrapRevision+1)
+		if err != nil {
+			return client.CreateSecretInput{}, ErrIntegrity
+		}
+		sealedField, err := toClientSealedField(rewrapped)
+		if err != nil {
+			return client.CreateSecretInput{}, err
+		}
+		field.Sealed = &sealedField
+	}
+	if !validCachedCreateRequest(out) || !sameCreateRequestLogicalValue(in, out) {
+		return client.CreateSecretInput{}, ErrIntegrity
+	}
+	return out, nil
+}
+
+func cloneCreateRequest(in client.CreateSecretInput) client.CreateSecretInput {
+	out := in
+	out.Tags = append([]string(nil), in.Tags...)
+	out.Fields = make([]client.CreateSecretFieldInput, len(in.Fields))
+	for index := range in.Fields {
+		out.Fields[index] = in.Fields[index]
+		if in.Fields[index].PublicValue != nil {
+			value := *in.Fields[index].PublicValue
+			out.Fields[index].PublicValue = &value
+		}
+		if in.Fields[index].Sealed != nil {
+			value := *in.Fields[index].Sealed
+			value.Ciphertext = append([]byte(nil), value.Ciphertext...)
+			value.DEK.WrappedDEK = append([]byte(nil), value.DEK.WrappedDEK...)
+			out.Fields[index].Sealed = &value
+		}
+	}
+	return out
+}
+
+func sameCreateRequestLogicalValue(a, b client.CreateSecretInput) bool {
+	if a.ID != b.ID || a.Name != b.Name || a.Description != b.Description || a.Template != b.Template ||
+		a.IdempotencyKey != b.IdempotencyKey || len(a.Tags) != len(b.Tags) || len(a.Fields) != len(b.Fields) {
+		return false
+	}
+	for index := range a.Tags {
+		if a.Tags[index] != b.Tags[index] {
+			return false
+		}
+	}
+	for index := range a.Fields {
+		left, right := a.Fields[index], b.Fields[index]
+		if left.ID != right.ID || left.Name != right.Name || left.Kind != right.Kind ||
+			left.Sensitive != right.Sensitive || left.Encoding != right.Encoding ||
+			left.ValueVersion != right.ValueVersion || (left.PublicValue == nil) != (right.PublicValue == nil) ||
+			(left.Sealed == nil) != (right.Sealed == nil) {
+			return false
+		}
+		if left.PublicValue != nil && *left.PublicValue != *right.PublicValue {
+			return false
+		}
+		if left.Sealed == nil {
+			continue
+		}
+		ls, rs := left.Sealed, right.Sealed
+		if ls.EnvelopeVersion != rs.EnvelopeVersion || !bytes.Equal(ls.Ciphertext, rs.Ciphertext) ||
+			ls.Algorithm != rs.Algorithm || ls.AADVersion != rs.AADVersion ||
+			ls.DEK.ID != rs.DEK.ID || ls.DEK.Generation != rs.DEK.Generation ||
+			ls.DEK.WrapAlgorithm != rs.DEK.WrapAlgorithm || ls.DEK.AADVersion != rs.DEK.AADVersion {
+			return false
+		}
+	}
+	return true
+}
+
+func sameCreateRequestExact(a, b client.CreateSecretInput) bool {
+	a.IdempotencyKey = ""
+	b.IdempotencyKey = ""
+	left, leftErr := json.Marshal(a)
+	right, rightErr := json.Marshal(b)
+	defer clear(left)
+	defer clear(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
 // List returns public metadata and explicitly public values only. It never
@@ -658,7 +968,24 @@ func (s *Service) observeVaultKey(ctx context.Context, identity client.SelfIdent
 	if backend != nil && !vaultBindingMatchesIdentity(backend, identity) {
 		return vaultObservation{}, ErrIdentityMismatch
 	}
-	localKey, err := local.ReadAgentVaultKey(s.accountName, s.realmName, s.agentName)
+	var localKey *sealed.AgentVaultKey
+	if backend != nil {
+		if backend.KeyVersion < 1 {
+			return vaultObservation{}, ErrOperation
+		}
+		localKey, err = local.ReadAgentVaultKeyEpoch(
+			s.accountName, s.realmName, s.agentName, backend.ID, uint64(backend.KeyVersion),
+		)
+		if errors.Is(err, local.ErrAgentVaultKeyUnavailable) {
+			// Preserve mismatch detection for an unrelated discoverable legacy
+			// bootstrap key while still preferring an exact immutable epoch.
+			localKey, err = local.ReadAgentVaultKey(s.accountName, s.realmName, s.agentName)
+		}
+	} else {
+		// Until a backend epoch exists, the legacy location remains the only
+		// compatible local-only state that may be registered.
+		localKey, err = local.ReadAgentVaultKey(s.accountName, s.realmName, s.agentName)
+	}
 	if errors.Is(err, local.ErrAgentVaultKeyUnavailable) {
 		localKey = nil
 	} else if err != nil {
@@ -698,6 +1025,10 @@ func (s *Service) reconcileVaultKey(ctx context.Context, identity client.SelfIde
 	}
 	switch observation.status.State {
 	case VaultKeyStateMatch:
+		if err := s.publishVaultKeyEpoch(observation.local); err != nil {
+			observation.local.Clear()
+			return nil, err
+		}
 		return observation.local, nil
 	case VaultKeyStateBackendOnly:
 		observation.local.Clear()
@@ -709,13 +1040,21 @@ func (s *Service) reconcileVaultKey(ctx context.Context, identity client.SelfIde
 		key, err := s.registerLocalVaultKey(ctx, identity, observation.local)
 		if err != nil {
 			observation.local.Clear()
+			return nil, err
 		}
-		return key, err
+		if err := s.publishVaultKeyEpoch(key); err != nil {
+			key.Clear()
+			return nil, err
+		}
+		return key, nil
 	case VaultKeyStateAbsent:
 		key, err := sealed.GenerateAgentVaultKey(sealed.InitialAgentVaultKeyVersion)
 		if err != nil {
 			return nil, ErrOperation
 		}
+		// The legacy/current path is the crash-discoverable staging pointer while
+		// no backend binding exists. Never publish only an undiscoverable epoch
+		// before registration has resolved.
 		if err := local.CreateAgentVaultKey(s.accountName, s.realmName, s.agentName, key); err != nil {
 			if !errors.Is(err, local.ErrAgentVaultKeyExists) {
 				key.Clear()
@@ -730,12 +1069,28 @@ func (s *Service) reconcileVaultKey(ctx context.Context, identity client.SelfIde
 		registered, err := s.registerLocalVaultKey(ctx, identity, key)
 		if err != nil {
 			key.Clear()
+			return nil, err
 		}
-		return registered, err
+		if err := s.publishVaultKeyEpoch(registered); err != nil {
+			registered.Clear()
+			return nil, err
+		}
+		return registered, nil
 	default:
 		observation.local.Clear()
 		return nil, ErrOperation
 	}
+}
+
+func (s *Service) publishVaultKeyEpoch(key *sealed.AgentVaultKey) error {
+	if key == nil {
+		return ErrOperation
+	}
+	err := local.CreateAgentVaultKeyEpoch(s.accountName, s.realmName, s.agentName, key)
+	if err == nil || errors.Is(err, local.ErrAgentVaultKeyExists) {
+		return nil
+	}
+	return ErrOperation
 }
 
 func (s *Service) registerLocalVaultKey(ctx context.Context, identity client.SelfIdentity, key *sealed.AgentVaultKey) (*sealed.AgentVaultKey, error) {
@@ -1032,6 +1387,13 @@ type remote interface {
 	self(context.Context) (client.SelfDigest, error)
 	currentVaultKey(context.Context) (*client.VaultKeyBinding, error)
 	registerVaultKey(context.Context, client.RegisterVaultKeyInput) (*client.VaultKeyMutationResult, error)
+	createVaultKeyEnrollment(context.Context, client.CreateVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error)
+	listVaultKeyEnrollments(context.Context, client.VaultKeyEnrollmentListOptions) ([]client.VaultKeyEnrollment, error)
+	getVaultKeyEnrollment(context.Context, string) (*client.VaultKeyEnrollment, error)
+	approveVaultKeyEnrollment(context.Context, string, client.ApproveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error)
+	receiveVaultKeyEnrollment(context.Context, string, client.ReceiveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollmentTransfer, error)
+	consumeVaultKeyEnrollment(context.Context, string, client.ConsumeVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error)
+	cancelVaultKeyEnrollment(context.Context, string, client.CancelVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error)
 	createSecret(context.Context, client.CreateSecretInput) (*client.SecretMutationResult, error)
 	listSecrets(context.Context, client.SecretListOptions) (*client.SecretPage, error)
 	getSecret(context.Context, string) (*client.Secret, error)
@@ -1053,6 +1415,34 @@ func (r httpRemote) currentVaultKey(ctx context.Context) (*client.VaultKeyBindin
 
 func (r httpRemote) registerVaultKey(ctx context.Context, input client.RegisterVaultKeyInput) (*client.VaultKeyMutationResult, error) {
 	return client.RegisterVaultKey(ctx, r.endpoint, r.token, input)
+}
+
+func (r httpRemote) createVaultKeyEnrollment(ctx context.Context, input client.CreateVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return client.CreateVaultKeyEnrollment(ctx, r.endpoint, r.token, input)
+}
+
+func (r httpRemote) listVaultKeyEnrollments(ctx context.Context, options client.VaultKeyEnrollmentListOptions) ([]client.VaultKeyEnrollment, error) {
+	return client.ListVaultKeyEnrollments(ctx, r.endpoint, r.token, options)
+}
+
+func (r httpRemote) getVaultKeyEnrollment(ctx context.Context, enrollmentID string) (*client.VaultKeyEnrollment, error) {
+	return client.GetVaultKeyEnrollment(ctx, r.endpoint, r.token, enrollmentID)
+}
+
+func (r httpRemote) approveVaultKeyEnrollment(ctx context.Context, enrollmentID string, input client.ApproveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return client.ApproveVaultKeyEnrollment(ctx, r.endpoint, r.token, enrollmentID, input)
+}
+
+func (r httpRemote) receiveVaultKeyEnrollment(ctx context.Context, enrollmentID string, input client.ReceiveVaultKeyEnrollmentInput) (*client.VaultKeyEnrollmentTransfer, error) {
+	return client.ReceiveVaultKeyEnrollment(ctx, r.endpoint, r.token, enrollmentID, input)
+}
+
+func (r httpRemote) consumeVaultKeyEnrollment(ctx context.Context, enrollmentID string, input client.ConsumeVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return client.ConsumeVaultKeyEnrollment(ctx, r.endpoint, r.token, enrollmentID, input)
+}
+
+func (r httpRemote) cancelVaultKeyEnrollment(ctx context.Context, enrollmentID string, input client.CancelVaultKeyEnrollmentInput) (*client.VaultKeyEnrollment, error) {
+	return client.CancelVaultKeyEnrollment(ctx, r.endpoint, r.token, enrollmentID, input)
 }
 
 func (r httpRemote) createSecret(ctx context.Context, input client.CreateSecretInput) (*client.SecretMutationResult, error) {

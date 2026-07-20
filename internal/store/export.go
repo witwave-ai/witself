@@ -21,6 +21,18 @@ import (
 // survive their cell's decommissioning (accounts live forever).
 var ErrAccountNotExportable = errors.New("account must be suspended (or closed) to export")
 
+// ErrVaultLifecycleInProgress prevents one vault-key lifecycle from crossing a
+// mutually exclusive operation or a cell move from silently abandoning active
+// enrollment or rotation work. It also fences orphan pending key epochs that
+// can only arise from legacy or manually damaged state.
+var ErrVaultLifecycleInProgress = errors.New("vault key enrollment or rotation is still active")
+
+// ErrVaultLifecycleIntegrity prevents ExportAccount from writing a
+// checksummed archive whose terminal AVK lifecycle cannot pass the current
+// importer. The message is intentionally value-free: callers should not need
+// key or secret identifiers to handle damaged lifecycle state safely.
+var ErrVaultLifecycleIntegrity = errors.New("vault key lifecycle state is not portable")
+
 // SchemaVersion is the highest embedded migration number — the schema
 // coordinate written into every archive manifest.
 func SchemaVersion() int {
@@ -75,6 +87,71 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 	}
 	if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
+	}
+	if err := expireAccountVaultKeyEnrollmentsTx(ctx, tx, accountID); err != nil {
+		return fmt.Errorf("expire vault key enrollments before export: %w", err)
+	}
+	var activeEnrollments, openRotations, orphanPendingKeys int64
+	if err := tx.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM agent_vault_key_enrollments
+		    WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')),
+		  (SELECT count(*) FROM agent_vault_key_rotations
+		    WHERE account_id=$1 AND lifecycle_state='open'),
+		  (SELECT count(*) FROM agent_vault_keys k
+		    WHERE k.account_id=$1 AND k.lifecycle_state='pending'
+		      AND NOT EXISTS (
+		        SELECT 1 FROM agent_vault_key_rotations r
+		         WHERE r.account_id=k.account_id
+		           AND r.realm_id=k.realm_id
+		           AND r.owner_agent_id=k.owner_agent_id
+		           AND r.target_key_id=k.id
+		           AND r.target_key_version=k.key_version
+		           AND r.lifecycle_state='open'
+		      ))`, accountID).Scan(
+		&activeEnrollments, &openRotations, &orphanPendingKeys); err != nil {
+		return fmt.Errorf("check vault key lifecycle before export: %w", err)
+	}
+	if activeEnrollments != 0 || openRotations != 0 || orphanPendingKeys != 0 {
+		return ErrVaultLifecycleInProgress
+	}
+	// Terminal lifecycle history is portable only when no staging workspace
+	// remains and its cross-table key states match the import contract. These
+	// invariants are maintained transactionally by normal mutations but cannot
+	// be expressed as row-local SQL constraints, so catch manually damaged or
+	// legacy state before the archive writer receives any bytes.
+	var nonPortableVaultLifecycle bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_vault_key_rotation_items
+		   WHERE account_id=$1
+		) OR EXISTS (
+		  SELECT 1
+		    FROM agent_vault_key_rotations r
+		    JOIN agent_vault_keys source
+		      ON source.account_id=r.account_id
+		     AND source.realm_id=r.realm_id
+		     AND source.owner_agent_id=r.owner_agent_id
+		     AND source.id=r.source_key_id
+		     AND source.key_version=r.source_key_version
+		    JOIN agent_vault_keys target
+		      ON target.account_id=r.account_id
+		     AND target.realm_id=r.realm_id
+		     AND target.owner_agent_id=r.owner_agent_id
+		     AND target.id=r.target_key_id
+		     AND target.key_version=r.target_key_version
+		   WHERE r.account_id=$1
+		     AND (
+		       source.lifecycle_state='pending'
+		       OR (r.lifecycle_state='committed' AND
+		           (target.lifecycle_state='pending' OR r.staged_count<>r.item_count))
+		       OR (r.lifecycle_state='cancelled' AND target.lifecycle_state<>'retired')
+		     )
+		)`, accountID).Scan(&nonPortableVaultLifecycle); err != nil {
+		return fmt.Errorf("check terminal vault key lifecycle before export: %w", err)
+	}
+	if nonPortableVaultLifecycle {
+		return ErrVaultLifecycleIntegrity
 	}
 	// A schema-50 pod may have inserted a full avatar while schema 51 was
 	// already live. The frozen account cannot acquire another legitimate avatar
@@ -209,6 +286,38 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at, 'retired_at', retired_at)
 			FROM agent_vault_keys WHERE account_id = $1
 			ORDER BY realm_id, owner_agent_id, key_version, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_vault_key_enrollments", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'vault_key_id', vault_key_id,
+			  'vault_key_version', vault_key_version,
+			  'target_location_id', target_location_id,
+			  'target_location_name', target_location_name,
+			  'target_public_key', target_public_key,
+			  'target_key_algorithm', target_key_algorithm,
+			  'pairing_commitment', pairing_commitment,
+			  'lifecycle_state', lifecycle_state,
+			  'source_location_id', source_location_id,
+			  'source_ephemeral_public_key', source_ephemeral_public_key,
+			  'transfer_ciphertext', CASE WHEN transfer_ciphertext IS NULL THEN NULL
+			                           ELSE E'\\x' || encode(transfer_ciphertext, 'hex') END,
+			  'transfer_algorithm', transfer_algorithm,
+			  'consume_commitment', consume_commitment,
+			  'row_version', row_version, 'created_at', created_at,
+			  'expires_at', expires_at, 'approved_at', approved_at,
+			  'consumed_at', consumed_at, 'cancelled_at', cancelled_at,
+			  'expired_at', expired_at)
+			FROM agent_vault_key_enrollments WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "vault_key_enrollment_receipts", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'operation', operation,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'request_hash', request_hash, 'enrollment_id', enrollment_id,
+			  'result_revision', result_revision, 'created_at', created_at)
+			FROM vault_key_enrollment_receipts WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID},
 		&querySource{tx: tx, table: "secrets", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -249,6 +358,50 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			FROM secret_deks WHERE account_id = $1
 			ORDER BY realm_id, owner_agent_id, secret_id, field_id,
 			         dek_generation, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_vault_key_rotations", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id,
+			  'source_key_id', source_key_id, 'source_key_version', source_key_version,
+			  'target_key_id', target_key_id, 'target_key_version', target_key_version,
+			  'lifecycle_state', lifecycle_state,
+			  'recovery_disposition_mode', recovery_disposition_mode,
+			  'recovery_artifact_sha256', recovery_artifact_sha256,
+			  'item_count', item_count,
+			  'staged_count', staged_count, 'row_version', row_version,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'committed_at', committed_at, 'cancelled_at', cancelled_at)
+			FROM agent_vault_key_rotations WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_vault_key_rotation_items", q: `
+			SELECT jsonb_build_object(
+			  'rotation_id', rotation_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'owner_agent_id', owner_agent_id,
+			  'secret_id', secret_id, 'field_id', field_id, 'dek_id', dek_id,
+			  'dek_generation', dek_generation,
+			  'source_dek_row_version', source_dek_row_version,
+			  'source_wrap_revision', source_wrap_revision,
+			  'source_wrapped_dek', E'\\x' || encode(source_wrapped_dek, 'hex'),
+			  'source_wrap_algorithm', source_wrap_algorithm,
+			  'source_aad_version', source_aad_version,
+			  'source_wrapping_key_id', source_wrapping_key_id,
+			  'source_wrapping_key_version', source_wrapping_key_version,
+			  'target_wrapped_dek', CASE WHEN target_wrapped_dek IS NULL THEN NULL
+			                         ELSE E'\\x' || encode(target_wrapped_dek, 'hex') END,
+			  'target_wrap_revision', target_wrap_revision,
+			  'target_wrapper_sha256', target_wrapper_sha256,
+			  'staged_at', staged_at)
+			FROM agent_vault_key_rotation_items WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, rotation_id, dek_id`, arg: accountID},
+		&querySource{tx: tx, table: "vault_key_rotation_receipts", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'operation', operation,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'request_hash', request_hash, 'rotation_id', rotation_id,
+			  'result_revision', result_revision, 'created_at', created_at)
+			FROM vault_key_rotation_receipts WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID},
 		&querySource{tx: tx, table: "secret_mutation_receipts", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,

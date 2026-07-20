@@ -25,7 +25,7 @@ const (
 	maxSecretListLimit                   = 100
 )
 
-var secretResourceIDPattern = regexp.MustCompile(`^(?:avk|sec|fld|dek)_[a-z2-7]{16}$`)
+var secretResourceIDPattern = regexp.MustCompile(`^(?:avk|sec|fld|dek|enr|vkr)_[a-z2-7]{16}$`)
 
 // ErrSecretVaultKeyUnavailable and ErrSecretVaultKeyMismatch are stable
 // transport sentinels for the fail-closed client-custody bootstrap state. They
@@ -602,11 +602,22 @@ func writeSecretError(w http.ResponseWriter, err error, operation string) bool {
 	case errors.Is(err, ErrSecretVaultKeyUnavailable):
 		writeJSONError(w, http.StatusConflict, ErrSecretVaultKeyUnavailable.Error())
 	case errors.Is(err, ErrSecretVaultKeyMismatch):
-		writeJSONError(w, http.StatusConflict, ErrSecretVaultKeyMismatch.Error())
+		writeSecretCodedError(w, http.StatusConflict, "secret_vault_key_mismatch", ErrSecretVaultKeyMismatch.Error())
 	case errors.Is(err, ErrConflict):
 		writeJSONError(w, http.StatusConflict, "secret state conflict")
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "could not "+operation)
 	}
 	return true
+}
+
+func writeSecretCodedError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"schema_version": "witself.v0",
+		"code":           code,
+		"error":          message,
+	})
 }

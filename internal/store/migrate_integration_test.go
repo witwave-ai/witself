@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
+	"github.com/witwave-ai/witself/internal/sealed"
 )
 
 var migrationTestSchemaSequence atomic.Uint64
@@ -67,6 +69,538 @@ func TestMigration55AgentSecretsPostgres(t *testing.T) {
 	migrationTestUpTo(t, dsn, 55)
 	assertMigrationTestVersion(t, dsn, 55)
 	assertSchema(true)
+}
+
+func TestMigration56ReplacesHistoricalVaultKeyVersionConstraintPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 55)
+	assertMigrationTestVersion(t, dsn, 55)
+
+	provisioned, err := st.ProvisionAccount(ctx, "migration56@witwave.ai", "migration 56", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate account = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "migration-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertKey := func(id string, version int64, fingerprint, state string) error {
+		retiredAt := any(nil)
+		if state == "retired" {
+			retiredAt = time.Now().UTC()
+		}
+		_, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_vault_keys
+			       (id,account_id,realm_id,owner_agent_id,key_version,
+			        algorithm,fingerprint,lifecycle_state,retired_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, provisioned.AccountID,
+			realm.ID, agent.ID, version, SecretAEADAlgorithm, fingerprint, state, retiredAt)
+		return err
+	}
+	insertCancelledRotation := func(id, targetKeyID string) error {
+		_, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_vault_key_rotations
+			       (id,account_id,realm_id,owner_agent_id,source_key_id,
+			        source_key_version,target_key_id,target_key_version,
+			        lifecycle_state,item_count,cancelled_at)
+			VALUES ($1,$2,$3,$4,'avk_aaaaaaaaaaaaaaaa',1,$5,2,
+			        'cancelled',0,clock_timestamp())`, id, provisioned.AccountID,
+			realm.ID, agent.ID, targetKeyID)
+		return err
+	}
+	if err := insertKey("avk_aaaaaaaaaaaaaaaa", 1, strings.Repeat("a", 64), "current"); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKey("avk_bbbbbbbbbbbbbbbb", 2, strings.Repeat("b", 64), "retired"); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKey("avk_cccccccccccccccc", 2, strings.Repeat("c", 64), "pending"); !secretUniqueViolation(err) {
+		t.Fatalf("schema 55 duplicate historical version error = %v", err)
+	}
+	if err := insertKey("avk_hhhhhhhhhhhhhhhh", 3, strings.Repeat("2", 64), "pending"); err != nil {
+		t.Fatalf("schema 55 legacy pending key = %v", err)
+	}
+	var legacyPendingCreatedAt time.Time
+	if err := st.pool.QueryRow(ctx, `
+		UPDATE agent_vault_keys
+		   SET row_version=7
+		 WHERE id='avk_hhhhhhhhhhhhhhhh'
+		 RETURNING created_at`).Scan(&legacyPendingCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationTestUpTo(t, dsn, 56)
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestIndexShape(t, st, "agent_vault_keys", "agent_vault_keys_one_live_version",
+		[]string{"account_id", "realm_id", "owner_agent_id", "key_version"},
+		[]string{"lifecycle_state", "pending", "current"})
+	var legacyPendingState string
+	var legacyPendingRowVersion int64
+	var legacyPendingRetiredAt, migratedCreatedAt time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT lifecycle_state, row_version, created_at, retired_at
+		  FROM agent_vault_keys
+		 WHERE id='avk_hhhhhhhhhhhhhhhh'`).Scan(
+		&legacyPendingState, &legacyPendingRowVersion,
+		&migratedCreatedAt, &legacyPendingRetiredAt); err != nil {
+		t.Fatal(err)
+	}
+	if legacyPendingState != "retired" || legacyPendingRowVersion != 7 ||
+		!migratedCreatedAt.Equal(legacyPendingCreatedAt) ||
+		!legacyPendingRetiredAt.Equal(legacyPendingCreatedAt) {
+		t.Fatalf("migrated legacy pending key = state %q revision %d created %v retired %v, want retired/7/%v/%v",
+			legacyPendingState, legacyPendingRowVersion, migratedCreatedAt,
+			legacyPendingRetiredAt, legacyPendingCreatedAt, legacyPendingCreatedAt)
+	}
+
+	if err := insertKey("avk_dddddddddddddddd", 2, strings.Repeat("d", 64), "pending"); err != nil {
+		t.Fatalf("first source+1 retry after schema 56 = %v", err)
+	}
+	err = insertKey("avk_eeeeeeeeeeeeeeee", 2, strings.Repeat("e", 64), "pending")
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "23505" ||
+		postgresError.ConstraintName != "agent_vault_keys_one_live_version" {
+		t.Fatalf("duplicate live version error = %#v / %v", postgresError, err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_vault_keys
+		   SET lifecycle_state='retired', retired_at=clock_timestamp(), row_version=row_version+1
+		 WHERE id='avk_dddddddddddddddd'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertCancelledRotation("vkr_dddddddddddddddd", "avk_dddddddddddddddd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKey("avk_ffffffffffffffff", 2, strings.Repeat("f", 64), "pending"); err != nil {
+		t.Fatalf("second source+1 retry after retiring candidate = %v", err)
+	}
+	var total, live int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE lifecycle_state IN ('pending','current'))
+		  FROM agent_vault_keys
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3 AND key_version=2`,
+		provisioned.AccountID, realm.ID, agent.ID).Scan(&total, &live); err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || live != 1 {
+		t.Fatalf("version 2 historical/live rows = %d/%d, want 3/1", total, live)
+	}
+
+	err = migrationTestDown(t, dsn, true)
+	if err == nil || !strings.Contains(err.Error(), "orphan pending vault key epoch") {
+		t.Fatalf("schema 56 downgrade with orphan pending epoch error = %v", err)
+	}
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestTable(t, st, "agent_vault_key_rotations", true)
+	assertMigrationTestIndex(t, st, "agent_vault_keys", "agent_vault_keys_one_live_version", true)
+
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_vault_keys
+		   SET lifecycle_state='retired', retired_at=clock_timestamp(), row_version=row_version+1
+		 WHERE id='avk_ffffffffffffffff'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertCancelledRotation("vkr_ffffffffffffffff", "avk_ffffffffffffffff"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 55)
+	assertMigrationTestTable(t, st, "agent_vault_key_rotations", false)
+	assertMigrationTestTable(t, st, "agent_vault_key_enrollments", false)
+	assertMigrationTestIndex(t, st, "agent_vault_keys", "agent_vault_keys_one_live_version", false)
+	assertMigrationTestTableConstraint(t, st, "agent_vault_keys",
+		"agent_vault_keys_scope_version_unique", true)
+
+	var survivor string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*), min(id)
+		  FROM agent_vault_keys
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3 AND key_version=2`,
+		provisioned.AccountID, realm.ID, agent.ID).Scan(&total, &survivor); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || survivor != "avk_ffffffffffffffff" {
+		t.Fatalf("compacted version 2 survivor = %d/%q, want 1/%q",
+			total, survivor, "avk_ffffffffffffffff")
+	}
+	err = insertKey("avk_gggggggggggggggg", 2, strings.Repeat("1", 64), "retired")
+	postgresError = nil
+	if !errors.As(err, &postgresError) || postgresError.Code != "23505" ||
+		postgresError.ConstraintName != "agent_vault_keys_scope_version_unique" {
+		t.Fatalf("schema 55 restored version constraint error = %#v / %v", postgresError, err)
+	}
+}
+
+func TestMigration56DownPreservesCurrentAndReferencedVaultKeyEpochPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+
+	t.Run("committed current epoch wins", func(t *testing.T) {
+		ctx := context.Background()
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 56)
+		p := migration56TestPrincipal(ctx, t, st)
+		_, source := migration56RegisterKey(ctx, t, st, p, 1,
+			"migration56-committed-source")
+		targetKey, err := sealed.GenerateAgentVaultKey(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(targetKey.Clear)
+		target := targetKey.Metadata()
+		rotationID := mustSecretTestID(t, "vkr")
+		rotation, _, err := st.StartVaultKeyRotation(ctx, p, StartVaultKeyRotationInput{
+			ID: rotationID, ExpectedSourceKeyID: source.ID,
+			ExpectedSourceKeyVersion:    source.KeyVersion,
+			ExpectedSourceKeyRowVersion: source.RowVersion,
+			TargetKeyID:                 target.ID, TargetKeyVersion: int64(target.Version),
+			TargetAlgorithm: target.Algorithm, TargetFingerprint: target.Fingerprint,
+			IdempotencyKey: "migration56-committed-start",
+		})
+		if err != nil || rotation.ItemCount != 0 || rotation.StagedPlanHash == "" {
+			t.Fatalf("start empty committed rotation = %#v / %v", rotation, err)
+		}
+		rotation, _, err = st.CommitVaultKeyRotation(ctx, p, rotation.ID,
+			CommitVaultKeyRotationInput{
+				ExpectedRotationRowVersion: rotation.RowVersion,
+				ExpectedItemCount:          rotation.ItemCount,
+				ExpectedPlanHash:           rotation.StagedPlanHash,
+				RecoveryDisposition: VaultKeyRotationRecoveryDisposition{
+					Mode: VaultKeyRotationRiskAccepted,
+				},
+				IdempotencyKey: "migration56-committed-commit",
+			})
+		if err != nil || rotation.LifecycleState != VaultKeyRotationCommitted {
+			t.Fatalf("commit empty rotation = %#v / %v", rotation, err)
+		}
+		migration56CreateSecret(ctx, t, st, p, targetKey, "committed-current")
+		migration56InsertNewerRetiredDuplicate(ctx, t, st, p, 2)
+		migration56AssertDownPreservesKey(ctx, t, st, dsn, p, 2, target.ID)
+	})
+
+	t.Run("referenced retired epoch wins over newer unreferenced", func(t *testing.T) {
+		ctx := context.Background()
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 56)
+		p := migration56TestPrincipal(ctx, t, st)
+		originalKey, original := migration56RegisterKey(ctx, t, st, p, 1,
+			"migration56-preserve-original")
+		migration56CreateSecret(ctx, t, st, p, originalKey, "preserved-retired")
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_vault_keys
+			   SET lifecycle_state='retired', retired_at=clock_timestamp(),
+			       row_version=row_version+1
+			 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3 AND id=$4`,
+			p.AccountID, p.RealmID, p.ID, original.ID); err != nil {
+			t.Fatal(err)
+		}
+		migration56InsertNewerRetiredDuplicate(ctx, t, st, p, 1)
+		migration56AssertDownPreservesKey(ctx, t, st, dsn, p, 1, original.ID)
+	})
+}
+
+func TestMigration56DownRefusesReferencedLosingDuplicatePostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 56)
+	p := migration56TestPrincipal(ctx, t, st)
+	firstKey, first := migration56RegisterKey(ctx, t, st, p, 1,
+		"migration56-losing-first")
+	migration56CreateSecret(ctx, t, st, p, firstKey, "first")
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_vault_keys
+		   SET lifecycle_state='retired', retired_at=clock_timestamp(),
+		       row_version=row_version+1
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3 AND id=$4`,
+		p.AccountID, p.RealmID, p.ID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondKey, second := migration56RegisterKey(ctx, t, st, p, 1,
+		"migration56-losing-second")
+	migration56CreateSecret(ctx, t, st, p, secondKey, "second")
+
+	err := migrationTestDown(t, dsn, true)
+	if err == nil || !strings.Contains(err.Error(),
+		"duplicate retired vault key epoch is still referenced") {
+		t.Fatalf("schema 56 downgrade with referenced losing duplicate error = %v", err)
+	}
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestTable(t, st, "agent_vault_key_rotations", true)
+	assertMigrationTestIndex(t, st, "agent_vault_keys", "agent_vault_keys_one_live_version", true)
+	var keyCount int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_vault_keys
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+		   AND id IN ($4,$5)`, p.AccountID, p.RealmID, p.ID,
+		first.ID, second.ID).Scan(&keyCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 2 {
+		t.Fatalf("keys after refused downgrade = %d, want 2", keyCount)
+	}
+}
+
+func TestMigration56DownRefusesActiveVaultLifecyclePostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	t.Run("pending enrollment", func(t *testing.T) {
+		ctx := context.Background()
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 56)
+		p := migration56TestPrincipal(ctx, t, st)
+		_, current := migration56RegisterKey(ctx, t, st, p, 1,
+			"migration56-active-enrollment")
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_vault_key_enrollments
+			       (id,account_id,realm_id,owner_agent_id,vault_key_id,
+			        vault_key_version,target_location_id,target_location_name,
+			        target_public_key,target_key_algorithm,pairing_commitment,expires_at)
+			VALUES ('enr_aaaaaaaaaaaaaaaa',$1,$2,$3,$4,$5,
+			        'loc_aaaaaaaaaaaaaaaa','test location',$6,$7,$8,
+			        clock_timestamp()+interval '10 minutes')`, p.AccountID, p.RealmID,
+			p.ID, current.ID, current.KeyVersion, strings.Repeat("A", 43),
+			"X25519_RAW_32_BASE64URL_V1", strings.Repeat("a", 64)); err != nil {
+			t.Fatal(err)
+		}
+
+		migration56AssertActiveLifecycleDownRefused(ctx, t, st, dsn)
+	})
+
+	t.Run("open rotation", func(t *testing.T) {
+		ctx := context.Background()
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 56)
+		p := migration56TestPrincipal(ctx, t, st)
+		_, current := migration56RegisterKey(ctx, t, st, p, 1,
+			"migration56-active-rotation")
+		targetKey, err := sealed.GenerateAgentVaultKey(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(targetKey.Clear)
+		target := targetKey.Metadata()
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_vault_keys
+			       (id,account_id,realm_id,owner_agent_id,key_version,
+			        algorithm,fingerprint,lifecycle_state)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'pending')`, target.ID, p.AccountID,
+			p.RealmID, p.ID, target.Version, target.Algorithm,
+			target.Fingerprint); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_vault_key_rotations
+			       (id,account_id,realm_id,owner_agent_id,source_key_id,
+			        source_key_version,target_key_id,target_key_version,item_count)
+			VALUES ('vkr_aaaaaaaaaaaaaaaa',$1,$2,$3,$4,$5,$6,$7,0)`,
+			p.AccountID, p.RealmID, p.ID, current.ID, current.KeyVersion,
+			target.ID, target.Version); err != nil {
+			t.Fatal(err)
+		}
+
+		migration56AssertActiveLifecycleDownRefused(ctx, t, st, dsn)
+	})
+}
+
+func migration56TestPrincipal(ctx context.Context, t *testing.T, st *Store) Principal {
+	t.Helper()
+	provisioned, err := st.ProvisionAccount(ctx,
+		"migration56-down@witwave.ai", "migration 56 down", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate account = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "migration-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID,
+		RealmID: realm.ID, AgentName: agent.Name, AccountStatus: "active",
+		AccessProfile: AccessProfileFull}
+}
+
+func migration56RegisterKey(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	version uint64,
+	idempotencyKey string,
+) (*sealed.AgentVaultKey, VaultKeyBinding) {
+	t.Helper()
+	key, err := sealed.GenerateAgentVaultKey(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(key.Clear)
+	metadata := key.Metadata()
+	binding, _, err := st.RegisterVaultKey(ctx, p, RegisterVaultKeyInput{
+		ID: metadata.ID, KeyVersion: int64(metadata.Version), Algorithm: metadata.Algorithm,
+		Fingerprint: metadata.Fingerprint, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key, binding
+}
+
+func migration56CreateSecret(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	key *sealed.AgentVaultKey,
+	suffix string,
+) {
+	t.Helper()
+	secretID := mustSecretTestID(t, "sec")
+	fieldID := mustSecretTestID(t, "fld")
+	scope := sealed.FieldScope{Domain: sealed.FieldValueDomain, AccountID: p.AccountID,
+		RealmID: p.RealmID, OwnerAgentID: p.ID, SecretID: secretID, FieldID: fieldID}
+	envelope, err := sealed.SealSensitiveField(key, []byte("migration 56 canary"),
+		sealed.SensitiveFieldOptions{Scope: scope, ValueVersion: 1, DEKGeneration: 1,
+			ValueEncoding: sealed.ValueEncodingUTF8, WrapRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateSecret(ctx, p, CreateSecretInput{
+		ID: secretID, Name: "migration 56 " + suffix, Template: "login",
+		IdempotencyKey: "migration56-create-" + suffix,
+		Fields: []CreateSecretFieldInput{{
+			ID: fieldID, Name: "password", Kind: SecretFieldPassword, Sensitive: true,
+			Encoding: SecretEncodingUTF8, ValueVersion: 1, Sealed: secretStoreEnvelope(envelope),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func migration56InsertNewerRetiredDuplicate(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	version uint64,
+) {
+	t.Helper()
+	key, err := sealed.GenerateAgentVaultKey(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(key.Clear)
+	metadata := key.Metadata()
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_vault_keys
+		       (id,account_id,realm_id,owner_agent_id,key_version,
+		        algorithm,fingerprint,lifecycle_state,created_at,retired_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'retired',
+		        clock_timestamp()+interval '1 hour',
+		        clock_timestamp()+interval '1 hour')`, metadata.ID, p.AccountID,
+		p.RealmID, p.ID, metadata.Version, metadata.Algorithm,
+		metadata.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func migration56AssertDownPreservesKey(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	dsn string,
+	p Principal,
+	keyVersion int64,
+	wantKeyID string,
+) {
+	t.Helper()
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 55)
+	assertMigrationTestTable(t, st, "agent_vault_key_rotations", false)
+	assertMigrationTestTable(t, st, "agent_vault_key_enrollments", false)
+	assertMigrationTestTableConstraint(t, st, "agent_vault_keys",
+		"agent_vault_keys_scope_version_unique", true)
+
+	var count int64
+	var survivor string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*), min(id)
+		  FROM agent_vault_keys
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3 AND key_version=$4`,
+		p.AccountID, p.RealmID, p.ID, keyVersion).Scan(&count, &survivor); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || survivor != wantKeyID {
+		t.Fatalf("schema 55 key survivor = %d/%q, want 1/%q", count, survivor, wantKeyID)
+	}
+	var wrappingKeyID string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT wrapping_key_id
+		  FROM secret_deks
+		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3`,
+		p.AccountID, p.RealmID, p.ID).Scan(&wrappingKeyID); err != nil {
+		t.Fatal(err)
+	}
+	if wrappingKeyID != wantKeyID {
+		t.Fatalf("preserved DEK wrapping key = %q, want %q", wrappingKeyID, wantKeyID)
+	}
+}
+
+func migration56AssertActiveLifecycleDownRefused(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	dsn string,
+) {
+	t.Helper()
+	err := migrationTestDown(t, dsn, true)
+	if err == nil || !strings.Contains(err.Error(),
+		"active vault key enrollment or rotation") {
+		t.Fatalf("schema 56 downgrade with active lifecycle error = %v", err)
+	}
+	assertMigrationTestVersion(t, dsn, 56)
+	assertMigrationTestTable(t, st, "agent_vault_key_enrollments", true)
+	assertMigrationTestTable(t, st, "agent_vault_key_rotations", true)
+	assertMigrationTestIndex(t, st, "agent_vault_keys", "agent_vault_keys_one_live_version", true)
+	var lifecycleRows int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM agent_vault_key_enrollments
+		         WHERE lifecycle_state IN ('pending','approved')) +
+		       (SELECT count(*) FROM agent_vault_key_rotations
+		         WHERE lifecycle_state='open')`).Scan(&lifecycleRows); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleRows != 1 {
+		t.Fatalf("active lifecycle rows after refused downgrade = %d, want 1", lifecycleRows)
+	}
 }
 
 func TestMigration37MessageAudiencePostgres(t *testing.T) {

@@ -95,17 +95,33 @@ func vaultCmd(args []string) int {
 	keyHelp := len(args) == 2 && args[0] == "key" && commandHelpRequested(args[1:])
 	if commandHelpRequested(args) || keyHelp {
 		printCommandGroupHelp(os.Stderr,
-			"usage: witself vault key init|status [agent connection flags]",
+			"usage: witself vault key init|status|enroll|recovery|rotate|rotation ...",
 			"key init    Reconcile or initialize this installation's agent vault key",
 			"key status  Compare the local key with the backend's public binding",
+			"key enroll  Enroll another installation without exposing the key to Witself",
+			"key recovery  Export, inspect, or import an offline encrypted recovery artifact",
+			"key rotate  Rotate every sensitive field wrapper to a new client-held key epoch",
+			"key rotation  Inspect or cancel an in-progress rotation",
 		)
 		return 0
 	}
-	if len(args) < 2 || args[0] != "key" || (args[1] != "init" && args[1] != "status") {
-		fmt.Fprintln(os.Stderr, "usage: witself vault key init|status [agent connection flags]")
+	if len(args) < 2 || args[0] != "key" {
+		fmt.Fprintln(os.Stderr, "usage: witself vault key init|status|enroll|recovery|rotate|rotation ...")
 		return 2
 	}
-	return vaultKey(args[1], args[2:])
+	switch args[1] {
+	case "init", "status":
+		return vaultKey(args[1], args[2:])
+	case "enroll":
+		return vaultKeyEnroll(args[2:])
+	case "recovery":
+		return vaultKeyRecovery(args[2:])
+	case "rotate", "rotation":
+		return vaultKeyRotation(args[1], args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "witself: unknown vault key command %q\n", args[1])
+		return 2
+	}
 }
 
 func vaultKey(operation string, args []string) int {

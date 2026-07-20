@@ -41,4 +41,29 @@ var (
 	// ErrRandomSource identifies failure of the operating system's
 	// cryptographic random source without exposing any value being processed.
 	ErrRandomSource = errors.New("cryptographic random source unavailable")
+
+	// ErrInvalidEnrollment identifies malformed, unsupported, or non-canonical
+	// AVK enrollment material. It never includes public-key or secret bytes.
+	ErrInvalidEnrollment = errors.New("agent vault key enrollment material is invalid")
+
+	// ErrEnrollmentIntegrity deliberately collapses a wrong recipient, wrong
+	// pairing secret, changed immutable binding, malformed package, and AEAD
+	// authentication failure into one value-free result.
+	ErrEnrollmentIntegrity = errors.New("agent vault key enrollment failed integrity verification")
+
+	// ErrEnrollmentDisclosure prevents generic serialization from accidentally
+	// exporting an enrollment private key, pairing secret, or consume proof.
+	ErrEnrollmentDisclosure = errors.New("agent vault key enrollment secret cannot be serialized generically")
+
+	// ErrInvalidRecovery identifies a malformed, unsupported, non-canonical, or
+	// caller-invalid AVK recovery package without exposing package contents.
+	ErrInvalidRecovery = errors.New("agent vault key recovery package is invalid")
+
+	// ErrRecoveryIntegrity deliberately collapses wrong-passphrase, wrong-scope,
+	// ciphertext, metadata, and recovered-key verification failures.
+	ErrRecoveryIntegrity = errors.New("agent vault key recovery failed integrity verification")
+
+	// ErrInvalidRecoveryPassphrase identifies only a violated public length
+	// policy and never includes the passphrase or any derived material.
+	ErrInvalidRecoveryPassphrase = errors.New("agent vault key recovery passphrase does not satisfy policy")
 )

@@ -112,6 +112,25 @@ var importColumns = map[string]map[string]bool{
 		"fingerprint": true, "lifecycle_state": true, "row_version": true,
 		"created_at": true, "retired_at": true,
 	},
+	"agent_vault_key_enrollments": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "vault_key_id": true,
+		"vault_key_version": true, "target_location_id": true,
+		"target_location_name": true, "target_public_key": true,
+		"target_key_algorithm": true, "pairing_commitment": true,
+		"lifecycle_state": true, "source_location_id": true,
+		"source_ephemeral_public_key": true, "transfer_ciphertext": true,
+		"transfer_algorithm": true, "consume_commitment": true,
+		"row_version": true, "created_at": true, "expires_at": true,
+		"approved_at": true, "consumed_at": true,
+		"cancelled_at": true, "expired_at": true,
+	},
+	"vault_key_enrollment_receipts": {
+		"account_id": true, "realm_id": true, "owner_agent_id": true,
+		"operation": true, "idempotency_key_hash": true,
+		"request_hash": true, "enrollment_id": true,
+		"result_revision": true, "created_at": true,
+	},
 	"secrets": {
 		"id": true, "account_id": true, "realm_id": true,
 		"owner_agent_id": true, "name": true, "description": true,
@@ -137,6 +156,33 @@ var importColumns = map[string]map[string]bool{
 		"wrap_revision": true, "wrapping_key_id": true,
 		"wrapping_key_version": true, "row_version": true,
 		"created_at": true, "retired_at": true,
+	},
+	"agent_vault_key_rotations": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "source_key_id": true,
+		"source_key_version": true, "target_key_id": true,
+		"target_key_version": true, "lifecycle_state": true,
+		"recovery_disposition_mode": true, "recovery_artifact_sha256": true,
+		"item_count": true, "staged_count": true, "row_version": true,
+		"created_at": true, "updated_at": true,
+		"committed_at": true, "cancelled_at": true,
+	},
+	"agent_vault_key_rotation_items": {
+		"rotation_id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "secret_id": true, "field_id": true,
+		"dek_id": true, "dek_generation": true,
+		"source_dek_row_version": true, "source_wrap_revision": true,
+		"source_wrapped_dek": true, "source_wrap_algorithm": true,
+		"source_aad_version": true, "source_wrapping_key_id": true,
+		"source_wrapping_key_version": true, "target_wrapped_dek": true,
+		"target_wrap_revision": true, "target_wrapper_sha256": true,
+		"staged_at": true,
+	},
+	"vault_key_rotation_receipts": {
+		"account_id": true, "realm_id": true, "owner_agent_id": true,
+		"operation": true, "idempotency_key_hash": true,
+		"request_hash": true, "rotation_id": true,
+		"result_revision": true, "created_at": true,
 	},
 	"secret_mutation_receipts": {
 		"account_id": true, "realm_id": true, "owner_agent_id": true,
@@ -776,9 +822,12 @@ type importCtx struct {
 	agentRealms                  map[string]string
 	agentActivity                map[agentActivityImportKey]bool
 	vaultKeys                    map[string]secretVaultKeyImportScope
-	vaultKeyVersions             map[secretVaultKeyVersionImportKey]string
+	vaultKeyIdentities           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
+	vaultLiveKeyVersions         map[secretVaultKeyVersionImportKey]string
 	vaultCurrentKeys             map[string]int
 	vaultFingerprints            map[string]bool
+	vaultEnrollments             map[string]vaultEnrollmentImportScope
+	vaultEnrollmentReceipts      map[string]bool
 	secrets                      map[string]secretImportScope
 	secretNames                  map[string]map[string]string
 	secretFields                 map[string]secretFieldImportScope
@@ -788,6 +837,8 @@ type importCtx struct {
 	secretDEKs                   map[string]secretDEKImportScope
 	secretDEKGenerations         map[secretDEKGenerationImportKey]bool
 	secretCurrentDEKs            map[string]int
+	vaultRotations               map[string]vaultRotationImportScope
+	vaultRotationReceipts        map[string]bool
 	secretReceipts               map[string]bool
 	avatarStyleHeads             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
 	avatarStyleVersions          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
@@ -856,9 +907,12 @@ func newImportCtx(accountID string) *importCtx {
 		agentRealms:                  map[string]string{},
 		agentActivity:                map[agentActivityImportKey]bool{},
 		vaultKeys:                    map[string]secretVaultKeyImportScope{},
-		vaultKeyVersions:             map[secretVaultKeyVersionImportKey]string{},
+		vaultKeyIdentities:           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
+		vaultLiveKeyVersions:         map[secretVaultKeyVersionImportKey]string{},
 		vaultCurrentKeys:             map[string]int{},
 		vaultFingerprints:            map[string]bool{},
+		vaultEnrollments:             map[string]vaultEnrollmentImportScope{},
+		vaultEnrollmentReceipts:      map[string]bool{},
 		secrets:                      map[string]secretImportScope{},
 		secretNames:                  map[string]map[string]string{},
 		secretFields:                 map[string]secretFieldImportScope{},
@@ -868,6 +922,8 @@ func newImportCtx(accountID string) *importCtx {
 		secretDEKs:                   map[string]secretDEKImportScope{},
 		secretDEKGenerations:         map[secretDEKGenerationImportKey]bool{},
 		secretCurrentDEKs:            map[string]int{},
+		vaultRotations:               map[string]vaultRotationImportScope{},
+		vaultRotationReceipts:        map[string]bool{},
 		secretReceipts:               map[string]bool{},
 		avatarStyleHeads:             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
 		avatarStyleVersions:          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
@@ -1112,7 +1168,10 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
-		"agent_vault_keys", "secrets", "secret_fields", "secret_deks",
+		"agent_vault_keys", "agent_vault_key_enrollments",
+		"vault_key_enrollment_receipts", "secrets", "secret_fields", "secret_deks",
+		"agent_vault_key_rotations", "agent_vault_key_rotation_items",
+		"vault_key_rotation_receipts",
 		"secret_mutation_receipts",
 		"avatar_style_packs", "avatar_style_pack_versions", "realm_avatar_styles",
 		"avatar_style_rollout_jobs",
@@ -1270,9 +1329,16 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("agent_vault_keys row %v", err)
 		}
+		identity := secretVaultKeyIdentityImportKey{id: scope.id, version: scope.version}
 		versionKey := secretVaultKeyVersionImportKey{agentID: scope.agentID, version: scope.version}
-		if _, duplicateID := ic.vaultKeys[scope.id]; duplicateID || ic.vaultKeyVersions[versionKey] != "" {
-			return badf("agent_vault_keys row duplicates id or agent key version")
+		if _, duplicateID := ic.vaultKeys[scope.id]; duplicateID {
+			return badf("agent_vault_keys row duplicates id")
+		}
+		if _, duplicateIdentity := ic.vaultKeyIdentities[identity]; duplicateIdentity {
+			return badf("agent_vault_keys row duplicates key identity")
+		}
+		if scope.state != "retired" && ic.vaultLiveKeyVersions[versionKey] != "" {
+			return badf("agent_vault_keys row duplicates a pending or current agent key version")
 		}
 		if ic.vaultFingerprints[scope.fingerprint] {
 			return badf("agent_vault_keys row reuses a key fingerprint")
@@ -1284,8 +1350,29 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			}
 		}
 		ic.vaultKeys[scope.id] = scope
-		ic.vaultKeyVersions[versionKey] = scope.id
+		ic.vaultKeyIdentities[identity] = scope
+		if scope.state != "retired" {
+			ic.vaultLiveKeyVersions[versionKey] = scope.id
+		}
 		ic.vaultFingerprints[scope.fingerprint] = true
+	case "agent_vault_key_enrollments":
+		scope, err := ic.validateImportedVaultEnrollment(obj)
+		if err != nil {
+			return badf("agent_vault_key_enrollments row %v", err)
+		}
+		if _, duplicate := ic.vaultEnrollments[scope.id]; duplicate {
+			return badf("agent_vault_key_enrollments row duplicates id")
+		}
+		ic.vaultEnrollments[scope.id] = scope
+	case "vault_key_enrollment_receipts":
+		key, err := ic.validateImportedVaultEnrollmentReceipt(obj)
+		if err != nil {
+			return badf("vault_key_enrollment_receipts row %v", err)
+		}
+		if ic.vaultEnrollmentReceipts[key] {
+			return badf("vault_key_enrollment_receipts row duplicates its retry fence")
+		}
+		ic.vaultEnrollmentReceipts[key] = true
 	case "secrets":
 		scope, normalizedName, err := ic.validateImportedSecret(obj)
 		if err != nil {
@@ -1351,6 +1438,30 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		}
 		ic.secretDEKs[id] = scope
 		ic.secretDEKGenerations[generationKey] = true
+	case "agent_vault_key_rotations":
+		scope, err := ic.validateImportedVaultRotation(obj)
+		if err != nil {
+			return badf("agent_vault_key_rotations row %v", err)
+		}
+		if _, duplicate := ic.vaultRotations[scope.id]; duplicate {
+			return badf("agent_vault_key_rotations row duplicates id")
+		}
+		ic.vaultRotations[scope.id] = scope
+	case "agent_vault_key_rotation_items":
+		// ExportAccount refuses open rotations, and both terminal transitions
+		// purge their staging rows. Accepting one here would recreate an
+		// internal transfer workspace that has no live authority on the new
+		// cell, so fail closed even if the row satisfies database constraints.
+		return badf("agent_vault_key_rotation_items must be empty in a portable archive")
+	case "vault_key_rotation_receipts":
+		key, err := ic.validateImportedVaultRotationReceipt(obj)
+		if err != nil {
+			return badf("vault_key_rotation_receipts row %v", err)
+		}
+		if ic.vaultRotationReceipts[key] {
+			return badf("vault_key_rotation_receipts row duplicates its retry fence")
+		}
+		ic.vaultRotationReceipts[key] = true
 	case "secret_mutation_receipts":
 		key, err := ic.validateImportedSecretReceipt(obj)
 		if err != nil {

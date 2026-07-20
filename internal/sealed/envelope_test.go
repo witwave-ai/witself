@@ -221,6 +221,71 @@ func TestSensitiveFieldDEKRewrapLeavesValueCiphertextUntouched(t *testing.T) {
 	}
 }
 
+func TestRewrapDEKRequiresOnlyOpaqueWrapperAndExactScope(t *testing.T) {
+	oldKey := mustAgentVaultKey(t, 1)
+	newKey := mustAgentVaultKey(t, 2)
+	original, err := SealSensitiveField(oldKey, []byte("wrapper-only rotation"), testSealOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := DEKWrapper{
+		DEKID: original.DEKID, DEKGeneration: original.DEKGeneration,
+		WrappedDEK: original.WrappedDEK, WrapAlgorithm: original.WrapAlgorithm,
+		AADVersion: original.AADVersion, WrapRevision: original.WrapRevision,
+		WrappingKeyID: original.WrappingKeyID, WrappingKeyVersion: original.WrappingKeyVersion,
+	}
+	target, err := RewrapDEK(oldKey, newKey, testFieldScope(), source, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(target.WrappedDEK) != WrappedDEKBytes || bytes.Equal(target.WrappedDEK, source.WrappedDEK) ||
+		target.WrappingKeyID != newKey.ID() || target.WrappingKeyVersion != newKey.Version() ||
+		target.WrapRevision != 2 {
+		t.Fatalf("unexpected target wrapper: %+v", target)
+	}
+	if err := VerifyDEKRewrap(oldKey, newKey, testFieldScope(), source, target); err != nil {
+		t.Fatalf("verify rewrap: %v", err)
+	}
+	rewrapped := cloneEnvelope(original)
+	rewrapped.WrappedDEK = target.WrappedDEK
+	rewrapped.WrappingKeyID = target.WrappingKeyID
+	rewrapped.WrappingKeyVersion = target.WrappingKeyVersion
+	rewrapped.WrapRevision = target.WrapRevision
+	opened, err := OpenSensitiveField(newKey, testFieldScope(), rewrapped)
+	if err != nil || string(opened) != "wrapper-only rotation" {
+		t.Fatalf("open rewrapped = %q, %v", opened, err)
+	}
+	wrongScope := testFieldScope()
+	wrongScope.FieldID = "fld_aaaaaaaaaaaaaaaa"
+	if _, err := RewrapDEK(oldKey, newKey, wrongScope, source, 2); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("wrong-scope error = %v", err)
+	}
+	tampered := source
+	tampered.WrappedDEK = append([]byte(nil), source.WrappedDEK...)
+	tampered.WrappedDEK[len(tampered.WrappedDEK)-1] ^= 1
+	if _, err := RewrapDEK(oldKey, newKey, testFieldScope(), tampered, 2); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("tampered-wrapper error = %v", err)
+	}
+	other, err := SealSensitiveField(oldKey, []byte("different DEK"), testSealOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTarget, err := RewrapDEK(oldKey, newKey, testFieldScope(), DEKWrapper{
+		DEKID: other.DEKID, DEKGeneration: other.DEKGeneration, WrappedDEK: other.WrappedDEK,
+		WrapAlgorithm: other.WrapAlgorithm, AADVersion: other.AADVersion,
+		WrapRevision: other.WrapRevision, WrappingKeyID: other.WrappingKeyID,
+		WrappingKeyVersion: other.WrappingKeyVersion,
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTarget.DEKID = source.DEKID
+	otherTarget.DEKGeneration = source.DEKGeneration
+	if err := VerifyDEKRewrap(oldKey, newKey, testFieldScope(), source, otherTarget); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("different-DEK verification error = %v", err)
+	}
+}
+
 func TestTOTPPayloadUsesIndependentDomainAndRoundTrips(t *testing.T) {
 	key := mustAgentVaultKey(t, 1)
 	options := testSealOptions()

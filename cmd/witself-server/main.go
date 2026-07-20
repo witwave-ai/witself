@@ -825,8 +825,11 @@ func serve() int {
 		}
 		cfg.DeleteAgent = func(ctx context.Context, accountID, realmID, agentID string) error {
 			err := st.DeleteAgent(ctx, accountID, realmID, agentID)
-			if errors.Is(err, store.ErrAgentNotFound) {
+			switch {
+			case errors.Is(err, store.ErrAgentNotFound):
 				return server.ErrNotFound
+			case errors.Is(err, store.ErrVaultLifecycleInProgress):
+				return server.ErrConflict
 			}
 			return err
 		}
@@ -957,6 +960,8 @@ func serve() int {
 				return server.ErrNotAccountOwner
 			case errors.Is(err, store.ErrCannotCloseDefault):
 				return server.ErrCannotCloseDefault
+			case errors.Is(err, store.ErrVaultLifecycleInProgress):
+				return server.ErrConflict
 			default:
 				return err
 			}
@@ -1044,6 +1049,8 @@ func serve() int {
 			case errors.Is(err, store.ErrAccountNotFound):
 				return server.ErrNotFound
 			case errors.Is(err, store.ErrAccountNotExportable):
+				return server.ErrConflict
+			case errors.Is(err, store.ErrVaultLifecycleInProgress):
 				return server.ErrConflict
 			}
 			return err

@@ -3920,7 +3920,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
 	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
 	usageLine(w, "  witself password generate    Generate a password locally with cryptographic randomness")
-	usageLine(w, "  witself vault key init|status  Manage this installation's client-held agent vault key")
+	usageLine(w, "  witself vault key init|status|enroll|recovery|rotate|rotation  Manage client-held key custody")
 	usageLine(w, "  witself secret create|list|search|show|reveal|archive|restore  Manage agent-owned structured secrets")
 	usageLine(w, "  witself totp show|code       Inspect TOTP metadata or generate a code locally")
 	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")

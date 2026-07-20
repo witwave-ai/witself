@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
@@ -62,6 +63,20 @@ type SensitiveFieldEnvelope struct {
 	WrapRevision       uint64 `json:"wrap_revision"`
 	WrappingKeyID      string `json:"wrapping_key_id"`
 	WrappingKeyVersion uint64 `json:"wrapping_key_version"`
+}
+
+// DEKWrapper is the minimal opaque wrapper shape needed for AVK rotation. It
+// deliberately excludes field ciphertext and value metadata: rotating an AVK
+// authenticates, unwraps, and rewraps only the per-field DEK.
+type DEKWrapper struct {
+	DEKID              string
+	DEKGeneration      uint64
+	WrappedDEK         []byte
+	WrapAlgorithm      string
+	AADVersion         uint32
+	WrapRevision       uint64
+	WrappingKeyID      string
+	WrappingKeyVersion uint64
 }
 
 // SealSensitiveField generates a fresh random DEK, encrypts plaintext under
@@ -184,26 +199,118 @@ func RewrapSensitiveFieldDEK(oldAVK, newAVK *AgentVaultKey, scope FieldScope, en
 		return SensitiveFieldEnvelope{}, ErrInvalidBinding
 	}
 
-	dek, err := unwrapEnvelopeDEK(oldAVK, scope, envelope)
-	if err != nil {
-		return SensitiveFieldEnvelope{}, ErrIntegrity
-	}
-	defer clear(dek)
-
-	result := cloneEnvelope(envelope)
-	result.WrappingKeyID = newAVK.ID()
-	result.WrappingKeyVersion = newAVK.Version()
-	result.WrapRevision = newWrapRevision
-	wrapAAD, err := CanonicalDEKWrapAAD(wrapBindingFromEnvelope(scope, result))
-	if err != nil {
-		return SensitiveFieldEnvelope{}, ErrInvalidBinding
-	}
-	result.WrappedDEK, err = sealAES256GCM(newAVK.material[:], dek, wrapAAD)
-	clear(wrapAAD)
+	wrapper, err := RewrapDEK(oldAVK, newAVK, scope, DEKWrapper{
+		DEKID: envelope.DEKID, DEKGeneration: envelope.DEKGeneration,
+		WrappedDEK: envelope.WrappedDEK, WrapAlgorithm: envelope.WrapAlgorithm,
+		AADVersion: envelope.AADVersion, WrapRevision: envelope.WrapRevision,
+		WrappingKeyID: envelope.WrappingKeyID, WrappingKeyVersion: envelope.WrappingKeyVersion,
+	}, newWrapRevision)
 	if err != nil {
 		return SensitiveFieldEnvelope{}, err
 	}
+
+	result := cloneEnvelope(envelope)
+	result.WrappedDEK = wrapper.WrappedDEK
+	result.WrappingKeyID = wrapper.WrappingKeyID
+	result.WrappingKeyVersion = wrapper.WrappingKeyVersion
+	result.WrapRevision = wrapper.WrapRevision
 	return result, nil
+}
+
+// RewrapDEK authenticates one source wrapper under oldAVK and produces a fresh
+// wrapper for the same DEK under newAVK. No field ciphertext or plaintext is
+// required. Wrong source metadata, wrong scope, wrong key, and AEAD failures
+// collapse to ErrIntegrity; invalid target ordering is ErrInvalidBinding.
+func RewrapDEK(oldAVK, newAVK *AgentVaultKey, scope FieldScope, source DEKWrapper, newWrapRevision uint64) (DEKWrapper, error) {
+	if !validAgentVaultKey(oldAVK) || !validAgentVaultKey(newAVK) ||
+		validateFieldScope(scope) != nil || source.AADVersion != AADVersionV1 ||
+		source.WrapAlgorithm != AES256GCMAlgorithm || !validPrefixedID(source.DEKID, "dek") ||
+		source.DEKGeneration == 0 || source.WrapRevision == 0 ||
+		source.WrappingKeyID != oldAVK.ID() || source.WrappingKeyVersion != oldAVK.Version() ||
+		len(source.WrappedDEK) != WrappedDEKBytes {
+		return DEKWrapper{}, ErrIntegrity
+	}
+	if newAVK.Version() <= oldAVK.Version() || newWrapRevision <= source.WrapRevision {
+		return DEKWrapper{}, ErrInvalidBinding
+	}
+	dek, err := unwrapDEKWrapper(oldAVK, scope, source)
+	if err != nil {
+		return DEKWrapper{}, ErrIntegrity
+	}
+	defer clear(dek)
+	target := DEKWrapper{
+		DEKID: source.DEKID, DEKGeneration: source.DEKGeneration,
+		WrapAlgorithm: AES256GCMAlgorithm, AADVersion: AADVersionV1,
+		WrapRevision: newWrapRevision, WrappingKeyID: newAVK.ID(),
+		WrappingKeyVersion: newAVK.Version(),
+	}
+	targetAAD, err := CanonicalDEKWrapAAD(DEKWrapAADBinding{
+		FieldScope: scope, DEKID: target.DEKID, DEKGeneration: target.DEKGeneration,
+		WrappingKeyID: target.WrappingKeyID, WrappingKeyVersion: target.WrappingKeyVersion,
+		WrapRevision: target.WrapRevision, WrapAlgorithm: target.WrapAlgorithm,
+	})
+	if err != nil {
+		return DEKWrapper{}, ErrInvalidBinding
+	}
+	target.WrappedDEK, err = sealAES256GCM(newAVK.material[:], dek, targetAAD)
+	clear(targetAAD)
+	if err != nil {
+		return DEKWrapper{}, err
+	}
+	return target, nil
+}
+
+// VerifyDEKRewrap independently authenticates source and target wrappers and
+// proves they contain the same DEK under the exact old/new epochs and field
+// scope. It supports crash recovery after the backend already accepted a stage
+// request without trusting staged metadata as client authority.
+func VerifyDEKRewrap(oldAVK, newAVK *AgentVaultKey, scope FieldScope, source, target DEKWrapper) error {
+	if !validAgentVaultKey(oldAVK) || !validAgentVaultKey(newAVK) ||
+		source.DEKID != target.DEKID || source.DEKGeneration != target.DEKGeneration ||
+		target.AADVersion != AADVersionV1 || target.WrapAlgorithm != AES256GCMAlgorithm ||
+		target.WrappingKeyID != newAVK.ID() || target.WrappingKeyVersion != newAVK.Version() ||
+		target.WrapRevision <= source.WrapRevision || len(target.WrappedDEK) != WrappedDEKBytes {
+		return ErrIntegrity
+	}
+	sourceDEK, err := unwrapDEKWrapper(oldAVK, scope, source)
+	if err != nil {
+		return ErrIntegrity
+	}
+	defer clear(sourceDEK)
+	targetDEK, err := unwrapDEKWrapper(newAVK, scope, target)
+	if err != nil {
+		return ErrIntegrity
+	}
+	defer clear(targetDEK)
+	if subtle.ConstantTimeCompare(sourceDEK, targetDEK) != 1 {
+		return ErrIntegrity
+	}
+	return nil
+}
+
+func unwrapDEKWrapper(avk *AgentVaultKey, scope FieldScope, wrapper DEKWrapper) ([]byte, error) {
+	if !validAgentVaultKey(avk) || validateFieldScope(scope) != nil ||
+		wrapper.AADVersion != AADVersionV1 || wrapper.WrapAlgorithm != AES256GCMAlgorithm ||
+		!validPrefixedID(wrapper.DEKID, "dek") || wrapper.DEKGeneration == 0 ||
+		wrapper.WrapRevision == 0 || wrapper.WrappingKeyID != avk.ID() ||
+		wrapper.WrappingKeyVersion != avk.Version() || len(wrapper.WrappedDEK) != WrappedDEKBytes {
+		return nil, ErrIntegrity
+	}
+	aad, err := CanonicalDEKWrapAAD(DEKWrapAADBinding{
+		FieldScope: scope, DEKID: wrapper.DEKID, DEKGeneration: wrapper.DEKGeneration,
+		WrappingKeyID: wrapper.WrappingKeyID, WrappingKeyVersion: wrapper.WrappingKeyVersion,
+		WrapRevision: wrapper.WrapRevision, WrapAlgorithm: wrapper.WrapAlgorithm,
+	})
+	if err != nil {
+		return nil, ErrIntegrity
+	}
+	dek, err := openAES256GCM(avk.material[:], wrapper.WrappedDEK, aad)
+	clear(aad)
+	if err != nil || len(dek) != DataEncryptionKeyBytes {
+		clear(dek)
+		return nil, ErrIntegrity
+	}
+	return dek, nil
 }
 
 func unwrapEnvelopeDEK(avk *AgentVaultKey, scope FieldScope, envelope SensitiveFieldEnvelope) ([]byte, error) {

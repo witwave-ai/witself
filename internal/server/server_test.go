@@ -971,12 +971,17 @@ func TestCloseAccount(t *testing.T) {
 			return "opr_member", "acc_y", "active", true, nil
 		case "root":
 			return "opr_root", "acc_default", "active", true, nil
+		case "busy":
+			return "opr_owner", "acc_busy", "active", true, nil
 		}
 		return "", "", "", false, nil
 	}
 	closeFn := func(_ context.Context, accountID, operatorID, _ string) error {
 		if accountID == "acc_default" {
 			return ErrCannotCloseDefault
+		}
+		if accountID == "acc_busy" {
+			return ErrConflict
 		}
 		if operatorID != "opr_owner" {
 			return ErrNotAccountOwner
@@ -1012,6 +1017,11 @@ func TestCloseAccount(t *testing.T) {
 	closeBody(t, r)
 	if r.StatusCode != http.StatusForbidden {
 		t.Errorf("default account = %d, want 403", r.StatusCode)
+	}
+	r = post("busy")
+	closeBody(t, r)
+	if r.StatusCode != http.StatusConflict {
+		t.Errorf("active vault lifecycle = %d, want 409", r.StatusCode)
 	}
 	r = post("owner")
 	defer closeBody(t, r)

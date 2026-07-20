@@ -158,13 +158,22 @@ const (
 	// Sealed-plane events are deliberately value-free. Secret names, field
 	// values, public search queries, ciphertext, nonces, wrapped DEKs, key
 	// fingerprints, and retry keys never enter the account ledger.
-	VerbVaultKeyRegistered      = "vault.key.registered"
-	VerbSecretCreated           = "secret.created"
-	VerbSecretUpdated           = "secret.updated"
-	VerbSecretArchived          = "secret.archived"
-	VerbSecretRestored          = "secret.restored"
-	VerbSecretMaterialDelivered = "secret.material.delivered"
-	VerbSecretDEKRewrapped      = "secret.dek.rewrapped"
+	VerbVaultKeyRegistered        = "vault.key.registered"
+	VerbVaultEnrollmentRequested  = "vault.enrollment.requested"
+	VerbVaultEnrollmentApproved   = "vault.enrollment.approved"
+	VerbVaultEnrollmentConsumed   = "vault.enrollment.consumed"
+	VerbVaultEnrollmentCancelled  = "vault.enrollment.cancelled"
+	VerbVaultEnrollmentExpired    = "vault.enrollment.expired"
+	VerbVaultKeyRotationStarted   = "vault.key.rotation.started"
+	VerbVaultKeyRotationStaged    = "vault.key.rotation.staged"
+	VerbVaultKeyRotationCommitted = "vault.key.rotation.committed"
+	VerbVaultKeyRotationCancelled = "vault.key.rotation.cancelled"
+	VerbSecretCreated             = "secret.created"
+	VerbSecretUpdated             = "secret.updated"
+	VerbSecretArchived            = "secret.archived"
+	VerbSecretRestored            = "secret.restored"
+	VerbSecretMaterialDelivered   = "secret.material.delivered"
+	VerbSecretDEKRewrapped        = "secret.dek.rewrapped"
 
 	// Support-ticket lifecycle. Every ticket mutation lands both a
 	// support_tickets state change AND an account_events row so the
@@ -569,6 +578,29 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedKeys:   []string{"agent_id", "key_id", "key_version", "algorithm"},
 		allowedActors: []string{ActorAgent},
 	},
+	VerbVaultEnrollmentRequested: vaultEnrollmentEventSpec(ActorAgent,
+		"agent_id", "enrollment_id", "key_id", "key_version", "target_location_id"),
+	VerbVaultEnrollmentApproved: vaultEnrollmentEventSpec(ActorAgent,
+		"agent_id", "enrollment_id", "key_id", "key_version", "target_location_id", "source_location_id"),
+	VerbVaultEnrollmentConsumed: vaultEnrollmentEventSpec(ActorAgent,
+		"agent_id", "enrollment_id", "key_id", "key_version", "target_location_id", "source_location_id"),
+	VerbVaultEnrollmentCancelled: vaultEnrollmentEventSpec(ActorAgent,
+		"agent_id", "enrollment_id", "key_id", "key_version", "target_location_id"),
+	VerbVaultEnrollmentExpired: vaultEnrollmentEventSpec(ActorSystem,
+		"agent_id", "enrollment_id", "key_id", "key_version", "target_location_id"),
+	VerbVaultKeyRotationStarted: vaultRotationEventSpec(
+		"agent_id", "rotation_id", "source_key_id", "source_key_version",
+		"target_key_id", "target_key_version", "item_count"),
+	VerbVaultKeyRotationStaged: vaultRotationEventSpec(
+		"agent_id", "rotation_id", "staged_batch_count", "staged_count",
+		"item_count", "rotation_revision"),
+	VerbVaultKeyRotationCommitted: vaultRotationEventSpecWithOptional(
+		[]string{"agent_id", "rotation_id", "source_key_id", "source_key_version",
+			"target_key_id", "target_key_version", "item_count", "recovery_disposition_mode"},
+		"recovery_artifact_sha256"),
+	VerbVaultKeyRotationCancelled: vaultRotationEventSpec(
+		"agent_id", "rotation_id", "source_key_id", "source_key_version",
+		"target_key_id", "target_key_version", "item_count", "staged_count"),
 	VerbSecretCreated: secretEventSpec(
 		"agent_id", "secret_id", "field_count", "sensitive_field_count",
 	),
@@ -658,6 +690,31 @@ func secretEventSpec(required ...string) verbSpec {
 	return verbSpec{
 		requiredKeys:  required,
 		allowedKeys:   required,
+		allowedActors: []string{ActorAgent},
+	}
+}
+
+func vaultEnrollmentEventSpec(actor string, required ...string) verbSpec {
+	return verbSpec{
+		requiredKeys:  required,
+		allowedKeys:   required,
+		allowedActors: []string{actor},
+	}
+}
+
+func vaultRotationEventSpec(required ...string) verbSpec {
+	return verbSpec{
+		requiredKeys:  required,
+		allowedKeys:   required,
+		allowedActors: []string{ActorAgent},
+	}
+}
+
+func vaultRotationEventSpecWithOptional(required []string, optional ...string) verbSpec {
+	allowed := append(append([]string(nil), required...), optional...)
+	return verbSpec{
+		requiredKeys:  required,
+		allowedKeys:   allowed,
 		allowedActors: []string{ActorAgent},
 	}
 }

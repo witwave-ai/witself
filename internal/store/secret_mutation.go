@@ -134,6 +134,11 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 	if err != nil {
 		return SecretMutationResult{}, err
 	}
+	wrappingKeyID, wrappingKeyVersion, sensitiveCount, encryptedBytes, err :=
+		secretCreateEnvelopeSummary(in.Fields)
+	if err != nil {
+		return SecretMutationResult{}, err
+	}
 	requestInput := in
 	requestInput.IdempotencyKey = ""
 	requestHash, err := secretMutationFingerprint(requestInput)
@@ -167,12 +172,16 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 		return SecretMutationResult{Secret: secret, Receipt: receipt}, nil
 	}
 
-	wrappingKeyID, wrappingKeyVersion, sensitiveCount, encryptedBytes, err :=
-		secretCreateEnvelopeSummary(in.Fields)
-	if err != nil {
-		return SecretMutationResult{}, err
-	}
 	if sensitiveCount > 0 {
+		// The stable owner-row lock serializes the last pre-rotation sensitive
+		// create against rotation snapshot creation. Once a run is open, no new
+		// wrapped DEK may appear outside its immutable item set.
+		if err := lockSecretOwnerAgentTx(ctx, tx, p); err != nil {
+			return SecretMutationResult{}, err
+		}
+		if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
+			return SecretMutationResult{}, err
+		}
 		key, err := lockCurrentVaultKeyTx(ctx, tx, p)
 		if err != nil {
 			return SecretMutationResult{}, err

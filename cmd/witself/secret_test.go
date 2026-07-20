@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +15,7 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/secretclient"
 )
 
 func TestSecretCreateDocumentRejectsDuplicateFields(t *testing.T) {
@@ -81,6 +85,19 @@ func TestSecretCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
 		{"vault", "key", "--help"},
 		{"vault", "key", "init", "--help"},
 		{"vault", "key", "status", "--help"},
+		{"vault", "key", "enroll", "--help"},
+		{"vault", "key", "enroll", "begin", "--help"},
+		{"vault", "key", "enroll", "approve", "--help"},
+		{"vault", "key", "enroll", "complete", "--help"},
+		{"vault", "key", "enroll", "list", "--help"},
+		{"vault", "key", "enroll", "status", "--help"},
+		{"vault", "key", "enroll", "cancel", "--help"},
+		{"vault", "key", "recovery", "--help"},
+		{"vault", "key", "recovery", "export", "--help"},
+		{"vault", "key", "recovery", "inspect", "--help"},
+		{"vault", "key", "recovery", "import", "--help"},
+		{"vault", "key", "rotate", "--help"},
+		{"vault", "key", "rotation", "--help"},
 		{"totp", "--help"},
 		{"totp", "show", "--help"},
 		{"totp", "code", "--help"},
@@ -94,6 +111,147 @@ func TestSecretCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
 				t.Fatalf("run(%q) = %d stdout=%q stderr=%q", args, code, stdout, stderr)
 			}
 		})
+	}
+}
+
+func TestVaultKeyCredentialsCannotBeSuppliedByFlag(t *testing.T) {
+	const canary = "never-place-this-vault-credential-in-argv"
+	tests := [][]string{
+		{"vault", "key", "enroll", "approve", "enr_abcdefghijklmnop", "--pairing-secret", canary},
+		{"vault", "key", "recovery", "export", "--out", filepath.Join(t.TempDir(), "key.recovery"), "--passphrase", canary},
+		{"vault", "key", "recovery", "import", "--file", filepath.Join(t.TempDir(), "key.recovery"), "--passphrase", canary},
+		{"vault", "key", "rotate", "--recovery-out", filepath.Join(t.TempDir(), "rotated.recovery"), "--passphrase", canary},
+	}
+	for _, args := range tests {
+		stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+		if code != 2 || stdout != "" || strings.Contains(stdout, canary) || strings.Contains(stderr, canary) {
+			t.Fatalf("run(%q) = %d stdout=%q stderr=%q", args[:len(args)-1], code, stdout, stderr)
+		}
+	}
+}
+
+func TestVaultKeyRotateRequiresExactlyOneRecoveryDecision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rotated.recovery")
+	tests := [][]string{
+		{"vault", "key", "rotate"},
+		{"vault", "key", "rotate", "--recovery-out", path, "--accept-unrecoverable-key-loss"},
+		{"vault", "key", "rotate", "--recovery-out", "   "},
+	}
+	for _, args := range tests {
+		stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+		if code != 2 || stdout != "" ||
+			!strings.Contains(stderr, "(--recovery-out FILE|--accept-unrecoverable-key-loss)") {
+			t.Fatalf("run(%q) = %d stdout=%q stderr=%q", args, code, stdout, stderr)
+		}
+	}
+}
+
+func TestVaultKeyRotationFileRecoverySinkIsDurableNoReplace(t *testing.T) {
+	key, err := sealed.GenerateAgentVaultKey(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Clear()
+	passphrase := []byte("rotation recovery passphrase for CLI test")
+	defer clear(passphrase)
+	artifact, err := sealed.ExportAgentVaultKeyRecovery(key, passphrase, sealed.AVKRecoveryScope{
+		AccountID: "acc_abcdefghijklmnop", RealmID: "realm_abcdefghijklmnop",
+		OwnerAgentID: "agent_abcdefghijklmnop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(artifact)
+	metadata, err := sealed.InspectAgentVaultKeyRecovery(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := vaultKeyRotationFileRecoverySink{path: filepath.Join(parent, "rotation.recovery")}
+	if value, err := sink.ReadBack(context.Background()); value != nil ||
+		!errors.Is(err, secretclient.ErrVaultKeyRotationRecoveryUnavailable) {
+		t.Fatalf("missing read = %q, %v", value, err)
+	}
+	if err := sink.PutIfAbsent(context.Background(), metadata, artifact); err != nil {
+		t.Fatal(err)
+	}
+	read, err := sink.ReadBack(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(read)
+	if !bytes.Equal(read, artifact) {
+		t.Fatal("file recovery sink changed durable artifact bytes")
+	}
+	if err := sink.PutIfAbsent(context.Background(), metadata, artifact); !errors.Is(err, secretclient.ErrVaultKeyRotationRecoveryExists) {
+		t.Fatalf("second put error = %v", err)
+	}
+}
+
+func TestPrintVaultKeyRotationShowsOnlyCommittedRecoveryDisposition(t *testing.T) {
+	committed := &client.VaultKeyRotation{
+		ID: "vkr_abcdefghijklmnop", LifecycleState: client.VaultKeyRotationCommitted,
+		SourceKeyID: "avk_abcdefghijklmnop", SourceKeyVersion: 1,
+		TargetKeyID: "avk_ponmlkjihgfedcba", TargetKeyVersion: 2,
+		ItemCount: 3, StagedCount: 3, RowVersion: 4,
+		RecoveryDispositionMode: client.VaultKeyRotationRecoveryArtifact,
+		RecoveryArtifactSHA256:  strings.Repeat("a", 64),
+	}
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return printVaultKeyRotation("status", committed, false)
+	})
+	if code != 0 || stderr != "" ||
+		!strings.Contains(stdout, "recovery disposition:\trecovery_artifact") ||
+		!strings.Contains(stdout, "recovery artifact sha256:\t"+strings.Repeat("a", 64)) {
+		t.Fatalf("committed output code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	open := *committed
+	open.LifecycleState = client.VaultKeyRotationOpen
+	open.RecoveryDispositionMode = ""
+	open.RecoveryArtifactSHA256 = ""
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int {
+		return printVaultKeyRotation("status", &open, false)
+	})
+	if code != 0 || stderr != "" || strings.Contains(stdout, "recovery disposition") ||
+		strings.Contains(stdout, "recovery artifact sha256") {
+		t.Fatalf("open output code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestVaultKeyRecoveryInspectIsOfflineAndValueFree(t *testing.T) {
+	key, err := sealed.GenerateAgentVaultKey(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Clear()
+	passphrase := []byte("long recovery passphrase for test only")
+	defer clear(passphrase)
+	artifact, err := sealed.ExportAgentVaultKeyRecovery(key, passphrase, sealed.AVKRecoveryScope{
+		AccountID: "acc_abcdefghijklmnop", RealmID: "realm_abcdefghijklmnop",
+		OwnerAgentID: "agent_abcdefghijklmnop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(artifact)
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "scott.recovery")
+	if err := local.WriteRecoveryArtifact(path, artifact); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return run([]string{"vault", "key", "recovery", "inspect", "--file", path, "--json"})
+	})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, key.ID()) ||
+		strings.Contains(stdout, string(passphrase)) || strings.Contains(stdout, string(artifact)) {
+		t.Fatalf("inspect code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,36 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCreateSecretMapsOnlyStableVaultKeyMismatchCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		status int
+		want   bool
+	}{
+		{name: "typed mismatch", status: http.StatusConflict, body: `{"schema_version":"witself.v0","code":"secret_vault_key_mismatch","error":"agent vault key mismatch"}`, want: true},
+		{name: "code on bad request is not proof", status: http.StatusBadRequest, body: `{"schema_version":"witself.v0","code":"secret_vault_key_mismatch","error":"agent vault key mismatch"}`},
+		{name: "code on server error is not proof", status: http.StatusInternalServerError, body: `{"schema_version":"witself.v0","code":"secret_vault_key_mismatch","error":"agent vault key mismatch"}`},
+		{name: "message alone is not authority", status: http.StatusConflict, body: `{"schema_version":"witself.v0","error":"agent vault key mismatch"}`},
+		{name: "generic conflict", status: http.StatusConflict, body: `{"schema_version":"witself.v0","error":"secret state conflict"}`},
+		{name: "idempotency conflict", status: http.StatusConflict, body: `{"schema_version":"witself.v0","error":"idempotency key was reused for a different secret operation"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer srv.Close()
+			_, err := CreateSecret(context.Background(), srv.URL, "agent-token", CreateSecretInput{})
+			if got := errors.Is(err, ErrSecretVaultKeyMismatch); got != test.want {
+				t.Fatalf("errors.Is(..., ErrSecretVaultKeyMismatch) = %v, want %v; error=%v", got, test.want, err)
+			}
+		})
+	}
+}
 
 func TestSecretClientVerticalContract(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
