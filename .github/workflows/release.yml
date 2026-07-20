@@ -2,10 +2,12 @@ name: release
 
 # Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, signs the
 # checksums (cosign keyless), generates SBOMs, publishes the GitHub release,
-# attaches build-provenance attestations, pushes the ws and witself-server
+# attaches build-provenance attestations, pushes the witself and witself-server
 # multi-arch images to GHCR, publishes the witself Helm chart as an OCI artifact
-# to ghcr.io/witwave-ai/charts, and pushes the Homebrew formula to witwave-ai/
-# homebrew-tap. A manual run (workflow_dispatch) is a no-publish snapshot.
+# to ghcr.io/witwave-ai/charts, and renders and publishes the Homebrew formulae
+# to witwave-ai/homebrew-tap before reconciling the existing GHCR latest tags to
+# that completed-release pointer. A manual run (workflow_dispatch) is a
+# no-publish snapshot that still renders the formulae for validation.
 on:
   push:
     tags:
@@ -126,8 +128,58 @@ jobs:
             echo "::endgroup::"
           done
 
+  # A tag can point at a commit that never went through normal branch CI. Keep
+  # the real Homebrew style/audit gate in the release workflow as well.
+  homebrew-verify:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            infra/pulumi/go.sum
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      # This no-publish pass deliberately uses the real GoReleaser archive
+      # pipeline. It catches archive-name or target drift before the release job
+      # publishes any GitHub or GHCR artifact.
+      - name: Build Homebrew archive contract
+        run: >-
+          goreleaser release
+          --snapshot
+          --clean
+          --skip=docker,sbom,sign
+          --parallelism 1
+          --timeout 2h
+
+      - name: Render and audit actual Homebrew archives
+        run: |
+          version="$(jq -r '.version // empty' dist/metadata.json)"
+          [[ -n "$version" ]] || { echo "missing GoReleaser version" >&2; exit 1; }
+          bash scripts/test-homebrew-formulas.sh dist "$version"
+
+      - name: Test Homebrew tap publisher
+        run: bash scripts/test-publish-homebrew-formulas.sh
+
+      - name: Test GHCR latest reconciliation
+        run: bash scripts/test-promote-latest-images.sh
+
   goreleaser:
-    needs: verify
+    needs: [verify, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -193,11 +245,14 @@ jobs:
           df -h
 
       - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: v2.17.0
           install-only: true
+
+      - name: Validate GoReleaser configuration
+        run: goreleaser check
 
       - name: Test checksum signer integration
         run: bash scripts/test-cosign-checksums.sh
@@ -212,8 +267,6 @@ jobs:
             ${{ github.event_name == 'push' && 'release --clean --parallelism 1 --timeout 2h'
                 || 'release --snapshot --clean --skip=sign --parallelism 1 --timeout 2h' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Required for the cross-repo Homebrew formula push (org secret).
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -o pipefail
 
@@ -234,6 +287,26 @@ jobs:
           date +%s > "$release_end"
           exit "$status"
 
+      - name: Render Homebrew formulae
+        id: homebrew
+        run: |
+          version="$(jq -r '.version // empty' dist/metadata.json)"
+          if [[ -z "$version" ]]; then
+            echo "GoReleaser metadata did not contain a release version" >&2
+            exit 1
+          fi
+
+          go run ./tools/homebrew-formula \
+            --version "$version" \
+            --dist dist \
+            --output dist/homebrew
+
+          for formula in dist/homebrew/Formula/*.rb; do
+            ruby -c "$formula"
+          done
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Attest container SBOMs
         if: github.event_name == 'push'
         run: |
@@ -246,7 +319,6 @@ jobs:
 
             syft "${image}:${version}" --output "spdx-json=${sbom}" --enrich all
             cosign attest --yes --type https://spdx.dev/Document --predicate "$sbom" "${image}:${version}"
-            cosign attest --yes --type https://spdx.dev/Document --predicate "$sbom" "${image}:latest"
           done
 
       - name: Summarize release timings
@@ -364,3 +436,46 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist-charts/*.tgz"
+
+      # The tap is the human-facing mutable install channel. Promote it last,
+      # only after every release artifact and attestation has succeeded.
+      - name: Publish Homebrew formulae
+        if: github.event_name == 'push'
+        env:
+          # This deliberately differs from the legacy secret name. Revoking the
+          # old workflow's tap credential prevents a historical run re-play
+          # from publishing an older formula after this migration.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_PUBLISH_TOKEN }}
+        run: >-
+          bash scripts/publish-homebrew-formulas.sh
+          dist/homebrew
+          "${{ steps.homebrew.outputs.version }}"
+
+  # Mutable image tags deliberately stay outside GoReleaser. This job is
+  # serialized across tag workflows and reads the current tap only after the
+  # immutable release and every attestation completed. Pending jobs may be
+  # coalesced safely because every surviving run reconciles the same durable
+  # completed-release pointer instead of its triggering tag.
+  promote-latest:
+    if: github.event_name == 'push'
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    concurrency:
+      group: witself-ghcr-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reconcile latest image tags
+        run: bash scripts/promote-latest-images.sh

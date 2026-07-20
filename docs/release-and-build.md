@@ -2,8 +2,8 @@
 
 Status: implemented release path with additional hardening targets. The current
 automation is defined by `.github/workflows/release.yml`, `.goreleaser.yaml`,
-the Helm chart, and `install.sh`; those executable sources win if this document
-drifts.
+the Homebrew renderer and publisher, the latest-image reconciler, the Helm
+chart, and `install.sh`; those executable sources win if this document drifts.
 
 Narrative-memory decision (accepted 2026-07-14): release artifacts have no
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
@@ -29,10 +29,16 @@ Pulumi-module, and vulnerability gates before publishing. GoReleaser then
 publishes the macOS/Linux archives, checksum Sigstore bundle and transitional
 detached-signature compatibility assets,
 archive SBOMs, GitHub release, multi-architecture CLI and server images,
-signed image manifests, and the `witself`, `witself-infra`, and
-`witself-admin` Homebrew formulae. The workflow separately publishes and
-attests the version-matched OCI Helm chart and attaches build-provenance
-attestations. A manual `workflow_dispatch` is a non-publishing snapshot build.
+and signed immutable image manifests. The workflow renders the `witself`,
+`witself-infra`, and `witself-admin` Homebrew formulae from those exact archives
+and publishes them to the tap in one non-force commit. After the tap records the
+completed release, a serialized reconciliation job promotes both GHCR `latest`
+tags to that tap version. A default-branch `workflow_run` guardian repeats the
+same reconciliation after every release completion, including a historical
+workflow rerun. The workflow separately publishes and attests the
+version-matched OCI Helm chart and attaches build-provenance attestations. A
+manual `workflow_dispatch` is a non-publishing snapshot build that still renders
+and syntax-checks the formulae.
 
 Publishing a tag does **not** deploy a cell. After every required release
 artifact exists, roll only the intended canary or wave with
@@ -196,6 +202,8 @@ Workflow:
 - Tag trigger: `v*`
 - Manual trigger: `workflow_dispatch`
 - Primary release tool: GoReleaser.
+- Pinned GoReleaser binary: `v2.17.0`.
+- Pinned GoReleaser action: `v7.2.3` by immutable commit SHA.
 
 The implemented release action owns:
 
@@ -218,7 +226,12 @@ The implemented release action owns:
   `ghcr.io/witwave-ai/charts/witself-server`.
 - Signing the published GHCR images.
 - Provenance-attesting the published Helm chart.
-- Updating the three public Homebrew formulae in `witwave-ai/homebrew-tap`.
+- Rendering the three public Homebrew formulae from the completed release
+  archives and updating `witwave-ai/homebrew-tap` atomically.
+- Reconciling the two existing GHCR `latest` tags from the tap's monotonic
+  completed-release version in a separate serialized job.
+- Re-running that reconciliation from the current default-branch workflow after
+  any historical release workflow completes.
 
 Broader published-artifact installation smoke tests remain release-hardening
 targets; they are not silently implied by the current workflow.
@@ -384,10 +397,10 @@ Required release checks once the API exists:
 
 Current cell infrastructure lives in the nested Go module under `infra/pulumi`.
 The release verify job runs vet, build, tests, and golangci-lint inside that
-module, and GoReleaser packages its `witself-infra` command as separate macOS
-and Linux archives and a Homebrew formula. The command drives Pulumi through
-the Automation API and keeps its large provider graph outside the root CLI
-module.
+module. GoReleaser packages its `witself-infra` command as separate macOS and
+Linux archives, and the Homebrew renderer turns those archives into its
+formula. The command drives Pulumi through the Automation API and keeps its
+large provider graph outside the root CLI module.
 
 Release artifacts must never include Pulumi state, backend credentials, cloud
 credentials, customer identifiers, or secret configuration. A release makes
@@ -407,8 +420,9 @@ The CLI/MCP image runs the same `witself` binary published in release archives.
 Its entrypoint supports both ordinary CLI and MCP usage:
 
 ```sh
-docker run --rm ghcr.io/witwave-ai/images/witself:latest version
-docker run --rm -i ghcr.io/witwave-ai/images/witself:latest mcp serve
+VERSION="${VERSION:?set VERSION to a published version without the v prefix}"
+docker run --rm "ghcr.io/witwave-ai/images/witself:${VERSION}" version
+docker run --rm -i "ghcr.io/witwave-ai/images/witself:${VERSION}" mcp serve
 ```
 
 The backend image is:
@@ -421,9 +435,10 @@ The backend image is:
 Example:
 
 ```sh
-docker run --rm ghcr.io/witwave-ai/images/witself-server:latest version
+VERSION="${VERSION:?set VERSION to a published version without the v prefix}"
+docker run --rm "ghcr.io/witwave-ai/images/witself-server:${VERSION}" version
 docker run --rm -p 8080:8080 -p 8081:8081 -p 9090:9090 \
-  ghcr.io/witwave-ai/images/witself-server:latest serve
+  "ghcr.io/witwave-ai/images/witself-server:${VERSION}" serve
 ```
 
 Implemented image behavior:
@@ -431,8 +446,11 @@ Implemented image behavior:
 - Build from the public distroless static base image.
 - Run as the distroless non-root user.
 - Include version, commit, and build date metadata labels.
-- Publish immutable version tags without the Git tag's `v` prefix, plus a
-  moving `latest` tag.
+- Publish immutable version tags without the Git tag's `v` prefix through
+  GoReleaser. Preserve the existing moving `latest` channel through a separate,
+  serialized reconciliation step that reads the tap's completed-release
+  version. The default-branch guardian repairs writes from historical workflow
+  reruns, so an older-tag retry cannot leave the channel rolled back.
 - Support `linux/amd64` and `linux/arm64`.
 - Do not include tokens, passphrases, store files, identity exports,
   model/provider credentials, or test fixtures in an image.
@@ -461,8 +479,36 @@ Homebrew distribution must use the Witwave-owned tap repository:
   `brew install witwave-ai/tap/witself-infra`, and
   `brew install witwave-ai/tap/witself-admin`
 
-GoReleaser currently commits formula updates directly to the existing tap by
-using `HOMEBREW_TAP_TOKEN`.
+GoReleaser owns the archives but does not own formula rendering. Its legacy
+`brews` pipe is deprecated, while moving unsigned macOS binaries into casks
+would introduce Gatekeeper friction. The release workflow therefore:
+
+1. runs the pinned GoReleaser and validates its configuration without
+   deprecation warnings;
+2. renders formulae from the exact archive paths and SHA-256 digests with
+   `go run ./tools/homebrew-formula`;
+3. syntax-checks every rendered Ruby file; and
+4. uses `scripts/publish-homebrew-formulas.sh` to update all three formulae and
+   the `Aliases/ws` symlink in one non-force tap commit. A bounded retry starts
+   from the newest tap head after a concurrent push; an older release becomes a
+   safe no-op instead of rolling the tap back.
+
+The publisher uses `HOMEBREW_TAP_PUBLISH_TOKEN`. The legacy
+`HOMEBREW_TAP_TOKEN` is intentionally unavailable to this repository so a
+historical workflow definition cannot write an older formula. This credential
+boundary and the default-branch channel guardian are both required parts of the
+migration.
+
+Normal CI renders fixture formulae and runs both `brew style` and
+`brew audit --strict` in a temporary tap. Before a tag can publish, the release
+gate also builds real snapshot archives through GoReleaser and repeats that
+render-and-audit path against the actual archive naming contract. Tap promotion
+runs after every immutable release artifact and attestation succeeds. The tap
+then serves as the monotonic input to the serialized GHCR `latest` reconciler.
+The formula-to-cask migration remains blocked on macOS signing and notarization,
+tracked in GitHub issues
+[`#1`](https://github.com/witwave-ai/witself/issues/1) and
+[`#4`](https://github.com/witwave-ai/witself/issues/4).
 
 Homebrew release smoke tests should verify:
 

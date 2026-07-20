@@ -2340,7 +2340,9 @@ Container image requirements:
   `images/witself-server/Dockerfile`.
 - Backend server image package: `ghcr.io/witwave-ai/images/witself-server`.
 - Supported platforms: `linux/amd64` and `linux/arm64`.
-- Tags should include immutable release versions and `latest`.
+- Images must use immutable release-version tags. The existing `latest` tags
+  must be reconciled from a monotonic completed-release pointer after immutable
+  publication; an older-tag retry must not be able to roll back the channel.
 - Images should run as a non-root user where practical.
 - The CLI/MCP image entrypoint should be the `ws` binary so it can run both
   normal CLI commands and `witself mcp serve`.
@@ -2399,6 +2401,15 @@ Release workflow requirements:
 - Support manual `workflow_dispatch` release dry runs or snapshots.
 - Build public release archives, checksums, signatures, SBOMs, provenance,
   Homebrew formula updates, and the public container image.
+- Pin the GoReleaser action and binary to reviewed immutable versions, and fail
+  CI when the release configuration uses deprecated properties.
+- Render Homebrew formulae from the exact built archives and publish all formula
+  plus alias changes to the tap in one non-force commit.
+- Retry a tap publication from the current branch head after a concurrent push,
+  and serialize GHCR `latest` reconciliation from the tap's completed release.
+- Keep the tap credential used by the current publisher unavailable to legacy
+  workflow definitions, and reconcile mutable image tags from a default-branch
+  workflow after historical release reruns.
 - Verify the Homebrew tap exists before publishing. If
   `github.com/witwave-ai/homebrew-tap` is missing, the workflow should create it
   when configured with an org token that can create public repositories, or fail

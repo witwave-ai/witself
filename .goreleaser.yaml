@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.17.0/www/static/schema.json
 version: 2
 
 project_name: witself
@@ -143,160 +144,61 @@ signs:
     artifacts: checksum
     output: true
 
-# Container images: one image per arch, combined into multi-arch manifests. The
-# Dockerfiles only COPY the prebuilt binaries, so cross-arch builds need no Go
-# compilation or emulation.
-dockers:
-  - id: witself-amd64
+# Build each container and its multi-architecture manifest in one BuildKit
+# operation. The Dockerfiles only COPY GoReleaser's platform-partitioned
+# binaries, so no emulation or in-container compilation is required.
+dockers_v2:
+  - id: witself
     ids:
       - witself
-    goos: linux
-    goarch: amd64
     dockerfile: images/witself/Dockerfile
-    use: buildx
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=witself"
-      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
-  - id: witself-arm64
-    ids:
-      - witself
-    goos: linux
-    goarch: arm64
-    dockerfile: images/witself/Dockerfile
-    use: buildx
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=witself"
-      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
-  - id: witself-server-amd64
+    images:
+      - "ghcr.io/witwave-ai/images/witself"
+    tags:
+      - "{{ .Version }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # The release workflow creates and attests a Syft SBOM for each published
+    # image, so do not add a second BuildKit-generated SBOM attestation here.
+    sbom: false
+    labels:
+      "org.opencontainers.image.title": "witself"
+      "org.opencontainers.image.source": "https://github.com/witwave-ai/witself"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "FSL-1.1-ALv2"
+
+  - id: witself-server
     ids:
       - witself-server
-    goos: linux
-    goarch: amd64
     dockerfile: images/witself-server/Dockerfile
-    use: buildx
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=witself-server"
-      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
-  - id: witself-server-arm64
-    ids:
-      - witself-server
-    goos: linux
-    goarch: arm64
-    dockerfile: images/witself-server/Dockerfile
-    use: buildx
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=witself-server"
-      - "--label=org.opencontainers.image.source=https://github.com/witwave-ai/witself"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=FSL-1.1-ALv2"
+    images:
+      - "ghcr.io/witwave-ai/images/witself-server"
+    tags:
+      - "{{ .Version }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: false
+    labels:
+      "org.opencontainers.image.title": "witself-server"
+      "org.opencontainers.image.source": "https://github.com/witwave-ai/witself"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "FSL-1.1-ALv2"
 
-docker_manifests:
-  - name_template: "ghcr.io/witwave-ai/images/witself:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/witwave-ai/images/witself:latest"
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/witself:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/witwave-ai/images/witself-server:latest"
-    image_templates:
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-amd64"
-      - "ghcr.io/witwave-ai/images/witself-server:{{ .Version }}-arm64"
-
-# Keyless cosign signatures over the published multi-arch container manifests.
-# GoReleaser supplies the manifest digest from the registry after publish.
+# Keyless cosign signatures over every published Docker v2 image tag.
+# GoReleaser supplies each multi-architecture digest after BuildKit publishes it.
 docker_signs:
   - id: container-manifests
     cmd: cosign
-    artifacts: manifests
     args:
       - sign
       - "${artifact}@${digest}"
       - "--yes"
     output: true
 
-brews:
-  - name: witself
-    ids:
-      - witself
-    directory: Formula
-    repository:
-      owner: witwave-ai
-      name: homebrew-tap
-      # The built-in GITHUB_TOKEN cannot push to another repo, so the formula
-      # push uses HOMEBREW_TAP_TOKEN (a token with write access to homebrew-tap).
-      # CI provides it from the org secret. For a local release, export it first,
-      # e.g. HOMEBREW_TAP_TOKEN="$(gh auth token)".
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/witwave-ai/witself"
-    description: "Witself CLI"
-    license: "FSL-1.1-ALv2"
-    install: |
-      bin.install "witself"
-      # Muscle-memory alias: `ws` keeps working forever.
-      bin.install_symlink "witself" => "ws"
-    test: |
-      system "#{bin}/witself", "version"
-
-  - name: witself-infra
-    ids:
-      - witself-infra
-    directory: Formula
-    repository:
-      owner: witwave-ai
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/witwave-ai/witself"
-    description: "Witself cell infrastructure provisioner (Pulumi-Go via the Automation API)"
-    license: "FSL-1.1-ALv2"
-    # The Automation API drives the pulumi engine binary, so the formula pulls it
-    # in. (A future self-bootstrap can install a pinned engine and drop this.)
-    dependencies:
-      - name: pulumi
-    install: |
-      bin.install "witself-infra"
-    test: |
-      system "#{bin}/witself-infra", "help"
-
-  - name: witself-admin
-    ids:
-      - witself-admin
-    directory: Formula
-    repository:
-      owner: witwave-ai
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/witwave-ai/witself"
-    description: "Witself fleet-admin CLI (talks only to the Witself control plane)"
-    license: "FSL-1.1-ALv2"
-    install: |
-      bin.install "witself-admin"
-    test: |
-      system "#{bin}/witself-admin", "version"
+# Homebrew formulae intentionally use the owned renderer under
+# tools/homebrew-formula. GoReleaser's legacy `brews` pipe is deprecated, while
+# its replacement casks require macOS signing/notarization for a clean install.
