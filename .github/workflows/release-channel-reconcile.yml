@@ -1,0 +1,43 @@
+name: release-channel-reconcile
+
+# GitHub re-runs a historical workflow with the workflow definition and commit
+# from the original run. Older Witself release definitions wrote GHCR latest
+# directly, so this default-branch guardian repairs the mutable channel after
+# every release completion, including failed or manually re-run old releases.
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+# Share the release workflow's group. Every surviving run reads the current
+# monotonic tap version, so GitHub may safely coalesce pending reconciliations.
+concurrency:
+  group: witself-ghcr-latest
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # workflow_run must use the protected current implementation rather than
+      # checking out the triggering release's historical commit.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reconcile latest image tags
+        run: bash scripts/promote-latest-images.sh

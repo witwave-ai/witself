@@ -4,6 +4,7 @@
 # rootless.
 FROM gcr.io/distroless/static:nonroot
 
-COPY witself /usr/local/bin/witself
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/witself /usr/local/bin/witself
 
 ENTRYPOINT ["/usr/local/bin/witself"]

@@ -80,6 +80,42 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+  release-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pin both the action wrapper and the binary: release configuration is a
+      # production interface, so upgrades should arrive as reviewed changes.
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      - name: Validate GoReleaser configuration
+        run: goreleaser check
+
+      - name: Test Homebrew tap publisher
+        run: bash scripts/test-publish-homebrew-formulas.sh
+
+      - name: Test GHCR latest reconciliation
+        run: bash scripts/test-promote-latest-images.sh
+
+  homebrew-formula:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Render and audit Homebrew formulae
+        run: bash scripts/test-homebrew-formulas.sh
+
   avatar-renderer-portability:
     strategy:
       fail-fast: false
