@@ -130,8 +130,16 @@ jobs:
 
   # A tag can point at a commit that never went through normal branch CI. Keep
   # the real Homebrew style/audit gate in the release workflow as well.
+  # Runs on ubuntu, not macOS: the formula checks (brew style/audit, tap
+  # render, publisher script) are platform-independent Ruby and Homebrew is
+  # preinstalled on ubuntu runners — while the snapshot build below compiles
+  # the full multi-target matrix including witself-infra's huge Pulumi graph.
+  # On the 3-core macOS runner that build ran cold at --parallelism 1 and
+  # blew the 2h GoReleaser timeout (v0.0.190: linux_arm64 alone took 1h59m).
+  # Ubuntu shares the goreleaser job's warmed release cache key, taking this
+  # job to publish-job speeds (~20m cold, ~4m warm).
   homebrew-verify:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -142,10 +150,20 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
-          cache-dependency-path: |
-            go.sum
-            infra/pulumi/go.sum
+          # Same split as the goreleaser job: skip setup-go's cache and use
+          # the dedicated release cache below so both jobs share one fully
+          # warmed mod+build cache under the same key family.
+          cache: false
+
+      - name: Cache Go release builds
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: release-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'infra/pulumi/go.sum') }}
+          restore-keys: |
+            release-go-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
@@ -163,7 +181,6 @@ jobs:
           --snapshot
           --clean
           --skip=docker,sbom,sign
-          --parallelism 1
           --timeout 2h
 
       - name: Render and audit actual Homebrew archives
