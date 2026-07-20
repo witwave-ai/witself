@@ -87,6 +87,11 @@ plane.
   signed realm/agent discovery, the blind cloud relay, cross-realm conversations,
   the loop and safety stack, and deny-by-default federation; extends
   inter-agent-messaging.md as the first post-v0 epic.
+- [agent-email.md](agent-email.md): draft agent-email design — managed-domain
+  receive-only agent mailboxes for verification/OTP mail, service mail, and
+  human-to-agent correspondence, the inverted (unverified-sender) trust
+  boundary, fenced foreground processing, sequenced send slices, and the
+  outbound-only platform-notification track.
 - [agent-avatars.md](agent-avatars.md): portable versioned agent portraits,
   deterministic placeholders, realm style packs, client-side AI generation,
   autonomy policy, safe SVG validation, evolution, and CLI/API/MCP routing for

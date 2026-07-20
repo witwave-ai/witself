@@ -260,6 +260,11 @@ SMS and email-code capture are post-v0. They require integrations with inboxes,
 phone-number providers, anti-abuse controls, privacy rules, retry behavior,
 delivery failure handling, and support boundaries.
 
+The email half is now being specced: [agent-email.md](agent-email.md) designs
+managed-domain receive-only agent mailboxes whose v1 slice includes
+verification-link and email-OTP consumption under the sealed-plane carve-outs.
+SMS and phone-number channels remain deferred with no active design.
+
 V0 solves authenticator-app style TOTP first
 (see [totp-2fa.md](totp-2fa.md)).
 
