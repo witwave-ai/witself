@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -65,6 +66,15 @@ const (
 	maxMemoryCurationBackoff             = 24 * time.Hour
 	memoryCurationPreviewCooldown        = 24 * time.Hour
 	maxMemoryCurationGeneration          = int64(1<<62 - 1)
+
+	// Byte budgets keep one materialized input and one input page small enough
+	// for MCP transports that reject oversized frames. Freeze chunks a large
+	// transcript window into multiple contiguous inputs; hydration elides
+	// oversized bodies from windows frozen before chunking existed. Elided
+	// content stays retrievable in full through the transcript tools.
+	maxMemoryCurationInputBytes     = 256 * 1024
+	maxMemoryCurationEntryBodyBytes = 16 * 1024
+	maxMemoryCurationPageBytes      = 1 << 20
 )
 
 // Memory curation errors classify stable authorization, validation, lifecycle,
@@ -1121,11 +1131,19 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 			}, fmt.Sprintf("05/cursor/transcript/%s", stream.id)); err != nil {
 				return counts, 0, 0, err
 			}
-			if err := appendInput(MemoryCurationRunInput{
-				Kind: MemoryCurationInputTranscript, TranscriptID: stream.id,
-				SequenceFrom: expected + 1, SequenceUntil: upper,
-			}, fmt.Sprintf("06/transcript/%s/%020d", stream.id, expected+1)); err != nil {
+			sizes, err := loadMemoryCurationTranscriptEntrySizes(ctx, tx, p,
+				stream.id, expected+1, upper)
+			if err != nil {
 				return counts, 0, 0, err
+			}
+			for _, slice := range chunkMemoryCurationTranscriptWindow(sizes,
+				expected+1, upper, maxMemoryCurationInputBytes) {
+				if err := appendInput(MemoryCurationRunInput{
+					Kind: MemoryCurationInputTranscript, TranscriptID: stream.id,
+					SequenceFrom: slice.From, SequenceUntil: slice.Until,
+				}, fmt.Sprintf("06/transcript/%s/%020d", stream.id, slice.From)); err != nil {
+					return counts, 0, 0, err
+				}
 			}
 			remaining -= int(upper - expected)
 		}
@@ -1259,6 +1277,68 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 		}
 	}
 	return counts, memoryUpper, evidenceUpper, nil
+}
+
+// memoryCurationTranscriptEntrySize carries one stored entry's sequence and
+// its raw body+payload+artifacts byte size, ordered by sequence.
+type memoryCurationTranscriptEntrySize struct {
+	Sequence int64
+	Bytes    int64
+}
+
+// memoryCurationTranscriptSlice is one contiguous frozen transcript window.
+type memoryCurationTranscriptSlice struct {
+	From, Until int64
+}
+
+func loadMemoryCurationTranscriptEntrySizes(ctx context.Context, tx pgx.Tx, p Principal, transcriptID string, from, until int64) ([]memoryCurationTranscriptEntrySize, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT sequence,
+		       octet_length(body)+COALESCE(octet_length(payload::text),0)+
+		       octet_length(artifacts::text)
+		FROM transcript_entries
+		WHERE transcript_id=$1 AND account_id=$2 AND realm_id=$3
+		  AND recorded_by_agent_id=$4 AND sequence BETWEEN $5 AND $6
+		ORDER BY sequence`, transcriptID, p.AccountID, p.RealmID, p.ID, from, until)
+	if err != nil {
+		return nil, fmt.Errorf("size curation transcript window: %w", err)
+	}
+	defer rows.Close()
+	sizes := make([]memoryCurationTranscriptEntrySize, 0)
+	for rows.Next() {
+		var item memoryCurationTranscriptEntrySize
+		if err := rows.Scan(&item.Sequence, &item.Bytes); err != nil {
+			return nil, err
+		}
+		sizes = append(sizes, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sizes, nil
+}
+
+// chunkMemoryCurationTranscriptWindow splits [from,until] into contiguous
+// slices whose stored entry bytes each fit one input budget, so no single
+// frozen input materializes larger than the transport can return. Coverage is
+// exact: slice boundaries only move where a sized entry exists, the first
+// slice starts at from, and the last slice ends at until. An entry larger than
+// the budget still gets its own slice.
+func chunkMemoryCurationTranscriptWindow(sizes []memoryCurationTranscriptEntrySize, from, until, budget int64) []memoryCurationTranscriptSlice {
+	slices := make([]memoryCurationTranscriptSlice, 0, 1)
+	chunkFrom, chunkBytes, last := from, int64(0), from-1
+	for _, item := range sizes {
+		if item.Sequence < from || item.Sequence > until {
+			continue
+		}
+		if chunkBytes > 0 && chunkBytes+item.Bytes > budget {
+			slices = append(slices, memoryCurationTranscriptSlice{From: chunkFrom, Until: last})
+			chunkFrom, chunkBytes = last+1, 0
+		}
+		chunkBytes += item.Bytes
+		last = item.Sequence
+	}
+	return append(slices, memoryCurationTranscriptSlice{From: chunkFrom, Until: until})
 }
 
 // StartCuration claims one due request and materializes immutable input
@@ -1903,9 +1983,23 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 	if hasMore {
 		inputs = inputs[:limit]
 	}
+	// A page stops early once its hydrated inputs exceed the page byte budget
+	// so one response never outgrows the transport, regardless of the
+	// requested limit. The cursor resumes from the last returned ordinal.
+	pageBytes := 0
 	for i := range inputs {
 		if err := hydrateMemoryCurationRunInput(ctx, tx, p, &inputs[i]); err != nil {
 			return MemoryCurationRunInputPage{}, err
+		}
+		encoded, err := json.Marshal(inputs[i])
+		if err != nil {
+			return MemoryCurationRunInputPage{}, err
+		}
+		pageBytes += len(encoded)
+		if pageBytes >= maxMemoryCurationPageBytes && i+1 < len(inputs) {
+			inputs = inputs[:i+1]
+			hasMore = true
+			break
 		}
 	}
 	nextCursor := ""
@@ -1996,12 +2090,80 @@ func hydrateMemoryCurationRunInput(ctx context.Context, q memoryQuerier, p Princ
 		if int64(len(input.TranscriptEntries)) != input.SequenceUntil-input.SequenceFrom+1 {
 			return ErrMemoryCurationConflict
 		}
+		boundMemoryCurationTranscriptEntries(input.TranscriptEntries)
 	case MemoryCurationInputCursor:
 		return nil
 	default:
 		return ErrMemoryCurationConflict
 	}
 	return nil
+}
+
+// boundMemoryCurationTranscriptEntries elides oversized entry content from the
+// materialized view of one frozen transcript input. Membership stays exact:
+// every frozen sequence remains present with its role and metadata, and an
+// in-band note documents each elision so the curator can read the full entry
+// through the transcript tools. Windows frozen before byte-budget chunking
+// existed hydrate within the same bound as newly frozen ones.
+func boundMemoryCurationTranscriptEntries(entries []TranscriptEntry) {
+	remaining := maxMemoryCurationInputBytes
+	for i := range entries {
+		remaining -= boundMemoryCurationTranscriptEntry(&entries[i], remaining)
+	}
+}
+
+// boundMemoryCurationTranscriptEntry rewrites oversized fields in place and
+// returns the bytes the bounded entry still carries. Once the shared input
+// budget is spent, later entries keep only elision notes.
+func boundMemoryCurationTranscriptEntry(entry *TranscriptEntry, remaining int) int {
+	if remaining < 0 {
+		remaining = 0
+	}
+	bodyCap := maxMemoryCurationEntryBodyBytes
+	if bodyCap > remaining {
+		bodyCap = remaining
+	}
+	if len(entry.Body) > bodyCap {
+		prefix := truncateMemoryCurationUTF8(entry.Body, bodyCap)
+		entry.Body = prefix + memoryCurationElisionNote(len(entry.Body)-len(prefix))
+	}
+	retained := len(entry.Body)
+	if len(entry.Payload) > 0 && len(entry.Payload) > remaining-retained {
+		entry.Payload = json.RawMessage(fmt.Sprintf(
+			`{"witself_elided":true,"omitted_bytes":%d}`, len(entry.Payload)))
+	}
+	retained += len(entry.Payload)
+	if isElidableCurationJSONArray(entry.Artifacts) &&
+		len(entry.Artifacts) > remaining-retained {
+		entry.Artifacts = json.RawMessage(fmt.Sprintf(
+			`[{"witself_elided":true,"omitted_bytes":%d}]`, len(entry.Artifacts)))
+	}
+	retained += len(entry.Artifacts)
+	return retained
+}
+
+func memoryCurationElisionNote(omitted int) string {
+	return fmt.Sprintf(
+		"\n[witself:elided omitted_bytes=%d; read the full entry via the transcript tools]",
+		omitted)
+}
+
+// isElidableCurationJSONArray reports whether replacing artifacts with an
+// elision stub would actually shrink it; the default empty array never
+// qualifies.
+func isElidableCurationJSONArray(raw json.RawMessage) bool {
+	return len(raw) > 64
+}
+
+func truncateMemoryCurationUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // GetCurationRun returns value-free status metadata without requiring an

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNormalizeRequestMemoryCurationInputIsCanonical(t *testing.T) {
@@ -163,4 +165,130 @@ func TestMemoryCurationBackoffIsBounded(t *testing.T) {
 	if got := curationBackoff(100); got > maxMemoryCurationBackoff {
 		t.Fatalf("large backoff = %s", got)
 	}
+}
+
+func TestChunkMemoryCurationTranscriptWindowPreservesCoverage(t *testing.T) {
+	size := func(sequence, bytes int64) memoryCurationTranscriptEntrySize {
+		return memoryCurationTranscriptEntrySize{Sequence: sequence, Bytes: bytes}
+	}
+	cases := []struct {
+		name        string
+		sizes       []memoryCurationTranscriptEntrySize
+		from, until int64
+		want        []memoryCurationTranscriptSlice
+	}{
+		{
+			name: "no sizes keeps one window",
+			from: 3, until: 9,
+			want: []memoryCurationTranscriptSlice{{From: 3, Until: 9}},
+		},
+		{
+			name:  "small entries keep one window",
+			sizes: []memoryCurationTranscriptEntrySize{size(1, 10), size(2, 10)},
+			from:  1, until: 2,
+			want: []memoryCurationTranscriptSlice{{From: 1, Until: 2}},
+		},
+		{
+			name: "budget splits at sized entries",
+			sizes: []memoryCurationTranscriptEntrySize{
+				size(1, 60), size(2, 60), size(3, 60), size(4, 10), size(5, 10),
+			},
+			from: 1, until: 5,
+			want: []memoryCurationTranscriptSlice{
+				{From: 1, Until: 1}, {From: 2, Until: 2}, {From: 3, Until: 5},
+			},
+		},
+		{
+			name:  "an entry over budget still gets one slice",
+			sizes: []memoryCurationTranscriptEntrySize{size(1, 250), size(2, 10)},
+			from:  1, until: 2,
+			want: []memoryCurationTranscriptSlice{
+				{From: 1, Until: 1}, {From: 2, Until: 2},
+			},
+		},
+		{
+			name:  "gaps stay covered by adjacent slices",
+			sizes: []memoryCurationTranscriptEntrySize{size(3, 200), size(7, 200)},
+			from:  1, until: 10,
+			want: []memoryCurationTranscriptSlice{
+				{From: 1, Until: 3}, {From: 4, Until: 10},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chunkMemoryCurationTranscriptWindow(tc.sizes, tc.from, tc.until, 100)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("slices = %#v, want %#v", got, tc.want)
+			}
+			next := tc.from
+			for _, slice := range got {
+				if slice.From != next || slice.Until < slice.From {
+					t.Fatalf("slices are not contiguous: %#v", got)
+				}
+				next = slice.Until + 1
+			}
+			if next != tc.until+1 {
+				t.Fatalf("slices end at %d, want %d", next-1, tc.until)
+			}
+		})
+	}
+}
+
+func TestBoundMemoryCurationTranscriptEntriesElidesOversizedContent(t *testing.T) {
+	t.Run("small entries are untouched", func(t *testing.T) {
+		entries := []TranscriptEntry{{
+			Sequence: 1, Body: "hello",
+			Payload:   json.RawMessage(`{"tool":"ok"}`),
+			Artifacts: json.RawMessage(`[]`),
+		}}
+		boundMemoryCurationTranscriptEntries(entries)
+		if entries[0].Body != "hello" || string(entries[0].Payload) != `{"tool":"ok"}` ||
+			string(entries[0].Artifacts) != `[]` {
+			t.Fatalf("entry mutated: %#v", entries[0])
+		}
+	})
+	t.Run("an oversized body keeps a valid prefix and a note", func(t *testing.T) {
+		body := strings.Repeat("é", 20000)
+		entries := []TranscriptEntry{{Sequence: 1, Body: body}}
+		boundMemoryCurationTranscriptEntries(entries)
+		bounded := entries[0].Body
+		if len(bounded) > maxMemoryCurationEntryBodyBytes+256 {
+			t.Fatalf("bounded body bytes = %d", len(bounded))
+		}
+		if !utf8.ValidString(bounded) {
+			t.Fatal("bounded body is not valid UTF-8")
+		}
+		if !strings.Contains(bounded, "witself:elided") {
+			t.Fatalf("bounded body lacks elision note: %q", bounded[len(bounded)-120:])
+		}
+	})
+	t.Run("a spent budget leaves only notes and stubs", func(t *testing.T) {
+		entries := make([]TranscriptEntry, 24)
+		for i := range entries {
+			entries[i] = TranscriptEntry{
+				Sequence:  int64(i + 1),
+				Body:      strings.Repeat("b", 60000),
+				Payload:   json.RawMessage(`{"tool":"` + strings.Repeat("p", 15000) + `"}`),
+				Artifacts: json.RawMessage(`[{"a":"` + strings.Repeat("x", 1000) + `"}]`),
+			}
+		}
+		boundMemoryCurationTranscriptEntries(entries)
+		total := 0
+		for _, entry := range entries {
+			total += len(entry.Body) + len(entry.Payload) + len(entry.Artifacts)
+		}
+		if limit := maxMemoryCurationInputBytes + len(entries)*512; total > limit {
+			t.Fatalf("bounded input bytes = %d, want <= %d", total, limit)
+		}
+		last := entries[len(entries)-1]
+		if !strings.Contains(last.Body, "witself:elided") ||
+			!strings.Contains(string(last.Payload), "witself_elided") ||
+			!strings.Contains(string(last.Artifacts), "witself_elided") {
+			t.Fatalf("late entry not elided: %#v", last)
+		}
+		if len(entries) != 24 || entries[11].Sequence != 12 {
+			t.Fatal("entry membership changed")
+		}
+	})
 }
