@@ -183,8 +183,23 @@ is always exactly 16 characters from `[a-z2-7]` — a valid DNS hostname label
 and local-part atom by construction, deterministic, collision-free by id
 uniqueness, and stable for the life of the realm. The label is opaque, which
 is acceptable: these addresses mostly serve services, not human recall.
-Vanity realm labels (an operator-claimed pretty alias registry) were
-considered and not adopted.
+**Vanity realm labels (decided 2026-07-21, deferred past v1).** Realms will
+eventually be able to claim a pretty alias label usable *in addition to* the
+automatic id-body label — `scott.acme@…` alongside
+`scott.drz4xnv73ficcrko@…`. The id-body label remains canonical, permanent,
+and always live; a vanity label is an alias entry in the same routing
+projection pointing at the same cell. Constraints the future design must
+honor: a vanity label lives in a single shared namespace on the base domain
+(first-come reservation with a reserved-word and anti-impersonation policy —
+brand and service names are phishing surface); it must fit the settled
+one-dot parse (same `[a-z0-9-]` grammar, no dots) and must not be a valid
+16-character id-body form, so alias and canonical namespaces cannot collide;
+its length reshapes the per-agent local-part budget (64-octet cap minus
+label minus dot), so vanity length gets a hard cap; and the
+address-permanence rule applies — once mail has been received at a vanity
+address, releasing or transferring that label is constrained by the same
+long deprecation contract as a domain cutover. V1 ships the id-body label
+only.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only
@@ -465,6 +480,11 @@ Receive-only still carries real obligations:
    of the `witwave.ai` zone, and confirm the current custom-address rule
    cap; on failure, follow the fallback ladder in Addressing And Domain
    Model.
+10. Vanity realm-label policy, when that deferred capability is scheduled:
+    reservation and dispute rules, the reserved-word and anti-impersonation
+    list, the vanity length cap, per-plan gating, and whether release or
+    transfer is ever permitted given address permanence (see Addressing And
+    Domain Model).
 
 Settled on 2026-07-20 (formerly items 1–2): realm-label derivation and
 local-part sanitization (see Addressing And Domain Model), and the Cloudflare
