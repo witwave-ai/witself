@@ -776,9 +776,9 @@ Rules:
 
 Used by `self show` and `GET /v1/self`. The bounded, always-loadable digest
 contains primary facts first, then top-N salient memories, authenticated
-value-free memory and message checkpoints, and a one-line index. It is cheap and
-never requires a vector profile or query vector. The digest shape, hard cap, and
-`elided` behavior are defined in
+value-free memory, message, email, and avatar checkpoints, and a one-line index.
+It is cheap and never requires a vector profile or query vector. The digest
+shape, hard cap, and `elided` behavior are defined in
 [context-hydration.md](context-hydration.md).
 
 ```json
@@ -818,6 +818,10 @@ never requires a vector profile or query vector. The digest shape, hard cap, and
     "due_at": "2026-07-15T12:00:00Z"
   },
   "message_checkpoint": {
+    "pending": true,
+    "mailbox_pending": true
+  },
+  "email_checkpoint": {
     "pending": true,
     "mailbox_pending": true
   },
@@ -864,6 +868,13 @@ Rules:
   never a processing fence, availability signal, authority grant, message body,
   or acknowledgement. `unavailable:true` means only that this additive
   projection failed; it must not be reported as an idle mailbox.
+- `email_checkpoint` is a separate authenticated, value-free hint for the
+  default-off receive-only email pilot. It is emitted only for an enrolled
+  realm/agent when the projection is selected. `pending:true` requires
+  `mailbox_pending:true`; neither field carries an address, sender, subject,
+  message id, body, attachment, code, or claim fence. `unavailable:true` means
+  only that this additive projection failed and must not be treated as an idle
+  mailbox.
 - `index` is a one-line summary of the store: the `kinds` and `tags` present and
   `counts` of facts and memories.
 - The digest has a hard byte/line cap (default ~8 KiB / ~200 lines,
@@ -873,6 +884,142 @@ Rules:
   open-plane context for the owning agent while retaining each record's
   `sensitive` marker. The ordinary HTTP and manual CLI posture is redacted by
   default. No option can select sealed secret or TOTP values into this digest.
+
+## Agent Email Pilot
+
+These contracts exist only behind the default-off, exact one-realm/5–10-agent
+Cloudflare receive pilot. The full agent token and the server's process-lifetime
+allowlist determine the owner; clients cannot supply account, realm, mailbox,
+or owner selectors.
+
+`GET /v1/email/address`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "address": {
+    "id": "eaddr_aaaaaaaaaaaaaaaa",
+    "mailbox_id": "emb_aaaaaaaaaaaaaaaa",
+    "account_id": "acc_123",
+    "realm_id": "realm_aaaaaaaaaaaaaaaa",
+    "owner_agent_id": "agent_bbbbbbbbbbbbbbbb",
+    "address": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+    "domain": "agent-mail.witwave.ai",
+    "local_part": "browser-agent.aaaaaaaaaaaaaaaa",
+    "agent_segment": "browser-agent",
+    "realm_label": "aaaaaaaaaaaaaaaa",
+    "provisioning_kind": "derived",
+    "receive_state": "enabled",
+    "created_at": "2026-07-21T12:00:00Z",
+    "updated_at": "2026-07-21T12:00:00Z"
+  }
+}
+```
+
+Metadata-only `GET /v1/email` and `POST /v1/email:listen` messages use this
+shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
+
+```json
+{
+  "schema_version": "witself.v0",
+  "messages": [
+    {
+      "id": "emsg_aaaaaaaaaaaaaaaa",
+      "account_id": "acc_123",
+      "realm_id": "realm_aaaaaaaaaaaaaaaa",
+      "mailbox_id": "emb_aaaaaaaaaaaaaaaa",
+      "owner_agent_id": "agent_bbbbbbbbbbbbbbbb",
+      "address_id": "eaddr_aaaaaaaaaaaaaaaa",
+      "provider": "cloudflare_email_routing",
+      "envelope_sender": "sender@example.net",
+      "envelope_recipient": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+      "agent_segment": "browser-agent",
+      "realm_label": "aaaaaaaaaaaaaaaa",
+      "raw_size_bytes": 2471,
+      "parse_state": "parsed",
+      "header_from": "Example Service <sender@example.net>",
+      "header_to": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+      "subject": "Your verification code",
+      "mime_message_id": "<untrusted@example.net>",
+      "attachment_count": 0,
+      "spf_result": "unknown",
+      "dkim_result": "unknown",
+      "dmarc_result": "unknown",
+      "spam_verdict": "unknown",
+      "sender_verification_state": "unverified",
+      "possible_duplicate": false,
+      "received_at": "2026-07-21T12:01:00Z",
+      "created_at": "2026-07-21T12:01:00Z",
+      "folder": "inbox",
+      "delivered_at": "2026-07-21T12:01:00Z",
+      "read_state": {"state": "unread"},
+      "processing": {"state": "available", "generation": 0, "failure_count": 0}
+    }
+  ],
+  "next_cursor": "opaque"
+}
+```
+
+All envelope/header/display fields above are untrusted external data. In the
+pilot, `spf_result`, `dkim_result`, `dmarc_result`, and `spam_verdict` are always
+`unknown`; `sender_verification_state` is always `unverified`; an authoritative
+provider-message-id field is absent. A suspected retry adds
+`possible_duplicate:true` and `possible_duplicate_of_message_id` but is still a
+distinct immutable message.
+
+`POST /v1/email/{message_id}:read` returns `{"schema_version":"witself.v0",
+"message":...}` with the same shape plus bounded `text` and `text_kind`, and
+marks `read_state.state` as `read`. It never returns raw MIME, HTML markup,
+attachment names/media types/bytes, or an active claim id/lease. A parse failure
+uses `parse_state:"error"` plus a value-free `parse_error_code`; it is not
+reported as successfully parsed empty content.
+
+`POST /v1/email/{message_id}:code-consumed` and `:ack` return the same
+metadata-only message envelope. The former sets `code_consumed_at` once and
+stores no candidate code; the latter sets `acked_at` and `read_state.state` to
+`acked`. Read, code consumption, acknowledgement, and processing completion
+are distinct transitions.
+
+Claim response (`Idempotency-Key` required, `lease_seconds` 30–900):
+
+```json
+{
+  "schema_version": "witself.v0",
+  "processing": {
+    "state": "claimed",
+    "generation": 1,
+    "failure_count": 0,
+    "claim_id": "ecl_aaaaaaaaaaaaaaaa",
+    "lease_expires_at": "2026-07-21T12:06:00Z"
+  }
+}
+```
+
+Renew, release, and complete require the exact `claim_id` and positive
+`generation`; complete also requires `Idempotency-Key`. Release may include
+`deterministic_failure:true`. Complete sets `state:"completed"` and
+`completed_at`, creates no outbound result, and does not acknowledge the email.
+Only direct transition responses expose claim capability fields.
+
+The signed Worker relay to `POST /v1/internal/agent-email:ingest` carries raw
+MIME as the request body and these single-value headers:
+
+```text
+X-Witself-Email-Version: witself-email-relay-pilot-v1
+X-Witself-Email-Timestamp: <unix-seconds>
+X-Witself-Email-Key-Id: <key-id>
+X-Witself-Email-Audience: <cell-audience>
+X-Witself-Email-Envelope-From: <base64url-no-padding UTF-8>
+X-Witself-Email-Envelope-To: <base64url-no-padding UTF-8>
+X-Witself-Email-Raw-Size: <canonical decimal>
+X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
+X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
+```
+
+The response is deliberately content-free: a success is exactly a 2xx JSON
+object with `{"verdict":"accepted"}`. Other typed verdicts are not success and
+the Worker maps them to a permanent generic rejection or one sanitized
+exception under the authorized pilot contract.
 
 ## Agent Activity Touch
 

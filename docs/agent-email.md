@@ -1,9 +1,10 @@
 # Witself Agent Email
 
-Status: draft. Kickoff spec, scoped 2026-07-20. A capability-limited
-Cloudflare receive pilot was authorized on 2026-07-21; the stronger production
-contract remains the promotion target. This document is the go-forward design
-for **agent email**: durable, addressable email identities
+Status: capability-limited pilot implemented locally; deployment pending.
+Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
+was authorized on 2026-07-21; the stronger production contract remains the
+promotion target. This document is the go-forward design for **agent email**:
+durable, addressable email identities
 for named Witself agents on a Witself-managed domain, plus a separate
 outbound-only platform-notification surface. It extends the sealed-plane
 roadmap item for email-code 2FA in
@@ -216,7 +217,7 @@ production tier.
   The Worker rejects an over-pilot-cap message before relay. Raw MIME may still
   contain attachments and is stored as one message, but neither raw MIME nor
   attachment content is retrievable through API, CLI, or MCP during the pilot;
-  content reads expose bounded decoded body parts and attachment metadata only.
+  content reads expose bounded decoded text and an attachment count only.
 - Success is returned only after the owning cell durably commits the message.
   On a cell timeout, transport failure, transient verdict, or unexpected
   exception, the Worker throws one deliberate **sanitized** exception and lets
@@ -417,6 +418,15 @@ The kickoff verification items were resolved on 2026-07-20:
   fine for realm placement); on a KV miss the Worker falls back to an
   edge-cached control-plane directory GET before rejecting. The control
   plane never handles message content — it only publishes routing facts.
+  The limited pilot intentionally does **not** bind its content-handling Worker
+  to the existing control-plane `DIRECTORY` namespace. That namespace contains
+  provisioning, administrative, and token indexes outside the email Worker's
+  authority. The isolated `witself-agent-email-pilot` Worker receives only an
+  email-specific `EMAIL_DIRECTORY` KV projection containing its default-off
+  pilot config and the 5–10 literal recipient routes. It has no HTTP route,
+  control-plane container binding, or catch-all mutation capability. A later
+  production projection may preserve the directory shape, but it must keep the
+  same least-privilege content-plane separation.
 - **Edge-to-cell authentication (settled): Ed25519 signed relay.** The
   Worker POSTs the raw MIME to the owning cell's ingestion endpoint with a
   detached Ed25519 signature over timestamp, provider message id, envelope
@@ -643,11 +653,12 @@ The receive-side lifecycle mirrors the proven messaging shape:
 - Metadata-only, cursor-paginated list; explicit content read; separate read
   and ack, so "the client saw the metadata" and "the agent is done with this
   mail" remain distinct facts.
-- A bounded, value-free checkpoint hint so active clients discover pending
-  mail without polling content. Whether this is a new `email_checkpoint` lane
-  in `self.show` or a fold into `message_checkpoint` is an open question; the
-  working assumption is a separate lane with the same foreground policy
-  (at most one lane handled per turn, user work first, no background service).
+- A bounded, value-free `email_checkpoint` lane in `self.show` lets active
+  clients discover pending mail without polling content. It is separate from
+  `message_checkpoint` and carries only `pending`, `mailbox_pending`, and an
+  additive `unavailable` projection state. The shared foreground policy handles
+  at most one Witself messaging-or-email lane per turn, after user work, with no
+  background service or wake behavior.
 - Retention is plan-scoped: raw MIME and attachments age out by plan window;
   quarantined spam ages out faster; metadata and content-free audit events
   follow [audit-retention.md](audit-retention.md). Account archives include
@@ -656,20 +667,50 @@ The receive-side lifecycle mirrors the proven messaging shape:
 
 ## Surfaces
 
-Sketch, to be pinned in [json-contracts.md](json-contracts.md) and
-[cli-command-surface.md](cli-command-surface.md) /
-[mcp-tools.md](mcp-tools.md) as shapes settle:
+The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
+[cli-command-surface.md](cli-command-surface.md), and
+[mcp-tools.md](mcp-tools.md):
 
 - CLI: `witself email address show`, `witself email list`, `witself email
-  read`, `witself email claim|renew|release|complete`, `witself email ack`,
+  read`, `witself email code-consumed`, `witself email
+  claim|renew|release|complete`, `witself email ack`,
   and a bounded `witself email listen` (wait for new mail — the OTP flow
   needs a sanctioned wait rather than a poll loop, mirroring
   `message.listen`).
 - MCP: `witself.email.*` mirroring the CLI, with metadata-only list results
   and untrusted-content framing in every content-bearing tool description.
-- API: routes on the one-core spine in [api-routes.md](api-routes.md);
-  provider webhook endpoints are cell-local, signature-verified, and separate
-  from the agent-facing API surface.
+- API: owner routes are `GET /v1/email/address`, `GET /v1/email`,
+  `POST /v1/email:listen`, `GET /v1/email/checkpoint`, and the
+  `/v1/email/{message_id}:read|code-consumed|ack|claim|renew|release|complete`
+  actions. The Worker relay uses the separate cell-local signed
+  `POST /v1/internal/agent-email:ingest` endpoint.
+
+List, listen, ack, code-consumed, and ordinary read-state projections never
+return raw MIME, attachment bytes, body HTML, or active claim capabilities.
+Explicit `read` marks the message read and returns one bounded decoded text
+projection; plain text is preferred and HTML is deterministically reduced to
+text. Every read result labels the sender unverified and the content untrusted.
+The MCP projection additionally limits returned text to 64 KiB and reports
+when that adapter-level truncation occurred.
+
+## Pilot Implementation Checkpoint
+
+The local checkout now contains migration 0059, scoped mailbox/address/message
+storage, durable suspected-duplicate grouping, MIME bounds, archive
+export/import, fenced foreground processing, value-free audit events, the
+signed cell ingestion endpoint, startup reconciliation for exactly the
+configured 5–10 agents, API/CLI/MCP owner surfaces, self/hook
+`email_checkpoint` hydration, and the isolated Cloudflare Worker plus
+literal-rule lifecycle tooling.
+
+This is an implementation checkpoint, not a deployment claim. No pilot Worker,
+email KV namespace, route, relay key, or cell feature flag is activated merely
+because the code exists. Live operation still requires the synthetic durable-
+accept and provider-retry canary, exact manifest/address comparison, explicit
+activation of only the pilot rules, and a tested rollback. Production remains
+blocked on the strict capability gaps above. Plan-tier retention, quarantine,
+trusted sender authentication, provider-id idempotency, and billable receive
+remain production work rather than features silently simulated by the pilot.
 
 **Authorization (settled 2026-07-21).** Mail is owner-agent-only, matching
 agent messages (the most sensitive existing analog), not the policy-engine-
@@ -766,15 +807,16 @@ Receive-only still carries real obligations:
 
 ## Open Questions
 
-1. `email_checkpoint` as a separate self.show lane vs a fold into
-   `message_checkpoint`.
+1. **Settled 2026-07-21:** `email_checkpoint` is a separate `self.show` lane;
+   it is value-free and shares the one-foreground-lane budget with messaging.
 2. OTP extraction details (location settled client-side; see Trust Model):
    the deterministic-vs-ambiguous pattern behavior (zero/multiple candidates,
    HTML-part handling, format/length bounds, localization), the audit shape
    for a code-consuming read, and whether extraction is permitted on
    quarantined messages.
-3. Attachment exposure in v1: metadata-only vs gated retrieval, pending the
-   injection review (storage itself is settled: inline in Postgres).
+3. **Pilot settled 2026-07-21:** only an attachment count is exposed; raw MIME,
+   attachment names, media types, and attachment bytes are unavailable.
+   A future production retrieval surface still requires the injection review.
 4. Retention windows per plan tier, the quarantine window, and the Postgres
    growth watermarks that would trigger revisiting object storage.
 5. Platform-notification templating, locale posture, and which events email
@@ -820,10 +862,11 @@ Receive-only still carries real obligations:
 Raised by the 2026-07-21 whole-spec gap review (blocking items were settled
 in place; these are the remaining important items):
 
-12. Content-read representation: does `read` return raw MIME or decoded
-    parts, how is HTML hidden-text / display-name injection surfaced to the
-    untrusted-content framing, what does a read of a parse-error message
-    return, and what are the backend MIME-parser resource bounds.
+12. **Pilot settled 2026-07-21:** `read` returns bounded decoded text, prefers
+    plain text, deterministically reduces HTML, never returns raw MIME or
+    attachment bytes, and surfaces a value-free parse-error code. Parsing is
+    bounded to 5 MiB raw MIME, 256 KiB headers, 64 MIME parts, depth 8, and
+    1 MiB decoded text; every content surface retains untrusted-input framing.
 13. Retention enforcement mechanics: what runs the aging, and the guard so
     aging never silently expires unread/unclaimed mail (especially the
     verification mail the feature exists to receive) — a durable-mailbox

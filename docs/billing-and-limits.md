@@ -56,6 +56,7 @@ Plans should define soft and hard limits for:
 - Cross-agent accesses.
 - Security groups.
 - Messages sent and delivered.
+- Agent-email addresses, received/sent events, and inline raw-MIME storage.
 - Stored secrets (sealed plane).
 - Secret reads, including reveal events and reference resolution (sealed plane).
 - TOTP code generation (sealed plane).
@@ -93,6 +94,10 @@ Witself should meter these dimensions internally in v0:
 | `security_group` | Group count, policy-evaluation surface. |
 | `message_sent` | Outbound mailbox load and abuse control. |
 | `message_delivered` | Fan-out delivery load (group fan-out multiplies this). |
+| `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed pilot charge. |
+| `email_sent` | Future outbound agent-email volume and sender-reputation enforcement. |
+| `email_address` | Provisioned live agent-email address count. |
+| `email_storage_byte` | Inline raw-MIME storage and backup size, separate from general open-plane storage. |
 | `storage_byte` | General open-plane data-at-rest footprint and backup size. |
 | `stored_secret` | Sealed-plane inventory size and storage footprint. |
 | `secret_read` | Sealed-plane sensitive access risk and service load (reveal + reference resolution). |
@@ -131,6 +136,17 @@ Notes on a few dimensions:
   same existing `message_sent` and `message_delivered` dimensions; a
   realm-qualified destination does not introduce a new billing dimension (see
   [agent-collaboration.md](agent-collaboration.md)).
+- Agent email uses its own dimensions because external inbound abuse, outbound
+  reputation, address allocation, and MIME storage have different controls from
+  the realm-local mailbox. `email_received` is accounting-only for the
+  authorized Cloudflare pilot: pilot ingestion emits no billable usage event,
+  has no quota/overage enforcement, and hostile inbound volume can never bill
+  the recipient. `email_sent` remains dormant until a send slice exists.
+  `email_address` counts live provisioned addresses. `email_storage_byte`
+  measures inline raw MIME independently so a mail attachment cannot silently
+  consume the ordinary `storage_byte` allowance. Production pricing and abuse
+  exclusions must be pinned before either receive or send becomes billable; see
+  [agent-email.md](agent-email.md).
 - `storage_byte` measures ordinary open-plane data-at-rest footprint (memories,
   facts, and the rest of the open plane on RDS/disk), not envelope-encrypted
   secret material (see [storage.md](storage.md)).
@@ -161,10 +177,11 @@ usage dimension. They are reused verbatim as:
   [observability-and-operations.md](observability-and-operations.md)).
 
 Whether a dimension is a point-in-time cap (`active_agent`, `stored_memory`,
-`stored_fact`, `security_group`, `vector_storage_byte`, `storage_byte`,
+`stored_fact`, `security_group`, `vector_storage_byte`, `email_address`,
+`email_storage_byte`, `storage_byte`,
 `stored_secret`, `encrypted_storage_byte`) or a rate (`memory_recall`,
 `memory_write`, `vector_write`, `crossagent_access`, `message_sent`,
-`message_delivered`, `secret_read`, `totp_code`, `runtime_injection`,
+`message_delivered`, `email_received`, `email_sent`, `secret_read`, `totp_code`, `runtime_injection`,
 `api_request`, `audit_event`) is conveyed by the limit object's fields
 (`max`/`used` for caps; `unit`, `included`, `soft_limit`, `hard_limit` for
 rates), not by the key name. Using one key across

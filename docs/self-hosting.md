@@ -371,6 +371,13 @@ Self-hosted deployments may differ from managed Witself Cloud:
   self-hosted deployments.
 - Managed-service abuse controls, quotas, and plan limits may be replaced by
   self-host policy.
+- The receive-only Cloudflare agent-email pilot is managed-edge specific. A
+  self-host does not gain inbound email by enabling the cell feature flag: it
+  must supply an equivalent SMTP edge that enforces exact recipient enrollment,
+  the 5 MiB raw-message cap, transactional cell acceptance, and the signed relay
+  contract. Until that provider-neutral adapter and its capability reporting
+  are implemented, self-hosted inbound agent email is unsupported rather than
+  silently degraded.
 - Client inference is operator-owned. Clients may use any supported AI runtime
   under their own contracts; backend configuration and behavior do not change.
 

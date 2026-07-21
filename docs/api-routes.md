@@ -107,6 +107,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
+- `/v1/email` (default-off receive-only pilot)
 - `/v1/message-requests`
 - `/v1/transcripts`
 - `/v1/usage`
@@ -147,6 +148,17 @@ POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
+GET  /v1/email/address
+GET  /v1/email
+POST /v1/email:listen
+GET  /v1/email/checkpoint
+POST /v1/email/{message_id}:read
+POST /v1/email/{message_id}:code-consumed
+POST /v1/email/{message_id}:ack
+POST /v1/email/{message_id}:claim
+POST /v1/email/{message_id}:renew
+POST /v1/email/{message_id}:release
+POST /v1/email/{message_id}:complete
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -372,6 +384,22 @@ POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
+
+# Default-off, owner-agent-only receive-email pilot.
+GET  /v1/email/address
+GET  /v1/email
+POST /v1/email:listen
+GET  /v1/email/checkpoint
+POST /v1/email/{message_id}:read
+POST /v1/email/{message_id}:code-consumed
+POST /v1/email/{message_id}:ack
+POST /v1/email/{message_id}:claim
+POST /v1/email/{message_id}:renew
+POST /v1/email/{message_id}:release
+POST /v1/email/{message_id}:complete
+
+# Cell-local signed relay endpoint; no agent/operator bearer token.
+POST /v1/internal/agent-email:ingest
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -650,6 +678,40 @@ audit events; read-only recall does neither:
   return HTTP 409.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
+- The `/v1/email` family exists only when the process-lifetime receive pilot is
+  valid and enabled for exactly one realm plus 5–10 agents. Every owner route
+  independently rechecks that exact realm/agent scope and requires a full agent
+  token; operator, non-full credential-profile, and unenrolled-agent access is
+  denied. `GET /v1/email/address` returns the caller's one provisioned
+  address. Startup reconciliation provisions exactly the configured agents and
+  fails closed on a missing agent, wrong realm, name collision, or ownership
+  mismatch.
+- `GET /v1/email` is metadata-only and cursor-paginated (`unread`, `unacked`,
+  `limit` 1–100, `cursor`). `POST /v1/email:listen` is a stateless metadata-only
+  long poll (`wait_seconds` 0–20, default 20; `limit` 1–100) over oldest
+  unacknowledged mail. Neither operation marks read/acknowledged, exposes body
+  text, raw MIME, attachment details beyond the count, or returns an active
+  claim capability. Listen admission is bounded per process and per agent.
+- `POST /v1/email/{message_id}:read` marks read and returns bounded decoded text
+  with the sender explicitly unverified. Raw MIME, HTML markup, attachment
+  names/media types/bytes, trusted auth results, and provider identifiers are
+  unavailable. `:code-consumed` records only a one-time timestamp after a
+  client successfully uses a low-risk expected code; it never stores or returns
+  the code. `:ack` remains a separate metadata-only durable handling marker.
+- `:claim`, `:renew`, `:release`, and `:complete` mirror the ordinary mailbox's
+  30–900 second exact-fence lifecycle. Claim and complete require an
+  `Idempotency-Key`; renew/release/complete require the live claim id and
+  generation. Email completion creates no reply/result artifact and does not
+  acknowledge the message.
+- `GET /v1/email/checkpoint` and the enrolled caller's `email_checkpoint` in
+  `GET /v1/self` are value-free pending-mail hints. They contain no address,
+  message id, sender, subject, body, attachment, or processing fence.
+- `POST /v1/internal/agent-email:ingest` accepts only the byte-identical raw body
+  with the pilot's Ed25519 relay headers. It verifies key id, signature, body
+  digest/size, audience, and a bounded timestamp window before calling the
+  scoped store. The endpoint is capped at 5 MiB and returns only a typed,
+  content-free verdict; successful `accepted` is emitted only after the owning
+  cell commit. It is not a public bearer-token route.
 - `POST /v1/message-requests` requires an agent token and `Idempotency-Key` and
   creates one realm `kind=open_request` message plus an immutable candidate
   snapshot in the same transaction. `selection_policy` is omitted or
@@ -823,14 +885,16 @@ POST /v1/memories:consolidate # superseded target; not implemented
 
 - `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
   facts first, then top-N salient memories, authenticated value-free memory and
-  message checkpoints, then a one-line index of kinds/tags/counts. It is cheap,
+  message, email, and avatar checkpoints, then a one-line index of
+  kinds/tags/counts. It is cheap,
   never requires a vector profile or query vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
   `:recall` rather than silently truncating. Implemented query parameters select
   what to include (`include_facts`, `include_salient`, `salient_limit`,
   `max_bytes`, `include_counts`, `include_checkpoint`,
-  `include_message_checkpoint`, and `include_sensitive`). Each checkpoint is
-  additive and independently fails open with `unavailable:true`; neither is
+  `include_message_checkpoint`, `include_email_checkpoint`,
+  `include_avatar_checkpoint`, and `include_sensitive`). Each checkpoint is
+  additive and independently fails open with `unavailable:true`; none is
   source content or authority. The target
   `?format=claude-md|agents-md|markdown` renderer would be the HTTP surface for
   `witself digest emit`, but neither that rendering behavior nor the command is

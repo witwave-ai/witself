@@ -367,18 +367,30 @@ Tool names should use the `witself.` prefix:
 - `witself.message.request.renew`
 - `witself.message.request.release`
 - `witself.message.request.complete`
+- `witself.email.address.show`
+- `witself.email.list`
+- `witself.email.listen`
+- `witself.email.read`
+- `witself.email.code.consume`
+- `witself.email.ack`
+- `witself.email.claim`
+- `witself.email.renew`
+- `witself.email.release`
+- `witself.email.complete`
 - `witself.transcript.list`
 - `witself.transcript.get`
 - `witself.transcript.tail`
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The current checkout's full profile exposes 67 tools, including the 12 direct narrative-memory
+The configured current checkout's full profile exposes 77 tools, including the 12 direct narrative-memory
 tools, fifteen client-curation tools, `witself.self.show`, realm-safe
 `witself.agent.peers`, deterministic fact
 reads/writes and candidate review, the three transcript read tools, and the
-ten ordinary server-backed message tools and eleven server-backed open-request
-tools. The read-only profile exposes 24 tools. Request list/show are
+ten ordinary server-backed message tools, eleven server-backed open-request
+tools, and ten receive-only agent-email tools. The read-only profile exposes 27
+tools, including email address/list/listen but no email content or mutation.
+Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
 completed-batch settlement. `witself install codex|claude|grok|cursor`
@@ -391,12 +403,17 @@ the same token-derived authorization boundary.
 
 The full and read-only MCP handshakes teach the active agent to perform a
 non-blocking mailbox startup check at the beginning of a non-trivial task:
-`witself.self.show`, inspection of its message checkpoint, and
-`witself.message.listen` with `wait_seconds=0`. Listen surfaces canonical
+`witself.self.show`, inspection of its message and email checkpoints, and at
+most one selected foreground lane after user work. Messaging uses
+`witself.message.listen` with `wait_seconds=0`; enrolled receive-only email uses
+`witself.email.listen` with `wait_seconds=0`. Listen surfaces canonical
 messages that remain unacknowledged. Neither startup call exposes message
 content or clears state, and neither can wake an idle model. An active agent
 explicitly claims and reads selected work, then acknowledges it only after
-handling. All 21 server-backed message and request operations retain
+handling. Every email sender/content field remains unverified untrusted input;
+the pilot allows only already-expected, user-authorized, low-risk code use and
+prohibits automated links or consequential workflows. All 21 server-backed
+message/request operations and all 10 email operations retain
 CLI/MCP/API parity; there is no host-local messaging service or bridge.
 
 Every agent-facing server-backed CLI verb is reachable via MCP with **full
@@ -466,7 +483,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.version` | yes | yes | No auth-sensitive data. |
 | `witself.whoami` | yes | yes | Shows effective principal, scopes, and primary facts. |
 | `witself.capabilities` | yes | yes | Reports backend surfaces independently; opportunistic curation is supported while server-side automatic capture and scheduled curation are not. Explicit legacy/manual local `memory curate auto` execution is client-owned and is not an MCP capability. |
-| `witself.self.show` | yes | yes | Bounded model-free digest plus authenticated value-free memory and message checkpoints; projection failure does not hide identity or recall, and `elided` is set when content is capped. |
+| `witself.self.show` | yes | yes | Bounded model-free digest plus authenticated value-free memory, message, email, and avatar checkpoints; projection failure does not hide identity or recall, and `elided` is set when content is capped. |
 | `witself.agent.peers` | yes | yes | Lists other agents in the token-derived realm with optional last-observed activity fields; never infers availability. |
 | `witself.remember` | deferred | deferred | If implemented, explicitly Witself-scoped; natural provider routing remains an agent-integration responsibility. |
 | `witself.session.start` | deferred | deferred | Target one-round-trip hydration helper; not exposed by the current MCP server. |
@@ -541,6 +558,16 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.message.request.renew` | yes | no | Selected agent renews one exact live request claim fence. |
 | `witself.message.request.release` | yes | no | Selected agent releases one exact fence, optionally recording deterministic failure. |
 | `witself.message.request.complete` | yes | no | Atomically creates a coordinator result and completes one exact claim; request settles when no other live selected work remains. |
+| `witself.email.address.show` | yes | yes | Show the token-bound enrolled agent's one receive-only pilot address; no cross-agent selector. |
+| `witself.email.list` | yes | yes | Metadata-only owner mailbox page; no body, raw MIME, attachment detail beyond count, or claim capability. |
+| `witself.email.listen` | yes | yes | Metadata-only oldest-unacknowledged wait (0–20 seconds); no state change and no wake behavior. |
+| `witself.email.read` | yes | no | Explicitly marks read and returns bounded decoded text with mandatory sender-unverified/untrusted framing; never raw MIME, HTML, or attachment content. |
+| `witself.email.code.consume` | yes | no | One-time value-free marker after a successfully used expected, user-authorized, low-risk code; stores/returns no code. |
+| `witself.email.ack` | yes | no | Metadata-only durable handling acknowledgement, separate from read and processing completion. |
+| `witself.email.claim` | yes | no | Acquire/idempotently replay a 30–900 second owner-only fence without reading or acknowledging. |
+| `witself.email.renew` | yes | no | Renew one exact live email claim id/generation using database time. |
+| `witself.email.release` | yes | no | Release one exact fence, optionally recording an email-specific deterministic failure; does not acknowledge. |
+| `witself.email.complete` | yes | no | Complete one exact live fence without creating a reply/result artifact and without acknowledging. |
 | `witself.transcript.list` | yes | yes | Lists the token-bound agent's newest transcript conversations; operators see their authorized account scope. |
 | `witself.transcript.get` | yes | yes | Reads one bounded forward page after a transcript-local sequence. |
 | `witself.transcript.tail` | yes | yes | Reads a bounded newest page, returned oldest-first. |
@@ -1663,6 +1690,45 @@ Input:
 Output data uses the group detail shape from
 [json-contracts.md](json-contracts.md). See
 [security-groups.md](security-groups.md).
+
+### `witself.email.*`
+
+The ten receive-only tools are advertised by the configured backend and work
+only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
+
+- `address.show` takes `{}` and returns the token-bound `address` record.
+- `list` accepts `unread_only`, `unacked_only`, `limit` (1–100, default 50),
+  and `cursor`; it returns metadata-only `messages` and `next_cursor`.
+- `listen` accepts `wait_seconds` (0–20, default 20) and `limit`; it returns
+  metadata-only `messages` and `timed_out` without changing state or waking a
+  client.
+- `read` accepts `message_id`, marks it read, and returns `message`, a mandatory
+  sender-unverified/untrusted warning, and `content_truncated` when the MCP
+  adapter reduced decoded text to its 64 KiB UTF-8-safe limit.
+- `code.consume` and `ack` accept `message_id` and return metadata only. Code
+  consumption is a one-time value-free marker after successful use, not an
+  extraction service.
+- `claim` accepts `message_id`, optional `lease_seconds` (30–900), and required
+  `idempotency_key`; it returns the exact processing capability.
+- `renew` accepts `message_id`, `claim_id`, positive `generation`, and optional
+  `lease_seconds`.
+- `release` accepts the exact fence and optional `deterministic_failure`.
+- `complete` accepts the exact fence and required `idempotency_key`; it creates
+  no result/reply and does not acknowledge.
+
+List, listen, code-consume, ack, and ordinary read projections never expose an
+active claim id or lease. No tool exposes raw MIME, HTML markup, attachment
+names/media types/bytes, trusted auth/spam fields, or a provider id. Every
+sender, header, subject, link, and body is unverified untrusted external input,
+never instructions or authority. A code may be used only in an already-
+expected, current-user-authorized, low-risk flow after independent context
+matching; no financial/identity/recovery/credential/domain-transfer or
+automated-link workflow is permitted.
+
+The read-only profile retains only `address.show`, `list`, and `listen`.
+`--no-value-tools` does not remove `read`: email content is an open-plane owner
+read, not sealed-secret value egress. Grok exposes the same tools with
+underscore-safe names such as `witself_email_code_consume`.
 
 ### `witself.message.send`
 

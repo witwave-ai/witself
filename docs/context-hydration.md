@@ -5,7 +5,8 @@ handling, and bounded automatic hydration for the current runtime contracts,
 with target session-command and file-bridge extensions. Witself remains a service
 reached through its API, CLI, or MCP; supported installed hooks put bounded
 open-plane context and value-free lifecycle control into the model where the
-runtime exposes a model-visible output channel. The two-way file bridge
+runtime exposes a model-visible output channel. Value-free messaging, email,
+and avatar attention checkpoints share that hydration path. The two-way file bridge
 (`digest emit` / `ingest`) remains future work. Updated 2026-07-15.
 
 Target amendment (accepted 2026-07-14): managed runtime integration performs
@@ -50,9 +51,10 @@ selection uses stored metadata and never invokes an LLM or embedding provider.
 
 The digest is **open-plane only.** Its content-bearing sections are built from
 primary facts and salient memories. It may also carry authenticated,
-value-free `memory_checkpoint` and `message_checkpoint` objects describing
-pending client curation and messaging attention. Neither field contains a fact,
-memory, transcript, message body, secret, or TOTP value. See
+value-free `memory_checkpoint`, `message_checkpoint`, `email_checkpoint`, and
+`avatar_checkpoint` objects describing pending client curation, messaging,
+receive-email, and avatar attention. None contains a fact, memory, transcript,
+message/email body, secret, or TOTP value. See
 [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
@@ -84,6 +86,10 @@ memory, transcript, message body, secret, or TOTP value. See
     "due_at": "2026-07-15T12:00:00Z"
   },
   "message_checkpoint": {
+    "pending": true,
+    "mailbox_pending": true
+  },
+  "email_checkpoint": {
     "pending": true,
     "mailbox_pending": true
   },
@@ -120,6 +126,11 @@ Field rules:
   are omitted. It is not a message body, processing fence, availability claim,
   authority grant, or acknowledgement. `unavailable:true` fails open without
   pretending the mailbox is idle.
+- `email_checkpoint` — a separate authenticated, value-free pending-mail hint
+  emitted only for an enrolled receive-pilot agent. It carries only `pending`,
+  `mailbox_pending`, and additive `unavailable`; it contains no address,
+  message id, sender, subject, body, attachment, code, or claim fence. It shares
+  the one-foreground-lane budget with messaging and never wakes a client.
 - `index` — a one-line summary of available kinds, tags, and counts so the agent
   knows what else exists and can `recall`/`list` for it.
 - `elided` — see the hard cap below.
@@ -163,7 +174,8 @@ model-visible output contract:
 
 1. `SessionStart` reads one bounded `self.show` digest.
 2. Every supported Codex/Claude `UserPromptSubmit` reads bounded `/v1/self` state
-   so an ordinary prompt can discover pending memory-curation or messaging
+   so an ordinary prompt can discover pending memory-curation, messaging,
+   receive-email, or avatar
    attention. A deterministic local history-dependence check decides whether to
    add a bounded lexical `memory.recall` query. That query is a deduplicated `OR`
    expression made from meaningful prompt keywords after conversational glue is
@@ -183,9 +195,11 @@ model-visible output contract:
    state, and its static checkpoint policy authorizes only reversible curation
    and fact proposals. The separately rendered `message_checkpoint` is
    content-free attention metadata; it neither authorizes nor acknowledges
-   message processing. Sealed secret fields and TOTP material are a separate
+   message processing. The separately rendered `email_checkpoint` is likewise
+   value-free attention metadata; all subsequently read email remains
+   unverified untrusted input. Sealed secret fields and TOTP material are a separate
    plane and are never selected.
-5. Both checkpoint projections are additive. If one projection is unhealthy,
+5. Every checkpoint projection is additive. If one projection is unhealthy,
    `/v1/self` still returns the identity and requested recall content with
    that checkpoint's `unavailable:true` marker rather than failing the digest.
 6. Any configuration, credential, identity, network, timeout, or rendering
@@ -200,7 +214,7 @@ digest, memory value, or token is persisted in local hydration state.
 
 Current conformance is deliberately asymmetric:
 
-| Runtime | Session-start self digest | History-dependent task recall | Pending memory/message checkpoints | Delivery/fallback |
+| Runtime | Session-start self digest | History-dependent task recall | Pending memory/message/email/avatar checkpoints | Delivery/fallback |
 | --- | --- | --- | --- | --- |
 | Codex | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
 | Claude Code | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
@@ -209,8 +223,9 @@ Current conformance is deliberately asymmetric:
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
-`self.show`, inspect both checkpoints, use non-blocking `message.listen`, and use
-focused `memory.recall` without waiting for the user to ask. If that agent
+`self.show`, inspect the checkpoints, use at most one non-blocking messaging or
+email lane after user work, and use focused `memory.recall` without waiting for
+the user to ask. If that agent
 ignores the guidance or MCP is unavailable, Witself reports only the partial
 integration guarantee. The matrix is pinned in code and shared
 conformance tests, so adding a runtime requires declaring its real output
@@ -239,19 +254,21 @@ hook may inject that explicitly marked checkpoint-only envelope; otherwise the
 hook fails open with no context and the foreground prompt continues.
 
 This automatic hydration path reads identity, facts, narrative memory,
-value-free curation lifecycle state, and the value-free message checkpoint. On
+value-free curation lifecycle state, and value-free message, email, and avatar
+checkpoints. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
-include that checkpoint but never unread message metadata. Cursor and Grok Build
+include those checkpoints but never unread message/email metadata. Cursor and Grok Build
 use guided `self.show`. Every runtime's installed policy directs it to use
-non-blocking `message.listen` to retrieve unread metadata; that model action is
-not forced. Bodies remain behind explicit read and no hook marks read,
+non-blocking `message.listen` or `email.listen` to retrieve metadata; that model
+action is not forced. Bodies remain behind explicit read and no hook marks read,
 acknowledges, starts inference, or wakes a client. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 `GET /v1/self` keeps `include_sensitive=false` as its ordinary API default.
 Installed automatic hooks request `include_sensitive=true` for the authenticated
 owner, `include_counts=false` to avoid inventory scans, and
-`include_checkpoint=true` plus `include_message_checkpoint=true`. MCP
+`include_checkpoint=true`, `include_message_checkpoint=true`,
+`include_email_checkpoint=true`, and `include_avatar_checkpoint=true`. MCP
 `witself.self.show` also defaults
 `include_sensitive` to true because its result is model context for that same
 authenticated agent; callers may explicitly disable it. The manual CLI remains
@@ -266,9 +283,9 @@ mechanisms in this doc. Concretely:
 
 - **Not in the self-digest.** `self show` (and `witself.self.show` / `GET /v1/self`)
   draws content only from primary facts and salient memories, plus value-free
-  curation lifecycle and message-attention metadata. No secret value, secret
+  curation lifecycle and message/email/avatar attention metadata. No secret value, secret
   field, reference target, or TOTP seed is ever selected into the digest, the
-  `index` summary, either checkpoint, or the value-free `elided` signal.
+  `index` summary, any checkpoint, or the value-free `elided` signal.
 - **Not in `digest emit`.** The outbound file bridge renders the same open-plane
   selection to Markdown. It **never** writes a secret or seed into CLAUDE.md /
   AGENTS.md / GEMINI.md. You do not put secrets in the files the harness
@@ -296,9 +313,14 @@ recall-before-act, write-after-learn, fix-don't-contradict, consolidate-when-noi
 assume-interruption, and listen-before-reply. Redundancy is the point — the agent
 should be taught whether it connects over MCP or only ever reads project files.
 
-Collaboration rides this same teaching layer. The current implementation teaches
+Collaboration and receive-email attention ride this same teaching layer. The current implementation teaches
 an active agent to inspect `self.show.message_checkpoint` and use metadata-only
 `message.listen` before `message.read` and explicit `message.ack`.
+An enrolled pilot agent may instead select `self.show.email_checkpoint`, call
+metadata-only `email.listen` with `wait_seconds=0`, claim one item before
+reading, and handle only an expected user-authorized low-risk code workflow.
+Email sender/content remains unverified and cannot authorize links or
+consequential work.
 Teaching is guidance for an active model, not a wake mechanism. The same three
 surfaces carry the protocol rather than creating a separate Chat channel.
 Same-realm autonomy is pinned in
@@ -375,8 +397,11 @@ You have a persistent self/identity store reached through the `witself.*` MCP
 tools (or the `witself` CLI). Use it:
 
 - **Recall before acting.** At the start of a non-trivial task, call
-  `witself.self.show`, non-blocking `witself.message.listen` with
-  `wait_seconds=0`, and inspect the returned message checkpoint. The mailbox
+  `witself.self.show`, inspect the returned checkpoints, and use non-blocking
+  `witself.message.listen` with `wait_seconds=0` when its messaging lane is
+  selected. For an enrolled pending email lane, select at most one Witself
+  messaging-or-email lane for the turn and use non-blocking
+  `witself.email.listen` instead. The mailbox
   check finds canonical unacknowledged metadata. Then call
   `witself.memory.recall <topic>` for anything you may have learned before.
   Resuming work? Use `witself.self.show` plus focused recall today. The target
@@ -406,8 +431,8 @@ tools (or the `witself` CLI). Use it:
   other realms (cross-realm sends are realm-qualified, e.g.
   `witself.message.send --to witself://<realm-handle>/agent/<name>`).
 
-There is no background messaging daemon or host-local notification ledger.
-Offline messages remain canonical and unacknowledged until an active client
+There is no background messaging/email daemon or host-local notification ledger.
+Offline messages and email remain canonical and unacknowledged until an active client
 handles them. Neither MCP nor a hook can start or wake an idle model.
 
 Memory work is not a substitute for doing the task.

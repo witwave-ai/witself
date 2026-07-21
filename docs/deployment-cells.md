@@ -133,6 +133,45 @@ cell model, not a problem:
 
 Because cells are isolated, a bad release is contained to the cells it reached.
 
+## Receive-only agent-email pilot
+
+The Cloudflare receive pilot is a managed, capability-limited cell feature. It
+is disabled unless every one of these server settings is present and valid:
+
+- `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED=true`
+- `WITSELF_AGENT_EMAIL_PILOT_DOMAIN` — the one canonical lowercase pilot domain
+- `WITSELF_AGENT_EMAIL_PILOT_AUDIENCE` — the exact destination-cell audience
+- `WITSELF_AGENT_EMAIL_PILOT_REALM_ID` — the one enrolled realm
+- `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS` — a comma-separated set of 5–10 enrolled
+  agent IDs
+- `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON` — a JSON object mapping relay key
+  IDs to standard-base64 raw Ed25519 public keys
+- `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` — optional; defaults to `5m` and may
+  not exceed `15m`
+
+The private Ed25519 relay key is a secret of the isolated Cloudflare Email
+Worker and must never be placed in cell configuration. On startup, an enabled
+cell reconciles the one realm and exact agent allowlist into durable mailboxes
+and addresses. Startup fails before serving when the realm or an agent is
+missing or inactive, an agent belongs to another realm, an address collides, or
+an existing mailbox/address has inconsistent ownership.
+
+The edge implementation lives in `infra/cloudflare/agent-email/`. It uses its
+own `witself-agent-email-pilot` Worker and an isolated
+`witself-agent-email-pilot-directory` KV namespace. It must never bind the
+control-plane `DIRECTORY` namespace. Route management is limited to literal
+rules for the 5–10 enrolled addresses; it reads and fingerprints the existing
+catch-all but has no operation that can update it.
+
+An operator activates the edge only after the cell release and configuration
+are healthy, the disabled exact-route set has been reviewed, and KV propagation
+has settled. A synthetic exact-address canary must then prove Worker-to-cell
+commit before any expected pilot mail is sent. Rollback disables only the
+pilot's directory gate and literal routes. See [Agent Email](agent-email.md) and
+the [edge README](../infra/cloudflare/agent-email/README.md) for the staged
+procedure. A configured cell, deployed Worker, or enabled routing rule alone is
+not proof of end-to-end operation.
+
 ## Current GitOps Release Rollout
 
 The directories under `.gitops/cells/` are configured desired-state targets;
