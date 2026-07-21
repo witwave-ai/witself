@@ -59,12 +59,17 @@ func TestAgentEmailReceiveControlSchema59BackfillPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.pool.Exec(ctx, `
+		WITH anchor AS (SELECT clock_timestamp() AS at)
 		INSERT INTO agent_email_mailboxes
 		  (id,account_id,realm_id,owner_agent_id,address_id,receive_state,
-		   row_version,disabled_at)
-		VALUES
-		  ('emb_aaaaaaaaaaaaaaaa',$1,$2,$3,'eaddr_aaaaaaaaaaaaaaaa','enabled',7,NULL),
-		  ('emb_bbbbbbbbbbbbbbbb',$1,$2,$4,'eaddr_bbbbbbbbbbbbbbbb','disabled',9,clock_timestamp())`,
+		   row_version,created_at,updated_at,disabled_at)
+		SELECT 'emb_aaaaaaaaaaaaaaaa',$1,$2,$3,'eaddr_aaaaaaaaaaaaaaaa',
+		       'enabled',7,at,at,NULL
+		FROM anchor
+		UNION ALL
+		SELECT 'emb_bbbbbbbbbbbbbbbb',$1,$2,$4,'eaddr_bbbbbbbbbbbbbbbb',
+		       'disabled',9,at,at,at
+		FROM anchor`,
 		provisioned.AccountID, realm.ID, enabledAgent.ID, disabledAgent.ID); err != nil {
 		t.Fatal(err)
 	}
