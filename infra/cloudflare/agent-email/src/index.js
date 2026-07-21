@@ -28,6 +28,12 @@ function transient() {
   return new Error(TRANSIENT_ERROR);
 }
 
+function logRelayFailure(fields) {
+  // Keep relay diagnostics value-free: never log envelope addresses, raw
+  // message content, digests, signatures, or directory values.
+  console.warn(JSON.stringify({ event: "agent_email_relay_failure", ...fields }));
+}
+
 async function directoryJSON(namespace, key) {
   try {
     return await namespace.get(key, "json");
@@ -194,12 +200,21 @@ export async function handleEmail(message, env, runtime = {}) {
       signal: controller.signal,
     });
     verdict = exactVerdict(await boundedResponseText(response));
-  } catch {
+  } catch (error) {
+    logRelayFailure({
+      phase: "fetch",
+      error_name: error instanceof Error ? error.name : "unknown",
+    });
     throw transient();
   } finally {
     clearTimeout(timer);
   }
   if (response.ok && verdict === "accepted") return;
+  logRelayFailure({
+    phase: "response",
+    status: response.status,
+    verdict: verdict || "invalid",
+  });
   if (verdict === "unknown_recipient" || verdict === "permanent") {
     message.setReject(PERMANENT_REJECTION);
     return;
