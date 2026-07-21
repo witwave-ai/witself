@@ -513,6 +513,50 @@ Every mutation is idempotent by actor, operation, and key. The server stores a
 canonical request hash. Replaying the same input returns the original receipt;
 reusing a key with different input returns a conflict.
 
+### Fast-Forward Observational Coverage
+
+Accepted design, implementation in progress (2026-07-20). Ambient capture
+writes raw tool-event entries far faster than full-fidelity review drains
+them: a busy runtime transcript accumulated a ~62,000-entry backlog against a
+500-entry-per-cycle review cap, and every apply requeued a `source_backlog`
+follow-up, so foreground turns burned on reviewing pure tool noise with empty
+plans (three consecutive cycles observed with zero message entries). The
+byte budgets from the bounded-input work keep each page transport-sized but
+do not change the drain rate.
+
+Fast-forward keeps the backend model-free by classifying entries on a stored
+field, not content:
+
+- An entry is **observational** when its frozen `payload` kind is `tool.call`
+  or `tool.result`. Every other entry — messages, capture markers, and any
+  entry with no payload kind — is **signal**. Unknown means signal; the
+  denylist is exact and deterministic.
+- At `start`, a transcript stream whose pending window exceeds the
+  fast-forward threshold (2,000 entries) materializes every signal entry in
+  the window at full fidelity (existing byte budgets and the request's
+  transcript-entry cap still apply), plus exactly one `transcript_coverage`
+  input per stream carrying the inclusive window and frozen per-kind entry
+  counts.
+- The coverage input is value-free run membership: reviewing it means reading
+  its window and counts. Its frozen cursor interval advances on apply exactly
+  like a transcript input's, so a deep backlog drains in one cycle without
+  violating never-advance-unseen-inputs — the coverage row is the seen input
+  for the observational bulk.
+- Streams at or under the threshold keep full-fidelity chunked
+  materialization unchanged.
+- When signal entries in a fast-forward window exceed the remaining
+  transcript-entry cap, the window splits after the last materialized signal
+  entry and the remainder stays backlog for the next cycle.
+- Stored entries are untouched: the observational bulk remains fully readable
+  through the transcript tools and CLI, and a client that wants to inspect a
+  covered window reads it there before planning.
+
+Schema: a migration widens the `input_kind` check with `transcript_coverage`
+and adds a frozen per-kind counts column; the validity clause requires the
+transcript id, inclusive bounds, and counts for the new kind. Clients that
+predate the kind fail closed on the unknown value rather than silently
+skipping frozen membership.
+
 ### Deterministic plan primitives
 
 The backend supports a deliberately small operation language:
@@ -792,6 +836,8 @@ Each run materializes stable, paginatable input membership:
 - exact memory id/version;
 - exact evidence row id;
 - transcript id with inclusive lower/upper sequence;
+- one value-free `transcript_coverage` row per fast-forwarded observational
+  window (transcript id, inclusive bounds, frozen per-kind entry counts);
 - the expected prior cursor for each source stream; and
 - deterministic page/order key.
 

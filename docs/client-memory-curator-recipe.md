@@ -128,7 +128,14 @@ protocol field, primitive, or bound fails the launch closed.
    artifact list may be elided with an in-band `witself:elided` /
    `witself_elided` note. Elision changes only this materialized view; the
    stored entry is unchanged and readable in full through the transcript tools
-   when an elided span matters to the plan. If local reasoning
+   when an elided span matters to the plan. A `transcript_coverage` input is a
+   fast-forwarded observational window: the backend froze its inclusive
+   bounds and per-kind entry counts instead of materializing tool-event
+   entries (`tool.call`/`tool.result`) individually, while every signal entry
+   in the window was materialized normally. Review it by reading its window
+   and counts; its cursor interval advances on apply like any transcript
+   input, and the covered raw entries stay readable through the transcript
+   tools if the plan needs them. If local reasoning
    may outlive the lease, call
    `witself.memory.curation.renew` before expiry with the same run and fence and
    a new mutation idempotency key; if renewal reports expiry, stop this curation
