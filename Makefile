@@ -24,7 +24,7 @@ MEMORY_LOAD_QUALITY_COMMIT      ?= $(shell git rev-parse HEAD)
 MEMORY_LOAD_QUALITY_PROVIDER    ?= local
 MEMORY_LOAD_QUALITY_HARDWARE    ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality build check
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -98,9 +98,10 @@ check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lin
 	$(MAKE) check-infra
 	@echo "check: all gates green"
 
-check-infra: ## Gates for the NESTED infra/pulumi module (root ./... never descends into it)
+check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email Worker
 	cd infra/pulumi && go vet ./...
 	cd infra/pulumi && go build ./...
 	cd infra/pulumi && go test ./...
 	cd infra/pulumi && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	npm --prefix infra/cloudflare/agent-email test
 	@echo "check-infra: infra gates green"

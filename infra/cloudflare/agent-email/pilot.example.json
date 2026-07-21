@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "realm_id": "realm_abcdefghijkl2345",
+  "realm_label": "abcdefghijkl2345",
+  "domain": "agent-mail.witwave.ai",
+  "worker_name": "witself-agent-email-pilot",
+  "cell_audience": "gcp-prod-us-central1-core",
+  "ingest_url": "https://api.cell.example/v1/internal/agent-email:ingest",
+  "agents": [
+    { "agent_id": "agent_aaaaaaaaaaaaaaa2", "address": "alpha.abcdefghijkl2345@agent-mail.witwave.ai" },
+    { "agent_id": "agent_aaaaaaaaaaaaaaa3", "address": "bravo.abcdefghijkl2345@agent-mail.witwave.ai" },
+    { "agent_id": "agent_aaaaaaaaaaaaaaa4", "address": "charlie.abcdefghijkl2345@agent-mail.witwave.ai" },
+    { "agent_id": "agent_aaaaaaaaaaaaaaa5", "address": "delta.abcdefghijkl2345@agent-mail.witwave.ai" },
+    { "agent_id": "agent_aaaaaaaaaaaaaaa6", "address": "canary.abcdefghijkl2345@agent-mail.witwave.ai" }
+  ]
+}

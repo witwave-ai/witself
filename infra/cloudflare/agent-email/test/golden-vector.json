@@ -1,0 +1,17 @@
+{
+  "description": "Non-secret deterministic Ed25519 cross-language relay vector",
+  "metadata": {
+    "timestamp": 1800000000,
+    "key_id": "pilot-2026-07",
+    "envelope_from": "sender@example.com",
+    "envelope_to": "alpha.abcdefghijkl2345@agent-mail.witwave.ai",
+    "audience": "gcp-prod-us-central1-core",
+    "raw_size": 132,
+    "raw_sha256": "72b8c6918edc264c0973978f7911e21651cc36eab283421d7f2435eaa7ae90c8"
+  },
+  "pkcs8_base64": "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g",
+  "public_key_base64": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+  "raw_base64": "RnJvbTogU2VuZGVyIDxzZW5kZXJAZXhhbXBsZS5jb20+DQpUbzogUGlsb3QgPGFscGhhLmFiY2RlZmdoaWprbDIzNDVAYWdlbnQtbWFpbC53aXR3YXZlLmFpPg0KU3ViamVjdDogR29sZGVuIHZlY3Rvcg0KDQpjb2RlIDEyMzQ1Ng0K",
+  "canonical_base64": "d2l0c2VsZi1lbWFpbC1yZWxheS1waWxvdC12MQoxODAwMDAwMDAwCnBpbG90LTIwMjYtMDcKYzJWdVpHVnlRR1Y0WVcxd2JHVXVZMjl0CllXeHdhR0V1WVdKalpHVm1aMmhwYW10c01qTTBOVUJoWjJWdWRDMXRZV2xzTG5kcGRIZGhkbVV1WVdrCloyTndMWEJ5YjJRdGRYTXRZMlZ1ZEhKaGJERXRZMjl5WlEKMTMyCnNoYTI1Njo3MmI4YzY5MThlZGMyNjRjMDk3Mzk3OGY3OTExZTIxNjUxY2MzNmVhYjI4MzQyMWQ3ZjI0MzVlYWE3YWU5MGM4Cg==",
+  "signature_base64": "Qo5ZsdmjB7uVj+pHVDRnLjb/G2IQe8O5hU8J7mg911H12nxrhuM1aoFAI7sfi193U+ygj0qOVPRstvR/4BooDQ=="
+}

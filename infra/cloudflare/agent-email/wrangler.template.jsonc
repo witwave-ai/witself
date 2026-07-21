@@ -1,0 +1,22 @@
+// This is intentionally a separate email-only Worker. It has no HTTP route,
+// no control-plane Container binding, and no binding to the control plane's
+// DIRECTORY namespace. Generate wrangler.generated.jsonc with `npm run config`.
+{
+  "name": "witself-agent-email-pilot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-21",
+  "workers_dev": false,
+  "preview_urls": false,
+  "kv_namespaces": [
+    {
+      "binding": "EMAIL_DIRECTORY",
+      "id": "__EMAIL_DIRECTORY_KV_ID__"
+    }
+  ],
+  "vars": {
+    "RELAY_KEY_ID": "__RELAY_KEY_ID__"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
