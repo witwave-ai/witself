@@ -371,6 +371,7 @@ Tool names should use the `witself.` prefix:
 - `witself.email.list`
 - `witself.email.listen`
 - `witself.email.read`
+- `witself.email.code.candidates`
 - `witself.email.code.consume`
 - `witself.email.ack`
 - `witself.email.claim`
@@ -383,13 +384,14 @@ Tool names should use the `witself.` prefix:
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The configured current checkout's full profile exposes 77 tools, including the 12 direct narrative-memory
-tools, fifteen client-curation tools, `witself.self.show`, realm-safe
+The configured current checkout's full profile exposes 78 tools, including the
+12 direct narrative-memory tools, fifteen client-curation tools,
+`witself.self.show`, realm-safe
 `witself.agent.peers`, deterministic fact
 reads/writes and candidate review, the three transcript read tools, and the
 ten ordinary server-backed message tools, eleven server-backed open-request
-tools, and ten receive-only agent-email tools. The read-only profile exposes 27
-tools, including email address/list/listen but no email content or mutation.
+tools, and eleven receive-only agent-email tools. The read-only profile exposes
+27 tools, including email address/list/listen but no email content or mutation.
 Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
@@ -562,6 +564,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.email.list` | yes | yes | Metadata-only owner mailbox page; no body, raw MIME, attachment detail beyond count, or claim capability. |
 | `witself.email.listen` | yes | yes | Metadata-only oldest-unacknowledged wait (0–20 seconds); no state change and no wake behavior. |
 | `witself.email.read` | yes | no | Explicitly marks read and returns bounded decoded text with mandatory sender-unverified/untrusted framing; never raw MIME, HTML, or attachment content. |
+| `witself.email.code.candidates` | yes | no | Performs the same owner-only read and locally scans the subject plus the UTF-8-safe first 64 KiB decoded text for conservative numeric candidates. Parse failure is unavailable; truncation or overflow forces `ambiguous`; it never follows, selects, uses, or consumes anything. |
 | `witself.email.code.consume` | yes | no | One-time value-free marker after a successfully used expected, user-authorized, low-risk code; stores/returns no code. |
 | `witself.email.ack` | yes | no | Metadata-only durable handling acknowledgement, separate from read and processing completion. |
 | `witself.email.claim` | yes | no | Acquire/idempotently replay a 30–900 second owner-only fence without reading or acknowledging. |
@@ -1693,7 +1696,7 @@ Output data uses the group detail shape from
 
 ### `witself.email.*`
 
-The ten receive-only tools are advertised by the configured backend and work
+The eleven receive-only tools are advertised by the configured backend and work
 only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
 
 - `address.show` takes `{}` and returns the token-bound `address` record.
@@ -1705,6 +1708,22 @@ only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
 - `read` accepts `message_id`, marks it read, and returns `message`, a mandatory
   sender-unverified/untrusted warning, and `content_truncated` when the MCP
   adapter reduced decoded text to its 64 KiB UTF-8-safe limit.
+- `code.candidates` accepts `message_id`, crosses the same explicit read
+  boundary, and therefore marks the message read. It requires
+  `parse_state:"parsed"`; otherwise the tool fails as unavailable rather than
+  returning a false `none`. It scans the subject followed by the same
+  UTF-8-safe first 64 KiB decoded-text projection exposed by MCP `read`, and
+  returns `scan_scope:"subject_and_bounded_text"` plus `content_truncated`.
+  It recognizes only locally keyword-associated standalone ASCII numeric
+  candidates of 4–8 digits and excludes URL-embedded values. Duplicate values
+  collapse with occurrence counts, distinct values remain in first-seen order,
+  and at most 32 are returned. `candidate_overflow` reports omitted distinct
+  candidates. Its selection state is `none`, `single`, or `ambiguous`; either
+  content truncation or candidate overflow forces `ambiguous`. The result also
+  carries `message_id`, untrusted `header_from` and `subject`,
+  `sender_verification_state:"unverified"`, `content_trust:"untrusted"`, the
+  candidate list, `code_consumption_performed:false`, and a mandatory warning.
+  It never follows a link, selects or uses a value, or calls `code.consume`.
 - `code.consume` and `ack` accept `message_id` and return metadata only. Code
   consumption is a one-time value-free marker after successful use, not an
   extraction service.
@@ -1726,9 +1745,10 @@ matching; no financial/identity/recovery/credential/domain-transfer or
 automated-link workflow is permitted.
 
 The read-only profile retains only `address.show`, `list`, and `listen`.
-`--no-value-tools` does not remove `read`: email content is an open-plane owner
-read, not sealed-secret value egress. Grok exposes the same tools with
-underscore-safe names such as `witself_email_code_consume`.
+`--no-value-tools` does not remove `read` or `code.candidates`: email content is
+an open-plane owner read, not sealed-secret value egress. Grok exposes the same
+tools with underscore-safe names such as `witself_email_code_candidates` and
+`witself_email_code_consume`.
 
 ### `witself.message.send`
 

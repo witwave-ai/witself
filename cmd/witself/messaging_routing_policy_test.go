@@ -69,14 +69,14 @@ func TestForegroundAgentEmailPolicyIsInstalledForEveryRuntime(t *testing.T) {
 		"claude-code": string(claudeMemoryRoutingBlock),
 		"cursor":      string(cursorMemoryRoutingBlock),
 	} {
-		for _, want := range []string{"email_checkpoint", "witself.email.listen", "witself.email.code.consume"} {
+		for _, want := range []string{"email_checkpoint", "witself.email.listen", "witself.email.code.candidates", "witself.email.code.consume"} {
 			if !strings.Contains(block, want) {
 				t.Errorf("%s managed instructions omitted %q", name, want)
 			}
 		}
 	}
 	grok := string(grokMemoryRoutingBlock)
-	for _, want := range []string{"email_checkpoint", "witself_email_listen", "witself_email_code_consume"} {
+	for _, want := range []string{"email_checkpoint", "witself_email_listen", "witself_email_code_candidates", "witself_email_code_consume"} {
 		if !strings.Contains(grok, want) {
 			t.Errorf("Grok managed instructions omitted %q", want)
 		}

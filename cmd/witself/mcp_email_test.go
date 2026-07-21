@@ -15,6 +15,7 @@ type fakeAgentEmailMCPBackend struct {
 	lastList       client.AgentEmailListOptions
 	lastListen     client.AgentEmailListenOptions
 	readID         string
+	readCalls      int
 	ackedID        string
 	codeConsumedID string
 	claimID        string
@@ -47,9 +48,11 @@ func (b *fakeAgentEmailMCPBackend) ListenAgentEmails(_ context.Context, opts cli
 
 func (b *fakeAgentEmailMCPBackend) ReadAgentEmail(_ context.Context, messageID string) (client.AgentEmailMessage, error) {
 	b.readID = messageID
+	b.readCalls++
 	return client.AgentEmailMessage{
 		ID: messageID, HeaderFrom: "attacker@example.com", SenderVerificationState: "unverified",
-		Text: strings.Repeat("é", 40_000), TextKind: "text/plain",
+		Subject: "untrusted verification", Text: "Verification code: 111111. Backup code: 222222.\n" + strings.Repeat("é", 40_000),
+		TextKind: "text/plain", ParseState: "parsed",
 	}, nil
 }
 
@@ -103,7 +106,8 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 	wantTools := map[string]bool{
 		"witself.email.address.show": false, "witself.email.list": false,
 		"witself.email.listen": false, "witself.email.read": false,
-		"witself.email.code.consume": false, "witself.email.ack": false,
+		"witself.email.code.candidates": false, "witself.email.code.consume": false,
+		"witself.email.ack":   false,
 		"witself.email.claim": false, "witself.email.renew": false,
 		"witself.email.release": false, "witself.email.complete": false,
 	}
@@ -137,6 +141,10 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 	wait := 0
 	call("witself.email.listen", map[string]any{"wait_seconds": wait, "limit": 3})
 	read := call("witself.email.read", map[string]any{"message_id": "emsg_aaaaaaaaaaaaaaaa"})
+	candidates := call("witself.email.code.candidates", map[string]any{"message_id": "emsg_aaaaaaaaaaaaaaaa"})
+	if backend.codeConsumedID != "" {
+		t.Fatalf("candidate extraction marked code consumed: %q", backend.codeConsumedID)
+	}
 	call("witself.email.code.consume", map[string]any{"message_id": "emsg_aaaaaaaaaaaaaaaa"})
 	ack := call("witself.email.ack", map[string]any{"message_id": "emsg_aaaaaaaaaaaaaaaa"})
 	call("witself.email.claim", map[string]any{
@@ -164,6 +172,22 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 		!strings.Contains(readOutput.Warning, "sender is unverified") {
 		t.Fatalf("bounded read output = %#v", readOutput)
 	}
+	candidatesJSON, err := json.Marshal(candidates.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidatesOutput agentEmailCodeCandidatesResult
+	if err := json.Unmarshal(candidatesJSON, &candidatesOutput); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesOutput.SelectionState != "ambiguous" || !candidatesOutput.ContentTruncated || candidatesOutput.CandidateOverflow ||
+		candidatesOutput.ScanScope != "subject_and_bounded_text" || len(candidatesOutput.Candidates) != 2 ||
+		candidatesOutput.Candidates[0].Value != "111111" || candidatesOutput.Candidates[0].Occurrences != 1 ||
+		candidatesOutput.Candidates[1].Value != "222222" || candidatesOutput.Candidates[1].Occurrences != 1 ||
+		candidatesOutput.SenderVerificationState != "unverified" || candidatesOutput.ContentTrust != "untrusted" ||
+		candidatesOutput.CodeConsumptionPerformed || !strings.Contains(candidatesOutput.Warning, "no link was followed") {
+		t.Fatalf("candidate output = %#v", candidatesOutput)
+	}
 	ackJSON, _ := json.Marshal(ack.StructuredContent)
 	var ackOutput mcpAgentEmailMessageOutput
 	if err := json.Unmarshal(ackJSON, &ackOutput); err != nil {
@@ -174,10 +198,41 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 	}
 	if backend.lastList.Limit != 7 || !backend.lastList.Unread || !backend.lastList.Unacked ||
 		backend.lastListen.WaitSeconds == nil || *backend.lastListen.WaitSeconds != 0 ||
-		backend.readID == "" || backend.ackedID == "" || backend.codeConsumedID == "" ||
+		backend.readID == "" || backend.readCalls != 2 || backend.ackedID == "" || backend.codeConsumedID == "" ||
 		backend.lastClaim.IdempotencyKey != "claim-1" || backend.lastRenew.LeaseSeconds != 120 ||
 		!backend.lastRelease.DeterministicFailure || backend.lastComplete.IdempotencyKey != "complete-1" {
 		t.Fatalf("email backend calls = %#v", backend)
+	}
+}
+
+func TestAgentEmailCodeCandidatesOnlyReadsOnce(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeAgentEmailMCPBackend{fakeMCPBackend: &fakeMCPBackend{}}
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "witself.email.code.candidates",
+		Arguments: map[string]any{"message_id": "emsg_aaaaaaaaaaaaaaaa"},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("candidate call = result %#v err %v", result, err)
+	}
+	if backend.readCalls != 1 || backend.readID != "emsg_aaaaaaaaaaaaaaaa" || backend.codeConsumedID != "" ||
+		backend.ackedID != "" || backend.claimID != "" || backend.renewID != "" || backend.releaseID != "" ||
+		backend.completeID != "" {
+		t.Fatalf("candidate side effects = %#v", backend)
 	}
 }
 
@@ -213,13 +268,13 @@ func TestAgentEmailMCPProfileBoundaries(t *testing.T) {
 					t.Errorf("read-only profile omitted %s", name)
 				}
 			}
-			for _, name := range []string{"witself.email.read", "witself.email.code.consume", "witself.email.ack", "witself.email.claim", "witself.email.renew", "witself.email.release", "witself.email.complete"} {
+			for _, name := range []string{"witself.email.read", "witself.email.code.candidates", "witself.email.code.consume", "witself.email.ack", "witself.email.claim", "witself.email.renew", "witself.email.release", "witself.email.complete"} {
 				if got[name] {
 					t.Errorf("read-only profile retained %s", name)
 				}
 			}
-		} else if !got["witself.email.read"] {
-			t.Error("--no-value-tools incorrectly removed email.read")
+		} else if !got["witself.email.read"] || !got["witself.email.code.candidates"] {
+			t.Error("--no-value-tools incorrectly removed email.read or email.code.candidates")
 		}
 		_ = clientSession.Close()
 		_ = serverSession.Close()

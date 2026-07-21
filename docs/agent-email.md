@@ -1,6 +1,13 @@
 # Witself Agent Email
 
-Status: capability-limited pilot implemented locally; deployment pending.
+Status: capability-limited receive pilot live in the GCP sandbox as of
+2026-07-21 (`v0.0.193`). One internal realm and six exact-address routes are
+enabled; durable receipt, provider-managed retry, owner processing, and
+disable/re-enable rollback have been exercised without changing the existing
+Cloudflare catch-all. That live receive deployment remains `v0.0.193`; the
+current checkout adds a local, deterministic code-candidate helper, with no new
+ingestion route, database field, sender-trust claim, or automatic code use.
+
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
 promotion target. This document is the go-forward design for **agent email**:
@@ -581,8 +588,18 @@ blur the two:
   [totp-2fa.md](totp-2fa.md) analogy (that computes a code from an enrolled
   seed; this reads a number out of untrusted text). The backend surface is
   an ordinary scoped read of one message; the active client extracts the
-  code with its own inference. Two requirements the client flow must meet,
-  because email OTP is a live attack surface:
+  code with its own inference or a conservative local deterministic helper.
+  The first helper scans the subject followed by the same UTF-8-safe first
+  64 KiB decoded-text projection visible through MCP `email.read`. It
+  recognizes only locally keyword-associated standalone ASCII numeric
+  candidates of 4–8 digits, excludes URL-embedded values, collapses duplicates
+  with occurrence counts, and preserves first-seen order. It returns at most
+  32 distinct candidates. A truncated content projection or candidate overflow
+  forces `ambiguous`, regardless of how many returned values are visible; an
+  unparsed message fails as unavailable rather than reporting a false `none`.
+  It never selects or uses a candidate, follows a link, or calls
+  `code.consume`. Two requirements the client flow must meet, because email OTP
+  is a live attack surface:
   - **Sender binding at point of use.** The read result carries the signed
     authentication results and the `From` domain, and the consuming flow
     asserts the expected service/sender before using a code — otherwise an
@@ -672,8 +689,8 @@ The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
 [mcp-tools.md](mcp-tools.md):
 
 - CLI: `witself email address show`, `witself email list`, `witself email
-  read`, `witself email code-consumed`, `witself email
-  claim|renew|release|complete`, `witself email ack`,
+  read`, `witself email code-candidates`, `witself email code-consumed`,
+  `witself email claim|renew|release|complete`, `witself email ack`,
   and a bounded `witself email listen` (wait for new mail — the OTP flow
   needs a sanctioned wait rather than a poll loop, mirroring
   `message.listen`).
@@ -691,7 +708,13 @@ Explicit `read` marks the message read and returns one bounded decoded text
 projection; plain text is preferred and HTML is deterministically reduced to
 text. Every read result labels the sender unverified and the content untrusted.
 The MCP projection additionally limits returned text to 64 KiB and reports
-when that adapter-level truncation occurred.
+when that adapter-level truncation occurred. `code-candidates` crosses that
+same owner-only read boundary and scans the subject plus exactly that UTF-8-safe
+64 KiB text projection. It returns the original message context, explicit scan
+completeness flags, `none`/`single`/`ambiguous`, and at most 32 distinct
+first-seen values with occurrence counts. It fails unavailable unless
+`parse_state` is `parsed`; truncation or candidate overflow forces
+`ambiguous`. It never follows, selects, uses, or consumes anything.
 
 ## Pilot Implementation Checkpoint
 
@@ -703,22 +726,23 @@ configured 5–10 agents, API/CLI/MCP owner surfaces, self/hook
 `email_checkpoint` hydration, and the isolated Cloudflare Worker plus
 literal-rule lifecycle tooling.
 
-This is an implementation checkpoint, not a deployment claim. No pilot Worker,
-email KV namespace, route, relay key, or cell feature flag is activated merely
-because the code exists. Live operation still requires the synthetic durable-
-accept and provider-retry canary, exact manifest/address comparison, explicit
-activation of only the pilot rules, and a tested rollback. Production remains
-blocked on the strict capability gaps above. Plan-tier retention, quarantine,
-trusted sender authentication, provider-id idempotency, and billable receive
-remain production work rather than features silently simulated by the pilot.
+The checkpoint was deployed on 2026-07-21 in `v0.0.193`: the isolated Worker
+and KV, six exact routes, matching cell feature configuration, synthetic
+durable-accept canary, delayed provider retries, and disable/re-enable rollback
+were all verified live. The existing catch-all and control-plane KV remained
+unchanged. Production remains blocked on the strict capability gaps above.
+Plan-tier retention, quarantine, trusted sender authentication, provider-id
+idempotency, and billable receive remain production work rather than features
+silently simulated by the pilot.
 
 **Authorization (settled 2026-07-21).** Mail is owner-agent-only, matching
 agent messages (the most sensitive existing analog), not the policy-engine-
 shareable posture of memories and facts. There is no cross-agent read of
 another agent's mailbox in v1: an agent reads only its own mail. New
 `email:*` scopes split the surface — a read tier (`address show`, `list`,
-`read`, `listen`) separate from a processing tier (`claim`/`renew`/`release`/
-`complete`, `ack`). Operators get no access to raw mail content in v1
+`read`, `code-candidates`, `listen`) separate from a processing tier
+(`claim`/`renew`/`release`/`complete`, `ack`). Operators get no access to raw
+mail content in v1
 (content is a private correspondence surface); operator visibility is
 metadata/lifecycle only, and any future content access is a separate
 governed decision. The client extracting a code is an ordinary scoped read,
@@ -809,11 +833,20 @@ Receive-only still carries real obligations:
 
 1. **Settled 2026-07-21:** `email_checkpoint` is a separate `self.show` lane;
    it is value-free and shares the one-foreground-lane budget with messaging.
-2. OTP extraction details (location settled client-side; see Trust Model):
-   the deterministic-vs-ambiguous pattern behavior (zero/multiple candidates,
-   HTML-part handling, format/length bounds, localization), the audit shape
-   for a code-consuming read, and whether extraction is permitted on
-   quarantined messages.
+2. **First helper settled 2026-07-21:** OTP extraction is client-side (see
+   Trust Model). It scans the subject followed by the same UTF-8-safe first
+   64 KiB decoded-text projection returned by MCP read. Standalone ASCII
+   numeric candidates of 4–8 digits must be locally associated with `code`,
+   `verification code`, `security code`, `one-time code`, `one time code`,
+   `passcode`, `OTP`, or `PIN`; URL-embedded values are excluded. Duplicate
+   values collapse with an occurrence count, first-seen order is stable, and
+   at most 32 distinct candidates are returned. The client reports `none`,
+   `single`, or `ambiguous`; any text truncation or candidate overflow forces
+   `ambiguous`. A message whose `parse_state` is not `parsed` fails unavailable
+   instead of producing a false `none`. The helper never follows a link,
+   selects or uses a value, or marks the message code-consumed. Alphanumeric
+   formats, localization, the audit shape for a code-consuming read, and
+   extraction from quarantined messages remain open.
 3. **Pilot settled 2026-07-21:** only an attachment count is exposed; raw MIME,
    attachment names, media types, and attachment bytes are unavailable.
    A future production retrieval surface still requires the injection review.

@@ -239,6 +239,22 @@ func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend 
 		}, nil
 	})
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        mcpToolName(runtimeName, "witself.email.code.candidates"),
+		Description: "Conservatively extract at most 32 distinct verification-code candidates from the untrusted subject plus the same bounded text projection exposed by email.read; this owner-only read marks the message read. Parse failure returns an error, while truncation or overflow forces ambiguous. Use only for an already-expected, current-user-authorized, independently matched low-risk workflow; stop on none or ambiguous and never use for money, identity, recovery, credential or domain transfer. This tool never selects or uses a value, follows a link, or calls email.code.consume.",
+		Annotations: mcpWriteClosedWorldAnnotations(true, true),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAgentEmailIDInput) (*mcp.CallToolResult, agentEmailCodeCandidatesResult, error) {
+		messageID, err := normalizeMCPAgentEmailID(in.MessageID)
+		if err != nil {
+			return nil, agentEmailCodeCandidatesResult{}, err
+		}
+		message, err := backend.ReadAgentEmail(ctx, messageID)
+		if err != nil {
+			return nil, agentEmailCodeCandidatesResult{}, err
+		}
+		output, err := buildAgentEmailCodeCandidatesResult(messageID, message)
+		return nil, output, err
+	})
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.code.consume"),
 		Description: "Mark that a client used one candidate verification code from this email. Call only for an active user-authorized, expected-service, low-risk workflow after independently validating context. The pilot prohibits financial, identity, recovery, domain, credential-transfer, or automated-link workflows. This stores no code value.",
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),

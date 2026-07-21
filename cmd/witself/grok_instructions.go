@@ -124,6 +124,7 @@ func grokPortableMCPInstructions(instructions, selfTool, messageListTool string)
 		"witself.email.list",
 		"witself.email.listen",
 		"witself.email.read",
+		"witself.email.code.candidates",
 		"witself.email.code.consume",
 		"witself.email.ack",
 		"witself.email.claim",
