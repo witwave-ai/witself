@@ -49,6 +49,7 @@ var upgraders = map[int]Upgrader{
 	55: preserveSchema55Rows,
 	56: preserveSchema56Rows,
 	57: preserveSchema57Rows,
+	58: preserveSchema58Rows,
 }
 
 const (
@@ -72,6 +73,14 @@ func preserveSchema56Rows(_ string, row map[string]any) (map[string]any, error) 
 // contain the four original input kinds and no coverage counts — imports
 // unchanged into the widened shape.
 func preserveSchema57Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema58Rows acknowledges the four agent-email tables introduced
+// by migration 0059. A schema-58 archive has none of those streams and no
+// existing row changes shape, so its rows pass through unchanged while the
+// destination imports the new tables as empty.
+func preserveSchema58Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

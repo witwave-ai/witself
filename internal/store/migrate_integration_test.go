@@ -21,6 +21,240 @@ import (
 
 var migrationTestSchemaSequence atomic.Uint64
 
+func TestMigration59AgentEmailPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	tables := []string{
+		"agent_email_addresses", "agent_email_mailboxes",
+		"agent_email_messages", "agent_email_deliveries",
+	}
+	assertSchema := func(want bool) {
+		t.Helper()
+		for _, table := range tables {
+			assertMigrationTestTable(t, st, table, want)
+		}
+		if want {
+			assertMigrationTestColumn(t, st, "agent_email_messages", "raw_mime", true)
+			assertMigrationTestColumn(t, st, "agent_email_messages", "duplicate_group_sha256", true)
+			assertMigrationTestColumn(t, st, "agent_email_deliveries", "failure_count", true)
+			assertMigrationTestColumn(t, st, "agent_email_deliveries", "result_message_id", false)
+			assertMigrationTestTableConstraint(t, st, "agent_email_deliveries",
+				"agent_email_deliveries_processing_shape", true)
+			assertMigrationTestIndexShape(t, st, "agent_email_messages",
+				"agent_email_messages_provider_dedupe",
+				[]string{"account_id", "realm_id", "provider", "provider_message_id", "envelope_recipient"},
+				[]string{"provider_message_id IS NOT NULL"})
+			assertMigrationTestIndexUnique(t, st, "agent_email_messages",
+				"agent_email_messages_provider_dedupe", true)
+			assertMigrationTestIndexUnique(t, st, "agent_email_addresses",
+				"agent_email_addresses_live_by_agent", true)
+			assertMigrationTestIndexShape(t, st, "agent_email_messages",
+				"agent_email_messages_duplicate_group",
+				[]string{"account_id", "realm_id", "mailbox_id", "duplicate_group_sha256", "received_at", "id"}, nil)
+			assertMigrationTestIndexShape(t, st, "agent_email_deliveries",
+				"agent_email_deliveries_claimable",
+				[]string{"account_id", "realm_id", "owner_agent_id", "processing_state", "lease_expires_at", "delivered_at", "message_id"},
+				[]string{"folder", "inbox", "acked_at IS NULL"})
+		}
+	}
+
+	migrationTestUpTo(t, dsn, 58)
+	assertMigrationTestVersion(t, dsn, 58)
+	assertSchema(false)
+
+	migrationTestUpTo(t, dsn, 59)
+	assertMigrationTestVersion(t, dsn, 59)
+	assertSchema(true)
+	insertMigrationTestMemoryPrincipals(t, st)
+
+	ctx := context.Background()
+	const (
+		accountID  = "acc_memory_trigger"
+		realmID    = "realm_aaaaaaaaaaaaaaaa"
+		ownerID    = "agent_aaaaaaaaaaaaaaaa"
+		addressID  = "eaddr_aaaaaaaaaaaaaaaa"
+		mailboxID  = "emb_aaaaaaaaaaaaaaaa"
+		messageAID = "emsg_aaaaaaaaaaaaaaaa"
+		messageBID = "emsg_bbbbbbbbbbbbbbbb"
+		realmLabel = "aaaaaaaaaaaaaaaa"
+		recipient  = "owner.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai"
+	)
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO realms (id,account_id,name) VALUES ($1,$2,'agent email migration')`,
+		realmID, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agents (id,realm_id,name) VALUES ($1,$2,'owner')`,
+		ownerID, realmID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_addresses
+		  (id,account_id,realm_id,provisioned_agent_id,domain,agent_segment,
+		   realm_label,local_part,provisioning_kind)
+		VALUES
+		  ('eaddr_zzzzzzzzzzzzzzzz',$1,$2,$3,'agent-mail.witwave.ai','owner',
+		   'bbbbbbbbbbbbbbbb','owner.bbbbbbbbbbbbbbbb','derived')`,
+		accountID, realmID, ownerID); err == nil {
+		t.Fatal("address with a realm label inconsistent with realm_id was accepted")
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_addresses
+		  (id,account_id,realm_id,provisioned_agent_id,domain,agent_segment,
+		   realm_label,local_part,provisioning_kind)
+		VALUES
+			  ($1,$2,$3,$4,
+			   'agent-mail.witwave.ai','owner',$5,'owner.' || $5,'derived')`,
+		addressID, accountID, realmID, ownerID, realmLabel); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_email_mailboxes
+			  (id,account_id,realm_id,owner_agent_id,address_id,receive_state)
+			VALUES
+			  ($1,$2,$3,$4,$5,'enabled')`, mailboxID, accountID, realmID, ownerID, addressID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_messages
+		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+		   provider,envelope_sender,envelope_recipient,agent_segment,realm_label,
+		   raw_mime,raw_size_bytes,raw_sha256,parse_state,
+		   spf_result,dkim_result,dmarc_result,spam_verdict,
+		   sender_verification_state,duplicate_group_sha256,received_at)
+		VALUES
+		  ('emsg_zzzzzzzzzzzzzzzz',$1,$2,$3,$4,$5,
+		   'cloudflare_email_routing','sender@example.com',$6,'owner',$7,
+		   convert_to(E'Subject: forged posture\r\n\r\nbody','UTF8'),31,$8,'parsed',
+		   'pass','unknown','unknown','unknown','unverified',$9,clock_timestamp())`,
+		accountID, realmID, mailboxID, ownerID, addressID, recipient, realmLabel,
+		strings.Repeat("e", 64), strings.Repeat("f", 64)); err == nil {
+		t.Fatal("Cloudflare pilot trust posture elevation was accepted")
+	}
+	insertMessage := func(id, providerMessageID string, raw []byte, possibleDuplicate *string) error {
+		_, err := st.pool.Exec(ctx, `
+				INSERT INTO agent_email_messages
+				  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+				   provider,provider_message_id,envelope_sender,envelope_recipient,agent_segment,
+				   realm_label,raw_mime,raw_size_bytes,raw_sha256,parse_state,
+				   header_subject,sender_verification_state,duplicate_group_sha256,
+				   possible_duplicate_of_message_id,received_at)
+				VALUES
+				  ($1,$2,$3,$4,$5,$6,'cloudflare',$7,'sender@example.com',$8,
+				   'owner',$9,$10,$11,$12,'parsed','migration mail','unverified',$13,
+				   $14,clock_timestamp())`, id, accountID, realmID, mailboxID, ownerID,
+			addressID, providerMessageID, recipient, realmLabel, raw, len(raw),
+			strings.Repeat("a", 64), strings.Repeat("b", 64), possibleDuplicate)
+		return err
+	}
+	rawA := []byte("Subject: migration A\r\n\r\nbody A")
+	if err := insertMessage(messageAID, "provider-a", rawA, nil); err != nil {
+		t.Fatal(err)
+	}
+	possibleDuplicate := messageAID
+	if err := insertMessage(messageBID, "provider-b", []byte("Subject: migration B\r\n\r\nbody B"),
+		&possibleDuplicate); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertMessage("emsg_cccccccccccccccc", "provider-a",
+		[]byte("Subject: provider duplicate\r\n\r\nbody"), nil); err == nil {
+		t.Fatal("duplicate provider identity was accepted")
+	}
+	var duplicateRows int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_messages
+		WHERE duplicate_group_sha256=$1`, strings.Repeat("b", 64)).Scan(&duplicateRows); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateRows != 2 {
+		t.Fatalf("non-destructive duplicate group rows = %d, want 2", duplicateRows)
+	}
+	if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_email_deliveries
+			  (message_id,account_id,realm_id,mailbox_id,owner_agent_id)
+			VALUES
+			  ($1,$2,$3,$4,$5)`,
+		messageAID, accountID, realmID, mailboxID, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_deliveries SET processing_state='needs_attention'
+		WHERE message_id=$1 AND mailbox_id=$2`, messageAID, mailboxID); err == nil {
+		t.Fatal("unresolved needs_attention delivery state was accepted")
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_messages
+		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+		   provider,envelope_sender,envelope_recipient,agent_segment,realm_label,
+		   raw_mime,raw_size_bytes,raw_sha256,duplicate_group_sha256,received_at)
+		VALUES
+			  ('emsg_dddddddddddddddd',$1,$2,$3,
+			   $4,$5,'cloudflare','sender@example.com',$6,'owner',$7,
+			   decode(repeat('00',5242881),'hex'),5242881,$8,$9,clock_timestamp())`,
+		accountID, realmID, mailboxID, ownerID, addressID, recipient, realmLabel,
+		strings.Repeat("c", 64), strings.Repeat("d", 64)); err == nil {
+		t.Fatal("raw MIME above the 5 MiB pilot cap was accepted")
+	}
+
+	// The mailbox and content are agent-owned and cascade on permanent agent
+	// deletion. The address reservation has intentionally no agent FK, so it
+	// remains to prevent the old recipient from being rebound.
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAgentEmailMailboxTx(ctx, tx, accountID, realmID, ownerID, "agent_deleted"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM agents WHERE id=$1 AND realm_id=$2`, ownerID, realmID); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]int{
+		"agent_email_addresses":  1,
+		"agent_email_mailboxes":  0,
+		"agent_email_messages":   0,
+		"agent_email_deliveries": 0,
+	} {
+		var got int
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s rows after agent deletion = %d, want %d", table, got, want)
+		}
+	}
+	var retiredAt *time.Time
+	var retirementReason *string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT retired_at,retirement_reason_code
+		FROM agent_email_addresses WHERE id=$1`, addressID).
+		Scan(&retiredAt, &retirementReason); err != nil {
+		t.Fatal(err)
+	}
+	if retiredAt == nil || retirementReason == nil || *retirementReason != "agent_deleted" {
+		t.Fatalf("hard-delete tombstone = retired_at %v reason %v", retiredAt, retirementReason)
+	}
+
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 58)
+	assertSchema(false)
+
+	migrationTestUpTo(t, dsn, 59)
+	assertMigrationTestVersion(t, dsn, 59)
+	assertSchema(true)
+}
+
 func TestMigration57DashboardPreferencesPostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {
@@ -1782,6 +2016,27 @@ func assertMigrationTestIndexShape(
 		if !strings.Contains(predicate, fragment) {
 			t.Fatalf("index %s.%s predicate = %q, want fragment %q", table, index, predicate, fragment)
 		}
+	}
+}
+
+func assertMigrationTestIndexUnique(
+	t *testing.T,
+	st *Store,
+	table string,
+	index string,
+	want bool,
+) {
+	t.Helper()
+	var got bool
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT indisunique
+		FROM pg_index
+		WHERE indrelid=to_regclass($1) AND indexrelid=to_regclass($2)`,
+		table, index).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("index %s.%s unique = %t, want %t", table, index, got, want)
 	}
 }
 

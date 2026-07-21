@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/placement"
 )
@@ -105,6 +106,47 @@ var importColumns = map[string]map[string]bool{
 	"agents": {
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
+	},
+	"agent_email_addresses": {
+		"id": true, "account_id": true, "realm_id": true,
+		"provisioned_agent_id": true, "domain": true,
+		"agent_segment": true, "realm_label": true, "local_part": true,
+		"provisioning_kind": true, "created_at": true,
+		"retired_at": true, "retirement_reason_code": true,
+	},
+	"agent_email_mailboxes": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "address_id": true,
+		"receive_state": true, "row_version": true,
+		"created_at": true, "updated_at": true,
+		"disabled_at": true, "retired_at": true,
+	},
+	"agent_email_messages": {
+		"id": true, "account_id": true, "realm_id": true,
+		"mailbox_id": true, "owner_agent_id": true, "address_id": true,
+		"provider": true, "provider_message_id": true,
+		"envelope_sender": true, "envelope_recipient": true,
+		"agent_segment": true, "realm_label": true, "subaddress_tag": true,
+		"raw_mime": true, "raw_size_bytes": true, "raw_sha256": true,
+		"parse_state": true, "parse_error": true,
+		"header_from": true, "header_to": true, "header_subject": true,
+		"mime_message_id": true, "message_date": true,
+		"attachment_count": true, "spf_result": true, "dkim_result": true,
+		"dmarc_result": true, "spam_verdict": true,
+		"sender_verification_state":        true,
+		"duplicate_group_sha256":           true,
+		"possible_duplicate_of_message_id": true,
+		"received_at":                      true, "created_at": true,
+	},
+	"agent_email_deliveries": {
+		"message_id": true, "account_id": true, "realm_id": true,
+		"mailbox_id": true, "owner_agent_id": true, "folder": true,
+		"delivered_at": true, "read_at": true, "acked_at": true,
+		"code_consumed_at": true,
+		"processing_state": true, "processing_generation": true,
+		"failure_count": true, "claim_id": true, "claim_key_hash": true,
+		"lease_expires_at": true, "completed_at": true,
+		"complete_key_hash": true, "created_at": true,
 	},
 	"agent_vault_keys": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -579,6 +621,46 @@ type transcriptImportScope struct {
 	nextSequence int64
 }
 
+type agentEmailAddressImportScope struct {
+	realmID      string
+	agentID      string
+	domain       string
+	agentSegment string
+	realmLabel   string
+	localPart    string
+	retired      bool
+	createdAt    time.Time
+}
+
+type agentEmailMailboxImportScope struct {
+	realmID      string
+	ownerAgentID string
+	addressID    string
+	receiveState string
+	createdAt    time.Time
+}
+
+type agentEmailMessageImportScope struct {
+	realmID             string
+	mailboxID           string
+	ownerAgentID        string
+	addressID           string
+	provider            string
+	providerMessageID   string
+	duplicateGroup      string
+	possibleDuplicateID string
+	receivedAt          time.Time
+	createdAt           time.Time
+}
+
+type agentEmailDeliveryImportScope struct {
+	messageID            string
+	mailboxID            string
+	processingState      string
+	processingGeneration int64
+	failureCount         int64
+}
+
 type messageImportScope struct {
 	realmID             string
 	fromAgentID         string
@@ -826,6 +908,15 @@ type importCtx struct {
 	agentRealms                  map[string]string
 	agentActivity                map[agentActivityImportKey]bool
 	dashboardPreferences         map[string]bool
+	agentEmailAddresses          map[string]agentEmailAddressImportScope
+	agentEmailAddressKeys        map[string]string
+	agentEmailLiveAddresses      map[string]string
+	agentEmailMailboxes          map[string]agentEmailMailboxImportScope
+	agentEmailMailboxOwners      map[string]string
+	agentEmailMailboxAddresses   map[string]string
+	agentEmailMessages           map[string]agentEmailMessageImportScope
+	agentEmailProviderKeys       map[string]string
+	agentEmailDeliveries         map[string]agentEmailDeliveryImportScope
 	vaultKeys                    map[string]secretVaultKeyImportScope
 	vaultKeyIdentities           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
 	vaultLiveKeyVersions         map[secretVaultKeyVersionImportKey]string
@@ -912,6 +1003,15 @@ func newImportCtx(accountID string) *importCtx {
 		agentRealms:                  map[string]string{},
 		agentActivity:                map[agentActivityImportKey]bool{},
 		dashboardPreferences:         map[string]bool{},
+		agentEmailAddresses:          map[string]agentEmailAddressImportScope{},
+		agentEmailAddressKeys:        map[string]string{},
+		agentEmailLiveAddresses:      map[string]string{},
+		agentEmailMailboxes:          map[string]agentEmailMailboxImportScope{},
+		agentEmailMailboxOwners:      map[string]string{},
+		agentEmailMailboxAddresses:   map[string]string{},
+		agentEmailMessages:           map[string]agentEmailMessageImportScope{},
+		agentEmailProviderKeys:       map[string]string{},
+		agentEmailDeliveries:         map[string]agentEmailDeliveryImportScope{},
 		vaultKeys:                    map[string]secretVaultKeyImportScope{},
 		vaultKeyIdentities:           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
 		vaultLiveKeyVersions:         map[secretVaultKeyVersionImportKey]string{},
@@ -1110,6 +1210,34 @@ func (ic *importCtx) normalizeImportedMessageClaim(table string, obj map[string]
 	return nil
 }
 
+// normalizeImportedAgentEmailClaim prevents an active email-processing lease
+// from becoming valid authority on the destination cell. The strict source
+// shape is checked before mutation; a claimed row then becomes available,
+// consumes one generation, and clears every source-cell fence field.
+func (ic *importCtx) normalizeImportedAgentEmailClaim(table string, obj map[string]any) error {
+	if table != "agent_email_deliveries" {
+		return nil
+	}
+	scope, err := validateImportedAgentEmailProcessingShape(obj)
+	if err != nil {
+		return fmt.Errorf("%w: agent_email_deliveries row %v", ErrArchiveContent, err)
+	}
+	if scope.processingState != MessageProcessingClaimed {
+		return nil
+	}
+	if scope.processingGeneration >= maxMessageProcessingGeneration {
+		return fmt.Errorf("%w: agent_email_deliveries active claim has no import fence reserve", ErrArchiveContent)
+	}
+	obj["processing_state"] = MessageProcessingAvailable
+	obj["processing_generation"] = scope.processingGeneration + 1
+	obj["claim_id"] = nil
+	obj["claim_key_hash"] = ""
+	obj["lease_expires_at"] = nil
+	obj["completed_at"] = nil
+	obj["complete_key_hash"] = ""
+	return nil
+}
+
 // normalizeImportedMessageRequestClaim prevents a selection reservation or
 // runner fence from becoming live authority on a different cell. The source
 // row must first prove its strict lifecycle shape. Reserved and claimed work
@@ -1174,6 +1302,8 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
+		"agent_email_addresses", "agent_email_mailboxes",
+		"agent_email_messages", "agent_email_deliveries",
 		"agent_vault_keys", "agent_vault_key_enrollments",
 		"vault_key_enrollment_receipts", "secrets", "secret_fields", "secret_deks",
 		"agent_vault_key_rotations", "agent_vault_key_rotation_items",
@@ -1330,6 +1460,73 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
 		}
+	case "agent_email_addresses":
+		id, scope, err := ic.validateImportedAgentEmailAddress(obj)
+		if err != nil {
+			return badf("agent_email_addresses row %v", err)
+		}
+		if _, duplicate := ic.agentEmailAddresses[id]; duplicate {
+			return badf("agent_email_addresses row duplicates id %q", id)
+		}
+		addressKey := scope.domain + "\x00" + scope.localPart
+		if previous := ic.agentEmailAddressKeys[addressKey]; previous != "" {
+			return badf("agent_email_addresses row reuses reserved address from %q", previous)
+		}
+		if !scope.retired {
+			agentKey := scope.realmID + "\x00" + scope.agentID
+			if previous := ic.agentEmailLiveAddresses[agentKey]; previous != "" {
+				return badf("agent_email_addresses row gives agent %q more than one live address", scope.agentID)
+			}
+			ic.agentEmailLiveAddresses[agentKey] = id
+		}
+		ic.agentEmailAddresses[id] = scope
+		ic.agentEmailAddressKeys[addressKey] = id
+	case "agent_email_mailboxes":
+		id, scope, err := ic.validateImportedAgentEmailMailbox(obj)
+		if err != nil {
+			return badf("agent_email_mailboxes row %v", err)
+		}
+		if _, duplicate := ic.agentEmailMailboxes[id]; duplicate {
+			return badf("agent_email_mailboxes row duplicates id %q", id)
+		}
+		ownerKey := scope.realmID + "\x00" + scope.ownerAgentID
+		if previous := ic.agentEmailMailboxOwners[ownerKey]; previous != "" {
+			return badf("agent_email_mailboxes row gives agent %q more than one mailbox", scope.ownerAgentID)
+		}
+		addressKey := scope.realmID + "\x00" + scope.addressID
+		if previous := ic.agentEmailMailboxAddresses[addressKey]; previous != "" {
+			return badf("agent_email_mailboxes row reuses address %q", scope.addressID)
+		}
+		ic.agentEmailMailboxes[id] = scope
+		ic.agentEmailMailboxOwners[ownerKey] = id
+		ic.agentEmailMailboxAddresses[addressKey] = id
+	case "agent_email_messages":
+		id, scope, err := ic.validateImportedAgentEmailMessage(obj)
+		if err != nil {
+			return badf("agent_email_messages row %v", err)
+		}
+		if _, duplicate := ic.agentEmailMessages[id]; duplicate {
+			return badf("agent_email_messages row duplicates id %q", id)
+		}
+		if scope.providerMessageID != "" {
+			providerKey := scope.realmID + "\x00" + scope.provider + "\x00" +
+				scope.providerMessageID + "\x00" + obj["envelope_recipient"].(string)
+			if previous := ic.agentEmailProviderKeys[providerKey]; previous != "" {
+				return badf("agent_email_messages row duplicates provider identity from %q", previous)
+			}
+			ic.agentEmailProviderKeys[providerKey] = id
+		}
+		ic.agentEmailMessages[id] = scope
+	case "agent_email_deliveries":
+		scope, err := ic.validateImportedAgentEmailDelivery(obj)
+		if err != nil {
+			return badf("agent_email_deliveries row %v", err)
+		}
+		key := scope.messageID + "\x00" + scope.mailboxID
+		if _, duplicate := ic.agentEmailDeliveries[key]; duplicate {
+			return badf("agent_email_deliveries row duplicates message %q mailbox %q", scope.messageID, scope.mailboxID)
+		}
+		ic.agentEmailDeliveries[key] = scope
 	case "agent_vault_keys":
 		scope, err := ic.validateImportedVaultKey(obj)
 		if err != nil {
@@ -3366,6 +3563,554 @@ func (ic *importCtx) validateUsageScope(obj map[string]any, badf func(string, ..
 	return nil
 }
 
+func (ic *importCtx) validateImportedAgentEmailAddress(obj map[string]any) (string, agentEmailAddressImportScope, error) {
+	id, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(id, "eaddr") {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	agentID, err := requireStringField(obj, "provisioned_agent_id")
+	if err != nil || len(agentID) > 128 || containsImportedAgentEmailControl(agentID) {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("provisioned agent id is invalid")
+	}
+	if ic.agents[agentID] && ic.agentRealms[agentID] != realmID {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("provisioned agent %q is outside realm %q", agentID, realmID)
+	}
+	domain, err := requireStringField(obj, "domain")
+	if err != nil || !validImportedAgentEmailDomain(domain) {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("domain is invalid")
+	}
+	agentSegment, err := requireStringField(obj, "agent_segment")
+	if err != nil || !validImportedAgentEmailSegment(agentSegment) {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("agent_segment is invalid")
+	}
+	realmLabel, err := requireStringField(obj, "realm_label")
+	if err != nil || !validImportedAgentEmailRealmLabel(realmLabel) || realmID != "realm_"+realmLabel {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("realm_label is invalid")
+	}
+	localPart, err := requireStringField(obj, "local_part")
+	if err != nil || localPart != agentSegment+"."+realmLabel || len(localPart) > 64 {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("local_part does not match its address components")
+	}
+	provisioningKind, err := requireStringField(obj, "provisioning_kind")
+	if err != nil || provisioningKind != "derived" && provisioningKind != "operator_override" {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("provisioning_kind is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	if err != nil || ic.requireTimestampAtOrBeforeExport("agent_email_addresses created_at", valueOrZero(createdAt)) != nil {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("created_at is invalid")
+	}
+	retiredAt, retired, err := importedOptionalTimestamp(obj, "retired_at")
+	if err != nil {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("retired_at is invalid")
+	}
+	reason, hasReason, err := importedNullableBoundedString(obj, "retirement_reason_code", 64, false)
+	if err != nil || retired != hasReason || hasReason && !validImportedAgentEmailCode(reason) {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("retirement metadata is invalid")
+	}
+	if retired {
+		if retiredAt.Before(*createdAt) || ic.requireTimestampAtOrBeforeExport("agent_email_addresses retired_at", *retiredAt) != nil {
+			return "", agentEmailAddressImportScope{}, fmt.Errorf("retired_at is invalid")
+		}
+	} else if !ic.agents[agentID] || !ic.liveAgents[agentID] {
+		return "", agentEmailAddressImportScope{}, fmt.Errorf("live address belongs to a missing or deleted agent")
+	}
+	return id, agentEmailAddressImportScope{
+		realmID: realmID, agentID: agentID, domain: domain,
+		agentSegment: agentSegment, realmLabel: realmLabel,
+		localPart: localPart, retired: retired, createdAt: *createdAt,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailMailbox(obj map[string]any) (string, agentEmailMailboxImportScope, error) {
+	id, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(id, "emb") {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	ownerID, err := requireStringField(obj, "owner_agent_id")
+	if err != nil || !ic.agents[ownerID] || ic.agentRealms[ownerID] != realmID {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("owner agent %q is outside realm %q", ownerID, realmID)
+	}
+	addressID, err := requireStringField(obj, "address_id")
+	address, exists := ic.agentEmailAddresses[addressID]
+	if err != nil || !exists || address.realmID != realmID || address.agentID != ownerID {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("address %q is outside mailbox scope", addressID)
+	}
+	state, err := requireStringField(obj, "receive_state")
+	if err != nil || state != "enabled" && state != "disabled" && state != "retired" {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive_state is invalid")
+	}
+	revision, ok := importedPositiveInteger(obj["row_version"])
+	if !ok || revision > maxMessageProcessingGeneration {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("row_version is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	updatedAt, updateErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updateErr != nil || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_mailboxes created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_mailboxes updated_at", valueOrZero(updatedAt)) != nil {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("timestamps are invalid")
+	}
+	disabledAt, disabled, err := importedOptionalTimestamp(obj, "disabled_at")
+	if err != nil || disabled && (disabledAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_mailboxes disabled_at", *disabledAt) != nil) {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("disabled_at is invalid")
+	}
+	retiredAt, retired, err := importedOptionalTimestamp(obj, "retired_at")
+	if err != nil || retired && (retiredAt.Before(*createdAt) || disabled && retiredAt.Before(*disabledAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_mailboxes retired_at", *retiredAt) != nil) {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("retired_at is invalid")
+	}
+	validState := state == "enabled" && !disabled && !retired ||
+		state == "disabled" && disabled && !retired ||
+		state == "retired" && retired
+	if !validState {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive-state lifecycle shape is invalid")
+	}
+	if address.retired != (state == "retired") {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive state does not match address retirement")
+	}
+	if state == "enabled" && !ic.liveAgents[ownerID] {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("enabled mailbox belongs to a deleted agent")
+	}
+	return id, agentEmailMailboxImportScope{
+		realmID: realmID, ownerAgentID: ownerID, addressID: addressID,
+		receiveState: state, createdAt: *createdAt,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (string, agentEmailMessageImportScope, error) {
+	id, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(id, "emsg") {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	mailboxID, mailboxErr := requireStringField(obj, "mailbox_id")
+	mailbox, mailboxExists := ic.agentEmailMailboxes[mailboxID]
+	ownerID, ownerErr := requireStringField(obj, "owner_agent_id")
+	addressID, addressErr := requireStringField(obj, "address_id")
+	address, addressExists := ic.agentEmailAddresses[addressID]
+	if err != nil || mailboxErr != nil || ownerErr != nil || addressErr != nil ||
+		!mailboxExists || !addressExists || mailbox.realmID != realmID ||
+		mailbox.ownerAgentID != ownerID || mailbox.addressID != addressID ||
+		address.realmID != realmID || address.agentID != ownerID {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("mailbox, owner, address, and realm scopes do not match")
+	}
+	provider, err := requireStringField(obj, "provider")
+	if err != nil || !validImportedAgentEmailCode(provider) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("provider is invalid")
+	}
+	providerMessageID, hasProviderMessageID, err := importedNullableBoundedString(obj, "provider_message_id", 512, false)
+	if err != nil {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("provider_message_id is invalid")
+	}
+	if hasProviderMessageID && containsImportedAgentEmailControl(providerMessageID) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("provider_message_id is invalid")
+	}
+	envelopeSender, ok := obj["envelope_sender"].(string)
+	if !ok || len(envelopeSender) > 320 || containsImportedAgentEmailControl(envelopeSender) ||
+		envelopeSender != strings.ToLower(envelopeSender) ||
+		envelopeSender != "" && strings.Count(envelopeSender, "@") != 1 {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_sender is invalid")
+	}
+	envelopeRecipient, err := requireStringField(obj, "envelope_recipient")
+	if err != nil || len(envelopeRecipient) > 320 || envelopeRecipient != strings.ToLower(envelopeRecipient) ||
+		containsImportedAgentEmailControl(envelopeRecipient) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_recipient is invalid")
+	}
+	agentSegment, err := requireStringField(obj, "agent_segment")
+	realmLabel, realmLabelErr := requireStringField(obj, "realm_label")
+	if err != nil || realmLabelErr != nil || agentSegment != address.agentSegment || realmLabel != address.realmLabel {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient components do not match address")
+	}
+	subaddressTag, hasTag, err := importedNullableBoundedString(obj, "subaddress_tag", 64, false)
+	if err != nil || hasTag && containsImportedAgentEmailControl(subaddressTag) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("subaddress_tag is invalid")
+	}
+	recipient, recipientErr := agentemail.ParseRecipient(envelopeRecipient, address.domain)
+	if recipientErr != nil || recipient.LocalPart != address.localPart ||
+		recipient.AgentSegment != address.agentSegment || recipient.RealmLabel != address.realmLabel ||
+		recipient.SubaddressTag != subaddressTag || hasTag != (recipient.SubaddressTag != "") {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_recipient does not match address and subaddress")
+	}
+	rawSize, ok := importedPositiveInteger(obj["raw_size_bytes"])
+	byteaSize, byteaOK := importedByteaLength(obj["raw_mime"])
+	if !ok || rawSize > 5*1024*1024 || !byteaOK || int64(byteaSize) != rawSize {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw MIME size is invalid")
+	}
+	rawSHA, err := requireStringField(obj, "raw_sha256")
+	if err != nil || !isSHA256Hex(rawSHA) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_sha256 is invalid")
+	}
+	encodedRaw, _ := obj["raw_mime"].(string)
+	raw, decodeErr := hex.DecodeString(encodedRaw[2:])
+	if decodeErr != nil {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_mime is invalid")
+	}
+	digest := sha256.Sum256(raw)
+	if hex.EncodeToString(digest[:]) != rawSHA {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_sha256 does not match raw_mime")
+	}
+	parseState, err := requireStringField(obj, "parse_state")
+	if err != nil || parseState != AgentEmailParseParsed && parseState != AgentEmailParseError {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("parse_state is invalid")
+	}
+	parseError, hasParseError, err := importedNullableBoundedString(obj, "parse_error", 1024, false)
+	if err != nil || parseState == AgentEmailParseError != hasParseError || hasParseError && !validImportedAgentEmailCode(parseError) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("parse_error lifecycle shape is invalid")
+	}
+	parsed, parseErr := agentemail.ParseMessage(raw, true)
+	expectedParseState := AgentEmailParseParsed
+	expectedParseError := ""
+	if parseErr != nil {
+		expectedParseState = AgentEmailParseError
+		expectedParseError = agentemail.ParseErrorCode(parseErr)
+	}
+	if parseState != expectedParseState || hasParseError != (expectedParseError != "") ||
+		parseError != expectedParseError {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("MIME parse projection does not match raw_mime")
+	}
+	for _, field := range []struct {
+		name     string
+		max      int
+		expected string
+	}{
+		{name: "header_from", max: 4096, expected: parsed.HeaderFrom},
+		{name: "header_to", max: 4096, expected: parsed.HeaderTo},
+		{name: "header_subject", max: 4096, expected: parsed.HeaderSubject},
+		{name: "mime_message_id", max: 998, expected: parsed.MIMEMessageID},
+	} {
+		value, present, fieldErr := importedNullableBoundedString(obj, field.name, field.max, true)
+		if fieldErr != nil || strings.ContainsRune(value, '\x00') ||
+			present != (field.expected != "") || value != field.expected {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("%s does not match raw_mime", field.name)
+		}
+	}
+	messageDate, hasMessageDate, err := importedOptionalTimestamp(obj, "message_date")
+	if err != nil || hasMessageDate != (parsed.MessageDate != nil) ||
+		hasMessageDate && !messageDate.Equal(*parsed.MessageDate) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("message_date does not match raw_mime")
+	}
+	attachmentCount, ok := importedNonnegativeInteger(obj["attachment_count"])
+	if !ok || attachmentCount > 10000 || attachmentCount != parsed.AttachmentCount {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_count does not match raw_mime")
+	}
+	if err := validateImportedAgentEmailAdvisoryResults(obj); err != nil {
+		return "", agentEmailMessageImportScope{}, err
+	}
+	verificationState, err := requireStringField(obj, "sender_verification_state")
+	if err != nil || verificationState != "unverified" && verificationState != "verified" {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("sender_verification_state is invalid")
+	}
+	if provider == agentEmailPilotProvider {
+		if hasProviderMessageID {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot provider_message_id must be unavailable")
+		}
+		for _, field := range []string{"spf_result", "dkim_result", "dmarc_result", "spam_verdict"} {
+			value, present, fieldErr := importedNullableBoundedString(obj, field, 32, false)
+			if fieldErr != nil || !present || value != "unknown" {
+				return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot %s must be unknown", field)
+			}
+		}
+		if verificationState != AgentEmailSenderUnverified {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot sender_verification_state must be unverified")
+		}
+	}
+	duplicateGroup, err := requireStringField(obj, "duplicate_group_sha256")
+	if err != nil || !isSHA256Hex(duplicateGroup) ||
+		duplicateGroup != agentEmailDuplicateGroup(rawSHA, envelopeRecipient, envelopeSender) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("duplicate_group_sha256 is invalid")
+	}
+	possibleDuplicateID, hasPossibleDuplicate, err := importedNullableBoundedString(obj, "possible_duplicate_of_message_id", 21, false)
+	if err != nil || hasPossibleDuplicate && (!validImportedGeneratedID(possibleDuplicateID, "emsg") || possibleDuplicateID == id) {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("possible_duplicate_of_message_id is invalid")
+	}
+	receivedAt, err := requireImportedTimestamp(obj, "received_at")
+	createdAt, createdErr := requireImportedTimestamp(obj, "created_at")
+	if err != nil || createdErr != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_messages received_at", valueOrZero(receivedAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_messages created_at", valueOrZero(createdAt)) != nil {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("timestamps are invalid")
+	}
+	return id, agentEmailMessageImportScope{
+		realmID: realmID, mailboxID: mailboxID, ownerAgentID: ownerID,
+		addressID: addressID, provider: provider,
+		providerMessageID: providerMessageID, duplicateGroup: duplicateGroup,
+		possibleDuplicateID: possibleDuplicateID,
+		receivedAt:          *receivedAt, createdAt: *createdAt,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailDelivery(obj map[string]any) (agentEmailDeliveryImportScope, error) {
+	messageID, err := requireStringField(obj, "message_id")
+	message, exists := ic.agentEmailMessages[messageID]
+	if err != nil || !exists {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("message %q is not present in this archive", messageID)
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	mailboxID, mailboxErr := requireStringField(obj, "mailbox_id")
+	ownerID, ownerErr := requireStringField(obj, "owner_agent_id")
+	if err != nil || mailboxErr != nil || ownerErr != nil || realmID != message.realmID ||
+		mailboxID != message.mailboxID || ownerID != message.ownerAgentID {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("realm, mailbox, and owner do not match message")
+	}
+	folder, err := requireStringField(obj, "folder")
+	if err != nil || folder != "inbox" && folder != "quarantine" {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("folder is invalid")
+	}
+	deliveredAt, err := requireImportedTimestamp(obj, "delivered_at")
+	createdAt, createdErr := requireImportedTimestamp(obj, "created_at")
+	if err != nil || createdErr != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_deliveries delivered_at", valueOrZero(deliveredAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_deliveries created_at", valueOrZero(createdAt)) != nil {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("timestamps are invalid")
+	}
+	readAt, hasRead, err := importedOptionalTimestamp(obj, "read_at")
+	if err != nil || hasRead && (readAt.Before(*deliveredAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_deliveries read_at", *readAt) != nil) {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("read_at is invalid")
+	}
+	ackedAt, hasAck, err := importedOptionalTimestamp(obj, "acked_at")
+	if err != nil || hasAck && (!hasRead || ackedAt.Before(*readAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_deliveries acked_at", *ackedAt) != nil) {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("acked_at is invalid")
+	}
+	consumedAt, hasConsumed, err := importedOptionalTimestamp(obj, "code_consumed_at")
+	if err != nil || hasConsumed && (!hasRead || consumedAt.Before(*readAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_deliveries code_consumed_at", *consumedAt) != nil) {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("code_consumed_at is invalid")
+	}
+	processing, err := validateImportedAgentEmailProcessingShape(obj)
+	if err != nil {
+		return agentEmailDeliveryImportScope{}, err
+	}
+	if completedAt, completed, err := importedOptionalTimestamp(obj, "completed_at"); err != nil ||
+		completed && (completedAt.Before(*deliveredAt) ||
+			ic.requireTimestampAtOrBeforeExport("agent_email_deliveries completed_at", *completedAt) != nil) {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("completed_at is invalid")
+	}
+	processing.messageID = messageID
+	processing.mailboxID = mailboxID
+	return processing, nil
+}
+
+func validateImportedAgentEmailProcessingShape(obj map[string]any) (agentEmailDeliveryImportScope, error) {
+	for _, field := range []string{
+		"processing_state", "processing_generation", "failure_count", "claim_id",
+		"claim_key_hash", "lease_expires_at", "completed_at", "complete_key_hash",
+	} {
+		if _, present := obj[field]; !present {
+			return agentEmailDeliveryImportScope{}, fmt.Errorf("missing %s", field)
+		}
+	}
+	state, ok := obj["processing_state"].(string)
+	if !ok {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("processing_state is invalid")
+	}
+	generation, ok := importedGeneration(obj["processing_generation"], true)
+	if !ok {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("processing_generation is invalid")
+	}
+	failureCount, ok := importedGeneration(obj["failure_count"], true)
+	if !ok {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("failure_count is invalid")
+	}
+	claimID, hasClaim, err := importedNullableNonemptyString(obj, "claim_id")
+	if err != nil {
+		return agentEmailDeliveryImportScope{}, err
+	}
+	claimKeyHash, ok := obj["claim_key_hash"].(string)
+	if !ok {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("claim_key_hash is invalid")
+	}
+	_, hasLease, err := importedOptionalTimestamp(obj, "lease_expires_at")
+	if err != nil {
+		return agentEmailDeliveryImportScope{}, err
+	}
+	_, hasCompletedAt, err := importedOptionalTimestamp(obj, "completed_at")
+	if err != nil {
+		return agentEmailDeliveryImportScope{}, err
+	}
+	completeKeyHash, ok := obj["complete_key_hash"].(string)
+	if !ok {
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("complete_key_hash is invalid")
+	}
+	scope := agentEmailDeliveryImportScope{
+		processingState: state, processingGeneration: generation,
+		failureCount: failureCount,
+	}
+	switch state {
+	case MessageProcessingAvailable:
+		if hasClaim || claimKeyHash != "" || hasLease || hasCompletedAt || completeKeyHash != "" {
+			return agentEmailDeliveryImportScope{}, fmt.Errorf("available processing shape is invalid")
+		}
+	case MessageProcessingClaimed:
+		if generation < 1 || !hasClaim || !validImportedGeneratedID(claimID, "ecl") ||
+			!isSHA256Hex(claimKeyHash) || !hasLease || hasCompletedAt || completeKeyHash != "" {
+			return agentEmailDeliveryImportScope{}, fmt.Errorf("claimed processing shape is invalid")
+		}
+	case MessageProcessingCompleted:
+		if generation < 1 || !hasClaim || !validImportedGeneratedID(claimID, "ecl") ||
+			!isSHA256Hex(claimKeyHash) || hasLease || !hasCompletedAt || !isSHA256Hex(completeKeyHash) {
+			return agentEmailDeliveryImportScope{}, fmt.Errorf("completed processing shape is invalid")
+		}
+	default:
+		return agentEmailDeliveryImportScope{}, fmt.Errorf("processing_state is invalid")
+	}
+	return scope, nil
+}
+
+func validateImportedAgentEmailGraph(
+	messages map[string]agentEmailMessageImportScope,
+	deliveries map[string]agentEmailDeliveryImportScope,
+) error {
+	for messageID, message := range messages {
+		if _, exists := deliveries[messageID+"\x00"+message.mailboxID]; !exists {
+			return fmt.Errorf("message %q has no mailbox delivery", messageID)
+		}
+		if message.possibleDuplicateID == "" {
+			continue
+		}
+		target, exists := messages[message.possibleDuplicateID]
+		if !exists {
+			return fmt.Errorf("message %q references missing possible duplicate %q", messageID, message.possibleDuplicateID)
+		}
+		if target.realmID != message.realmID || target.mailboxID != message.mailboxID ||
+			target.ownerAgentID != message.ownerAgentID || target.addressID != message.addressID ||
+			target.duplicateGroup != message.duplicateGroup {
+			return fmt.Errorf("message %q possible duplicate is outside its duplicate group", messageID)
+		}
+	}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(messageID string) error {
+		if visiting[messageID] {
+			return fmt.Errorf("possible-duplicate graph contains a cycle at %q", messageID)
+		}
+		if visited[messageID] {
+			return nil
+		}
+		visiting[messageID] = true
+		if target := messages[messageID].possibleDuplicateID; target != "" {
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		delete(visiting, messageID)
+		visited[messageID] = true
+		return nil
+	}
+	for messageID := range messages {
+		if err := visit(messageID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateImportedAgentEmailAdvisoryResults(obj map[string]any) error {
+	allowed := map[string]map[string]bool{
+		"spf_result": {
+			"unknown": true, "none": true, "neutral": true, "pass": true,
+			"fail": true, "softfail": true, "temperror": true, "permerror": true,
+		},
+		"dkim_result": {
+			"unknown": true, "none": true, "neutral": true, "pass": true,
+			"fail": true, "policy": true, "temperror": true, "permerror": true,
+		},
+		"dmarc_result": {
+			"unknown": true, "none": true, "pass": true, "fail": true,
+			"temperror": true, "permerror": true,
+		},
+		"spam_verdict": {
+			"unknown": true, "clean": true, "spam": true, "suspected_spam": true,
+		},
+	}
+	for field, values := range allowed {
+		value, present, err := importedNullableBoundedString(obj, field, 32, false)
+		if err != nil || present && !values[value] {
+			return fmt.Errorf("%s is invalid", field)
+		}
+	}
+	return nil
+}
+
+func importedNullableBoundedString(obj map[string]any, field string, maxBytes int, allowEmpty bool) (string, bool, error) {
+	raw, exists := obj[field]
+	if !exists {
+		return "", false, fmt.Errorf("missing %s", field)
+	}
+	if raw == nil {
+		return "", false, nil
+	}
+	value, ok := raw.(string)
+	if !ok || len(value) > maxBytes || !allowEmpty && value == "" {
+		return "", false, fmt.Errorf("%s is invalid", field)
+	}
+	return value, true, nil
+}
+
+func validImportedAgentEmailDomain(value string) bool {
+	normalized, err := agentemail.ValidateDomain(value)
+	return err == nil && normalized == value
+}
+
+func validImportedAgentEmailSegment(value string) bool {
+	normalized, err := agentemail.ValidateAgentSegment(value)
+	return err == nil && normalized == value
+}
+
+func validImportedAgentEmailRealmLabel(value string) bool {
+	if len(value) != 16 {
+		return false
+	}
+	for i := range value {
+		if value[i] < 'a' || value[i] > 'z' {
+			if value[i] < '2' || value[i] > '7' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validImportedAgentEmailCode(value string) bool {
+	if len(value) < 1 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := range value {
+		c := value[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '.' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func containsImportedAgentEmailControl(value string) bool {
+	for i := range value {
+		if value[i] < 0x20 || value[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func valueOrZero(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
+}
+
 // requireStringField reads a JSON string field; treats JSON null / missing / wrong-type as absent.
 func requireStringField(obj map[string]any, key string) (string, error) {
 	s, ok := stringField(obj, key)
@@ -4006,6 +4751,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := ic.normalizeImportedMessageClaim(table, obj); err != nil {
 				return err
 			}
+			if err := ic.normalizeImportedAgentEmailClaim(table, obj); err != nil {
+				return err
+			}
 			if err := ic.normalizeImportedMessageRequestClaim(table, obj, importedAt); err != nil {
 				return err
 			}
@@ -4036,6 +4784,9 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	}
 	if err := ic.validateImportedSecretGraph(); err != nil {
 		return export.Manifest{}, fmt.Errorf("%w: secret graph: %v", ErrArchiveContent, err)
+	}
+	if err := validateImportedAgentEmailGraph(ic.agentEmailMessages, ic.agentEmailDeliveries); err != nil {
+		return export.Manifest{}, fmt.Errorf("%w: agent email graph: %v", ErrArchiveContent, err)
 	}
 	if m.SchemaVersion < 35 {
 		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {

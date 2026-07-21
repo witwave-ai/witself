@@ -95,6 +95,19 @@ const (
 	VerbMessageProcessingReleased  = "message.processing.released"
 	VerbMessageProcessingCompleted = "message.processing.completed"
 
+	// Receive-only agent email. Raw MIME, decoded content, header values,
+	// envelope addresses, claim capabilities, and retry keys never enter the
+	// account ledger.
+	VerbAgentEmailAddressProvisioned  = "agent_email.address.provisioned"
+	VerbAgentEmailReceived            = "agent_email.received"
+	VerbAgentEmailRead                = "agent_email.read"
+	VerbAgentEmailAcked               = "agent_email.acked"
+	VerbAgentEmailCodeConsumed        = "agent_email.code_consumed"
+	VerbAgentEmailProcessingClaimed   = "agent_email.processing.claimed"
+	VerbAgentEmailProcessingRenewed   = "agent_email.processing.renewed"
+	VerbAgentEmailProcessingReleased  = "agent_email.processing.released"
+	VerbAgentEmailProcessingCompleted = "agent_email.processing.completed"
+
 	// Realm-wide request coordination. These events intentionally carry only
 	// stable ids and decimal counters. Offer/result content, raw idempotency
 	// keys, claim capabilities, and lease timestamps remain in their canonical
@@ -426,6 +439,28 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbMessageProcessingRenewed:   messageProcessingEventSpec(false),
 	VerbMessageProcessingReleased:  messageProcessingEventSpec(false),
 	VerbMessageProcessingCompleted: messageProcessingEventSpec(true),
+	VerbAgentEmailAddressProvisioned: {
+		requiredKeys:  []string{"address_id", "mailbox_id", "owner_agent_id", "realm_id"},
+		allowedKeys:   []string{"address_id", "mailbox_id", "owner_agent_id", "realm_id"},
+		allowedActors: []string{ActorSystem},
+	},
+	VerbAgentEmailReceived: {
+		requiredKeys: []string{
+			"message_id", "mailbox_id", "owner_agent_id", "address_id", "raw_size_bytes",
+		},
+		allowedKeys: []string{
+			"message_id", "mailbox_id", "owner_agent_id", "address_id", "raw_size_bytes",
+			"possible_duplicate",
+		},
+		allowedActors: []string{ActorSystem},
+	},
+	VerbAgentEmailRead:                agentEmailEventSpec(false),
+	VerbAgentEmailAcked:               agentEmailEventSpec(false),
+	VerbAgentEmailCodeConsumed:        agentEmailEventSpec(false),
+	VerbAgentEmailProcessingClaimed:   agentEmailEventSpec(true),
+	VerbAgentEmailProcessingRenewed:   agentEmailEventSpec(true),
+	VerbAgentEmailProcessingReleased:  agentEmailEventSpec(true),
+	VerbAgentEmailProcessingCompleted: agentEmailEventSpec(true),
 	VerbMessageRequestOpened: messageRequestEventSpec(
 		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",
 	),
@@ -733,6 +768,18 @@ func messageProcessingEventSpec(completed bool) verbSpec {
 		required = append(required, "result_message_id")
 	}
 	return verbSpec{requiredKeys: required, allowedKeys: allowed, allowedActors: []string{ActorAgent}}
+}
+
+func agentEmailEventSpec(processing bool) verbSpec {
+	required := []string{"message_id", "mailbox_id", "owner_agent_id", "address_id"}
+	if processing {
+		required = append(required, "processing_generation", "failure_count")
+	}
+	return verbSpec{
+		requiredKeys:  required,
+		allowedKeys:   required,
+		allowedActors: []string{ActorAgent},
+	}
 }
 
 func messageRequestEventSpec(keys ...string) verbSpec {

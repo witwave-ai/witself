@@ -175,6 +175,12 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 	if activeVaultLifecycle {
 		return ErrVaultLifecycleInProgress
 	}
+	// Email content is owned by the principal and is purged with a future hard
+	// agent delete, but the address reservation must become unroutable now and
+	// survive that delete so a re-created name cannot inherit it.
+	if err := retireAgentEmailMailboxTx(ctx, tx, accountID, realmID, agentID, "agent_deleted"); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE tokens SET consumed_at = now()

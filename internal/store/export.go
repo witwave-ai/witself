@@ -274,6 +274,71 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		// Agent-email address reservations intentionally retain retired rows. The
+		// remaining streams follow their foreign-key dependency order, and raw
+		// MIME uses the archive's canonical lowercase bytea hex representation.
+		&querySource{tx: tx, table: "agent_email_addresses", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'provisioned_agent_id', provisioned_agent_id,
+			  'domain', domain, 'agent_segment', agent_segment,
+			  'realm_label', realm_label, 'local_part', local_part,
+			  'provisioning_kind', provisioning_kind,
+			  'created_at', created_at, 'retired_at', retired_at,
+			  'retirement_reason_code', retirement_reason_code)
+			FROM agent_email_addresses WHERE account_id = $1
+			ORDER BY realm_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_mailboxes", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'address_id', address_id,
+			  'receive_state', receive_state, 'row_version', row_version,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'disabled_at', disabled_at, 'retired_at', retired_at)
+			FROM agent_email_mailboxes WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_messages", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'mailbox_id', mailbox_id, 'owner_agent_id', owner_agent_id,
+			  'address_id', address_id, 'provider', provider,
+			  'provider_message_id', provider_message_id,
+			  'envelope_sender', envelope_sender,
+			  'envelope_recipient', envelope_recipient,
+			  'agent_segment', agent_segment, 'realm_label', realm_label,
+			  'subaddress_tag', subaddress_tag,
+			  'raw_mime', E'\\x' || encode(raw_mime, 'hex'),
+			  'raw_size_bytes', raw_size_bytes, 'raw_sha256', raw_sha256,
+			  'parse_state', parse_state, 'parse_error', parse_error,
+			  'header_from', header_from, 'header_to', header_to,
+			  'header_subject', header_subject,
+			  'mime_message_id', mime_message_id, 'message_date', message_date,
+			  'attachment_count', attachment_count,
+			  'spf_result', spf_result, 'dkim_result', dkim_result,
+			  'dmarc_result', dmarc_result, 'spam_verdict', spam_verdict,
+			  'sender_verification_state', sender_verification_state,
+			  'duplicate_group_sha256', duplicate_group_sha256,
+			  'possible_duplicate_of_message_id', possible_duplicate_of_message_id,
+			  'received_at', received_at, 'created_at', created_at)
+			FROM agent_email_messages WHERE account_id = $1
+			ORDER BY realm_id, mailbox_id, received_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_deliveries", q: `
+			SELECT jsonb_build_object(
+			  'message_id', message_id, 'account_id', account_id,
+			  'realm_id', realm_id, 'mailbox_id', mailbox_id,
+			  'owner_agent_id', owner_agent_id, 'folder', folder,
+			  'delivered_at', delivered_at, 'read_at', read_at,
+			  'acked_at', acked_at, 'code_consumed_at', code_consumed_at,
+			  'processing_state', processing_state,
+			  'processing_generation', processing_generation,
+			  'failure_count', failure_count,
+			  'claim_id', claim_id, 'claim_key_hash', claim_key_hash,
+			  'lease_expires_at', lease_expires_at,
+			  'completed_at', completed_at,
+			  'complete_key_hash', complete_key_hash,
+			  'created_at', created_at)
+			FROM agent_email_deliveries WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id, delivered_at, message_id, mailbox_id`, arg: accountID},
 		// The AVK itself is never exported. These streams preserve only its
 		// public binding plus byte-identical ciphertext and wrapped DEKs so the
 		// same client-held key can reopen the vault after a cell move.
