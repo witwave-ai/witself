@@ -196,7 +196,10 @@ export async function handleEmail(message, env, runtime = {}) {
       method: "POST",
       headers: relayHeaders(metadata, signature),
       body: raw,
-      redirect: "error",
+      // Cloudflare Workers implements follow/manual, not RequestRedirect
+      // "error". Manual keeps the signed relay headers on this exact origin;
+      // any 3xx falls through to the fail-closed response check below.
+      redirect: "manual",
       signal: controller.signal,
     });
     verdict = exactVerdict(await boundedResponseText(response));

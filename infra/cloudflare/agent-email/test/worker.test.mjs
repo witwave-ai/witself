@@ -57,6 +57,7 @@ test("email-only handler signs and relays the byte-identical raw message", async
   assert.deepEqual(mail.rejected, []);
   assert.equal(request.url, example.ingest_url);
   assert.equal(request.init.method, "POST");
+  assert.equal(request.init.redirect, "manual");
   assert.deepEqual(Buffer.from(request.init.body), raw);
   const headers = request.init.headers;
   assert.equal(headers.get("X-Witself-Email-Version"), "witself-email-relay-pilot-v1");
