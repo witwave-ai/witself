@@ -48,6 +48,7 @@ var upgraders = map[int]Upgrader{
 	54: preserveSchema54Rows,
 	55: preserveSchema55Rows,
 	56: preserveSchema56Rows,
+	57: preserveSchema57Rows,
 }
 
 const (
@@ -62,6 +63,15 @@ const (
 // passes through unchanged; the destination simply imports the new table as
 // an empty stream.
 func preserveSchema56Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema57Rows acknowledges the transcript_coverage input kind added
+// by migration 0058. The migration only widens the input-kind check and adds
+// a nullable coverage_counts column, so a schema-57 archive — which can only
+// contain the four original input kinds and no coverage counts — imports
+// unchanged into the widened shape.
+func preserveSchema57Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

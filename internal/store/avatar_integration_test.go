@@ -965,6 +965,12 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}
+	assertMigrationTestVersion(t, dsn, 57)
+	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "coverage_counts", false)
+	assertMigrationTestTable(t, st, "agent_dashboard_preferences", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
 	assertMigrationTestVersion(t, dsn, 56)
 	assertMigrationTestTable(t, st, "agent_dashboard_preferences", false)
 	assertMigrationTestTable(t, st, "secrets", true)

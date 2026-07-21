@@ -302,9 +302,15 @@ func memoryCurateShow(args []string) int {
 		return printJSON(page)
 	}
 	for _, input := range page.Inputs {
-		fmt.Printf("%d\t%s\tmemory=%s@%d\tevidence=%s\ttranscript=%s:%d-%d\n",
+		coverage := ""
+		if input.CoverageCounts != nil {
+			coverage = fmt.Sprintf("\tcoverage=calls:%d,results:%d,signal:%d",
+				input.CoverageCounts.ToolCalls, input.CoverageCounts.ToolResults,
+				input.CoverageCounts.Signal)
+		}
+		fmt.Printf("%d\t%s\tmemory=%s@%d\tevidence=%s\ttranscript=%s:%d-%d%s\n",
 			input.Ordinal, input.Kind, input.MemoryID, input.MemoryVersion, input.EvidenceID,
-			input.TranscriptID, input.SequenceFrom, input.SequenceUntil)
+			input.TranscriptID, input.SequenceFrom, input.SequenceUntil, coverage)
 	}
 	if page.NextCursor != "" {
 		fmt.Printf("next-cursor\t%s\n", page.NextCursor)

@@ -987,7 +987,8 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'cursor_source_kind', cursor_source_kind,
 			  'cursor_stream_id', cursor_stream_id,
 			  'cursor_expected_prior', cursor_expected_prior,
-			  'cursor_upper', cursor_upper, 'created_at', created_at)
+			  'cursor_upper', cursor_upper,
+			  'coverage_counts', coverage_counts, 'created_at', created_at)
 			FROM memory_curation_run_inputs WHERE account_id = $1
 			ORDER BY run_id, ordinal`, arg: accountID},
 		&querySource{tx: tx, table: "memory_curation_actions", q: `

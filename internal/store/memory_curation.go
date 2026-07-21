@@ -41,6 +41,10 @@ const (
 	MemoryCurationInputEvidence   = "evidence"
 	MemoryCurationInputTranscript = "transcript"
 	MemoryCurationInputCursor     = "cursor"
+	// MemoryCurationInputTranscriptCoverage is one value-free fast-forwarded
+	// observational window: inclusive bounds plus frozen per-class entry
+	// counts, standing in for individually materialized tool-event entries.
+	MemoryCurationInputTranscriptCoverage = "transcript_coverage"
 
 	MemoryCurationSourceMemory     = "memory"
 	MemoryCurationSourceEvidence   = "evidence"
@@ -75,6 +79,15 @@ const (
 	maxMemoryCurationInputBytes     = 256 * 1024
 	maxMemoryCurationEntryBodyBytes = 16 * 1024
 	maxMemoryCurationPageBytes      = 1 << 20
+
+	// Fast-forward observational coverage: a transcript stream more than the
+	// threshold behind materializes only signal entries at full fidelity plus
+	// one value-free coverage input for the window, so tool-event backlog
+	// drains in one reviewed cycle. Entries whose stored payload kind is
+	// tool.call or tool.result are observational; everything else — including
+	// entries with no payload kind — is signal.
+	memoryCurationFastForwardThreshold = int64(2000)
+	memoryCurationFastForwardMaxWindow = int64(100_000)
 )
 
 // Memory curation errors classify stable authorization, validation, lifecycle,
@@ -282,23 +295,32 @@ type FinishMemoryCurationResult = RenewMemoryCurationResult
 // data inputs, the exact payload resolved from that reference. Cursor inputs
 // carry only value-free expected/upper sequence bounds.
 type MemoryCurationRunInput struct {
-	RunID               string            `json:"run_id"`
-	Ordinal             int64             `json:"ordinal"`
-	Kind                string            `json:"kind"`
-	MemoryID            string            `json:"memory_id,omitempty"`
-	MemoryVersion       int64             `json:"memory_version,omitempty"`
-	EvidenceID          string            `json:"evidence_id,omitempty"`
-	TranscriptID        string            `json:"transcript_id,omitempty"`
-	SequenceFrom        int64             `json:"sequence_from,omitempty"`
-	SequenceUntil       int64             `json:"sequence_until,omitempty"`
-	CursorSourceKind    string            `json:"cursor_source_kind,omitempty"`
-	CursorStreamID      string            `json:"cursor_stream_id,omitempty"`
-	CursorExpectedPrior int64             `json:"cursor_expected_prior,omitempty"`
-	CursorUpper         int64             `json:"cursor_upper,omitempty"`
-	Memory              *Memory           `json:"memory,omitempty"`
-	Evidence            *MemoryEvidence   `json:"evidence,omitempty"`
-	TranscriptEntries   []TranscriptEntry `json:"transcript_entries,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
+	RunID               string                        `json:"run_id"`
+	Ordinal             int64                         `json:"ordinal"`
+	Kind                string                        `json:"kind"`
+	MemoryID            string                        `json:"memory_id,omitempty"`
+	MemoryVersion       int64                         `json:"memory_version,omitempty"`
+	EvidenceID          string                        `json:"evidence_id,omitempty"`
+	TranscriptID        string                        `json:"transcript_id,omitempty"`
+	SequenceFrom        int64                         `json:"sequence_from,omitempty"`
+	SequenceUntil       int64                         `json:"sequence_until,omitempty"`
+	CursorSourceKind    string                        `json:"cursor_source_kind,omitempty"`
+	CursorStreamID      string                        `json:"cursor_stream_id,omitempty"`
+	CursorExpectedPrior int64                         `json:"cursor_expected_prior,omitempty"`
+	CursorUpper         int64                         `json:"cursor_upper,omitempty"`
+	Memory              *Memory                       `json:"memory,omitempty"`
+	Evidence            *MemoryEvidence               `json:"evidence,omitempty"`
+	TranscriptEntries   []TranscriptEntry             `json:"transcript_entries,omitempty"`
+	CoverageCounts      *MemoryCurationCoverageCounts `json:"coverage_counts,omitempty"`
+	CreatedAt           time.Time                     `json:"created_at"`
+}
+
+// MemoryCurationCoverageCounts freezes the deterministic per-class entry
+// counts for one fast-forwarded observational window.
+type MemoryCurationCoverageCounts struct {
+	ToolCalls   int64 `json:"tool_calls"`
+	ToolResults int64 `json:"tool_results"`
+	Signal      int64 `json:"signal"`
 }
 
 // MemoryCurationRunInputPage contains one page of immutable run inputs.
@@ -869,20 +891,28 @@ type memoryCurationInputCounts struct {
 }
 
 func insertMemoryCurationRunInputTx(ctx context.Context, tx pgx.Tx, p Principal, input *MemoryCurationRunInput, orderKey string) error {
+	var coverage any
+	if input.CoverageCounts != nil {
+		encoded, err := json.Marshal(input.CoverageCounts)
+		if err != nil {
+			return fmt.Errorf("encode curation coverage counts: %w", err)
+		}
+		coverage = encoded
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO memory_curation_run_inputs
 		  (run_id,ordinal,account_id,realm_id,owner_kind,owner_id,input_kind,
 		   order_key,memory_id,memory_version,evidence_id,transcript_id,
 		   sequence_from,sequence_until,cursor_source_kind,cursor_stream_id,
-		   cursor_expected_prior,cursor_upper)
+		   cursor_expected_prior,cursor_upper,coverage_counts)
 		VALUES ($1,$2,$3,$4,'agent',$5,$6,$7,NULLIF($8,''),NULLIF($9,0),
 		        NULLIF($10,''),NULLIF($11,''),NULLIF($12,0),NULLIF($13,0),
-		        NULLIF($14,''),NULLIF($15,''),$16,$17)`, input.RunID, input.Ordinal,
+		        NULLIF($14,''),NULLIF($15,''),$16,$17,$18)`, input.RunID, input.Ordinal,
 		p.AccountID, p.RealmID, p.ID, input.Kind, orderKey, input.MemoryID,
 		input.MemoryVersion, input.EvidenceID, input.TranscriptID,
 		input.SequenceFrom, input.SequenceUntil, input.CursorSourceKind,
 		input.CursorStreamID, nullableCurationCursorValue(input.Kind, input.CursorExpectedPrior),
-		nullableCurationCursorValue(input.Kind, input.CursorUpper))
+		nullableCurationCursorValue(input.Kind, input.CursorUpper), coverage)
 	if err != nil {
 		return fmt.Errorf("insert curation run input: %w", err)
 	}
@@ -912,7 +942,7 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 			counts.memories++
 		case MemoryCurationInputEvidence:
 			counts.evidence++
-		case MemoryCurationInputTranscript:
+		case MemoryCurationInputTranscript, MemoryCurationInputTranscriptCoverage:
 			counts.transcripts++
 		case MemoryCurationInputCursor:
 			counts.cursors++
@@ -1122,6 +1152,54 @@ func materializeMemoryCurationInputsTx(ctx context.Context, tx pgx.Tx, p Princip
 			if fairShare < 1 {
 				fairShare = 1
 			}
+			if available > memoryCurationFastForwardThreshold {
+				// Fast-forward: freeze signal entries individually plus one
+				// value-free coverage input for the observational bulk, so the
+				// cursor drains the deep window in this single reviewed cycle.
+				if available > memoryCurationFastForwardMaxWindow {
+					upper = expected + memoryCurationFastForwardMaxWindow
+				}
+				signals, err := loadMemoryCurationSignalSequences(ctx, tx, p,
+					stream.id, expected+1, upper, fairShare+1)
+				if err != nil {
+					return counts, 0, 0, err
+				}
+				if len(signals) > fairShare {
+					// End the window before the first signal entry that no
+					// longer fits the run's entry budget; the remainder stays
+					// backlog for the next cycle.
+					upper = signals[fairShare] - 1
+					signals = signals[:fairShare]
+				}
+				coverage, err := loadMemoryCurationCoverageCounts(ctx, tx, p,
+					stream.id, expected+1, upper)
+				if err != nil {
+					return counts, 0, 0, err
+				}
+				if err := appendInput(MemoryCurationRunInput{
+					Kind: MemoryCurationInputCursor, CursorSourceKind: MemoryCurationSourceTranscript,
+					CursorStreamID: stream.id, CursorExpectedPrior: expected, CursorUpper: upper,
+				}, fmt.Sprintf("05/cursor/transcript/%s", stream.id)); err != nil {
+					return counts, 0, 0, err
+				}
+				for _, sequence := range signals {
+					if err := appendInput(MemoryCurationRunInput{
+						Kind: MemoryCurationInputTranscript, TranscriptID: stream.id,
+						SequenceFrom: sequence, SequenceUntil: sequence,
+					}, fmt.Sprintf("06/transcript/%s/%020d", stream.id, sequence)); err != nil {
+						return counts, 0, 0, err
+					}
+				}
+				if err := appendInput(MemoryCurationRunInput{
+					Kind: MemoryCurationInputTranscriptCoverage, TranscriptID: stream.id,
+					SequenceFrom: expected + 1, SequenceUntil: upper,
+					CoverageCounts: &coverage,
+				}, fmt.Sprintf("07/transcript_coverage/%s", stream.id)); err != nil {
+					return counts, 0, 0, err
+				}
+				remaining -= len(signals)
+				continue
+			}
 			if available > int64(fairShare) {
 				upper = expected + int64(fairShare)
 			}
@@ -1316,6 +1394,59 @@ func loadMemoryCurationTranscriptEntrySizes(ctx context.Context, tx pgx.Tx, p Pr
 		return nil, err
 	}
 	return sizes, nil
+}
+
+// memoryCurationObservationalKindsSQL is the exact deterministic denylist:
+// entries whose stored payload kind matches are observational; every other
+// entry, including entries with no payload kind, is signal.
+const memoryCurationObservationalKindsSQL = `COALESCE(payload->>'kind','') IN ('tool.call','tool.result')`
+
+// loadMemoryCurationSignalSequences returns the ordered sequences of signal
+// entries in [from,until], bounded to limit rows so a fast-forward window can
+// split at the first signal entry that no longer fits the run's entry budget.
+func loadMemoryCurationSignalSequences(ctx context.Context, tx pgx.Tx, p Principal, transcriptID string, from, until int64, limit int) ([]int64, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT sequence FROM transcript_entries
+		WHERE transcript_id=$1 AND account_id=$2 AND realm_id=$3
+		  AND recorded_by_agent_id=$4 AND sequence BETWEEN $5 AND $6
+		  AND NOT (`+memoryCurationObservationalKindsSQL+`)
+		ORDER BY sequence LIMIT $7`,
+		transcriptID, p.AccountID, p.RealmID, p.ID, from, until, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load curation signal sequences: %w", err)
+	}
+	defer rows.Close()
+	sequences := make([]int64, 0)
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			return nil, err
+		}
+		sequences = append(sequences, sequence)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sequences, nil
+}
+
+// loadMemoryCurationCoverageCounts freezes the deterministic per-class entry
+// counts for one fast-forward window.
+func loadMemoryCurationCoverageCounts(ctx context.Context, tx pgx.Tx, p Principal, transcriptID string, from, until int64) (MemoryCurationCoverageCounts, error) {
+	var counts MemoryCurationCoverageCounts
+	err := tx.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE COALESCE(payload->>'kind','')='tool.call'),
+		       COUNT(*) FILTER (WHERE COALESCE(payload->>'kind','')='tool.result'),
+		       COUNT(*) FILTER (WHERE NOT (`+memoryCurationObservationalKindsSQL+`))
+		FROM transcript_entries
+		WHERE transcript_id=$1 AND account_id=$2 AND realm_id=$3
+		  AND recorded_by_agent_id=$4 AND sequence BETWEEN $5 AND $6`,
+		transcriptID, p.AccountID, p.RealmID, p.ID, from, until).
+		Scan(&counts.ToolCalls, &counts.ToolResults, &counts.Signal)
+	if err != nil {
+		return counts, fmt.Errorf("load curation coverage counts: %w", err)
+	}
+	return counts, nil
 }
 
 // chunkMemoryCurationTranscriptWindow splits [from,until] into contiguous
@@ -1952,7 +2083,7 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 		       COALESCE(transcript_id,''),COALESCE(sequence_from,0),
 		       COALESCE(sequence_until,0),COALESCE(cursor_source_kind,''),
 		       COALESCE(cursor_stream_id,''),COALESCE(cursor_expected_prior,0),
-		       COALESCE(cursor_upper,0),created_at
+		       COALESCE(cursor_upper,0),coverage_counts,created_at
 		FROM memory_curation_run_inputs
 		WHERE run_id=$1 AND account_id=$2 AND realm_id=$3 AND owner_kind='agent'
 		  AND owner_id=$4 AND ordinal>$5
@@ -1964,13 +2095,23 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 	inputs := make([]MemoryCurationRunInput, 0, limit+1)
 	for rows.Next() {
 		var input MemoryCurationRunInput
+		var coverage []byte
 		if err := rows.Scan(&input.RunID, &input.Ordinal, &input.Kind,
 			&input.MemoryID, &input.MemoryVersion, &input.EvidenceID,
 			&input.TranscriptID, &input.SequenceFrom, &input.SequenceUntil,
 			&input.CursorSourceKind, &input.CursorStreamID,
-			&input.CursorExpectedPrior, &input.CursorUpper, &input.CreatedAt); err != nil {
+			&input.CursorExpectedPrior, &input.CursorUpper, &coverage,
+			&input.CreatedAt); err != nil {
 			rows.Close()
 			return MemoryCurationRunInputPage{}, err
+		}
+		if len(coverage) > 0 {
+			counts := MemoryCurationCoverageCounts{}
+			if err := json.Unmarshal(coverage, &counts); err != nil {
+				rows.Close()
+				return MemoryCurationRunInputPage{}, fmt.Errorf("decode curation coverage counts: %w", err)
+			}
+			input.CoverageCounts = &counts
 		}
 		inputs = append(inputs, input)
 	}
@@ -2091,6 +2232,9 @@ func hydrateMemoryCurationRunInput(ctx context.Context, q memoryQuerier, p Princ
 			return ErrMemoryCurationConflict
 		}
 		boundMemoryCurationTranscriptEntries(input.TranscriptEntries)
+	case MemoryCurationInputTranscriptCoverage:
+		// Value-free membership: the frozen bounds and counts are the input.
+		return nil
 	case MemoryCurationInputCursor:
 		return nil
 	default:

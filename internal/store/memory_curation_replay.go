@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -65,7 +66,7 @@ func materializeMemoryCurationReplayInputsTx(
 	rows, err := tx.Query(ctx, `
 		SELECT ordinal,input_kind,COALESCE(memory_id,''),COALESCE(memory_version,0),
 		       COALESCE(evidence_id,''),COALESCE(transcript_id,''),
-		       COALESCE(sequence_from,0),COALESCE(sequence_until,0)
+		       COALESCE(sequence_from,0),COALESCE(sequence_until,0),coverage_counts
 		FROM memory_curation_run_inputs
 		WHERE run_id=$1 AND account_id=$2 AND realm_id=$3
 		  AND owner_kind='agent' AND owner_id=$4 AND input_kind<>'cursor'
@@ -82,11 +83,20 @@ func materializeMemoryCurationReplayInputsTx(
 	for rows.Next() {
 		var originalOrdinal int64
 		var input MemoryCurationRunInput
+		var coverage []byte
 		if err := rows.Scan(&originalOrdinal, &input.Kind, &input.MemoryID,
 			&input.MemoryVersion, &input.EvidenceID, &input.TranscriptID,
-			&input.SequenceFrom, &input.SequenceUntil); err != nil {
+			&input.SequenceFrom, &input.SequenceUntil, &coverage); err != nil {
 			rows.Close()
 			return counts, 0, 0, err
+		}
+		if len(coverage) > 0 {
+			decoded := MemoryCurationCoverageCounts{}
+			if err := json.Unmarshal(coverage, &decoded); err != nil {
+				rows.Close()
+				return counts, 0, 0, fmt.Errorf("decode replay coverage counts: %w", err)
+			}
+			input.CoverageCounts = &decoded
 		}
 		if input.Kind == MemoryCurationInputEvidence {
 			evidenceIDs = append(evidenceIDs, input.EvidenceID)

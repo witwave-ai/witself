@@ -548,7 +548,7 @@ var importColumns = map[string]map[string]bool{
 		"transcript_id": true, "sequence_from": true, "sequence_until": true,
 		"cursor_source_kind": true, "cursor_stream_id": true,
 		"cursor_expected_prior": true, "cursor_upper": true,
-		"created_at": true,
+		"coverage_counts": true, "created_at": true,
 	},
 	"memory_curation_actions": {
 		"id": true, "run_id": true, "account_id": true,
@@ -3065,6 +3065,25 @@ func (ic *importCtx) validateImportedCurationRunInput(
 			transcript.ownerAgentID != run.owner.ownerID || !fromOK || !untilOK ||
 			until < from || until >= transcript.nextSequence {
 			return fmt.Errorf("transcript input range is outside its owner stream")
+		}
+	case "transcript_coverage":
+		transcriptID, err := requireStringField(obj, "transcript_id")
+		transcript, exists := ic.transcripts[transcriptID]
+		from, fromOK := importedGeneration(obj["sequence_from"], false)
+		until, untilOK := importedGeneration(obj["sequence_until"], false)
+		if err != nil || !exists || transcript.realmID != run.owner.realmID ||
+			transcript.ownerAgentID != run.owner.ownerID || !fromOK || !untilOK ||
+			until < from || until >= transcript.nextSequence {
+			return fmt.Errorf("transcript coverage range is outside its owner stream")
+		}
+		counts, ok := obj["coverage_counts"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("coverage input counts are invalid")
+		}
+		for _, field := range []string{"tool_calls", "tool_results", "signal"} {
+			if _, ok := importedGeneration(counts[field], true); !ok {
+				return fmt.Errorf("coverage input counts are invalid")
+			}
 		}
 	case "cursor":
 		sourceKind, err := requireStringField(obj, "cursor_source_kind")

@@ -324,23 +324,32 @@ type FinishMemoryCurationResult = RenewMemoryCurationResult
 // MemoryCurationRunInput contains an immutable membership reference and its
 // materialized payload, or value-free cursor bounds.
 type MemoryCurationRunInput struct {
-	RunID               string            `json:"run_id"`
-	Ordinal             int64             `json:"ordinal"`
-	Kind                string            `json:"kind"`
-	MemoryID            string            `json:"memory_id,omitempty"`
-	MemoryVersion       int64             `json:"memory_version,omitempty"`
-	EvidenceID          string            `json:"evidence_id,omitempty"`
-	TranscriptID        string            `json:"transcript_id,omitempty"`
-	SequenceFrom        int64             `json:"sequence_from,omitempty"`
-	SequenceUntil       int64             `json:"sequence_until,omitempty"`
-	CursorSourceKind    string            `json:"cursor_source_kind,omitempty"`
-	CursorStreamID      string            `json:"cursor_stream_id,omitempty"`
-	CursorExpectedPrior int64             `json:"cursor_expected_prior,omitempty"`
-	CursorUpper         int64             `json:"cursor_upper,omitempty"`
-	Memory              *Memory           `json:"memory,omitempty"`
-	Evidence            *MemoryEvidence   `json:"evidence,omitempty"`
-	TranscriptEntries   []TranscriptEntry `json:"transcript_entries,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
+	RunID               string                        `json:"run_id"`
+	Ordinal             int64                         `json:"ordinal"`
+	Kind                string                        `json:"kind"`
+	MemoryID            string                        `json:"memory_id,omitempty"`
+	MemoryVersion       int64                         `json:"memory_version,omitempty"`
+	EvidenceID          string                        `json:"evidence_id,omitempty"`
+	TranscriptID        string                        `json:"transcript_id,omitempty"`
+	SequenceFrom        int64                         `json:"sequence_from,omitempty"`
+	SequenceUntil       int64                         `json:"sequence_until,omitempty"`
+	CursorSourceKind    string                        `json:"cursor_source_kind,omitempty"`
+	CursorStreamID      string                        `json:"cursor_stream_id,omitempty"`
+	CursorExpectedPrior int64                         `json:"cursor_expected_prior,omitempty"`
+	CursorUpper         int64                         `json:"cursor_upper,omitempty"`
+	Memory              *Memory                       `json:"memory,omitempty"`
+	Evidence            *MemoryEvidence               `json:"evidence,omitempty"`
+	TranscriptEntries   []TranscriptEntry             `json:"transcript_entries,omitempty"`
+	CoverageCounts      *MemoryCurationCoverageCounts `json:"coverage_counts,omitempty"`
+	CreatedAt           time.Time                     `json:"created_at"`
+}
+
+// MemoryCurationCoverageCounts mirrors the frozen per-class entry counts of
+// one fast-forwarded observational transcript window.
+type MemoryCurationCoverageCounts struct {
+	ToolCalls   int64 `json:"tool_calls"`
+	ToolResults int64 `json:"tool_results"`
+	Signal      int64 `json:"signal"`
 }
 
 // MemoryCurationRunInputPage is one opaque-cursor page of frozen run inputs.
