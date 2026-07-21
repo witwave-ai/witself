@@ -36,6 +36,28 @@ test("Cloudflare client exposes no catch-all mutation and uses exact documented 
   assert.equal(calls.every(({ headers }) => headers.Authorization === "Bearer test-token"), true);
 });
 
+test("Cloudflare client reads zone Email Routing settings without a mutation path", async () => {
+  const calls = [];
+  const fetchAPI = async (url, init) => {
+    calls.push({ url, ...init });
+    return Response.json({
+      success: true,
+      errors: [],
+      messages: [],
+      result: { enabled: true, status: "ready", support_subaddress: true },
+    });
+  };
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32), zoneID: "b".repeat(32), apiToken: "settings-token", fetchAPI,
+  });
+
+  assert.equal((await api.getEmailRoutingSettings()).support_subaddress, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+  assert.match(calls[0].url, new RegExp(`/zones/${"b".repeat(32)}/email/routing$`));
+  assert.equal(typeof api.updateEmailRoutingSettings, "undefined");
+});
+
 test("Analytics Engine query uses the account-scoped SQL endpoint and remains value-free", async () => {
   const calls = [];
   const fetchAPI = async (url, init) => {

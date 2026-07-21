@@ -21,7 +21,9 @@ response containing exactly `{"verdict":"accepted"}` counts as SMTP success.
 - Do not put relay private-key material in the manifest, generated Wrangler
   configuration, Git, logs, or cell configuration.
 - Treat `pilot.example.json` as a shape example, not deployable values.
-- Run `status` and review the exact literal routes before activation.
+- Enable Email Routing subaddressing and run `status` to review the exact
+  literal routes before activation. The route manager reports the live setting
+  and refuses preparation or activation if it cannot be read or is disabled.
 - Do not activate until the destination cell is enabled and healthy.
 - A failed operation attempts to disable the pilot gate and its managed rules;
   inspect Cloudflare state before retrying any reported incomplete rollback.
@@ -56,9 +58,11 @@ the operator shell without printing their values:
 - `EMAIL_DIRECTORY_KV_ID`
 - `RELAY_KEY_ID`
 
-The token needs Workers deployment/secret access plus Email Routing edit and KV
-read/write for the isolated namespace. The route-manager scripts validate the
-account, zone, namespace, manifest, and existing routes before mutation.
+The token needs Workers deployment/secret access, Account Analytics Read,
+Zone Settings Read, Email Routing Rules Write, and KV read/write for the
+isolated namespace. The route-manager scripts validate the account, zone,
+subaddressing setting, namespace, manifest, and existing routes before
+mutation.
 
 1. Create or locate the isolated KV namespace, then verify its exact title:
 

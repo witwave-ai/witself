@@ -80,6 +80,14 @@ function assertCatchAllUnchanged(before, after) {
   }
 }
 
+async function assertSubaddressingEnabled(api) {
+  const settings = await api.getEmailRoutingSettings();
+  if (settings?.support_subaddress !== true) {
+    throw new Error("Cloudflare Email Routing subaddressing is not enabled");
+  }
+  return settings;
+}
+
 async function verifyCatchAllUnchanged(api, before) {
   let after;
   try {
@@ -177,6 +185,7 @@ async function failClosed(api, manifest) {
 
 export async function preparePilot(api, manifestInput) {
   const manifest = normalizePilotManifest(manifestInput);
+  await assertSubaddressingEnabled(api);
   const rollback = () => failClosed(api, manifest);
   return operation(api, async () => {
     // Validate before mutating, then make config-off the first write. Any
@@ -197,6 +206,7 @@ export async function preparePilot(api, manifestInput) {
 
 export async function activatePilot(api, manifestInput) {
   const manifest = normalizePilotManifest(manifestInput);
+  await assertSubaddressingEnabled(api);
   const rollback = () => failClosed(api, manifest);
   return operation(api, async () => {
     // Validate the complete exact-route set before exposing an enabled config.
@@ -239,6 +249,7 @@ export async function removePilot(api, manifestInput) {
 
 export async function inspectPilot(api, manifestInput) {
   const manifest = normalizePilotManifest(manifestInput);
+  const settings = await api.getEmailRoutingSettings();
   return operation(api, async () => {
     const indexed = indexRules(await api.listRules(), manifest);
     return {
@@ -246,6 +257,7 @@ export async function inspectPilot(api, manifestInput) {
       configured: indexed.size,
       enabled: manifest.agents.filter((agent) => indexed.get(agent.address)?.enabled === true).length,
       expected: manifest.agents.length,
+      support_subaddress: settings.support_subaddress,
     };
   });
 }

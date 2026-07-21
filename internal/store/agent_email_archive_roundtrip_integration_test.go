@@ -306,3 +306,113 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		t.Fatalf("restored retry canary = %q/%q", restoredCanaryState, restoredCanaryMessage)
 	}
 }
+
+func TestLegacyAgentEmailArchiveImportScopesReceiveControlSynthesisPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	source, _ := newMigrationTestStore(t, dsn)
+	destination, _ := newMigrationTestStore(t, dsn)
+	if err := source.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	createLegacyMailbox := func(t *testing.T, st *Store, email, accountName, realmName, agentName, addressID, mailboxID string) (string, string) {
+		t.Helper()
+		provisioned, err := st.ProvisionAccount(ctx, email, accountName, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+			t.Fatalf("activate = %t / %v", activated, err)
+		}
+		realm, err := st.CreateRealm(ctx, provisioned.AccountID, realmName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, agentName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		realmLabel := strings.TrimPrefix(realm.ID, "realm_")
+		agentSegment := strings.ReplaceAll(agentName, " ", "-")
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_email_addresses
+			  (id,account_id,realm_id,provisioned_agent_id,domain,agent_segment,
+			   realm_label,local_part,provisioning_kind)
+			VALUES ($1,$2,$3,$4,'agent-mail.witwave.ai',$5,$6,$5 || '.' || $6,'derived')`,
+			addressID, provisioned.AccountID, realm.ID, agent.ID, agentSegment, realmLabel); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_email_mailboxes
+			  (id,account_id,realm_id,owner_agent_id,address_id,receive_state)
+			VALUES ($1,$2,$3,$4,$5,'enabled')`,
+			mailboxID, provisioned.AccountID, realm.ID, agent.ID, addressID); err != nil {
+			t.Fatal(err)
+		}
+		return provisioned.AccountID, realm.ID
+	}
+
+	importedAccountID, importedRealmID := createLegacyMailbox(t, source,
+		"legacy-email-import-source@witwave.ai", "legacy email import source",
+		"legacy source", "legacy source", "eaddr_aaaaaaaaaaaaaaaa", "emb_aaaaaaaaaaaaaaaa")
+	if err := source.SuspendAccountSystem(ctx, importedAccountID,
+		"evacuation", "legacy schema 59 import isolation"); err != nil {
+		t.Fatal(err)
+	}
+	var current bytes.Buffer
+	if err := source.ExportAccount(ctx, importedAccountID, "legacy-source", "test", &current); err != nil {
+		t.Fatal(err)
+	}
+	manifest, rows := readAvatarArchiveRows(t, current.Bytes(), SchemaVersion())
+	legacy := writeAvatarArchiveRows(t, archiveexport.Manifest{
+		SchemaVersion: 59, ServerVersion: manifest.ServerVersion,
+		AccountID: importedAccountID, Cell: manifest.Cell,
+		Status: manifest.Status, ExportedAt: manifest.ExportedAt,
+	}, canonicalArchiveTableNamesForSchema(59), rows)
+
+	unrelatedAccountID, unrelatedRealmID := createLegacyMailbox(t, destination,
+		"legacy-email-import-unrelated@witwave.ai", "legacy email import unrelated",
+		"unrelated destination", "unrelated agent", "eaddr_bbbbbbbbbbbbbbbb", "emb_bbbbbbbbbbbbbbbb")
+	var unrelatedBefore int
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_realm_receive_controls
+		WHERE account_id=$1 AND realm_id=$2`, unrelatedAccountID, unrelatedRealmID).
+		Scan(&unrelatedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if unrelatedBefore != 0 {
+		t.Fatalf("unrelated receive controls before import = %d, want 0", unrelatedBefore)
+	}
+
+	imported, err := destination.ImportAccount(ctx, importedAccountID, bytes.NewReader(legacy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported.SchemaVersion != 59 {
+		t.Fatalf("imported manifest schema = %d, want 59", imported.SchemaVersion)
+	}
+	var importedControls, unrelatedControls int
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM agent_email_realm_receive_controls
+		   WHERE account_id=$1 AND realm_id=$2),
+		  (SELECT count(*) FROM agent_email_realm_receive_controls
+		   WHERE account_id=$3 AND realm_id=$4)`,
+		importedAccountID, importedRealmID, unrelatedAccountID, unrelatedRealmID).
+		Scan(&importedControls, &unrelatedControls); err != nil {
+		t.Fatal(err)
+	}
+	if importedControls != 1 {
+		t.Fatalf("imported account receive controls = %d, want 1", importedControls)
+	}
+	if unrelatedControls != 0 {
+		t.Fatalf("unrelated account receive controls after import = %d, want 0", unrelatedControls)
+	}
+}
