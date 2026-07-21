@@ -1,6 +1,6 @@
 # Agent Email Cloudflare Launch Spike
 
-Status: **FAILED — implementation stopped before migration 0059**
+Status: **STRICT PRODUCTION GATE FAILED — LIMITED PILOT AUTHORIZED**
 
 - Run date: 2026-07-21 UTC
 - Canonical design commit: `f350825b71614db9470f059cb6cdf445e515b247`
@@ -10,9 +10,10 @@ Status: **FAILED — implementation stopped before migration 0059**
 
 This report records the launch-gating spike required by Open Question 9 in
 [agent-email.md](agent-email.md). It is evidence, not a replacement design.
-The failure is against the settled Inbound SMTP Transaction Contract, so no
-schema, ingestion, Worker, CLI, MCP, API, metering, retention, or archive code
-was started.
+No schema, ingestion, Worker, CLI, MCP, API, metering, retention, or archive
+code was started during the spike. A subsequent operator decision authorized a
+capability-limited internal pilot while preserving the failed requirements as
+production promotion gates.
 
 ## Decision
 
@@ -32,9 +33,43 @@ settled requirements:
    data visible inside the spike Worker was in MIME headers, which the settled
    contract explicitly forbids treating as authoritative.
 
-The launch gate therefore fails. Work remains stopped pending an operator
-choice to revise the SMTP/authentication contract or select an inbound edge
-that exposes the required synchronous controls and metadata.
+The strict production launch gate therefore fails. This is not a total
+Cloudflare receive no-go: the proven baseline is sufficient for an explicitly
+limited internal pilot. Production promotion remains blocked pending an
+inbound edge that exposes the required synchronous controls and metadata, or a
+separate operator decision that revises the production contract.
+
+## Pilot Authorization And Boundary
+
+Development may proceed under the Cloudflare limited receive-only pilot in
+[agent-email.md](agent-email.md#capability-tiers-and-authorized-pilot). The
+authorization is deliberately narrower than the production contract:
+
+- one internal realm and 5–10 explicitly enrolled agents;
+- one exact Email Routing rule per pilot address, with the pre-existing global
+  catch-all left unchanged;
+- a default-off feature flag and realm/agent allowlist;
+- a 5 MiB raw-MIME cap and no raw-MIME or attachment-content retrieval;
+- durable cell commit before successful Worker completion;
+- deliberate sanitized Worker exceptions for transient failures, relying on
+  the provider-managed retry observed here without claiming an explicit `451`
+  response, retry count, or retry schedule;
+- all messages marked sender-unverified, authentication/spam `unknown`, and
+  provider id unavailable; MIME authentication headers remain untrusted;
+- no billable receive usage or inbound quota enforcement during the pilot;
+- raw-digest, envelope-recipient, and envelope-sender grouping for suspected
+  duplicates, with no automatic drop, overwrite, or deletion;
+- only already-expected, low-risk verification-code workflows, with no
+  financial, identity-proofing, account/password recovery, credential/domain
+  transfer, automated link following, or similarly consequential automation;
+  and
+- a synthetic exact-route canary for durable accept and exception/retry, plus
+  rollback by disabling the feature and removing only pilot exact rules.
+
+This boundary makes unavailable capabilities explicit instead of representing
+them as passed, empty, or inferred fields. Catch-all Worker cutover, external
+realm enrollment, messages above 5 MiB, billable receive, sender-auth-dependent
+automation, and production delivery claims remain out of scope.
 
 ## Gate Matrix
 

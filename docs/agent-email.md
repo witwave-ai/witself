@@ -1,7 +1,9 @@
 # Witself Agent Email
 
-Status: draft. Kickoff spec, scoped 2026-07-20. This document is the
-go-forward design for **agent email**: durable, addressable email identities
+Status: draft. Kickoff spec, scoped 2026-07-20. A capability-limited
+Cloudflare receive pilot was authorized on 2026-07-21; the stronger production
+contract remains the promotion target. This document is the go-forward design
+for **agent email**: durable, addressable email identities
 for named Witself agents on a Witself-managed domain, plus a separate
 outbound-only platform-notification surface. It extends the sealed-plane
 roadmap item for email-code 2FA in
@@ -105,6 +107,20 @@ An operator decision on 2026-07-21 set the launch receive domain:
   configured subdomain is a launch-gating spike (see Addressing And Domain
   Model for the fallback ladder).
 
+The launch spike passed the basic receive path but failed the strict production
+contract. A follow-up operator decision on 2026-07-21 authorized development of
+a deliberately limited pilot rather than treating those production gaps as a
+total provider no-go:
+
+- **The strict contract is preserved.** Explicit temporary SMTP control,
+  trusted structured sender-auth/spam metadata, a provider message id, and the
+  full size/latency envelope remain requirements for production promotion.
+- **The pilot is narrow and capability-honest.** It uses exact-address routes
+  for one internal realm and 5–10 enrolled agents, marks every message
+  unverified, excludes pilot receive from billing, and permits only expected,
+  low-risk verification-code workflows. See Capability Tiers And Authorized
+  Pilot for the full boundary.
+
 ## Goal
 
 Every named agent already has a durable, attributable self: memories, facts,
@@ -130,7 +146,9 @@ The standing platform invariants carry over unchanged:
 
 - **The backend is model-free.** It terminates inbound mail through a provider
   adapter, verifies webhook signatures, parses MIME structure, records
-  SPF/DKIM/DMARC results, stores, filters, meters, and returns data. Reading
+  available SPF/DKIM/DMARC results, stores, filters, meters where authorized,
+  and returns data. The limited pilot records unavailable authentication and
+  spam results as `unknown` and excludes receive from billing. Reading
   mail, deciding what it means, extracting anything semantic, and (in later
   slices) drafting replies are client-side inference in the active AI client.
 - **No wake.** Inbound mail lands durably and waits. Witself and MCP never
@@ -148,6 +166,10 @@ The standing platform invariants carry over unchanged:
 
 ## Sequencing
 
+- **Pilot — Cloudflare-limited receive-only.** Build the slice-1 storage,
+  ingestion, owner-only mailbox, and bounded code-consumption spine behind a
+  default-off feature flag for one internal realm. The pilot limitations below
+  are part of its contract, not TODOs hidden behind production-looking fields.
 - **Slice 1 — receive-only core (v1).** Managed-domain address provisioning,
   inbound pipeline, durable per-agent mailbox with fenced foreground
   processing, metadata list/read/ack surfaces, verification-link and
@@ -170,6 +192,77 @@ Deliverability reality drives this order: receiving mail requires no sender
 reputation, while sending is the largest abuse surface in the feature. V1
 deliberately sidesteps it.
 
+## Capability Tiers And Authorized Pilot
+
+The 2026-07-21 Cloudflare spike was a failure of the **strict production
+contract**, not a failure of basic email receipt. Cloudflare delivered real mail
+to a Worker, matched the configured subdomain, invoked once per envelope
+recipient, exposed the raw MIME stream, supported permanent rejection, and
+retried deliberate Worker exceptions. Development may therefore proceed in two
+explicit tiers. The pilot tier does not weaken or silently redefine the
+production tier.
+
+**Cloudflare limited receive-only pilot (authorized 2026-07-21):**
+
+- One internal realm, with 5–10 explicitly enrolled agents. Each mailbox gets
+  one exact Cloudflare Email Routing address rule pointing to the Worker. The
+  existing zone-global catch-all, its action, and its destination remain
+  unchanged; unknown addresses are outside the pilot and the pilot makes no
+  claim that they receive the production `550 unknown_recipient` behavior.
+- A default-off `agent_email_receive_pilot` feature flag plus a realm/agent
+  allowlist gates provisioning, ingestion, and agent-facing surfaces. Merely
+  possessing an address-like local part does not enroll an agent.
+- The pilot cap is **5 MiB raw MIME**, below Cloudflare's 25 MiB provider cap.
+  The Worker rejects an over-pilot-cap message before relay. Raw MIME may still
+  contain attachments and is stored as one message, but neither raw MIME nor
+  attachment content is retrievable through API, CLI, or MCP during the pilot;
+  content reads expose bounded decoded body parts and attachment metadata only.
+- Success is returned only after the owning cell durably commits the message.
+  On a cell timeout, transport failure, transient verdict, or unexpected
+  exception, the Worker throws one deliberate **sanitized** exception and lets
+  Cloudflare manage retry. The spike observed provider temporary-error retries,
+  but the pilot neither promises a literal `451` nor depends on a documented
+  retry count or schedule. No raw provider error or message content is placed
+  in the exception.
+- The signed edge envelope covers only fields the Worker can actually observe:
+  timestamp, normalized envelope sender and recipient, destination-cell
+  audience, raw size, and body digest. Provider message id, structured
+  SPF/DKIM/DMARC results, and spam verdict are unavailable. Header-carried
+  `Authentication-Results`, `Received-SPF`, provider trace ids, and spam headers
+  remain untrusted message content and never fill those fields.
+- Every pilot message is stored and surfaced as **sender unverified**, with
+  authentication and spam states `unknown` and no authoritative provider id.
+  Pilot receive is excluded from billable usage and quota enforcement. Value-
+  free operational counters may still measure volume, bytes, errors, and
+  latency, but they cannot become customer charges.
+- Retry correlation uses a non-authoritative grouping key over the raw MIME
+  SHA-256 digest, normalized envelope recipient, and normalized envelope
+  sender. Matching keys mark messages as suspected duplicates for the owner;
+  they never cause an automatic drop, overwrite, or content deletion. This is
+  grouping, not the production idempotency guarantee.
+- Verification-code use is allowed only when an active, user-authorized
+  workflow is already waiting for mail from an expected service and the
+  consequence is low risk. The client may read and extract a candidate code,
+  but must present the sender as unverified and must not infer authenticity
+  from message headers. Financial, identity-proofing, password/account
+  recovery, domain or credential transfer, and other consequential automation
+  are prohibited in the pilot; automated link following is disabled.
+- A dedicated synthetic exact-route canary continuously proves both durable
+  accept and provider-managed retry behavior. Promotion or continued operation
+  requires recent canary success. The rollback is intentionally small: turn
+  off `agent_email_receive_pilot`, stop provisioning and surfaces, disable or
+  remove only the pilot exact-address rules, and leave the pre-existing global
+  catch-all and its destination unchanged. Stored pilot mail follows normal
+  retention/export policy rather than being destroyed by rollback.
+
+**Production receive-only contract:** the Inbound SMTP Transaction Contract
+below remains the target. Promotion beyond the internal pilot, catch-all Worker
+cutover, messages above 5 MiB, billable receive, sender-auth-dependent behavior,
+or consequential OTP/link automation stays blocked until the provider path (or
+a replacement inbound edge) supplies explicit temporary SMTP semantics,
+trusted structured authentication/spam metadata, a stable provider identity,
+and the size/latency feasibility evidence required by that contract.
+
 ## Addressing And Domain Model
 
 Agents receive addresses shaped `<agent-local-part>.<realm-label>@<base-domain>`
@@ -187,10 +280,12 @@ and provisioned. The address shape is identical on both:
 `<agent-local-part>.<realm-label>@agent-mail.witwave.ai` at launch, the same
 local part at `witmail.ai` after cutover.
 
-One engineering caveat gates the launch domain: Cloudflare documents
-catch-all at the zone apex only, and whether catch-all (or an equivalent
-full-coverage route) works on a configured subdomain is unverified. That
-verification is a launch-gating spike. If it fails, the fallback ladder is:
+One engineering caveat gates production use of the launch domain: Cloudflare
+documents catch-all at the zone apex only. The launch spike established that
+the zone-global catch-all covers the configured subdomain, but routing that
+catch-all to the Worker would also move existing apex traffic. The limited
+pilot therefore uses exact-address rules and leaves the catch-all unchanged.
+Before production cutover, the fallback ladder remains:
 run `agent-mail.witwave.ai` as its own Cloudflare zone if the account plan
 permits subdomain zones; otherwise accelerate the `witmail.ai` acquisition
 and launch on the apex directly. Per-address routing rules are not a
@@ -282,7 +377,9 @@ Witself cells do not terminate SMTP. Cloudflare is the selected inbound edge:
 Email Routing accepts mail for the managed zones, and an Email Worker relays
 each message to the owning cell's signature-verified ingestion endpoint.
 Cloudflare evaluates SPF/DKIM/DMARC at the edge and enforces a provider
-message-size cap; both are recorded with the stored message. MX and routing
+message-size cap. The production contract requires edge results to be signed
+and recorded with the stored message; the limited pilot cannot obtain those
+structured results and records them as `unknown`. MX and routing
 configuration follow the cell topology in
 [deployment-cells.md](deployment-cells.md); the control plane stays thin and
 never handles message content, consistent with the control-plane-only
@@ -296,10 +393,12 @@ The kickoff verification items were resolved on 2026-07-20:
   documented at the zone apex only. Native per-realm subdomain configuration
   therefore cannot scale, which is what moved the realm label into the local
   part (see Addressing And Domain Model).
-- **Settled topology: a full-coverage catch-all into an Email Worker.** On
+- **Production topology: a full-coverage catch-all into an Email Worker.** On
   the `witmail.ai` apex this is the documented zone-apex catch-all; on the
-  `agent-mail.witwave.ai` launch domain, catch-all on a configured subdomain
-  is the launch-gating spike (see Addressing And Domain Model). The Worker
+  `agent-mail.witwave.ai` launch domain, the spike confirmed that the
+  zone-global catch-all covers the configured subdomain but cannot be moved
+  without also moving existing apex traffic (see Addressing And Domain Model).
+  The Worker
   first matches reserved/role addresses and routes them to the operator —
   explicit Email Routing rules ahead of the catch-all delivering to the
   operator support inbox; a handful of exact addresses, well inside rule
@@ -308,6 +407,9 @@ The kickoff verification items were resolved on 2026-07-20:
   cell.
   Structurally invalid or unknown recipients are rejected during the SMTP
   transaction so the sender gets a bounce — never accepted and dropped.
+  The limited pilot is the explicit exception: exact-address rules feed the
+  Worker for enrolled agents while the pre-existing global catch-all remains
+  unchanged.
 - **Realm-to-cell routing map (settled): a KV projection.** The map
   (`realm-label` → cell ingestion endpoint) follows the locked control-plane
   directory shape: the control plane maintains a write-through Workers KV
@@ -331,23 +433,32 @@ The kickoff verification items were resolved on 2026-07-20:
   key; cells hard-fail on delisted keys and surface the attempt as a
   forged-relay event. No per-cell secret fan-out; self-hosted cells verify
   their own edge's key the same way.
+  During the limited pilot the same signature and audience binding protect a
+  reduced envelope containing only Worker-observable fields; unavailable
+  provider identity, authentication, and spam fields are represented as
+  absent/unknown, never synthesized from MIME headers.
 - **Provider constraints recorded.** Inbound messages cap at 25 MiB, which
   bounds the Postgres raw-size cap below. Since July 2025 Cloudflare only
-  forwards mail that passes SPF or DKIM; whether that gate also applies to
-  Worker-delivered mail is a small implementation-time check — either way
-  authentication results are recorded per message. Subaddress tags are
-  preserved and stored with recipient metadata.
+  forwards mail that passes SPF or DKIM, and the spike confirmed that the
+  authentication stage precedes Worker delivery. The Worker event does not
+  expose those structured results, so the production relay cannot yet record
+  them authoritatively; pilot rows use `unknown`. Subaddress tags are preserved
+  and stored with recipient metadata. The pilot imposes its own 5 MiB cap.
 - **Send is no longer provider-orphaned.** Cloudflare Email Sending entered
   public beta in April 2026 (Workers Paid; 3,000 messages/month included,
   then $0.35 per 1,000; REST, Workers binding, and SMTP submission;
   suppression handling), so the send slices have an in-house leading
   candidate. That dependency still must not leak into the inbound design.
 
-### Inbound SMTP Transaction Contract
+### Inbound SMTP Transaction Contract (Production Target)
 
 Settled 2026-07-21 after gap review: the never-accepted-and-dropped
 guarantee is only implementable inside the SMTP transaction, so the Worker
 completes the whole verdict path while the sender's connection is open.
+This contract remains mandatory for production promotion. The authorized
+limited pilot uses the documented exception-and-retry downgrade above and does
+not claim compliance with steps 3–8 where Cloudflare lacks the required
+control or metadata.
 
 1. **Parse.** Case-fold the envelope recipient to lowercase before every
    match (RFC 5321 leaves local-part case to the receiver, and provisioning
@@ -426,6 +537,13 @@ Pipeline contract:
   attachment bytes inline with the raw message in Postgres under the same cap
   but may gate retrieval until that review lands (open question).
 
+The pipeline items above describe the production requirements. In the pilot,
+provider-id idempotency is replaced by non-destructive suspected-duplicate
+grouping, raw MIME is capped at 5 MiB, structured auth/spam fields are
+`unknown`, quarantine classification is unavailable, and attachment retrieval
+and raw-MIME reads are disabled even though attachment bytes remain inside the
+stored raw MIME.
+
 ## Trust Model
 
 Inbound email inverts the messaging trust boundary and the design must never
@@ -467,6 +585,10 @@ blur the two:
   the stored message like any other content (see the plaintext-at-rest note
   under Abuse, Privacy, And Metering), and nothing writes a second copy into
   logs, diagnostics, or a dedicated field.
+  Sender binding remains a production requirement. Because the pilot has no
+  authoritative sender-auth metadata, its narrower exception is limited to an
+  already-active, expected, low-risk workflow; it labels the sender unverified
+  and prohibits financial, identity, recovery, or other consequential use.
 - **Threat-model addition.** Inbound email is a new injection surface with
   attacker-controlled content arriving continuously and for free.
   [threat-model.md](threat-model.md) gains a section covering prompt
@@ -587,6 +709,9 @@ Receive-only still carries real obligations:
   can be stopped without disabling the whole mailbox; the fallback
   classification when Cloudflare supplies no usable spam verdict is an Open
   Question.
+  The limited pilot resolves this conservatively by excluding every received
+  pilot message from billable usage and quota enforcement; its counters are
+  operational only until authoritative classification exists.
 - **Billing dimensions (settled 2026-07-21).** Email gets its own
   `billing-and-limits.md` dimensions rather than reusing the messaging keys
   (the separate-surface rule, and to keep abuse signals distinct):
@@ -675,11 +800,13 @@ Receive-only still carries real obligations:
    latency budget, Worker CPU/subrequest limits vs the 25 MiB cap,
    per-recipient vs per-message Worker invocation) and whether the
    SPF-or-DKIM forwarding gate applies to Worker-delivered mail.
-   **Run 2026-07-21: failed.** Full coverage and per-recipient dispatch worked,
-   but Cloudflare exposes neither an explicit temporary-reject action nor the
-   trusted structured authentication/spam/provider-id fields required by the
-   settled SMTP contract. Implementation is stopped before migration 0059;
-   see [the launch-spike report](agent-email-cloudflare-launch-spike.md).
+   **Run 2026-07-21: strict production gate failed; limited pilot authorized.**
+   Full coverage and per-recipient dispatch worked, but Cloudflare exposes
+   neither an explicit temporary-reject action nor the trusted structured
+   authentication/spam/provider-id fields required by the settled production
+   SMTP contract. Development may proceed only within Capability Tiers And
+   Authorized Pilot; production promotion remains blocked. See
+   [the launch-spike report](agent-email-cloudflare-launch-spike.md).
 10. Vanity realm-label policy, when that deferred capability is scheduled:
     reservation and dispute rules, the reserved-word and anti-impersonation
     list, the vanity length cap, per-plan gating, and whether release or
