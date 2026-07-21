@@ -172,6 +172,12 @@ jobs:
           version: v2.17.0
           install-only: true
 
+      # Ubuntu runner images no longer bundle Homebrew (macOS images still
+      # do), so install it for the formula render/audit step below. Runs
+      # before the long snapshot build so an install flake fails fast.
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef # master 2026-07-17
+
       # This no-publish pass deliberately uses the real GoReleaser archive
       # pipeline. It catches archive-name or target drift before the release job
       # publishes any GitHub or GHCR artifact.
