@@ -72,6 +72,28 @@ inbound-edge open questions, revising two kickoff assumptions:
   2026) replaces the kickoff assumption that a send slice would require a
   separate outbound provider; it is now the leading candidate.
 
+A whole-spec adversarial gap review on 2026-07-21 surfaced 7 blocking gaps;
+all were settled in place (see the sections named):
+
+- **Sender-auth results are signed relay metadata, not message headers** —
+  the trust anchor the OTP flow depends on cannot be sender-forgeable
+  (Inbound Pipeline, SMTP contract).
+- **Mail is owner-agent-only** with `email:*` read/processing scopes and no
+  operator content access in v1 (Surfaces).
+- **OTP extraction is client-side** with sender-binding and single-use
+  marking, resolving the model-free-backend / Non-Goals tension (Trust
+  Model).
+- **Hostile inbound volume never bills the victim**; spam/quarantine/abuse
+  traffic is unmetered, and a disabled mailbox tempfails rather than
+  permanently suppressing its address (Abuse, Privacy, And Metering; SMTP
+  contract).
+- **One name-derived address per agent** in v1, provisioned automatically
+  (Mailbox Semantics).
+- **Address/tombstone rows outlive the agent** so a re-created name cannot
+  inherit a prior principal's mail (Mailbox Semantics).
+- **Email gets its own billing dimensions**, including a dedicated
+  `email_storage_byte` (Abuse, Privacy, And Metering).
+
 An operator decision on 2026-07-21 set the launch receive domain:
 
 - **Receive starts on `agent-mail.witwave.ai`.** V1 receives on
@@ -296,9 +318,12 @@ The kickoff verification items were resolved on 2026-07-20:
 - **Edge-to-cell authentication (settled): Ed25519 signed relay.** The
   Worker POSTs the raw MIME to the owning cell's ingestion endpoint with a
   detached Ed25519 signature over timestamp, provider message id, envelope
-  recipient, destination-cell audience, and body digest (standard-webhooks
+  recipient, destination-cell audience, the edge-evaluated SPF/DKIM/DMARC
+  results, the provider spam verdict, and the body digest (standard-webhooks
   style) — audience binding, so a capture replayed at a different cell never
-  verifies. The private key lives as a Worker secret; cells verify against
+  verifies, and authentication/spam results are covered by the signature so
+  they are the cell's sole trust anchor for sender authenticity (the cell
+  never trusts message-header trace fields; see the SMTP contract). The private key lives as a Worker secret; cells verify against
   the control-plane-published public key, cached and pinned, with a bounded
   clock-skew replay window. Rotation is a dual-key overlap: publish the
   successor, re-sign, retire the predecessor. Compromise recovery is the
@@ -334,11 +359,21 @@ completes the whole verdict path while the sender's connection is open.
    directory fallback. Unknown realm: permanent reject (550).
 3. **Relay-and-verdict.** The Ed25519-signed relay POST runs synchronously;
    the owning cell validates the agent segment against live mailboxes and
-   returns a typed verdict the Worker maps to the SMTP reply: `accepted` →
-   250; `unknown_recipient` → 550; `receive_disabled` → 550, deliberately
-   indistinguishable from unknown so a kill switch never leaks mailbox
-   state (and never defers forever); `over_cap` and `retry_later` → 451
-   tempfail.
+   returns a typed verdict the Worker maps to the SMTP reply:
+   - `accepted` → 250 (only after the durable write — see step 6);
+   - `unknown_recipient` → 550 permanent;
+   - `receive_disabled` (kill switch or plan enforcement) → **451 tempfail
+     within a grace window** (operator decision 2026-07-21). A disabled
+     mailbox defers rather than hard-bouncing, so external services do not
+     convert a bounce into permanent address suppression; if the mailbox is
+     still disabled when the grace window lapses, the sender's own MTA
+     produces the eventual bounce. The 451 is deliberately the same shape as
+     a transient failure, so a kill switch never leaks a distinct
+     mailbox-state signal to senders;
+   - `over_cap_transient` (per-period inbound cap; will free up) → 451;
+   - `mailbox_full` or other permanent-refusal conditions → 550. `over_cap`
+     must be split at the cell into transient vs permanent so the Worker
+     never maps a recoverable cap to a permanent bounce.
 4. **Transient failure is always tempfail.** Cell unreachable, verdict
    timeout, directory-fallback failure, or any Worker exception maps to an
    explicit 451 — the sender's MTA is the retry mechanism, because
@@ -348,11 +383,21 @@ completes the whole verdict path while the sender's connection is open.
    not-mine verdict, which the Worker maps to 451; the sender retries after
    the routing projection has repointed. Mail is never imported by a cell
    that does not own the realm.
-6. **Acceptance is a durable write.** 250 is returned only after the cell
-   has committed the message row — the verdict doubles as the durability
-   acknowledgment. Ingestion is idempotent on (provider message id, envelope
-   recipient), which also gives multi-recipient fan-out its dedup key.
-7. **Feasibility bounds go to the launch spike**: the in-transaction latency
+6. **Acceptance is a durable write, idempotent across retries.** 250 is
+   returned only after the cell has committed the message row — the verdict
+   doubles as the durability acknowledgment. Ingestion is idempotent on
+   (provider message id, envelope recipient): if the durable write commits
+   but the 250 is lost and the sender's MTA retries, the cell recognizes the
+   committed key and re-returns 250 without creating a duplicate. The same
+   key gives multi-recipient fan-out its dedup semantics.
+7. **Recorded authentication is signed metadata, never sender headers.** The
+   SPF/DKIM/DMARC results and the provider spam verdict the cell stores come
+   only from the signed relay envelope (step added to the Ed25519 field set
+   below), never parsed from message headers. The cell strips or renames any
+   inbound `Authentication-Results`, `Received-SPF`, and `X-Spam-*` trace
+   headers before storage so a sender cannot pre-inject a forged
+   `dkim=pass header.d=github.com` that later reads as genuine evidence.
+8. **Feasibility bounds go to the launch spike**: the in-transaction latency
    budget, Worker CPU/subrequest limits against the 25 MiB cap, and whether
    Cloudflare invokes the Worker once per recipient or once per message.
 
@@ -400,15 +445,28 @@ blur the two:
   An email asking the agent to do something is untrusted content to surface,
   not an instruction. Email never authorizes fact writes, memory deletion,
   secret reveals, or configuration changes.
-- **Code consumption composes with the sealed plane.** An emailed OTP is
-  transient, unlike a TOTP seed, but its handling follows the same posture as
-  [totp-2fa.md](totp-2fa.md): deterministic, model-free extraction on the
-  backend is permitted (pattern-based, no inference), the code is returned
-  only through an explicit gated call scoped to one message, and codes never
-  appear in logs, diagnostics, audit events, or stored plaintext state.
-  Whether extraction is a distinct reveal-style ceremony or an ordinary
-  read-derived tool result is an open question; the roadmap's sealed-plane
-  carve-outs bound the answer.
+- **Code consumption is client-side extraction over a bounded read
+  (settled 2026-07-21).** An emailed OTP is attacker-controlled prose, not a
+  platform-owned seed, so pattern-matching it is not the model-free
+  backend's job — doing it on the backend would contradict this doc's own
+  Non-Goal ("no auto-extraction of meaning") and overstate the
+  [totp-2fa.md](totp-2fa.md) analogy (that computes a code from an enrolled
+  seed; this reads a number out of untrusted text). The backend surface is
+  an ordinary scoped read of one message; the active client extracts the
+  code with its own inference. Two requirements the client flow must meet,
+  because email OTP is a live attack surface:
+  - **Sender binding at point of use.** The read result carries the signed
+    authentication results and the `From` domain, and the consuming flow
+    asserts the expected service/sender before using a code — otherwise an
+    attacker who knows the address races a look-alike "your code is NNNNNN"
+    message and the client consumes the wrong one.
+  - **Single-use marking.** Consuming a code marks that message
+    code-consumed, so a repeated call or a prompt-injected re-extraction is
+    visible as an anomaly rather than silently re-revealing it.
+  Unlike a sealed secret, the code is not separately stored: it lives inside
+  the stored message like any other content (see the plaintext-at-rest note
+  under Abuse, Privacy, And Metering), and nothing writes a second copy into
+  logs, diagnostics, or a dedicated field.
 - **Threat-model addition.** Inbound email is a new injection surface with
   attacker-controlled content arriving continuously and for free.
   [threat-model.md](threat-model.md) gains a section covering prompt
@@ -431,10 +489,35 @@ The receive-side lifecycle mirrors the proven messaging shape:
   and when a realm re-homes to another cell its mail moves with it (the edge
   routing map repoints; the data travels in the archive like everything
   else).
+- **One address per agent (settled 2026-07-21).** Each agent has exactly one
+  auto-provisioned, name-derived address from the sanitization pipeline;
+  addresses are 1:1 with agents, message rows key to the owning agent, and
+  the plan "address count" gate is trivially one in v1. Multiple named
+  addresses per agent are deferred (their mint/list/select verbs and a
+  message-to-address FK are post-v1 — see Open Questions). Provisioning is
+  automatic at agent creation, failing closed to the operator-override path
+  on a collision or empty result.
+- **Deletion and tombstone durability (settled 2026-07-21).** Agent deletion
+  flips the recipient verdict to `unknown_recipient` and (per data-model.md's
+  soft-then-permanent delete) purges the mailbox on permanent delete, but the
+  address and its tombstone row must **outlive the agent row** — they must
+  not cascade-delete — or a re-created agent with the same name re-provisions
+  the identical local part and receives the prior principal's mail. Tombstones
+  are durable across account archive export/import; the sanitization
+  live-or-tombstoned collision check depends on it. Agent rename mints a new
+  address; whether the old address keeps delivering as an alias for a bounded
+  window (so a mid-verification rename does not silently break) versus
+  immediately returns `unknown_recipient` is an Open Question. Realm deletion
+  removes the realm-label KV entry (in-flight relays during the ~60s window
+  get the not-mine 451) and purges the realm's mailboxes with the rest of its
+  data.
 - Immutable message rows with per-mailbox delivery, read, and acknowledgement
-  state, and fenced claim/renew/release/complete processing for foreground
-  handling — the migration-0034/0036 pattern (generation fence, database-time
-  lease, deterministic failure counting) applied to a new table family.
+  state. Fenced claim/renew/release/complete processing is adapted from the
+  migration-0034/0036 messaging pattern, with one difference recorded as an
+  Open Question: receive-only mail has no outbound result artifact, so
+  `complete` marks handling done rather than linking a durable reply, and the
+  deterministic-failure counter needs a defined escalation destination (a
+  dead-letter/needs-attention state, since there is no sender to notify).
 - Metadata-only, cursor-paginated list; explicit content read; separate read
   and ack, so "the client saw the metadata" and "the agent is done with this
   mail" remain distinct facts.
@@ -457,12 +540,28 @@ Sketch, to be pinned in [json-contracts.md](json-contracts.md) and
 
 - CLI: `witself email address show`, `witself email list`, `witself email
   read`, `witself email claim|renew|release|complete`, `witself email ack`,
-  `witself email code` (gated single-message OTP extraction).
+  and a bounded `witself email listen` (wait for new mail — the OTP flow
+  needs a sanctioned wait rather than a poll loop, mirroring
+  `message.listen`).
 - MCP: `witself.email.*` mirroring the CLI, with metadata-only list results
   and untrusted-content framing in every content-bearing tool description.
 - API: routes on the one-core spine in [api-routes.md](api-routes.md);
   provider webhook endpoints are cell-local, signature-verified, and separate
   from the agent-facing API surface.
+
+**Authorization (settled 2026-07-21).** Mail is owner-agent-only, matching
+agent messages (the most sensitive existing analog), not the policy-engine-
+shareable posture of memories and facts. There is no cross-agent read of
+another agent's mailbox in v1: an agent reads only its own mail. New
+`email:*` scopes split the surface — a read tier (`address show`, `list`,
+`read`, `listen`) separate from a processing tier (`claim`/`renew`/`release`/
+`complete`, `ack`). Operators get no access to raw mail content in v1
+(content is a private correspondence surface); operator visibility is
+metadata/lifecycle only, and any future content access is a separate
+governed decision. The client extracting a code is an ordinary scoped read,
+so it is not a value-egress tool in the `secret.reveal`/`totp.code` sense;
+`--no-value-tools` therefore does not gate it, but `--read-only` still
+withholds the processing tier.
 
 Platform notifications get an operator-plane surface (template + event
 triggers) rather than agent tools; that design lands with its track.
@@ -473,10 +572,32 @@ Receive-only still carries real obligations:
 
 - Per-mailbox inbound rate and size caps enforced at ingestion; overflow is
   rejected at the provider boundary, not silently dropped after storage.
-- Sent and received message counts are billing points, metered per period
-  through the existing value-free usage-telemetry patterns, alongside
-  plan-gated address counts and stored bytes; platform notifications are cost
-  of service and not user-metered.
+- **Hostile inbound volume does not bill the victim (settled 2026-07-21).**
+  Nobody controls who sends an agent mail, so metering must not hand an
+  attacker a lever. Provider-flagged spam, quarantined mail, and traffic
+  classified as an abuse flood are excluded from metering and billing;
+  inbound caps are accounting-only with no overage charge on received mail,
+  and cap accounting is scoped so a single-sender flood cannot crowd out the
+  one legitimate verification mail (per-sender/per-source accounting, or an
+  equivalent, is a launch requirement, not a nicety). Because a
+  receive-disabled mailbox tempfails within a grace window rather than
+  hard-bouncing (see the SMTP contract), driving a mailbox to enforcement
+  does not permanently suppress its address. A per-sender/per-domain
+  denylist and a mark-as-spam feedback surface are required so a campaign
+  can be stopped without disabling the whole mailbox; the fallback
+  classification when Cloudflare supplies no usable spam verdict is an Open
+  Question.
+- **Billing dimensions (settled 2026-07-21).** Email gets its own
+  `billing-and-limits.md` dimensions rather than reusing the messaging keys
+  (the separate-surface rule, and to keep abuse signals distinct):
+  `email_received`, `email_sent`, `email_address`, and a dedicated
+  `email_storage_byte` for inline raw MIME — mail bytes must not fall under
+  the general open-plane `storage_byte`, or 25 MiB messages silently consume
+  the general storage cap. Each dimension needs its cap-vs-rate
+  classification and overage default recorded in the billing doc's canonical
+  table before the slice-1 metering deliverable can be built against the
+  `/v1/capabilities`, `/v1/billing/usage`, and Prometheus `limit_dimension`
+  machinery. Platform notifications are cost of service and not user-metered.
 - Email is switchable per agent and per realm: an operator or plan
   enforcement can turn receive — and later send — off independently without
   deprovisioning addresses.
@@ -486,7 +607,15 @@ Receive-only still carries real obligations:
   platform; threshold accounting exists per agent and per realm from the
   first send slice.
 - Content never appears in logs, metrics, or diagnostics; audit events for
-  provision/ingest/read/ack/purge are content-free, matching messaging.
+  provision/ingest/read/ack/purge are content-free, matching messaging. Note
+  the honest boundary: message bodies — including any OTP or reset link they
+  carry — are open-plane realm data and are therefore **plaintext at rest**
+  in the cell for the retention window, exactly like a memory or a stored
+  agent message. This is not the sealed plane; the guarantee is only that no
+  *second* copy of that content leaks into logs, audit, or a dedicated field,
+  not that credential-bearing mail is encrypted at rest. Whether a shorter
+  retention floor should apply to mail classified as carrying a transient
+  code is an Open Question.
 - Mailbox deletion purges content and attachments from live storage while
   preserving value-free usage events and rollups — the standing deletion
   posture. Export before purge remains available through account archives.
@@ -514,8 +643,11 @@ Receive-only still carries real obligations:
 
 1. `email_checkpoint` as a separate self.show lane vs a fold into
    `message_checkpoint`.
-2. OTP extraction ceremony: reveal-gated like sealed-plane material vs
-   ordinary gated read; audit shape either way.
+2. OTP extraction details (location settled client-side; see Trust Model):
+   the deterministic-vs-ambiguous pattern behavior (zero/multiple candidates,
+   HTML-part handling, format/length bounds, localization), the audit shape
+   for a code-consuming read, and whether extraction is permitted on
+   quarantined messages.
 3. Attachment exposure in v1: metadata-only vs gated retrieval, pending the
    injection review (storage itself is settled: inline in Postgres).
 4. Retention windows per plan tier, the quarantine window, and the Postgres
@@ -553,10 +685,67 @@ Receive-only still carries real obligations:
     export into the platform metrics plane) are the only visibility into
     edge drops; decide the mechanism before v1 promotion.
 
+Raised by the 2026-07-21 whole-spec gap review (blocking items were settled
+in place; these are the remaining important items):
+
+12. Content-read representation: does `read` return raw MIME or decoded
+    parts, how is HTML hidden-text / display-name injection surfaced to the
+    untrusted-content framing, what does a read of a parse-error message
+    return, and what are the backend MIME-parser resource bounds.
+13. Retention enforcement mechanics: what runs the aging, and the guard so
+    aging never silently expires unread/unclaimed mail (especially the
+    verification mail the feature exists to receive) — a durable-mailbox
+    promise needs an expiry that cannot black-hole pending work.
+14. Quarantine lifecycle: a rescue/disposition path (list, inspect, release,
+    or discard quarantined mail) and the fix for the checkpoint-exclusion
+    trap — legitimate OTP mail misflagged as spam is invisible to the
+    checkpoint, so a provisioning flow hangs. Ties to OQ2's
+    extraction-on-quarantined decision.
+15. `complete` / deterministic-failure semantics for receive-only mail:
+    `complete` has no outbound result artifact to link, and failure
+    escalation needs a defined destination (a dead-letter / needs-attention
+    state, since there is no sender to notify). Recorded inline in Mailbox
+    Semantics; the exact state machine is open.
+16. Kill-switch surface and agent-visible state: the per-agent/per-realm
+    receive toggle needs a control surface and a way for the agent to see
+    that its own receive is disabled (otherwise mail silently tempfails with
+    no local signal).
+17. Self-host parity: the "identical pipeline" claim needs a self-host
+    analog for the Cloudflare-specific delivery guarantee and for edge-key
+    publication — a self-hoster's own edge and key-publication path, or an
+    explicit narrowing of the parity claim.
+18. Restrictive sender-auth DNS on the receive domains: publish `SPF -all`
+    and `DMARC p=reject` on `agent-mail.witwave.ai` / `witmail.ai` (they
+    send no mail in v1) so the domains cannot be spoofed outbound; confirm
+    this composes with a future send slice.
+19. Edge-key freshness bound: the delist/rotation propagation to cells needs
+    a bounded staleness window and a hard-fail on delisted keys, plus the
+    ingestion-endpoint hardening and availability posture (the OTP use case
+    makes ingestion availability load-bearing).
+20. Audit + attribution: register the email audit event family; decide how
+    ingestion attributes a token-derived actor when the "sender" is external
+    (edge-attributed, not agent-attributed); register cell-side telemetry
+    and the synchronous-verdict latency SLO.
+21. Compliance posture for stored third-party correspondence: per-message
+    purge/redaction, illegal-content handling, and the controller/processor,
+    DSAR, and data-residency decisions for mail content held in a cell.
+22. Routing-projection integrity: a poisoned realm-label→cell KV entry
+    redirects message *content* to an attacker cell, which is stronger than
+    the "control-plane compromise is a routing incident, not a data breach"
+    invariant elsewhere; decide the integrity control (signed projection
+    entries, or cell-side ownership assertion on the relay) so a bad routing
+    write cannot exfiltrate mail.
+23. Multiple named addresses per agent (deferred past v1): the mint / list /
+    select verbs, the message-to-address FK, and primary-address designation
+    if the one-address-per-agent rule is later relaxed.
+
 Settled on 2026-07-20 (formerly items 1–2): realm-label derivation and
 local-part sanitization (see Addressing And Domain Model), and the Cloudflare
 topology, edge authentication, and routing-map publication (see Inbound
-Pipeline).
+Pipeline). Settled on 2026-07-21 by the whole-spec gap review: the SPF/DKIM
+trust anchor, mailbox authorization, OTP extraction location, inbound-abuse
+billing, kill-switch tempfail, one-address-per-agent, deletion/tombstone
+durability, and the email billing dimensions (all in the sections above).
 
 ## Relationship To Existing Docs
 
