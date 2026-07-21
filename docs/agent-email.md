@@ -72,6 +72,17 @@ inbound-edge open questions, revising two kickoff assumptions:
   2026) replaces the kickoff assumption that a send slice would require a
   separate outbound provider; it is now the leading candidate.
 
+An operator decision on 2026-07-21 set the launch receive domain:
+
+- **Receive starts on `agent-mail.witwave.ai`.** V1 receives on
+  `agent-mail.witwave.ai` — configured for Email Routing inside the existing
+  `witwave.ai` zone — until `witmail.ai` is acquired and provisioned, then
+  cuts over with a dual-domain receive window. The address shape is identical
+  on both domains. Because Cloudflare documents catch-all at the zone apex
+  only, verifying catch-all (or an equivalent full-coverage route) on a
+  configured subdomain is a launch-gating spike (see Addressing And Domain
+  Model for the fallback ladder).
+
 ## Goal
 
 Every named agent already has a durable, attributable self: memories, facts,
@@ -146,12 +157,24 @@ but as a local-part segment rather than a subdomain. The subdomain shape from
 kickoff was dropped after verification: Cloudflare Email Routing caps a zone
 at 30 configured domains (apex plus routing/sending subdomains combined) and
 has no wildcard subdomain receive, so per-realm subdomains cannot scale (see
-Inbound Pipeline for the full findings). The base domain is a dedicated
-Cloudflare-fronted apex zone: `witmail.ai`, whose acquisition moves from
-"target" to launch prerequisite. If the acquisition falls through, another
-dedicated apex takes its place — v1 does not launch on a subdomain of the
-existing estate, because catch-all behavior on a configured subdomain is
-undocumented and the design depends on an apex catch-all.
+Inbound Pipeline for the full findings). The launch receive domain is
+`agent-mail.witwave.ai`, configured for Email Routing inside the existing
+`witwave.ai` zone (operator decision, 2026-07-21), with `witmail.ai` — a
+dedicated Cloudflare-fronted apex zone — as the durable home once acquired
+and provisioned. The address shape is identical on both:
+`<agent-local-part>.<realm-label>@agent-mail.witwave.ai` at launch, the same
+local part at `witmail.ai` after cutover.
+
+One engineering caveat gates the launch domain: Cloudflare documents
+catch-all at the zone apex only, and whether catch-all (or an equivalent
+full-coverage route) works on a configured subdomain is unverified. That
+verification is a launch-gating spike. If it fails, the fallback ladder is:
+run `agent-mail.witwave.ai` as its own Cloudflare zone if the account plan
+permits subdomain zones; otherwise accelerate the `witmail.ai` acquisition
+and launch on the apex directly. Per-address routing rules are not a
+fallback beyond a small pilot fleet — Email Routing custom-address rules are
+capped per zone (the spike should confirm the current cap) and the address
+population grows with every agent.
 
 **Realm label (settled).** `<realm-label>` is the realm id body verbatim:
 strip the `realm_` prefix and use the remainder. Realm ids are minted as 80
@@ -209,12 +232,12 @@ Requirements regardless of format:
   enforced by the backend hard caps and per-agent/per-realm kill switches
   settled at kickoff, not by DNS separation; per-realm sending subdomains
   would hit the same 30-domain zone cap and are not the isolation mechanism.
-- If v1 launches on an apex other than `witmail.ai`, the cutover is a real
-  migration: external services will hold launch-domain addresses on file, so
-  the launch domain must keep receiving (dual-domain routing) for a long
-  deprecation window after `witmail.ai` activates. Every address a third
-  party ever saw must keep working until its agent is done with the accounts
-  behind it. Acquiring `witmail.ai` before launch makes this moot.
+- The `agent-mail.witwave.ai` to `witmail.ai` cutover is a real migration:
+  external services will hold launch-domain addresses on file, so
+  `agent-mail.witwave.ai` must keep receiving (dual-domain routing) for a
+  long deprecation window after `witmail.ai` activates. Every address a
+  third party ever saw must keep working until its agent is done with the
+  accounts behind it.
 
 ## Inbound Pipeline
 
@@ -236,7 +259,10 @@ The kickoff verification items were resolved on 2026-07-20:
   documented at the zone apex only. Native per-realm subdomain configuration
   therefore cannot scale, which is what moved the realm label into the local
   part (see Addressing And Domain Model).
-- **Settled topology: apex catch-all into an Email Worker.** The Worker
+- **Settled topology: a full-coverage catch-all into an Email Worker.** On
+  the `witmail.ai` apex this is the documented zone-apex catch-all; on the
+  `agent-mail.witwave.ai` launch domain, catch-all on a configured subdomain
+  is the launch-gating spike (see Addressing And Domain Model). The Worker
   first matches reserved/role addresses and routes them to the operator,
   then parses the envelope recipient: strip any subaddress tag, split the
   local part on its single dot, resolve `<realm-label>` to the owning cell.
@@ -431,11 +457,14 @@ Receive-only still carries real obligations:
    Sending (public beta April 2026) is the leading candidate; confirm GA
    status, deliverability posture, and suppression semantics when a send
    slice is scheduled.
-8. Domain cutover mechanics if v1 launches on an apex other than
-   `witmail.ai`: the dual-domain receive window and how long launch-domain
-   addresses must survive after `witmail.ai` activates. Moot if the
-   acquisition completes before launch; the `witmail.witwave.ai` interim is
-   dropped either way.
+8. Domain cutover mechanics for `agent-mail.witwave.ai` to `witmail.ai`:
+   the dual-domain receive window, address rewriting policy, and how long
+   launch-domain addresses must survive after `witmail.ai` activates.
+9. Launch-gating spike: verify catch-all (or an equivalent full-coverage
+   route) on `agent-mail.witwave.ai` as a configured Email Routing subdomain
+   of the `witwave.ai` zone, and confirm the current custom-address rule
+   cap; on failure, follow the fallback ladder in Addressing And Domain
+   Model.
 
 Settled on 2026-07-20 (formerly items 1–2): realm-label derivation and
 local-part sanitization (see Addressing And Domain Model), and the Cloudflare
