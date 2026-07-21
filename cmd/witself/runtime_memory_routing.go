@@ -15,7 +15,11 @@ type runtimeMemoryRoutingSnapshot struct {
 }
 
 func installRuntimeMemoryRoutingInstructions(runtimeName string) (runtimeMemoryRoutingSnapshot, error) {
-	spec, displayName, managed, err := runtimeMemoryRoutingSpec(runtimeName)
+	return installRuntimeMemoryRoutingInstructionsAt(runtimeName, "")
+}
+
+func installRuntimeMemoryRoutingInstructionsAt(runtimeName, runtimeWorkspace string) (runtimeMemoryRoutingSnapshot, error) {
+	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
 	if err != nil {
 		return runtimeMemoryRoutingSnapshot{}, fmt.Errorf("resolve %s memory routing instructions: %w", displayName, err)
 	}
@@ -41,7 +45,11 @@ func installRuntimeMemoryRoutingInstructions(runtimeName string) (runtimeMemoryR
 }
 
 func removeRuntimeMemoryRoutingInstructions(runtimeName string) (runtimeMemoryRoutingSnapshot, error) {
-	spec, displayName, managed, err := runtimeMemoryRoutingSpec(runtimeName)
+	return removeRuntimeMemoryRoutingInstructionsAt(runtimeName, "")
+}
+
+func removeRuntimeMemoryRoutingInstructionsAt(runtimeName, runtimeWorkspace string) (runtimeMemoryRoutingSnapshot, error) {
+	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
 	if err != nil {
 		return runtimeMemoryRoutingSnapshot{}, fmt.Errorf("resolve %s memory routing instructions: %w", displayName, err)
 	}
@@ -69,6 +77,10 @@ func (state runtimeMemoryRoutingSnapshot) restore() error {
 }
 
 func runtimeMemoryRoutingSpec(runtimeName string) (managedInstructionsSpec, string, bool, error) {
+	return runtimeMemoryRoutingSpecAt(runtimeName, "")
+}
+
+func runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace string) (managedInstructionsSpec, string, bool, error) {
 	switch runtimeName {
 	case transcriptcapture.RuntimeCodex:
 		path, err := codexAgentsPath()
@@ -85,6 +97,15 @@ func runtimeMemoryRoutingSpec(runtimeName string) (managedInstructionsSpec, stri
 	case transcriptcapture.RuntimeCursor:
 		spec, err := cursorManagedInstructionsSpec()
 		return spec, "Cursor", true, err
+	case transcriptcapture.RuntimeOpenClaw:
+		var spec managedInstructionsSpec
+		var err error
+		if runtimeWorkspace == "" {
+			spec, err = openClawManagedInstructionsSpec()
+		} else {
+			spec, err = openClawManagedInstructionsSpecAt(runtimeWorkspace)
+		}
+		return spec, "OpenClaw", true, err
 	default:
 		return managedInstructionsSpec{}, "", false, fmt.Errorf("unsupported runtime %q", runtimeName)
 	}

@@ -75,6 +75,14 @@ func installCmd(args []string) int {
 	}
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	if !supportsTranscriptHooks(runtime) {
+		for _, name := range []string{"capture", "managed-hooks", "user-hooks"} {
+			if setFlags[name] {
+				fmt.Fprintf(os.Stderr, "witself: --%s is not supported for %s because this integration has no transcript hooks\n", name, runtime)
+				return 2
+			}
+		}
+	}
 	if *userHooks && setFlags["managed-hooks"] && *managedHooks {
 		fmt.Fprintln(os.Stderr, "witself: --user-hooks conflicts with --managed-hooks")
 		return 2
@@ -90,7 +98,34 @@ func installCmd(args []string) int {
 				return 2
 			}
 		}
-		routing, err := installRuntimeMemoryRoutingInstructions(runtime)
+		runtimeWorkspace := ""
+		if runtime == transcriptcapture.RuntimeOpenClaw {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				runtimeWorkspace = installed.RuntimeWorkspace
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			} else {
+				environment, environmentErr := captureOpenClawMCPEnvironment()
+				if environmentErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", environmentErr)
+					return 1
+				}
+				runtimeCLI, cliErr := findRuntimeCLIWithEnvironment(runtime, environment)
+				if cliErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", cliErr)
+					return 1
+				}
+				openClawAgent, inspectErr := inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI, environment)
+				cliErr = inspectErr
+				if cliErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", cliErr)
+					return 1
+				}
+				runtimeWorkspace = openClawAgent.Workspace
+			}
+		}
+		routing, err := installRuntimeMemoryRoutingInstructionsAt(runtime, runtimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
@@ -152,16 +187,54 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
-	hookMode := transcriptcapture.HookModeUser
+	hookMode := transcriptcapture.HookModeNone
+	if supportsTranscriptHooks(runtime) {
+		hookMode = transcriptcapture.HookModeUser
+	}
 	if useManagedHooks {
 		hookMode = transcriptcapture.HookModeManaged
 	}
-	runtimeCLI, err := findRuntimeCLI(runtime)
+	var openClawEnvironment map[string]string
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		openClawEnvironment, err = captureOpenClawMCPEnvironment()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil && !equalOpenClawMCPEnvironment(previousConfig.MCPEnvironment, openClawEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw selector environment changed since installation; restore the installed OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, and OPENCLAW_PROFILE values before reinstalling or uninstall the existing integration first")
+			return 1
+		}
+	}
+	runtimeCLI, err := findRuntimeCLIWithEnvironment(runtime, openClawEnvironment)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	runtimeVersion := detectRuntimeVersion(runtime, runtimeCLI)
+	openClawWorkspace := ""
+	openClawAgentID := ""
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		var openClawAgent openClawAgent
+		openClawAgent, err = inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI, openClawEnvironment)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		openClawWorkspace = openClawAgent.Workspace
+		openClawAgentID = openClawAgent.ID
+		if errors.Is(previousConfigErr, os.ErrNotExist) {
+			_, exists, inspectErr := inspectOpenClawMCPWithEnvironment(runtimeCLI, openClawEnvironment)
+			if inspectErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: inspect OpenClaw-managed mcp.servers before install: %v\n", inspectErr)
+				return 1
+			}
+			if exists {
+				fmt.Fprintln(os.Stderr, "witself: OpenClaw-managed mcp.servers.witself exists without a Witself integration record; refusing to claim or replace it")
+				return 1
+			}
+		}
+	}
+	runtimeVersion := detectRuntimeVersionWithEnvironment(runtime, runtimeCLI, openClawEnvironment)
 	if runtimeVersion == "" && previousConfigErr == nil {
 		runtimeVersion = previousConfig.RuntimeVersion
 	}
@@ -227,6 +300,27 @@ func installCmd(args []string) int {
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		cfg.RuntimeCLICommand = runtimeCLI
+		cfg.MCPCommand = witselfExecutable
+		cfg.MCPEnvironment = cloneOpenClawEnvironment(openClawEnvironment)
+		cfg.MCPConnectTimeoutSeconds = openClawMCPConnectTimeoutSeconds
+		cfg.RuntimeWorkspace = openClawWorkspace
+		cfg.RuntimeAgentID = openClawAgentID
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeAgentID != cfg.RuntimeAgentID:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw default agent changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeAgentID, cfg.RuntimeAgentID)
+				return 1
+			case previousConfig.RuntimeWorkspace != cfg.RuntimeWorkspace:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw default workspace changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeWorkspace, cfg.RuntimeWorkspace)
+				return 1
+			}
+		}
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	if runtime == transcriptcapture.RuntimeCursor {
 		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
@@ -244,12 +338,14 @@ func installCmd(args []string) int {
 		return 1
 	}
 	stagedConfig := cfg
-	if previousConfigErr == nil {
+	if previousConfigErr == nil && supportsTranscriptHooks(runtime) {
 		stagedConfig.HookMode = previousConfig.HookMode
 	}
-	if err := transcriptcapture.SaveConfig(stagedConfig); err != nil {
-		fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
-		return 1
+	if runtime != transcriptcapture.RuntimeOpenClaw || errors.Is(previousConfigErr, os.ErrNotExist) {
+		if err := transcriptcapture.SaveConfig(stagedConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
+			return 1
+		}
 	}
 	restoreConfig := func() error {
 		if previousConfigErr == nil {
@@ -257,7 +353,7 @@ func installCmd(args []string) int {
 		}
 		return transcriptcapture.RemoveConfig(runtime)
 	}
-	memoryRouting, err := installRuntimeMemoryRoutingInstructions(runtime)
+	memoryRouting, err := installRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 	if err != nil {
 		if rollbackErr := restoreConfig(); rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
@@ -272,6 +368,49 @@ func installCmd(args []string) int {
 	}
 	cursorPermissionTouched := false
 	rollbackInstall := func(mcpTouched, hooksTouched bool) {
+		if runtime == transcriptcapture.RuntimeOpenClaw {
+			if previousBinding != nil {
+				// Keep the newly installed policy in place until the previous exact
+				// MCP binding is restored. An older policy may not cover tools added
+				// by the attempted binding if MCP rollback itself fails.
+				if mcpTouched {
+					if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current OpenClaw routing and integration recovery state\n", rollbackErr)
+						return
+					}
+				}
+				if memoryRouting.managed {
+					if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+						return
+					}
+				}
+				if rollbackErr := restoreConfig(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+				}
+				return
+			}
+
+			// On a first install, the newly installed policy and staged config are
+			// the only durable recovery fence for a credential-bound MCP that may
+			// still be live. Remove neither until exact MCP absence is proven.
+			if mcpTouched {
+				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, nil, &cfg); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving OpenClaw routing and integration recovery state\n", rollbackErr)
+					return
+				}
+			}
+			if memoryRouting.managed {
+				if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+					return
+				}
+			}
+			if rollbackErr := restoreConfig(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+			}
+			return
+		}
 		if rollbackErr := restoreConfig(); rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
 		}
@@ -291,7 +430,7 @@ func installCmd(args []string) int {
 			}
 		}
 		if mcpTouched {
-			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
 			}
 		}
@@ -313,13 +452,36 @@ func installCmd(args []string) int {
 			cfg.ManagedPermissions = addManagedCursorMCPPermission(cfg.ManagedPermissions)
 		}
 	}
-	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
+	openClawMCPPreTouched := false
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		openClawMCPPreTouched, err = prepareOpenClawMCPInstall(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		if err != nil {
+			rollbackInstall(openClawMCPPreTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+			return 1
+		}
+	}
+	var registerErr error
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		desiredBinding, bindingErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
+		if bindingErr != nil {
+			registerErr = bindingErr
+		} else {
+			registerErr = registerOpenClawMCPBinding(runtimeCLI, desiredBinding)
+		}
+	} else {
+		registerErr = registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+	}
+	if registerErr != nil {
 		rollbackInstall(true, false)
-		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
 	var hookPath string
-	if useManagedHooks {
+	if !supportsTranscriptHooks(runtime) {
+		// OpenClaw's first integration phase is MCP plus static routing only.
+		// Keep the explicit none mode durable so later code never infers hooks.
+	} else if useManagedHooks {
 		hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
 		if err == nil {
 			_, err = transcriptcapture.RemoveHooks(runtime)
@@ -346,7 +508,11 @@ func installCmd(args []string) int {
 	} else {
 		fmt.Printf("installed %s for agent %s at %s\n", runtime, self.Identity.AgentName, loc.Name)
 	}
-	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
+	if supportsTranscriptHooks(runtime) {
+		fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
+	} else {
+		fmt.Println("transcript capture: unavailable (no supported OpenClaw hooks)")
+	}
 	fmt.Println("mcp: witself")
 	hydrationCapability := memoryhydration.CapabilityFor(runtime)
 	fmt.Printf("memory hydration: session=%s automatic=%t task=%s automatic=%t\n",
@@ -363,6 +529,8 @@ func installCmd(args []string) int {
 		}
 	} else if runtime == transcriptcapture.RuntimeCodex {
 		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook; then start a new Codex task (or restart Codex) to load the managed memory-routing instructions")
+	} else if runtime == transcriptcapture.RuntimeOpenClaw {
+		fmt.Println("next: start a new OpenClaw task to load the managed memory-routing instructions and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -476,7 +644,7 @@ func uninstallCmd(args []string) int {
 	// Reject malformed managed routing before invoking any runtime CLI. This is
 	// intentionally read-only: CLI availability is the second preflight, and no
 	// local integration state is changed unless both checks pass.
-	if err := preflightRuntimeMemoryRoutingRemoval(runtime); err != nil {
+	if err := preflightRuntimeMemoryRoutingRemovalAt(runtime, cfg.RuntimeWorkspace); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
@@ -499,30 +667,53 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
-	runtimeCLI, runtimeCLIErr := findRuntimeCLI(runtime)
+	runtimeCLI := ""
+	var runtimeCLIErr error
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		// The OpenClaw namespace is selected by the installed CLI binding.
+		// Uninstall through that exact persisted command instead of whichever
+		// `openclaw` binary now happens to win PATH lookup.
+		runtimeCLI = cfg.RuntimeCLICommand
+		_, _, runtimeCLIErr = inspectOpenClawMCPWithEnvironment(runtimeCLI, cfg.MCPEnvironment)
+	} else {
+		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
+	}
 	if runtime != transcriptcapture.RuntimeCursor && runtimeCLIErr != nil {
 		// Non-Cursor MCP registrations are owned by the runtime CLI. Preserve all
 		// local state so a later retry can remove the complete integration.
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
 		return 1
 	}
-	// Remove the preflighted managed instruction block before irreversible
-	// teardown. Its snapshot is cheap to restore if a later hook, MCP, or config
-	// operation fails.
-	memoryRouting, err := removeRuntimeMemoryRoutingInstructions(runtime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
-		return 1
+	// OpenClaw ignores MCP initialization instructions, so its AGENTS.md block
+	// is the only model-visible policy surface. Keep that block in place until
+	// after its credential-bound MCP registration is gone. Other runtimes retain
+	// the existing routing-first teardown, whose snapshot supports rollback.
+	var memoryRouting runtimeMemoryRoutingSnapshot
+	if runtime != transcriptcapture.RuntimeOpenClaw {
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
 	}
 	cursorPermissionTouched := false
 	rollbackUninstall := func(hooksTouched, mcpTouched bool) {
+		routingHandled := false
+		mcpRestoreAllowed := true
+		if runtime == transcriptcapture.RuntimeOpenClaw && memoryRouting.managed {
+			routingHandled = true
+			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+				mcpRestoreAllowed = false
+			}
+		}
 		if cursorPermissionTouched {
 			if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
 			}
 		}
-		if mcpTouched && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
-			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+		if mcpTouched && mcpRestoreAllowed && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
 			}
 		}
@@ -531,7 +722,7 @@ func uninstallCmd(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
 			}
 		}
-		if memoryRouting.managed {
+		if memoryRouting.managed && !routingHandled {
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
 			}
@@ -545,12 +736,34 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
-	if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
-		rollbackUninstall(true, false)
-		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
-		return 1
+	if supportsTranscriptHooks(runtime) {
+		if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
+			rollbackUninstall(true, false)
+			fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
+			return 1
+		}
 	}
-	if runtime == transcriptcapture.RuntimeCursor {
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		expected, expectedErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
+		if expectedErr != nil {
+			rollbackUninstall(true, false)
+			fmt.Fprintf(os.Stderr, "witself: resolve installed MCP binding: %v\n", expectedErr)
+			return 1
+		}
+		if err := unregisterOpenClawMCP(runtimeCLI, &expected); err != nil {
+			rollbackUninstall(true, true)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			// A failed removal returns no trustworthy snapshot. Leave MCP absent
+			// rather than risk restoring credential-bound tools without policy.
+			rollbackUninstall(false, false)
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+	} else if runtime == transcriptcapture.RuntimeCursor {
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
 			rollbackUninstall(true, true)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
@@ -1189,9 +1402,25 @@ func supportsManagedHooks(runtime string) bool {
 	return runtime == transcriptcapture.RuntimeCodex || runtime == transcriptcapture.RuntimeClaudeCode
 }
 
+func supportsTranscriptHooks(runtime string) bool {
+	switch runtime {
+	case transcriptcapture.RuntimeCodex,
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeCursor:
+		return true
+	default:
+		return false
+	}
+}
+
 var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-+][0-9a-z][0-9a-z.-]*)?)\b`)
 
 func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
+	return detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI, nil)
+}
+
+func detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI string, environment map[string]string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// Version output is part of the executable's stdout contract. Keep stderr
@@ -1204,7 +1433,11 @@ func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 		// so bind and verify that same executable surface.
 		args = []string{"agent", "--version"}
 	}
-	output, err := exec.CommandContext(ctx, runtimeCLI, args...).Output()
+	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	if runtimeName == transcriptcapture.RuntimeOpenClaw && environment != nil {
+		cmd = openClawCommandContext(ctx, runtimeCLI, environment, args...)
+	}
+	output, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -1225,6 +1458,10 @@ func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 }
 
 func findRuntimeCLI(runtime string) (string, error) {
+	return findRuntimeCLIWithEnvironment(runtime, nil)
+}
+
+func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string) (string, error) {
 	candidates := []string{}
 	var probeArgs []string
 	switch runtime {
@@ -1253,15 +1490,29 @@ func findRuntimeCLI(runtime string) (string, error) {
 			candidates = append(candidates, path)
 		}
 		probeArgs = []string{"agent", "mcp", "list", "--help"}
+	case transcriptcapture.RuntimeOpenClaw:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("OPENCLAW_CLI_PATH")))
+		if path, err := exec.LookPath("openclaw"); err == nil {
+			candidates = append(candidates, path)
+		}
+		probeArgs = []string{"mcp", "add", "--help"}
 	}
 	seen := map[string]bool{}
+	probeTimeout := runtimeCLICapabilityProbeTimeout
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		probeTimeout = openClawCLIReadTimeout
+	}
 	for _, candidate := range candidates {
 		if candidate == "" || seen[candidate] {
 			continue
 		}
 		seen[candidate] = true
-		ctx, cancel := context.WithTimeout(context.Background(), runtimeCLICapabilityProbeTimeout)
-		err := exec.CommandContext(ctx, candidate, probeArgs...).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		cmd := exec.CommandContext(ctx, candidate, probeArgs...)
+		if runtime == transcriptcapture.RuntimeOpenClaw && environment != nil {
+			cmd = openClawCommandContext(ctx, candidate, environment, probeArgs...)
+		}
+		err := cmd.Run()
 		cancel()
 		if err == nil {
 			return candidate, nil
@@ -1271,13 +1522,7 @@ func findRuntimeCLI(runtime string) (string, error) {
 }
 
 func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, location string) error {
-	serveArgs := []string{
-		witselfExecutable, "mcp", "serve", "--runtime", runtime,
-		"--account", account, "--realm", realm, "--agent", agent,
-	}
-	if location != "" {
-		serveArgs = append(serveArgs, "--location", location)
-	}
+	serveArgs := runtimeMCPServeArgs(runtime, witselfExecutable, account, realm, agent, location)
 	if runtime == transcriptcapture.RuntimeCursor {
 		if err := registerCursorMCP(serveArgs); err != nil {
 			return err
@@ -1304,6 +1549,8 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	case transcriptcapture.RuntimeGrokBuild:
 		removeArgs = []string{"mcp", "remove", "--scope", "user", "witself"}
 		addArgs = append([]string{"mcp", "add", "--scope", "user", "witself", "--"}, serveArgs...)
+	case transcriptcapture.RuntimeOpenClaw:
+		return registerOpenClawMCP(runtimeCLI, serveArgs)
 	default:
 		return fmt.Errorf("unsupported runtime %q", runtime)
 	}
@@ -1321,6 +1568,17 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	return nil
 }
 
+func runtimeMCPServeArgs(runtime, witselfExecutable, account, realm, agent, location string) []string {
+	serveArgs := []string{
+		witselfExecutable, "mcp", "serve", "--runtime", runtime,
+		"--account", account, "--realm", realm, "--agent", agent,
+	}
+	if location != "" {
+		serveArgs = append(serveArgs, "--location", location)
+	}
+	return serveArgs
+}
+
 func unregisterMCP(runtime, runtimeCLI string) error {
 	if runtime == transcriptcapture.RuntimeCursor {
 		if runtimeCLI != "" {
@@ -1333,6 +1591,9 @@ func unregisterMCP(runtime, runtimeCLI string) error {
 			return removeErr
 		}
 		return nil
+	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		return unregisterOpenClawMCP(runtimeCLI, nil)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -2,13 +2,16 @@
 
 Status: portable fact, direct narrative-memory, automatic-recall, and foreground
 checkpoint guidance is implemented for Codex, Claude Code, Grok Build, and
-Cursor. Provider aggregation remains an agent behavior contract, not a new
-Witself API. Witself narrative memory is the portable default; native memory is
-an optional explicitly selected second destination. PostgreSQL stores the due
-state, and the active agent performs synthesis. Runtime hooks never launch
-inference or a curator. The explicit `memory curate auto` worker and per-user
-launchd/systemd service are retained only as legacy/manual compatibility paths
-in [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+Cursor. OpenClaw phase 1 is a preview with the same managed routing contract
+over stdio MCP and workspace guidance, but without transcript hooks or automatic
+prompt-context injection. Provider aggregation remains an agent behavior
+contract, not a new Witself API. Witself narrative memory is the portable
+default; native memory is an optional explicitly selected second destination.
+PostgreSQL stores the due state, and the active agent performs synthesis.
+Runtime hooks never launch inference or a curator. The explicit `memory curate
+auto` worker and per-user launchd/systemd service are retained only as
+legacy/manual compatibility paths in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Authority and delivery
 
@@ -17,12 +20,13 @@ the Witself API remains the portable fact and narrative-memory system of
 record. Witself does not copy the policy into an independent server-side
 classifier.
 
-| Runtime | Managed file installed by `witself install` | MCP initialization policy |
+| Runtime | Managed file installed by `witself install` | MCP and tool guidance |
 |---|---|---|
 | Codex | `$CODEX_HOME/AGENTS.md`, normally `~/.codex/AGENTS.md` | The full Codex-specific policy is prepended to the implemented Witself protocol. |
 | Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A high-salience Claude-specific synopsis plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
 | Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
 | Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
+| OpenClaw preview | `AGENTS.md` in the sole default agent's configured workspace | OpenClaw exposes the full configured stdio MCP catalog under its own transformed names; the managed workspace block carries its safety and routing contract because no Witself prompt hook injects it automatically. |
 
 Codex's installed block and MCP policy use the same Codex-specific contract.
 Grok's installed block preserves the same Grok behavior with underscore-safe
@@ -43,21 +47,62 @@ selected Cursor installation to discover that directory. Witself does not copy
 the rule into project repositories to work around a custom path outside the
 runtime's rule-discovery boundary.
 
+OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH`, or an explicit
+`OPENCLAW_CLI_PATH`, and exactly one configured agent. That sole agent must be
+the default and have a clean absolute workspace path. The installer registers
+`witself` through OpenClaw's MCP registry and places the marker-delimited policy
+in that workspace's `AGENTS.md`. It deliberately refuses multi-agent selection
+in this preview. This is a CLI/MCP adapter, not a native OpenClaw plugin, and it
+does not install an OpenClaw transcript, session, or prompt hook.
+
+The MCP definition includes a 60-second connection timeout and a strict
+non-secret environment allowlist: the effective absolute `WITSELF_HOME`, plus
+any non-empty `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and
+`OPENCLAW_PROFILE` selectors used during installation. This preserves the same
+Witself state and OpenClaw configuration namespace when OpenClaw launches the
+server from its reduced SDK environment. A profile without explicit path
+selectors is expanded to OpenClaw's normal
+`~/.openclaw-PROFILE/openclaw.json` namespace and persisted in that expanded
+form. Arbitrary environment variables,
+credentials, `HOME`, and `PATH` are not copied. Reinstall rejects selector
+drift; other OpenClaw home/workspace/agent-directory/include-root overrides are
+unsupported in phase 1 and fail closed.
+
+The OpenClaw block is intentionally broader than memory routing. It carries the
+guided safety and lifecycle policy for identity, facts, narrative memory,
+curation, messaging and agent email, avatars, and client-custodied secrets
+across the full configured Witself MCP catalog. Because current OpenClaw does
+not consume the MCP server's initialization instructions, that managed file is
+the phase-1 policy surface. Against OpenClaw's default 20,000-character
+per-bootstrap-file limit, Witself applies a more conservative 20,000-byte guard
+to the complete resulting `AGENTS.md`. If the existing file plus the managed
+block would exceed the guard, installation fails closed before changing the file
+instead of allowing partial safety policy through truncation.
+
 Every managed file contains routing policy only. Personal facts and memory
 content never belong in it. Installation is idempotent and replaces only the
-marker-delimited Witself block. Uninstall removes only that block. Shared Codex
-and Grok `AGENTS.md` files retain unrelated content and remain present if the
-managed block was their only content; the dedicated Claude and Cursor rules are
-removed when empty. Cursor installation refuses to merge into an unmarked
-pre-existing file at Witself's dedicated rule path, because prepending another
-MDC document could silently change the existing rule's frontmatter. Codex
-installation also refuses to write when a non-empty global
+marker-delimited Witself block. Uninstall removes only that block. Shared Codex,
+Grok, and OpenClaw `AGENTS.md` files retain unrelated content and remain present
+if the managed block was their only content; the dedicated Claude and Cursor
+rules are removed when empty. Cursor installation refuses to merge into an
+unmarked pre-existing file at Witself's dedicated rule path, because prepending
+another MDC document could silently change the existing rule's frontmatter.
+Codex installation also refuses to write when a non-empty global
 `AGENTS.override.md` would shadow its `AGENTS.md`.
+
+OpenClaw reinstall owns only the exact `witself` MCP registration recorded in
+the local integration, including its allowlisted environment and connection
+timeout. It is idempotent when the live definition already
+matches, but refuses to claim an unrecorded registration or replace one that no
+longer matches the recorded or requested binding. Uninstall removes the MCP
+registration only when it still matches; otherwise it fails closed and restores
+the managed routing block. A changed default workspace also requires uninstall
+before reinstall so the old managed block is not orphaned.
 
 Installation and removal use atomic file replacement and restore the previous
 routing state if a later integration step fails. After installation or upgrade,
-restart the runtime and start a new task so both file guidance and MCP
-initialization are refreshed.
+restart the runtime and start a new task so its available file guidance and MCP
+tool surface are refreshed.
 
 ### Foreground checkpoint contract
 
@@ -66,9 +111,10 @@ PostgreSQL. `GET /v1/self` and `witself.self.show` expose only an authenticated,
 value-free `memory_checkpoint` pointer to that lifecycle state. Codex and Claude
 Code prompt hooks inject a pending checkpoint through model-visible structured
 context when it is already durable at read time. Cursor's context delivery is
-not reliably model-visible and Grok ignores passive-hook output, so their
-always-on managed rules instruct the foreground agent to call `self.show`; that
-is a guided fallback, not automatic hook injection.
+not reliably model-visible, Grok ignores passive-hook output, and OpenClaw has
+no supported Witself prompt hook. Their always-on managed rules instruct the
+foreground agent to call `self.show`; that is a guided fallback, not automatic
+hook injection.
 
 The authenticated checkpoint is also the deterministic foreground selector.
 Its exact `request_id` and optional `run_id` drive the one curation lane for
@@ -96,11 +142,11 @@ self-contained final answer containing every authorized requested answer or
 value. It must not substitute curation or other housekeeping status, or refer
 to an answer as being "above" in hidden context.
 
-Checkpoint timing is eventual. The prompt hook starts transcript flushing and
-then reads `/v1/self`, so the current prompt is not guaranteed to be in the
-returned request and the current assistant response cannot be. Those events may
-be reviewed on a later interaction. The checkpoint never authorizes permanent
-deletion or promotion of a canonical fact.
+Checkpoint timing is eventual on hook-capable runtimes. The prompt hook starts
+transcript flushing and then reads `/v1/self`, so the current prompt is not
+guaranteed to be in the returned request and the current assistant response
+cannot be. Those events may be reviewed on a later interaction. The checkpoint
+never authorizes permanent deletion or promotion of a canonical fact.
 
 ## Capture contract
 
@@ -166,11 +212,11 @@ integrity. The subject and aliases remain because they may own other facts.
 Re-creation is a separate explicit store request and receives a new fact id.
 
 This routing is scoped: deleting a Witself fact does not delete Codex memory,
-Claude auto memory, Grok memory, Cursor Memories, transcripts, prior exports,
-or backups still within retention. After an exact Witself deletion, the agent
-must not silently answer from native memory as though the canonical fact still
-existed. It may surface separately requested native context only with its
-provider and advisory status named.
+Claude auto memory, Grok memory, Cursor Memories, OpenClaw's native workspace
+memory, transcripts, prior exports, or backups still within retention. After an
+exact Witself deletion, the agent must not silently answer from native memory as
+though the canonical fact still existed. It may surface separately requested
+native context only with its provider and advisory status named.
 
 ### Provider-specific native memory
 
@@ -200,6 +246,11 @@ provider and advisory status named.
   Never substitute or manually edit `.cursor/rules`, User Rules, `AGENTS.md`,
   project or plan Markdown, a Witself fact, or a transcript. Report a failed or
   unavailable write without changing Cursor's settings.
+- **OpenClaw:** OpenClaw's native workspace `MEMORY.md` and Witself are distinct
+  providers. The managed Witself policy never writes or changes that file or
+  OpenClaw's native-memory settings. An explicitly selected native destination
+  must use behavior supported by OpenClaw and must not be reported as stored
+  unless that operation is confirmed.
 
 ## Retrieval contract
 
@@ -229,6 +280,9 @@ Native retrieval inherits each runtime's boundary:
   repository, but Cursor exposes no supported exhaustive native-memory search
   contract. Report its project scope and partial coverage rather than claiming
   every Cursor Memory was searched.
+- OpenClaw phase 1 does not add a native-memory search adapter. Use only native
+  context OpenClaw actually makes available, keep it distinct from Witself, and
+  report partial coverage when completeness cannot be established.
 
 If a requested provider is unavailable or cannot be queried, the answer names
 that provider and marks the result partial instead of claiming comprehensive
@@ -261,20 +315,22 @@ memory route ever includes sealed secret or TOTP values.
 A future federating interface should use `provider`, not `source`, because
 Witself records already use `source_kind` and `source_ref` for provenance. A
 request may eventually accept selectors such as
-`provider=auto|witself|native|codex|claude|grok|cursor|all`, with an envelope that
-reports requested providers, provider statuses, results, conflicts, and a
-top-level `partial` flag.
+`provider=auto|witself|native|codex|claude|grok|cursor|openclaw|all`, with an
+envelope that reports requested providers, provider statuses, results,
+conflicts, and a top-level `partial` flag.
 
 That wire contract should be added only when each selected runtime exposes a
 supported retrieval boundary or a deliberate local federation adapter exists.
-Witself must not scrape generated Codex, Claude, Grok, or Cursor files as if
-they were stable cross-provider APIs.
+Witself must not scrape generated Codex, Claude, Grok, Cursor, or OpenClaw files
+as if they were stable cross-provider APIs.
 
 ## Runtime expectations
 
-All four managed runtimes load file guidance and MCP server instructions at
-runtime initialization. Start a new task after installing or upgrading so both
-instruction surfaces are refreshed.
+The four hook-capable managed runtimes load file guidance and MCP server
+instructions at runtime initialization. OpenClaw phase 1 relies on its managed
+workspace `AGENTS.md` plus the registered MCP tools and does not claim automatic
+prompt injection. Start a new task after installing or upgrading so the runtime
+reloads the available instruction and tool surfaces.
 
 Official runtime documentation:
 
@@ -291,3 +347,5 @@ Official runtime documentation:
 - Cursor: [rules](https://docs.cursor.com/context/rules),
   [Memories](https://docs.cursor.com/en/context/memories), and
   [CLI rules and MCP](https://docs.cursor.com/en/cli/using)
+- OpenClaw: [agent workspace](https://docs.openclaw.ai/concepts/agent-workspace)
+  and [MCP CLI](https://docs.openclaw.ai/cli/mcp)

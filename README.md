@@ -31,11 +31,15 @@ witself version
 ## Agent Runtime Integration
 
 Once an agent token exists under the normal `~/.witself` account layout, one
-command installs the Witself stdio MCP server and durable transcript hooks.
-Codex, Claude Code, Grok Build, and Cursor also receive managed portable
-fact-and-narrative-memory routing guidance. Witself is the default narrative
-destination; native-provider memory is an optional second destination used only
-when explicitly requested. See the
+command installs the Witself stdio MCP server. Codex, Claude Code, Grok Build,
+and Cursor also receive durable transcript hooks. The OpenClaw preview instead
+installs stdio MCP plus managed workspace routing only; it has no Witself
+transcript hooks or automatic prompt-context injection. All five runtimes
+receive managed safety and routing guidance for the full configured MCP catalog,
+including identity, facts, narrative memory, curation, messaging and email,
+avatars, and secrets. Witself is the default narrative destination;
+native-provider memory is an optional second destination used only when
+explicitly requested. See the
 [narrative-memory design](docs/narrative-memory-and-curation.md).
 
 - Codex: `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`)
@@ -44,6 +48,8 @@ when explicitly requested. See the
 - Grok Build: `$GROK_HOME/AGENTS.md` (normally `~/.grok/AGENTS.md`)
 - Cursor: `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
   `~/.cursor/rules/witself-memory-routing.mdc`)
+- OpenClaw preview: `AGENTS.md` in the sole default agent's configured
+  workspace
 
 Cursor installation also merges `Mcp(witself:*)` into
 `$CURSOR_CONFIG_DIR/cli-config.json` so the approved server's tools can run in
@@ -56,7 +62,27 @@ witself install codex
 witself install claude
 witself install grok
 witself install cursor
+witself install openclaw
 ```
+
+OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH` (or selected
+with `OPENCLAW_CLI_PATH`) and exactly one configured agent. That sole agent must
+be the default and have a clean absolute workspace path. Multi-agent OpenClaw
+selection and native-plugin hooks are not part of this preview. The resulting
+workspace `AGENTS.md` must fit within Witself's conservative 20,000-byte
+OpenClaw bootstrap guard; installation fails without changing the file rather
+than risk OpenClaw silently truncating the policy.
+
+The OpenClaw MCP registration pins a 60-second connection timeout and only the
+non-secret environment needed to preserve the selected local namespace:
+the effective absolute `WITSELF_HOME`, plus non-empty
+`OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and `OPENCLAW_PROFILE` values.
+When only `OPENCLAW_PROFILE` is set, Witself derives and persists OpenClaw's
+normal `~/.openclaw-PROFILE/openclaw.json` namespace before invoking the CLI.
+Witself never copies arbitrary environment variables, credentials, `HOME`, or
+`PATH` into the registration. Reinstall refuses selector drift, and phase 1
+fails closed on other OpenClaw home, workspace, agent-directory, or include-root
+overrides instead of guessing how to reproduce them in the spawned MCP server.
 
 The installer reuses an existing integration or the only local agent credential.
 When more than one agent is available, select one explicitly; a location label
@@ -67,9 +93,10 @@ witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
 The resolved account, realm, and agent are pinned explicitly in every installed
-hook and MCP command. A supplied location is pinned in both places; when
-omitted, no `--location` argument is written. The installer verifies that
-token-bound identity, preserves unrelated runtime hook configuration, and never
+MCP command and, where supported, every hook command. A supplied location is
+pinned in both places for hook-capable runtimes and in OpenClaw's MCP command;
+when omitted, no `--location` argument is written. The installer verifies that
+token-bound identity, preserves unrelated runtime configuration, and never
 copies a token into the MCP or hook command. Local
 integration identity and the retryable transcript outbox live under
 `~/.witself/` (`WITSELF_HOME` overrides it).
@@ -77,7 +104,10 @@ integration identity and the retryable transcript outbox live under
 Managed guidance contains policy only, never personal facts. Reinstall updates
 the marker-delimited policy without duplicating it. Codex and Grok preserve
 unrelated content in their shared `AGENTS.md` files; Claude and Cursor use
-dedicated rule files that uninstall removes when empty. Cursor's MDC rule has
+dedicated rule files that uninstall removes when empty. OpenClaw preserves
+unrelated content in the default workspace's shared `AGENTS.md`; if that
+workspace changes, uninstall the existing integration before reinstalling.
+Cursor's MDC rule has
 `alwaysApply: true` frontmatter and is discovered as an ancestor rule for
 workspaces below the normal user home. `CURSOR_CONFIG_DIR` relocates the files
 Witself manages, but the selected Cursor runtime must also discover that custom
@@ -86,6 +116,17 @@ installation refuses to proceed when a non-empty global `AGENTS.override.md`
 would shadow its managed file. After installing, restart the runtime and start a
 new task so the file guidance and MCP initialization are refreshed. See
 [Agent Memory Routing](docs/agent-memory-routing.md).
+
+The OpenClaw preview registers only the exact `witself` stdio MCP binding that
+Witself records, including its allowlisted environment and connection timeout.
+Reinstall is idempotent when that binding already matches and refuses to claim
+or replace an unrecorded or changed registration. Uninstall
+likewise removes only the exact recorded binding and managed `AGENTS.md` block;
+on a mismatch it fails closed and restores the routing block. This is a CLI/MCP
+integration, not an OpenClaw-native plugin, so transcript capture and automatic
+session or prompt injection remain unavailable. The managed workspace block is
+therefore the safety contract for OpenClaw's full Witself MCP catalog, not just
+its memory tools.
 
 Grok Build enables Claude and Cursor compatibility by default, including their
 hooks and MCP servers. During `witself install grok`, Witself inspects Grok's
@@ -109,8 +150,9 @@ that preserves the generated retry key. Deletion removes values, assertion/evide
 candidates; it retains only a non-restorable value-free tombstone plus immutable
 usage history so retries, audit, billing, and exports remain consistent. The
 MCP tool `witself.fact.delete` uses the same preview/apply contract across
-Codex, Claude Code, Grok Build, and Cursor. Plain “forget” remains ambiguous
-with each runtime's native memory and is clarified before any destructive call.
+Codex, Claude Code, Grok Build, Cursor, and OpenClaw. Plain “forget” remains
+ambiguous with each runtime's native memory and is clarified before any
+destructive call.
 
 Administrator-managed hooks are the Codex and Claude Code default. Run the
 command as your normal user; Witself requests administrator access only for the
@@ -123,7 +165,7 @@ through `/hooks` once.
 Remove an integration without deleting tokens or queued transcript events:
 
 ```sh
-witself uninstall claude,codex,grok,cursor
+witself uninstall claude,codex,grok,cursor,openclaw
 ```
 
 `messages` captures visible conversation and lifecycle events, `trace` adds

@@ -25,6 +25,7 @@ const (
 	RuntimeClaudeCode = "claude-code"
 	RuntimeGrokBuild  = "grok-build"
 	RuntimeCursor     = "cursor"
+	RuntimeOpenClaw   = "openclaw"
 	// HookEventCodexPermissionReview is Codex's normalized internal approval-review event.
 	HookEventCodexPermissionReview = "PermissionReview"
 
@@ -32,6 +33,7 @@ const (
 	ModeTrace    = "trace"
 	ModeRaw      = "raw"
 
+	HookModeNone    = "none"
 	HookModeUser    = "user"
 	HookModeManaged = "managed"
 )
@@ -47,23 +49,29 @@ type Location struct {
 
 // Config is the non-secret integration binding for one runtime.
 type Config struct {
-	SchemaVersion      string    `json:"schema_version"`
-	Runtime            string    `json:"runtime"`
-	RuntimeVersion     string    `json:"runtime_version,omitempty"`
-	CaptureMode        string    `json:"capture_mode"`
-	HookMode           string    `json:"hook_mode"`
-	Account            string    `json:"account"`
-	AccountID          string    `json:"account_id,omitempty"`
-	Realm              string    `json:"realm"`
-	RealmID            string    `json:"realm_id,omitempty"`
-	Agent              string    `json:"agent"`
-	AgentID            string    `json:"agent_id"`
-	AgentName          string    `json:"agent_name"`
-	Endpoint           string    `json:"endpoint,omitempty"`
-	TokenFile          string    `json:"token_file,omitempty"`
-	ManagedPermissions []string  `json:"managed_permissions,omitempty"`
-	Location           Location  `json:"location"`
-	InstalledAt        time.Time `json:"installed_at"`
+	SchemaVersion            string            `json:"schema_version"`
+	Runtime                  string            `json:"runtime"`
+	RuntimeVersion           string            `json:"runtime_version,omitempty"`
+	RuntimeCLICommand        string            `json:"runtime_cli_command,omitempty"`
+	MCPCommand               string            `json:"mcp_command,omitempty"`
+	MCPEnvironment           map[string]string `json:"mcp_environment,omitempty"`
+	MCPConnectTimeoutSeconds int               `json:"mcp_connect_timeout_seconds,omitempty"`
+	RuntimeWorkspace         string            `json:"runtime_workspace,omitempty"`
+	RuntimeAgentID           string            `json:"runtime_agent_id,omitempty"`
+	CaptureMode              string            `json:"capture_mode"`
+	HookMode                 string            `json:"hook_mode"`
+	Account                  string            `json:"account"`
+	AccountID                string            `json:"account_id,omitempty"`
+	Realm                    string            `json:"realm"`
+	RealmID                  string            `json:"realm_id,omitempty"`
+	Agent                    string            `json:"agent"`
+	AgentID                  string            `json:"agent_id"`
+	AgentName                string            `json:"agent_name"`
+	Endpoint                 string            `json:"endpoint,omitempty"`
+	TokenFile                string            `json:"token_file,omitempty"`
+	ManagedPermissions       []string          `json:"managed_permissions,omitempty"`
+	Location                 Location          `json:"location"`
+	InstalledAt              time.Time         `json:"installed_at"`
 }
 
 // NormalizeRuntime returns the stable runtime namespace used in transcript ids.
@@ -77,8 +85,10 @@ func NormalizeRuntime(runtime string) (string, error) {
 		return RuntimeGrokBuild, nil
 	case RuntimeCursor:
 		return RuntimeCursor, nil
+	case RuntimeOpenClaw:
+		return RuntimeOpenClaw, nil
 	default:
-		return "", fmt.Errorf("runtime must be %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor)
+		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw)
 	}
 }
 
@@ -101,10 +111,12 @@ func NormalizeHookMode(mode string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", HookModeUser:
 		return HookModeUser, nil
+	case HookModeNone:
+		return HookModeNone, nil
 	case HookModeManaged:
 		return HookModeManaged, nil
 	default:
-		return "", fmt.Errorf("hook mode must be %s or %s", HookModeUser, HookModeManaged)
+		return "", fmt.Errorf("hook mode must be %s, %s, or %s", HookModeNone, HookModeUser, HookModeManaged)
 	}
 }
 
@@ -172,6 +184,16 @@ func SaveConfig(cfg Config) error {
 	if len(cfg.RuntimeVersion) > 256 {
 		return errors.New("runtime_version must be 256 bytes or fewer")
 	}
+	cfg.MCPCommand = strings.TrimSpace(cfg.MCPCommand)
+	if cfg.MCPCommand != "" && (!filepath.IsAbs(cfg.MCPCommand) || filepath.Clean(cfg.MCPCommand) != cfg.MCPCommand) {
+		return errors.New("mcp_command must be a clean absolute path")
+	}
+	cfg.RuntimeWorkspace = strings.TrimSpace(cfg.RuntimeWorkspace)
+	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
+	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
+	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID); err != nil {
+		return err
+	}
 	cfg.CaptureMode = mode
 	cfg.HookMode = hookMode
 	if cfg.Account == "" {
@@ -215,7 +237,100 @@ func LoadConfig(runtime string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
+	cfg.MCPCommand = strings.TrimSpace(cfg.MCPCommand)
+	cfg.RuntimeWorkspace = strings.TrimSpace(cfg.RuntimeWorkspace)
+	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
+	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
+	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID); err != nil {
+		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID string) error {
+	if runtimeCLICommand != "" && (!filepath.IsAbs(runtimeCLICommand) || filepath.Clean(runtimeCLICommand) != runtimeCLICommand) {
+		return errors.New("runtime_cli_command must be a clean absolute path")
+	}
+	if mcpCommand != "" && (!filepath.IsAbs(mcpCommand) || filepath.Clean(mcpCommand) != mcpCommand) {
+		return errors.New("mcp_command must be a clean absolute path")
+	}
+	if workspace != "" && (!filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace) {
+		return errors.New("runtime_workspace must be a clean absolute path")
+	}
+	if runtime == RuntimeOpenClaw {
+		if hookMode != HookModeNone {
+			return errors.New("OpenClaw hook_mode must be none")
+		}
+		if mcpCommand == "" {
+			return errors.New("mcp_command is required for OpenClaw")
+		}
+		if runtimeCLICommand == "" {
+			return errors.New("runtime_cli_command is required for OpenClaw")
+		}
+		if workspace == "" {
+			return errors.New("runtime_workspace is required for OpenClaw")
+		}
+		if strings.TrimSpace(runtimeAgentID) == "" {
+			return errors.New("runtime_agent_id is required for OpenClaw")
+		}
+		if err := validateOpenClawMCPEnvironment(mcpEnvironment); err != nil {
+			return err
+		}
+		if mcpConnectTimeoutSeconds <= 0 || mcpConnectTimeoutSeconds > 3600 {
+			return errors.New("mcp_connect_timeout_seconds must be between 1 and 3600 for OpenClaw")
+		}
+		return nil
+	}
+	if len(mcpEnvironment) != 0 {
+		return fmt.Errorf("mcp_environment is not supported for %s", runtime)
+	}
+	if mcpConnectTimeoutSeconds != 0 {
+		return fmt.Errorf("mcp_connect_timeout_seconds is not supported for %s", runtime)
+	}
+	if hookMode == HookModeNone {
+		return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+	}
+	return nil
+}
+
+func validateOpenClawMCPEnvironment(environment map[string]string) error {
+	if strings.TrimSpace(environment["WITSELF_HOME"]) == "" {
+		return errors.New("mcp_environment WITSELF_HOME is required for OpenClaw")
+	}
+	if environment["OPENCLAW_PROFILE"] != "" && (environment["OPENCLAW_CONFIG_PATH"] == "" || environment["OPENCLAW_STATE_DIR"] == "") {
+		return errors.New("mcp_environment OPENCLAW_PROFILE requires OPENCLAW_CONFIG_PATH and OPENCLAW_STATE_DIR")
+	}
+	pathKeys := map[string]bool{
+		"WITSELF_HOME":         true,
+		"OPENCLAW_STATE_DIR":   true,
+		"OPENCLAW_CONFIG_PATH": true,
+	}
+	for key, value := range environment {
+		if !pathKeys[key] && key != "OPENCLAW_PROFILE" {
+			return fmt.Errorf("mcp_environment key %q is not allowed for OpenClaw", key)
+		}
+		if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("mcp_environment value for %s is invalid", key)
+		}
+		if pathKeys[key] && (!filepath.IsAbs(value) || filepath.Clean(value) != value) {
+			return fmt.Errorf("mcp_environment value for %s must be a clean absolute path", key)
+		}
+		if key == "OPENCLAW_PROFILE" {
+			if len(value) > 64 || !isOpenClawProfileLetterOrDigit(value[0]) {
+				return errors.New("mcp_environment value for OPENCLAW_PROFILE is invalid")
+			}
+			for _, character := range []byte(value) {
+				if !isOpenClawProfileLetterOrDigit(character) && character != '-' && character != '_' {
+					return errors.New("mcp_environment value for OPENCLAW_PROFILE is invalid")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func isOpenClawProfileLetterOrDigit(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
 }
 
 // RemoveConfig removes one runtime binding without touching tokens or pending

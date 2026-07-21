@@ -1058,11 +1058,11 @@ type mcpMessage struct {
 
 func mcpCmd(args []string) int {
 	if commandHelpRequested(args) {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 2
 	}
 	command, err := parseMCPServeCommandOptions(args[1:], os.Stderr)
@@ -1076,6 +1076,12 @@ func mcpCmd(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
+	}
+	if command.Runtime == transcriptcapture.RuntimeOpenClaw {
+		if err := validateOpenClawInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
 	}
 	if expected := strings.TrimSpace(command.Account); expected != "" && expected != cfg.Account {
 		fmt.Fprintf(os.Stderr, "witself mcp: account %q does not match installed account %q\n", expected, cfg.Account)
@@ -1133,8 +1139,8 @@ type mcpServeCommandOptions struct {
 func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeCommandOptions, error) {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(output)
-	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
-	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor")
+	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor|openclaw")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")

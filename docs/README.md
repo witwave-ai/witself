@@ -39,8 +39,9 @@ plane.
 - [fact-service.md](fact-service.md): the implemented subject/predicate core,
   typed assertions, provenance/history, CLI/API/MCP surfaces, and deferred work.
 - [agent-memory-routing.md](agent-memory-routing.md): the implemented Codex,
-  Claude Code, Grok Build, and Cursor portable fact-and-narrative-memory routing
-  policies and explicitly selected provider-native coexistence contract.
+  Claude Code, Grok Build, and Cursor policies plus the OpenClaw MCP/workspace
+  preview for portable fact-and-narrative-memory routing and explicitly selected
+  provider-native coexistence.
 - [client-custodied-agent-vault.md](client-custodied-agent-vault.md): the
   authoritative secrets implementation plan: client-held per-agent vault key,
   ciphertext-only backend, local password/TOTP/use paths, archive portability,

@@ -21,7 +21,11 @@ func mcpRegistrationAlreadyMissing(output []byte) bool {
 // runtime CLI so malformed local state wins deterministically and no external
 // command runs until local teardown is known to be safe.
 func preflightRuntimeMemoryRoutingRemoval(runtimeName string) error {
-	spec, displayName, managed, err := runtimeMemoryRoutingSpec(runtimeName)
+	return preflightRuntimeMemoryRoutingRemovalAt(runtimeName, "")
+}
+
+func preflightRuntimeMemoryRoutingRemovalAt(runtimeName, runtimeWorkspace string) error {
+	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
 	if err != nil {
 		return fmt.Errorf("resolve %s memory routing instructions: %w", displayName, err)
 	}
@@ -50,7 +54,42 @@ func preflightRuntimeMemoryRoutingRemoval(runtimeName string) error {
 	return nil
 }
 
-func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previous *transcriptcapture.Config) error {
+func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previous, attempted *transcriptcapture.Config) error {
+	if runtimeName == transcriptcapture.RuntimeOpenClaw {
+		if attempted == nil {
+			return errors.New("attempted OpenClaw integration binding is required for safe MCP rollback")
+		}
+		attemptedBinding, err := openClawMCPBindingFromConfig(executable, *attempted)
+		if err != nil {
+			return err
+		}
+		current, exists, err := inspectOpenClawMCPWithEnvironment(runtimeCLI, attemptedBinding.Env)
+		if err != nil {
+			return err
+		}
+		var previousBinding openClawMCPBinding
+		if previous != nil {
+			previousBinding, err = openClawMCPBindingFromConfig(executable, *previous)
+			if err != nil {
+				return err
+			}
+			if exists && equalOpenClawMCPBinding(current, previousBinding) {
+				return nil
+			}
+		}
+		if exists {
+			if !equalOpenClawMCPBinding(current, attemptedBinding) {
+				return errors.New("OpenClaw-managed mcp.servers.witself changed during rollback; refusing to modify it")
+			}
+			if err := unregisterOpenClawMCP(runtimeCLI, &attemptedBinding); err != nil {
+				return err
+			}
+		}
+		if previous == nil {
+			return nil
+		}
+		return registerOpenClawMCPBinding(runtimeCLI, previousBinding)
+	}
 	if previous == nil {
 		return unregisterMCP(runtimeName, runtimeCLI)
 	}
@@ -91,6 +130,9 @@ type runtimeHooksSnapshot struct {
 }
 
 func snapshotRuntimeHooks(runtimeName string) (runtimeHooksSnapshot, error) {
+	if !supportsTranscriptHooks(runtimeName) {
+		return runtimeHooksSnapshot{}, nil
+	}
 	userPresent, err := transcriptcapture.HooksInstalled(runtimeName)
 	if err != nil {
 		return runtimeHooksSnapshot{}, fmt.Errorf("inspect user hooks: %w", err)
@@ -124,6 +166,12 @@ func restoreRuntimeHooksBinding(runtimeName, executable string, previous *transc
 }
 
 func restoreRuntimeHooksSnapshot(runtimeName, executable string, previous *transcriptcapture.Config, snapshot runtimeHooksSnapshot) error {
+	if !supportsTranscriptHooks(runtimeName) {
+		if snapshot.userPresent || snapshot.managedPresent {
+			return fmt.Errorf("%s does not support transcript hooks", runtimeName)
+		}
+		return nil
+	}
 	if previous == nil && (snapshot.userPresent || snapshot.managedPresent) {
 		return errors.New("cannot reconstruct pre-existing hooks without an integration binding")
 	}

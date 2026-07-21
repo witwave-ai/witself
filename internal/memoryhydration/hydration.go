@@ -102,6 +102,14 @@ func CapabilityFor(runtime string) Capability {
 			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
 				Reason: "Grok ignores stdout from passive hooks"},
 		}
+	case transcriptcapture.RuntimeOpenClaw:
+		return Capability{
+			Runtime: runtime,
+			SessionHydration: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "OpenClaw has no supported Witself transcript hook context channel"},
+			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "OpenClaw has no supported Witself prompt hook context channel"},
+		}
 	default:
 		return Capability{
 			Runtime:          runtime,

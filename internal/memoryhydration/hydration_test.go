@@ -58,6 +58,7 @@ func TestRuntimeCapabilityConformance(t *testing.T) {
 		{transcriptcapture.RuntimeClaudeCode, true, true, DeliveryHookAdditionalContext, DeliveryHookAdditionalContext},
 		{transcriptcapture.RuntimeCursor, false, false, DeliveryGuidedMCPFallback, DeliveryGuidedMCPFallback},
 		{transcriptcapture.RuntimeGrokBuild, false, false, DeliveryGuidedMCPFallback, DeliveryGuidedMCPFallback},
+		{transcriptcapture.RuntimeOpenClaw, false, false, DeliveryGuidedMCPFallback, DeliveryGuidedMCPFallback},
 	}
 	for _, test := range tests {
 		t.Run(test.runtime, func(t *testing.T) {
