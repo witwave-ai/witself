@@ -80,7 +80,7 @@
         "receivePilot": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "domain", "audience", "realmID", "agentIDs", "relayPublicKeysJSON", "relayReplayWindow"],
+          "required": ["enabled", "domain", "audience", "realmID", "agentIDs", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
           "properties": {
             "enabled": { "type": "boolean" },
             "domain": { "type": "string" },
@@ -90,6 +90,10 @@
               "type": "array",
               "uniqueItems": true,
               "items": { "type": "string", "pattern": "^agent_[a-z2-7]{16}$" }
+            },
+            "retryCanaryAgentID": {
+              "type": "string",
+              "pattern": "^$|^agent_[a-z2-7]{16}$"
             },
             "relayPublicKeysJSON": { "type": "string" },
             "relayReplayWindow": { "type": "string", "minLength": 1 }

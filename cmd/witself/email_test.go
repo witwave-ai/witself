@@ -56,6 +56,59 @@ func TestEmailCLIAddressListAndRead(t *testing.T) {
 	}
 }
 
+func TestEmailCLIOperatorReceiveControls(t *testing.T) {
+	var requests []string
+	var states []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPatch {
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			states = append(states, body["receive_state"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/agents/") {
+			_, _ = w.Write([]byte(`{"control":{"agent_id":"agent_aaaaaaaaaaaaaaaa","receive_state":"disabled","agent_receive_state":"disabled","realm_receive_state":"enabled","row_version":2}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"control":{"realm_id":"realm_aaaaaaaaaaaaaaaa","receive_state":"enabled","mailbox_count":5,"row_version":3}}`))
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "operator.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_opr_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--endpoint", srv.URL, "--token-file", tokenFile, "--json"}
+	commands := [][]string{
+		append([]string{"email", "operator", "receive", "show", "--agent-id", "agent_aaaaaaaaaaaaaaaa"}, base...),
+		append([]string{"email", "operator", "receive", "disable", "--agent-id", "agent_aaaaaaaaaaaaaaaa"}, base...),
+		append([]string{"email", "operator", "receive", "show", "--realm-id", "realm_aaaaaaaaaaaaaaaa"}, base...),
+		append([]string{"email", "operator", "receive", "enable", "--realm-id", "realm_aaaaaaaaaaaaaaaa"}, base...),
+	}
+	for _, command := range commands {
+		if code := run(command); code != 0 {
+			t.Fatalf("run(%v) = %d", command, code)
+		}
+	}
+	wantRequests := []string{
+		"GET /v1/agents/agent_aaaaaaaaaaaaaaaa/email-receive",
+		"PATCH /v1/agents/agent_aaaaaaaaaaaaaaaa/email-receive",
+		"GET /v1/realms/realm_aaaaaaaaaaaaaaaa/email-receive",
+		"PATCH /v1/realms/realm_aaaaaaaaaaaaaaaa/email-receive",
+	}
+	if !reflect.DeepEqual(requests, wantRequests) || !reflect.DeepEqual(states, []string{"disabled", "enabled"}) {
+		t.Fatalf("requests = %#v states = %#v", requests, states)
+	}
+	if code := run(append([]string{
+		"email", "operator", "receive", "disable",
+		"--agent-id", "agent_aaaaaaaaaaaaaaaa", "--realm-id", "realm_aaaaaaaaaaaaaaaa",
+	}, base...)); code != 2 {
+		t.Fatalf("ambiguous target code = %d, want 2", code)
+	}
+}
+
 func TestBuildAgentEmailCodeCandidatesResult(t *testing.T) {
 	tests := []struct {
 		name       string

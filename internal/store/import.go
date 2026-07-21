@@ -107,6 +107,11 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "realm_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
 	},
+	"agent_email_realm_receive_controls": {
+		"account_id": true, "realm_id": true, "receive_state": true,
+		"row_version": true, "created_at": true, "updated_at": true,
+		"disabled_at": true,
+	},
 	"agent_email_addresses": {
 		"id": true, "account_id": true, "realm_id": true,
 		"provisioned_agent_id": true, "domain": true,
@@ -147,6 +152,15 @@ var importColumns = map[string]map[string]bool{
 		"failure_count": true, "claim_id": true, "claim_key_hash": true,
 		"lease_expires_at": true, "completed_at": true,
 		"complete_key_hash": true, "created_at": true,
+	},
+	"agent_email_retry_canary_arms": {
+		"account_id": true, "realm_id": true, "mailbox_id": true,
+		"owner_agent_id": true, "challenge_sha256": true, "state": true,
+		"delivery_fingerprint_sha256": true, "accepted_message_id": true,
+		"tempfail_count": true, "row_version": true,
+		"armed_at": true, "expires_at": true, "tempfailed_at": true,
+		"retry_expires_at": true,
+		"accepted_at":      true,
 	},
 	"agent_vault_keys": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -651,6 +665,7 @@ type agentEmailMessageImportScope struct {
 	possibleDuplicateID string
 	receivedAt          time.Time
 	createdAt           time.Time
+	retryCanaryHash     string
 }
 
 type agentEmailDeliveryImportScope struct {
@@ -659,6 +674,11 @@ type agentEmailDeliveryImportScope struct {
 	processingState      string
 	processingGeneration int64
 	failureCount         int64
+}
+
+type agentEmailRetryCanaryImportScope struct {
+	mailboxID string
+	messageID string
 }
 
 type messageImportScope struct {
@@ -914,9 +934,12 @@ type importCtx struct {
 	agentEmailMailboxes          map[string]agentEmailMailboxImportScope
 	agentEmailMailboxOwners      map[string]string
 	agentEmailMailboxAddresses   map[string]string
+	agentEmailRealmReceiveStates map[string]string
 	agentEmailMessages           map[string]agentEmailMessageImportScope
 	agentEmailProviderKeys       map[string]string
 	agentEmailDeliveries         map[string]agentEmailDeliveryImportScope
+	agentEmailRetryCanaries      map[string]agentEmailRetryCanaryImportScope
+	agentEmailCanaryMessages     map[string]bool
 	vaultKeys                    map[string]secretVaultKeyImportScope
 	vaultKeyIdentities           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
 	vaultLiveKeyVersions         map[secretVaultKeyVersionImportKey]string
@@ -1009,9 +1032,12 @@ func newImportCtx(accountID string) *importCtx {
 		agentEmailMailboxes:          map[string]agentEmailMailboxImportScope{},
 		agentEmailMailboxOwners:      map[string]string{},
 		agentEmailMailboxAddresses:   map[string]string{},
+		agentEmailRealmReceiveStates: map[string]string{},
 		agentEmailMessages:           map[string]agentEmailMessageImportScope{},
 		agentEmailProviderKeys:       map[string]string{},
 		agentEmailDeliveries:         map[string]agentEmailDeliveryImportScope{},
+		agentEmailRetryCanaries:      map[string]agentEmailRetryCanaryImportScope{},
+		agentEmailCanaryMessages:     map[string]bool{},
 		vaultKeys:                    map[string]secretVaultKeyImportScope{},
 		vaultKeyIdentities:           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
 		vaultLiveKeyVersions:         map[secretVaultKeyVersionImportKey]string{},
@@ -1302,8 +1328,10 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
+		"agent_email_realm_receive_controls",
 		"agent_email_addresses", "agent_email_mailboxes",
 		"agent_email_messages", "agent_email_deliveries",
+		"agent_email_retry_canary_arms",
 		"agent_vault_keys", "agent_vault_key_enrollments",
 		"vault_key_enrollment_receipts", "secrets", "secret_fields", "secret_deks",
 		"agent_vault_key_rotations", "agent_vault_key_rotation_items",
@@ -1460,6 +1488,15 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.liveAgents[id] = !deleted
 			ic.agentRealms[id] = realmID
 		}
+	case "agent_email_realm_receive_controls":
+		realmID, state, err := ic.validateImportedAgentEmailRealmReceiveControl(obj)
+		if err != nil {
+			return badf("agent_email_realm_receive_controls row %v", err)
+		}
+		if previous := ic.agentEmailRealmReceiveStates[realmID]; previous != "" {
+			return badf("agent_email_realm_receive_controls row duplicates realm %q", realmID)
+		}
+		ic.agentEmailRealmReceiveStates[realmID] = state
 	case "agent_email_addresses":
 		id, scope, err := ic.validateImportedAgentEmailAddress(obj)
 		if err != nil {
@@ -1527,6 +1564,19 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_email_deliveries row duplicates message %q mailbox %q", scope.messageID, scope.mailboxID)
 		}
 		ic.agentEmailDeliveries[key] = scope
+	case "agent_email_retry_canary_arms":
+		key, scope, err := ic.validateImportedAgentEmailRetryCanary(obj)
+		if err != nil {
+			return badf("agent_email_retry_canary_arms row %v", err)
+		}
+		if _, duplicate := ic.agentEmailRetryCanaries[key]; duplicate {
+			return badf("agent_email_retry_canary_arms row duplicates accepted proof")
+		}
+		if ic.agentEmailCanaryMessages[scope.messageID] {
+			return badf("agent_email_retry_canary_arms row reuses accepted message")
+		}
+		ic.agentEmailRetryCanaries[key] = scope
+		ic.agentEmailCanaryMessages[scope.messageID] = true
 	case "agent_vault_keys":
 		scope, err := ic.validateImportedVaultKey(obj)
 		if err != nil {
@@ -3644,7 +3694,8 @@ func (ic *importCtx) validateImportedAgentEmailMailbox(obj map[string]any) (stri
 		return "", agentEmailMailboxImportScope{}, fmt.Errorf("address %q is outside mailbox scope", addressID)
 	}
 	state, err := requireStringField(obj, "receive_state")
-	if err != nil || state != "enabled" && state != "disabled" && state != "retired" {
+	if err != nil || state != AgentEmailReceiveEnabled &&
+		state != AgentEmailReceiveDisabled && state != AgentEmailReceiveRetired {
 		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive_state is invalid")
 	}
 	revision, ok := importedPositiveInteger(obj["row_version"])
@@ -3668,22 +3719,53 @@ func (ic *importCtx) validateImportedAgentEmailMailbox(obj map[string]any) (stri
 		ic.requireTimestampAtOrBeforeExport("agent_email_mailboxes retired_at", *retiredAt) != nil) {
 		return "", agentEmailMailboxImportScope{}, fmt.Errorf("retired_at is invalid")
 	}
-	validState := state == "enabled" && !disabled && !retired ||
-		state == "disabled" && disabled && !retired ||
-		state == "retired" && retired
+	validState := state == AgentEmailReceiveEnabled && !disabled && !retired ||
+		state == AgentEmailReceiveDisabled && disabled && !retired ||
+		state == AgentEmailReceiveRetired && retired
 	if !validState {
 		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive-state lifecycle shape is invalid")
 	}
-	if address.retired != (state == "retired") {
+	if address.retired != (state == AgentEmailReceiveRetired) {
 		return "", agentEmailMailboxImportScope{}, fmt.Errorf("receive state does not match address retirement")
 	}
-	if state == "enabled" && !ic.liveAgents[ownerID] {
-		return "", agentEmailMailboxImportScope{}, fmt.Errorf("enabled mailbox belongs to a deleted agent")
+	if state != AgentEmailReceiveRetired && !ic.liveAgents[ownerID] {
+		return "", agentEmailMailboxImportScope{}, fmt.Errorf("non-retired mailbox belongs to a deleted agent")
 	}
 	return id, agentEmailMailboxImportScope{
 		realmID: realmID, ownerAgentID: ownerID, addressID: addressID,
 		receiveState: state, createdAt: *createdAt,
 	}, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailRealmReceiveControl(obj map[string]any) (string, string, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return "", "", fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	state, err := requireStringField(obj, "receive_state")
+	if err != nil || state != AgentEmailReceiveEnabled && state != AgentEmailReceiveDisabled {
+		return "", "", fmt.Errorf("receive_state is invalid")
+	}
+	revision, ok := importedPositiveInteger(obj["row_version"])
+	if !ok || revision > maxMessageProcessingGeneration {
+		return "", "", fmt.Errorf("row_version is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	updatedAt, updateErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updateErr != nil || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_receive_controls created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_receive_controls updated_at", valueOrZero(updatedAt)) != nil {
+		return "", "", fmt.Errorf("timestamps are invalid")
+	}
+	disabledAt, disabled, err := importedOptionalTimestamp(obj, "disabled_at")
+	if err != nil || disabled && (disabledAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_receive_controls disabled_at", *disabledAt) != nil) {
+		return "", "", fmt.Errorf("disabled_at is invalid")
+	}
+	if state == AgentEmailReceiveEnabled && disabled || state == AgentEmailReceiveDisabled && !disabled {
+		return "", "", fmt.Errorf("receive-state lifecycle shape is invalid")
+	}
+	return realmID, state, nil
 }
 
 func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (string, agentEmailMessageImportScope, error) {
@@ -3777,6 +3859,10 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		parseError != expectedParseError {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("MIME parse projection does not match raw_mime")
 	}
+	retryCanaryHash := ""
+	if challenge, present, challengeErr := agentemail.RetryCanaryChallenge(raw); challengeErr == nil && present {
+		retryCanaryHash = agentEmailRetryCanaryChallengeHash(challenge)
+	}
 	for _, field := range []struct {
 		name     string
 		max      int
@@ -3845,6 +3931,7 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		providerMessageID: providerMessageID, duplicateGroup: duplicateGroup,
 		possibleDuplicateID: possibleDuplicateID,
 		receivedAt:          *receivedAt, createdAt: *createdAt,
+		retryCanaryHash: retryCanaryHash,
 	}, nil
 }
 
@@ -3899,6 +3986,61 @@ func (ic *importCtx) validateImportedAgentEmailDelivery(obj map[string]any) (age
 	processing.messageID = messageID
 	processing.mailboxID = mailboxID
 	return processing, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailRetryCanary(
+	obj map[string]any,
+) (string, agentEmailRetryCanaryImportScope, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	mailboxID, mailboxErr := requireStringField(obj, "mailbox_id")
+	ownerID, ownerErr := requireStringField(obj, "owner_agent_id")
+	mailbox, mailboxExists := ic.agentEmailMailboxes[mailboxID]
+	if err != nil || mailboxErr != nil || ownerErr != nil || !mailboxExists ||
+		mailbox.realmID != realmID || mailbox.ownerAgentID != ownerID {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("realm, mailbox, and owner scope is invalid")
+	}
+	challengeHash, err := requireStringField(obj, "challenge_sha256")
+	if err != nil || !isSHA256Hex(challengeHash) {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("challenge digest is invalid")
+	}
+	state, err := requireStringField(obj, "state")
+	if err != nil || state != agentEmailRetryCanaryAccepted {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("only accepted proofs are portable")
+	}
+	fingerprint, err := requireStringField(obj, "delivery_fingerprint_sha256")
+	messageID, messageErr := requireStringField(obj, "accepted_message_id")
+	message, messageExists := ic.agentEmailMessages[messageID]
+	if err != nil || !isSHA256Hex(fingerprint) || messageErr != nil || !messageExists ||
+		message.realmID != realmID || message.mailboxID != mailboxID ||
+		message.ownerAgentID != ownerID || message.provider != agentEmailPilotProvider ||
+		message.duplicateGroup != fingerprint || message.retryCanaryHash != challengeHash {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("accepted message proof is invalid")
+	}
+	if _, delivered := ic.agentEmailDeliveries[messageID+"\x00"+mailboxID]; !delivered {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("accepted message delivery is missing")
+	}
+	tempfailCount, ok := importedNonnegativeInteger(obj["tempfail_count"])
+	rowVersion, versionOK := importedGeneration(obj["row_version"], false)
+	if !ok || tempfailCount != 1 || !versionOK || rowVersion != 3 {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("accepted proof counters are invalid")
+	}
+	armedAt, armedErr := requireImportedTimestamp(obj, "armed_at")
+	expiresAt, expiresErr := requireImportedTimestamp(obj, "expires_at")
+	tempfailedAt, tempfailedErr := requireImportedTimestamp(obj, "tempfailed_at")
+	retryExpiresAt, retryExpiresErr := requireImportedTimestamp(obj, "retry_expires_at")
+	acceptedAt, acceptedErr := requireImportedTimestamp(obj, "accepted_at")
+	if armedErr != nil || expiresErr != nil || tempfailedErr != nil || retryExpiresErr != nil || acceptedErr != nil ||
+		expiresAt.Sub(*armedAt) != agentEmailRetryCanaryArmTTL ||
+		retryExpiresAt.Sub(*tempfailedAt) != agentEmailRetryCanaryRetryGrace ||
+		tempfailedAt.Before(*armedAt) || acceptedAt.Before(*tempfailedAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_retry_canary_arms armed_at", *armedAt) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_retry_canary_arms tempfailed_at", *tempfailedAt) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_retry_canary_arms accepted_at", *acceptedAt) != nil {
+		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("accepted proof timestamps are invalid")
+	}
+	return mailboxID + "\x00" + challengeHash, agentEmailRetryCanaryImportScope{
+		mailboxID: mailboxID, messageID: messageID,
+	}, nil
 }
 
 func validateImportedAgentEmailProcessingShape(obj map[string]any) (agentEmailDeliveryImportScope, error) {
@@ -4787,6 +4929,23 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	}
 	if err := validateImportedAgentEmailGraph(ic.agentEmailMessages, ic.agentEmailDeliveries); err != nil {
 		return export.Manifest{}, fmt.Errorf("%w: agent email graph: %v", ErrArchiveContent, err)
+	}
+	if m.SchemaVersion < 60 {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO agent_email_realm_receive_controls (account_id,realm_id)
+			SELECT DISTINCT account_id,realm_id FROM agent_email_mailboxes
+			ON CONFLICT (account_id,realm_id) DO NOTHING`); err != nil {
+			return export.Manifest{}, fmt.Errorf("synthesize legacy agent-email realm receive controls: %w", err)
+		}
+	} else {
+		for _, mailbox := range ic.agentEmailMailboxes {
+			if ic.agentEmailRealmReceiveStates[mailbox.realmID] == "" {
+				return export.Manifest{}, fmt.Errorf(
+					"%w: agent email mailbox realm %q has no receive control",
+					ErrArchiveContent, mailbox.realmID,
+				)
+			}
+		}
 	}
 	if m.SchemaVersion < 35 {
 		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {

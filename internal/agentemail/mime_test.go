@@ -132,3 +132,30 @@ func TestParseMessageCountsInlineNonTextLeavesAsAttachments(t *testing.T) {
 		t.Fatalf("attachment count = %d; want 2", parsed.AttachmentCount)
 	}
 }
+
+func TestRetryCanaryChallengeRequiresOneCanonicalUUIDv4Header(t *testing.T) {
+	const challenge = "11111111-2222-4333-8444-555555555555"
+	raw := []byte("Subject: canary\r\n" + RetryCanaryHeader + ": " + challenge + "\r\n\r\nbody")
+	got, present, err := RetryCanaryChallenge(raw)
+	if err != nil || !present || got != challenge {
+		t.Fatalf("challenge = %q present=%v err=%v", got, present, err)
+	}
+	if err := ValidateRetryCanaryChallenge(challenge); err != nil {
+		t.Fatal(err)
+	}
+	if got, present, err := RetryCanaryChallenge([]byte("Subject: ordinary\r\n\r\nbody")); err != nil || present || got != "" {
+		t.Fatalf("absent challenge = %q present=%v err=%v", got, present, err)
+	}
+	for name, raw := range map[string][]byte{
+		"duplicate":          []byte(RetryCanaryHeader + ": " + challenge + "\r\n" + RetryCanaryHeader + ": " + challenge + "\r\n\r\nbody"),
+		"folded":             []byte(RetryCanaryHeader + ": 11111111-2222-4333-8444-\r\n 555555555555\r\n\r\nbody"),
+		"uppercase":          []byte(RetryCanaryHeader + ": 11111111-2222-4333-8444-55555555555A\r\n\r\nbody"),
+		"wrong UUID version": []byte(RetryCanaryHeader + ": 11111111-2222-3333-8444-555555555555\r\n\r\nbody"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, present, err := RetryCanaryChallenge(raw); err == nil || !present {
+				t.Fatalf("present=%v err=%v", present, err)
+			}
+		})
+	}
+}

@@ -965,6 +965,19 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}
+	assertMigrationTestVersion(t, dsn, 60)
+	assertMigrationTestTable(t, st, "agent_email_retry_canary_arms", false)
+	assertMigrationTestTable(t, st, "agent_email_realm_receive_controls", true)
+	assertMigrationTestTable(t, st, "agent_email_addresses", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 59)
+	assertMigrationTestTable(t, st, "agent_email_realm_receive_controls", false)
+	assertMigrationTestTable(t, st, "agent_email_addresses", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
 	assertMigrationTestVersion(t, dsn, 58)
 	assertMigrationTestTable(t, st, "agent_email_addresses", false)
 	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "coverage_counts", true)

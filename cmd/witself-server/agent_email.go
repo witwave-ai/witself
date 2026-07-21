@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	agentEmailPilotEnabledEnv      = "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED"
-	agentEmailPilotDomainEnv       = "WITSELF_AGENT_EMAIL_PILOT_DOMAIN"
-	agentEmailPilotAudienceEnv     = "WITSELF_AGENT_EMAIL_PILOT_AUDIENCE"
-	agentEmailPilotRealmIDEnv      = "WITSELF_AGENT_EMAIL_PILOT_REALM_ID"
-	agentEmailPilotAgentIDsEnv     = "WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS"
-	agentEmailRelayPublicKeysEnv   = "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON"
-	agentEmailRelayReplayWindowEnv = "WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW"
-	defaultAgentEmailReplayWindow  = 5 * time.Minute
+	agentEmailPilotEnabledEnv       = "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED"
+	agentEmailPilotDomainEnv        = "WITSELF_AGENT_EMAIL_PILOT_DOMAIN"
+	agentEmailPilotAudienceEnv      = "WITSELF_AGENT_EMAIL_PILOT_AUDIENCE"
+	agentEmailPilotRealmIDEnv       = "WITSELF_AGENT_EMAIL_PILOT_REALM_ID"
+	agentEmailPilotAgentIDsEnv      = "WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS"
+	agentEmailRelayPublicKeysEnv    = "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON"
+	agentEmailRelayReplayWindowEnv  = "WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW"
+	agentEmailRetryCanaryAgentIDEnv = "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID"
+	defaultAgentEmailReplayWindow   = 5 * time.Minute
 )
 
 // agentEmailPilotConfigFromEnv parses all pilot trust and enrollment material
@@ -100,7 +101,8 @@ func agentEmailPilotConfigFromEnv() (server.AgentEmailPilotConfig, error) {
 	pilot := server.AgentEmailPilotConfig{
 		Enabled: true, Domain: domain, Audience: audience,
 		RealmIDs: map[string]bool{realmID: true}, AgentIDs: agentIDs,
-		RelayPublicKeys: publicKeys, RelayReplayWindow: replayWindow,
+		RetryCanaryAgentID: strings.TrimSpace(os.Getenv(agentEmailRetryCanaryAgentIDEnv)),
+		RelayPublicKeys:    publicKeys, RelayReplayWindow: replayWindow,
 	}
 	if err := server.ValidateAgentEmailPilotConfig(pilot); err != nil {
 		return server.AgentEmailPilotConfig{}, err
@@ -130,8 +132,9 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 	}
 	scope := store.AgentEmailPilotScope{
 		Enabled: true, Domain: pilot.Domain, Audience: pilot.Audience,
-		RealmIDs: cloneAgentEmailBoolMap(pilot.RealmIDs),
-		AgentIDs: cloneAgentEmailBoolMap(pilot.AgentIDs),
+		RealmIDs:           cloneAgentEmailBoolMap(pilot.RealmIDs),
+		AgentIDs:           cloneAgentEmailBoolMap(pilot.AgentIDs),
+		RetryCanaryAgentID: pilot.RetryCanaryAgentID,
 	}
 	if _, err := st.ReconcileAgentEmailPilot(ctx, scope); err != nil {
 		return fmt.Errorf("agent-email pilot startup reconciliation: %w", err)
@@ -146,6 +149,30 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 			return server.AgentEmailAddress{}, mapAgentEmailError(err)
 		}
 		return toServerAgentEmailAddress(address), nil
+	}
+	cfg.ArmAgentEmailRetryCanary = func(ctx context.Context, p server.DomainPrincipal, challenge string) (server.AgentEmailRetryCanaryCheckpoint, error) {
+		checkpoint, err := st.ArmAgentEmailRetryCanary(ctx, scope, toStorePrincipal(p), challenge)
+		return toServerAgentEmailRetryCanaryCheckpoint(checkpoint), mapAgentEmailError(err)
+	}
+	cfg.GetAgentEmailRetryCanary = func(ctx context.Context, p server.DomainPrincipal, challenge string) (server.AgentEmailRetryCanaryCheckpoint, error) {
+		checkpoint, err := st.GetAgentEmailRetryCanaryStatus(ctx, scope, toStorePrincipal(p), challenge)
+		return toServerAgentEmailRetryCanaryCheckpoint(checkpoint), mapAgentEmailError(err)
+	}
+	cfg.GetAgentEmailReceiveControl = func(ctx context.Context, accountID, operatorID, agentID string) (server.AgentEmailReceiveControl, error) {
+		control, err := st.GetAgentEmailReceiveControl(ctx, scope, accountID, operatorID, agentID)
+		return toServerAgentEmailReceiveControl(control), mapAgentEmailError(err)
+	}
+	cfg.SetAgentEmailReceiveControl = func(ctx context.Context, accountID, operatorID, agentID, receiveState string) (server.AgentEmailReceiveControl, error) {
+		control, err := st.SetAgentEmailReceiveControl(ctx, scope, accountID, operatorID, agentID, receiveState)
+		return toServerAgentEmailReceiveControl(control), mapAgentEmailError(err)
+	}
+	cfg.GetRealmEmailReceiveControl = func(ctx context.Context, accountID, operatorID, realmID string) (server.AgentEmailRealmReceiveControl, error) {
+		control, err := st.GetRealmAgentEmailReceiveControl(ctx, scope, accountID, operatorID, realmID)
+		return toServerAgentEmailRealmReceiveControl(control), mapAgentEmailError(err)
+	}
+	cfg.SetRealmEmailReceiveControl = func(ctx context.Context, accountID, operatorID, realmID, receiveState string) (server.AgentEmailRealmReceiveControl, error) {
+		control, err := st.SetRealmAgentEmailReceiveControl(ctx, scope, accountID, operatorID, realmID, receiveState)
+		return toServerAgentEmailRealmReceiveControl(control), mapAgentEmailError(err)
 	}
 	cfg.ListAgentEmails = func(ctx context.Context, p server.DomainPrincipal, opts server.AgentEmailListOptions) (server.AgentEmailPage, error) {
 		page, err := st.ListAgentEmails(ctx, scope, toStorePrincipal(p), store.AgentEmailFilter{
@@ -189,6 +216,9 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		}
 		return server.AgentEmailCheckpoint{
 			Pending: checkpoint.Pending, MailboxPending: checkpoint.MailboxPending,
+			ReceiveState:      checkpoint.ReceiveState,
+			AgentReceiveState: checkpoint.AgentReceiveState,
+			RealmReceiveState: checkpoint.RealmReceiveState,
 		}, nil
 	}
 	cfg.ClaimAgentEmail = func(ctx context.Context, p server.DomainPrincipal, messageID string, in server.ClaimAgentEmailRequest) (server.AgentEmailProcessing, error) {
@@ -237,6 +267,10 @@ func mapAgentEmailIngestError(err error) error {
 		return server.ErrAgentEmailUnknownRecipient
 	case errors.Is(err, store.ErrAgentEmailReceiveDisabled):
 		return server.ErrAgentEmailReceiveDisabled
+	case errors.Is(err, store.ErrAgentEmailRetryCanaryTemporary):
+		return server.ErrAgentEmailRetryCanaryTemporary
+	case errors.Is(err, store.ErrAgentEmailRetryCanaryPermanent):
+		return server.ErrAgentEmailRetryCanaryPermanent
 	case errors.Is(err, store.ErrAgentEmailPilotDisabled):
 		return server.ErrAgentEmailPilotUnavailable
 	case errors.Is(err, store.ErrAgentEmailInputInvalid):
@@ -277,8 +311,30 @@ func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmai
 		Address: address.Address, Domain: address.Domain, LocalPart: address.LocalPart,
 		AgentSegment: address.AgentSegment, RealmLabel: address.RealmLabel,
 		ProvisioningKind: address.ProvisioningKind, ReceiveState: address.ReceiveState,
+		AgentReceiveState: address.AgentReceiveState,
+		RealmReceiveState: address.RealmReceiveState, RowVersion: address.RowVersion,
 		CreatedAt: address.CreatedAt, UpdatedAt: address.UpdatedAt,
-		DisabledAt: address.DisabledAt, RetiredAt: address.RetiredAt,
+		DisabledAt: address.DisabledAt, RealmDisabledAt: address.RealmDisabledAt,
+		RetiredAt: address.RetiredAt,
+	}
+}
+
+func toServerAgentEmailReceiveControl(control store.AgentEmailReceiveControl) server.AgentEmailReceiveControl {
+	return server.AgentEmailReceiveControl{
+		AccountID: control.AccountID, RealmID: control.RealmID, AgentID: control.AgentID,
+		ReceiveState: control.ReceiveState, AgentReceiveState: control.AgentReceiveState,
+		RealmReceiveState: control.RealmReceiveState, RowVersion: control.RowVersion,
+		UpdatedAt: control.UpdatedAt, DisabledAt: control.DisabledAt,
+		RealmDisabledAt: control.RealmDisabledAt,
+	}
+}
+
+func toServerAgentEmailRealmReceiveControl(control store.AgentEmailRealmReceiveControl) server.AgentEmailRealmReceiveControl {
+	return server.AgentEmailRealmReceiveControl{
+		AccountID: control.AccountID, RealmID: control.RealmID,
+		ReceiveState: control.ReceiveState, MailboxCount: control.MailboxCount,
+		RowVersion: control.RowVersion, UpdatedAt: control.UpdatedAt,
+		DisabledAt: control.DisabledAt,
 	}
 }
 
@@ -314,5 +370,13 @@ func toServerAgentEmailProcessing(processing store.AgentEmailProcessing) server.
 		State: processing.State, Generation: processing.Generation,
 		FailureCount: processing.FailureCount, ClaimID: processing.ClaimID,
 		LeaseExpiresAt: processing.LeaseExpiresAt, CompletedAt: processing.CompletedAt,
+	}
+}
+
+func toServerAgentEmailRetryCanaryCheckpoint(checkpoint store.AgentEmailRetryCanaryCheckpoint) server.AgentEmailRetryCanaryCheckpoint {
+	return server.AgentEmailRetryCanaryCheckpoint{
+		State: checkpoint.State, Armed: checkpoint.Armed,
+		Tempfailed: checkpoint.Tempfailed, Accepted: checkpoint.Accepted,
+		TempfailCount: checkpoint.TempfailCount,
 	}
 }

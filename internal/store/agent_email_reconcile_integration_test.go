@@ -85,6 +85,39 @@ func TestReconcileAgentEmailPilotPostgres(t *testing.T) {
 			t.Fatalf("reconciliation changed identity: prior %#v next %#v", prior, address)
 		}
 	}
+	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation", "email restart test"); err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := st.ReconcileAgentEmailPilot(ctx, scope)
+	if err != nil || len(suspended) != len(second) {
+		t.Fatalf("suspended read-only reconciliation = %#v / %v", suspended, err)
+	}
+	for _, address := range suspended {
+		prior := byOwner[address.OwnerAgentID]
+		if prior.ID != address.ID || prior.MailboxID != address.MailboxID ||
+			prior.RowVersion != address.RowVersion {
+			t.Fatalf("suspended reconciliation mutated identity: prior %#v next %#v", prior, address)
+		}
+	}
+	// A frozen account may be verified but never repaired or provisioned. A
+	// missing configured address therefore keeps startup fail-closed.
+	driftedAddressID := suspended[0].ID
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_addresses SET retired_at=clock_timestamp()
+		WHERE id=$1`, driftedAddressID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ReconcileAgentEmailPilot(ctx, scope); !errors.Is(err, ErrAgentEmailNotFound) {
+		t.Fatalf("suspended drift reconciliation error = %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_addresses SET retired_at=NULL
+		WHERE id=$1`, driftedAddressID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
+		t.Fatal(err)
+	}
 	var total, unenrolled int
 	if err := st.pool.QueryRow(ctx, `
 		SELECT count(*),count(*) FILTER (WHERE owner_agent_id=$1)

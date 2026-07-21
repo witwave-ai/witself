@@ -270,7 +270,7 @@ witself
   uninstall RUNTIME[,RUNTIME...]
   transcript create|append|list|show|tail|flush
   message send|reply|list|listen|read|ack|claim|renew|release|complete
-  email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete
+  email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
   federation peers|card
   reference parse|resolve
   agent create|list|peers|show|rename|copy|disable|enable|delete
@@ -3604,9 +3604,11 @@ historical offers. There is no first-offer or first-eligible fallback.
 ## `witself email`
 
 Receive-only external email for an agent enrolled in the default-off
-Cloudflare pilot. Every command derives account, realm, mailbox, and owner from
-the full agent token and fails for an operator, non-full credential profile, or
-unenrolled agent. The pilot is limited to one realm and 5–10 agents.
+Cloudflare pilot. Owner commands derive account, realm, mailbox, and owner from
+the full agent token and fail for an operator, non-full credential profile, or
+unenrolled agent. The `operator receive` branch instead requires a settled
+operator credential and an exact configured pilot agent or realm target. The
+pilot is limited to one realm and 5–10 agents.
 
 ```sh
 witself email address show
@@ -3624,6 +3626,9 @@ witself email complete emsg_aaaaaaaaaaaaaaaa \
   --claim ecl_aaaaaaaaaaaaaaaa --generation 1 \
   --idempotency-key complete-emsg-a-1
 witself email ack emsg_aaaaaaaaaaaaaaaa
+# Value-free operator lifecycle controls; neither route can read mail.
+witself email operator receive show --agent-id agent_aaaaaaaaaaaaaaaa
+witself email operator receive disable --realm-id realm_aaaaaaaaaaaaaaaa
 ```
 
 Subcommands:
@@ -3641,6 +3646,7 @@ Subcommands:
 | `renew ID` | Renew the exact `--claim` and positive `--generation` fence with optional `--lease 30s-15m`. |
 | `release ID` | Release the exact fence without acking. `--deterministic-failure` is only for a repeatable failure attributable to this email, never a provider/configuration/cancellation/timeout/lease-maintenance failure. |
 | `complete ID` | Complete the exact live fence with a required `--idempotency-key`. It creates no reply/result artifact and does not ack. |
+| `operator receive show\|enable\|disable` | Show or set one exact `--agent-id` or `--realm-id` receive layer using operator authentication. Agent and realm layers remain independent; output is lifecycle-only and contains no address or message metadata. A suspended account may show or disable either layer as a harm-reducing safety action, but enable remains active-account-only. |
 
 `code-candidates` requires a successfully parsed message and marks it read. A
 non-`parsed` `parse_state` fails as candidate extraction unavailable rather

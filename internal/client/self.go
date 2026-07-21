@@ -83,9 +83,12 @@ type SelfMessageCheckpoint struct {
 // receive-only agent-email mailbox. It carries no sender, subject, body,
 // address, message identifier, or processing fence.
 type SelfEmailCheckpoint struct {
-	Pending        bool `json:"pending"`
-	Unavailable    bool `json:"unavailable,omitempty"`
-	MailboxPending bool `json:"mailbox_pending,omitempty"`
+	Pending           bool   `json:"pending"`
+	Unavailable       bool   `json:"unavailable,omitempty"`
+	MailboxPending    bool   `json:"mailbox_pending,omitempty"`
+	ReceiveState      string `json:"receive_state,omitempty"`
+	AgentReceiveState string `json:"agent_receive_state,omitempty"`
+	RealmReceiveState string `json:"realm_receive_state,omitempty"`
 }
 
 // SelfAvatarCheckpoint is value-free, authenticated lifecycle state for an

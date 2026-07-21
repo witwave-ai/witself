@@ -219,6 +219,78 @@ func TestAgentEmailArchiveRejectsHostileContentAndCrossScopeLinks(t *testing.T) 
 	})
 }
 
+func TestAgentEmailArchiveAcceptsOnlyMessageBoundTerminalCanaryProof(t *testing.T) {
+	const (
+		accountID = "acc_1"
+		realmID   = "realm_abcdefghijkl2345"
+		agentID   = "agent_1"
+		addressID = "eaddr_aaaaaaaaaaaaaaaa"
+		mailboxID = "emb_aaaaaaaaaaaaaaaa"
+		messageID = "emsg_aaaaaaaaaaaaaaaa"
+		challenge = "11111111-2222-4333-8444-555555555555"
+	)
+	newContext := func(t *testing.T) (*importCtx, string, string) {
+		t.Helper()
+		ic := newImportCtx(accountID)
+		ic.exportedAt = time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+		ic.realms[realmID] = true
+		ic.agents[agentID] = true
+		ic.liveAgents[agentID] = true
+		ic.agentRealms[agentID] = realmID
+		feedAgentEmailArchiveRow(t, ic, "agent_email_addresses", agentEmailArchiveAddressRow(
+			accountID, realmID, agentID, addressID, false,
+		))
+		feedAgentEmailArchiveRow(t, ic, "agent_email_mailboxes", agentEmailArchiveMailboxRow(
+			accountID, realmID, agentID, addressID, mailboxID,
+		))
+		raw := []byte("X-Witself-Canary-Retry: " + challenge + "\r\nSubject: retry\r\n\r\nbody")
+		fingerprint := agentEmailArchiveDuplicateGroup(raw)
+		feedAgentEmailArchiveRow(t, ic, "agent_email_messages", agentEmailArchiveMessageRow(
+			accountID, realmID, agentID, addressID, mailboxID, messageID, raw, fingerprint, "",
+		))
+		feedAgentEmailArchiveRow(t, ic, "agent_email_deliveries", agentEmailArchiveDeliveryRow(
+			accountID, realmID, agentID, mailboxID, messageID,
+		))
+		digest := sha256.Sum256([]byte(challenge))
+		return ic, hex.EncodeToString(digest[:]), fingerprint
+	}
+	row := func(challengeHash, fingerprint string) map[string]any {
+		return map[string]any{
+			"account_id": accountID, "realm_id": realmID, "mailbox_id": mailboxID,
+			"owner_agent_id": agentID, "challenge_sha256": challengeHash,
+			"state": "accepted", "delivery_fingerprint_sha256": fingerprint,
+			"accepted_message_id": messageID, "tempfail_count": 1, "row_version": 3,
+			"armed_at": "2026-07-21T12:00:00Z", "expires_at": "2026-07-21T12:15:00Z",
+			"tempfailed_at": "2026-07-21T12:00:01Z", "retry_expires_at": "2026-07-22T12:00:01Z",
+			"accepted_at": "2026-07-21T12:00:02Z",
+		}
+	}
+	ic, challengeHash, fingerprint := newContext(t)
+	feedAgentEmailArchiveRow(t, ic, "agent_email_retry_canary_arms", row(challengeHash, fingerprint))
+	if len(ic.agentEmailRetryCanaries) != 1 {
+		t.Fatalf("accepted retry proofs = %#v", ic.agentEmailRetryCanaries)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"live arm": func(candidate map[string]any) { candidate["state"] = "tempfailed" },
+		"wrong fingerprint": func(candidate map[string]any) {
+			candidate["delivery_fingerprint_sha256"] = strings.Repeat("f", 64)
+		},
+		"wrong challenge": func(candidate map[string]any) {
+			candidate["challenge_sha256"] = strings.Repeat("e", 64)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ic, challengeHash, fingerprint := newContext(t)
+			candidate := row(challengeHash, fingerprint)
+			mutate(candidate)
+			if err := ic.validateAndRecord("agent_email_retry_canary_arms", candidate); !errors.Is(err, ErrArchiveContent) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
 func feedAgentEmailArchiveRow(t *testing.T, ic *importCtx, table string, row map[string]any) {
 	t.Helper()
 	if err := ic.validateAndRecord(table, row); err != nil {

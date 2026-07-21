@@ -47,9 +47,11 @@ func lockAccountForMint(ctx context.Context, tx pgx.Tx, accountID string, allowP
 // lockAccountForSafetyWrite is the same lock as lockAccountForMint but also
 // permits suspended accounts — used for writes that are HARM-REDUCING
 // regardless of the freeze: revoking a possibly-leaked token, closing, and
-// other lifecycle terminals. If suspend means "no state changes I'd regret
-// while frozen," these are the state changes an owner NEEDS in order to
-// protect the account, so they slip past the gate.
+// other lifecycle terminals, including disabling an agent-email receive
+// layer. If suspend means "no state changes I'd regret while frozen," these
+// are the state changes an owner NEEDS in order to protect the account, so
+// they slip past the gate. Re-enabling receive is not a safety write and
+// remains active-account-only.
 func lockAccountForSafetyWrite(ctx context.Context, tx pgx.Tx, accountID string) error {
 	var status string
 	err := tx.QueryRow(ctx,

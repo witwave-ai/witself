@@ -12,20 +12,49 @@ import (
 
 // AgentEmailAddress is the authenticated agent's one pilot receive address.
 type AgentEmailAddress struct {
-	ID               string     `json:"id"`
-	MailboxID        string     `json:"mailbox_id"`
-	OwnerAgentID     string     `json:"owner_agent_id"`
-	Address          string     `json:"address"`
-	Domain           string     `json:"domain"`
-	LocalPart        string     `json:"local_part"`
-	AgentSegment     string     `json:"agent_segment"`
-	RealmLabel       string     `json:"realm_label"`
-	ProvisioningKind string     `json:"provisioning_kind"`
-	ReceiveState     string     `json:"receive_state"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	DisabledAt       *time.Time `json:"disabled_at,omitempty"`
-	RetiredAt        *time.Time `json:"retired_at,omitempty"`
+	ID                string     `json:"id"`
+	MailboxID         string     `json:"mailbox_id"`
+	OwnerAgentID      string     `json:"owner_agent_id"`
+	Address           string     `json:"address"`
+	Domain            string     `json:"domain"`
+	LocalPart         string     `json:"local_part"`
+	AgentSegment      string     `json:"agent_segment"`
+	RealmLabel        string     `json:"realm_label"`
+	ProvisioningKind  string     `json:"provisioning_kind"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+}
+
+// AgentEmailReceiveControl is an operator-visible value-free mailbox switch.
+type AgentEmailReceiveControl struct {
+	AccountID         string     `json:"account_id"`
+	RealmID           string     `json:"realm_id"`
+	AgentID           string     `json:"agent_id"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
+}
+
+// AgentEmailRealmReceiveControl is an operator-visible realm kill switch.
+type AgentEmailRealmReceiveControl struct {
+	AccountID    string     `json:"account_id"`
+	RealmID      string     `json:"realm_id"`
+	ReceiveState string     `json:"receive_state"`
+	MailboxCount int64      `json:"mailbox_count"`
+	RowVersion   int64      `json:"row_version"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
 }
 
 // AgentEmailReadState records independent read, acknowledgement, and
@@ -148,6 +177,64 @@ func ShowAgentEmailAddress(ctx context.Context, endpoint, token string) (AgentEm
 		return AgentEmailAddress{}, err
 	}
 	return out.Address, nil
+}
+
+// GetAgentEmailReceiveControl returns one account agent's value-free receive
+// lifecycle state through the operator surface.
+func GetAgentEmailReceiveControl(ctx context.Context, endpoint, token, agentID string) (AgentEmailReceiveControl, error) {
+	var out struct {
+		Control AgentEmailReceiveControl `json:"control"`
+	}
+	if err := doJSON(ctx, http.MethodGet, agentEmailAgentReceiveURL(endpoint, agentID), token, nil, &out); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	return out.Control, nil
+}
+
+// SetAgentEmailReceiveControl sets only one agent's receive layer.
+func SetAgentEmailReceiveControl(ctx context.Context, endpoint, token, agentID, receiveState string) (AgentEmailReceiveControl, error) {
+	body, err := json.Marshal(struct {
+		ReceiveState string `json:"receive_state"`
+	}{ReceiveState: receiveState})
+	if err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	var out struct {
+		Control AgentEmailReceiveControl `json:"control"`
+	}
+	if err := doJSON(ctx, http.MethodPatch, agentEmailAgentReceiveURL(endpoint, agentID), token, body, &out); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	return out.Control, nil
+}
+
+// GetRealmAgentEmailReceiveControl returns one realm's value-free receive
+// kill-switch state through the operator surface.
+func GetRealmAgentEmailReceiveControl(ctx context.Context, endpoint, token, realmID string) (AgentEmailRealmReceiveControl, error) {
+	var out struct {
+		Control AgentEmailRealmReceiveControl `json:"control"`
+	}
+	if err := doJSON(ctx, http.MethodGet, agentEmailRealmReceiveURL(endpoint, realmID), token, nil, &out); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	return out.Control, nil
+}
+
+// SetRealmAgentEmailReceiveControl atomically sets the enrolled realm layer.
+func SetRealmAgentEmailReceiveControl(ctx context.Context, endpoint, token, realmID, receiveState string) (AgentEmailRealmReceiveControl, error) {
+	body, err := json.Marshal(struct {
+		ReceiveState string `json:"receive_state"`
+	}{ReceiveState: receiveState})
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	var out struct {
+		Control AgentEmailRealmReceiveControl `json:"control"`
+	}
+	if err := doJSON(ctx, http.MethodPatch, agentEmailRealmReceiveURL(endpoint, realmID), token, body, &out); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	return out.Control, nil
 }
 
 // ListAgentEmails returns a metadata-only page from the authenticated mailbox.
@@ -296,6 +383,14 @@ func agentEmailActionURL(endpoint, messageID, action string) string {
 
 func agentEmailURL(endpoint string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/email"
+}
+
+func agentEmailAgentReceiveURL(endpoint, agentID string) string {
+	return strings.TrimRight(endpoint, "/") + "/v1/agents/" + neturl.PathEscape(agentID) + "/email-receive"
+}
+
+func agentEmailRealmReceiveURL(endpoint, realmID string) string {
+	return strings.TrimRight(endpoint, "/") + "/v1/realms/" + neturl.PathEscape(realmID) + "/email-receive"
 }
 
 func agentEmailListenTransportTimeout(opts AgentEmailListenOptions) time.Duration {

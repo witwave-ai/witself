@@ -418,6 +418,40 @@ func TestStaticIndexServedWithSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
+	index, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	app, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	for _, want := range []string{
+		`href="#/email" data-nav="email"`,
+	} {
+		if !strings.Contains(string(index), want) {
+			t.Errorf("index missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`self.email_checkpoint`, `href: "#/email"`, `fetchJSON("/api/email/address")`,
+		`fetchJSON("/api/email?"`, `params.push("email=true")`, `params.push("email_unread=true")`,
+		`params.push("email_unacked=true")`, "raw MIME", "processing claims never enter this page",
+		`updateEmailAddressFromCheckpoint(self.email_checkpoint)`,
+		`emailStateChanged && current.section === "email"`,
+	} {
+		if !strings.Contains(string(app), want) {
+			t.Errorf("app missing %q", want)
+		}
+	}
+	// Browser code has no action URL; all mutations remain available only to
+	// active agents through the CLI/MCP surfaces, never this local viewer.
+	if strings.Contains(string(app), `"/api/email:`) || strings.Contains(string(app), `"/api/email/" +`) {
+		t.Fatal("email UI contains a per-message action URL")
+	}
+}
+
 func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 	t.Run("observational round trip", func(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
@@ -684,6 +718,189 @@ func TestMessagesProxyOnlyTouchesPassiveList(t *testing.T) {
 	}
 }
 
+// TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata proves the
+// dashboard's browser boundary is stricter than the public list wire shape:
+// even a misbehaving cell cannot leak content, raw MIME/header data,
+// attachment detail, row identifiers, or a processing claim fence.
+func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 21, 20, 1, 2, 0, time.UTC)
+	lease := now.Add(time.Minute)
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || strings.Contains(r.URL.Path, ":") {
+			t.Errorf("email dashboard touched non-passive route %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/email/address":
+			writeTestJSON(t, w, map[string]any{"address": client.AgentEmailAddress{
+				ID: "private-address-id", MailboxID: "private-mailbox-id", OwnerAgentID: "private-owner-id",
+				Address: "dash@agents.example", Domain: "private-domain", LocalPart: "private-local-part",
+				AgentSegment: "private-agent-segment", RealmLabel: "private-realm-label",
+				ProvisioningKind: "pilot", ReceiveState: "disabled",
+				AgentReceiveState: "enabled", RealmReceiveState: "disabled",
+				CreatedAt: now, UpdatedAt: now,
+			}})
+		case "/v1/email":
+			query := r.URL.Query()
+			if query.Get("unread") != "true" || query.Get("unacked") != "true" ||
+				query.Get("limit") != "7" || query.Get("cursor") != "" {
+				t.Errorf("unexpected email query %s", r.URL.RawQuery)
+			}
+			writeTestJSON(t, w, client.AgentEmailPage{
+				Messages: []client.AgentEmailMessage{{
+					ID: "claimable-message-id", MailboxID: "private-mailbox-id", OwnerAgentID: "private-owner-id",
+					AddressID: "private-address-id", Provider: "cloudflare", EnvelopeSender: "sender@example.net",
+					EnvelopeRecipient: "private-recipient", AgentSegment: "private-agent-segment",
+					RealmLabel: "private-realm-label", SubaddressTag: "private-subaddress",
+					RawSizeBytes: 2048, ParseState: "parsed", HeaderFrom: "leaked-header-from",
+					HeaderTo: "leaked-header-to", Subject: "safe subject", MIMEMessageID: "leaked-mime-id",
+					MessageDate: &now, AttachmentCount: 2, SPFResult: "pass", DKIMResult: "pass",
+					DMARCResult: "pass", SpamVerdict: "none", SenderVerificationState: "unverified",
+					PossibleDuplicate: true, PossibleDuplicateOfMessage: "leaked-duplicate-id",
+					ReceivedAt: now, Folder: "inbox", DeliveredAt: now,
+					ReadState: client.AgentEmailReadState{State: "unread"},
+					Processing: client.AgentEmailProcessing{
+						State: "claimed", Generation: 9, FailureCount: 2,
+						ClaimID: "leaked-claim-id", LeaseExpiresAt: &lease,
+					},
+					Text: "leaked decoded body", TextKind: "plain",
+				}},
+				NextCursor: "cursor-2",
+			})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	addressResp := authedGet(t, srv, cfg, "/api/email/address")
+	addressRaw, err := io.ReadAll(addressResp.Body)
+	_ = addressResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read address: %v", err)
+	}
+	if addressResp.StatusCode != http.StatusOK || !strings.Contains(string(addressRaw), "dash@agents.example") ||
+		!strings.Contains(string(addressRaw), `"receive_state":"disabled"`) ||
+		!strings.Contains(string(addressRaw), `"agent_receive_state":"enabled"`) ||
+		!strings.Contains(string(addressRaw), `"realm_receive_state":"disabled"`) {
+		t.Fatalf("address projection = %d %s", addressResp.StatusCode, addressRaw)
+	}
+	for _, forbidden := range []string{"private-address-id", "private-mailbox-id", "private-owner-id", "private-domain", "private-local-part", "private-agent-segment", "private-realm-label"} {
+		if strings.Contains(string(addressRaw), forbidden) {
+			t.Fatalf("address projection leaked %q: %s", forbidden, addressRaw)
+		}
+	}
+
+	listResp := authedGet(t, srv, cfg, "/api/email?unread=true&unacked=true&limit=7")
+	listRaw, err := io.ReadAll(listResp.Body)
+	_ = listResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read list: %v", err)
+	}
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list got %d: %s", listResp.StatusCode, listRaw)
+	}
+	for _, want := range []string{"safe subject", "sender@example.net", `"attachment_count":2`, `"possible_duplicate":true`, `"failure_count":2`} {
+		if !strings.Contains(string(listRaw), want) {
+			t.Errorf("safe metadata %q missing: %s", want, listRaw)
+		}
+	}
+	for _, forbidden := range []string{
+		"claimable-message-id", "private-mailbox-id", "private-owner-id", "private-address-id",
+		"private-recipient", "private-agent-segment", "private-realm-label", "private-subaddress",
+		"leaked-header-from", "leaked-header-to", "leaked-mime-id", "leaked-duplicate-id",
+		"leaked-claim-id", "leaked decoded body", `"generation"`, `"lease_expires_at"`, `"text_kind"`,
+		"cursor-2", `"next_cursor"`,
+	} {
+		if strings.Contains(string(listRaw), forbidden) {
+			t.Fatalf("email projection leaked %q: %s", forbidden, listRaw)
+		}
+	}
+}
+
+func TestAgentEmailProxyValidatesFilters(t *testing.T) {
+	srv, cfg := newDashboard(t, selfBackend(t), nil)
+	for _, path := range []string{
+		"/api/email?unread=nope",
+		"/api/email?unacked=nope",
+		"/api/email?limit=-1",
+		"/api/email?limit=0",
+		"/api/email?limit=101",
+		"/api/email?cursor=1700000000000000000:emsg_aaaaaaaaaaaaaaaa",
+	} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+func TestAgentEmailProjectionIsHardBounded(t *testing.T) {
+	messages := make([]client.AgentEmailMessage, sseEmailPageLimit+1)
+	for i := range messages {
+		messages[i].Subject = strconv.Itoa(i)
+	}
+	got := sanitizeAgentEmails(messages)
+	if len(got) != sseEmailPageLimit {
+		t.Fatalf("sanitized messages = %d, want %d", len(got), sseEmailPageLimit)
+	}
+	if got[0].Subject != "0" || got[len(got)-1].Subject != strconv.Itoa(sseEmailPageLimit-1) {
+		t.Fatalf("sanitizer did not retain the newest bounded prefix: first=%q last=%q", got[0].Subject, got[len(got)-1].Subject)
+	}
+}
+
+func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
+	t.Run("cell unavailable", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}, nil)
+		for _, path := range []string{"/api/email/address", "/api/email"} {
+			resp := authedGet(t, srv, cfg, path)
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("%s: got %d, want 501", path, resp.StatusCode)
+			}
+			_ = resp.Body.Close()
+		}
+	})
+
+	t.Run("agent not enrolled", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")
+		}, nil)
+		for _, path := range []string{"/api/email/address", "/api/email"} {
+			resp := authedGet(t, srv, cfg, path)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("%s: got %d, want 403", path, resp.StatusCode)
+			}
+			_ = resp.Body.Close()
+		}
+	})
+
+	t.Run("upstream errors are content free", func(t *testing.T) {
+		const leaked = "private subject and emsg_aaaaaaaaaaaaaaaa"
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONError(w, http.StatusInternalServerError, leaked)
+		}, nil)
+		for _, path := range []string{"/api/email/address", "/api/email"} {
+			resp := authedGet(t, srv, cfg, path)
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), agentEmailUpstreamMessage) {
+				t.Errorf("%s: got %d %s", path, resp.StatusCode, body)
+			}
+			if strings.Contains(string(body), leaked) || strings.Contains(string(body), "emsg_") {
+				t.Fatalf("%s leaked upstream email error: %s", path, body)
+			}
+		}
+	})
+}
+
 func TestEventsStreamEmitsSelfAndTranscript(t *testing.T) {
 	backend := func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -829,9 +1046,178 @@ func TestEventsStreamEmitsMessagesFromPassiveList(t *testing.T) {
 	cancel()
 }
 
+// TestEventsStreamEmitsAgentEmailFromPassiveList proves live email refreshes
+// use only the filtered GET list and apply the same browser allow-list as the
+// direct proxy. In particular, the stream never uses :listen or a lifecycle
+// action and never carries an id that could target one.
+func TestEventsStreamEmitsAgentEmailFromPassiveList(t *testing.T) {
+	now := time.Date(2026, 7, 21, 20, 2, 3, 0, time.UTC)
+	lease := now.Add(time.Minute)
+	var mu sync.Mutex
+	emailCalls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, ":") || r.Method != http.MethodGet {
+			t.Errorf("email tick touched non-passive route %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email":
+			query := r.URL.Query()
+			if query.Get("unread") != "true" || query.Get("unacked") != "true" ||
+				query.Get("limit") != strconv.Itoa(sseEmailPageLimit) {
+				t.Errorf("unexpected email tick query %s", r.URL.RawQuery)
+			}
+			mu.Lock()
+			emailCalls++
+			mu.Unlock()
+			writeTestJSON(t, w, client.AgentEmailPage{Messages: []client.AgentEmailMessage{{
+				ID: "leaked-message-id", EnvelopeSender: "sender@example.net", Subject: "live subject",
+				AttachmentCount: 1, SenderVerificationState: "unverified", ReceivedAt: now, DeliveredAt: now,
+				ReadState: client.AgentEmailReadState{State: "unread"},
+				Processing: client.AgentEmailProcessing{
+					State: "claimed", Generation: 4, ClaimID: "leaked-claim-id", LeaseExpiresAt: &lease,
+				},
+				Text: "leaked live body", MIMEMessageID: "leaked-mime-id",
+			}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true&email_unread=true&email_unacked=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	sawEvent, sawMetadata := false, false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawEvent || !sawMetadata) {
+		line := scanner.Text()
+		if line == "event: email" {
+			sawEvent = true
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "live subject") {
+			sawMetadata = true
+			for _, forbidden := range []string{"leaked-message-id", "leaked-claim-id", "leaked live body", "leaked-mime-id", `"generation"`, `"lease_expires_at"`} {
+				if strings.Contains(line, forbidden) {
+					t.Fatalf("email SSE leaked %q: %s", forbidden, line)
+				}
+			}
+		}
+	}
+	if !sawEvent || !sawMetadata {
+		t.Fatalf("stream ended early: event=%v metadata=%v (%v)", sawEvent, sawMetadata, scanner.Err())
+	}
+	mu.Lock()
+	if emailCalls == 0 {
+		t.Error("email list was never polled")
+	}
+	mu.Unlock()
+	cancel()
+}
+
+func TestEventsStreamEmitsSettledEmailUnavailableState(t *testing.T) {
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email":
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	sawEmail, sawUnavailable, sawEmailDegraded := false, false, false
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && !sawUnavailable {
+		line := scanner.Text()
+		if line == "event: email" {
+			sawEmail = true
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"source":"email"`) {
+			sawEmailDegraded = true
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"available":false`) &&
+			strings.Contains(line, `"reason":"unavailable"`) {
+			sawUnavailable = true
+		}
+	}
+	if !sawEmail || !sawUnavailable || sawEmailDegraded {
+		t.Fatalf("settled availability event: email=%v unavailable=%v degraded=%v (%v)",
+			sawEmail, sawUnavailable, sawEmailDegraded, scanner.Err())
+	}
+	cancel()
+}
+
+func TestEventsStreamRedactsAgentEmailUpstreamError(t *testing.T) {
+	const leaked = "private subject and emsg_aaaaaaaaaaaaaaaa"
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email":
+			writeJSONError(w, http.StatusInternalServerError, leaked)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, leaked) || strings.Contains(line, "emsg_") {
+			t.Fatalf("email SSE leaked upstream error: %s", line)
+		}
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"source":"email"`) {
+			if !strings.Contains(line, agentEmailUpstreamMessage) {
+				t.Fatalf("email SSE did not use fixed error: %s", line)
+			}
+			cancel()
+			return
+		}
+	}
+	t.Fatalf("email upstream event not observed: %v", scanner.Err())
+}
+
 func TestEventsStreamRejectsInvalidMessagesFlag(t *testing.T) {
 	srv, cfg := newDashboard(t, selfBackend(t), nil)
-	for _, path := range []string{"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope", "/api/events?secrets=nope"} {
+	for _, path := range []string{
+		"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope", "/api/events?secrets=nope",
+		"/api/events?email=nope", "/api/events?email=true&email_unread=nope", "/api/events?email=true&email_unacked=nope",
+	} {
 		resp := authedGet(t, srv, cfg, path)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("%s: got %d, want 400", path, resp.StatusCode)

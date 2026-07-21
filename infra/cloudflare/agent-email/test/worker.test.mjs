@@ -5,13 +5,14 @@ import test from "node:test";
 import { handleEmail } from "../src/index.js";
 import { CONFIG_KEY, recipientKey, runtimeConfig, runtimeRecipient } from "../src/directory.mjs";
 import { PILOT_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
+import { EDGE_METRICS_SCHEMA } from "../src/metrics.mjs";
 
 const vector = JSON.parse(await readFile(new URL("./golden-vector.json", import.meta.url), "utf8"));
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
 const raw = Buffer.from(vector.raw_base64, "base64");
 const first = example.agents[0];
 
-function env(enabled = true, includeRecipient = true) {
+function env(enabled = true, includeRecipient = true, metrics = null) {
   const values = new Map([[CONFIG_KEY, runtimeConfig(example, enabled)]]);
   if (includeRecipient) values.set(recipientKey(first.address), runtimeRecipient(example, first));
   return {
@@ -23,6 +24,7 @@ function env(enabled = true, includeRecipient = true) {
         return values.get(key) ?? null;
       },
     },
+    ...(metrics ? { EMAIL_EDGE_METRICS: metrics } : {}),
   };
 }
 
@@ -99,6 +101,22 @@ test("unknown and permanent cell verdicts use one sanitized permanent rejection"
   }
 });
 
+test("terminal retry-canary verdict rejects once with no marker leakage", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const mail = message();
+  await handleEmail(mail, env(true, true, metrics), {
+    fetch: async () => new Response('{"verdict":"retry_canary_rejected"}', { status: 410 }),
+  });
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0].blobs, [
+    EDGE_METRICS_SCHEMA, "rejected_retry_canary", "response",
+  ]);
+  assert.equal(points[0].doubles[3], 410);
+  assert.doesNotMatch(JSON.stringify(points[0]), /challenge|retry_canary_rejected|X-Witself/i);
+});
+
 test("disabled pilot and transport failures use one sanitized transient error", async () => {
   await assert.rejects(() => handleEmail(message(), env(false), {}), {
     message: "agent email relay temporarily unavailable",
@@ -135,4 +153,56 @@ test("provider raw-size mismatch tempfails rather than accepting partial content
     () => handleEmail(message({ rawSize: raw.byteLength + 1 }), env(), { fetch: async () => new Response() }),
     { message: "agent email relay temporarily unavailable" },
   );
+});
+
+test("edge metrics record value-free accepted, rejected, and tempfailed outcomes", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+
+  await handleEmail(message(), env(true, true, metrics), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async () => new Response('{"verdict":"accepted"}', { status: 200 }),
+  });
+
+  const unknown = message({ to: `other.${example.realm_label}@${example.domain}` });
+  await handleEmail(unknown, env(true, true, metrics), {
+    now: () => vector.metadata.timestamp * 1000,
+  });
+
+  await assert.rejects(
+    () => handleEmail(message(), env(false, true, metrics), {
+      now: () => vector.metadata.timestamp * 1000,
+    }),
+    { message: "agent email relay temporarily unavailable" },
+  );
+
+  await assert.rejects(
+    () => handleEmail(message(), env(true, true, metrics), {
+      now: () => vector.metadata.timestamp * 1000,
+      fetch: async () => new Response('{"verdict":"receive_disabled"}', { status: 503 }),
+    }),
+    { message: "agent email relay temporarily unavailable" },
+  );
+
+  assert.equal(points.length, 4);
+  assert.deepEqual(points.map((point) => point.blobs[1]), [
+    "accepted", "rejected_unknown_recipient", "tempfail_disabled", "tempfail_disabled",
+  ]);
+  assert.equal(points.at(-1).blobs[2], "response");
+  for (const point of points) {
+    assert.deepEqual(point.indexes, [point.blobs[1]]);
+    assert.equal(point.blobs[0], EDGE_METRICS_SCHEMA);
+    assert.equal(point.doubles[0], 1);
+    const serialized = JSON.stringify(point);
+    assert.doesNotMatch(serialized, /@|sha256|signature|realm_|agent_/i);
+  }
+});
+
+test("edge metrics failures never alter the SMTP disposition", async () => {
+  const metrics = { writeDataPoint() { throw new Error("analytics unavailable"); } };
+  const mail = message();
+  await handleEmail(mail, env(true, true, metrics), {
+    fetch: async () => new Response('{"verdict":"accepted"}', { status: 200 }),
+  });
+  assert.deepEqual(mail.rejected, []);
 });

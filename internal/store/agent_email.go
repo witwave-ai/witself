@@ -46,16 +46,25 @@ const (
 	// AgentEmailSenderUnverified is the mandatory receive-pilot sender posture.
 	AgentEmailSenderUnverified = "unverified"
 
-	agentEmailPilotProvider       = "cloudflare_email_routing"
-	defaultAgentEmailPageSize     = 50
-	maximumAgentEmailPageSize     = 100
-	maximumAgentEmailFailureCount = int64(4611686018427387903)
-	maximumAgentEmailGeneration   = int64(4611686018427387903)
-	defaultAgentEmailLease        = 5 * time.Minute
-	minimumAgentEmailLease        = 30 * time.Second
-	maximumAgentEmailLease        = 15 * time.Minute
-	maximumAgentEmailKeyBytes     = 512
-	maximumAgentEmailClaimIDBytes = 128
+	agentEmailPilotProvider           = "cloudflare_email_routing"
+	defaultAgentEmailPageSize         = 50
+	maximumAgentEmailPageSize         = 100
+	maximumAgentEmailFailureCount     = int64(4611686018427387903)
+	maximumAgentEmailGeneration       = int64(4611686018427387903)
+	defaultAgentEmailLease            = 5 * time.Minute
+	minimumAgentEmailLease            = 30 * time.Second
+	maximumAgentEmailLease            = 15 * time.Minute
+	maximumAgentEmailKeyBytes         = 512
+	maximumAgentEmailClaimIDBytes     = 128
+	agentEmailRetryCanaryArmTTL       = 15 * time.Minute
+	agentEmailRetryCanaryRetryGrace   = 24 * time.Hour
+	agentEmailRetryCanaryCleanup      = 7 * 24 * time.Hour
+	agentEmailRetryCanaryCleanupLimit = 32
+
+	agentEmailRetryCanaryArmed      = "armed"
+	agentEmailRetryCanaryTempfailed = "tempfailed"
+	agentEmailRetryCanaryAccepted   = "accepted"
+	agentEmailRetryCanaryExpired    = "expired"
 )
 
 var (
@@ -87,27 +96,66 @@ var (
 	ErrAgentEmailCodeConsumed = errors.New("agent-email code was already consumed")
 	// ErrAgentEmailCursorInvalid reports an invalid mailbox pagination cursor.
 	ErrAgentEmailCursorInvalid = errors.New("malformed agent-email cursor")
+	// ErrAgentEmailRetryCanaryTemporary asks the verified relay to retry one
+	// synthetic delivery. It is never returned for ordinary mailbox traffic.
+	ErrAgentEmailRetryCanaryTemporary = errors.New("agent-email retry canary temporary failure")
+	// ErrAgentEmailRetryCanaryPermanent rejects a synthetic retry marker after
+	// no live arm can authorize it. It prevents both ordinary acceptance and an
+	// attacker-triggerable unbounded provider retry loop.
+	ErrAgentEmailRetryCanaryPermanent = errors.New("agent-email retry canary permanent rejection")
 )
 
 // AgentEmailAddress is the durable reservation and current mailbox state for
 // one agent. Address tombstones intentionally survive permanent agent deletion.
 type AgentEmailAddress struct {
-	ID               string     `json:"id"`
-	MailboxID        string     `json:"mailbox_id"`
-	AccountID        string     `json:"account_id"`
-	RealmID          string     `json:"realm_id"`
-	OwnerAgentID     string     `json:"owner_agent_id"`
-	Address          string     `json:"address"`
-	Domain           string     `json:"domain"`
-	LocalPart        string     `json:"local_part"`
-	AgentSegment     string     `json:"agent_segment"`
-	RealmLabel       string     `json:"realm_label"`
-	ProvisioningKind string     `json:"provisioning_kind"`
-	ReceiveState     string     `json:"receive_state"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	DisabledAt       *time.Time `json:"disabled_at,omitempty"`
-	RetiredAt        *time.Time `json:"retired_at,omitempty"`
+	ID                string     `json:"id"`
+	MailboxID         string     `json:"mailbox_id"`
+	AccountID         string     `json:"account_id"`
+	RealmID           string     `json:"realm_id"`
+	OwnerAgentID      string     `json:"owner_agent_id"`
+	Address           string     `json:"address"`
+	Domain            string     `json:"domain"`
+	LocalPart         string     `json:"local_part"`
+	AgentSegment      string     `json:"agent_segment"`
+	RealmLabel        string     `json:"realm_label"`
+	ProvisioningKind  string     `json:"provisioning_kind"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+}
+
+// AgentEmailRealmReceiveControl is the value-free operator view of one
+// enrolled realm kill switch. Its durable state is independent of mailbox
+// rows; MailboxCount is informational blast-radius metadata.
+type AgentEmailRealmReceiveControl struct {
+	AccountID    string     `json:"account_id"`
+	RealmID      string     `json:"realm_id"`
+	ReceiveState string     `json:"receive_state"`
+	MailboxCount int64      `json:"mailbox_count"`
+	RowVersion   int64      `json:"row_version"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
+}
+
+// AgentEmailReceiveControl is the value-free operator view of one enrolled
+// agent mailbox. It deliberately omits the address and all message metadata.
+type AgentEmailReceiveControl struct {
+	AccountID         string     `json:"account_id"`
+	RealmID           string     `json:"realm_id"`
+	AgentID           string     `json:"agent_id"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
 }
 
 // AgentEmailReadState distinguishes explicit content reads, acknowledgement,
@@ -219,11 +267,12 @@ type CompleteAgentEmailInput struct {
 // AgentEmailPilotScope is the process-lifetime default-off allowlist. Both a
 // mailbox row and these exact realm/agent entries are required for ingestion.
 type AgentEmailPilotScope struct {
-	Enabled  bool
-	Domain   string
-	Audience string
-	RealmIDs map[string]bool
-	AgentIDs map[string]bool
+	Enabled            bool
+	Domain             string
+	Audience           string
+	RealmIDs           map[string]bool
+	AgentIDs           map[string]bool
+	RetryCanaryAgentID string
 }
 
 // AgentEmailIngestInput carries already signature-verified relay metadata and
@@ -235,8 +284,22 @@ type AgentEmailIngestInput struct {
 
 // AgentEmailCheckpoint is a bounded value-free foreground-work hint.
 type AgentEmailCheckpoint struct {
-	Pending        bool `json:"pending"`
-	MailboxPending bool `json:"mailbox_pending,omitempty"`
+	Pending           bool   `json:"pending"`
+	MailboxPending    bool   `json:"mailbox_pending,omitempty"`
+	ReceiveState      string `json:"receive_state,omitempty"`
+	AgentReceiveState string `json:"agent_receive_state,omitempty"`
+	RealmReceiveState string `json:"realm_receive_state,omitempty"`
+}
+
+// AgentEmailRetryCanaryCheckpoint is the value-free cumulative proof for one
+// owner-generated challenge. It deliberately omits the challenge, its hash,
+// all mailbox identifiers, addresses, message identifiers, and content.
+type AgentEmailRetryCanaryCheckpoint struct {
+	State         string `json:"state"`
+	Armed         bool   `json:"armed"`
+	Tempfailed    bool   `json:"tempfailed"`
+	Accepted      bool   `json:"accepted"`
+	TempfailCount int64  `json:"tempfail_count"`
 }
 
 // EnsureAgentEmailMailbox idempotently provisions one pilot mailbox. An
@@ -265,6 +328,10 @@ func (s *Store) EnsureAgentEmailMailbox(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	realmControl, err := ensureAgentEmailRealmReceiveControlTx(ctx, tx, accountID, realmID)
+	if err != nil {
 		return AgentEmailAddress{}, err
 	}
 	if existing, err := agentEmailAddressForOwnerTx(ctx, tx, accountID, realmID, agentID); err == nil {
@@ -354,7 +421,13 @@ func (s *Store) EnsureAgentEmailMailbox(
 		OwnerAgentID: agentID, Address: parts.BaseAddress, Domain: parts.Domain,
 		LocalPart: parts.LocalPart, AgentSegment: parts.AgentSegment,
 		RealmLabel: parts.RealmLabel, ProvisioningKind: provisioningKind,
-		ReceiveState: AgentEmailReceiveEnabled, CreatedAt: createdAt, UpdatedAt: updatedAt,
+		ReceiveState: agentEmailEffectiveReceiveState(
+			AgentEmailReceiveEnabled, realmControl.ReceiveState,
+		),
+		AgentReceiveState: AgentEmailReceiveEnabled,
+		RealmReceiveState: realmControl.ReceiveState,
+		RowVersion:        1, CreatedAt: createdAt, UpdatedAt: updatedAt,
+		RealmDisabledAt: realmControl.DisabledAt,
 	}, nil
 }
 
@@ -386,6 +459,350 @@ func (s *Store) GetAgentEmailAddress(
 		return AgentEmailAddress{}, err
 	}
 	return address, nil
+}
+
+// ArmAgentEmailRetryCanary creates the sole unused provider-retry challenge for
+// the configured canary mailbox. The arm/proof row persists only a SHA-256
+// digest; after acceptance the opaque UUID header remains ordinary synthetic
+// raw MIME under the mailbox/archive policy. Repeating an identical arm is
+// idempotent. A retained tempfailed proof remains independently retryable but
+// does not block arming the next run.
+func (s *Store) ArmAgentEmailRetryCanary(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	p Principal,
+	challenge string,
+) (AgentEmailRetryCanaryCheckpoint, error) {
+	if err := requireAgentEmailRetryCanaryPrincipal(scope, p); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	if err := agentemail.ValidateRetryCanaryChallenge(challenge); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("%w: retry canary challenge is invalid", ErrAgentEmailInputInvalid)
+	}
+	challengeHash := agentEmailRetryCanaryChallengeHash(challenge)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	address, err := lockAgentEmailRetryCanaryOwnerTx(ctx, tx, p)
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	if address.ReceiveState != AgentEmailReceiveEnabled {
+		return AgentEmailRetryCanaryCheckpoint{}, ErrAgentEmailReceiveDisabled
+	}
+	if err := maintainAgentEmailRetryCanaryTx(ctx, tx, address); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+
+	var state string
+	var tempfailCount int64
+	err = tx.QueryRow(ctx, `
+		SELECT state,tempfail_count
+		FROM agent_email_retry_canary_arms
+		WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		  AND challenge_sha256=$4
+		FOR UPDATE`, address.AccountID, address.RealmID, address.MailboxID, challengeHash).
+		Scan(&state, &tempfailCount)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailRetryCanaryCheckpoint{}, err
+		}
+		return agentEmailRetryCanaryCheckpoint(state, tempfailCount), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("read retry canary arm: %w", err)
+	}
+
+	var live bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_email_retry_canary_arms
+		  WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		    AND state='armed'
+		)`, address.AccountID, address.RealmID, address.MailboxID).Scan(&live); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("check retry canary arm: %w", err)
+	}
+	if live {
+		return AgentEmailRetryCanaryCheckpoint{}, ErrAgentEmailConflict
+	}
+	command, err := tx.Exec(ctx, `
+		WITH armed AS (SELECT clock_timestamp() AS at)
+		INSERT INTO agent_email_retry_canary_arms
+		  (account_id,realm_id,mailbox_id,owner_agent_id,challenge_sha256,armed_at,expires_at)
+		SELECT $1,$2,$3,$4,$5,at,at+($6::double precision * interval '1 second') FROM armed
+		ON CONFLICT DO NOTHING`,
+		address.AccountID, address.RealmID, address.MailboxID, address.OwnerAgentID,
+		challengeHash, agentEmailRetryCanaryArmTTL.Seconds())
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("arm retry canary: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		err := tx.QueryRow(ctx, `
+			SELECT state,tempfail_count
+			FROM agent_email_retry_canary_arms
+			WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+			  AND challenge_sha256=$4`, address.AccountID, address.RealmID,
+			address.MailboxID, challengeHash).Scan(&state, &tempfailCount)
+		if err == nil {
+			if err := tx.Commit(ctx); err != nil {
+				return AgentEmailRetryCanaryCheckpoint{}, err
+			}
+			return agentEmailRetryCanaryCheckpoint(state, tempfailCount), nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("resolve retry canary arm race: %w", err)
+		}
+		return AgentEmailRetryCanaryCheckpoint{}, ErrAgentEmailConflict
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	return agentEmailRetryCanaryCheckpoint(agentEmailRetryCanaryArmed, 0), nil
+}
+
+// GetAgentEmailRetryCanaryStatus returns only cumulative value-free proof for
+// the configured canary owner. The challenge travels in a POST body so it is
+// absent from request URLs and ordinary access logs.
+func (s *Store) GetAgentEmailRetryCanaryStatus(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	p Principal,
+	challenge string,
+) (AgentEmailRetryCanaryCheckpoint, error) {
+	if err := requireAgentEmailRetryCanaryPrincipal(scope, p); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	if err := agentemail.ValidateRetryCanaryChallenge(challenge); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("%w: retry canary challenge is invalid", ErrAgentEmailInputInvalid)
+	}
+	challengeHash := agentEmailRetryCanaryChallengeHash(challenge)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	address, err := lockAgentEmailRetryCanaryOwnerTx(ctx, tx, p)
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	if err := maintainAgentEmailRetryCanaryTx(ctx, tx, address); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	var state string
+	var tempfailCount int64
+	err = tx.QueryRow(ctx, `
+		SELECT state,tempfail_count
+		FROM agent_email_retry_canary_arms
+		WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		  AND challenge_sha256=$4`, address.AccountID, address.RealmID,
+		address.MailboxID, challengeHash).Scan(&state, &tempfailCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRetryCanaryCheckpoint{}, ErrAgentEmailNotFound
+	}
+	if err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, fmt.Errorf("read retry canary status: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailRetryCanaryCheckpoint{}, err
+	}
+	return agentEmailRetryCanaryCheckpoint(state, tempfailCount), nil
+}
+
+// GetAgentEmailReceiveControl returns value-free lifecycle state for one
+// enrolled account agent. It is intended only for an authenticated operator
+// route; mailbox content and the address itself are deliberately omitted.
+func (s *Store) GetAgentEmailReceiveControl(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	accountID, operatorID, agentID string,
+) (AgentEmailReceiveControl, error) {
+	if err := requireAgentEmailOperatorTarget(scope, operatorID, "agent", agentID); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAccountForSafetyWrite(ctx, tx, accountID); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	address, err := agentEmailAddressForOperatorAgentTx(ctx, tx, scope, accountID, agentID, false)
+	if err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	return agentEmailReceiveControlFromAddress(address), nil
+}
+
+// SetAgentEmailReceiveControl changes only the agent layer of one mailbox.
+// Repeating the same desired state is a no-op; a realm disable remains intact.
+func (s *Store) SetAgentEmailReceiveControl(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	accountID, operatorID, agentID, desiredState string,
+) (AgentEmailReceiveControl, error) {
+	if err := requireAgentEmailOperatorTarget(scope, operatorID, "agent", agentID); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	desiredState = strings.TrimSpace(desiredState)
+	if desiredState != AgentEmailReceiveEnabled && desiredState != AgentEmailReceiveDisabled {
+		return AgentEmailReceiveControl{}, fmt.Errorf("%w: receive_state must be enabled or disabled", ErrAgentEmailInputInvalid)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentEmailReceiveControlWrite(ctx, tx, accountID, desiredState); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	address, err := agentEmailAddressForOperatorAgentTx(ctx, tx, scope, accountID, agentID, true)
+	if err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	if address.AgentReceiveState == desiredState {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailReceiveControl{}, err
+		}
+		return agentEmailReceiveControlFromAddress(address), nil
+	}
+	err = tx.QueryRow(ctx, `
+		UPDATE agent_email_mailboxes
+		SET receive_state=$1,
+		    disabled_at=CASE
+		      WHEN $1='enabled' THEN NULL
+		      ELSE COALESCE(disabled_at,clock_timestamp())
+		    END,
+		    updated_at=clock_timestamp(),row_version=row_version+1
+		WHERE id=$2 AND account_id=$3 AND realm_id=$4 AND owner_agent_id=$5
+		RETURNING row_version,updated_at,disabled_at`,
+		desiredState, address.MailboxID, accountID, address.RealmID, agentID).
+		Scan(&address.RowVersion, &address.UpdatedAt, &address.DisabledAt)
+	if err != nil {
+		return AgentEmailReceiveControl{}, fmt.Errorf("set agent-email agent receive control: %w", err)
+	}
+	address.AgentReceiveState = desiredState
+	address.ReceiveState = agentEmailEffectiveReceiveState(desiredState, address.RealmReceiveState)
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
+		Verb: VerbAgentEmailAgentReceiveChanged,
+		Metadata: map[string]any{
+			"owner_agent_id": agentID, "realm_id": address.RealmID,
+			"receive_state": desiredState,
+			"row_version":   strconv.FormatInt(address.RowVersion, 10),
+		},
+	}); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailReceiveControl{}, err
+	}
+	return agentEmailReceiveControlFromAddress(address), nil
+}
+
+// GetRealmAgentEmailReceiveControl returns the enrolled realm kill-switch
+// state without exposing any mailbox address or message metadata. It is
+// deliberately read-only: provisioning and PATCH establish a missing row.
+func (s *Store) GetRealmAgentEmailReceiveControl(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	accountID, operatorID, realmID string,
+) (AgentEmailRealmReceiveControl, error) {
+	if err := requireAgentEmailOperatorTarget(scope, operatorID, "realm", realmID); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAccountForSafetyWrite(ctx, tx, accountID); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	control, err := agentEmailRealmReceiveControlTx(ctx, tx, accountID, realmID, false)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	return control, nil
+}
+
+// SetRealmAgentEmailReceiveControl changes the durable realm aggregate without
+// mutating any mailbox's independent agent layer.
+func (s *Store) SetRealmAgentEmailReceiveControl(
+	ctx context.Context,
+	scope AgentEmailPilotScope,
+	accountID, operatorID, realmID, desiredState string,
+) (AgentEmailRealmReceiveControl, error) {
+	if err := requireAgentEmailOperatorTarget(scope, operatorID, "realm", realmID); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	desiredState = strings.TrimSpace(desiredState)
+	if desiredState != AgentEmailReceiveEnabled && desiredState != AgentEmailReceiveDisabled {
+		return AgentEmailRealmReceiveControl{}, fmt.Errorf("%w: receive_state must be enabled or disabled", ErrAgentEmailInputInvalid)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentEmailReceiveControlWrite(ctx, tx, accountID, desiredState); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	current, err := ensureAgentEmailRealmReceiveControlTx(ctx, tx, accountID, realmID)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	if current.ReceiveState == desiredState {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailRealmReceiveControl{}, err
+		}
+		return current, nil
+	}
+	err = tx.QueryRow(ctx, `
+		UPDATE agent_email_realm_receive_controls
+		SET receive_state=$1,
+		    disabled_at=CASE
+		      WHEN $1='enabled' THEN NULL
+		      ELSE COALESCE(disabled_at,clock_timestamp())
+		    END,
+		    updated_at=clock_timestamp(),row_version=row_version+1
+		WHERE account_id=$2 AND realm_id=$3
+		RETURNING receive_state,row_version,updated_at,disabled_at`,
+		desiredState, accountID, realmID).
+		Scan(&current.ReceiveState, &current.RowVersion, &current.UpdatedAt, &current.DisabledAt)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, fmt.Errorf("set agent-email realm receive control: %w", err)
+	}
+	updated := current
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_mailboxes
+		WHERE account_id=$1 AND realm_id=$2 AND retired_at IS NULL`,
+		accountID, realmID).Scan(&updated.MailboxCount); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	if err := logEventTx(ctx, tx, EventInput{
+		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
+		Verb: VerbAgentEmailRealmReceiveChanged,
+		Metadata: map[string]any{
+			"realm_id": realmID, "receive_state": desiredState,
+			"mailbox_count": strconv.FormatInt(updated.MailboxCount, 10),
+			"row_version":   strconv.FormatInt(updated.RowVersion, 10),
+		},
+	}); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailRealmReceiveControl{}, err
+	}
+	return updated, nil
 }
 
 // IngestAgentEmailPilot durably stores one signed Cloudflare delivery. Digest
@@ -429,6 +846,8 @@ func (s *Store) IngestAgentEmailPilot(
 		parseState = AgentEmailParseError
 		parseErrorCode = agentemail.ParseErrorCode(parseErr)
 	}
+	retryCanaryChallenge, retryCanaryHeaderPresent, retryCanaryHeaderErr :=
+		agentemail.RetryCanaryChallenge(in.Raw)
 	duplicateGroup := agentEmailDuplicateGroup(rawSHA, parts.Address, relay.EnvelopeSender)
 	messageID, err := id.New("emsg")
 	if err != nil {
@@ -472,6 +891,42 @@ func (s *Store) IngestAgentEmailPilot(
 	}
 	if address.AgentSegment != parts.AgentSegment || address.RealmLabel != parts.RealmLabel {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
+	}
+	canaryGate, err := applyAgentEmailRetryCanaryGateTx(
+		ctx, tx, scope, address, retryCanaryChallenge, retryCanaryHeaderPresent,
+		retryCanaryHeaderErr, duplicateGroup,
+	)
+	if err != nil {
+		return AgentEmailMessage{}, err
+	}
+	if canaryGate.temporary {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailMessage{}, err
+		}
+		return AgentEmailMessage{}, ErrAgentEmailRetryCanaryTemporary
+	}
+	if canaryGate.permanent {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailMessage{}, err
+		}
+		return AgentEmailMessage{}, ErrAgentEmailRetryCanaryPermanent
+	}
+	if canaryGate.acceptedReplayMessageID != "" {
+		msg, err := scanAgentEmail(tx.QueryRow(ctx, agentEmailSelect(false)+`
+			WHERE m.account_id=$1 AND m.realm_id=$2 AND m.mailbox_id=$3
+			  AND m.owner_agent_id=$4 AND m.id=$5`, address.AccountID,
+			address.RealmID, address.MailboxID, address.OwnerAgentID,
+			canaryGate.acceptedReplayMessageID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentEmailMessage{}, ErrAgentEmailConflict
+		}
+		if err != nil {
+			return AgentEmailMessage{}, fmt.Errorf("read accepted retry canary message: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailMessage{}, err
+		}
+		return msg, nil
 	}
 	lockKey := int64(binary.BigEndian.Uint64(digest[:8]))
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockKey); err != nil {
@@ -529,6 +984,25 @@ func (s *Store) IngestAgentEmailPilot(
 		Scan(&receivedAt, &createdAt, &deliveredAt)
 	if err != nil {
 		return AgentEmailMessage{}, fmt.Errorf("store agent email: %w", err)
+	}
+	if canaryGate.acceptAfterInsert {
+		command, err := tx.Exec(ctx, `
+			UPDATE agent_email_retry_canary_arms
+			SET state='accepted',accepted_message_id=$6,
+			    accepted_at=clock_timestamp(),row_version=row_version+1
+			WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+			  AND owner_agent_id=$4 AND challenge_sha256=$5
+			  AND state='tempfailed'
+			  AND delivery_fingerprint_sha256=$7`,
+			address.AccountID, address.RealmID, address.MailboxID,
+			address.OwnerAgentID, canaryGate.challengeHash, messageID,
+			duplicateGroup)
+		if err != nil {
+			return AgentEmailMessage{}, fmt.Errorf("accept retry canary: %w", err)
+		}
+		if command.RowsAffected() != 1 {
+			return AgentEmailMessage{}, ErrAgentEmailConflict
+		}
 	}
 	msg := AgentEmailMessage{
 		ID: messageID, AccountID: address.AccountID, RealmID: address.RealmID,
@@ -693,8 +1167,12 @@ func (s *Store) GetSelfAgentEmailCheckpoint(
 	if err := requireAgentEmailPilotPrincipal(scope, p); err != nil {
 		return AgentEmailCheckpoint{}, err
 	}
+	address, err := s.GetAgentEmailAddress(ctx, scope, p)
+	if err != nil {
+		return AgentEmailCheckpoint{}, err
+	}
 	var pending bool
-	err := s.pool.QueryRow(ctx, `
+	err = s.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM agent_email_deliveries d
 		  JOIN agent_email_mailboxes mb
@@ -711,7 +1189,12 @@ func (s *Store) GetSelfAgentEmailCheckpoint(
 	if err != nil {
 		return AgentEmailCheckpoint{}, fmt.Errorf("read agent-email checkpoint: %w", err)
 	}
-	return AgentEmailCheckpoint{Pending: pending, MailboxPending: pending}, nil
+	return AgentEmailCheckpoint{
+		Pending: pending, MailboxPending: pending,
+		ReceiveState:      address.ReceiveState,
+		AgentReceiveState: address.AgentReceiveState,
+		RealmReceiveState: address.RealmReceiveState,
+	}, nil
 }
 
 // ClaimAgentEmail acquires one exact owner-only processing lease. General
@@ -1175,7 +1658,7 @@ func agentEmailAddressByRecipientTx(
 	query := agentEmailAddressSelect() + `
 		WHERE addr.domain=$1 AND addr.local_part=$2 AND addr.retired_at IS NULL`
 	if lock {
-		query += ` FOR SHARE OF addr,mb`
+		query += ` FOR SHARE OF addr,mb,rc`
 	}
 	row := tx.QueryRow(ctx, query, domain, localPart)
 	address, err := scanAgentEmailAddress(row)
@@ -1192,24 +1675,34 @@ func agentEmailAddressSelect() string {
 	return `SELECT addr.id,mb.id,addr.account_id,addr.realm_id,mb.owner_agent_id,
 		       addr.local_part || '@' || addr.domain,addr.domain,addr.local_part,
 		       addr.agent_segment,addr.realm_label,addr.provisioning_kind,
-		       mb.receive_state,addr.created_at,mb.updated_at,mb.disabled_at,
+		       mb.receive_state,rc.receive_state,mb.row_version,
+		       addr.created_at,mb.updated_at,mb.disabled_at,rc.disabled_at,
 		       COALESCE(mb.retired_at,addr.retired_at)
 		FROM agent_email_addresses addr
 		JOIN agent_email_mailboxes mb
 		  ON mb.address_id=addr.id AND mb.account_id=addr.account_id
 		 AND mb.realm_id=addr.realm_id
-		 AND mb.owner_agent_id=addr.provisioned_agent_id`
+		 AND mb.owner_agent_id=addr.provisioned_agent_id
+		JOIN agent_email_realm_receive_controls rc
+		  ON rc.account_id=mb.account_id AND rc.realm_id=mb.realm_id`
 }
 
 func scanAgentEmailAddress(row rowScanner) (AgentEmailAddress, error) {
 	var address AgentEmailAddress
+	var agentReceiveState, realmReceiveState string
 	err := row.Scan(
 		&address.ID, &address.MailboxID, &address.AccountID, &address.RealmID,
 		&address.OwnerAgentID, &address.Address, &address.Domain,
 		&address.LocalPart, &address.AgentSegment, &address.RealmLabel,
-		&address.ProvisioningKind, &address.ReceiveState, &address.CreatedAt,
-		&address.UpdatedAt, &address.DisabledAt, &address.RetiredAt,
+		&address.ProvisioningKind, &agentReceiveState, &realmReceiveState,
+		&address.RowVersion, &address.CreatedAt, &address.UpdatedAt,
+		&address.DisabledAt, &address.RealmDisabledAt, &address.RetiredAt,
 	)
+	if err == nil {
+		address.AgentReceiveState = agentReceiveState
+		address.RealmReceiveState = realmReceiveState
+		address.ReceiveState = agentEmailEffectiveReceiveState(agentReceiveState, realmReceiveState)
+	}
 	return address, err
 }
 
@@ -1371,6 +1864,161 @@ func validAgentEmailGeneratedID(value, prefix string) bool {
 	return true
 }
 
+func agentEmailEffectiveReceiveState(agentState, realmState string) string {
+	if agentState == AgentEmailReceiveRetired {
+		return AgentEmailReceiveRetired
+	}
+	if agentState == AgentEmailReceiveEnabled && realmState == AgentEmailReceiveEnabled {
+		return AgentEmailReceiveEnabled
+	}
+	return AgentEmailReceiveDisabled
+}
+
+func agentEmailReceiveControlFromAddress(address AgentEmailAddress) AgentEmailReceiveControl {
+	return AgentEmailReceiveControl{
+		AccountID: address.AccountID, RealmID: address.RealmID,
+		AgentID: address.OwnerAgentID, ReceiveState: address.ReceiveState,
+		AgentReceiveState: address.AgentReceiveState,
+		RealmReceiveState: address.RealmReceiveState,
+		RowVersion:        address.RowVersion, UpdatedAt: address.UpdatedAt,
+		DisabledAt: address.DisabledAt, RealmDisabledAt: address.RealmDisabledAt,
+	}
+}
+
+func requireAgentEmailOperatorTarget(
+	scope AgentEmailPilotScope,
+	operatorID, kind, targetID string,
+) error {
+	if !scope.Enabled {
+		return ErrAgentEmailPilotDisabled
+	}
+	if _, err := normalizeAgentEmailPilotScope(scope); err != nil {
+		return err
+	}
+	if strings.TrimSpace(operatorID) == "" {
+		return ErrAgentEmailForbidden
+	}
+	switch kind {
+	case "agent":
+		if !scope.AgentIDs[targetID] {
+			return ErrAgentEmailPilotNotEnrolled
+		}
+	case "realm":
+		if !scope.RealmIDs[targetID] {
+			return ErrAgentEmailPilotNotEnrolled
+		}
+	default:
+		return ErrAgentEmailForbidden
+	}
+	return nil
+}
+
+func lockAgentEmailReceiveControlWrite(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, desiredState string,
+) error {
+	if desiredState == AgentEmailReceiveDisabled {
+		return lockAccountForSafetyWrite(ctx, tx, accountID)
+	}
+	return lockAccountForMint(ctx, tx, accountID, false)
+}
+
+func agentEmailAddressForOperatorAgentTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	accountID, agentID string,
+	lock bool,
+) (AgentEmailAddress, error) {
+	query := agentEmailAddressSelect() + `
+		WHERE addr.account_id=$1 AND mb.owner_agent_id=$2
+		  AND addr.retired_at IS NULL AND mb.retired_at IS NULL
+		  AND EXISTS (
+		    SELECT 1 FROM agents a JOIN realms r ON r.id=a.realm_id
+		    WHERE a.id=mb.owner_agent_id AND a.realm_id=mb.realm_id
+		      AND a.deleted_at IS NULL AND r.account_id=mb.account_id
+		      AND r.deleted_at IS NULL
+		  )`
+	if lock {
+		// The returned projection includes the realm layer. Lock it alongside
+		// the mailbox so a concurrent realm toggle cannot make this setter
+		// return a mixed or already-stale effective state.
+		query += ` FOR UPDATE OF addr,mb,rc`
+	}
+	address, err := scanAgentEmailAddress(tx.QueryRow(ctx, query, accountID, agentID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailAddress{}, ErrAgentEmailNotFound
+	}
+	if err != nil {
+		return AgentEmailAddress{}, fmt.Errorf("read agent-email operator control: %w", err)
+	}
+	if !scope.RealmIDs[address.RealmID] || !scope.AgentIDs[address.OwnerAgentID] {
+		return AgentEmailAddress{}, ErrAgentEmailPilotNotEnrolled
+	}
+	return address, nil
+}
+
+func ensureAgentEmailRealmReceiveControlTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, realmID string,
+) (AgentEmailRealmReceiveControl, error) {
+	var liveRealm bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM realms
+		  WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL
+		)`, accountID, realmID).Scan(&liveRealm)
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, fmt.Errorf("resolve agent-email realm receive control: %w", err)
+	}
+	if !liveRealm {
+		return AgentEmailRealmReceiveControl{}, ErrAgentEmailNotFound
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO agent_email_realm_receive_controls (account_id,realm_id)
+		VALUES ($1,$2)
+		ON CONFLICT (account_id,realm_id) DO NOTHING`, accountID, realmID); err != nil {
+		return AgentEmailRealmReceiveControl{}, fmt.Errorf("ensure agent-email realm receive control: %w", err)
+	}
+	return agentEmailRealmReceiveControlTx(ctx, tx, accountID, realmID, true)
+}
+
+func agentEmailRealmReceiveControlTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, realmID string,
+	lock bool,
+) (AgentEmailRealmReceiveControl, error) {
+	var control AgentEmailRealmReceiveControl
+	query := `
+		SELECT rc.account_id,rc.realm_id,rc.receive_state,rc.row_version,
+		       rc.updated_at,rc.disabled_at,
+		       (SELECT count(*) FROM agent_email_mailboxes mb
+		        WHERE mb.account_id=rc.account_id AND mb.realm_id=rc.realm_id
+		          AND mb.retired_at IS NULL)
+		FROM agent_email_realm_receive_controls rc
+		JOIN realms r ON r.account_id=rc.account_id AND r.id=rc.realm_id
+		WHERE rc.account_id=$1 AND rc.realm_id=$2
+		  AND r.deleted_at IS NULL`
+	if lock {
+		query += ` FOR UPDATE OF rc`
+	}
+	err := tx.QueryRow(ctx, query, accountID, realmID).Scan(
+		&control.AccountID, &control.RealmID, &control.ReceiveState,
+		&control.RowVersion, &control.UpdatedAt, &control.DisabledAt,
+		&control.MailboxCount,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmReceiveControl{}, ErrAgentEmailNotFound
+	}
+	if err != nil {
+		return AgentEmailRealmReceiveControl{}, fmt.Errorf("read agent-email realm receive control: %w", err)
+	}
+	return control, nil
+}
+
 func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
 	domain, err := agentemail.ValidateDomain(scope.Domain)
 	if err != nil {
@@ -1414,6 +2062,13 @@ func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
 	if agents < 5 || agents > 10 {
 		return "", fmt.Errorf("%w: pilot requires 5-10 enrolled agents", ErrAgentEmailInputInvalid)
 	}
+	if scope.RetryCanaryAgentID != "" {
+		if strings.TrimSpace(scope.RetryCanaryAgentID) != scope.RetryCanaryAgentID ||
+			!validAgentEmailGeneratedID(scope.RetryCanaryAgentID, "agent") ||
+			!scope.AgentIDs[scope.RetryCanaryAgentID] {
+			return "", fmt.Errorf("%w: retry canary agent is not enrolled", ErrAgentEmailInputInvalid)
+		}
+	}
 	return domain, nil
 }
 
@@ -1451,9 +2106,203 @@ func requireAgentEmailPilotPrincipal(scope AgentEmailPilotScope, p Principal) er
 	return nil
 }
 
+func requireAgentEmailRetryCanaryPrincipal(scope AgentEmailPilotScope, p Principal) error {
+	if err := requireAgentEmailPilotPrincipal(scope, p); err != nil {
+		return err
+	}
+	if scope.RetryCanaryAgentID == "" || p.ID != scope.RetryCanaryAgentID {
+		return ErrAgentEmailForbidden
+	}
+	return nil
+}
+
 func agentEmailDuplicateGroup(rawSHA, recipient, sender string) string {
 	sum := sha256.Sum256([]byte(rawSHA + "\x00" + recipient + "\x00" + sender))
 	return hex.EncodeToString(sum[:])
+}
+
+type agentEmailRetryCanaryGate struct {
+	temporary               bool
+	permanent               bool
+	acceptAfterInsert       bool
+	challengeHash           string
+	acceptedReplayMessageID string
+}
+
+func applyAgentEmailRetryCanaryGateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	address AgentEmailAddress,
+	challenge string,
+	headerPresent bool,
+	headerErr error,
+	deliveryFingerprint string,
+) (agentEmailRetryCanaryGate, error) {
+	if scope.RetryCanaryAgentID == "" || address.OwnerAgentID != scope.RetryCanaryAgentID {
+		return agentEmailRetryCanaryGate{}, nil
+	}
+	if err := maintainAgentEmailRetryCanaryTx(ctx, tx, address); err != nil {
+		return agentEmailRetryCanaryGate{}, err
+	}
+
+	// A valid marker selects its own retained proof, even when a later run has
+	// already armed another challenge. This keeps provider retries independent
+	// and lets an abandoned tempfailed run coexist with the next canary run.
+	if headerPresent && headerErr == nil {
+		challengeHash := agentEmailRetryCanaryChallengeHash(challenge)
+		var state, fingerprint string
+		var acceptedMessageID *string
+		err := tx.QueryRow(ctx, `
+			SELECT state,COALESCE(delivery_fingerprint_sha256,''),accepted_message_id
+			FROM agent_email_retry_canary_arms
+			WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+			  AND challenge_sha256=$4
+			FOR UPDATE`, address.AccountID, address.RealmID, address.MailboxID,
+			challengeHash).Scan(&state, &fingerprint, &acceptedMessageID)
+		if err == nil {
+			switch state {
+			case agentEmailRetryCanaryArmed:
+				command, updateErr := tx.Exec(ctx, `
+					WITH failed AS (SELECT clock_timestamp() AS at)
+					UPDATE agent_email_retry_canary_arms
+					SET state='tempfailed',delivery_fingerprint_sha256=$5,
+					    tempfail_count=1,tempfailed_at=failed.at,
+					    retry_expires_at=failed.at+($6::double precision * interval '1 second'),
+					    row_version=row_version+1
+					FROM failed
+					WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+					  AND challenge_sha256=$4 AND state='armed'`,
+					address.AccountID, address.RealmID, address.MailboxID,
+					challengeHash, deliveryFingerprint,
+					agentEmailRetryCanaryRetryGrace.Seconds())
+				if updateErr != nil {
+					return agentEmailRetryCanaryGate{}, fmt.Errorf("tempfail retry canary: %w", updateErr)
+				}
+				if command.RowsAffected() != 1 {
+					return agentEmailRetryCanaryGate{}, ErrAgentEmailConflict
+				}
+				return agentEmailRetryCanaryGate{temporary: true}, nil
+			case agentEmailRetryCanaryTempfailed:
+				if fingerprint != deliveryFingerprint {
+					return agentEmailRetryCanaryGate{temporary: true}, nil
+				}
+				return agentEmailRetryCanaryGate{
+					acceptAfterInsert: true, challengeHash: challengeHash,
+				}, nil
+			case agentEmailRetryCanaryAccepted:
+				if acceptedMessageID != nil && fingerprint == deliveryFingerprint {
+					return agentEmailRetryCanaryGate{
+						acceptedReplayMessageID: *acceptedMessageID,
+					}, nil
+				}
+				return agentEmailRetryCanaryGate{permanent: true}, nil
+			case agentEmailRetryCanaryExpired:
+				return agentEmailRetryCanaryGate{permanent: true}, nil
+			default:
+				return agentEmailRetryCanaryGate{}, ErrAgentEmailConflict
+			}
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return agentEmailRetryCanaryGate{}, fmt.Errorf("lock retry canary proof: %w", err)
+		}
+	}
+
+	var armed bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_email_retry_canary_arms
+		  WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		    AND state='armed'
+		)`, address.AccountID, address.RealmID, address.MailboxID).Scan(&armed); err != nil {
+		return agentEmailRetryCanaryGate{}, fmt.Errorf("check retry canary arm: %w", err)
+	}
+	if armed {
+		// The first delivery may omit or corrupt the marker, or carry a marker
+		// for a different challenge. Preserve the one bounded retry opportunity.
+		return agentEmailRetryCanaryGate{temporary: true}, nil
+	}
+	if headerErr != nil {
+		// The canary owner is a dedicated synthetic mailbox. Once no arm is
+		// live, parse-invalid RFC 5322 cannot safely prove that it lacks a retry
+		// marker, so reject it terminally instead of ordinary-accepting it.
+		return agentEmailRetryCanaryGate{permanent: true}, nil
+	}
+	if !headerPresent {
+		return agentEmailRetryCanaryGate{}, nil
+	}
+	// With no unused arm, every malformed, unknown, or expired synthetic marker
+	// is terminal. It must neither become ordinary mail nor drive an unbounded
+	// provider retry loop, including after expired-tombstone cleanup.
+	return agentEmailRetryCanaryGate{permanent: true}, nil
+}
+
+func lockAgentEmailRetryCanaryOwnerTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	p Principal,
+) (AgentEmailAddress, error) {
+	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
+		return AgentEmailAddress{}, mapAgentEmailPrincipalError(err)
+	}
+	address, err := scanAgentEmailAddress(tx.QueryRow(ctx, agentEmailAddressSelect()+`
+		WHERE mb.account_id=$1 AND mb.realm_id=$2 AND mb.owner_agent_id=$3
+		FOR SHARE OF addr,mb,rc`, p.AccountID, p.RealmID, p.ID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailAddress{}, ErrAgentEmailAddressMissing
+	}
+	if err != nil {
+		return AgentEmailAddress{}, fmt.Errorf("lock retry canary mailbox: %w", err)
+	}
+	return address, nil
+}
+
+func maintainAgentEmailRetryCanaryTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	address AgentEmailAddress,
+) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE agent_email_retry_canary_arms
+		SET state='expired',row_version=row_version+1
+		WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		  AND ((state='armed' AND expires_at <= clock_timestamp())
+		       OR (state='tempfailed' AND retry_expires_at <= clock_timestamp()))`,
+		address.AccountID, address.RealmID, address.MailboxID); err != nil {
+		return fmt.Errorf("expire retry canary arm: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM agent_email_retry_canary_arms
+		WHERE ctid IN (
+		  SELECT ctid FROM agent_email_retry_canary_arms
+		  WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+		    AND state='expired'
+		    AND COALESCE(retry_expires_at,expires_at) <
+		        clock_timestamp()-($4::double precision * interval '1 second')
+		  ORDER BY expires_at
+		  LIMIT $5
+		)`, address.AccountID, address.RealmID, address.MailboxID,
+		agentEmailRetryCanaryCleanup.Seconds(), agentEmailRetryCanaryCleanupLimit); err != nil {
+		return fmt.Errorf("clean retry canary arms: %w", err)
+	}
+	return nil
+}
+
+func agentEmailRetryCanaryChallengeHash(challenge string) string {
+	sum := sha256.Sum256([]byte(challenge))
+	return hex.EncodeToString(sum[:])
+}
+
+func agentEmailRetryCanaryCheckpoint(state string, tempfailCount int64) AgentEmailRetryCanaryCheckpoint {
+	return AgentEmailRetryCanaryCheckpoint{
+		State: state, Armed: true,
+		Tempfailed:    tempfailCount == 1,
+		Accepted:      state == agentEmailRetryCanaryAccepted,
+		TempfailCount: tempfailCount,
+	}
 }
 
 func agentEmailReadState(readAt, ackedAt *time.Time) string {

@@ -41,7 +41,7 @@ func TestGetSelfDecodesAndRequestsEmailCheckpoint(t *testing.T) {
 		if r.URL.Query().Get("include_email_checkpoint") != "true" {
 			t.Fatalf("self query = %s", r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"email_checkpoint":{"pending":true,"mailbox_pending":true},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"email_checkpoint":{"pending":true,"mailbox_pending":true,"receive_state":"disabled","agent_receive_state":"enabled","realm_receive_state":"disabled"},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
 	}))
 	defer srv.Close()
 
@@ -50,7 +50,10 @@ func TestGetSelfDecodesAndRequestsEmailCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.EmailCheckpoint == nil || !got.EmailCheckpoint.Pending ||
-		!got.EmailCheckpoint.MailboxPending || got.EmailCheckpoint.Unavailable {
+		!got.EmailCheckpoint.MailboxPending || got.EmailCheckpoint.Unavailable ||
+		got.EmailCheckpoint.ReceiveState != "disabled" ||
+		got.EmailCheckpoint.AgentReceiveState != "enabled" ||
+		got.EmailCheckpoint.RealmReceiveState != "disabled" {
 		t.Fatalf("email checkpoint = %#v", got.EmailCheckpoint)
 	}
 }

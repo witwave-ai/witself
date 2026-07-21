@@ -61,6 +61,36 @@ export class CloudflareAPI {
     return result.result;
   }
 
+  async queryAnalytics(query) {
+    if (typeof query !== "string" || query.trim() === "" || query.length > 16_384) {
+      throw new Error("Analytics Engine query is missing or invalid");
+    }
+    let response;
+    try {
+      response = await this.fetchAPI(
+        `${API_ROOT}/accounts/${this.accountID}/analytics_engine/sql`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${this.apiToken}` },
+          body: query,
+          redirect: "error",
+        },
+      );
+    } catch {
+      throw new Error("Cloudflare Analytics Engine query failed");
+    }
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error(`Cloudflare Analytics Engine returned a malformed response (${response.status})`);
+    }
+    if (!response.ok || !result || typeof result !== "object" || Array.isArray(result)) {
+      throw new Error(`Cloudflare Analytics Engine query failed with status ${response.status}`);
+    }
+    return result;
+  }
+
   async getNamespace() {
     if (!this.namespaceID) throw new Error("EMAIL_DIRECTORY_KV_ID is required");
     return this.request(`/accounts/${this.accountID}/storage/kv/namespaces/${this.namespaceID}`);
@@ -118,6 +148,16 @@ export class CloudflareAPI {
   async deleteRule(ruleID) {
     if (!/^[0-9a-f]{1,32}$/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/${ruleID}`, { method: "DELETE" });
+  }
+
+  async sendEmail(message) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      throw new Error("Cloudflare email submission is invalid");
+    }
+    return this.request(`/accounts/${this.accountID}/email/sending/send`, {
+      method: "POST",
+      body: message,
+    });
   }
 }
 

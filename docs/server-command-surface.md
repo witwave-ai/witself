@@ -321,6 +321,16 @@ self-hosted first operator is created exclusively through this bootstrap path.
 See [operator-auth.md](operator-auth.md) and
 [token-lifecycle.md](token-lifecycle.md).
 
+## Agent-email retry-canary server configuration
+
+The receive pilot remains default-off. Setting
+`WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` additionally enables the controlled
+provider-retry proof for exactly one agent already present in
+`WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`. That agent may use the owner-token POST
+routes `/v1/email/retry-canary:arm` and `/v1/email/retry-canary:status`; the
+ephemeral UUID challenge is accepted only in the JSON body and never echoed.
+Do not set the variable until schema 61 code has converged on every replica.
+
 ## `witself-server healthcheck`
 
 Run a local liveness, readiness, or startup check for containers and service

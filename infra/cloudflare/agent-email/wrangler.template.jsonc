@@ -14,6 +14,12 @@
       "id": "__EMAIL_DIRECTORY_KV_ID__"
     }
   ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "EMAIL_EDGE_METRICS",
+      "dataset": "witself_agent_email_edge"
+    }
+  ],
   "vars": {
     "RELAY_KEY_ID": "__RELAY_KEY_ID__"
   },

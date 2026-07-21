@@ -159,6 +159,12 @@ POST /v1/email/{message_id}:claim
 POST /v1/email/{message_id}:renew
 POST /v1/email/{message_id}:release
 POST /v1/email/{message_id}:complete
+GET  /v1/agents/{agent_id}/email-receive
+PATCH /v1/agents/{agent_id}/email-receive
+GET  /v1/realms/{realm_id}/email-receive
+PATCH /v1/realms/{realm_id}/email-receive
+POST /v1/email/retry-canary:arm
+POST /v1/email/retry-canary:status
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -397,6 +403,16 @@ POST /v1/email/{message_id}:claim
 POST /v1/email/{message_id}:renew
 POST /v1/email/{message_id}:release
 POST /v1/email/{message_id}:complete
+
+# Operator-only, value-free receive lifecycle controls.
+GET   /v1/agents/{agent_id}/email-receive
+PATCH /v1/agents/{agent_id}/email-receive
+GET   /v1/realms/{realm_id}/email-receive
+PATCH /v1/realms/{realm_id}/email-receive
+
+# Exact configured canary agent only; opaque challenge is POST-body-only.
+POST /v1/email/retry-canary:arm
+POST /v1/email/retry-canary:status
 
 # Cell-local signed relay endpoint; no agent/operator bearer token.
 POST /v1/internal/agent-email:ingest
@@ -703,6 +719,16 @@ audit events; read-only recall does neither:
   `Idempotency-Key`; renew/release/complete require the live claim id and
   generation. Email completion creates no reply/result artifact and does not
   acknowledge the message.
+- `GET|PATCH /v1/agents/{agent_id}/email-receive` and
+  `GET|PATCH /v1/realms/{realm_id}/email-receive` are operator-only,
+  path-bound, value-free lifecycle controls; they never expose an address or
+  message metadata. Effective receive is enabled only when both independent
+  layers are enabled. A suspended account may inspect or disable either layer,
+  but cannot re-enable one until resume. Pending and closed accounts are
+  denied.
+- The retry-canary arm/status routes exist only when one exact enrolled canary
+  agent is configured and accept only that agent's full token. They return
+  cumulative value-free state and never echo the opaque challenge.
 - `GET /v1/email/checkpoint` and the enrolled caller's `email_checkpoint` in
   `GET /v1/self` are value-free pending-mail hints. They contain no address,
   message id, sender, subject, body, attachment, or processing fence.

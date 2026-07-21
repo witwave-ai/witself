@@ -102,6 +102,76 @@ account, zone, namespace, manifest, and existing routes before mutation.
    mailbox row through the owner-only API before allowing expected low-risk
    verification-code workflows.
 
+7. Confirm the value-free edge outcome stream. The Worker writes one
+   best-effort Analytics Engine point per final SMTP-facing outcome; metrics
+   failure never changes message disposition. The dataset contains only the
+   fixed schema, outcome, phase, count, latency, raw byte count, and numeric
+   response status — never an address, realm, agent, sender, subject, message
+   id, digest, signature, or content-derived value. Query the last hour with a
+   token carrying `Account Analytics Read`:
+
+   ```sh
+   npm run metrics -- summary 60
+   ```
+
+   `accepted`, permanent-rejection, and tempfail outcomes must all be visible
+   during acceptance and rollback drills. Built-in Worker invocation metrics
+   remain the independent signal for runtime exceptions and resource failures.
+
+## Continuous canary
+
+`npm run canary` first arms one owner-generated opaque UUID through the
+owner-only retry-canary endpoint, then sends the synthetic message through
+Cloudflare Email Sending with `X-Witself-Canary-Retry`. The cell commits the
+first matching attempt as a deliberate temporary result without storing a
+message; the identical provider retry is accepted once. The runner requires
+the cumulative tempfail-then-accepted checkpoint before it passively scans the
+owner mailbox newest-first through bounded cursor pages, verifies the exact
+subject and parsed synthetic code, claims, marks the code used, completes, and
+acknowledges the message. A separate correlation nonce identifies the subject;
+the retry challenge appears only in its dedicated MIME header, never the
+subject or body. Its output is value-free and includes only
+`provider_retry_proven:true`: no code, message content, challenge/message
+identifier, address, or token is returned. A post-claim failure releases the
+exact fence when possible; otherwise the bounded lease expires normally. A
+retained tempfailed proof remains retryable for 24 hours but does not block the
+next run from arming a fresh challenge.
+
+The `agent-email-canary` GitHub Actions workflow runs every 15 minutes only
+when repository variable `AGENT_EMAIL_CANARY_ENABLED` is exactly `true`.
+Provision these repository variables:
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `WITSELF_EMAIL_CANARY_ENDPOINT`
+
+Create the protected-main-only GitHub Environment named `agent-email-canary`
+and place these environment secrets there (not repository variables or
+repository-wide secrets):
+
+- `AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN` (`Email Sending: Edit` only)
+- `WITSELF_EMAIL_CANARY_TOKEN` (the dedicated enrolled canary agent only)
+- `AGENT_EMAIL_CANARY_FROM`
+- `AGENT_EMAIL_CANARY_TO`
+
+Run one manual workflow dispatch and review both the value-free canary result
+and Analytics Engine outcomes before setting `AGENT_EMAIL_CANARY_ENABLED=true`.
+Keep the schedule false until that success. The
+Cloudflare sender must already belong to an onboarded Email Sending domain.
+The job has a 15-minute outer limit and a 600-second absolute canary deadline.
+
+Do not arm or send during a mixed-version deployment. Deploy schema-61-capable
+server code with `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` empty, wait for
+every pod to converge, then perform a config-only rollout selecting exactly one
+enrolled agent and wait for every pod again. Only then run the manual canary.
+For rollback, disable the schedule first and settle the unused arm or let its
+15-minute TTL expire before unsetting the canary agent or deploying older code;
+otherwise an old replica can ordinary-accept the first synthetic delivery.
+
+Acknowledgement does not delete synthetic messages. A 15-minute schedule adds
+about 96 retained messages per day until the ordinary mailbox retention/delete
+contract is implemented. Keep the schedule default-off unless that accumulation
+is explicitly accepted and monitored.
+
 ## Rollback
 
 Disable first; this preserves the exact rules and directory rows for inspection:

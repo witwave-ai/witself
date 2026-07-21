@@ -182,7 +182,7 @@ type mcpAgentEmailProcessingOutput struct {
 func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend mcpAgentEmailBackend) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.address.show"),
-		Description: "Show this token-bound agent's one enrolled receive-only email address. The pilot feature and exact realm/agent enrollment must both be enabled.",
+		Description: "Show this token-bound agent's one enrolled receive-only email address and its effective, agent-level, and realm-level receive states. The pilot feature and exact realm/agent enrollment must both be enabled.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpAgentEmailAddressOutput, error) {
 		address, err := backend.ShowAgentEmailAddress(ctx)

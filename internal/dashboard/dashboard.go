@@ -2,9 +2,10 @@
 // mounted by `witself dashboard serve` (ADR 0004). Every route is a thin
 // authenticated proxy over the public /v1 read API using the agent's own
 // token: self digests, transcripts, and fact lists use observational reads,
-// messages use the passive metadata-only list, broad memory and fact reads
-// stay redacted (a sensitive fact value appears only in the single-fact
-// user-initiated reveal response), and the
+// messages use the passive metadata-only list, receive-only email uses only
+// its address and passive metadata list (with a stricter browser allow-list),
+// broad memory and fact reads stay redacted (a sensitive fact value appears
+// only in the single-fact user-initiated reveal response), and the
 // avatar SVG passes the same canonical sanitizer-and-hash gate as
 // `witself self card`. Sealed secrets are metadata only: the proxy uses the
 // two public GET routes and rebuilds every payload as an allow-list
@@ -82,6 +83,20 @@ const (
 	// by message id.
 	sseMessagePageLimit = 100
 
+	// sseEmailPageLimit is the newest-first metadata-only mailbox page the
+	// email view polls. Unlike :listen, this is a plain GET and neither
+	// consumes a listen slot nor changes read, acknowledgement, or processing
+	// state. It is also the hard browser-boundary maximum: both the direct
+	// handler and the sanitizer enforce it so a caller or regressed cell
+	// cannot turn this local view into an unbounded projection.
+	sseEmailPageLimit = 100
+
+	// agentEmailUpstreamMessage is the only failure detail allowed across the
+	// email browser boundary. Unlike ordinary dashboard reads, email's strict
+	// projection must also distrust a cell-provided JSON error string because
+	// it could contain message content or an actionable identifier.
+	agentEmailUpstreamMessage = "receive-only email metadata is temporarily unavailable"
+
 	// sseMemoryPageLimit is the first-page size the memories tick asks for,
 	// matching the memories view's own fetch. Every tick re-reads the first
 	// page and the browser skips identical frames.
@@ -151,7 +166,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	// this proxy that has ever forwarded a mutation, and PUT here reaches
 	// exactly one upstream write — the agent's own namespaced UI preferences
 	// row (PUT /v1/self/dashboard-preferences). It never touches agent
-	// content: no memories, facts, messages, secrets, usage, or rankings.
+	// content: no memories, facts, messages, email, secrets, usage, or rankings.
 	// The handler itself guards the method set, size-caps the body before
 	// decoding, and forwards only the validated {"schema","theme"} shape.
 	mux.Handle("/api/prefs", secure(cfg, session, prefsHandler(cfg)))
@@ -162,6 +177,8 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /api/memories/{id}", secure(cfg, session, memoryHandler(cfg)))
 	mux.Handle("GET /api/memories/{id}/history", secure(cfg, session, memoryHistoryHandler(cfg)))
 	mux.Handle("GET /api/messages", secure(cfg, session, messagesHandler(cfg)))
+	mux.Handle("GET /api/email/address", secure(cfg, session, agentEmailAddressHandler(cfg)))
+	mux.Handle("GET /api/email", secure(cfg, session, agentEmailsHandler(cfg)))
 	mux.Handle("GET /api/facts", secure(cfg, session, factsHandler(cfg, factReads)))
 	mux.Handle("GET /api/facts/{id}/history", secure(cfg, session, factHistoryHandler(cfg, factReads)))
 	// The reveal is query-addressed like the upstream exact read
@@ -683,6 +700,217 @@ func stripMessageBodies(messages []client.Message) []client.Message {
 	return messages
 }
 
+// sanitizedAgentEmailAddress is the deliberately small browser projection of
+// the token-bound receive address. Backend row identifiers and routing pieces
+// are unnecessary in the UI; omitting them also keeps the page from becoming
+// an address-management surface.
+type sanitizedAgentEmailAddress struct {
+	Address           string     `json:"address"`
+	ProvisioningKind  string     `json:"provisioning_kind,omitempty"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+}
+
+// sanitizedAgentEmailMessage is the only email shape allowed across the
+// local browser boundary. It is rebuilt field-by-field instead of clearing a
+// few current client fields, so future client additions cannot accidentally
+// expose body text, decoded content, raw MIME/header material, attachment
+// detail, message/duplicate identifiers, or a processing claim capability.
+// The opaque upstream message id is intentionally absent: this observational
+// page offers no per-message action and therefore gives browser code no target
+// for :read, :ack, :claim, or another lifecycle call.
+type sanitizedAgentEmailMessage struct {
+	Provider                string                       `json:"provider,omitempty"`
+	EnvelopeSender          string                       `json:"envelope_sender,omitempty"`
+	Subject                 string                       `json:"subject,omitempty"`
+	RawSizeBytes            int64                        `json:"raw_size_bytes"`
+	ParseState              string                       `json:"parse_state,omitempty"`
+	ParseErrorCode          string                       `json:"parse_error_code,omitempty"`
+	AttachmentCount         int64                        `json:"attachment_count"`
+	SPFResult               string                       `json:"spf_result,omitempty"`
+	DKIMResult              string                       `json:"dkim_result,omitempty"`
+	DMARCResult             string                       `json:"dmarc_result,omitempty"`
+	SpamVerdict             string                       `json:"spam_verdict,omitempty"`
+	SenderVerificationState string                       `json:"sender_verification_state"`
+	PossibleDuplicate       bool                         `json:"possible_duplicate"`
+	ReceivedAt              time.Time                    `json:"received_at"`
+	DeliveredAt             time.Time                    `json:"delivered_at"`
+	Folder                  string                       `json:"folder,omitempty"`
+	ReadState               sanitizedAgentEmailReadState `json:"read_state"`
+	Processing              sanitizedAgentEmailProcess   `json:"processing"`
+}
+
+type sanitizedAgentEmailReadState struct {
+	State          string     `json:"state"`
+	ReadAt         *time.Time `json:"read_at,omitempty"`
+	AckedAt        *time.Time `json:"acked_at,omitempty"`
+	CodeConsumedAt *time.Time `json:"code_consumed_at,omitempty"`
+}
+
+// sanitizedAgentEmailProcess carries status only. ClaimID, Generation, and
+// LeaseExpiresAt form the processing fence and are deliberately not present.
+type sanitizedAgentEmailProcess struct {
+	State        string     `json:"state"`
+	FailureCount int64      `json:"failure_count"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
+func sanitizeAgentEmailAddress(address client.AgentEmailAddress) sanitizedAgentEmailAddress {
+	return sanitizedAgentEmailAddress{
+		Address:           address.Address,
+		ProvisioningKind:  address.ProvisioningKind,
+		ReceiveState:      address.ReceiveState,
+		AgentReceiveState: address.AgentReceiveState,
+		RealmReceiveState: address.RealmReceiveState,
+		CreatedAt:         address.CreatedAt,
+		UpdatedAt:         address.UpdatedAt,
+		DisabledAt:        address.DisabledAt,
+		RetiredAt:         address.RetiredAt,
+	}
+}
+
+func sanitizeAgentEmails(messages []client.AgentEmailMessage) []sanitizedAgentEmailMessage {
+	if len(messages) > sseEmailPageLimit {
+		messages = messages[:sseEmailPageLimit]
+	}
+	out := make([]sanitizedAgentEmailMessage, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, sanitizedAgentEmailMessage{
+			Provider:                message.Provider,
+			EnvelopeSender:          message.EnvelopeSender,
+			Subject:                 message.Subject,
+			RawSizeBytes:            message.RawSizeBytes,
+			ParseState:              message.ParseState,
+			ParseErrorCode:          message.ParseErrorCode,
+			AttachmentCount:         message.AttachmentCount,
+			SPFResult:               message.SPFResult,
+			DKIMResult:              message.DKIMResult,
+			DMARCResult:             message.DMARCResult,
+			SpamVerdict:             message.SpamVerdict,
+			SenderVerificationState: message.SenderVerificationState,
+			PossibleDuplicate:       message.PossibleDuplicate,
+			ReceivedAt:              message.ReceivedAt,
+			DeliveredAt:             message.DeliveredAt,
+			Folder:                  message.Folder,
+			ReadState: sanitizedAgentEmailReadState{
+				State:          message.ReadState.State,
+				ReadAt:         message.ReadState.ReadAt,
+				AckedAt:        message.ReadState.AckedAt,
+				CodeConsumedAt: message.ReadState.CodeConsumedAt,
+			},
+			Processing: sanitizedAgentEmailProcess{
+				State:        message.Processing.State,
+				FailureCount: message.Processing.FailureCount,
+				CompletedAt:  message.Processing.CompletedAt,
+			},
+		})
+	}
+	return out
+}
+
+func agentEmailUnavailableKind(err error) string {
+	if errors.Is(err, client.ErrNotFound) {
+		return "unavailable"
+	}
+	// The agent-email pilot's principal gate currently returns an untyped 403.
+	// Match its exact stable public error rather than treating arbitrary
+	// forbidden/transport failures as an enrollment verdict.
+	if err != nil && err.Error() == "agent is not enrolled in the email pilot" {
+		return "not_enrolled"
+	}
+	return ""
+}
+
+func writeAgentEmailUnavailable(w http.ResponseWriter, kind string) {
+	switch kind {
+	case "not_enrolled":
+		writeJSONError(w, http.StatusForbidden, "agent is not enrolled in receive-only email")
+	default:
+		writeJSONError(w, http.StatusNotImplemented, "cell does not serve receive-only agent email")
+	}
+}
+
+// agentEmailAddressHandler proxies exactly GET /v1/email/address and returns
+// the display-only allow-list above. It never reaches an address mutation.
+func agentEmailAddressHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		address, err := client.ShowAgentEmailAddress(r.Context(), cfg.Endpoint, cfg.BearerToken)
+		if err != nil {
+			if kind := agentEmailUnavailableKind(err); kind != "" {
+				writeAgentEmailUnavailable(w, kind)
+				return
+			}
+			writeAgentEmailUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"available": true,
+			"enrolled":  true,
+			"address":   sanitizeAgentEmailAddress(address),
+		})
+	})
+}
+
+// agentEmailsHandler proxies exactly the passive GET /v1/email list. It
+// never calls :listen, :read, :ack, or any processing lifecycle route.
+func agentEmailsHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opts, ok := parseAgentEmailListOptions(w, r.URL.Query(), 0)
+		if !ok {
+			return
+		}
+		page, err := client.ListAgentEmails(r.Context(), cfg.Endpoint, cfg.BearerToken, opts)
+		if err != nil {
+			if kind := agentEmailUnavailableKind(err); kind != "" {
+				writeAgentEmailUnavailable(w, kind)
+				return
+			}
+			writeAgentEmailUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"available": true,
+			"enrolled":  true,
+			"messages":  sanitizeAgentEmails(page.Messages),
+		})
+	})
+}
+
+func parseAgentEmailListOptions(w http.ResponseWriter, query interface{ Get(string) string }, defaultLimit int) (client.AgentEmailListOptions, bool) {
+	// The upstream cursor is "timestamp:message_id". This local observational
+	// surface intentionally exposes no message id, so it is a bounded newest
+	// page rather than a browser-addressable pagination capability.
+	if query.Get("cursor") != "" {
+		writeJSONError(w, http.StatusBadRequest, "email cursor pagination is unavailable in the metadata-only dashboard")
+		return client.AgentEmailListOptions{}, false
+	}
+	opts := client.AgentEmailListOptions{Limit: defaultLimit}
+	for name, target := range map[string]*bool{"unread": &opts.Unread, "unacked": &opts.Unacked} {
+		if raw := query.Get(name); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, name+" must be a boolean")
+				return client.AgentEmailListOptions{}, false
+			}
+			*target = value
+		}
+	}
+	if raw := query.Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > sseEmailPageLimit {
+			writeJSONError(w, http.StatusBadRequest, "limit must be an integer between 1 and 100")
+			return client.AgentEmailListOptions{}, false
+		}
+		opts.Limit = value
+	}
+	return opts, true
+}
+
 // factReadCapability memoizes one client.ProbeObservationalFactReads answer
 // per serve. Cells released before the observational fact-read parameter
 // ignore it and silently run the plain usage-recording read path instead of
@@ -1127,6 +1355,29 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 			}
 			includeSecrets = value
 		}
+		var includeEmail bool
+		if raw := query.Get("email"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "email must be a boolean")
+				return
+			}
+			includeEmail = value
+		}
+		emailOpts := client.AgentEmailListOptions{Limit: sseEmailPageLimit}
+		for name, target := range map[string]*bool{
+			"email_unread":  &emailOpts.Unread,
+			"email_unacked": &emailOpts.Unacked,
+		} {
+			if raw := query.Get(name); raw != "" {
+				value, err := strconv.ParseBool(raw)
+				if err != nil {
+					writeJSONError(w, http.StatusBadRequest, name+" must be a boolean")
+					return
+				}
+				*target = value
+			}
+		}
 		var lastSeen int64
 		if raw := query.Get("after_sequence"); raw != "" {
 			value, err := strconv.ParseInt(raw, 10, 64)
@@ -1166,7 +1417,7 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
-			lastSeen = emitEvents(ctx, cfg, factReads, secrets, upstream, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, lastSeen)
+			lastSeen = emitEvents(ctx, cfg, factReads, secrets, upstream, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail, emailOpts, lastSeen)
 			select {
 			case <-ctx.Done():
 				return
@@ -1210,7 +1461,11 @@ func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source stri
 		return
 	}
 	t.failed[source] = true
-	writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: false, Message: err.Error()})
+	message := err.Error()
+	if source == "email" {
+		message = agentEmailUpstreamMessage
+	}
+	writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: false, Message: message})
 }
 
 // emitEvents sends one poll tick: the observational self digest, the passive
@@ -1221,7 +1476,7 @@ func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source stri
 // and the next tick retries from the same cursor; each failure and recovery
 // also flows through the tracker so the browser sees per-source "upstream"
 // state-change events instead of a silent stall.
-func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, upstream *upstreamTracker, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets bool, lastSeen int64) int64 {
+func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, upstream *upstreamTracker, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail bool, emailOpts client.AgentEmailListOptions, lastSeen int64) int64 {
 	digest, observational, err := fetchSelf(ctx, cfg)
 	upstream.observe(w, flusher, "self", err)
 	if err == nil {
@@ -1238,6 +1493,9 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 	}
 	if includeSecrets {
 		upstream.observe(w, flusher, "secrets", emitSecretsEvent(ctx, cfg, secrets, w, flusher))
+	}
+	if includeEmail {
+		upstream.observe(w, flusher, "email", emitAgentEmailEvent(ctx, cfg, emailOpts, w, flusher))
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -1295,6 +1553,35 @@ func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 		pages[direction] = stripMessageBodies(page.Messages)
 	}
 	writeSSE(w, flusher, "messages", "", pages)
+	return nil
+}
+
+// emitAgentEmailEvent polls only GET /v1/email. It never long-polls :listen,
+// reads content, acknowledges delivery, or acquires a processing lease. The
+// same allow-list projection as the JSON list route is applied before the
+// frame crosses into the browser. Feature absence or revoked pilot enrollment
+// is a settled UI state, not a degraded transport.
+func emitAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmailListOptions, w io.Writer, flusher http.Flusher) error {
+	opts.Cursor = ""
+	opts.Limit = sseEmailPageLimit
+	page, err := client.ListAgentEmails(ctx, cfg.Endpoint, cfg.BearerToken, opts)
+	if err != nil {
+		if kind := agentEmailUnavailableKind(err); kind != "" {
+			writeSSE(w, flusher, "email", "", map[string]any{
+				"available": false,
+				"enrolled":  false,
+				"reason":    kind,
+				"messages":  []sanitizedAgentEmailMessage{},
+			})
+			return nil
+		}
+		return err
+	}
+	writeSSE(w, flusher, "email", "", map[string]any{
+		"available": true,
+		"enrolled":  true,
+		"messages":  sanitizeAgentEmails(page.Messages),
+	})
 	return nil
 }
 
@@ -1413,4 +1700,12 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 		status = http.StatusBadRequest
 	}
 	writeJSONError(w, status, err.Error())
+}
+
+func writeAgentEmailUpstreamError(w http.ResponseWriter, err error) {
+	if errors.Is(err, client.ErrBadRequest) {
+		writeJSONError(w, http.StatusBadRequest, "email filters were rejected")
+		return
+	}
+	writeJSONError(w, http.StatusBadGateway, agentEmailUpstreamMessage)
 }
