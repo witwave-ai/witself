@@ -375,6 +375,15 @@ blur the two:
 
 The receive-side lifecycle mirrors the proven messaging shape:
 
+- **Mail is realm data (settled 2026-07-21).** Mailboxes, messages, raw MIME,
+  and processing state live in the owning realm's cell Postgres with the
+  standard tenant scoping (`account_id`, `realm_id`, owner agent) — the same
+  database and tenancy pattern as the realm's memories, facts, and agent
+  messages. No separate mail store, ever: account archives include the
+  mailbox stream, import/export round-trips it with the rest of the realm,
+  and when a realm re-homes to another cell its mail moves with it (the edge
+  routing map repoints; the data travels in the archive like everything
+  else).
 - Immutable message rows with per-mailbox delivery, read, and acknowledgement
   state, and fenced claim/renew/release/complete processing for foreground
   handling — the migration-0034/0036 pattern (generation fence, database-time
