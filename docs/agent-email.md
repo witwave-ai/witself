@@ -278,9 +278,12 @@ The kickoff verification items were resolved on 2026-07-20:
   the `witmail.ai` apex this is the documented zone-apex catch-all; on the
   `agent-mail.witwave.ai` launch domain, catch-all on a configured subdomain
   is the launch-gating spike (see Addressing And Domain Model). The Worker
-  first matches reserved/role addresses and routes them to the operator,
-  then parses the envelope recipient: strip any subaddress tag, split the
-  local part on its single dot, resolve `<realm-label>` to the owning cell.
+  first matches reserved/role addresses and routes them to the operator —
+  explicit Email Routing rules ahead of the catch-all delivering to the
+  operator support inbox; a handful of exact addresses, well inside rule
+  caps — then parses the envelope recipient: strip any subaddress tag, split
+  the local part on its single dot, resolve `<realm-label>` to the owning
+  cell.
   Structurally invalid or unknown recipients are rejected during the SMTP
   transaction so the sender gets a bounce — never accepted and dropped.
 - **Realm-to-cell routing map (settled): a KV projection.** The map
@@ -292,13 +295,17 @@ The kickoff verification items were resolved on 2026-07-20:
   plane never handles message content — it only publishes routing facts.
 - **Edge-to-cell authentication (settled): Ed25519 signed relay.** The
   Worker POSTs the raw MIME to the owning cell's ingestion endpoint with a
-  detached Ed25519 signature over timestamp, provider message id, and body
-  digest (standard-webhooks style). The private key lives as a Worker
-  secret; cells verify against the control-plane-published public key,
-  cached and pinned, with a bounded clock-skew replay window. Rotation is a
-  dual-key overlap: publish the successor, re-sign, retire the predecessor.
-  No per-cell secret fan-out; self-hosted cells verify their own edge's key
-  the same way.
+  detached Ed25519 signature over timestamp, provider message id, envelope
+  recipient, destination-cell audience, and body digest (standard-webhooks
+  style) — audience binding, so a capture replayed at a different cell never
+  verifies. The private key lives as a Worker secret; cells verify against
+  the control-plane-published public key, cached and pinned, with a bounded
+  clock-skew replay window. Rotation is a dual-key overlap: publish the
+  successor, re-sign, retire the predecessor. Compromise recovery is the
+  same mechanism run fast: publish the successor and delist the compromised
+  key; cells hard-fail on delisted keys and surface the attempt as a
+  forged-relay event. No per-cell secret fan-out; self-hosted cells verify
+  their own edge's key the same way.
 - **Provider constraints recorded.** Inbound messages cap at 25 MiB, which
   bounds the Postgres raw-size cap below. Since July 2025 Cloudflare only
   forwards mail that passes SPF or DKIM; whether that gate also applies to
@@ -310,6 +317,44 @@ The kickoff verification items were resolved on 2026-07-20:
   then $0.35 per 1,000; REST, Workers binding, and SMTP submission;
   suppression handling), so the send slices have an in-house leading
   candidate. That dependency still must not leak into the inbound design.
+
+### Inbound SMTP Transaction Contract
+
+Settled 2026-07-21 after gap review: the never-accepted-and-dropped
+guarantee is only implementable inside the SMTP transaction, so the Worker
+completes the whole verdict path while the sender's connection is open.
+
+1. **Parse.** Case-fold the envelope recipient to lowercase before every
+   match (RFC 5321 leaves local-part case to the receiver, and provisioning
+   lowercases). The receive grammar is ASCII: `[a-z0-9-]` segments joined by
+   exactly one dot, plus an optional subaddress tag. SMTPUTF8 local parts,
+   quoted-string forms outside the grammar, and empty segments are
+   structurally invalid — permanent reject.
+2. **Route.** Resolve the realm label through KV, then the edge-cached
+   directory fallback. Unknown realm: permanent reject (550).
+3. **Relay-and-verdict.** The Ed25519-signed relay POST runs synchronously;
+   the owning cell validates the agent segment against live mailboxes and
+   returns a typed verdict the Worker maps to the SMTP reply: `accepted` →
+   250; `unknown_recipient` → 550; `receive_disabled` → 550, deliberately
+   indistinguishable from unknown so a kill switch never leaks mailbox
+   state (and never defers forever); `over_cap` and `retry_later` → 451
+   tempfail.
+4. **Transient failure is always tempfail.** Cell unreachable, verdict
+   timeout, directory-fallback failure, or any Worker exception maps to an
+   explicit 451 — the sender's MTA is the retry mechanism, because
+   Cloudflare does not queue or retry Worker relays. The handler wraps every
+   path so no exception falls through to provider-default behavior.
+5. **Re-homing safety.** A cell that no longer owns the realm answers with a
+   not-mine verdict, which the Worker maps to 451; the sender retries after
+   the routing projection has repointed. Mail is never imported by a cell
+   that does not own the realm.
+6. **Acceptance is a durable write.** 250 is returned only after the cell
+   has committed the message row — the verdict doubles as the durability
+   acknowledgment. Ingestion is idempotent on (provider message id, envelope
+   recipient), which also gives multi-recipient fan-out its dedup key.
+7. **Feasibility bounds go to the launch spike**: the in-transaction latency
+   budget, Worker CPU/subrequest limits against the 25 MiB cap, and whether
+   Cloudflare invokes the Worker once per recipient or once per message.
 
 Pipeline contract:
 
@@ -369,7 +414,9 @@ blur the two:
   [threat-model.md](threat-model.md) gains a section covering prompt
   injection via mail, address harvesting, mailbox flooding, spoofed
   verification mail (a service the agent never signed up for "confirming" an
-  account), and quarantine-evasion, before v1 promotion.
+  account), quarantine-evasion, and the edge boundary — forged relay
+  webhooks against cell ingestion endpoints and edge-key compromise recovery
+  — before v1 promotion.
 
 ## Mailbox Semantics
 
@@ -480,7 +527,11 @@ Receive-only still carries real obligations:
 7. Outbound provider confirmation for the send slices: Cloudflare Email
    Sending (public beta April 2026) is the leading candidate; confirm GA
    status, deliverability posture, and suppression semantics when a send
-   slice is scheduled.
+   slice is scheduled. Also settle then: the cell-to-provider send path and
+   sending-credential custody, per-realm spoofing blast radius on the
+   shared apex (any realm's compromise can send as any address unless
+   sending is scoped), and how sending domains consume the 30-domain zone
+   cap.
 8. Domain cutover mechanics for `agent-mail.witwave.ai` to `witmail.ai`:
    the dual-domain receive window, address rewriting policy, and how long
    launch-domain addresses must survive after `witmail.ai` activates.
@@ -488,12 +539,19 @@ Receive-only still carries real obligations:
    route) on `agent-mail.witwave.ai` as a configured Email Routing subdomain
    of the `witwave.ai` zone, and confirm the current custom-address rule
    cap; on failure, follow the fallback ladder in Addressing And Domain
-   Model.
+   Model. Same spike: the SMTP-transaction feasibility bounds (verdict
+   latency budget, Worker CPU/subrequest limits vs the 25 MiB cap,
+   per-recipient vs per-message Worker invocation) and whether the
+   SPF-or-DKIM forwarding gate applies to Worker-delivered mail.
 10. Vanity realm-label policy, when that deferred capability is scheduled:
     reservation and dispute rules, the reserved-word and anti-impersonation
     list, the vanity length cap, per-plan gating, and whether release or
     transfer is ever permitted given address permanence (see Addressing And
     Domain Model).
+11. Edge observability and metering: rejected and tempfailed mail never
+    reaches a cell, so Worker-side verdict counters (and their value-free
+    export into the platform metrics plane) are the only visibility into
+    edge drops; decide the mechanism before v1 promotion.
 
 Settled on 2026-07-20 (formerly items 1–2): realm-label derivation and
 local-part sanitization (see Addressing And Domain Model), and the Cloudflare
