@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.189
-    imageTag: 0.0.189
+    chartVersion: 0.0.193
+    imageTag: 0.0.193
     factDeletionEnabled: true
     # Phase B enabled compaction after every schema-54-compatible v186 server
     # pod replaced the old writers.
