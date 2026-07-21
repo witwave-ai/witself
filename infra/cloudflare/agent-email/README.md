@@ -14,6 +14,10 @@ response containing exactly `{"verdict":"accepted"}` counts as SMTP success.
 
 - Keep the existing Email Routing catch-all unchanged.
 - Use only the dedicated `witself-agent-email-pilot-directory` KV namespace.
+- Keep `global_fetch_strictly_public` enabled so the Worker reaches the
+  DNS-only cell ingress through its public hostname even though both hostnames
+  are in the `witwave.ai` zone. Signed headers are never followed across a
+  redirect.
 - Do not put relay private-key material in the manifest, generated Wrangler
   configuration, Git, logs, or cell configuration.
 - Treat `pilot.example.json` as a shape example, not deployable values.

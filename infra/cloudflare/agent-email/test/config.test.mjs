@@ -28,6 +28,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   const config = await readFile(new URL("../wrangler.generated.jsonc", import.meta.url), "utf8");
   assert.match(config, /"workers_dev"\s*:\s*false/);
   assert.match(config, /"preview_urls"\s*:\s*false/);
+  assert.match(config, /"compatibility_flags"\s*:\s*\["global_fetch_strictly_public"\]/);
   assert.match(config, /"binding"\s*:\s*"EMAIL_DIRECTORY"/);
   assert.doesNotMatch(config, /"binding"\s*:\s*"DIRECTORY"/);
   assert.doesNotMatch(config, /"routes"\s*:/);
