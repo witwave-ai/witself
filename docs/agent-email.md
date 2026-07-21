@@ -675,6 +675,11 @@ Receive-only still carries real obligations:
    latency budget, Worker CPU/subrequest limits vs the 25 MiB cap,
    per-recipient vs per-message Worker invocation) and whether the
    SPF-or-DKIM forwarding gate applies to Worker-delivered mail.
+   **Run 2026-07-21: failed.** Full coverage and per-recipient dispatch worked,
+   but Cloudflare exposes neither an explicit temporary-reject action nor the
+   trusted structured authentication/spam/provider-id fields required by the
+   settled SMTP contract. Implementation is stopped before migration 0059;
+   see [the launch-spike report](agent-email-cloudflare-launch-spike.md).
 10. Vanity realm-label policy, when that deferred capability is scheduled:
     reservation and dispute rules, the reserved-word and anti-impersonation
     list, the vanity length cap, per-plan gating, and whether release or
