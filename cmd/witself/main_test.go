@@ -372,6 +372,7 @@ func TestSelfShowUsesAgentToken(t *testing.T) {
 		q := r.URL.Query()
 		if q.Get("include_facts") != "true" || q.Get("include_salient") != "true" || q.Get("include_counts") != "true" ||
 			q.Get("include_checkpoint") != "true" || q.Get("include_message_checkpoint") != "true" ||
+			q.Get("include_email_checkpoint") != "true" ||
 			q.Get("include_sensitive") != "false" ||
 			q.Get("salient_limit") != "10" || q.Get("max_bytes") != "8192" {
 			t.Errorf("query = %s", r.URL.RawQuery)

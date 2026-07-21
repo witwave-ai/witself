@@ -79,6 +79,11 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	agentEmailPilot, err := agentEmailPilotConfigFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -142,6 +147,10 @@ func serve() int {
 				return server.DomainPrincipal{}, ok, err
 			}
 			return toServerPrincipal(p), true, nil
+		}
+		if err := configureAgentEmail(ctx, &cfg, st, agentEmailPilot); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
 		}
 		configureAvatar(&cfg, st)
 		configureSecrets(&cfg, st)
@@ -1437,6 +1446,10 @@ func serve() int {
 			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
+		if agentEmailPilot.Enabled {
+			fmt.Fprintln(os.Stderr, "witself-server: agent email pilot requires WITSELF_DATABASE_URL")
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
 

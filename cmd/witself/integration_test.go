@@ -1467,6 +1467,7 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 				case "/v1/self":
 					if r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "true" ||
 						r.URL.Query().Get("include_message_checkpoint") != "true" ||
+						r.URL.Query().Get("include_email_checkpoint") != "true" ||
 						r.URL.Query().Get("include_sensitive") != "true" {
 						t.Errorf("unsafe automatic hydration query: %s", r.URL.RawQuery)
 					}

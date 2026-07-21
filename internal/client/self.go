@@ -79,6 +79,15 @@ type SelfMessageCheckpoint struct {
 	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
 }
 
+// SelfEmailCheckpoint is value-free, authenticated discovery state for the
+// receive-only agent-email mailbox. It carries no sender, subject, body,
+// address, message identifier, or processing fence.
+type SelfEmailCheckpoint struct {
+	Pending        bool `json:"pending"`
+	Unavailable    bool `json:"unavailable,omitempty"`
+	MailboxPending bool `json:"mailbox_pending,omitempty"`
+}
+
 // SelfAvatarCheckpoint is value-free, authenticated lifecycle state for an
 // agent avatar that needs attention from an active AI client. It never carries
 // SVG, prompt, description, or visual-spec content.
@@ -105,6 +114,7 @@ type SelfDigest struct {
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
+	EmailCheckpoint   *SelfEmailCheckpoint   `json:"email_checkpoint,omitempty"`
 	AvatarCheckpoint  *SelfAvatarCheckpoint  `json:"avatar_checkpoint,omitempty"`
 	Index             SelfIndex              `json:"index"`
 	Elided            bool                   `json:"elided"`
@@ -125,6 +135,9 @@ type SelfOptions struct {
 	// mailbox and open-request work. Identity-only callers should leave this
 	// false to avoid messaging queries.
 	IncludeMessageCheckpoint bool
+	// IncludeEmailCheckpoint requests a content-free projection of pending
+	// receive-only email. Identity-only callers should leave this false.
+	IncludeEmailCheckpoint bool
 	// IncludeAvatarCheckpoint requests content-free avatar lifecycle state.
 	// Identity-only callers should leave this false to avoid avatar queries.
 	IncludeAvatarCheckpoint bool
@@ -166,6 +179,7 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params.Set("include_counts", strconv.FormatBool(opts.IncludeCounts))
 	params.Set("include_checkpoint", strconv.FormatBool(opts.IncludeCheckpoint))
 	params.Set("include_message_checkpoint", strconv.FormatBool(opts.IncludeMessageCheckpoint))
+	params.Set("include_email_checkpoint", strconv.FormatBool(opts.IncludeEmailCheckpoint))
 	params.Set("include_avatar_checkpoint", strconv.FormatBool(opts.IncludeAvatarCheckpoint))
 	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
 	if opts.Observational {

@@ -427,6 +427,7 @@ var dashboardSelfOptions = client.SelfOptions{
 	IncludeCounts:            true,
 	IncludeCheckpoint:        true,
 	IncludeMessageCheckpoint: true,
+	IncludeEmailCheckpoint:   true,
 	IncludeAvatarCheckpoint:  true,
 }
 

@@ -99,6 +99,8 @@ func run(args []string) int {
 		return transcriptCmd(args[1:])
 	case "message":
 		return messageCmd(args[1:])
+	case "email":
+		return emailCmd(args[1:])
 	case "install":
 		return installCmd(args[1:])
 	case "uninstall":
@@ -2563,6 +2565,7 @@ func selfShow(args []string) int {
 		IncludeCounts:            true,
 		IncludeCheckpoint:        true,
 		IncludeMessageCheckpoint: true,
+		IncludeEmailCheckpoint:   true,
 		IncludeAvatarCheckpoint:  true,
 		SalientLimit:             *salientLimit,
 		MaximumByteSize:          *maxBytes,

@@ -430,7 +430,8 @@ func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 			}
 			if query.Get("include_facts") != "false" || query.Get("include_salient") != "true" ||
 				query.Get("include_counts") != "true" || query.Get("include_checkpoint") != "true" ||
-				query.Get("include_message_checkpoint") != "true" || query.Get("include_avatar_checkpoint") != "true" {
+				query.Get("include_message_checkpoint") != "true" || query.Get("include_email_checkpoint") != "true" ||
+				query.Get("include_avatar_checkpoint") != "true" {
 				t.Errorf("unexpected include flags: %s", r.URL.RawQuery)
 			}
 			if query.Get("include_sensitive") != "false" {

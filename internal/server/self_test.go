@@ -202,6 +202,89 @@ func TestSelfDigestIncludesContentFreeMessageCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSelfDigestIncludesValueFreeEmailCheckpointOnlyForEnrolledAgent(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		agentID := "agent_aaaaaaaaaaaaaaaa"
+		if token == "unenrolled" {
+			agentID = "agent_bbbbbbbbbbbbba"
+		}
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: agentID, AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	checkpointCalls := 0
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		AgentEmailPilot: AgentEmailPilotConfig{
+			Enabled:  true,
+			RealmIDs: map[string]bool{"realm_aaaaaaaaaaaaaaaa": true},
+			AgentIDs: map[string]bool{"agent_aaaaaaaaaaaaaaaa": true},
+		},
+		GetSelfAgentEmailCheckpoint: func(_ context.Context, p DomainPrincipal) (AgentEmailCheckpoint, error) {
+			checkpointCalls++
+			if p.ID != "agent_aaaaaaaaaaaaaaaa" {
+				t.Fatalf("email checkpoint principal = %+v", p)
+			}
+			return AgentEmailCheckpoint{Pending: true, MailboxPending: true}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_email_checkpoint=true", "agent-token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint == nil ||
+		!digest.EmailCheckpoint.Pending || !digest.EmailCheckpoint.MailboxPending || digest.EmailCheckpoint.Unavailable {
+		t.Fatalf("enrolled self/email checkpoint = %d / %+v", resp.StatusCode, digest.EmailCheckpoint)
+	}
+
+	resp = selfRequest(t, srv.URL+"/v1/self?include_email_checkpoint=true", "unenrolled")
+	defer closeBody(t, resp)
+	digest = SelfDigest{}
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint != nil || checkpointCalls != 1 {
+		t.Fatalf("unenrolled self/email checkpoint = %d / %+v / calls=%d", resp.StatusCode, digest.EmailCheckpoint, checkpointCalls)
+	}
+}
+
+func TestSelfDigestEmailCheckpointFailsOpen(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_aaaaaaaaaaaaaaaa", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		AgentEmailPilot: AgentEmailPilotConfig{
+			Enabled:  true,
+			RealmIDs: map[string]bool{"realm_aaaaaaaaaaaaaaaa": true},
+			AgentIDs: map[string]bool{"agent_aaaaaaaaaaaaaaaa": true},
+		},
+		GetSelfAgentEmailCheckpoint: func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error) {
+			return AgentEmailCheckpoint{}, errors.New("email checkpoint unavailable")
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint == nil ||
+		!digest.EmailCheckpoint.Unavailable || digest.EmailCheckpoint.Pending {
+		t.Fatalf("fail-open email checkpoint = %d / %+v", resp.StatusCode, digest.EmailCheckpoint)
+	}
+}
+
 func TestSelfDigestFailsOpenWhenMessageCheckpointIsUnavailable(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{
@@ -262,6 +345,7 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 		{name: "bad count boolean", path: "/v1/self?include_counts=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad checkpoint boolean", path: "/v1/self?include_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad message checkpoint boolean", path: "/v1/self?include_message_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
+		{name: "bad email checkpoint boolean", path: "/v1/self?include_email_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad sensitive boolean", path: "/v1/self?include_sensitive=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad salient limit", path: "/v1/self?salient_limit=101", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad max bytes", path: "/v1/self?max_bytes=100", token: "agent-token", want: http.StatusBadRequest},

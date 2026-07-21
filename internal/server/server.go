@@ -434,6 +434,24 @@ type Config struct {
 	ReleaseMessageClaim func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error)
 	CompleteMessage     func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error)
 
+	// The capability-limited receive-only email pilot is default-off and
+	// process-scoped to one realm plus 5-10 agents. IngestAgentEmailPilot is a
+	// cell-local signed-relay hook; every other callback receives the exact
+	// bearer-token-derived owner agent. List/checkpoint/listen are value-free,
+	// while ReadAgentEmail is the explicit untrusted-content boundary.
+	AgentEmailPilot             AgentEmailPilotConfig
+	IngestAgentEmailPilot       AgentEmailIngestFunc
+	GetAgentEmailAddress        func(ctx context.Context, p DomainPrincipal) (AgentEmailAddress, error)
+	ListAgentEmails             func(ctx context.Context, p DomainPrincipal, opts AgentEmailListOptions) (AgentEmailPage, error)
+	ReadAgentEmail              func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	AckAgentEmail               func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	MarkAgentEmailCodeConsumed  func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	GetSelfAgentEmailCheckpoint func(ctx context.Context, p DomainPrincipal) (AgentEmailCheckpoint, error)
+	ClaimAgentEmail             func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimAgentEmailRequest) (AgentEmailProcessing, error)
+	RenewAgentEmailClaim        func(ctx context.Context, p DomainPrincipal, messageID string, in RenewAgentEmailClaimRequest) (AgentEmailProcessing, error)
+	ReleaseAgentEmailClaim      func(ctx context.Context, p DomainPrincipal, messageID string, in ReleaseAgentEmailClaimRequest) (AgentEmailProcessing, error)
+	CompleteAgentEmail          func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteAgentEmailRequest) (AgentEmailProcessing, error)
+
 	// Open message requests are realm-local, message-backed delegations. The
 	// backend persists candidate snapshots, offers, coordinator selections, and
 	// fenced claims, but it never invokes a model or ranks an offer. Every hook
@@ -673,6 +691,7 @@ type SelfDigest struct {
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
+	EmailCheckpoint   *AgentEmailCheckpoint  `json:"email_checkpoint,omitempty"`
 	AvatarCheckpoint  *SelfAvatarCheckpoint  `json:"avatar_checkpoint,omitempty"`
 	Index             SelfIndex              `json:"index"`
 	Elided            bool                   `json:"elided"`
@@ -1514,6 +1533,14 @@ func apiMux(cfg Config) http.Handler {
 		_, _ = fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
 			version.Version, version.Commit, version.Date)
 	})
+	agentEmailPilotSupported := cfg.AgentEmailPilot.Enabled &&
+		ValidateAgentEmailPilotConfig(cfg.AgentEmailPilot) == nil
+	if agentEmailPilotSupported && cfg.IngestAgentEmailPilot != nil {
+		// This route intentionally does not share bearer authentication with the
+		// public API. Its sole authority is the verified Ed25519 relay envelope.
+		mux.HandleFunc("POST /v1/internal/agent-email:ingest",
+			agentEmailIngestHandler(cfg.AgentEmailPilot, cfg.IngestAgentEmailPilot))
+	}
 	selfDigestSupported := cfg.AuthenticatePrincipal != nil
 	transcriptsSupported := selfDigestSupported &&
 		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
@@ -1714,6 +1741,8 @@ func apiMux(cfg Config) http.Handler {
 			cfg.CountSelfMemories,
 			cfg.GetSelfMemoryCheckpoint,
 			cfg.GetSelfMessageCheckpoint,
+			cfg.AgentEmailPilot,
+			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
 		))
 		if cfg.ListSelfPeers != nil {
@@ -1983,6 +2012,32 @@ func apiMux(cfg Config) http.Handler {
 				cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage, cfg.ReplyMessage,
 				cfg.ClaimMessage, cfg.RenewMessageClaim, cfg.ReleaseMessageClaim, cfg.CompleteMessage))
 		}
+		if agentEmailPilotSupported {
+			if cfg.GetAgentEmailAddress != nil {
+				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetAgentEmailAddress))
+			}
+			if cfg.ListAgentEmails != nil {
+				mux.HandleFunc("GET /v1/email", listAgentEmailsHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ListAgentEmails))
+				mux.HandleFunc("POST /v1/email:listen", agentEmailListenHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ListAgentEmails))
+			}
+			if cfg.GetSelfAgentEmailCheckpoint != nil {
+				mux.HandleFunc("GET /v1/email/checkpoint", getAgentEmailCheckpointHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetSelfAgentEmailCheckpoint))
+			}
+			if cfg.ReadAgentEmail != nil || cfg.AckAgentEmail != nil ||
+				cfg.MarkAgentEmailCodeConsumed != nil || cfg.ClaimAgentEmail != nil ||
+				cfg.RenewAgentEmailClaim != nil || cfg.ReleaseAgentEmailClaim != nil ||
+				cfg.CompleteAgentEmail != nil {
+				mux.HandleFunc("POST /v1/email/{action}", agentEmailActionHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.ReadAgentEmail, cfg.AckAgentEmail, cfg.MarkAgentEmailCodeConsumed,
+					cfg.ClaimAgentEmail, cfg.RenewAgentEmailClaim,
+					cfg.ReleaseAgentEmailClaim, cfg.CompleteAgentEmail))
+			}
+		}
 		if cfg.CreateMessageRequest != nil {
 			mux.HandleFunc("POST /v1/message-requests", createMessageRequestHandler(cfg.AuthenticatePrincipal, cfg.CreateMessageRequest))
 		}
@@ -2013,7 +2068,7 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux)))
+	return agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
@@ -2297,6 +2352,8 @@ func selfHandler(
 	countMemories func(context.Context, DomainPrincipal) (int, error),
 	getMemoryCheckpoint func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error),
 	getMessageCheckpoint func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error),
+	agentEmailPilot AgentEmailPilotConfig,
+	getEmailCheckpoint func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 	getAvatarCheckpoint func(context.Context, DomainPrincipal) (*SelfAvatarCheckpoint, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
@@ -2308,7 +2365,7 @@ func selfHandler(
 			return
 		}
 		q := r.URL.Query()
-		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_avatar_checkpoint", "include_sensitive", "observational"} {
+		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint", "include_sensitive", "observational"} {
 			if value := q.Get(name); value != "" {
 				if _, err := strconv.ParseBool(value); err != nil {
 					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
@@ -2377,6 +2434,22 @@ func selfHandler(
 				// additive projection. Never hide the authenticated self digest or
 				// misreport an unhealthy projection as an idle mailbox.
 				messageCheckpoint = &SelfMessageCheckpoint{Unavailable: true}
+			}
+		}
+		includeEmailCheckpoint := true
+		if raw := q.Get("include_email_checkpoint"); raw != "" {
+			includeEmailCheckpoint, _ = strconv.ParseBool(raw)
+		}
+		var emailCheckpoint *AgentEmailCheckpoint
+		if includeEmailCheckpoint && agentEmailPilot.allows(p) && getEmailCheckpoint != nil {
+			checkpoint, err := getEmailCheckpoint(r.Context(), p)
+			if err != nil {
+				// Email attention state is additive and content-free. Preserve the
+				// authenticated digest while distinguishing an unhealthy projection
+				// from an idle enrolled mailbox.
+				emailCheckpoint = &AgentEmailCheckpoint{Unavailable: true}
+			} else {
+				emailCheckpoint = &checkpoint
 			}
 		}
 		includeAvatarCheckpoint := true
@@ -2519,6 +2592,7 @@ func selfHandler(
 			SalientMemories:   memories,
 			MemoryCheckpoint:  memoryCheckpoint,
 			MessageCheckpoint: messageCheckpoint,
+			EmailCheckpoint:   emailCheckpoint,
 			AvatarCheckpoint:  avatarCheckpoint,
 			Index: SelfIndex{Kinds: kinds, Tags: tags, Counts: func() map[string]int {
 				if !includeCounts {

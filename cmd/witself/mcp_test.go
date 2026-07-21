@@ -468,6 +468,13 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.message.renew",
 		"witself.message.release",
 		"witself.message.complete",
+		"witself.email.read",
+		"witself.email.code.consume",
+		"witself.email.ack",
+		"witself.email.claim",
+		"witself.email.renew",
+		"witself.email.release",
+		"witself.email.complete",
 		"witself.message.request.open",
 		"witself.message.request.list",
 		"witself.message.request.show",
@@ -1676,7 +1683,7 @@ func TestCodexMCPInstructionsLeadWithCanonicalMemoryRouting(t *testing.T) {
 			t.Errorf("first 512 Codex instruction bytes do not contain %q: %q", want, first)
 		}
 	}
-	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions+"\n\n"+secretRoutingInstructions {
+	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+foregroundMessagingRoutingInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions+"\n\n"+secretRoutingInstructions {
 		t.Fatal("provider-specific Codex routing leaked into generic MCP instructions")
 	}
 }

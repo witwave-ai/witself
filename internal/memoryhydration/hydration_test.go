@@ -161,6 +161,7 @@ func TestSessionHydrationIsBoundedOpenPlaneAndEscaped(t *testing.T) {
 	}
 	if !source.selfOptions.IncludeFacts || !source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
 		!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeMessageCheckpoint ||
+		!source.selfOptions.IncludeEmailCheckpoint ||
 		!source.selfOptions.IncludeSensitive ||
 		source.selfOptions.MaximumByteSize != 2048 {
 		t.Fatalf("self options = %#v", source.selfOptions)
@@ -247,6 +248,7 @@ func TestOrdinaryPromptChecksCheckpointWithoutRecall(t *testing.T) {
 			if !result.Attempted || result.Injected || source.selfCalls != 1 || source.recallCalls != 0 ||
 				source.selfOptions.IncludeFacts || source.selfOptions.IncludeSalient || source.selfOptions.IncludeCounts ||
 				!source.selfOptions.IncludeCheckpoint || !source.selfOptions.IncludeMessageCheckpoint ||
+				!source.selfOptions.IncludeEmailCheckpoint ||
 				!source.selfOptions.IncludeSensitive {
 				t.Fatalf("idle checkpoint result/source = %#v / %#v", result, source)
 			}
@@ -314,6 +316,24 @@ func TestUnavailableMessageCheckpointIsVisibleWithoutBlockingHydration(t *testin
 		!strings.Contains(result.Context, `"message_checkpoint":{"pending":false,"unavailable":true}`) ||
 		strings.Contains(result.Context, foregroundMessageCheckpointPolicy) {
 		t.Fatalf("unavailable message checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
+func TestOrdinaryPromptInjectsPendingEmailCheckpointPolicy(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity:        exactIdentity(),
+		EmailCheckpoint: &client.SelfEmailCheckpoint{Pending: true, MailboxPending: true},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Attempted || !result.Injected || source.recallCalls != 0 ||
+		!strings.Contains(result.Context, `"email_checkpoint":{"pending":true,"mailbox_pending":true}`) ||
+		!strings.Contains(result.Context, foregroundEmailCheckpointPolicy) {
+		t.Fatalf("pending email checkpoint result/source = %#v / %#v", result, source)
 	}
 }
 
@@ -419,7 +439,7 @@ func TestIdleAvatarCheckpointDoesNotInjectContext(t *testing.T) {
 	}
 }
 
-func TestPendingMemoryAndMessageCheckpointsFitMinimumHydrationBudget(t *testing.T) {
+func TestPendingMemoryMessageAndEmailCheckpointsFitMinimumHydrationBudget(t *testing.T) {
 	source := &hydrationSourceStub{self: client.SelfDigest{
 		Identity: exactIdentity(),
 		MemoryCheckpoint: &client.SelfMemoryCheckpoint{
@@ -429,6 +449,7 @@ func TestPendingMemoryAndMessageCheckpointsFitMinimumHydrationBudget(t *testing.
 			Pending: true, MailboxPending: true, CandidateOfferPending: true,
 			CoordinatorSelectionPending: true, CandidateAssignmentPending: true,
 		},
+		EmailCheckpoint: &client.SelfEmailCheckpoint{Pending: true, MailboxPending: true},
 	}}
 	result, err := Execute(context.Background(), Config{MaximumBytes: 1024}, exactBinding(), Request{
 		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
@@ -444,8 +465,26 @@ func TestPendingMemoryAndMessageCheckpointsFitMinimumHydrationBudget(t *testing.
 		!strings.Contains(result.Context, `"candidate_offer_pending":true`) ||
 		!strings.Contains(result.Context, `"coordinator_selection_pending":true`) ||
 		!strings.Contains(result.Context, `"candidate_assignment_pending":true`) ||
+		!strings.Contains(result.Context, `"email_checkpoint"`) ||
+		!strings.Contains(result.Context, `"email_checkpoint":{"pending":true,"mailbox_pending":true}`) ||
 		!strings.Contains(result.Context, advisoryBoundary) {
 		t.Fatalf("minimum-budget checkpoints = %#v", result)
+	}
+}
+
+func TestUnavailableEmailCheckpointIsVisibleWithoutForegroundPolicy(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(), EmailCheckpoint: &client.SelfEmailCheckpoint{Unavailable: true},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || !strings.Contains(result.Context, `"email_checkpoint":{"pending":false,"unavailable":true}`) ||
+		strings.Contains(result.Context, foregroundEmailCheckpointPolicy) {
+		t.Fatalf("unavailable email checkpoint result/source = %#v / %#v", result, source)
 	}
 }
 
