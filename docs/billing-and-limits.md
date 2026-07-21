@@ -139,9 +139,13 @@ Notes on a few dimensions:
 - Agent email uses its own dimensions because external inbound abuse, outbound
   reputation, address allocation, and MIME storage have different controls from
   the realm-local mailbox. `email_received` is accounting-only for the
-  authorized Cloudflare pilot: pilot ingestion emits no billable usage event,
-  has no quota/overage enforcement, and hostile inbound volume can never bill
-  the recipient. `email_sent` remains dormant until a send slice exists.
+  authorized Cloudflare pilot: pilot provisioning and ingestion emit no
+  billable usage event, have no quota/overage enforcement, and hostile inbound
+  volume can never bill the recipient. The canonical dimension and unit names
+  exist in the cell usage contract so later production metering cannot invent
+  incompatible keys; emission remains disabled until authoritative abuse
+  classification and production pricing are both pinned. `email_sent` remains
+  dormant until a send slice exists.
   `email_address` counts live provisioned addresses. `email_storage_byte`
   measures inline raw MIME independently so a mail attachment cannot silently
   consume the ordinary `storage_byte` allowance. Production pricing and abuse
@@ -181,10 +185,10 @@ Whether a dimension is a point-in-time cap (`active_agent`, `stored_memory`,
 `email_storage_byte`, `storage_byte`,
 `stored_secret`, `encrypted_storage_byte`) or a rate (`memory_recall`,
 `memory_write`, `vector_write`, `crossagent_access`, `message_sent`,
-`message_delivered`, `email_received`, `email_sent`, `secret_read`, `totp_code`, `runtime_injection`,
-`api_request`, `audit_event`) is conveyed by the limit object's fields
-(`max`/`used` for caps; `unit`, `included`, `soft_limit`, `hard_limit` for
-rates), not by the key name. Using one key across
+`message_delivered`, `email_received`, `email_sent`, `secret_read`, `totp_code`,
+`runtime_injection`, `api_request`, `audit_event`) is conveyed by the limit
+object's fields (`max`/`used` for caps; `unit`, `included`, `soft_limit`,
+`hard_limit` for rates), not by the key name. Using one key across
 all three surfaces lets a client join capability limits, usage items, and metrics
 directly. Field shapes are pinned in [json-contracts.md](json-contracts.md).
 
@@ -232,6 +236,10 @@ Recommended defaults:
 | Cross-agent accesses | `throttle` or `warn`; block only for abuse or hard caps. |
 | Security groups | `block` for hard cap, `warn` near cap. |
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
+| Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
+| Agent email received | No plan overage action in the limited pilot. A production default is blocked on authoritative spam/abuse classification and source-scoped enforcement; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
+| Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
+| Agent-email raw-MIME storage | No quota enforcement in the limited pilot. Production may `warn` near cap and `block` at hard cap only after abuse-excluded accounting and safe inbound tempfail behavior are pinned. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |
 | Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |
 | TOTP code generation | `throttle` or `warn`; block only for abuse or hard caps. |

@@ -823,7 +823,10 @@ shape, hard cap, and `elided` behavior are defined in
   },
   "email_checkpoint": {
     "pending": true,
-    "mailbox_pending": true
+    "mailbox_pending": true,
+    "receive_state": "disabled",
+    "agent_receive_state": "enabled",
+    "realm_receive_state": "disabled"
   },
   "index": {
     "kinds": ["profile", "episodic", "session"],
@@ -871,7 +874,9 @@ Rules:
 - `email_checkpoint` is a separate authenticated, value-free hint for the
   default-off receive-only email pilot. It is emitted only for an enrolled
   realm/agent when the projection is selected. `pending:true` requires
-  `mailbox_pending:true`; neither field carries an address, sender, subject,
+  `mailbox_pending:true`. `receive_state` is effective lifecycle state;
+  `agent_receive_state` and `realm_receive_state` identify which independent
+  layer disabled it. None of these fields carries an address, sender, subject,
   message id, body, attachment, code, or claim fence. `unavailable:true` means
   only that this additive projection failed and must not be treated as an idle
   mailbox.
@@ -888,9 +893,10 @@ Rules:
 ## Agent Email Pilot
 
 These contracts exist only behind the default-off, exact one-realm/5–10-agent
-Cloudflare receive pilot. The full agent token and the server's process-lifetime
-allowlist determine the owner; clients cannot supply account, realm, mailbox,
-or owner selectors.
+Cloudflare receive pilot. For owner contracts, the full agent token and the
+server's process-lifetime allowlist determine the owner; clients cannot supply
+account, realm, mailbox, or owner selectors. The separate value-free operator
+controls below bind one allowlisted agent or realm target from the route path.
 
 `GET /v1/email/address`:
 
@@ -909,12 +915,82 @@ or owner selectors.
     "agent_segment": "browser-agent",
     "realm_label": "aaaaaaaaaaaaaaaa",
     "provisioning_kind": "derived",
-    "receive_state": "enabled",
+    "receive_state": "disabled",
+    "agent_receive_state": "enabled",
+    "realm_receive_state": "disabled",
+    "row_version": 1,
     "created_at": "2026-07-21T12:00:00Z",
-    "updated_at": "2026-07-21T12:00:00Z"
+    "updated_at": "2026-07-21T12:00:00Z",
+    "realm_disabled_at": "2026-07-21T12:05:00Z"
   }
 }
 ```
+
+`receive_state` is the effective owner-visible state: it is `enabled` only
+when both independent layers are enabled, `disabled` when either layer is
+disabled, and `retired` for a retired mailbox. `disabled_at` is the optional
+agent-layer timestamp; `realm_disabled_at` is the optional realm-layer
+timestamp. `row_version` belongs to the agent mailbox layer.
+
+Settled operator authentication protects these lifecycle-only controls:
+
+```text
+GET|PATCH /v1/agents/{agent}/email-receive
+GET|PATCH /v1/realms/{realm}/email-receive
+```
+
+PATCH accepts exactly one desired state and binds the target only from the
+path:
+
+```json
+{"receive_state":"disabled"}
+```
+
+An agent control response deliberately omits the address and all message
+metadata:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "control": {
+    "account_id": "acc_123",
+    "realm_id": "realm_aaaaaaaaaaaaaaaa",
+    "agent_id": "agent_bbbbbbbbbbbbbbbb",
+    "receive_state": "disabled",
+    "agent_receive_state": "enabled",
+    "realm_receive_state": "disabled",
+    "row_version": 1,
+    "updated_at": "2026-07-21T12:00:00Z",
+    "realm_disabled_at": "2026-07-21T12:05:00Z"
+  }
+}
+```
+
+A realm control response carries only aggregate lifecycle state and an
+informational live-mailbox count:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "control": {
+    "account_id": "acc_123",
+    "realm_id": "realm_aaaaaaaaaaaaaaaa",
+    "receive_state": "disabled",
+    "mailbox_count": 5,
+    "row_version": 2,
+    "updated_at": "2026-07-21T12:05:00Z",
+    "disabled_at": "2026-07-21T12:05:00Z"
+  }
+}
+```
+
+The realm row is durable even when `mailbox_count` is zero. Re-enabling an
+agent does not override a disabled realm, and re-enabling the realm does not
+override a disabled agent. Operator routes never grant message-content access.
+For a suspended account, both lifecycle GETs and a PATCH to `disabled` remain
+available as harm-reducing safety operations; PATCH to `enabled` is rejected
+until resume. A rejected enable is a true no-op: no row version, timestamp, or
+audit event advances.
 
 Metadata-only `GET /v1/email` and `POST /v1/email:listen` messages use this
 shape (the list envelope uses `next_cursor`; listen uses `timed_out`):

@@ -226,6 +226,24 @@ advancing:
    a migration error exits the process rather than serving the new build.
 5. The release-specific API, CLI/MCP, and multi-provider client smoke tests pass.
 
+For the agent-email schema-60/61 rollout, treat old/new writer convergence as
+a hard feature barrier. Freeze agent-email receive-control mutations and all
+account export/import or cell-move work before Phase A. Deploy the new schema
+and application with `retryCanaryAgentID` empty, then verify that every old pod
+has drained. A realm disable is not authoritative while a pre-schema-60 pod is
+still serving: that binary reads only each mailbox's agent layer. A pre-60
+export can also omit the realm-control row and cause a newer importer to
+synthesize `enabled`.
+
+Only after full Phase-A convergence may operators change agent/realm receive
+controls or resume archive movement. Enable the provider-retry canary in a
+separate config-only Phase B, wait for every pod to converge again, and only
+then arm/send a manual proof. For rollback, turn the canary schedule off and
+settle any armed proof first. Before removing the canary setting or deploying
+pre-60/61 code, disable the process-level receive pilot and the exact edge
+routes; never rely on a realm-disabled row to protect traffic from an older
+binary, and never run a pre-60 export after that row has become authoritative.
+
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar
 mutation/import/export during writer convergence, and wait until every old

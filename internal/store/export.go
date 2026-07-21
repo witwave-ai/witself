@@ -206,6 +206,14 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'deleted_at', deleted_at)
 			FROM realms WHERE account_id = $1 ORDER BY id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_realm_receive_controls", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'receive_state', receive_state, 'row_version', row_version,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'disabled_at', disabled_at)
+			FROM agent_email_realm_receive_controls
+			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID},
 		// Realm avatar style heads and immutable versions precede agents so
 		// profiles can reference the selected style as soon as they stream.
 		// The current-version head foreign key is deferred because the head and
@@ -339,6 +347,23 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'created_at', created_at)
 			FROM agent_email_deliveries WHERE account_id = $1
 			ORDER BY realm_id, owner_agent_id, delivered_at, message_id, mailbox_id`, arg: accountID},
+		// Live retry tests are local, expiring work and never cross cells. Only
+		// accepted proofs move with their immutable message so a provider replay
+		// after cutover cannot create a second delivery.
+		&querySource{tx: tx, table: "agent_email_retry_canary_arms", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'mailbox_id', mailbox_id, 'owner_agent_id', owner_agent_id,
+			  'challenge_sha256', challenge_sha256, 'state', state,
+			  'delivery_fingerprint_sha256', delivery_fingerprint_sha256,
+			  'accepted_message_id', accepted_message_id,
+			  'tempfail_count', tempfail_count, 'row_version', row_version,
+			  'armed_at', armed_at, 'expires_at', expires_at,
+			  'tempfailed_at', tempfailed_at, 'retry_expires_at', retry_expires_at,
+			  'accepted_at', accepted_at)
+			FROM agent_email_retry_canary_arms
+			WHERE account_id = $1 AND state = 'accepted'
+			ORDER BY realm_id, owner_agent_id, accepted_at, challenge_sha256`, arg: accountID},
 		// The AVK itself is never exported. These streams preserve only its
 		// public binding plus byte-identical ciphertext and wrapped DEKs so the
 		// same client-held key can reopen the vault after a cell move.

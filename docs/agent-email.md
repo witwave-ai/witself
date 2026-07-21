@@ -1,12 +1,14 @@
 # Witself Agent Email
 
 Status: capability-limited receive pilot live in the GCP sandbox as of
-2026-07-21 (`v0.0.193`). One internal realm and six exact-address routes are
+2026-07-21 (`v0.0.194`). One internal realm and six exact-address routes are
 enabled; durable receipt, provider-managed retry, owner processing, and
 disable/re-enable rollback have been exercised without changing the existing
-Cloudflare catch-all. That live receive deployment remains `v0.0.193`; the
-current checkout adds a local, deterministic code-candidate helper, with no new
-ingestion route, database field, sender-trust claim, or automatic code use.
+Cloudflare catch-all. That live receive deployment remains `v0.0.194`; the
+current checkout adds receive controls and a default-off, exact-agent synthetic
+provider-retry proof. Those additions are not live until the ordered schema-61
+rollout below is complete. They do not add a sender-trust claim or automatic
+code use.
 
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
@@ -262,6 +264,71 @@ production tier.
   remove only the pilot exact-address rules, and leave the pre-existing global
   catch-all and its destination unchanged. Stored pilot mail follows normal
   retention/export policy rather than being destroyed by rollback.
+
+### Controlled provider-retry proof
+
+The stronger canary is separately default-off through
+`WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID`, which must equal one enrolled pilot
+agent. The two control routes are exposed only to that exact agent's full token:
+`POST /v1/email/retry-canary:arm` and
+`POST /v1/email/retry-canary:status`. The runner also uses that token's ordinary
+owner-only list, read, claim, processing, and acknowledgement routes to prove
+the accepted message lifecycle. Both control routes accept one canonical
+lowercase UUIDv4 in a JSON body, never a URL. Responses are value-free
+cumulative checkpoints. No challenge, digest, address, message id, or content
+enters logs, audit metadata, status output, or runner output.
+
+The proof/arm row stores the challenge only as SHA-256. The challenge appears
+only in the synthetic `X-Witself-Canary-Retry` header; a separate random
+correlation nonce identifies the message through its subject, so neither the
+subject nor body copies the challenge. After the retry is accepted, the opaque
+UUID header remains ordinary synthetic `raw_mime` and is covered by normal
+mailbox/archive policy. The first exact signed delivery
+atomically records a value-free body/envelope fingerprint and returns a
+deliberate temporary verdict without inserting a message. The identical retry
+inserts exactly one message and marks the proof accepted in the same
+transaction; later identical replays return that message without duplication.
+While an arm is live, missing, malformed, mismatched, or changed-body attempts
+tempfail. Once no unused arm is live, a malformed, unknown, expired, or
+wrong-body `X-Witself-Canary-Retry` marker gets the fixed terminal cell verdict
+`retry_canary_rejected`; the Worker maps only that exact verdict to its generic
+permanent rejection and records the value-free `rejected_retry_canary` edge
+outcome. This prevents both ordinary acceptance after tombstone cleanup and an
+attacker-triggerable provider retry loop. Because the canary owner is a
+dedicated synthetic mailbox, parse-invalid RFC 5322 is also terminally rejected
+when no arm is live: the parser cannot safely prove that a physical retry
+marker was absent.
+
+An unused arm expires after 15 minutes. Once the first delivery tempfails, its
+separate retry grace is 24 hours, so crossing the arm TTL cannot lose the
+idempotency proof. A retained tempfailed proof remains independently retryable
+but does not block the next run from arming a new challenge; only one unused
+`armed` challenge may exist at a time. An unaccepted proof then becomes an
+expiring tombstone; bounded cleanup runs opportunistically after seven
+additional days. A retry after grace is terminal even after that tombstone is
+cleaned. Accepted proofs remain attached to their accepted message and move
+with it in account archives. Unused arms and tempfailed proofs never move
+between cells.
+
+The runner uses a distinct opaque correlation nonce in the subject and keeps
+the proof challenge out of both subject and body. After the accepted checkpoint
+is proven, it passively traverses bounded newest-first owner-mailbox pages with
+an opaque cursor; it does not use the oldest-first listen surface, so more than
+100 older unacknowledged messages cannot hide the new canary.
+
+Mixed versions are unsafe for arming: a replica without the exact canary config
+would ordinary-accept the first delivery. Keep the schedule off, deploy
+schema-61-capable code with the canary agent unset, wait for every pod to
+converge, then add the exact agent in a config-only rollout and wait again.
+Only then arm/send manually; enable the schedule only after that run proves the
+fixed edge sequence `tempfail_cell_response` / `response` / `503`, then
+`accepted`. Rollback reverses this carefully: disable the schedule, settle the
+unused arm or let its 15-minute TTL expire, and only then unset the agent or
+downgrade.
+
+The 15-minute workflow schedule is intentionally gated off. A successful run
+acknowledges but does not delete its synthetic message, so enabling that cadence
+retains about 96 messages per day until mailbox retention/delete is settled.
 
 **Production receive-only contract:** the Inbound SMTP Transaction Contract
 below remains the target. Promotion beyond the internal pilot, catch-all Worker
@@ -672,10 +739,11 @@ The receive-side lifecycle mirrors the proven messaging shape:
   mail" remain distinct facts.
 - A bounded, value-free `email_checkpoint` lane in `self.show` lets active
   clients discover pending mail without polling content. It is separate from
-  `message_checkpoint` and carries only `pending`, `mailbox_pending`, and an
-  additive `unavailable` projection state. The shared foreground policy handles
-  at most one Witself messaging-or-email lane per turn, after user work, with no
-  background service or wake behavior.
+  `message_checkpoint` and carries only `pending`, `mailbox_pending`, effective
+  `receive_state`, its `agent_receive_state` / `realm_receive_state`
+  components, and an additive `unavailable` projection state. The shared
+  foreground policy handles at most one Witself messaging-or-email lane per
+  turn, after user work, with no background service or wake behavior.
 - Retention is plan-scoped: raw MIME and attachments age out by plan window;
   quarantined spam ages out faster; metadata and content-free audit events
   follow [audit-retention.md](audit-retention.md). Account archives include
@@ -691,16 +759,19 @@ The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
 - CLI: `witself email address show`, `witself email list`, `witself email
   read`, `witself email code-candidates`, `witself email code-consumed`,
   `witself email claim|renew|release|complete`, `witself email ack`,
-  and a bounded `witself email listen` (wait for new mail — the OTP flow
-  needs a sanctioned wait rather than a poll loop, mirroring
-  `message.listen`).
+  a bounded `witself email listen` (wait for new mail — the OTP flow needs a
+  sanctioned wait rather than a poll loop, mirroring `message.listen`), and
+  operator-only `witself email operator receive show|enable|disable` for one
+  exact enrolled agent or realm.
 - MCP: `witself.email.*` mirroring the CLI, with metadata-only list results
   and untrusted-content framing in every content-bearing tool description.
 - API: owner routes are `GET /v1/email/address`, `GET /v1/email`,
   `POST /v1/email:listen`, `GET /v1/email/checkpoint`, and the
   `/v1/email/{message_id}:read|code-consumed|ack|claim|renew|release|complete`
-  actions. The Worker relay uses the separate cell-local signed
-  `POST /v1/internal/agent-email:ingest` endpoint.
+  actions. Value-free operator controls are `GET` / `PATCH`
+  `/v1/agents/{agent}/email-receive` and
+  `/v1/realms/{realm}/email-receive`. The Worker relay uses the separate
+  cell-local signed `POST /v1/internal/agent-email:ingest` endpoint.
 
 List, listen, ack, code-consumed, and ordinary read-state projections never
 return raw MIME, attachment bytes, body HTML, or active claim capabilities.
@@ -718,15 +789,34 @@ first-seen values with occurrence counts. It fails unavailable unless
 
 ## Pilot Implementation Checkpoint
 
-The local checkout now contains migration 0059, scoped mailbox/address/message
-storage, durable suspected-duplicate grouping, MIME bounds, archive
-export/import, fenced foreground processing, value-free audit events, the
+The local checkout now contains migrations 0059–0061, scoped
+mailbox/address/message storage, durable suspected-duplicate grouping, MIME
+bounds, archive export/import, fenced foreground processing, value-free audit events, the
 signed cell ingestion endpoint, startup reconciliation for exactly the
 configured 5–10 agents, API/CLI/MCP owner surfaces, self/hook
 `email_checkpoint` hydration, and the isolated Cloudflare Worker plus
 literal-rule lifecycle tooling.
 
-The checkpoint was deployed on 2026-07-21 in `v0.0.193`: the isolated Worker
+Migration 0060 adds independent per-agent receive state and a durable
+one-row-per-realm receive control. Effective receive is enabled only when both
+layers are enabled; the realm row survives zero active mailboxes, so deleting
+and later reprovisioning pilot agents cannot accidentally clear a realm
+disable. Ingestion locks all rows contributing to that effective decision.
+Operators may inspect or disable either layer while an account is suspended so
+incident containment remains available, but re-enabling either layer requires
+an active account. A rejected suspended-account enable is a strict no-op: it
+does not change row versions, timestamps, or audit events. Startup
+reconciliation is likewise read-only for suspended accounts and performs no
+mailbox provisioning or repair.
+
+Migration 0061 adds the default-off retry-canary proof state described above.
+Schema 60 is also a deployment compatibility barrier: schema-59 servers ignore
+the realm row, and schema-59 exporters omit it. Freeze receive-control changes,
+archive export/import, and cell moves until every replica is schema-60 capable.
+Do not roll an account back across that barrier after relying on a realm
+disable; first disable the edge/process pilot and drain the older replicas.
+
+The checkpoint was deployed on 2026-07-21 and is currently live in `v0.0.194`: the isolated Worker
 and KV, six exact routes, matching cell feature configuration, synthetic
 durable-accept canary, delayed provider retries, and disable/re-enable rollback
 were all verified live. The existing catch-all and control-plane KV remained
@@ -914,10 +1004,15 @@ in place; these are the remaining important items):
     escalation needs a defined destination (a dead-letter / needs-attention
     state, since there is no sender to notify). Recorded inline in Mailbox
     Semantics; the exact state machine is open.
-16. Kill-switch surface and agent-visible state: the per-agent/per-realm
-    receive toggle needs a control surface and a way for the agent to see
-    that its own receive is disabled (otherwise mail silently tempfails with
-    no local signal).
+16. **Settled 2026-07-21:** per-agent and per-realm receive controls are
+    independent, with a durable realm aggregate that survives zero active
+    mailboxes. Effective receive is disabled when either layer is disabled
+    (and retired when the mailbox is retired). Settled operator auth protects
+    value-free `GET`/`PATCH /v1/agents/{agent}/email-receive` and
+    `/v1/realms/{realm}/email-receive`; agents cannot mutate those routes.
+    The owner address and `email_checkpoint` projections expose effective,
+    agent, and realm state, without exposing another mailbox or granting
+    operators access to message content.
 17. Self-host parity: the "identical pipeline" claim needs a self-host
     analog for the Cloudflare-specific delivery guarantee and for edge-key
     publication — a self-hoster's own edge and key-publication path, or an

@@ -277,6 +277,18 @@ select {
 .kv dt { color: var(--fg-dim); }
 .kv dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
 
+/* Receive-only email */
+.email-address { color: var(--accent-2); overflow-wrap: anywhere; }
+.email-note { color: var(--fg-dim); font-style: italic; font-size: 0.8rem; margin-top: 0.35rem; }
+.email-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.5rem; color: var(--fg-dim); }
+.email-controls label { display: inline-flex; align-items: center; gap: 0.35rem; }
+.email-controls input { accent-color: var(--accent); }
+.email-row { align-items: flex-start; }
+.email-subject { font-weight: 600; overflow-wrap: anywhere; }
+.email-sender { color: var(--fg-dim); font-size: 0.82rem; overflow-wrap: anywhere; }
+.email-warning { color: var(--danger); font-size: 0.8rem; }
+.email-state { color: var(--fg-dim); font-size: 0.78rem; white-space: nowrap; }
+
 /* Conversations */
 .unread {
   display: inline-block;

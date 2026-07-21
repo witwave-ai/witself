@@ -40,6 +40,11 @@ func TestAgentEmailPilotConfigFromEnvDefaultOffAndValid(t *testing.T) {
 		pilot.RelayReplayWindow != defaultAgentEmailReplayWindow {
 		t.Fatalf("valid pilot = %+v", pilot)
 	}
+	t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_aaaaaaaaaaaaaaaa")
+	pilot, err = agentEmailPilotConfigFromEnv()
+	if err != nil || pilot.RetryCanaryAgentID != "agent_aaaaaaaaaaaaaaaa" {
+		t.Fatalf("retry canary config = %+v / %v", pilot, err)
+	}
 
 	t.Setenv(agentEmailRelayReplayWindowEnv, "90s")
 	pilot, err = agentEmailPilotConfigFromEnv()
@@ -86,6 +91,10 @@ func TestAgentEmailPilotConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 			name: "oversized replay window", want: "replay window",
 			mutate: func(t *testing.T) { t.Setenv(agentEmailRelayReplayWindowEnv, "16m") },
 		},
+		{
+			name: "unenrolled retry canary", want: "retry canary",
+			mutate: func(t *testing.T) { t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_zzzzzzzzzzzzzzzz") },
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +113,8 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 	if !errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailUnknownRecipient), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotNotEnrolled), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailReceiveDisabled), server.ErrAgentEmailReceiveDisabled) ||
+		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryTemporary), server.ErrAgentEmailRetryCanaryTemporary) ||
+		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryPermanent), server.ErrAgentEmailRetryCanaryPermanent) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotDisabled), server.ErrAgentEmailPilotUnavailable) {
 		t.Fatal("ingestion errors did not map to typed relay verdict errors")
 	}
@@ -147,6 +158,7 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 		agentEmailPilotEnabledEnv, agentEmailPilotDomainEnv, agentEmailPilotAudienceEnv,
 		agentEmailPilotRealmIDEnv, agentEmailPilotAgentIDsEnv,
 		agentEmailRelayPublicKeysEnv, agentEmailRelayReplayWindowEnv,
+		agentEmailRetryCanaryAgentIDEnv,
 	} {
 		original, present := os.LookupEnv(name)
 		name, original, present := name, original, present

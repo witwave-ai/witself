@@ -50,6 +50,8 @@ var upgraders = map[int]Upgrader{
 	56: preserveSchema56Rows,
 	57: preserveSchema57Rows,
 	58: preserveSchema58Rows,
+	59: preserveSchema59Rows,
+	60: preserveSchema60Rows,
 }
 
 const (
@@ -81,6 +83,21 @@ func preserveSchema57Rows(_ string, row map[string]any) (map[string]any, error) 
 // existing row changes shape, so its rows pass through unchanged while the
 // destination imports the new tables as empty.
 func preserveSchema58Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema59Rows acknowledges the durable realm receive-control table
+// introduced by migration 0060. Schema-59 rows remain valid unchanged; the
+// account importer synthesizes enabled control rows for legacy mailbox realms.
+func preserveSchema59Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema60Rows acknowledges the accepted retry-canary proof table
+// introduced by migration 0061. A schema-60 archive has no such stream and
+// all existing rows pass through unchanged; live canary work is deliberately
+// cell-local and is never synthesized during restore.
+func preserveSchema60Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

@@ -58,7 +58,7 @@ func (s *Store) ReconcileAgentEmailPilot(
 	if err != nil {
 		return nil, fmt.Errorf("resolve agent-email pilot realm: %w", err)
 	}
-	if accountStatus != "active" {
+	if accountStatus != "active" && accountStatus != "suspended" {
 		return nil, ErrAccountNotActive
 	}
 	rows, err := tx.Query(ctx, `
@@ -90,6 +90,36 @@ func (s *Store) ReconcileAgentEmailPilot(
 				ErrAgentEmailPilotNotEnrolled, agentID, realmID,
 			)
 		}
+	}
+	// Suspension already pauses ingestion through the account lifecycle gate,
+	// but it must not make a routine server restart fail. While suspended, only
+	// verify the exact pre-existing enrollment and return it read-only. Never
+	// provision or repair mailboxes for a frozen account: any missing or drifted
+	// row remains a startup failure until an operator resumes the account.
+	if accountStatus == "suspended" {
+		addresses := make([]AgentEmailAddress, 0, len(agentIDs))
+		for _, agentID := range agentIDs {
+			address, err := agentEmailAddressForOperatorAgentTx(
+				ctx, tx, scope, accountID, agentID, false,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"verify suspended agent-email mailbox for %s: %w",
+					agentID, err,
+				)
+			}
+			if address.RealmID != realmID || address.Domain != domain {
+				return nil, fmt.Errorf(
+					"%w: suspended agent-email mailbox for %s drifted from configured realm or domain",
+					ErrAgentEmailPilotNotEnrolled, agentID,
+				)
+			}
+			addresses = append(addresses, address)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return addresses, nil
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err

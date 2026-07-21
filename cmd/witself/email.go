@@ -41,7 +41,7 @@ type agentEmailCodeCandidatesResult struct {
 
 func emailCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete ...")
+		fmt.Fprintln(os.Stderr, "usage: witself email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator ...")
 		return 2
 	}
 	switch args[0] {
@@ -67,10 +67,93 @@ func emailCmd(args []string) int {
 		return emailRelease(args[1:])
 	case "complete":
 		return emailComplete(args[1:])
+	case "operator":
+		return emailOperatorCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself email: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+func emailOperatorCmd(args []string) int {
+	if len(args) == 0 || args[0] != "receive" {
+		fmt.Fprintln(os.Stderr, "usage: witself email operator receive show|enable|disable ...")
+		return 2
+	}
+	return emailOperatorReceiveCmd(args[1:])
+}
+
+func emailOperatorReceiveCmd(args []string) int {
+	if len(args) == 0 || (args[0] != "show" && args[0] != "enable" && args[0] != "disable") {
+		fmt.Fprintln(os.Stderr, "usage: witself email operator receive show|enable|disable (--agent-id AGENT | --realm-id REALM) [operator connection flags]")
+		return 2
+	}
+	operation := args[0]
+	fs := flag.NewFlagSet("email operator receive "+operation, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
+	tokenFile := fs.String("token-file", "", "file containing an operator token")
+	agentID := fs.String("agent-id", "", "target enrolled account agent id")
+	realmID := fs.String("realm-id", "", "target enrolled realm id")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	agent := strings.TrimSpace(*agentID)
+	realm := strings.TrimSpace(*realmID)
+	if fs.NArg() != 0 || (agent == "") == (realm == "") {
+		fmt.Fprintln(os.Stderr, "usage: witself email operator receive "+operation+" (--agent-id AGENT | --realm-id REALM) [operator connection flags]")
+		return 2
+	}
+	ctx := context.Background()
+	ep, token, err := connect(ctx, *account, *endpoint, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	desiredState := ""
+	switch operation {
+	case "enable":
+		desiredState = "enabled"
+	case "disable":
+		desiredState = "disabled"
+	}
+	if agent != "" {
+		var control client.AgentEmailReceiveControl
+		if operation == "show" {
+			control, err = client.GetAgentEmailReceiveControl(ctx, ep, token, agent)
+		} else {
+			control, err = client.SetAgentEmailReceiveControl(ctx, ep, token, agent, desiredState)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return printJSON(map[string]any{"control": control})
+		}
+		fmt.Printf("agent\t%s\neffective receive\t%s\nagent receive\t%s\nrealm receive\t%s\nrow version\t%d\n",
+			control.AgentID, control.ReceiveState, control.AgentReceiveState,
+			control.RealmReceiveState, control.RowVersion)
+		return 0
+	}
+	var control client.AgentEmailRealmReceiveControl
+	if operation == "show" {
+		control, err = client.GetRealmAgentEmailReceiveControl(ctx, ep, token, realm)
+	} else {
+		control, err = client.SetRealmAgentEmailReceiveControl(ctx, ep, token, realm, desiredState)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"control": control})
+	}
+	fmt.Printf("realm\t%s\nreceive\t%s\nmailboxes\t%d\nrow version\t%d\n",
+		control.RealmID, control.ReceiveState, control.MailboxCount, control.RowVersion)
+	return 0
 }
 
 func emailAddressCmd(args []string) int {

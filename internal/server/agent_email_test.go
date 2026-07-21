@@ -59,6 +59,16 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
 	assertAgentEmailVerdict(t, response, http.StatusServiceUnavailable, "receive_disabled")
 
+	ingestErr = ErrAgentEmailRetryCanaryTemporary
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusServiceUnavailable, "temporary")
+
+	ingestErr = ErrAgentEmailRetryCanaryPermanent
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusGone, "retry_canary_rejected")
+
 	ingestErr = context.DeadlineExceeded
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
@@ -164,7 +174,8 @@ func TestAgentEmailOwnerHTTPContractAndAuthorization(t *testing.T) {
 			return AgentEmailAddress{
 				ID: "eaddr_aaaaaaaaaaaaaaaa", MailboxID: message.MailboxID,
 				AccountID: "acc_1", RealmID: realmID, OwnerAgentID: ownerID,
-				Address: "pilot.realm@agent-mail.witwave.ai", ReceiveState: "enabled",
+				Address: "pilot.realm@agent-mail.witwave.ai", ReceiveState: "disabled",
+				AgentReceiveState: "enabled", RealmReceiveState: "disabled",
 			}, nil
 		},
 		ListAgentEmails: func(_ context.Context, _ DomainPrincipal, opts AgentEmailListOptions) (AgentEmailPage, error) {
@@ -222,7 +233,9 @@ func TestAgentEmailOwnerHTTPContractAndAuthorization(t *testing.T) {
 	handler := apiMux(cfg)
 
 	response := performAgentEmailOwnerRequest(handler, http.MethodGet, "/v1/email/address", "full", "", nil)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "pilot.realm@agent-mail.witwave.ai") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "pilot.realm@agent-mail.witwave.ai") ||
+		!strings.Contains(response.Body.String(), `"receive_state":"disabled"`) ||
+		!strings.Contains(response.Body.String(), `"realm_receive_state":"disabled"`) {
 		t.Fatalf("address response = %d %s", response.Code, response.Body.String())
 	}
 
@@ -326,6 +339,182 @@ func TestAgentEmailOwnerHTTPContractAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestAgentEmailOperatorReceiveControlHTTPContract(t *testing.T) {
+	pilot, _ := testAgentEmailPilotConfig(t)
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	var agentTarget, agentState, realmTarget, realmState string
+	auth := func(_ context.Context, token string) (string, string, string, bool, error) {
+		status := "active"
+		switch token {
+		case "operator-token":
+		case "suspended-token":
+			status = "suspended"
+		case "pending-token":
+			status = "pending"
+		default:
+			return "", "", "", false, nil
+		}
+		return "opr_1", "acc_1", status, true, nil
+	}
+	cfg := Config{
+		Authenticate: auth, AgentEmailPilot: pilot,
+		GetAgentEmailReceiveControl: func(_ context.Context, accountID, operatorID, agentID string) (AgentEmailReceiveControl, error) {
+			if accountID != "acc_1" || operatorID != "opr_1" {
+				t.Fatalf("agent get principal = %q/%q", accountID, operatorID)
+			}
+			agentTarget = agentID
+			return AgentEmailReceiveControl{
+				AccountID: accountID, RealmID: "realm_aaaaaaaaaaaaaaaa", AgentID: agentID,
+				ReceiveState: "disabled", AgentReceiveState: "enabled",
+				RealmReceiveState: "disabled", RowVersion: 3, UpdatedAt: now,
+			}, nil
+		},
+		SetAgentEmailReceiveControl: func(_ context.Context, accountID, _ string, agentID, state string) (AgentEmailReceiveControl, error) {
+			agentTarget, agentState = agentID, state
+			return AgentEmailReceiveControl{
+				AccountID: accountID, RealmID: "realm_aaaaaaaaaaaaaaaa", AgentID: agentID,
+				ReceiveState: state, AgentReceiveState: state,
+				RealmReceiveState: "enabled", RowVersion: 4, UpdatedAt: now,
+			}, nil
+		},
+		GetRealmEmailReceiveControl: func(_ context.Context, accountID, _ string, realmID string) (AgentEmailRealmReceiveControl, error) {
+			realmTarget = realmID
+			return AgentEmailRealmReceiveControl{
+				AccountID: accountID, RealmID: realmID, ReceiveState: "enabled",
+				MailboxCount: 5, RowVersion: 1, UpdatedAt: now,
+			}, nil
+		},
+		SetRealmEmailReceiveControl: func(_ context.Context, accountID, _ string, realmID, state string) (AgentEmailRealmReceiveControl, error) {
+			realmTarget, realmState = realmID, state
+			return AgentEmailRealmReceiveControl{
+				AccountID: accountID, RealmID: realmID, ReceiveState: state,
+				MailboxCount: 5, RowVersion: 2, UpdatedAt: now,
+			}, nil
+		},
+	}
+	handler := apiMux(cfg)
+	agentID := "agent_aaaaaaaaaaaaaaaa"
+	realmID := "realm_aaaaaaaaaaaaaaaa"
+
+	response := performAgentEmailOwnerRequest(handler, http.MethodGet,
+		"/v1/agents/"+agentID+"/email-receive", "operator-token", "", nil)
+	if response.Code != http.StatusOK || agentTarget != agentID ||
+		strings.Contains(response.Body.String(), "@") ||
+		!strings.Contains(response.Body.String(), `"realm_receive_state":"disabled"`) {
+		t.Fatalf("agent control get = %d %s target=%q", response.Code, response.Body.String(), agentTarget)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPatch,
+		"/v1/agents/"+agentID+"/email-receive", "operator-token",
+		`{"receive_state":"disabled"}`, nil)
+	if response.Code != http.StatusOK || agentState != "disabled" {
+		t.Fatalf("agent control set = %d %s state=%q", response.Code, response.Body.String(), agentState)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPatch,
+		"/v1/agents/"+agentID+"/email-receive", "operator-token",
+		`{"receive_state":"enabled","agent_id":"agent_bbbbbbbbbbbbbbbb"}`, nil)
+	if response.Code != http.StatusBadRequest || agentState != "disabled" {
+		t.Fatalf("spoofed agent control = %d %s state=%q", response.Code, response.Body.String(), agentState)
+	}
+
+	response = performAgentEmailOwnerRequest(handler, http.MethodGet,
+		"/v1/realms/"+realmID+"/email-receive", "operator-token", "", nil)
+	if response.Code != http.StatusOK || realmTarget != realmID ||
+		!strings.Contains(response.Body.String(), `"mailbox_count":5`) {
+		t.Fatalf("realm control get = %d %s target=%q", response.Code, response.Body.String(), realmTarget)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPatch,
+		"/v1/realms/"+realmID+"/email-receive", "operator-token",
+		`{"receive_state":"disabled"}`, nil)
+	if response.Code != http.StatusOK || realmState != "disabled" {
+		t.Fatalf("realm control set = %d %s state=%q", response.Code, response.Body.String(), realmState)
+	}
+	for _, target := range []string{
+		"/v1/agents/" + agentID + "/email-receive",
+		"/v1/realms/" + realmID + "/email-receive",
+	} {
+		response = performAgentEmailOwnerRequest(handler, http.MethodGet, target, "agent-token", "", nil)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("non-operator %s status = %d", target, response.Code)
+		}
+		if got := response.Header().Get("Cache-Control"); got != "private, no-store" {
+			t.Fatalf("operator control Cache-Control = %q", got)
+		}
+		response = performAgentEmailOwnerRequest(handler, http.MethodGet, target, "suspended-token", "", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("suspended control GET %s status = %d body=%s", target, response.Code, response.Body.String())
+		}
+		response = performAgentEmailOwnerRequest(handler, http.MethodPatch, target, "suspended-token",
+			`{"receive_state":"disabled"}`, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("suspended disable %s status = %d body=%s", target, response.Code, response.Body.String())
+		}
+		response = performAgentEmailOwnerRequest(handler, http.MethodPatch, target, "suspended-token",
+			`{"receive_state":"enabled"}`, nil)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("suspended enable %s status = %d body=%s", target, response.Code, response.Body.String())
+		}
+		response = performAgentEmailOwnerRequest(handler, http.MethodGet, target, "pending-token", "", nil)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("pending control GET %s status = %d", target, response.Code)
+		}
+	}
+}
+
+func TestAgentEmailRetryCanaryHTTPContract(t *testing.T) {
+	pilot, _ := testAgentEmailPilotConfig(t)
+	pilot.RetryCanaryAgentID = "agent_aaaaaaaaaaaaaaaa"
+	const challenge = "11111111-2222-4333-8444-555555555555"
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		p := DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: pilot.RetryCanaryAgentID,
+			AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa",
+			AccountStatus: "active", AccessProfile: AccessProfileFull,
+		}
+		if token == "other" {
+			p.ID = "agent_bbbbbbbbbbbbbbbb"
+		}
+		return p, token == "canary" || token == "other", nil
+	}
+	var armedChallenge, statusChallenge string
+	handler := apiMux(Config{
+		AuthenticatePrincipal: auth, AgentEmailPilot: pilot,
+		ArmAgentEmailRetryCanary: func(_ context.Context, _ DomainPrincipal, got string) (AgentEmailRetryCanaryCheckpoint, error) {
+			armedChallenge = got
+			return AgentEmailRetryCanaryCheckpoint{State: "armed", Armed: true}, nil
+		},
+		GetAgentEmailRetryCanary: func(_ context.Context, _ DomainPrincipal, got string) (AgentEmailRetryCanaryCheckpoint, error) {
+			statusChallenge = got
+			return AgentEmailRetryCanaryCheckpoint{
+				State: "accepted", Armed: true, Tempfailed: true,
+				Accepted: true, TempfailCount: 1,
+			}, nil
+		},
+	})
+	response := performAgentEmailOwnerRequest(handler, http.MethodPost,
+		"/v1/email/retry-canary:arm", "canary", `{"challenge":"`+challenge+`"}`, nil)
+	if response.Code != http.StatusOK || armedChallenge != challenge ||
+		strings.Contains(response.Body.String(), challenge) {
+		t.Fatalf("canary arm = %d %s challenge=%q", response.Code, response.Body.String(), armedChallenge)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPost,
+		"/v1/email/retry-canary:status", "canary", `{"challenge":"`+challenge+`"}`, nil)
+	if response.Code != http.StatusOK || statusChallenge != challenge ||
+		!strings.Contains(response.Body.String(), `"accepted":true`) ||
+		strings.Contains(response.Body.String(), challenge) {
+		t.Fatalf("canary status = %d %s challenge=%q", response.Code, response.Body.String(), statusChallenge)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPost,
+		"/v1/email/retry-canary:arm?challenge="+challenge, "canary", `{}`, nil)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("query challenge status = %d", response.Code)
+	}
+	response = performAgentEmailOwnerRequest(handler, http.MethodPost,
+		"/v1/email/retry-canary:arm", "other", `{"challenge":"`+challenge+`"}`, nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("non-canary arm status = %d", response.Code)
+	}
+}
+
 func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	disabled := apiMux(Config{
 		AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
@@ -372,6 +561,11 @@ func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	badKey.RelayPublicKeys = map[string]ed25519.PublicKey{"pilot-key": {1}}
 	if err := ValidateAgentEmailPilotConfig(badKey); err == nil {
 		t.Fatal("short relay public key accepted")
+	}
+	badCanary := pilot
+	badCanary.RetryCanaryAgentID = "agent_zzzzzzzzzzzzzzzz"
+	if err := ValidateAgentEmailPilotConfig(badCanary); err == nil {
+		t.Fatal("unenrolled retry canary accepted")
 	}
 }
 

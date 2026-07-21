@@ -44,6 +44,27 @@ metadata-only guarantee holds even against a cell that returns them. Showing
 bodies is a
 deliberate follow-up: a server-side observational message body read in the
 public API, consistent with the existing observational read family.
+Receive-only agent email is a separate metadata-only surface built from
+exactly `GET /v1/email/address` and `GET /v1/email`; the dashboard never calls
+`:listen`, `:read`, `:ack`, or any processing action. The proxy rebuilds both
+responses through a narrow allow-list rather than trusting the current wire
+shape. The browser receives the display address and effective/agent/realm
+receive states plus sender, subject, receive time, read/ack state, processing state, attachment count,
+duplicate warning, and edge verdict metadata. It receives no email/message,
+mailbox, owner, address, duplicate-target, or processing-fence identifiers; no
+decoded text or raw MIME/header material; and no attachment details. Omitting
+the message id is deliberate: the observational page has no per-message
+action, so browser code has no target with which to form a read,
+acknowledgement, or claim request. The upstream cursor contains a message id,
+so this observational surface deliberately omits cursor pagination and shows
+only a bounded newest page. Unread and unacknowledged filters are forwarded to
+the passive list. Live updates re-read that bounded newest page through SSE and
+never occupy an agent email `:listen` slot. A pre-feature cell
+or an unenrolled agent gets a settled unavailable/not-enrolled panel rather
+than a broken view, and the Overview checkpoint links to the email pane when
+the value-free `email_checkpoint` says work is pending. Sender and subject are
+always rendered as untrusted external input; attachment bodies remain deferred
+pending their separate security review.
 Facts render as a fifth surface from the redacted `observational=true` fact
 list (never `include_sensitive`; the plain list records ranking-eligible
 search usage, so a cell without observational fact reads gets a clear 501
@@ -86,8 +107,8 @@ about a minute and is re-proven rather than memoized for the life of the
 serve.
 
 Read-only means the dashboard writes no agent content: no memories, facts,
-messages, secrets, usage, or rankings. Its sole, deliberate write is its own
-namespaced UI preferences row — today just the theme choice — behind a
+messages, email, secrets, usage, or rankings. Its sole, deliberate write is
+its own namespaced UI preferences row — today just the theme choice — behind a
 dedicated pair of self endpoints (`GET`/`PUT
 /v1/self/dashboard-preferences`), agent-token-only and own-row-only. The row
 is a size-capped (4 KiB), strictly validated flat document
@@ -173,8 +194,9 @@ discovery.
 
 ## Consequences
 
-- Operators get a live window into transcripts, memories, facts, and sealed
-  secret metadata without any widened read capability or privileged path.
+- Operators get a live window into transcripts, memories, facts, receive-only
+  email metadata, and sealed secret metadata without any widened read
+  capability or privileged path.
 - Read-only means the dashboard writes no agent content. Its sole write is
   its own size-capped, strictly-validated, agent-scoped UI preferences row
   via a dedicated endpoint (`PUT /v1/self/dashboard-preferences`, proxied as

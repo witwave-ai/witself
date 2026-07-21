@@ -226,7 +226,10 @@ func TestSelfDigestIncludesValueFreeEmailCheckpointOnlyForEnrolledAgent(t *testi
 			if p.ID != "agent_aaaaaaaaaaaaaaaa" {
 				t.Fatalf("email checkpoint principal = %+v", p)
 			}
-			return AgentEmailCheckpoint{Pending: true, MailboxPending: true}, nil
+			return AgentEmailCheckpoint{
+				Pending: true, MailboxPending: true, ReceiveState: "disabled",
+				AgentReceiveState: "enabled", RealmReceiveState: "disabled",
+			}, nil
 		},
 	}))
 	defer srv.Close()
@@ -238,7 +241,10 @@ func TestSelfDigestIncludesValueFreeEmailCheckpointOnlyForEnrolledAgent(t *testi
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint == nil ||
-		!digest.EmailCheckpoint.Pending || !digest.EmailCheckpoint.MailboxPending || digest.EmailCheckpoint.Unavailable {
+		!digest.EmailCheckpoint.Pending || !digest.EmailCheckpoint.MailboxPending || digest.EmailCheckpoint.Unavailable ||
+		digest.EmailCheckpoint.ReceiveState != "disabled" ||
+		digest.EmailCheckpoint.AgentReceiveState != "enabled" ||
+		digest.EmailCheckpoint.RealmReceiveState != "disabled" {
 		t.Fatalf("enrolled self/email checkpoint = %d / %+v", resp.StatusCode, digest.EmailCheckpoint)
 	}
 

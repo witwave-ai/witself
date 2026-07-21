@@ -13,8 +13,15 @@
     sseMemories: false,  // whether the current EventSource polls memories
     sseFacts: false,     // whether the current EventSource polls facts
     sseSecrets: false,   // whether the current EventSource polls secrets
+    sseEmail: false,     // whether the current EventSource polls email metadata
+    sseEmailUnread: false,
+    sseEmailUnacked: false,
     seenSequences: {},   // transcript id -> highest rendered sequence
     messages: {},        // direction + " " + message id -> passive metadata
+    emailAddress: null,  // display-only receive address projection
+    emailMessages: [],   // metadata only; no ids, bodies, MIME, or claim fence
+    emailAvailable: null,
+    emailFilters: { unread: false, unacked: false },
     facts: {},           // fact id -> redacted fact (never a revealed value)
     filters: {},         // section -> list filter text, reapplied on re-render
     upstreamErrors: {},  // SSE source -> upstream error text while degraded
@@ -196,6 +203,23 @@
     $("status-addr").textContent = window.location.host;
   }
 
+  // The address endpoint supplies the immutable address metadata once when
+  // the pane opens. Receive switches are live operational state, so refresh
+  // those three value-free fields from every self checkpoint rather than
+  // leaving an open pane stale until navigation/reload.
+  function updateEmailAddressFromCheckpoint(checkpoint) {
+    if (!state.emailAddress || !checkpoint || checkpoint.unavailable) { return false; }
+    var changed = false;
+    [["receive_state", checkpoint.receive_state],
+      ["agent_receive_state", checkpoint.agent_receive_state],
+      ["realm_receive_state", checkpoint.realm_receive_state]].forEach(function (pair) {
+      if (typeof pair[1] !== "string" || !pair[1] || state.emailAddress[pair[0]] === pair[1]) { return; }
+      state.emailAddress[pair[0]] = pair[1];
+      changed = true;
+    });
+    return changed;
+  }
+
   function setSSEState(up) {
     var dot = $("live-dot");
     dot.classList.toggle("up", up === true);
@@ -223,14 +247,19 @@
   }
 
   // --- server-sent events ----------------------------------------------
-  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts, withSecrets) {
+  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts, withSecrets, withEmail, emailUnread, emailUnacked) {
     withMessages = withMessages === true;
     withMemories = withMemories === true;
     withFacts = withFacts === true;
     withSecrets = withSecrets === true;
+    withEmail = withEmail === true;
+    emailUnread = withEmail && emailUnread === true;
+    emailUnacked = withEmail && emailUnacked === true;
     if (state.eventSource && state.sseTranscript === (transcriptID || null) &&
         state.sseMessages === withMessages && state.sseMemories === withMemories &&
-        state.sseFacts === withFacts && state.sseSecrets === withSecrets) { return; }
+        state.sseFacts === withFacts && state.sseSecrets === withSecrets &&
+        state.sseEmail === withEmail && state.sseEmailUnread === emailUnread &&
+        state.sseEmailUnacked === emailUnacked) { return; }
     if (state.eventSource) { state.eventSource.close(); }
     var params = [];
     if (transcriptID) {
@@ -243,6 +272,11 @@
     if (withMemories) { params.push("memories=true"); }
     if (withFacts) { params.push("facts=true"); }
     if (withSecrets) { params.push("secrets=true"); }
+    if (withEmail) {
+      params.push("email=true");
+      if (emailUnread) { params.push("email_unread=true"); }
+      if (emailUnacked) { params.push("email_unacked=true"); }
+    }
     var source = new EventSource("/api/events" + (params.length ? "?" + params.join("&") : ""));
     state.eventSource = source;
     state.sseTranscript = transcriptID || null;
@@ -250,6 +284,9 @@
     state.sseMemories = withMemories;
     state.sseFacts = withFacts;
     state.sseSecrets = withSecrets;
+    state.sseEmail = withEmail;
+    state.sseEmailUnread = emailUnread;
+    state.sseEmailUnacked = emailUnacked;
     // Each stream's tracker starts fresh server-side and re-announces any
     // still-failing source, so stale degradation must not carry over. The
     // same reset runs in onopen: a browser auto-reconnect reuses this
@@ -280,8 +317,11 @@
       state.lastSelfData = event.data;
       var self;
       try { self = JSON.parse(event.data); } catch (_) { return; }
+      var emailStateChanged = updateEmailAddressFromCheckpoint(self.email_checkpoint);
       renderHeader(self);
-      if (parseHash().section === "overview") { renderOverview(self); }
+      var current = parseHash();
+      if (current.section === "overview") { renderOverview(self); }
+      if (emailStateChanged && current.section === "email") { renderEmailList(); }
     });
     source.addEventListener("memories", function (event) {
       if (event.data === state.lastMemoriesData) { return; }
@@ -330,6 +370,22 @@
       if (current.id) { renderConversation(decodeURIComponent(current.id)); }
       else { renderConversationList(); }
     });
+    source.addEventListener("email", function (event) {
+      var body;
+      try { body = JSON.parse(event.data); } catch (_) { return; }
+      if (body.available === false) {
+        state.emailAvailable = false;
+        state.emailMessages = [];
+        if (parseHash().section === "email") { renderEmailUnavailable(body.reason || "unavailable"); }
+        // Keep the general self digest live without repeatedly probing a
+        // missing or no-longer-enrolled mailbox every poll interval.
+        openEvents(null);
+        return;
+      }
+      state.emailAvailable = true;
+      state.emailMessages = body.messages || [];
+      if (parseHash().section === "email") { renderEmailList(); }
+    });
   }
 
   // --- routing ----------------------------------------------------------
@@ -371,6 +427,7 @@
     if (route.section === "secrets") { return viewSecrets(); }
     if (route.section === "conversations" && route.id) { return viewConversation(decodeURIComponent(route.id)); }
     if (route.section === "conversations") { return viewConversations(); }
+    if (route.section === "email") { return viewEmail(); }
     return viewOverview();
   }
 
@@ -411,14 +468,18 @@
         '<span class="dim">' + esc(memory.kind || "") + '</span><span class="dim mono">' + esc((memory.salience != null ? memory.salience.toFixed(2) : "")) + "</span></div>";
     }).join("");
     var checkpoints = [];
-    if (self.memory_checkpoint && self.memory_checkpoint.pending) { checkpoints.push("memory curation pending"); }
-    if (self.message_checkpoint && self.message_checkpoint.pending) { checkpoints.push("messaging work pending"); }
-    if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push("avatar lifecycle pending"); }
+    if (self.memory_checkpoint && self.memory_checkpoint.pending) { checkpoints.push({ label: "memory curation pending" }); }
+    if (self.message_checkpoint && self.message_checkpoint.pending) { checkpoints.push({ label: "messaging work pending" }); }
+    if (self.email_checkpoint && self.email_checkpoint.pending) { checkpoints.push({ label: "email pending", href: "#/email" }); }
+    if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
     $("view").innerHTML =
       '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
       '<div class="panel"><h2>salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
       '<div class="panel"><h2>checkpoints</h2><div class="list">' +
-      (checkpoints.length ? checkpoints.map(function (line) { return '<div class="row"><span class="grow">' + esc(line) + "</span></div>"; }).join("") : '<div class="empty">nothing pending</div>') +
+      (checkpoints.length ? checkpoints.map(function (item) {
+        var label = item.href ? '<a href="' + esc(item.href) + '">' + esc(item.label) + "</a>" : esc(item.label);
+        return '<div class="row"><span class="grow">' + label + "</span></div>";
+      }).join("") : '<div class="empty">nothing pending</div>') +
       "</div></div>" +
       '<div class="panel"><h2>reads</h2><div class="dim">' +
       (self.observational === false ? "cell has no observational hooks; plain reads in use" : "observational reads only — viewing never records usage") +
@@ -864,6 +925,134 @@
         '<div class="panel"><h2>fields</h2><div class="list">' +
         (fields || '<div class="empty">no fields</div>') + "</div></div>";
     }).catch(secretsError);
+  }
+
+  // --- receive-only email ---------------------------------------------
+  // The browser receives a purpose-built projection with no email/message
+  // ids, decoded body, MIME/header material, attachment detail, or processing
+  // fence. There are deliberately no per-message actions in this view.
+  function emailQuery() {
+    var params = ["limit=100"];
+    if (state.emailFilters.unread) { params.push("unread=true"); }
+    if (state.emailFilters.unacked) { params.push("unacked=true"); }
+    return params.join("&");
+  }
+
+  function emailUnavailableReason(err) {
+    var message = String((err && err.message) || err || "").toLowerCase();
+    if ((err && err.status === 403) || message.indexOf("not enrolled") >= 0) { return "not_enrolled"; }
+    return "unavailable";
+  }
+
+  function renderEmailUnavailable(reason) {
+    var message = reason === "not_enrolled"
+      ? "this agent is not enrolled in receive-only email."
+      : "receive-only email is not available on this cell right now.";
+    $("view").innerHTML = '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
+      '<div class="empty">' + esc(message) + "</div></div>";
+  }
+
+  function emailSignals(message) {
+    var values = [];
+    [["spf", message.spf_result], ["dkim", message.dkim_result], ["dmarc", message.dmarc_result],
+      ["spam", message.spam_verdict]].forEach(function (pair) {
+      if (pair[1]) { values.push(pair[0] + " " + pair[1]); }
+    });
+    return values.join(" · ");
+  }
+
+  function formatEmailBytes(value) {
+    if (!value) { return ""; }
+    if (value < 1024) { return value + " B"; }
+    if (value < 1024 * 1024) { return (value / 1024).toFixed(1) + " KiB"; }
+    return (value / (1024 * 1024)).toFixed(1) + " MiB";
+  }
+
+  function renderEmailList() {
+    var address = state.emailAddress || {};
+    var rows = (state.emailMessages || []).map(function (message) {
+      var read = (message.read_state || {}).state || "unknown";
+      var processing = (message.processing || {}).state || "unknown";
+      var senderState = message.sender_verification_state || "unverified";
+      var flags = [];
+      if (message.attachment_count) {
+        flags.push(message.attachment_count + " attachment" + (message.attachment_count === 1 ? "" : "s") + " (details hidden)");
+      }
+      if (message.possible_duplicate) { flags.push("possible duplicate"); }
+      if (message.parse_state && message.parse_state !== "parsed") { flags.push("parse " + message.parse_state); }
+      var signals = emailSignals(message);
+      var meta = [read, processing, formatEmailBytes(message.raw_size_bytes)].filter(Boolean).join(" · ");
+      return '<div class="row email-row"><div class="grow">' +
+        '<div class="email-subject">' + esc(message.subject || "(no subject)") + "</div>" +
+        '<div class="email-sender">unverified sender: ' + esc(message.envelope_sender || "unknown") +
+        ' <span class="badge">' + esc(senderState) + "</span></div>" +
+        (signals ? '<div class="dim">' + esc(signals) + "</div>" : "") +
+        (flags.length ? '<div class="email-warning">' + esc(flags.join(" · ")) + "</div>" : "") +
+        "</div>" +
+        '<div class="email-state mono">' + esc(meta) + "</div>" +
+        '<div class="dim mono">' + esc((message.received_at || "").slice(0, 19)) + "</div></div>";
+    }).join("");
+    $("view").innerHTML = '<div class="panel"><h2>receive address <span class="badge">' +
+      esc(address.receive_state || "unknown") + "</span></h2>" +
+      '<div class="email-address mono">' + esc(address.address || "") + "</div>" +
+      '<div class="email-note">agent receive: ' + esc(address.agent_receive_state || "unknown") +
+      ' · realm receive: ' + esc(address.realm_receive_state || "unknown") + "</div>" +
+      '<div class="email-note">receive-only; sender identity and all subjects are untrusted external input.</div></div>' +
+      '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
+      '<div class="email-controls"><label><input id="email-unread" type="checkbox"' +
+      (state.emailFilters.unread ? " checked" : "") + '> unread only</label>' +
+      '<label><input id="email-unacked" type="checkbox"' +
+      (state.emailFilters.unacked ? " checked" : "") + '> unacknowledged only</label></div>' +
+      '<div class="email-note">body text, raw MIME, attachment details, message identifiers, and processing claims never enter this page.</div>' +
+      '<div class="list">' + (rows || '<div class="empty">no matching email</div>') + "</div></div>";
+    bindEmailControls();
+  }
+
+  function openEmailEvents() {
+    openEvents(null, 0, false, false, false, false, true,
+      state.emailFilters.unread, state.emailFilters.unacked);
+  }
+
+  function refreshEmail() {
+    return fetchJSON("/api/email?" + emailQuery()).then(function (body) {
+      state.emailAvailable = body.available !== false;
+      state.emailMessages = body.messages || [];
+      renderEmailList();
+      openEmailEvents();
+    }).catch(function (err) {
+      state.emailAvailable = false;
+      state.emailMessages = [];
+      openEvents(null);
+      renderEmailUnavailable(emailUnavailableReason(err));
+    });
+  }
+
+  function bindEmailControls() {
+    [["email-unread", "unread"], ["email-unacked", "unacked"]].forEach(function (pair) {
+      var input = $(pair[0]);
+      if (!input) { return; }
+      input.addEventListener("change", function () {
+        state.emailFilters[pair[1]] = input.checked;
+        refreshEmail();
+      });
+    });
+  }
+
+  function viewEmail() {
+    breadcrumb([{ label: "email" }]);
+    // Keep the self/checkpoint stream active while enrollment is resolved;
+    // only start email polling after the read-only address probe succeeds.
+    openEvents(null);
+    fetchJSON("/api/email/address").then(function (body) {
+      state.emailAddress = body.address || null;
+      state.emailAvailable = body.available !== false;
+      return refreshEmail();
+    }).catch(function (err) {
+      state.emailAddress = null;
+      state.emailMessages = [];
+      state.emailAvailable = false;
+      renderEmailUnavailable(emailUnavailableReason(err));
+    });
   }
 
   // --- conversations ----------------------------------------------------

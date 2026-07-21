@@ -55,6 +55,9 @@ agentEmail:
     audience: ""
     realmID: ""
     agentIDs: []
+    # Optional synthetic provider-retry proof. Keep empty until every server pod
+    # runs schema-61-capable code, then select exactly one enrolled pilot agent.
+    retryCanaryAgentID: ""
     relayPublicKeysJSON: ""
     relayReplayWindow: 5m
 

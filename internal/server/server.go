@@ -447,10 +447,16 @@ type Config struct {
 	AckAgentEmail               func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
 	MarkAgentEmailCodeConsumed  func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
 	GetSelfAgentEmailCheckpoint func(ctx context.Context, p DomainPrincipal) (AgentEmailCheckpoint, error)
+	ArmAgentEmailRetryCanary    func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
+	GetAgentEmailRetryCanary    func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
 	ClaimAgentEmail             func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimAgentEmailRequest) (AgentEmailProcessing, error)
 	RenewAgentEmailClaim        func(ctx context.Context, p DomainPrincipal, messageID string, in RenewAgentEmailClaimRequest) (AgentEmailProcessing, error)
 	ReleaseAgentEmailClaim      func(ctx context.Context, p DomainPrincipal, messageID string, in ReleaseAgentEmailClaimRequest) (AgentEmailProcessing, error)
 	CompleteAgentEmail          func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteAgentEmailRequest) (AgentEmailProcessing, error)
+	GetAgentEmailReceiveControl func(ctx context.Context, accountID, operatorID, agentID string) (AgentEmailReceiveControl, error)
+	SetAgentEmailReceiveControl func(ctx context.Context, accountID, operatorID, agentID, receiveState string) (AgentEmailReceiveControl, error)
+	GetRealmEmailReceiveControl func(ctx context.Context, accountID, operatorID, realmID string) (AgentEmailRealmReceiveControl, error)
+	SetRealmEmailReceiveControl func(ctx context.Context, accountID, operatorID, realmID, receiveState string) (AgentEmailRealmReceiveControl, error)
 
 	// Open message requests are realm-local, message-backed delegations. The
 	// backend persists candidate snapshots, offers, coordinator selections, and
@@ -1730,6 +1736,24 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.CreateRealmAvatarStyleVersion != nil {
 			mux.HandleFunc("POST /v1/realms/{realm}/avatar-style/versions", createRealmAvatarStyleVersionHandler(cfg.Authenticate, cfg.CreateRealmAvatarStyleVersion))
 		}
+		if agentEmailPilotSupported {
+			if cfg.GetAgentEmailReceiveControl != nil {
+				mux.HandleFunc("GET /v1/agents/{agent}/email-receive", getAgentEmailReceiveControlHandler(
+					cfg.Authenticate, cfg.GetAgentEmailReceiveControl))
+			}
+			if cfg.SetAgentEmailReceiveControl != nil {
+				mux.HandleFunc("PATCH /v1/agents/{agent}/email-receive", setAgentEmailReceiveControlHandler(
+					cfg.Authenticate, cfg.SetAgentEmailReceiveControl))
+			}
+			if cfg.GetRealmEmailReceiveControl != nil {
+				mux.HandleFunc("GET /v1/realms/{realm}/email-receive", getRealmAgentEmailReceiveControlHandler(
+					cfg.Authenticate, cfg.GetRealmEmailReceiveControl))
+			}
+			if cfg.SetRealmEmailReceiveControl != nil {
+				mux.HandleFunc("PATCH /v1/realms/{realm}/email-receive", setRealmAgentEmailReceiveControlHandler(
+					cfg.Authenticate, cfg.SetRealmEmailReceiveControl))
+			}
+		}
 	}
 	if cfg.AuthenticatePrincipal != nil {
 		mux.HandleFunc("GET /v1/self", selfHandler(
@@ -2027,6 +2051,16 @@ func apiMux(cfg Config) http.Handler {
 				mux.HandleFunc("GET /v1/email/checkpoint", getAgentEmailCheckpointHandler(
 					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetSelfAgentEmailCheckpoint))
 			}
+			if cfg.AgentEmailPilot.RetryCanaryAgentID != "" {
+				if cfg.ArmAgentEmailRetryCanary != nil {
+					mux.HandleFunc("POST /v1/email/retry-canary:arm", agentEmailRetryCanaryHandler(
+						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ArmAgentEmailRetryCanary))
+				}
+				if cfg.GetAgentEmailRetryCanary != nil {
+					mux.HandleFunc("POST /v1/email/retry-canary:status", agentEmailRetryCanaryHandler(
+						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetAgentEmailRetryCanary))
+				}
+			}
 			if cfg.ReadAgentEmail != nil || cfg.AckAgentEmail != nil ||
 				cfg.MarkAgentEmailCodeConsumed != nil || cfg.ClaimAgentEmail != nil ||
 				cfg.RenewAgentEmailClaim != nil || cfg.ReleaseAgentEmailClaim != nil ||
@@ -2249,11 +2283,12 @@ type principal struct {
 // requireOperator authenticates the bearer token and passes the principal to
 // h, or writes 401 (missing/invalid) / 500 (server fault). It also requires
 // the account to be ACTIVE (-> 403 otherwise): a pending account can do
-// nothing until its activation gates pass, and a suspended account can do
-// nothing until it resumes. The exceptions — check status, close, suspend,
-// resume — use requireOperatorAnyStatus instead. The refusal message names
-// the current status verbatim so a suspended owner sees "account is
-// suspended" and knows to reach for `witself account resume`.
+// nothing until its activation gates pass, and ordinary suspended-account
+// work stays frozen until resume. The narrow exceptions — status, close,
+// suspend/resume, and explicitly gated harm-reducing actions such as disabling
+// agent-email receive — use requireOperatorAnyStatus instead. The refusal
+// message names the current status verbatim so a suspended owner sees
+// "account is suspended" and knows to reach for `witself account resume`.
 func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		if p.accountStatus != "active" {
@@ -2266,9 +2301,10 @@ func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, p
 }
 
 // requireOperatorAnyStatus authenticates without gating on account status. Use
-// only for the endpoints a not-yet-active or suspended account must still
-// reach: checking its own status, closing itself, and (owner-initiated)
-// suspending or resuming.
+// only for endpoints a not-yet-active or suspended account must still reach:
+// checking its own status, closing itself, (owner-initiated) suspension or
+// resume, and endpoint-local safety gates that permit a read or disable while
+// continuing to reject enable/mint behavior.
 func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)

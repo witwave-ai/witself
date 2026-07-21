@@ -21,6 +21,12 @@ import (
 )
 
 const (
+	// RetryCanaryHeader is the synthetic-only, owner-armed provider-retry
+	// challenge carried inside the signed raw RFC 5322 body. It is never a
+	// sender-authentication signal and has no effect outside the configured
+	// canary mailbox.
+	RetryCanaryHeader = "X-Witself-Canary-Retry"
+
 	maximumMIMEHeaderBytes = 256 * 1024
 	maximumMIMEParts       = 64
 	maximumMIMEDepth       = 8
@@ -28,6 +34,65 @@ const (
 	maximumHeaderValue     = 4096
 	maximumMessageID       = 998
 )
+
+// RetryCanaryChallenge returns one exact canonical UUID challenge from the
+// bounded top-level RFC 5322 headers. The value remains untrusted until the
+// caller has verified the signed relay and matched its hash to an owner-armed
+// canary fence. Duplicate, folded, non-ASCII, or otherwise non-canonical
+// values fail closed.
+func RetryCanaryChallenge(raw []byte) (string, bool, error) {
+	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+		return "", false, ErrMIMEInvalid
+	}
+	end := headerEnd(raw)
+	if end < 0 {
+		return "", false, ErrMIMEInvalid
+	}
+	if end > maximumMIMEHeaderBytes {
+		return "", false, ErrMIMEHeaderLimit
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", false, fmt.Errorf("%w: read message", ErrMIMEInvalid)
+	}
+	values := textproto.MIMEHeader(message.Header).Values(RetryCanaryHeader)
+	if len(values) == 0 {
+		return "", false, nil
+	}
+	if len(values) != 1 || !validRetryCanaryChallenge(values[0]) {
+		return "", true, fmt.Errorf("%w: retry canary header", ErrMIMEInvalid)
+	}
+	return values[0], true, nil
+}
+
+// ValidateRetryCanaryChallenge accepts only the canonical lower-case UUIDv4
+// representation used by the synthetic retry proof. Callers must never place
+// the returned challenge in logs, audit metadata, or URLs.
+func ValidateRetryCanaryChallenge(value string) error {
+	if !validRetryCanaryChallenge(value) {
+		return fmt.Errorf("%w: retry canary challenge", ErrMIMEInvalid)
+	}
+	return nil
+}
+
+func validRetryCanaryChallenge(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' ||
+		value[18] != '-' || value[23] != '-' || value[14] != '4' {
+		return false
+	}
+	if value[19] != '8' && value[19] != '9' && value[19] != 'a' && value[19] != 'b' {
+		return false
+	}
+	for index, char := range []byte(value) {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 var (
 	// ErrMIMEInvalid reports an empty, oversized, or structurally invalid message.

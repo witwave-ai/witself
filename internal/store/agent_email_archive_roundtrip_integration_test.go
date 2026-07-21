@@ -75,6 +75,11 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	realmControl, err := source.SetRealmAgentEmailReceiveControl(ctx, scope,
+		provisioned.AccountID, provisioned.OperatorID, realm.ID, AgentEmailReceiveDisabled)
+	if err != nil || realmControl.ReceiveState != AgentEmailReceiveDisabled || realmControl.RowVersion != 2 {
+		t.Fatalf("disable source realm receive = %#v / %v", realmControl, err)
+	}
 
 	// Retire one address and permanently remove its original agent. Its mailbox
 	// cascades, but the address reservation must remain in the archive without
@@ -87,10 +92,11 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 
 	const (
-		messageA = "emsg_aaaaaaaaaaaaaaaa"
-		messageB = "emsg_bbbbbbbbbbbbbbbb"
+		messageA  = "emsg_aaaaaaaaaaaaaaaa"
+		messageB  = "emsg_bbbbbbbbbbbbbbbb"
+		challenge = "11111111-2222-4333-8444-555555555555"
 	)
-	raw := []byte("From: sender@example.com\r\nTo: owner@example.com\r\nSubject: portable\r\n\r\ncode 123456\r\n")
+	raw := []byte("From: sender@example.com\r\nTo: owner@example.com\r\nX-Witself-Canary-Retry: " + challenge + "\r\nSubject: portable\r\n\r\ncode 123456\r\n")
 	digest := sha256.Sum256(raw)
 	rawSHA := hex.EncodeToString(digest[:])
 	duplicateGroup := agentEmailDuplicateGroup(rawSHA, ownerAddress.Address, "sender@example.com")
@@ -137,6 +143,22 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		ownerAddress.MailboxID, owner.ID, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)
 	}
+	challengeDigest := sha256.Sum256([]byte(challenge))
+	if _, err := source.pool.Exec(ctx, `
+		WITH anchor AS (SELECT clock_timestamp() AS at)
+		INSERT INTO agent_email_retry_canary_arms
+		  (account_id,realm_id,mailbox_id,owner_agent_id,challenge_sha256,
+		   state,delivery_fingerprint_sha256,accepted_message_id,
+		   tempfail_count,row_version,armed_at,expires_at,tempfailed_at,retry_expires_at,accepted_at)
+		SELECT $1,$2,$3,$4,$5,'accepted',$6,$7,1,3,
+		       at-interval '3 seconds',at+interval '14 minutes 57 seconds',
+		       at-interval '2 seconds',at+interval '23 hours 59 minutes 58 seconds',
+		       at-interval '1 second'
+		FROM anchor`,
+		provisioned.AccountID, realm.ID, ownerAddress.MailboxID, owner.ID,
+		hex.EncodeToString(challengeDigest[:]), duplicateGroup, messageA); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := source.SuspendAccountSystem(ctx, provisioned.AccountID,
 		"evacuation", "move agent email to another cell"); err != nil {
@@ -147,20 +169,36 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	archiveBytes := archive.Bytes()
-	var archivedMessages int
+	var archivedMessages, archivedReceiveControls, archivedCanaryProofs int
 	if _, err := archiveexport.Read(ctx, bytes.NewReader(archiveBytes), archiveexport.ImportOptions{
 		CurrentSchema: SchemaVersion(),
 		Row: func(table string, row []byte) error {
-			if table != "agent_email_messages" {
-				return nil
-			}
-			archivedMessages++
 			var object map[string]any
-			if err := json.Unmarshal(row, &object); err != nil {
-				return err
-			}
-			if object["raw_mime"] != `\x`+hex.EncodeToString(raw) {
-				t.Fatalf("archived raw_mime = %#v", object["raw_mime"])
+			switch table {
+			case "agent_email_messages":
+				archivedMessages++
+				if err := json.Unmarshal(row, &object); err != nil {
+					return err
+				}
+				if object["raw_mime"] != `\x`+hex.EncodeToString(raw) {
+					t.Fatalf("archived raw_mime = %#v", object["raw_mime"])
+				}
+			case "agent_email_realm_receive_controls":
+				archivedReceiveControls++
+				if err := json.Unmarshal(row, &object); err != nil {
+					return err
+				}
+				if object["realm_id"] != realm.ID || object["receive_state"] != AgentEmailReceiveDisabled {
+					t.Fatalf("archived realm receive control = %#v", object)
+				}
+			case "agent_email_retry_canary_arms":
+				archivedCanaryProofs++
+				if err := json.Unmarshal(row, &object); err != nil {
+					return err
+				}
+				if object["state"] != agentEmailRetryCanaryAccepted || object["accepted_message_id"] != messageA {
+					t.Fatalf("archived retry canary proof = %#v", object)
+				}
 			}
 			return nil
 		},
@@ -169,6 +207,12 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 	if archivedMessages != 2 {
 		t.Fatalf("archived agent-email messages = %d, want 2", archivedMessages)
+	}
+	if archivedReceiveControls != 1 {
+		t.Fatalf("archived realm receive controls = %d, want 1", archivedReceiveControls)
+	}
+	if archivedCanaryProofs != 1 {
+		t.Fatalf("archived retry canary proofs = %d, want 1", archivedCanaryProofs)
 	}
 
 	if _, err := destination.ImportAccount(ctx, provisioned.AccountID,
@@ -228,5 +272,37 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 	if tombstones != 1 || formerAgents != 0 {
 		t.Fatalf("restored tombstone rows=%d former agents=%d", tombstones, formerAgents)
+	}
+	var restoredAgentReceiveState, restoredRealmReceiveState string
+	var restoredRealmRowVersion int64
+	var restoredRealmDisabledAt *time.Time
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT mb.receive_state,rc.receive_state,rc.row_version,rc.disabled_at
+		FROM agent_email_mailboxes mb
+		JOIN agent_email_realm_receive_controls rc
+		  ON rc.account_id=mb.account_id AND rc.realm_id=mb.realm_id
+		WHERE mb.account_id=$1 AND mb.realm_id=$2 AND mb.owner_agent_id=$3`,
+		provisioned.AccountID, realm.ID, owner.ID).Scan(
+		&restoredAgentReceiveState, &restoredRealmReceiveState,
+		&restoredRealmRowVersion, &restoredRealmDisabledAt); err != nil {
+		t.Fatal(err)
+	}
+	if restoredAgentReceiveState != AgentEmailReceiveEnabled ||
+		restoredRealmReceiveState != AgentEmailReceiveDisabled ||
+		restoredRealmRowVersion != 2 || restoredRealmDisabledAt == nil {
+		t.Fatalf("restored receive layers = agent=%s realm=%s version=%d disabled_at=%v",
+			restoredAgentReceiveState, restoredRealmReceiveState,
+			restoredRealmRowVersion, restoredRealmDisabledAt)
+	}
+	var restoredCanaryState, restoredCanaryMessage string
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT state,accepted_message_id
+		FROM agent_email_retry_canary_arms
+		WHERE account_id=$1 AND mailbox_id=$2`, provisioned.AccountID,
+		ownerAddress.MailboxID).Scan(&restoredCanaryState, &restoredCanaryMessage); err != nil {
+		t.Fatal(err)
+	}
+	if restoredCanaryState != agentEmailRetryCanaryAccepted || restoredCanaryMessage != messageA {
+		t.Fatalf("restored retry canary = %q/%q", restoredCanaryState, restoredCanaryMessage)
 	}
 }

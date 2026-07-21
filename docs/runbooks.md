@@ -179,13 +179,18 @@ witself account forget --account default --yes
 
 ## Suspend and resume an account
 
-Suspend freezes every write on the account while keeping reads and credentials
-alive — a reversible pause for time off, an audit, or a planned migration.
+Suspend freezes ordinary account work while keeping credentials and explicit
+safety paths alive — a reversible pause for time off, an audit, or a planned
+migration. Agent-email receive controls are the narrow exception: lifecycle
+state remains readable and an operator may disable an agent or realm layer
+while suspended, but may not re-enable either layer until the account resumes.
 
 ```sh
 witself account suspend --yes                       # optionally --reason "on vacation"
-# every domain command now refuses:
+# ordinary domain commands now refuse:
 #   witself: account is suspended — this action requires an active account
+# harm-reducing receive shutdown remains available:
+witself email operator receive disable --realm-id realm_aaaaaaaaaaaaaaaa
 # status still works, and shows why:
 witself account status
 witself account resume

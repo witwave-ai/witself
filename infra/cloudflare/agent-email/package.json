@@ -4,9 +4,11 @@
   "type": "module",
   "description": "Isolated Cloudflare Email Worker for the capability-limited Witself receive pilot",
   "scripts": {
+    "canary": "node scripts/canary.mjs",
     "config": "node scripts/render-wrangler.mjs",
     "deploy": "node scripts/render-wrangler.mjs && wrangler deploy --config wrangler.generated.jsonc",
     "directory": "node scripts/directory.mjs",
+    "metrics": "node scripts/metrics.mjs",
     "routes": "node scripts/routes.mjs",
     "secret:put": "node scripts/render-wrangler.mjs && wrangler secret put RELAY_ED25519_PRIVATE_KEY --config wrangler.generated.jsonc",
     "test": "node --test test/*.test.mjs && go run ./test/golden-go ./test/golden-vector.json"

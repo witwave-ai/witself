@@ -15,6 +15,7 @@ import {
   validateRuntimeConfig,
   validateRuntimeRecipient,
 } from "./directory.mjs";
+import { recordEdgeVerdict } from "./metrics.mjs";
 
 const PERMANENT_REJECTION = "recipient unavailable";
 const TRANSIENT_ERROR = "agent email relay temporarily unavailable";
@@ -24,8 +25,12 @@ const MAX_VERDICT_BYTES = 4_096;
 let cachedSecret = "";
 let cachedSigningKey;
 
-function transient() {
-  return new Error(TRANSIENT_ERROR);
+const EDGE_METRIC = Symbol("agent-email-edge-metric");
+
+function transient(outcome = "tempfail_internal", phase = "internal", status = 0) {
+  const error = new Error(TRANSIENT_ERROR);
+  error[EDGE_METRIC] = { outcome, phase, status };
+  return error;
 }
 
 function logRelayFailure(fields) {
@@ -38,7 +43,7 @@ async function directoryJSON(namespace, key) {
   try {
     return await namespace.get(key, "json");
   } catch {
-    throw transient();
+    throw transient("tempfail_directory", "directory");
   }
 }
 
@@ -48,7 +53,7 @@ async function signingKey(env, cryptoAPI) {
     cachedSecret = secret;
     cachedSigningKey = importSigningKey(secret, cryptoAPI).catch(() => {
       cachedSigningKey = undefined;
-      throw transient();
+      throw transient("tempfail_signing", "signing");
     });
   }
   return cachedSigningKey;
@@ -65,7 +70,7 @@ async function boundedResponseText(response, maximumBytes = MAX_VERDICT_BYTES) {
       const { value, done } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      if (received > maximumBytes) throw transient();
+      if (received > maximumBytes) throw transient("tempfail_cell_response", "response");
       result += decoder.decode(value, { stream: true });
     }
     return result + decoder.decode();
@@ -84,7 +89,18 @@ function exactVerdict(text) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   const keys = Object.keys(value);
   if (keys.length !== 1 || keys[0] !== "verdict" || typeof value.verdict !== "string") return "";
-  return value.verdict;
+  switch (value.verdict) {
+    case "accepted":
+    case "unknown_recipient":
+    case "permanent":
+    case "receive_disabled":
+    case "temporary":
+    case "invalid_relay":
+    case "retry_canary_rejected":
+      return value.verdict;
+    default:
+      return "";
+  }
 }
 
 function relayHeaders(metadata, signature) {
@@ -102,21 +118,23 @@ function relayHeaders(metadata, signature) {
   });
 }
 
-export async function handleEmail(message, env, runtime = {}) {
+async function handleEmailTransaction(message, env, runtime = {}) {
   const fetchAPI = runtime.fetch ?? fetch;
   const cryptoAPI = runtime.crypto ?? crypto;
   const now = runtime.now ?? (() => Date.now());
-  if (!env?.EMAIL_DIRECTORY || typeof env.EMAIL_DIRECTORY.get !== "function") throw transient();
+  if (!env?.EMAIL_DIRECTORY || typeof env.EMAIL_DIRECTORY.get !== "function") {
+    throw transient("tempfail_configuration", "configuration");
+  }
 
   const configValue = await directoryJSON(env.EMAIL_DIRECTORY, CONFIG_KEY);
-  if (configValue == null) throw transient();
+  if (configValue == null) throw transient("tempfail_configuration", "configuration");
   let config;
   try {
     config = validateRuntimeConfig(configValue);
   } catch {
-    throw transient();
+    throw transient("tempfail_configuration", "configuration");
   }
-  if (!config.enabled) throw transient();
+  if (!config.enabled) throw transient("tempfail_disabled", "configuration");
 
   let envelopeTo;
   let parsed;
@@ -125,22 +143,22 @@ export async function handleEmail(message, env, runtime = {}) {
     parsed = parsePilotAddress(envelopeTo, config.domain, config.realm_label, true);
   } catch {
     message.setReject(PERMANENT_REJECTION);
-    return;
+    return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
   }
   const enrolled = config.agents.some((agent) => agent.address === parsed.baseAddress);
   if (!enrolled) {
     message.setReject(PERMANENT_REJECTION);
-    return;
+    return { outcome: "rejected_unknown_recipient", phase: "recipient", status: 550 };
   }
   const recipientValue = await directoryJSON(env.EMAIL_DIRECTORY, recipientKey(parsed.baseAddress));
   // The address is enrolled in the atomic config projection. A missing or
   // inconsistent detail row can be KV propagation lag or operator error, so
   // it must retry rather than permanently bouncing an enrolled mailbox.
-  if (recipientValue == null) throw transient();
+  if (recipientValue == null) throw transient("tempfail_directory", "directory");
   try {
     validateRuntimeRecipient(recipientValue, config, parsed.baseAddress);
   } catch {
-    throw transient();
+    throw transient("tempfail_directory", "directory");
   }
 
   if (
@@ -149,16 +167,18 @@ export async function handleEmail(message, env, runtime = {}) {
     message.rawSize > PILOT_MAXIMUM_RAW_BYTES
   ) {
     message.setReject(PERMANENT_REJECTION);
-    return;
+    return { outcome: "rejected_over_size", phase: "content", status: 552 };
   }
 
   let raw;
   try {
     raw = await new Response(message.raw).arrayBuffer();
   } catch {
-    throw transient();
+    throw transient("tempfail_content", "content");
   }
-  if (raw.byteLength !== message.rawSize || raw.byteLength > PILOT_MAXIMUM_RAW_BYTES) throw transient();
+  if (raw.byteLength !== message.rawSize || raw.byteLength > PILOT_MAXIMUM_RAW_BYTES) {
+    throw transient("tempfail_content", "content");
+  }
 
   let metadata;
   try {
@@ -172,7 +192,7 @@ export async function handleEmail(message, env, runtime = {}) {
       rawSHA256: await sha256Hex(raw, cryptoAPI),
     });
   } catch {
-    throw transient();
+    throw transient("tempfail_signing", "signing");
   }
 
   let signature;
@@ -180,7 +200,7 @@ export async function handleEmail(message, env, runtime = {}) {
     const key = await signingKey(env, cryptoAPI);
     ({ signature } = await signRelay(metadata, key, cryptoAPI));
   } catch {
-    throw transient();
+    throw transient("tempfail_signing", "signing");
   }
 
   const timeoutValue = Number(env.RELAY_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
@@ -208,11 +228,13 @@ export async function handleEmail(message, env, runtime = {}) {
       phase: "fetch",
       error_name: error instanceof Error ? error.name : "unknown",
     });
-    throw transient();
+    throw transient("tempfail_transport", "fetch");
   } finally {
     clearTimeout(timer);
   }
-  if (response.ok && verdict === "accepted") return;
+  if (response.ok && verdict === "accepted") {
+    return { outcome: "accepted", phase: "response", status: response.status };
+  }
   logRelayFailure({
     phase: "response",
     status: response.status,
@@ -220,9 +242,42 @@ export async function handleEmail(message, env, runtime = {}) {
   });
   if (verdict === "unknown_recipient" || verdict === "permanent") {
     message.setReject(PERMANENT_REJECTION);
-    return;
+    return { outcome: "rejected_cell_permanent", phase: "response", status: response.status };
   }
-  throw transient();
+  if (verdict === "retry_canary_rejected") {
+    message.setReject(PERMANENT_REJECTION);
+    return { outcome: "rejected_retry_canary", phase: "response", status: response.status };
+  }
+  if (verdict === "receive_disabled") {
+    throw transient("tempfail_disabled", "response", response.status);
+  }
+  throw transient("tempfail_cell_response", "response", response.status);
+}
+
+export async function handleEmail(message, env, runtime = {}) {
+  const now = runtime.now ?? (() => Date.now());
+  const startedAt = now();
+  const rawSize = Number.isSafeInteger(message?.rawSize) && message.rawSize > 0 ? message.rawSize : 0;
+  try {
+    const result = await handleEmailTransaction(message, env, { ...runtime, now });
+    recordEdgeVerdict(env, {
+      ...result,
+      durationMS: Math.max(0, now() - startedAt),
+      rawSize,
+    });
+  } catch (error) {
+    const metric = error?.[EDGE_METRIC] ?? {
+      outcome: "tempfail_internal",
+      phase: "internal",
+      status: 0,
+    };
+    recordEdgeVerdict(env, {
+      ...metric,
+      durationMS: Math.max(0, now() - startedAt),
+      rawSize,
+    });
+    throw error;
+  }
 }
 
 export default {

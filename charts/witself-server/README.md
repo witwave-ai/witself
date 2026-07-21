@@ -54,7 +54,7 @@ The receive-only agent-email pilot is disabled by default. Enabling
 `agentEmail.receivePilot.enabled` requires one canonical domain, audience and
 realm ID, exactly 5-10 unique canonical agent IDs, one or more relay public keys
 encoded in `relayPublicKeysJSON`, and a replay window. The chart then renders
-only these seven server variables:
+these seven base server variables:
 
 - `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`
 - `WITSELF_AGENT_EMAIL_PILOT_DOMAIN`
@@ -63,6 +63,21 @@ only these seven server variables:
 - `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`
 - `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON`
 - `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW`
+
+An optional `agentEmail.receivePilot.retryCanaryAgentID` must equal one of the
+enrolled agent IDs and renders `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID`.
+Keep it empty until every server pod is schema-61-capable; an older pod would
+ordinary-accept the synthetic first delivery instead of deliberately returning
+a temporary result.
+
+Use a two-phase rollout: first deploy schema-61-capable code with
+`retryCanaryAgentID` empty and wait for every pod to converge; then set the
+exact enrolled agent in a config-only rollout and wait for convergence again.
+Keep the external canary schedule off until a manual run succeeds. For
+rollback, turn the schedule off and settle the unused arm or let its 15-minute
+TTL expire before clearing this value or downgrading code. The 15-minute schedule retains about
+96 acknowledged synthetic messages per day until ordinary mailbox retention
+or deletion is implemented.
 
 The Ed25519 relay private key is not a chart value, Secret reference, or server
 environment variable. It remains exclusively in the isolated Cloudflare Email

@@ -560,7 +560,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.message.request.renew` | yes | no | Selected agent renews one exact live request claim fence. |
 | `witself.message.request.release` | yes | no | Selected agent releases one exact fence, optionally recording deterministic failure. |
 | `witself.message.request.complete` | yes | no | Atomically creates a coordinator result and completes one exact claim; request settles when no other live selected work remains. |
-| `witself.email.address.show` | yes | yes | Show the token-bound enrolled agent's one receive-only pilot address; no cross-agent selector. |
+| `witself.email.address.show` | yes | yes | Show the token-bound enrolled agent's one receive-only pilot address plus effective, agent-layer, and realm-layer receive state; no cross-agent selector. |
 | `witself.email.list` | yes | yes | Metadata-only owner mailbox page; no body, raw MIME, attachment detail beyond count, or claim capability. |
 | `witself.email.listen` | yes | yes | Metadata-only oldest-unacknowledged wait (0–20 seconds); no state change and no wake behavior. |
 | `witself.email.read` | yes | no | Explicitly marks read and returns bounded decoded text with mandatory sender-unverified/untrusted framing; never raw MIME, HTML, or attachment content. |

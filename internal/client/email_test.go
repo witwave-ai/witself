@@ -88,3 +88,56 @@ func TestAgentEmailClientRoutes(t *testing.T) {
 		t.Fatalf("lifecycle bodies = %#v / %#v", seen[7].body, seen[8].body)
 	}
 }
+
+func TestAgentEmailOperatorReceiveControlClientRoutes(t *testing.T) {
+	type request struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	var seen []request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entry := request{method: r.Method, path: r.URL.EscapedPath()}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&entry.body)
+		}
+		seen = append(seen, entry)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/agents/") {
+			_, _ = w.Write([]byte(`{"control":{"agent_id":"agent_aaaaaaaaaaaaaaaa","receive_state":"disabled","agent_receive_state":"enabled","realm_receive_state":"disabled"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"control":{"realm_id":"realm_aaaaaaaaaaaaaaaa","receive_state":"disabled","mailbox_count":5,"row_version":2}}`))
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	if _, err := GetAgentEmailReceiveControl(ctx, srv.URL, "operator", "agent_aaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetAgentEmailReceiveControl(ctx, srv.URL, "operator", "agent_aaaaaaaaaaaaaaaa", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetRealmAgentEmailReceiveControl(ctx, srv.URL, "operator", "realm_aaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetRealmAgentEmailReceiveControl(ctx, srv.URL, "operator", "realm_aaaaaaaaaaaaaaaa", "enabled"); err != nil {
+		t.Fatal(err)
+	}
+	want := []request{
+		{method: http.MethodGet, path: "/v1/agents/agent_aaaaaaaaaaaaaaaa/email-receive"},
+		{method: http.MethodPatch, path: "/v1/agents/agent_aaaaaaaaaaaaaaaa/email-receive"},
+		{method: http.MethodGet, path: "/v1/realms/realm_aaaaaaaaaaaaaaaa/email-receive"},
+		{method: http.MethodPatch, path: "/v1/realms/realm_aaaaaaaaaaaaaaaa/email-receive"},
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("requests = %#v", seen)
+	}
+	for i := range want {
+		if seen[i].method != want[i].method || seen[i].path != want[i].path {
+			t.Fatalf("request %d = %#v, want %#v", i, seen[i], want[i])
+		}
+	}
+	if seen[1].body["receive_state"] != "disabled" || seen[3].body["receive_state"] != "enabled" {
+		t.Fatalf("mutation bodies = %#v / %#v", seen[1].body, seen[3].body)
+	}
+}

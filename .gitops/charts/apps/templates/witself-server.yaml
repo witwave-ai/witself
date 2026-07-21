@@ -25,8 +25,13 @@
 {{- end -}}
 {{- $_ := set $seenAgentIDs $agentID true -}}
 {{- end -}}
+{{- if $emailPilot.retryCanaryAgentID -}}
+{{- if not (hasKey $seenAgentIDs $emailPilot.retryCanaryAgentID) -}}
+{{- fail "apps.witselfServer.agentEmail.receivePilot.retryCanaryAgentID must equal one enrolled agent ID" -}}
 {{- end -}}
-{{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
+{{- end -}}
+{{- end -}}
+{{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "retryCanaryAgentID" $emailPilot.retryCanaryAgentID "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" (dict "receivePilot" $serverEmailPilot) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled) "styleRollout" .Values.apps.witselfServer.avatarStyleRollout) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- $_ := set $serverValues "replicaCount" .Values.apps.witselfServer.replicaCount -}}
 {{- $_ := set $serverValues "minReadySeconds" .Values.apps.witselfServer.minReadySeconds -}}

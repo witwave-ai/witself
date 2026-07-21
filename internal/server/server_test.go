@@ -1512,9 +1512,11 @@ func TestSuspendedAccountIsGated(t *testing.T) {
 		return resp
 	}
 
-	// Domain endpoints must all 403 with "account is suspended" — the whole
-	// point of the freeze. Cover reads (list) AND writes (create) so any
-	// future endpoint added without the requireOperator gate breaks CI.
+	// Ordinary domain endpoints must 403 with "account is suspended" — the
+	// point of the freeze. Explicitly gated harm-reducing endpoints (for
+	// example receive-disable) are tested at their own boundary. Cover reads
+	// (list) AND writes (create) so any ordinary endpoint added without the
+	// requireOperator gate breaks CI.
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodPost, "/v1/realms", `{"name":"prod"}`},
 		{http.MethodGet, "/v1/realms", ""},

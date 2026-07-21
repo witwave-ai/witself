@@ -48,6 +48,12 @@ var (
 	ErrAgentEmailReceiveDisabled = errors.New("agent-email receive is disabled")
 	// ErrAgentEmailPilotUnavailable reports a transient pilot-wide ingestion failure.
 	ErrAgentEmailPilotUnavailable = errors.New("agent-email pilot is unavailable")
+	// ErrAgentEmailRetryCanaryTemporary reports the deliberate first-attempt
+	// temporary result for the synthetic provider retry proof.
+	ErrAgentEmailRetryCanaryTemporary = errors.New("agent-email retry canary temporary failure")
+	// ErrAgentEmailRetryCanaryPermanent reports a synthetic retry marker that
+	// no live arm can authorize and that the edge must reject without retrying.
+	ErrAgentEmailRetryCanaryPermanent = errors.New("agent-email retry canary permanent rejection")
 	// ErrAgentEmailCodeConsumed reports a repeated single-use code-consumption attempt.
 	ErrAgentEmailCodeConsumed = errors.New("agent-email code was already consumed")
 )
@@ -56,14 +62,15 @@ var (
 // Exactly one realm and 5-10 agents must be enabled. RelayPublicKeys supports
 // bounded dual-key rotation; the signed key id selects one exact key.
 type AgentEmailPilotConfig struct {
-	Enabled           bool
-	Domain            string
-	Audience          string
-	RealmIDs          map[string]bool
-	AgentIDs          map[string]bool
-	RelayPublicKeys   map[string]ed25519.PublicKey
-	RelayReplayWindow time.Duration
-	Now               func() time.Time
+	Enabled            bool
+	Domain             string
+	Audience           string
+	RealmIDs           map[string]bool
+	AgentIDs           map[string]bool
+	RetryCanaryAgentID string
+	RelayPublicKeys    map[string]ed25519.PublicKey
+	RelayReplayWindow  time.Duration
+	Now                func() time.Time
 }
 
 // ValidateAgentEmailPilotConfig fails closed on an enabled pilot whose scope
@@ -97,6 +104,13 @@ func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
 	agents := countEnabledAgentEmailIDs(cfg.AgentIDs, "agent")
 	if agents < 5 || agents > 10 {
 		return errors.New("agent-email pilot requires 5-10 enabled agents")
+	}
+	if cfg.RetryCanaryAgentID != "" {
+		if !validAgentEmailGeneratedID(cfg.RetryCanaryAgentID, "agent") ||
+			!cfg.AgentIDs[cfg.RetryCanaryAgentID] ||
+			cfg.RetryCanaryAgentID != strings.TrimSpace(cfg.RetryCanaryAgentID) {
+			return errors.New("agent-email retry canary agent must be enrolled")
+		}
 	}
 	return nil
 }
@@ -162,22 +176,60 @@ type AgentEmailIngestFunc func(context.Context, agentemail.RelayMetadata, []byte
 
 // AgentEmailAddress is the owner-visible mailbox address and lifecycle state.
 type AgentEmailAddress struct {
-	ID               string     `json:"id"`
-	MailboxID        string     `json:"mailbox_id"`
-	AccountID        string     `json:"account_id"`
-	RealmID          string     `json:"realm_id"`
-	OwnerAgentID     string     `json:"owner_agent_id"`
-	Address          string     `json:"address"`
-	Domain           string     `json:"domain"`
-	LocalPart        string     `json:"local_part"`
-	AgentSegment     string     `json:"agent_segment"`
-	RealmLabel       string     `json:"realm_label"`
-	ProvisioningKind string     `json:"provisioning_kind"`
-	ReceiveState     string     `json:"receive_state"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	DisabledAt       *time.Time `json:"disabled_at,omitempty"`
-	RetiredAt        *time.Time `json:"retired_at,omitempty"`
+	ID                string     `json:"id"`
+	MailboxID         string     `json:"mailbox_id"`
+	AccountID         string     `json:"account_id"`
+	RealmID           string     `json:"realm_id"`
+	OwnerAgentID      string     `json:"owner_agent_id"`
+	Address           string     `json:"address"`
+	Domain            string     `json:"domain"`
+	LocalPart         string     `json:"local_part"`
+	AgentSegment      string     `json:"agent_segment"`
+	RealmLabel        string     `json:"realm_label"`
+	ProvisioningKind  string     `json:"provisioning_kind"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+}
+
+// AgentEmailReceiveControl is the operator-visible value-free lifecycle view
+// for one enrolled mailbox. It intentionally carries no address or message
+// metadata.
+type AgentEmailReceiveControl struct {
+	AccountID         string     `json:"account_id"`
+	RealmID           string     `json:"realm_id"`
+	AgentID           string     `json:"agent_id"`
+	ReceiveState      string     `json:"receive_state"`
+	AgentReceiveState string     `json:"agent_receive_state"`
+	RealmReceiveState string     `json:"realm_receive_state"`
+	RowVersion        int64      `json:"row_version"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
+}
+
+// AgentEmailRealmReceiveControl is the operator-visible realm kill-switch
+// state. MailboxCount is value-free and confirms the bounded blast radius.
+type AgentEmailRealmReceiveControl struct {
+	AccountID    string     `json:"account_id"`
+	RealmID      string     `json:"realm_id"`
+	ReceiveState string     `json:"receive_state"`
+	MailboxCount int64      `json:"mailbox_count"`
+	RowVersion   int64      `json:"row_version"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
+}
+
+// SetAgentEmailReceiveControlRequest carries one exact desired switch state.
+// Target identity is path-bound and never accepted from the body.
+type SetAgentEmailReceiveControlRequest struct {
+	ReceiveState string `json:"receive_state"`
 }
 
 // AgentEmailReadState records explicit content reads, acknowledgements, and
@@ -291,9 +343,28 @@ type CompleteAgentEmailRequest struct {
 
 // AgentEmailCheckpoint is a bounded, value-free foreground-work hint.
 type AgentEmailCheckpoint struct {
-	Pending        bool `json:"pending"`
-	Unavailable    bool `json:"unavailable,omitempty"`
-	MailboxPending bool `json:"mailbox_pending,omitempty"`
+	Pending           bool   `json:"pending"`
+	Unavailable       bool   `json:"unavailable,omitempty"`
+	MailboxPending    bool   `json:"mailbox_pending,omitempty"`
+	ReceiveState      string `json:"receive_state,omitempty"`
+	AgentReceiveState string `json:"agent_receive_state,omitempty"`
+	RealmReceiveState string `json:"realm_receive_state,omitempty"`
+}
+
+// AgentEmailRetryCanaryRequest carries one secret-like ephemeral challenge in
+// a POST body. The challenge is never echoed by the server.
+type AgentEmailRetryCanaryRequest struct {
+	Challenge string `json:"challenge"`
+}
+
+// AgentEmailRetryCanaryCheckpoint is cumulative value-free proof that the
+// edge provider observed a temporary result and retried the identical body.
+type AgentEmailRetryCanaryCheckpoint struct {
+	State         string `json:"state"`
+	Armed         bool   `json:"armed"`
+	Tempfailed    bool   `json:"tempfailed"`
+	Accepted      bool   `json:"accepted"`
+	TempfailCount int64  `json:"tempfail_count"`
 }
 
 func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestFunc) http.HandlerFunc {
@@ -332,6 +403,10 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 			writeAgentEmailVerdict(w, http.StatusNotFound, "unknown_recipient")
 		case errors.Is(err, ErrAgentEmailReceiveDisabled):
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "receive_disabled")
+		case errors.Is(err, ErrAgentEmailRetryCanaryTemporary):
+			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
+		case errors.Is(err, ErrAgentEmailRetryCanaryPermanent):
+			writeAgentEmailVerdict(w, http.StatusGone, "retry_canary_rejected")
 		case errors.Is(err, ErrAgentEmailPilotUnavailable), errors.Is(err, ErrForbidden):
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		default:
@@ -431,6 +506,149 @@ func getAgentEmailAddressHandler(
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "address": address})
 	}))
+}
+
+func getAgentEmailReceiveControlHandler(
+	auth AuthFunc,
+	get func(context.Context, string, string, string) (AgentEmailReceiveControl, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if !allowAgentEmailReceiveControlStatus(w, p.accountStatus, "") {
+			return
+		}
+		if len(r.URL.Query()) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "email receive control does not accept query parameters")
+			return
+		}
+		agentID := strings.TrimSpace(r.PathValue("agent"))
+		if agentID == "" {
+			writeJSONError(w, http.StatusBadRequest, "agent id is required")
+			return
+		}
+		control, err := get(r.Context(), p.accountID, p.operatorID, agentID)
+		if writeAgentEmailOwnerError(w, err, "could not get agent email receive control") {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "control": control,
+		})
+	}))
+}
+
+func setAgentEmailReceiveControlHandler(
+	auth AuthFunc,
+	set func(context.Context, string, string, string, string) (AgentEmailReceiveControl, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if len(r.URL.Query()) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "email receive control does not accept query parameters")
+			return
+		}
+		agentID := strings.TrimSpace(r.PathValue("agent"))
+		if agentID == "" {
+			writeJSONError(w, http.StatusBadRequest, "agent id is required")
+			return
+		}
+		var req SetAgentEmailReceiveControlRequest
+		if err := decodeStrictAgentEmailJSON(w, r, &req, 16*1024); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if req.ReceiveState != "enabled" && req.ReceiveState != "disabled" {
+			writeJSONError(w, http.StatusBadRequest, "receive_state must be enabled or disabled")
+			return
+		}
+		if !allowAgentEmailReceiveControlStatus(w, p.accountStatus, req.ReceiveState) {
+			return
+		}
+		control, err := set(r.Context(), p.accountID, p.operatorID, agentID, req.ReceiveState)
+		if writeAgentEmailOwnerError(w, err, "could not set agent email receive control") {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "control": control,
+		})
+	}))
+}
+
+func getRealmAgentEmailReceiveControlHandler(
+	auth AuthFunc,
+	get func(context.Context, string, string, string) (AgentEmailRealmReceiveControl, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if !allowAgentEmailReceiveControlStatus(w, p.accountStatus, "") {
+			return
+		}
+		if len(r.URL.Query()) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "email receive control does not accept query parameters")
+			return
+		}
+		realmID := strings.TrimSpace(r.PathValue("realm"))
+		if realmID == "" {
+			writeJSONError(w, http.StatusBadRequest, "realm id is required")
+			return
+		}
+		control, err := get(r.Context(), p.accountID, p.operatorID, realmID)
+		if writeAgentEmailOwnerError(w, err, "could not get realm email receive control") {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "control": control,
+		})
+	}))
+}
+
+func setRealmAgentEmailReceiveControlHandler(
+	auth AuthFunc,
+	set func(context.Context, string, string, string, string) (AgentEmailRealmReceiveControl, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if len(r.URL.Query()) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "email receive control does not accept query parameters")
+			return
+		}
+		realmID := strings.TrimSpace(r.PathValue("realm"))
+		if realmID == "" {
+			writeJSONError(w, http.StatusBadRequest, "realm id is required")
+			return
+		}
+		var req SetAgentEmailReceiveControlRequest
+		if err := decodeStrictAgentEmailJSON(w, r, &req, 16*1024); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if req.ReceiveState != "enabled" && req.ReceiveState != "disabled" {
+			writeJSONError(w, http.StatusBadRequest, "receive_state must be enabled or disabled")
+			return
+		}
+		if !allowAgentEmailReceiveControlStatus(w, p.accountStatus, req.ReceiveState) {
+			return
+		}
+		control, err := set(r.Context(), p.accountID, p.operatorID, realmID, req.ReceiveState)
+		if writeAgentEmailOwnerError(w, err, "could not set realm email receive control") {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "control": control,
+		})
+	}))
+}
+
+func allowAgentEmailReceiveControlStatus(w http.ResponseWriter, accountStatus, desiredState string) bool {
+	if accountStatus == "active" ||
+		accountStatus == "suspended" && (desiredState == "" || desiredState == "disabled") {
+		return true
+	}
+	if desiredState == "enabled" {
+		writeJSONError(w, http.StatusForbidden, "enabling email receive requires an active account")
+		return false
+	}
+	writeJSONError(w, http.StatusForbidden, "email receive control requires an active or suspended account")
+	return false
 }
 
 func listAgentEmailsHandler(
@@ -585,6 +803,37 @@ func getAgentEmailCheckpointHandler(
 	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		checkpoint, err := get(r.Context(), p)
 		if writeAgentEmailOwnerError(w, err, "could not get agent email checkpoint") {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "checkpoint": checkpoint,
+		})
+	}))
+}
+
+func agentEmailRetryCanaryHandler(
+	auth PrincipalAuthFunc,
+	pilot AgentEmailPilotConfig,
+	operation func(context.Context, DomainPrincipal, string) (AgentEmailRetryCanaryCheckpoint, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if len(r.URL.Query()) != 0 {
+			writeJSONError(w, http.StatusBadRequest, "retry canary does not accept query parameters")
+			return
+		}
+		if pilot.RetryCanaryAgentID == "" || p.ID != pilot.RetryCanaryAgentID {
+			writeJSONError(w, http.StatusForbidden, "agent-email access forbidden")
+			return
+		}
+		var req AgentEmailRetryCanaryRequest
+		if err := decodeStrictAgentEmailJSON(w, r, &req, 1024); err != nil ||
+			agentemail.ValidateRetryCanaryChallenge(req.Challenge) != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid retry canary body")
+			return
+		}
+		checkpoint, err := operation(r.Context(), p, req.Challenge)
+		if writeAgentEmailOwnerError(w, err, "could not advance retry canary") {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

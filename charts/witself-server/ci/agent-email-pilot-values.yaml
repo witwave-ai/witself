@@ -11,5 +11,6 @@ agentEmail:
       - agent_cccccccccccccccc
       - agent_dddddddddddddddd
       - agent_eeeeeeeeeeeeeeee
+    retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa
     relayPublicKeysJSON: '{"pilot-2026-07":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}'
     relayReplayWindow: 5m

@@ -44,6 +44,7 @@ apps:
         audience: ""
         realmID: ""
         agentIDs: []
+        retryCanaryAgentID: ""
         relayPublicKeysJSON: ""
         relayReplayWindow: 5m
     # Expand/activate gate for irreversible avatar creative-payload cleanup.

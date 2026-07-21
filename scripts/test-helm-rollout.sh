@@ -147,18 +147,19 @@ if helm template witself-server "$server_chart" --namespace witself \
   exit 1
 fi
 
-# The receive-only email pilot exposes exactly its seven server variables when
-# enabled, carries public verification material only, and fails closed outside
-# the authorized 5-10-agent enrollment.
+# The receive-only email pilot exposes its seven base server variables plus the
+# optional retry-canary agent when configured, carries public verification
+# material only, and fails closed outside the authorized 5-10-agent enrollment.
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "true"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: "agent-mail.witwave.ai"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: "gcp-sandbox-use1-dev"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_REALM_ID: "realm_aaaaaaaaaaaaaaaa"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: "agent_aaaaaaaaaaaaaaaa,agent_bbbbbbbbbbbbbbbb,agent_cccccccccccccccc,agent_dddddddddddddddd,agent_eeeeeeeeeeeeeeee"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_pilot_render"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_pilot_render"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_pilot_render")" -ne 7 ]]; then
-  echo "enabled pilot did not render exactly seven agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_pilot_render")" -ne 8 ]]; then
+  echo "enabled pilot with a retry canary did not render exactly eight agent-email variables" >&2
   exit 1
 fi
 if grep -Eq 'WITSELF_AGENT_EMAIL_.*PRIVATE|RELAY_ED25519_PRIVATE_KEY|relayPrivateKey' \
@@ -180,12 +181,27 @@ if helm template witself-server "$server_chart" --namespace witself \
   echo "enabled pilot with eleven agents unexpectedly passed validation" >&2
   exit 1
 fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" \
+  --set agentEmail.receivePilot.retryCanaryAgentID=agent_ffffffffffffffff \
+  >/dev/null 2>&1; then
+  echo "enabled pilot accepted a retry canary outside its enrolled agents" >&2
+  exit 1
+fi
 if helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_email_pilot_profile" \
   --set-json 'apps.witselfServer.agentEmail.receivePilot.agentIDs=["agent_aaaaaaaaaaaaaaaa","agent_bbbbbbbbbbbbbbbb","agent_cccccccccccccccc","agent_dddddddddddddddd"]' \
   >/dev/null 2>&1; then
   echo "app-of-apps accepted an enabled pilot with four agents" >&2
+  exit 1
+fi
+if helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_email_pilot_profile" \
+  --set apps.witselfServer.agentEmail.receivePilot.retryCanaryAgentID=agent_ffffffffffffffff \
+  >/dev/null 2>&1; then
+  echo "app-of-apps accepted a retry canary outside its enrolled agents" >&2
   exit 1
 fi
 require_sequence "$email_pilot_apps_render" \
@@ -202,7 +218,8 @@ require_sequence "$email_pilot_apps_render" \
   "            enabled: true" \
   "            realmID: realm_aaaaaaaaaaaaaaaa" \
   "            relayPublicKeysJSON: '{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}'" \
-  "            relayReplayWindow: 5m"
+  "            relayReplayWindow: 5m" \
+  "            retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa"
 default_checksum="$(config_checksum "$default_render")"
 email_pilot_checksum="$(config_checksum "$email_pilot_render")"
 if [[ -z "$default_checksum" || -z "$email_pilot_checksum" || "$default_checksum" == "$email_pilot_checksum" ]]; then

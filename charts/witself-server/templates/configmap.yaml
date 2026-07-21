@@ -19,6 +19,11 @@
 {{- end -}}
 {{- $_ := set $seenAgentIDs $agentID true -}}
 {{- end -}}
+{{- if $emailPilot.retryCanaryAgentID -}}
+{{- if not (hasKey $seenAgentIDs $emailPilot.retryCanaryAgentID) -}}
+{{- fail "agentEmail.receivePilot.retryCanaryAgentID must equal one enrolled agent ID" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
@@ -44,6 +49,9 @@ data:
   WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: {{ join "," $emailPilot.agentIDs | quote }}
   WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: {{ $emailPilot.relayPublicKeysJSON | quote }}
   WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: {{ $emailPilot.relayReplayWindow | quote }}
+{{ if $emailPilot.retryCanaryAgentID }}
+  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: {{ $emailPilot.retryCanaryAgentID | quote }}
+{{ end }}
 {{ end }}
   WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: {{ .Values.avatar.payloadCompaction.enabled | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: {{ .Values.avatar.styleRollout.enabled | quote }}
