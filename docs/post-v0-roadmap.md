@@ -246,6 +246,20 @@ available at the limit, account export/import must preserve the resulting
 canonical set, and the policy must not introduce availability or heartbeat
 semantics.
 
+## Deferred Avatar Surfaces
+
+### Outbound Avatar Webhooks
+
+Outbound avatar webhooks are deferred until their product value, privacy
+boundary, and delivery contract get a dedicated review. Open questions: which
+lifecycle events consumers actually want (missing, proposed, activated,
+rejected, reset, evolved, style rollout selected, compacted, quota reached);
+whether payloads stay value-free by default (agent id, version, hashes,
+revision, action, actor, reason, provenance) with raw SVG only ever fetched
+explicitly through an authenticated API; and what ordering, idempotency,
+retry, replay, dead-letter, and endpoint-authentication guarantees a delivery
+contract owes. Previously tracked as issue #67.
+
 ## Deferred Sealed-Plane 2FA Modalities
 
 These extend the sealed credential plane. V0 ships authenticator-app style TOTP
@@ -331,6 +345,17 @@ for Witself staff and trusted internal AI support/admin agents, not part of the
 public customer/operator `witself` CLI.
 
 The public CLI remains the customer-facing control plane.
+
+### Fleet Escape Hatches: Force-Close, Support Recovery, GDPR Anonymize
+
+Three operator-only escape hatches share the fleet-authority surface and are
+deferred together: a fleet-token force-close for accounts whose every owner
+credential is lost or that were orphaned before local names existed; an
+operator-assisted recovery ceremony for accounts with no email on file or with
+email recovery disabled by enterprise policy; and a GDPR anonymize-in-place
+pass that scrubs PII (email, display name) from a closed tombstone while
+preserving the row, since close is a permanent tombstone by design. Previously
+tracked as issue #17.
 
 ## Deferred MCP Transport
 
@@ -419,6 +444,31 @@ These forks are intentionally left open; see
 - Self-host topology: single-cell versus multi-cell.
 - Migration cutover: a brief read-only freeze versus dual-write and reconcile.
 
+## Deferred Control-Plane Hardening
+
+### Durable Object Counter Authority
+
+Every control-plane counter today is best-effort KV read-modify-write with no
+compare-and-swap: invite uses, resend-verification quota and cooldown,
+recovery attempt counters, and email-change quotas. Concurrent requests can
+exceed caps and last-write-wins can clobber sibling updates. The anticipated
+design is a Durable Object holding per-account and per-invite counter state as
+the single writer — serializing all counters at once and unlocking exact
+invite-use counting — with KV kept as a read projection where useful.
+Previously tracked as issue #13.
+
+### Restore Orchestration Beyond Worker Limits
+
+`restoreAccount` runs as a single Cloudflare Worker invocation: read the R2
+archive, forward to the target cell's import, wait for the transaction, resume
+the account, rewrite registry keys, delete the archive — all inside one
+invocation holding a 15-minute claim. Test archives are ~1KB; production
+archives (embeddings, audit retention, attachments) can reach hundreds of
+megabytes or more and will exceed Worker wall-clock and body limits. The
+restore path needs re-platforming — resumable orchestration (queues, Durable
+Object steps, or cell-side pull) — before real archive sizes arrive.
+Previously tracked as issue #19.
+
 ## Deferred Provider And Cloud Targets
 
 ### Additional Vector Projections
@@ -450,6 +500,15 @@ PostgreSQL integrations, object/blob storage, workload
 identity, and production Helm examples follow AWS. Promotion to GA requires the
 same backup/restore, migration, upgrade, and observability guidance demanded of
 AWS.
+
+### Private GitOps Repository Credentials
+
+Argo CD currently reads the public `witwave-ai/witself` GitOps path with no
+credentials. When the GitOps repo is private — a self-hoster's private fork or
+a future private main repo — Argo needs read credentials. Preferred design: a
+GitHub App installed on the org (fine-grained read, native Argo support, Argo
+mints short-lived tokens, one centrally revocable org secret), with deploy
+keys as the fallback. Previously tracked as issue #7.
 
 ## Deferred Policy And Encryption Surfaces
 
@@ -532,6 +591,16 @@ messaging, CLI use, or MCP use.
 
 Traditional payment methods and provider-mediated crypto payment rails can exist
 without a Witself-specific token (see [billing-and-limits.md](billing-and-limits.md)).
+
+### Billing And KYC Activation Gates
+
+Account lifecycle was deliberately homed on the control plane so paid plans
+can add activation gates beyond email verification. The shape: the
+pending-to-active transition becomes a per-plan gate chain (free: email only;
+paid: email + billing authorization + KYC), with activation refusing until
+every gate passes and account status showing which gates remain. Billing
+webhooks already land on the control plane for exactly this reason.
+Previously tracked as issue #16.
 
 ## Identity-Tied Feature Candidates
 
@@ -627,6 +696,36 @@ bitemporal facts, typed entity graph, and C2PA content-provenance) and is
 tracked as a backlog to prioritize later. Lightweight provenance is already
 seeded in v0 via the `source` field on memories/facts (see
 [data-model.md](data-model.md) and [memory-model.md](memory-model.md)).
+
+## Deferred Release Hardening
+
+### macOS Code Signing And Notarization
+
+Release binaries are unsigned. The Homebrew formula avoids Gatekeeper
+quarantine, but direct downloads — or a future Homebrew cask — hit "developer
+cannot be verified" on macOS. Blocked on obtaining an Apple Developer ID
+Application certificate and notarytool credentials; then GoReleaser gains a
+notarize plus macOS binary-signs block gated to CI, and a release is re-cut
+and verified with `spctl` and `notarytool history`. Previously tracked as
+issue #1.
+
+### Homebrew Cask Migration
+
+GoReleaser's formula pipe is the deliberate choice today because casks apply
+Gatekeeper quarantine, which breaks an unsigned binary's first run. Once
+notarization lands, migrate the tap to a cask, verify a friction-free install,
+and clear the deprecation warning. Depends on the notarization item above.
+Previously tracked as issue #4.
+
+### Native Sigstore Verification In Self-Upgrade
+
+The direct-download self-upgrade path verifies the cosign keyless signature
+over `checksums.txt` only when a `cosign` binary happens to be on PATH,
+falling back to same-origin sha256 — which protects against corruption, not a
+compromised release-asset write path. Deferred: vendor sigstore-go so every
+self-upgrade natively verifies the signature (certificate identity pinned to
+this repo's GitHub Actions, hard-fail on mismatch), accepting the large
+dependency tree when it is worth taking. Previously tracked as issue #30.
 
 ## Promotion Criteria
 
