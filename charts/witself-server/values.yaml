@@ -44,6 +44,20 @@ features:
     # separate release; older compiled schemas refuse to start when enabled.
     enabled: false
 
+# Capability-limited receive-only agent-email pilot. This stays off unless one
+# managed cell explicitly enrolls exactly one realm and 5-10 agents. The relay
+# private key belongs only in the isolated Cloudflare Worker secret; this chart
+# accepts public verification keys only.
+agentEmail:
+  receivePilot:
+    enabled: false
+    domain: ""
+    audience: ""
+    realmID: ""
+    agentIDs: []
+    relayPublicKeysJSON: ""
+    relayReplayWindow: 5m
+
 avatar:
   payloadCompaction:
     # Phase A of a rolling schema-54 renderer-profile upgrade must remain false.

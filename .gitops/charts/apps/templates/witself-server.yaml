@@ -4,7 +4,30 @@
 {{- $bootstrapTargetName := default "witself-bootstrap" $bootstrap.targetName -}}
 {{- $bootstrapMountPath := default (printf "/.witself/tokens/%s/bootstrap.token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
-{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled) "styleRollout" .Values.apps.witselfServer.avatarStyleRollout) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $emailPilot := .Values.apps.witselfServer.agentEmail.receivePilot -}}
+{{- if $emailPilot.enabled -}}
+{{- $agentCount := len $emailPilot.agentIDs -}}
+{{- if or (lt $agentCount 5) (gt $agentCount 10) -}}
+{{- fail "apps.witselfServer.agentEmail.receivePilot.agentIDs must contain 5-10 agent IDs when enabled" -}}
+{{- end -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receivePilot.domain is required when enabled" $emailPilot.domain -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receivePilot.audience is required when enabled" $emailPilot.audience -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receivePilot.realmID is required when enabled" $emailPilot.realmID -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receivePilot.relayPublicKeysJSON is required when enabled" $emailPilot.relayPublicKeysJSON -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receivePilot.relayReplayWindow is required when enabled" $emailPilot.relayReplayWindow -}}
+{{- $seenAgentIDs := dict -}}
+{{- range $agentID := $emailPilot.agentIDs -}}
+{{- if not (regexMatch "^agent_[a-z2-7]{16}$" $agentID) -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receivePilot.agentIDs contains invalid agent ID %q" $agentID) -}}
+{{- end -}}
+{{- if hasKey $seenAgentIDs $agentID -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receivePilot.agentIDs contains duplicate agent ID %q" $agentID) -}}
+{{- end -}}
+{{- $_ := set $seenAgentIDs $agentID true -}}
+{{- end -}}
+{{- end -}}
+{{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
+{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" (dict "receivePilot" $serverEmailPilot) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled) "styleRollout" .Values.apps.witselfServer.avatarStyleRollout) "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- $_ := set $serverValues "replicaCount" .Values.apps.witselfServer.replicaCount -}}
 {{- $_ := set $serverValues "minReadySeconds" .Values.apps.witselfServer.minReadySeconds -}}
 {{- $_ := set $serverValues "strategy" .Values.apps.witselfServer.strategy -}}

@@ -1,3 +1,25 @@
+{{- $emailPilot := .Values.agentEmail.receivePilot -}}
+{{- if $emailPilot.enabled -}}
+{{- $agentCount := len $emailPilot.agentIDs -}}
+{{- if or (lt $agentCount 5) (gt $agentCount 10) -}}
+{{- fail "agentEmail.receivePilot.agentIDs must contain 5-10 agent IDs when enabled" -}}
+{{- end -}}
+{{- $_ := required "agentEmail.receivePilot.domain is required when enabled" $emailPilot.domain -}}
+{{- $_ := required "agentEmail.receivePilot.audience is required when enabled" $emailPilot.audience -}}
+{{- $_ := required "agentEmail.receivePilot.realmID is required when enabled" $emailPilot.realmID -}}
+{{- $_ := required "agentEmail.receivePilot.relayPublicKeysJSON is required when enabled" $emailPilot.relayPublicKeysJSON -}}
+{{- $_ := required "agentEmail.receivePilot.relayReplayWindow is required when enabled" $emailPilot.relayReplayWindow -}}
+{{- $seenAgentIDs := dict -}}
+{{- range $agentID := $emailPilot.agentIDs -}}
+{{- if not (regexMatch "^agent_[a-z2-7]{16}$" $agentID) -}}
+{{- fail (printf "agentEmail.receivePilot.agentIDs contains invalid agent ID %q" $agentID) -}}
+{{- end -}}
+{{- if hasKey $seenAgentIDs $agentID -}}
+{{- fail (printf "agentEmail.receivePilot.agentIDs contains duplicate agent ID %q" $agentID) -}}
+{{- end -}}
+{{- $_ := set $seenAgentIDs $agentID true -}}
+{{- end -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,6 +36,15 @@ data:
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
   WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
+  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: {{ $emailPilot.enabled | quote }}
+{{ if $emailPilot.enabled }}
+  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: {{ $emailPilot.domain | quote }}
+  WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: {{ $emailPilot.audience | quote }}
+  WITSELF_AGENT_EMAIL_PILOT_REALM_ID: {{ $emailPilot.realmID | quote }}
+  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: {{ join "," $emailPilot.agentIDs | quote }}
+  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: {{ $emailPilot.relayPublicKeysJSON | quote }}
+  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: {{ $emailPilot.relayReplayWindow | quote }}
+{{ end }}
   WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: {{ .Values.avatar.payloadCompaction.enabled | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: {{ .Values.avatar.styleRollout.enabled | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.avatar.styleRollout.batchSize | quote }}

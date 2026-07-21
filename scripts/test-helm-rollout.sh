@@ -6,6 +6,8 @@ server_chart="$repo_root/charts/witself-server"
 apps_chart="$repo_root/.gitops/charts/apps"
 apps_profile="$apps_chart/ci/gcp-rollout-values.yaml"
 gcp_profile="$server_chart/ci/gcp-rollout-values.yaml"
+email_pilot_profile="$server_chart/ci/agent-email-pilot-values.yaml"
+apps_email_pilot_profile="$apps_chart/ci/agent-email-pilot-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
 
 default_render="$(mktemp)"
@@ -13,7 +15,9 @@ gcp_render="$(mktemp)"
 apps_render="$(mktemp)"
 phase_b_gcp_render="$(mktemp)"
 phase_b_apps_render="$(mktemp)"
-trap 'rm -f "$default_render" "$gcp_render" "$apps_render" "$phase_b_gcp_render" "$phase_b_apps_render"' EXIT
+email_pilot_render="$(mktemp)"
+email_pilot_apps_render="$(mktemp)"
+trap 'rm -f "$default_render" "$gcp_render" "$apps_render" "$phase_b_gcp_render" "$phase_b_apps_render" "$email_pilot_render" "$email_pilot_apps_render"' EXIT
 
 helm template witself-server "$server_chart" --namespace witself >"$default_render"
 helm template witself-server "$server_chart" --namespace witself \
@@ -29,6 +33,12 @@ helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
   --set apps.witselfServer.avatarPayloadCompactionEnabled=true >"$phase_b_apps_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" >"$email_pilot_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --values "$apps_email_pilot_profile" >"$email_pilot_apps_render"
 
 require_line() {
   local expected="$1"
@@ -77,6 +87,11 @@ require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$default_render"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: "100"' "$default_render"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: "2s"' "$default_render"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$default_render"
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_render"
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_render")" -ne 1 ]]; then
+  echo "default render exposed agent-email configuration beyond the disabled gate" >&2
+  exit 1
+fi
 if grep -Fqx "          lifecycle:" "$default_render"; then
   echo "default render unexpectedly contains a container lifecycle handler" >&2
   exit 1
@@ -129,6 +144,69 @@ if helm template witself-server "$server_chart" --namespace witself \
   --set strategy.rollingUpdate.maxUnavailable=0 \
   --set strategy.rollingUpdate.maxSurge=0 >/dev/null 2>&1; then
   echo "zero maxUnavailable and maxSurge unexpectedly passed schema validation" >&2
+  exit 1
+fi
+
+# The receive-only email pilot exposes exactly its seven server variables when
+# enabled, carries public verification material only, and fails closed outside
+# the authorized 5-10-agent enrollment.
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "true"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: "agent-mail.witwave.ai"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: "gcp-sandbox-use1-dev"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_PILOT_REALM_ID: "realm_aaaaaaaaaaaaaaaa"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: "agent_aaaaaaaaaaaaaaaa,agent_bbbbbbbbbbbbbbbb,agent_cccccccccccccccc,agent_dddddddddddddddd,agent_eeeeeeeeeeeeeeee"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_pilot_render"
+require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_pilot_render"
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_pilot_render")" -ne 7 ]]; then
+  echo "enabled pilot did not render exactly seven agent-email variables" >&2
+  exit 1
+fi
+if grep -Eq 'WITSELF_AGENT_EMAIL_.*PRIVATE|RELAY_ED25519_PRIVATE_KEY|relayPrivateKey' \
+  "$email_pilot_render" "$email_pilot_apps_render"; then
+  echo "relay private-key configuration leaked into the cell render" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" \
+  --set-json 'agentEmail.receivePilot.agentIDs=["agent_aaaaaaaaaaaaaaaa","agent_bbbbbbbbbbbbbbbb","agent_cccccccccccccccc","agent_dddddddddddddddd"]' \
+  >/dev/null 2>&1; then
+  echo "enabled pilot with four agents unexpectedly passed validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" \
+  --set-json 'agentEmail.receivePilot.agentIDs=["agent_aaaaaaaaaaaaaaaa","agent_bbbbbbbbbbbbbbbb","agent_cccccccccccccccc","agent_dddddddddddddddd","agent_eeeeeeeeeeeeeeee","agent_ffffffffffffffff","agent_gggggggggggggggg","agent_hhhhhhhhhhhhhhhh","agent_iiiiiiiiiiiiiiii","agent_jjjjjjjjjjjjjjjj","agent_kkkkkkkkkkkkkkkk"]' \
+  >/dev/null 2>&1; then
+  echo "enabled pilot with eleven agents unexpectedly passed validation" >&2
+  exit 1
+fi
+if helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_email_pilot_profile" \
+  --set-json 'apps.witselfServer.agentEmail.receivePilot.agentIDs=["agent_aaaaaaaaaaaaaaaa","agent_bbbbbbbbbbbbbbbb","agent_cccccccccccccccc","agent_dddddddddddddddd"]' \
+  >/dev/null 2>&1; then
+  echo "app-of-apps accepted an enabled pilot with four agents" >&2
+  exit 1
+fi
+require_sequence "$email_pilot_apps_render" \
+  "        agentEmail:" \
+  "          receivePilot:" \
+  "            agentIDs:" \
+  "            - agent_aaaaaaaaaaaaaaaa" \
+  "            - agent_bbbbbbbbbbbbbbbb" \
+  "            - agent_cccccccccccccccc" \
+  "            - agent_dddddddddddddddd" \
+  "            - agent_eeeeeeeeeeeeeeee" \
+  "            audience: gcp-sandbox-use1-dev" \
+  "            domain: agent-mail.witwave.ai" \
+  "            enabled: true" \
+  "            realmID: realm_aaaaaaaaaaaaaaaa" \
+  "            relayPublicKeysJSON: '{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}'" \
+  "            relayReplayWindow: 5m"
+default_checksum="$(config_checksum "$default_render")"
+email_pilot_checksum="$(config_checksum "$email_pilot_render")"
+if [[ -z "$default_checksum" || -z "$email_pilot_checksum" || "$default_checksum" == "$email_pilot_checksum" ]]; then
+  echo "agent-email pilot activation did not change the pod config checksum" >&2
   exit 1
 fi
 

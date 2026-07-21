@@ -50,6 +50,25 @@ renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 27 or older refuses to start when it is enabled, so turn it on only with schema
 28 or newer.
 
+The receive-only agent-email pilot is disabled by default. Enabling
+`agentEmail.receivePilot.enabled` requires one canonical domain, audience and
+realm ID, exactly 5-10 unique canonical agent IDs, one or more relay public keys
+encoded in `relayPublicKeysJSON`, and a replay window. The chart then renders
+only these seven server variables:
+
+- `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`
+- `WITSELF_AGENT_EMAIL_PILOT_DOMAIN`
+- `WITSELF_AGENT_EMAIL_PILOT_AUDIENCE`
+- `WITSELF_AGENT_EMAIL_PILOT_REALM_ID`
+- `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`
+- `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON`
+- `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW`
+
+The Ed25519 relay private key is not a chart value, Secret reference, or server
+environment variable. It remains exclusively in the isolated Cloudflare Email
+Worker secret. Changing any pilot value changes the ConfigMap checksum and
+restarts the server pods for fail-closed startup reconciliation.
+
 Large-realm avatar style propagation is enabled by default. The
 `avatar.styleRollout` values render
 `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED`,
@@ -105,7 +124,7 @@ ingress + TLS, and topology spread.
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
-`avatar.styleRollout.*`, `database.existingSecret.*`,
+`avatar.styleRollout.*`, `agentEmail.receivePilot.*`, `database.existingSecret.*`,
 `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,

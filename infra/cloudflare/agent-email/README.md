@@ -63,14 +63,15 @@ account, zone, namespace, manifest, and existing routes before mutation.
    npm run directory -- show
    ```
 
-2. Render the Worker configuration, load the operator-provisioned PKCS#8
-   Ed25519 private key through Wrangler's secret prompt, and deploy the
-   email-only Worker:
+2. Render and deploy the unreachable email-only Worker first, then load the
+   operator-provisioned PKCS#8 Ed25519 private key through Wrangler's secret
+   prompt. The Worker has no HTTP or email route at this stage; putting the
+   secret creates and deploys the secret-bearing version:
 
    ```sh
    npm run config
-   npm run secret:put
    npm run deploy
+   npm run secret:put
    ```
 
 3. Enable the matching cell configuration with only the public key, deploy the

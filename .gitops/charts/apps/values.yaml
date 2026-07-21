@@ -34,6 +34,18 @@ apps:
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.
     factDeletionEnabled: false
+    # Receive-only agent-email pilot. Default off in every cell. Only public
+    # relay verification keys belong here; the relay private key remains in the
+    # isolated Cloudflare Worker secret.
+    agentEmail:
+      receivePilot:
+        enabled: false
+        domain: ""
+        audience: ""
+        realmID: ""
+        agentIDs: []
+        relayPublicKeysJSON: ""
+        relayReplayWindow: 5m
     # Expand/activate gate for irreversible avatar creative-payload cleanup.
     # Keep false in the version rollout; flip only after all old writers drain.
     avatarPayloadCompactionEnabled: false

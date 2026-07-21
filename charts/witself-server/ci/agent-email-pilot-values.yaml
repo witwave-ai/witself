@@ -1,0 +1,15 @@
+# Non-secret render fixture for the receive-only agent-email pilot.
+agentEmail:
+  receivePilot:
+    enabled: true
+    domain: agent-mail.witwave.ai
+    audience: gcp-sandbox-use1-dev
+    realmID: realm_aaaaaaaaaaaaaaaa
+    agentIDs:
+      - agent_aaaaaaaaaaaaaaaa
+      - agent_bbbbbbbbbbbbbbbb
+      - agent_cccccccccccccccc
+      - agent_dddddddddddddddd
+      - agent_eeeeeeeeeeeeeeee
+    relayPublicKeysJSON: '{"pilot-2026-07":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}'
+    relayReplayWindow: 5m
