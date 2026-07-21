@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { CONFIG_KEY, normalizePilotManifest } from "../src/directory.mjs";
-import { activatePilot, disablePilot, preparePilot, removePilot } from "../scripts/routing-lib.mjs";
+import { activatePilot, disablePilot, inspectPilot, preparePilot, removePilot } from "../scripts/routing-lib.mjs";
 import { EMAIL_DIRECTORY_TITLE } from "../scripts/cloudflare.mjs";
 
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
@@ -18,11 +18,16 @@ class FakeCloudflare {
     };
     this.rules = [];
     this.kv = new Map();
+    this.settings = { enabled: true, status: "ready", support_subaddress: true };
     this.calls = [];
     this.nextID = 1;
   }
   async getNamespace() { this.calls.push(["getNamespace"]); return { id: this.namespaceID, title: EMAIL_DIRECTORY_TITLE }; }
   async getCatchAll() { this.calls.push(["getCatchAll"]); return structuredClone(this.catchAll); }
+  async getEmailRoutingSettings() {
+    this.calls.push(["getEmailRoutingSettings"]);
+    return structuredClone(this.settings);
+  }
   async listRules() { this.calls.push(["listRules"]); return structuredClone(this.rules); }
   async putKV(key, value) { this.calls.push(["putKV", key]); this.kv.set(key, structuredClone(value)); }
   async deleteKV(key) { this.calls.push(["deleteKV", key]); this.kv.delete(key); }
@@ -92,6 +97,28 @@ test("activation refuses incomplete or unmanaged address rules", async () => {
     actions: [{ type: "forward", value: ["owner@example.com"] }],
   });
   await assert.rejects(() => preparePilot(conflict, example), /unmanaged routing rule/);
+});
+
+test("prepare and activate fail closed when subaddressing is disabled", async () => {
+  for (const operation of [preparePilot, activatePilot]) {
+    const api = new FakeCloudflare();
+    api.settings.support_subaddress = false;
+    await assert.rejects(() => operation(api, example), /subaddressing is not enabled/);
+    assert.equal(api.kv.size, 0);
+    assert.equal(api.rules.length, 0);
+    assert.deepEqual(api.calls, [["getEmailRoutingSettings"]]);
+  }
+});
+
+test("status reports disabled subaddressing without mutating the pilot", async () => {
+  const api = new FakeCloudflare();
+  api.settings.support_subaddress = false;
+  const result = await inspectPilot(api, example);
+  assert.equal(result.support_subaddress, false);
+  assert.equal(result.configured, 0);
+  assert.equal(result.enabled, 0);
+  assert.equal(api.kv.size, 0);
+  assert.equal(api.rules.length, 0);
 });
 
 test("partial activation failure rolls the config and exact rules back to disabled", async () => {

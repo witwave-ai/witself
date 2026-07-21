@@ -128,6 +128,11 @@ export class CloudflareAPI {
     return this.request(`/zones/${this.zoneID}/email/routing/rules?per_page=200`);
   }
 
+  async getEmailRoutingSettings() {
+    if (!this.zoneID) throw new Error("CLOUDFLARE_ZONE_ID is required");
+    return this.request(`/zones/${this.zoneID}/email/routing`);
+  }
+
   async getCatchAll() {
     if (!this.zoneID) throw new Error("CLOUDFLARE_ZONE_ID is required");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/catch_all`);

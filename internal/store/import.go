@@ -4934,7 +4934,8 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO agent_email_realm_receive_controls (account_id,realm_id)
 			SELECT DISTINCT account_id,realm_id FROM agent_email_mailboxes
-			ON CONFLICT (account_id,realm_id) DO NOTHING`); err != nil {
+			WHERE account_id=$1
+			ON CONFLICT (account_id,realm_id) DO NOTHING`, expectedAccountID); err != nil {
 			return export.Manifest{}, fmt.Errorf("synthesize legacy agent-email realm receive controls: %w", err)
 		}
 	} else {

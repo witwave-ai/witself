@@ -15,13 +15,16 @@ function usage() {
   return `usage: node scripts/routes.mjs <prepare|activate|disable|remove|status> <pilot.json>
 
 Required environment:
-  CLOUDFLARE_API_TOKEN    Email Routing Edit plus Workers KV read/write
+  CLOUDFLARE_API_TOKEN    Zone Settings Read, Email Routing Rules Write,
+                          plus Workers KV read/write
   CLOUDFLARE_ACCOUNT_ID   32-character Cloudflare account id
   CLOUDFLARE_ZONE_ID      32-character Email Routing zone id
   EMAIL_DIRECTORY_KV_ID   isolated witself-agent-email-pilot-directory id
 
-The manager uses literal-address routes only. It reads the catch-all before and
-after every operation but contains no operation capable of updating catch_all.`;
+The manager uses literal-address routes only. Prepare and activate require
+Cloudflare Email Routing subaddressing to be enabled; status reports the live
+setting. It reads the catch-all before and after every operation but contains
+no operation capable of updating catch_all.`;
 }
 
 async function main(argv = process.argv.slice(2)) {
