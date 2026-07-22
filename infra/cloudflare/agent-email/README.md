@@ -102,6 +102,12 @@ mutation.
    npm run routes -- status /absolute/path/to/pilot.json
    ```
 
+   Route activation is also eventually consistent. After the first active
+   status, wait at least 60 seconds, run `status` again, and confirm the exact
+   canary rule is still Active in Cloudflare before sending. An immediate
+   message can otherwise miss the new literal rule and follow the unchanged
+   catch-all.
+
 6. Send one synthetic message to the exact canary address. Confirm a committed
    mailbox row through the owner-only API before allowing expected low-risk
    verification-code workflows.

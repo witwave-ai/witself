@@ -27,7 +27,11 @@ function canaryUUIDGenerator() {
   return () => values.shift() ?? completeKey;
 }
 
-function successfulCanaryFetch({ calls, list }) {
+function successfulCanaryFetch({
+  calls,
+  list,
+  sendResult = { delivered: [config.to], permanent_bounces: [], queued: [] },
+}) {
   let statusCalls = 0;
   return async (url, init) => {
     calls.push({ url, ...init });
@@ -39,7 +43,7 @@ function successfulCanaryFetch({ calls, list }) {
       } });
     }
     if (path.includes("/email/sending/send")) {
-      return Response.json({ success: true, result: { delivered: [config.to], queued: [] } });
+      return Response.json({ success: true, result: sendResult });
     }
     if (path.endsWith("/v1/email/retry-canary:status")) {
       statusCalls += 1;
@@ -135,6 +139,82 @@ test("canary completes the full value-free owner lifecycle", async () => {
   assert.doesNotMatch(JSON.stringify(result), new RegExp(messageID));
   assert.doesNotMatch(JSON.stringify(result), new RegExp(retryChallenge));
   assert.doesNotMatch(JSON.stringify(result), new RegExp(correlationNonce));
+});
+
+test("canary continues when Cloudflare succeeds before assigning a recipient status", async () => {
+  const calls = [];
+  const fetch = successfulCanaryFetch({
+    calls,
+    list: () => ({ messages: [{ id: messageID, subject }], next_cursor: "" }),
+    sendResult: {
+      delivered: [],
+      message_id: "<canary@sender.example>",
+      permanent_bounces: [],
+      queued: [],
+    },
+  });
+
+  const result = await runSuccessfulCanary(fetch);
+  assert.equal(result.outcome, "passed");
+  assert.equal(result.provider_retry_proven, true);
+});
+
+test("canary stops immediately on an explicit Cloudflare permanent bounce", async () => {
+  const paths = [];
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    paths.push(path);
+    if (path.endsWith("/v1/email/retry-canary:arm")) {
+      return Response.json({ checkpoint: {
+        state: "armed", armed: true, tempfailed: false, accepted: false, tempfail_count: 0,
+      } });
+    }
+    if (path.includes("/email/sending/send")) {
+      return Response.json({ success: true, result: {
+        delivered: [],
+        message_id: "<canary@sender.example>",
+        permanent_bounces: [` ${config.to.toUpperCase()} `],
+        queued: [],
+      } });
+    }
+    throw new Error(`unexpected ${path}`);
+  };
+
+  await assert.rejects(() => runCanary(config, {
+    fetch,
+    randomUUID: canaryUUIDGenerator(),
+    randomCode: () => Number(code),
+  }), /permanently bounced/);
+  assert.deepEqual(paths, [
+    "/v1/email/retry-canary:arm",
+    `/client/v4/accounts/${config.accountID}/email/sending/send`,
+  ]);
+});
+
+test("canary rejects a successful Cloudflare envelope with no submission evidence", async () => {
+  const paths = [];
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    paths.push(path);
+    if (path.endsWith("/v1/email/retry-canary:arm")) {
+      return Response.json({ checkpoint: {
+        state: "armed", armed: true, tempfailed: false, accepted: false, tempfail_count: 0,
+      } });
+    }
+    if (path.includes("/email/sending/send")) {
+      return Response.json({ success: true, result: {
+        delivered: [], permanent_bounces: [], queued: [],
+      } });
+    }
+    throw new Error(`unexpected ${path}`);
+  };
+
+  await assert.rejects(() => runCanary(config, {
+    fetch,
+    randomUUID: canaryUUIDGenerator(),
+    randomCode: () => Number(code),
+  }), /did not confirm/);
+  assert.equal(paths.length, 2);
 });
 
 test("canary discovers its message behind more than 100 unacked messages", async () => {
