@@ -81,6 +81,9 @@ func beginAntigravityTransaction(operation string, previous, desired *transcript
 			previous.RuntimePluginPath != desired.RuntimePluginPath || previousServer != desiredServer {
 			return antigravityTransactionJournal{}, errors.New("antigravity transaction cannot change its config root or collision-resistant binding identity")
 		}
+		if previous.RuntimeMCPConfigPath != "" && desired.RuntimeMCPConfigPath == "" {
+			return antigravityTransactionJournal{}, errors.New("antigravity transaction cannot downgrade shared MCP ownership to a plugin-level declaration")
+		}
 	}
 	switch operation {
 	case antigravityTransactionInstall:
@@ -203,6 +206,16 @@ func clearAntigravityTransaction(configRoot string, expected antigravityTransact
 // covers host/power loss as well as an ordinary process stop on the supported
 // macOS and Linux providers.
 func syncAntigravityCommittedState(journal antigravityTransactionJournal) error {
+	binding := journal.Desired
+	if binding == nil {
+		binding = journal.Previous
+	}
+	if binding == nil {
+		return errors.New("transaction has no Antigravity binding")
+	}
+	if err := requireAntigravitySharedMCPScratchAbsent(binding.RuntimeConfigRoot, journal); err != nil {
+		return err
+	}
 	current, configState, err := currentAntigravityConfigState(journal.Previous, journal.Desired)
 	if err != nil {
 		return err
@@ -218,13 +231,6 @@ func syncAntigravityCommittedState(journal antigravityTransactionJournal) error 
 		return errors.New("integration config has an unknown transaction state")
 	}
 
-	binding := journal.Desired
-	if binding == nil {
-		binding = journal.Previous
-	}
-	if binding == nil {
-		return errors.New("transaction has no Antigravity binding")
-	}
 	if err := validateAntigravityCanonicalOwnershipPaths(*binding); err != nil {
 		return err
 	}
@@ -262,6 +268,11 @@ func syncAntigravityCommittedState(journal antigravityTransactionJournal) error 
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
+		if absent, stateErr := antigravitySharedMCPMatches(nil, binding); stateErr != nil {
+			return stateErr
+		} else if !absent {
+			return errors.New("antigravity shared MCP entry remains without its integration config")
+		}
 	} else {
 		if err := rejectAntigravityDiscoveryCollisions(*committed); err != nil {
 			return err
@@ -272,6 +283,9 @@ func syncAntigravityCommittedState(journal antigravityTransactionJournal) error 
 		}
 		if err := syncAntigravityBundleDirectory(committed.RuntimePluginPath, bundle); err != nil {
 			return fmt.Errorf("sync installed Antigravity plugin: %w", err)
+		}
+		if err := syncAntigravitySharedMCPState(*committed); err != nil {
+			return fmt.Errorf("sync installed Antigravity shared MCP state: %w", err)
 		}
 	}
 
@@ -300,7 +314,7 @@ func syncAntigravityBundleDirectory(path string, bundle antigravityPluginBundle)
 	if err := verifyAntigravityBundleDirectory(path, bundle); err != nil {
 		return err
 	}
-	for _, relativePath := range []string{"plugin.json", "mcp_config.json", "rules/witself.md"} {
+	for relativePath := range bundle.files {
 		if err := syncAntigravityRegularFile(filepath.Join(path, filepath.FromSlash(relativePath))); err != nil {
 			return err
 		}
@@ -375,6 +389,9 @@ func validateAntigravityTransactionConfig(configRoot string, cfg transcriptcaptu
 	if cfg.RuntimePluginPath != filepath.Join(configRoot, "plugins", pluginName) {
 		return errors.New("antigravity transaction plugin path is invalid")
 	}
+	if cfg.RuntimeMCPConfigPath != "" && cfg.RuntimeMCPConfigPath != filepath.Join(configRoot, "mcp_config.json") {
+		return errors.New("antigravity transaction MCP config path is invalid")
+	}
 	if len(cfg.MCPEnvironment) != 1 {
 		return errors.New("antigravity transaction environment is invalid")
 	}
@@ -440,6 +457,9 @@ func recoverAntigravityTransaction(configRoot string) error {
 			previousServer != desiredServer {
 			return errors.New("antigravity transaction journal changes its config root or binding identity")
 		}
+		if journal.Previous.RuntimeMCPConfigPath != "" && journal.Desired.RuntimeMCPConfigPath == "" {
+			return errors.New("antigravity transaction journal downgrades shared MCP ownership")
+		}
 	}
 	currentHome, err := local.Home()
 	if err != nil {
@@ -451,6 +471,9 @@ func recoverAntigravityTransaction(configRoot string) error {
 	}
 	if currentHome != binding.MCPEnvironment["WITSELF_HOME"] {
 		return errors.New("restore the WITSELF_HOME used by the interrupted Antigravity transaction before retrying")
+	}
+	if err := reconcileAntigravitySharedMCPScratch(configRoot, journal); err != nil {
+		return fmt.Errorf("reconcile interrupted Antigravity shared MCP mutation: %w", err)
 	}
 	switch journal.Operation {
 	case antigravityTransactionInstall:
@@ -474,82 +497,128 @@ func recoverAntigravityInstallTransaction(configRoot string, journal antigravity
 	if err != nil {
 		return err
 	}
-	liveState := antigravityBundlePathState(desired.RuntimePluginPath, desiredBundle)
+	livePluginState := antigravityBundlePathState(desired.RuntimePluginPath, desiredBundle)
+	desiredPlugin := livePluginState == antigravityPathExact
+	pluginMissing := livePluginState == antigravityPathMissing
 	var previousBundle antigravityPluginBundle
+	previousPlugin := false
 	if journal.Previous != nil {
 		previousBundle, err = verifiedAntigravitySourceBundle(*journal.Previous)
 		if err != nil {
 			return fmt.Errorf("recover previous Antigravity bundle: %w", err)
 		}
-	}
-	if liveState == antigravityPathForeign && journal.Previous != nil {
-		if antigravityBundlePathState(desired.RuntimePluginPath, previousBundle) == antigravityPathExact {
-			liveState = antigravityPathPrevious
+		previousPlugin = antigravityBundlePathState(desired.RuntimePluginPath, previousBundle) == antigravityPathExact
+	} else {
+		_, statErr := os.Lstat(desired.RuntimePluginPath)
+		previousPlugin = errors.Is(statErr, os.ErrNotExist)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
 		}
+	}
+	desiredShared, err := antigravitySharedMCPMatches(journal.Desired, journal.Desired)
+	if err != nil {
+		return err
+	}
+	previousShared, err := antigravitySharedMCPMatches(journal.Previous, journal.Desired)
+	if err != nil {
+		return err
 	}
 	swapPath := antigravityBundleSwapPath(desired.RuntimePluginPath, desiredBundle)
 	cleanupAfterClear := make([]transcriptcapture.Config, 0, 1)
-	switch liveState {
-	case antigravityPathExact:
-		if currentState == antigravityConfigForeign {
-			return errors.New("integration config changed during interrupted Antigravity install")
-		}
+	if currentState == antigravityConfigForeign {
+		return errors.New("integration config changed during interrupted Antigravity install")
+	}
+
+	commitDesired := desiredPlugin && desiredShared
+	rollbackPrevious := (previousPlugin || pluginMissing) && previousShared
+	quiesceDesiredShared := false
+	if commitDesired && rollbackPrevious {
+		// No provider artifact changed. The staged config is the durable marker
+		// for whether the install reached its mutation phase.
+		commitDesired = currentState == antigravityConfigDesired
+		rollbackPrevious = !commitDesired
+	} else if desiredPlugin && previousShared {
+		// Policy was installed but tools were not exposed: conservatively return
+		// to the previous complete tuple.
+		commitDesired = false
+		rollbackPrevious = true
+	} else if !desiredPlugin && (previousPlugin || pluginMissing) && desiredShared {
+		// A prior binary may have made the shared entry durable before its plugin
+		// directory. Quiesce those tools and restore the previous complete tuple.
+		rollbackPrevious = true
+		quiesceDesiredShared = true
+	}
+
+	switch {
+	case commitDesired:
 		if err := verifyAntigravityBundleDirectory(desired.RuntimePluginSource, desiredBundle); err != nil {
 			return fmt.Errorf("verify desired Antigravity recovery source: %w", err)
 		}
-		if err := transcriptcapture.SaveConfig(desired); err != nil {
+		if err := verifyAntigravitySharedMCPState(desired); err != nil {
 			return err
 		}
-		if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, journal.Previous, previousBundle); err != nil {
+		if err := syncAntigravityBundleDirectory(desired.RuntimePluginPath, desiredBundle); err != nil {
+			return fmt.Errorf("sync recovered Antigravity plugin before retaining shared tools: %w", err)
+		}
+		if err := transcriptcapture.SaveConfig(desired); err != nil {
 			return err
 		}
 		if journal.Previous != nil && journal.Previous.RuntimePluginSource != desired.RuntimePluginSource {
 			cleanupAfterClear = append(cleanupAfterClear, *journal.Previous)
 		}
-	case antigravityPathPrevious:
-		if currentState == antigravityConfigForeign {
-			return errors.New("integration config changed during interrupted Antigravity install")
-		}
-		if err := transcriptcapture.SaveConfig(*journal.Previous); err != nil {
-			return err
-		}
-		if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, journal.Previous, previousBundle); err != nil {
-			return err
-		}
-		if journal.Previous.RuntimePluginSource != desired.RuntimePluginSource {
-			cleanupAfterClear = append(cleanupAfterClear, desired)
-		}
-	case antigravityPathMissing:
-		if currentState == antigravityConfigForeign {
-			return errors.New("integration config changed during interrupted Antigravity install")
+	case rollbackPrevious:
+		if quiesceDesiredShared {
+			if _, err := convergeAntigravitySharedMCP(journal.Desired, nil); err != nil {
+				return fmt.Errorf("quiesce Antigravity shared MCP entry before recovery: %w", err)
+			}
 		}
 		if journal.Previous == nil {
-			if err := transcriptcapture.RemoveConfig(transcriptcapture.RuntimeAntigravity); err != nil {
-				return err
+			if desiredPlugin {
+				if err := removeExactAntigravityBundleDirectory(desired.RuntimePluginPath, desiredBundle); err != nil {
+					return err
+				}
 			}
-			if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, nil, antigravityPluginBundle{}); err != nil {
+			if err := transcriptcapture.RemoveConfig(transcriptcapture.RuntimeAntigravity); err != nil {
 				return err
 			}
 			cleanupAfterClear = append(cleanupAfterClear, desired)
 		} else {
-			if err := verifyAntigravityBundleDirectory(journal.Previous.RuntimePluginSource, previousBundle); err != nil {
-				return fmt.Errorf("verify previous Antigravity recovery source: %w", err)
+			previous := *journal.Previous
+			if !previousPlugin {
+				if err := verifyAntigravityBundleDirectory(previous.RuntimePluginSource, previousBundle); err != nil {
+					return fmt.Errorf("verify previous Antigravity recovery source: %w", err)
+				}
+				var currentBundle *antigravityPluginBundle
+				if desiredPlugin {
+					currentBundle = &desiredBundle
+				}
+				if err := installAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle, currentBundle); err != nil {
+					return err
+				}
 			}
-			if err := installAntigravityBundleDirectory(journal.Previous.RuntimePluginPath, previousBundle, nil); err != nil {
+			if err := syncAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle); err != nil {
+				return fmt.Errorf("sync previous Antigravity plugin before restoring shared tools: %w", err)
+			}
+			if quiesceDesiredShared && previous.RuntimeMCPConfigPath != "" {
+				if _, err := convergeAntigravitySharedMCP(nil, journal.Previous); err != nil {
+					return fmt.Errorf("restore previous Antigravity shared MCP entry: %w", err)
+				}
+			}
+			if err := verifyAntigravitySharedMCPState(previous); err != nil {
 				return err
 			}
-			if err := transcriptcapture.SaveConfig(*journal.Previous); err != nil {
+			if err := transcriptcapture.SaveConfig(previous); err != nil {
 				return err
 			}
-			if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, journal.Previous, previousBundle); err != nil {
-				return err
-			}
-			if journal.Previous.RuntimePluginSource != desired.RuntimePluginSource {
+			if previous.RuntimePluginSource != desired.RuntimePluginSource {
 				cleanupAfterClear = append(cleanupAfterClear, desired)
 			}
 		}
 	default:
-		return errors.New("installed Antigravity plugin changed during interrupted install; refusing automatic recovery")
+		return errors.New("antigravity plugin or shared MCP entry changed during interrupted install; refusing automatic recovery")
+	}
+	if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, journal.Previous, previousBundle); err != nil {
+		return err
 	}
 	if err := clearAntigravityTransaction(configRoot, journal); err != nil {
 		return err
@@ -585,6 +654,17 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 		}
 		removalState = antigravityPathMissing
 	}
+	sharedPrevious, err := antigravitySharedMCPMatches(journal.Previous, journal.Previous)
+	if err != nil {
+		return err
+	}
+	sharedAbsent, err := antigravitySharedMCPMatches(nil, journal.Previous)
+	if err != nil {
+		return err
+	}
+	if !sharedPrevious && !sharedAbsent {
+		return errors.New("antigravity shared MCP entry changed during interrupted uninstall")
+	}
 	cleanupSourceAfterClear := false
 	switch configState {
 	case antigravityConfigPrevious:
@@ -606,6 +686,14 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 				return err
 			}
 		}
+		if err := syncAntigravityBundleDirectory(previous.RuntimePluginPath, bundle); err != nil {
+			return fmt.Errorf("sync recovered Antigravity plugin before restoring shared tools: %w", err)
+		}
+		if !sharedPrevious {
+			if _, err := convergeAntigravitySharedMCP(nil, journal.Previous); err != nil {
+				return fmt.Errorf("restore Antigravity shared MCP entry: %w", err)
+			}
+		}
 	case antigravityConfigMissing:
 		if liveState == antigravityPathExact {
 			return errors.New("antigravity config is missing while its plugin is still live; refusing ambiguous recovery")
@@ -613,6 +701,14 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 		if removalState == antigravityPathExact {
 			if err := removeVerifiedAntigravityScratch(removalPath, bundle); err != nil {
 				return err
+			}
+		}
+		if !sharedAbsent {
+			if !sharedPrevious {
+				return errors.New("antigravity config is missing while a foreign shared MCP entry remains live; refusing ambiguous recovery")
+			}
+			if _, err := convergeAntigravitySharedMCP(journal.Previous, nil); err != nil {
+				return fmt.Errorf("remove reappeared Antigravity shared MCP entry: %w", err)
 			}
 		}
 		cleanupSourceAfterClear = true

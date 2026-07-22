@@ -50,8 +50,9 @@ explicitly requested. See the
   `~/.cursor/rules/witself-memory-routing.mdc`)
 - OpenClaw preview: `AGENTS.md` in the sole default agent's configured
   workspace
-- Antigravity preview: an exact-owned, automatically discovered plugin at
-  `~/.gemini/config/plugins/witself-managed-<binding-id>/`
+- Antigravity preview: an exact-owned, automatically discovered rules plugin at
+  `~/.gemini/config/plugins/witself-managed-<binding-id>/` plus one exact
+  collision-resistant server entry in `~/.gemini/config/mcp_config.json`
 
 Cursor installation also merges `Mcp(witself:*)` into
 `$CURSOR_CONFIG_DIR/cli-config.json` so the approved server's tools can run in
@@ -91,18 +92,20 @@ Antigravity phase 1 requires the `agy` CLI on `PATH`, at
 `~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`, and currently
 supports macOS and Linux because installation depends on native file locking
 and no-replace/exchange renames. Witself validates
-an immutable source bundle, then atomically installs exactly `plugin.json`,
-`mcp_config.json`, and `rules/witself.md` beneath Antigravity's standard global
-plugin root. It never edits the shared `~/.gemini/config/mcp_config.json`,
-`plugins.json`, or import manifest. The plugin pins the absolute Witself binary,
-agent identity, optional location, and only the non-secret absolute
-`WITSELF_HOME`; it never persists credentials, `HOME`, or `PATH`. Reinstall and
-uninstall refuse foreign, disabled, symlinked plugin roots or entries, locally
-edited, or extra-file plugin state instead of overwriting it. A per-home lock,
-durable transaction journal, and atomic directory exchange make interrupted or
-concurrent Witself mutations recoverable on the next install or uninstall.
-`--routing-only` is unavailable because
-the MCP definition and always-on safety rule are one exact ownership unit.
+an immutable source bundle, then atomically installs exactly `plugin.json` and
+`rules/witself.md` beneath Antigravity's standard global plugin root. It also
+merges one exact, collision-resistant server entry into the canonical
+`~/.gemini/config/mcp_config.json`; unrelated root fields and sibling servers
+are preserved. That entry pins the absolute Witself binary, agent identity,
+optional location, and only the non-secret absolute `WITSELF_HOME`; it never
+persists credentials, `HOME`, or `PATH`. Witself does not edit `plugins.json` or
+the import manifest. Reinstall and uninstall refuse foreign, disabled,
+symlinked, malformed, locally edited, or extra-file owned state instead of
+overwriting it. A per-home lock, durable transaction journal, atomic directory
+exchange, and atomic 0600 shared-config writes make interrupted or concurrent
+Witself mutations recoverable on the next install or uninstall.
+`--routing-only` is unavailable because the exact-owned MCP entry and always-on
+safety rule are maintained as one transaction across two provider surfaces.
 
 The installer reuses an existing integration or the only local agent credential.
 When more than one agent is available, select one explicitly; a location label
@@ -149,21 +152,25 @@ session or prompt injection remain unavailable. The managed workspace block is
 therefore the safety contract for OpenClaw's full Witself MCP catalog, not just
 its memory tools.
 
-The Antigravity preview uses its native plugin format rather than splicing a
-shared global rule or MCP file. Antigravity automatically discovers the owned
-plugin directory and exposes dotted declared tool names under its
-collision-resistant per-binding namespace
+The Antigravity preview uses its native plugin format for an always-on rule and
+the canonical shared MCP file for the server Antigravity actually loads.
+Antigravity automatically discovers the owned plugin directory and exposes
+dotted declared tool names under its collision-resistant per-binding namespace
 `mcp_ws-<server-id>_`, such as
 `mcp_ws-<server-id>_witself.memory.recall`. The 16-hex server id is a shortened
 form of the plugin's 24-hex binding id, preventing an
 ordinary workspace or global plugin named `witself` from shadowing this binding.
 Atomic install, upgrade, and uninstall are fenced by a 0600 transaction journal;
-Witself synchronizes the selected plugin, integration config, immutable recovery
-bundle, and their parent directories before clearing it. Before every MCP server startup, Witself
-revalidates the installed plugin and immutable recovery source against the
-recorded SHA-256 binding; any drift prevents credential-bound tools from being
-exposed. Antigravity's synchronous hooks and transcript-path payload remain a
-phase-2 conformance task because they do not yet provide a validated direct
+Witself synchronizes the selected plugin, exact shared MCP entry, integration
+config, immutable recovery bundle, and their parent directories before clearing
+it. Unrelated shared-config fields and servers remain outside Witself's
+ownership. Before every MCP server startup, Witself revalidates the installed
+plugin, immutable recovery source, and managed shared entry against the recorded
+binding; any drift prevents credential-bound tools from being exposed. A
+recorded v0.0.198 three-file plugin remains valid for exact uninstall, while
+reinstall migrates it transactionally to the rules-only plugin and canonical
+shared entry. Antigravity's synchronous hooks and transcript-path payload remain
+a phase-2 conformance task because they do not yet provide a validated direct
 message or prompt-context contract.
 
 Grok Build enables Claude and Cursor compatibility by default, including their

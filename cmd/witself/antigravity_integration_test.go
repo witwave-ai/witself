@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -71,9 +72,9 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1 $2" = "plugin validate" ]; then
-  test -f "$3/plugin.json" || exit 21
-  test -f "$3/mcp_config.json" || exit 22
-  test -f "$3/rules/witself.md" || exit 23
+	test -f "$3/plugin.json" || exit 21
+	test ! -e "$3/mcp_config.json" || exit 22
+	test -f "$3/rules/witself.md" || exit 23
 	if [ -n "$FAKE_AGY_FAIL_VALIDATE" ]; then
 	  printf '%s\n' 'simulated validation failure' >&2
 	  exit 25
@@ -155,6 +156,41 @@ func (fixture antigravityIntegrationFixture) pluginPath(t *testing.T) string {
 	return filepath.Join(fixture.configRoot(), "plugins", fixture.pluginName(t))
 }
 
+func sharedMCPContainsServer(raw []byte, name string) bool {
+	var config antigravityMCPConfig
+	if json.Unmarshal(raw, &config) != nil {
+		return false
+	}
+	_, ok := config.Servers[name]
+	return ok
+}
+
+func sharedMCPHasExactServer(raw []byte, name string, expected antigravityMCPServer) bool {
+	var config antigravityMCPConfig
+	if json.Unmarshal(raw, &config) != nil {
+		return false
+	}
+	actual, ok := config.Servers[name]
+	return ok && actual.Command == expected.Command && equalOrderedStrings(actual.Args, expected.Args) &&
+		equalStringMaps(actual.Env, expected.Env)
+}
+
+func sharedMCPHasRootField(raw []byte, name, expectedJSON string) bool {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(raw, &root) != nil {
+		return false
+	}
+	actual, ok := root[name]
+	if !ok {
+		return false
+	}
+	var actualCompact, expectedCompact bytes.Buffer
+	if json.Compact(&actualCompact, actual) != nil || json.Compact(&expectedCompact, []byte(expectedJSON)) != nil {
+		return false
+	}
+	return actualCompact.String() == expectedCompact.String()
+}
+
 func TestAntigravityBindingNamesAreDeterministicAndScoped(t *testing.T) {
 	fixture := setupAntigravityIntegrationFixture(t)
 	base := fixture.namingConfig()
@@ -216,7 +252,7 @@ func TestAntigravityInstallReinstallAndUninstallLifecycle(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(sharedMCP), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sharedMCPRaw := []byte(`{"mcpServers":{"witself":{"command":"/legacy-unrelated"}}}`)
+	sharedMCPRaw := []byte(`{"providerSettings":{"enabled":true},"mcpServers":{"witself":{"command":"/legacy-unrelated"}}}`)
 	if err := os.WriteFile(sharedMCP, sharedMCPRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +281,7 @@ func TestAntigravityInstallReinstallAndUninstallLifecycle(t *testing.T) {
 	if cfg.HookMode != transcriptcapture.HookModeNone || cfg.RuntimeCLICommand != fixture.cli ||
 		cfg.MCPCommand != fixture.witself || cfg.RuntimeVersion != "1.1.1" ||
 		cfg.RuntimeConfigRoot != fixture.configRoot() || cfg.RuntimePluginPath != fixture.pluginPath(t) ||
+		cfg.RuntimeMCPConfigPath != sharedMCP ||
 		len(cfg.MCPEnvironment) != 1 || cfg.MCPEnvironment["WITSELF_HOME"] != filepath.Join(fixture.home, ".witself") ||
 		len(cfg.RuntimePluginDigest) != 64 || filepath.Base(cfg.RuntimePluginSource) != cfg.RuntimePluginDigest {
 		t.Fatalf("Antigravity config = %#v", cfg)
@@ -278,7 +315,10 @@ func TestAntigravityInstallReinstallAndUninstallLifecycle(t *testing.T) {
 	if strings.Contains(string(rule), "witself__witself-") || strings.Contains(string(rule), "OpenClaw") {
 		t.Fatalf("managed Antigravity rule retains another runtime's names: %s", rule)
 	}
-	mcpRaw, err := os.ReadFile(filepath.Join(cfg.RuntimePluginPath, "mcp_config.json"))
+	if _, err := os.Lstat(filepath.Join(cfg.RuntimePluginPath, "mcp_config.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rules-only plugin unexpectedly contains MCP config: %v", err)
+	}
+	mcpRaw, err := os.ReadFile(sharedMCP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,8 +335,9 @@ func TestAntigravityInstallReinstallAndUninstallLifecycle(t *testing.T) {
 	if code := installCmd(fixture.installArgs()); code != 0 {
 		t.Fatalf("idempotent reinstall code = %d", code)
 	}
-	if raw, err := os.ReadFile(sharedMCP); err != nil || string(raw) != string(sharedMCPRaw) {
-		t.Fatalf("shared MCP config changed: %q, %v", raw, err)
+	if raw, err := os.ReadFile(sharedMCP); err != nil || !sharedMCPHasExactServer(raw, "witself", antigravityMCPServer{Command: "/legacy-unrelated"}) ||
+		!sharedMCPHasExactServer(raw, serverName, server) || !sharedMCPHasRootField(raw, "providerSettings", `{"enabled":true}`) {
+		t.Fatalf("shared MCP config lost a server after reinstall: %q, %v", raw, err)
 	}
 	if raw, err := os.ReadFile(manifestPath); err != nil || string(raw) != string(manifest) {
 		t.Fatalf("import manifest changed: %q, %v", raw, err)
@@ -320,8 +361,9 @@ func TestAntigravityInstallReinstallAndUninstallLifecycle(t *testing.T) {
 	if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("integration config remains after uninstall: %v", err)
 	}
-	if raw, err := os.ReadFile(sharedMCP); err != nil || string(raw) != string(sharedMCPRaw) {
-		t.Fatalf("shared MCP config changed on uninstall: %q, %v", raw, err)
+	if raw, err := os.ReadFile(sharedMCP); err != nil || !sharedMCPHasExactServer(raw, "witself", antigravityMCPServer{Command: "/legacy-unrelated"}) ||
+		sharedMCPContainsServer(raw, serverName) || !sharedMCPHasRootField(raw, "providerSettings", `{"enabled":true}`) {
+		t.Fatalf("shared MCP config was not entry-scoped on uninstall: %q, %v", raw, err)
 	}
 	if raw, err := os.ReadFile(manifestPath); err != nil || string(raw) != string(manifest) {
 		t.Fatalf("import manifest changed on uninstall: %q, %v", raw, err)
@@ -824,6 +866,9 @@ func TestAntigravityUpgradeFinalConfigFailureRestoresPriorBinding(t *testing.T) 
 	originalFinalize := finalizeRuntimeIntegrationConfig
 	finalizeRuntimeIntegrationConfig = func(cfg transcriptcapture.Config) error {
 		if cfg.Runtime == transcriptcapture.RuntimeAntigravity && cfg.MCPCommand == upgradedExecutable {
+			mutateAntigravitySharedMCPForTest(t, cfg, func(_ string, root, _ map[string]json.RawMessage) {
+				root["concurrentProviderEdit"] = json.RawMessage(`{"preserved":true}`)
+			})
 			return errors.New("simulated final config write failure")
 		}
 		return originalFinalize(cfg)
@@ -846,8 +891,17 @@ func TestAntigravityUpgradeFinalConfigFailureRestoresPriorBinding(t *testing.T) 
 	if err := verifyAntigravityBundleDirectory(previous.RuntimePluginSource, previousBundle); err != nil {
 		t.Fatalf("prior recovery source was not preserved: %v", err)
 	}
-	if _, err := os.Lstat(attemptedSource); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("attempted upgrade source remains: %v", err)
+	if attemptedSource != previous.RuntimePluginSource {
+		if _, err := os.Lstat(attemptedSource); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("attempted upgrade source remains: %v", err)
+		}
+	}
+	if err := verifyAntigravitySharedMCPState(previous); err != nil {
+		t.Fatalf("prior shared MCP entry was not restored: %v", err)
+	}
+	if raw, err := os.ReadFile(previous.RuntimeMCPConfigPath); err != nil ||
+		!sharedMCPHasRootField(raw, "concurrentProviderEdit", `{"preserved":true}`) {
+		t.Fatalf("concurrent shared MCP sibling edit was not preserved: %q, %v", raw, err)
 	}
 	assertNoAntigravityScratchDirectories(t, fixture.configRoot())
 }
@@ -909,6 +963,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err := removeExactAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
+			t.Fatal(err)
+		}
 		if err := transcriptcapture.RemoveConfig(transcriptcapture.RuntimeAntigravity); err != nil {
 			t.Fatal(err)
 		}
@@ -919,6 +976,35 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if _, err := os.Lstat(cfg.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("rolled-back first-install source remains: %v", err)
 		}
+	})
+
+	t.Run("first install shared MCP durable before plugin", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		cfg := installAntigravityFixtureConfig(t, fixture)
+		bundle, err := verifiedAntigravitySourceBundle(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal, err := beginAntigravityTransaction(antigravityTransactionInstall, nil, &cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := removeExactAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
+			t.Fatal(err)
+		}
+		if err := recoverAntigravityTransaction(cfg.RuntimeConfigRoot); err != nil {
+			t.Fatal(err)
+		}
+		if present, err := antigravitySharedMCPMatches(nil, &cfg); err != nil || !present {
+			t.Fatalf("unsafe shared MCP entry remained after recovery: present=%t err=%v", present, err)
+		}
+		if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("first-install config remained after recovery: %v", err)
+		}
+		if _, err := os.Lstat(cfg.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rolled-back first-install source remains: %v", err)
+		}
+		assertAntigravityTransactionAbsent(t, cfg.RuntimeConfigRoot, journal)
 	})
 
 	t.Run("upgrade before atomic exchange", func(t *testing.T) {
@@ -953,15 +1039,21 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err := verifyAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle); err != nil {
 			t.Fatalf("previous plugin was not preserved: %v", err)
 		}
-		if _, err := os.Lstat(desired.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("rolled-back upgrade source remains: %v", err)
+		if desired.RuntimePluginSource != previous.RuntimePluginSource {
+			if _, err := os.Lstat(desired.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rolled-back upgrade source remains: %v", err)
+			}
 		}
 		assertAntigravityTransactionAbsent(t, desired.RuntimeConfigRoot, journal)
 	})
 
-	t.Run("upgrade after atomic exchange", func(t *testing.T) {
+	t.Run("upgrade after plugin exchange before shared MCP", func(t *testing.T) {
 		fixture := setupAntigravityIntegrationFixture(t)
 		previous := installAntigravityFixtureConfig(t, fixture)
+		previousBundle, err := verifiedAntigravitySourceBundle(previous)
+		if err != nil {
+			t.Fatal(err)
+		}
 		desired, desiredBundle := prepareAntigravityUpgrade(t, fixture, previous)
 		journal, err := beginAntigravityTransaction(antigravityTransactionInstall, &previous, &desired)
 		if err != nil {
@@ -984,14 +1076,59 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 			t.Fatal(err)
 		}
 		loaded, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity)
+		if err != nil || !equalAntigravityTransactionConfig(loaded, previous) {
+			t.Fatalf("previous config was not restored: %#v, %v", loaded, err)
+		}
+		if err := verifyAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle); err != nil {
+			t.Fatalf("previous plugin was not restored: %v", err)
+		}
+		if err := verifyAntigravitySharedMCPState(previous); err != nil {
+			t.Fatalf("previous shared MCP entry was not restored: %v", err)
+		}
+		assertAntigravityTransactionAbsent(t, desired.RuntimeConfigRoot, journal)
+	})
+
+	t.Run("upgrade after plugin and shared MCP commit", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		previous := installAntigravityFixtureConfig(t, fixture)
+		desired, desiredBundle := prepareAntigravityUpgrade(t, fixture, previous)
+		journal, err := beginAntigravityTransaction(antigravityTransactionInstall, &previous, &desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := transcriptcapture.SaveConfig(desired); err != nil {
+			t.Fatal(err)
+		}
+		swapPath := antigravityBundleSwapPath(desired.RuntimePluginPath, desiredBundle)
+		if err := os.Mkdir(swapPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := populateAntigravityBundleDirectory(swapPath, desiredBundle); err != nil {
+			t.Fatal(err)
+		}
+		if err := exchangeManagedInstructionFiles(desired.RuntimePluginPath, swapPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := convergeAntigravitySharedMCP(&previous, &desired); err != nil {
+			t.Fatal(err)
+		}
+		if err := recoverAntigravityTransaction(desired.RuntimeConfigRoot); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity)
 		if err != nil || !equalAntigravityTransactionConfig(loaded, desired) {
 			t.Fatalf("desired config was not committed: %#v, %v", loaded, err)
 		}
 		if err := verifyAntigravityBundleDirectory(desired.RuntimePluginPath, desiredBundle); err != nil {
 			t.Fatalf("desired plugin was not committed: %v", err)
 		}
-		if _, err := os.Lstat(previous.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("superseded source remains after recovery: %v", err)
+		if err := verifyAntigravitySharedMCPState(desired); err != nil {
+			t.Fatalf("desired shared MCP entry was not committed: %v", err)
+		}
+		if previous.RuntimePluginSource != desired.RuntimePluginSource {
+			if _, err := os.Lstat(previous.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("superseded source remains after recovery: %v", err)
+			}
 		}
 		assertAntigravityTransactionAbsent(t, desired.RuntimeConfigRoot, journal)
 	})
@@ -1041,6 +1178,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
+			t.Fatal(err)
+		}
 		removalPath := antigravityBundleRemovalPath(cfg.RuntimePluginPath, bundle)
 		if err := renameManagedInstructionFileNoReplace(cfg.RuntimePluginPath, removalPath); err != nil {
 			t.Fatal(err)
@@ -1054,6 +1194,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); err != nil {
 			t.Fatalf("installed config was not preserved: %v", err)
 		}
+		if err := verifyAntigravitySharedMCPState(cfg); err != nil {
+			t.Fatalf("shared MCP entry was not restored: %v", err)
+		}
 		assertAntigravityTransactionAbsent(t, cfg.RuntimeConfigRoot, journal)
 	})
 
@@ -1066,6 +1209,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		}
 		journal, err := beginAntigravityTransaction(antigravityTransactionUninstall, &cfg, nil)
 		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		removalPath := antigravityBundleRemovalPath(cfg.RuntimePluginPath, bundle)
@@ -1084,6 +1230,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if _, err := os.Lstat(removalPath); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("partial removal scratch remains: %v", err)
 		}
+		if err := verifyAntigravitySharedMCPState(cfg); err != nil {
+			t.Fatalf("shared MCP entry was not restored: %v", err)
+		}
 		assertAntigravityTransactionAbsent(t, cfg.RuntimeConfigRoot, journal)
 	})
 
@@ -1098,6 +1247,9 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
+			t.Fatal(err)
+		}
 		if err := removeExactAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
 			t.Fatal(err)
 		}
@@ -1109,6 +1261,38 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		}
 		if _, err := os.Lstat(cfg.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("completed uninstall source remains: %v", err)
+		}
+		assertAntigravityTransactionAbsent(t, cfg.RuntimeConfigRoot, journal)
+	})
+
+	t.Run("uninstall quiesces exact shared MCP entry recreated after config removal", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		cfg := installAntigravityFixtureConfig(t, fixture)
+		bundle, err := verifiedAntigravitySourceBundle(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal, err := beginAntigravityTransaction(antigravityTransactionUninstall, &cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := removeExactAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
+			t.Fatal(err)
+		}
+		if err := transcriptcapture.RemoveConfig(transcriptcapture.RuntimeAntigravity); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := convergeAntigravitySharedMCP(nil, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := recoverAntigravityTransaction(cfg.RuntimeConfigRoot); err != nil {
+			t.Fatal(err)
+		}
+		if absent, err := antigravitySharedMCPMatches(nil, &cfg); err != nil || !absent {
+			t.Fatalf("recreated shared MCP entry survived recovery: absent=%t err=%v", absent, err)
 		}
 		assertAntigravityTransactionAbsent(t, cfg.RuntimeConfigRoot, journal)
 	})
@@ -1250,6 +1434,76 @@ func TestAntigravityRecordedPolicyArtifactSurvivesBinaryPolicyChanges(t *testing
 	})
 }
 
+func TestAntigravityLegacyPluginMCPMigratesAndUninstalls(t *testing.T) {
+	t.Run("reinstall migrates to canonical shared MCP", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		legacy := installLegacyAntigravityPluginMCPConfig(t, fixture)
+		canonicalPath := filepath.Join(fixture.configRoot(), "mcp_config.json")
+		if err := os.WriteFile(canonicalPath, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(canonicalPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(legacy.RuntimePluginPath, "mcp_config.json")); err != nil {
+			t.Fatalf("legacy plugin MCP is missing: %v", err)
+		}
+		if code := installCmd(fixture.installArgs()); code != 0 {
+			t.Fatalf("legacy migration code = %d", code)
+		}
+		migrated, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.RuntimeMCPConfigPath != filepath.Join(fixture.configRoot(), "mcp_config.json") {
+			t.Fatalf("migrated MCP config path = %q", migrated.RuntimeMCPConfigPath)
+		}
+		if _, err := os.Lstat(filepath.Join(migrated.RuntimePluginPath, "mcp_config.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("migrated plugin still contains MCP config: %v", err)
+		}
+		if err := validateAntigravityInstalledTopology(migrated); err != nil {
+			t.Fatalf("migrated topology is invalid: %v", err)
+		}
+		if legacy.RuntimePluginSource != migrated.RuntimePluginSource {
+			if _, err := os.Lstat(legacy.RuntimePluginSource); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("legacy source remains after migration: %v", err)
+			}
+		}
+	})
+
+	t.Run("legacy direct uninstall needs no shared entry or provider CLI", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		legacy := installLegacyAntigravityPluginMCPConfig(t, fixture)
+		canonicalPath := filepath.Join(fixture.configRoot(), "mcp_config.json")
+		if err := os.WriteFile(canonicalPath, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(canonicalPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(fixture.cli); err != nil {
+			t.Fatal(err)
+		}
+		if code := uninstallCmd([]string{"agy"}); code != 0 {
+			t.Fatalf("legacy direct uninstall code = %d", code)
+		}
+		if _, err := os.Lstat(legacy.RuntimePluginPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy plugin remains after uninstall: %v", err)
+		}
+		raw, err := os.ReadFile(canonicalPath)
+		if err != nil || len(raw) != 0 {
+			t.Fatalf("legacy uninstall changed preexisting shared MCP config: %q, %v", raw, err)
+		}
+		info, err := os.Lstat(canonicalPath)
+		if err != nil {
+			t.Fatalf("inspect legacy shared MCP config after uninstall: %v", err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Fatalf("legacy uninstall changed preexisting shared MCP mode: %v", info.Mode())
+		}
+	})
+}
+
 func installAntigravityFixtureConfig(t *testing.T, fixture antigravityIntegrationFixture) transcriptcapture.Config {
 	t.Helper()
 	if code := installCmd(fixture.installArgs()); code != 0 {
@@ -1318,10 +1572,58 @@ func installLegacyAntigravityPolicyConfig(t *testing.T, fixture antigravityInteg
 	return cfg
 }
 
-func assertAntigravityTransactionAbsent(t *testing.T, configRoot string, _ antigravityTransactionJournal) {
+func installLegacyAntigravityPluginMCPConfig(t *testing.T, fixture antigravityIntegrationFixture) transcriptcapture.Config {
 	t.Helper()
-	if _, err := os.Lstat(antigravityTransactionPath(configRoot)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Antigravity transaction journal remains: %v", err)
+	current := installAntigravityFixtureConfig(t, fixture)
+	currentBundle, err := verifiedAntigravitySourceBundle(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := current
+	legacy.RuntimeMCPConfigPath = ""
+	legacyBundle, err := antigravityBundleFromConfig(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.RuntimePluginDigest = legacyBundle.digest()
+	legacy.RuntimePluginSource = filepath.Join(
+		legacy.MCPEnvironment["WITSELF_HOME"], "integrations", "antigravity", "bundles", legacy.RuntimePluginDigest,
+	)
+	if err := stageAntigravitySourceBundle(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := convergeAntigravitySharedMCP(&current, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := installAntigravityBundleDirectory(legacy.RuntimePluginPath, legacyBundle, &currentBundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if current.RuntimePluginSource != legacy.RuntimePluginSource {
+		if err := removeExactAntigravityBundleDirectory(current.RuntimePluginSource, currentBundle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateAntigravityInstalledTopology(legacy); err != nil {
+		t.Fatalf("legacy plugin-MCP topology is invalid: %v", err)
+	}
+	return legacy
+}
+
+func assertAntigravityTransactionAbsent(t *testing.T, configRoot string, journal antigravityTransactionJournal) {
+	t.Helper()
+	paths := []string{
+		antigravityTransactionPath(configRoot),
+		antigravitySharedMCPScratchPathForJournal(configRoot, journal),
+		antigravitySharedMCPStagePath(antigravitySharedMCPScratchPathForJournal(configRoot, journal)),
+		antigravitySharedMCPMutationPath(configRoot, journal),
+	}
+	for _, path := range paths {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Antigravity transaction artifact remains at %s: %v", path, err)
+		}
 	}
 }
 
@@ -1497,7 +1799,8 @@ func assertNoAntigravityScratchDirectories(t *testing.T, configRoot string) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".witself-plugin-") {
+		if strings.HasPrefix(entry.Name(), ".witself-plugin-") ||
+			strings.HasPrefix(entry.Name(), ".witself-antigravity-mcp-") {
 			t.Errorf("Antigravity scratch directory remains live: %s", entry.Name())
 		}
 	}

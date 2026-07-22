@@ -99,7 +99,7 @@ func installCmd(args []string) int {
 	}
 	if *routingOnly {
 		if runtime == transcriptcapture.RuntimeAntigravity {
-			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one exact plugin ownership unit")
+			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one transactionally managed integration unit")
 			return 2
 		}
 		for name := range setFlags {
@@ -915,7 +915,7 @@ func uninstallCmd(args []string) int {
 	rollbackUninstall := func(hooksTouched, mcpTouched bool) {
 		if runtime == transcriptcapture.RuntimeAntigravity {
 			if mcpTouched && previousBinding != nil {
-				if rollbackErr := restoreAntigravityPlugin(previousBinding, previousBinding); rollbackErr != nil {
+				if rollbackErr := restoreAntigravityUninstall(previousBinding); rollbackErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: restore Antigravity plugin: %v; preserving the transaction journal for recovery\n", rollbackErr)
 					return
 				}
@@ -1022,6 +1022,18 @@ func uninstallCmd(args []string) int {
 	} else {
 		fmt.Fprintf(os.Stderr, "witself: warning: MCP registration was not removed: %v\n", runtimeCLIErr)
 	}
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		absent, stateErr := antigravitySharedMCPMatches(nil, &cfg)
+		if stateErr != nil || !absent {
+			rollbackUninstall(true, true)
+			if stateErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: verify Antigravity shared MCP removal: %v\n", stateErr)
+			} else {
+				fmt.Fprintln(os.Stderr, "witself: Antigravity shared MCP entry reappeared during uninstall; restored the managed plugin and retained the integration")
+			}
+			return 1
+		}
+	}
 	if cursorPermissionManaged {
 		cursorPermissionTouched, err = cursorPermissionSnapshot.removeWitselfMCPPermission()
 		if err != nil {
@@ -1037,13 +1049,18 @@ func uninstallCmd(args []string) int {
 	}
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		if antigravityJournal != nil {
-			if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
-				fmt.Fprintf(os.Stderr, "witself: finalize Antigravity transaction: %v\n", clearErr)
+			if recoveryErr := recoverAntigravityUninstallTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); recoveryErr != nil {
+				// The integration config was the uninstall commit marker. If final
+				// convergence fails, make a best-effort exact restoration before
+				// returning and retain the journal whenever restoration is incomplete.
+				if saveErr := transcriptcapture.SaveConfig(cfg); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore Antigravity integration config: %v\n", saveErr)
+				} else if restoreErr := restoreAntigravityUninstall(&cfg); restoreErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore Antigravity policy after finalization failure: %v\n", restoreErr)
+				}
+				fmt.Fprintf(os.Stderr, "witself: finalize Antigravity transaction: %v\n", recoveryErr)
 				return 1
 			}
-		}
-		if cleanupErr := removeAntigravitySourceBundle(cfg); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "witself: warning: remove Antigravity recovery bundle: %v\n", cleanupErr)
 		}
 	}
 	fmt.Printf("uninstalled %s integration; tokens and pending transcript events were preserved\n", runtime)
