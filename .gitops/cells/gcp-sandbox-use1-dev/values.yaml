@@ -31,6 +31,8 @@ apps:
           - agent_k7mxv7zemzl7eryc
           - agent_eshphz2flzvdfnj2
           - agent_z7flki3nxargu2gl
+          - agent_xixytd2csyffgmll
+        retryCanaryAgentID: agent_xixytd2csyffgmll
         relayPublicKeysJSON: '{"pilot_20260721_v1":"4YFALyKdS19xyYFyoJkP1kydVKw0xlmhf92Hog5b81s="}'
         relayReplayWindow: 5m
     # Phase B enabled compaction after every schema-54-compatible v186 server
