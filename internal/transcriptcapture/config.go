@@ -39,6 +39,19 @@ const (
 	HookModeManaged = "managed"
 )
 
+// SupportedRuntimes returns the canonical runtime names in stable display
+// order. Callers may mutate the returned slice without affecting later calls.
+func SupportedRuntimes() []string {
+	return []string{
+		RuntimeCodex,
+		RuntimeClaudeCode,
+		RuntimeGrokBuild,
+		RuntimeCursor,
+		RuntimeOpenClaw,
+		RuntimeAntigravity,
+	}
+}
+
 var (
 	locationNamePattern            = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 	antigravityPluginDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)

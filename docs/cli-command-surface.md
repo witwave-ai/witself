@@ -266,8 +266,9 @@ witself
   totp enroll|code|show|delete
   policy create|list|show|delete|test
   group create|list|show|add-member|remove-member|delete
-  install RUNTIME[,RUNTIME...]
-  uninstall RUNTIME[,RUNTIME...]
+  integrations
+  install RUNTIME[,RUNTIME...]|all
+  uninstall RUNTIME[,RUNTIME...]|all
   transcript create|append|list|show|tail|flush
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
@@ -3107,6 +3108,23 @@ raw prompt payloads for recovered messages. Witself preserves the body
 unchanged when that envelope is malformed, nested, repeated, or has any extra
 bytes; no other runtime uses this normalization.
 
+## `witself integrations`
+
+List the agent runtimes supported by this Witself build and report local
+detection separately from Witself installation state:
+
+```sh
+witself integrations
+witself integrations --json
+```
+
+"Detected" means the supported runtime is currently discoverable on this
+machine. "Installed" means a local Witself integration record exists for that
+runtime. These states are intentionally independent: a detected runtime may not
+yet be integrated, while an installed integration may remain after its provider
+executable becomes unavailable. Human output is a concise per-runtime status
+view; `--json` exposes the same distinction for scripts.
+
 ## `witself install`
 
 Install MCP access and managed memory routing for a supported local agent
@@ -3120,9 +3138,43 @@ witself install grok
 witself install cursor
 witself install openclaw
 witself install antigravity
-witself install claude,codex,grok,cursor,openclaw,antigravity --agent scott --location home
+witself install all --agent scott --location home --dry-run
+witself install all --agent scott --location home
 witself install claude,codex --routing-only
 ```
+
+The literal `all` selector chooses every supported runtime currently detected
+on the machine. It is a CLI keyword, not a shell wildcard: do not write `*`,
+because the shell can expand it to workspace filenames before Witself receives
+the arguments. Explicit single-runtime and comma-separated selectors remain
+available when a narrower target set is wanted.
+
+Bulk install accepts common selection and connection flags (`--account`,
+`--realm`, `--agent`, `--location`, `--endpoint`, and `--token-file`) and
+applies them to every selected runtime. `--user-hooks` requests user-scoped
+hooks on every hook-capable target; `--managed-hooks` requests
+administrator-managed hooks where that capability exists and leaves other
+hook-capable targets user-scoped. Without either flag, refreshes preserve each
+installed runtime's hook mode, while new integrations retain their normal
+provider defaults. In particular, new Codex and Claude Code integrations may
+request administrator access unless `--user-hooks` is supplied.
+Provider-specific capture and routing flags are rejected with `all`; use an
+explicit runtime selector for those controls. `--dry-run` reports the detected
+target set, identity effects, and intended per-runtime actions without changing
+any runtime integration.
+
+Targets run sequentially through the same ownership and safety checks as an
+individual install. Witself continues after a per-runtime failure, retains any
+earlier successful installs, prints a final per-runtime result summary, and
+returns a nonzero status when at least one target fails. Bulk install is not a
+cross-runtime transaction.
+
+An explicit identity applies to every target, including one that is already
+integrated. For example, `witself install all --agent scott` is a rebind request
+for an installed runtime currently bound to another agent, not merely a default
+for new integrations. Preview first; normal runtime ownership fences can refuse
+an unsafe rebind, and such a failure leaves that runtime unchanged while bulk
+processing continues.
 
 The installer reuses an existing binding or the only local agent credential. If
 selection is ambiguous, pass `--agent NAME`; the resolved account, realm, and
@@ -3293,8 +3345,20 @@ witself uninstall grok
 witself uninstall cursor
 witself uninstall openclaw
 witself uninstall antigravity
-witself uninstall claude,codex,grok,cursor,openclaw,antigravity
+witself uninstall all --dry-run
+witself uninstall all
 ```
+
+The literal `all` selector chooses runtimes with an installed Witself
+integration record. Selection does not depend on current provider detection, so
+an integration remains eligible for cleanup when its provider executable is no
+longer discoverable. `--dry-run` reports the target set and intended removals
+without changing integration state.
+
+Bulk uninstall processes targets sequentially, continues after an individual
+failure, preserves successful removals, and prints a final per-runtime summary.
+It exits nonzero when any target fails and does not roll successful removals
+back merely because a later runtime could not be uninstalled.
 
 For hook-capable runtimes, uninstall infers user versus managed hook mode from
 the local integration record and preserves tokens and pending transcript events.

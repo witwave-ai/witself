@@ -61,13 +61,33 @@ reinstall is idempotent, uninstall removes only a Witself-owned entry, and a
 pre-existing user-owned entry is preserved.
 
 ```sh
+witself integrations
 witself install codex
 witself install claude
 witself install grok
 witself install cursor
 witself install openclaw
 witself install antigravity
+
+# Preview, then install every supported runtime detected on this machine.
+witself install all --agent scott --location home --dry-run
+witself install all --agent scott --location home
 ```
+
+`witself integrations` distinguishes runtimes detected on the current machine
+from runtimes that already have a Witself integration. Use the literal selector
+`all` for bulk operations; do not use `*`, which a shell can expand before
+Witself sees it. Bulk install applies common identity, location, and connection
+flags to every detected target, processes targets sequentially, and prints a
+per-runtime summary. It continues after an individual failure, preserves earlier
+successful installs, and exits nonzero when any target fails. An explicit
+`--agent` also applies to already installed targets, so preview first when those
+integrations may be bound to different agents.
+
+Bulk refreshes preserve each installed runtime's existing hook ownership. New
+Codex and Claude Code integrations use their normal administrator-managed hook
+default, which may request access; add `--user-hooks` to keep every hook-capable
+runtime user-scoped instead.
 
 OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH` (or selected
 with `OPENCLAW_CLI_PATH`) and exactly one configured agent. That sole agent must
@@ -112,7 +132,8 @@ When more than one agent is available, select one explicitly; a location label
 is optional:
 
 ```sh
-witself install claude,codex,grok,cursor --agent scott --location home
+witself install all --agent scott --location home --dry-run
+witself install all --agent scott --location home
 ```
 
 The resolved account, realm, and agent are pinned explicitly in every installed
@@ -210,8 +231,14 @@ through `/hooks` once.
 Remove an integration without deleting tokens or queued transcript events:
 
 ```sh
-witself uninstall claude,codex,grok,cursor,openclaw,antigravity
+witself uninstall all --dry-run
+witself uninstall all
 ```
+
+Bulk uninstall selects runtimes by installed Witself state, not by whether their
+provider executable is still detected. It uses the same sequential,
+continue-and-summarize behavior as bulk install, so one failure does not undo
+successful removals from other runtimes.
 
 `messages` captures visible conversation and lifecycle events, `trace` adds
 exposed tool, failure, permission, and subagent activity, and `raw` also retains
