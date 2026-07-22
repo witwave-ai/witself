@@ -150,8 +150,7 @@ exact fence when possible; otherwise the bounded lease expires normally. A
 retained tempfailed proof remains retryable for 24 hours but does not block the
 next run from arming a fresh challenge.
 
-The `agent-email-canary` GitHub Actions workflow runs every 15 minutes only
-when repository variable `AGENT_EMAIL_CANARY_ENABLED` is exactly `true`.
+The `agent-email-canary` GitHub Actions workflow is manual-dispatch-only.
 Provision these repository variables:
 
 - `CLOUDFLARE_ACCOUNT_ID`
@@ -167,8 +166,8 @@ repository-wide secrets):
 - `AGENT_EMAIL_CANARY_TO`
 
 Run one manual workflow dispatch and review both the value-free canary result
-and Analytics Engine outcomes before setting `AGENT_EMAIL_CANARY_ENABLED=true`.
-Keep the schedule false until that success. The
+and Analytics Engine outcomes. Add a recurring schedule only when continuous
+monitoring and its retained-message growth are intentionally accepted. The
 Cloudflare sender must already belong to an onboarded Email Sending domain.
 The job has a 15-minute outer limit and a 600-second absolute canary deadline.
 
@@ -176,14 +175,15 @@ Do not arm or send during a mixed-version deployment. Deploy schema-61-capable
 server code with `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` empty, wait for
 every pod to converge, then perform a config-only rollout selecting exactly one
 enrolled agent and wait for every pod again. Only then run the manual canary.
-For rollback, disable the schedule first and settle the unused arm or let its
-15-minute TTL expire before unsetting the canary agent or deploying older code;
-otherwise an old replica can ordinary-accept the first synthetic delivery.
+For rollback, first disable any recurring schedule that has been added, then
+settle the unused arm or let its 15-minute TTL expire before unsetting the
+canary agent or deploying older code; otherwise an old replica can
+ordinary-accept the first synthetic delivery.
 
-Acknowledgement does not delete synthetic messages. A 15-minute schedule adds
-about 96 retained messages per day until the ordinary mailbox retention/delete
-contract is implemented. Keep the schedule default-off unless that accumulation
-is explicitly accepted and monitored.
+Acknowledgement does not delete synthetic messages. A future 15-minute schedule
+would add about 96 retained messages per day until the ordinary mailbox
+retention/delete contract is implemented. Keep the workflow manual-only unless
+that accumulation is explicitly accepted and monitored.
 
 ## Rollback
 

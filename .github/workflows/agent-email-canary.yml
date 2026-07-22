@@ -2,8 +2,6 @@ name: agent-email-canary
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"
 
 permissions:
   contents: read
@@ -14,9 +12,8 @@ concurrency:
 
 jobs:
   receive-canary:
-    # A manual dispatch is the pre-enable acceptance drill. Scheduled runs
-    # remain inert until the repository variable is explicitly enabled.
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.AGENT_EMAIL_CANARY_ENABLED == 'true' }}
+    # Manual dispatch is the acceptance and diagnostic drill. Add a schedule
+    # only when continuous monitoring is intentionally enabled.
     runs-on: ubuntu-latest
     environment: agent-email-canary
     timeout-minutes: 15

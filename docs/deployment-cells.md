@@ -238,11 +238,12 @@ synthesize `enabled`.
 Only after full Phase-A convergence may operators change agent/realm receive
 controls or resume archive movement. Enable the provider-retry canary in a
 separate config-only Phase B, wait for every pod to converge again, and only
-then arm/send a manual proof. For rollback, turn the canary schedule off and
-settle any armed proof first. Before removing the canary setting or deploying
-pre-60/61 code, disable the process-level receive pilot and the exact edge
-routes; never rely on a realm-disabled row to protect traffic from an older
-binary, and never run a pre-60 export after that row has become authoritative.
+then arm/send a manual proof. For rollback, turn off any recurring canary
+schedule that has been added and settle any armed proof first. Before removing
+the canary setting or deploying pre-60/61 code, disable the process-level
+receive pilot and the exact edge routes; never rely on a realm-disabled row to
+protect traffic from an older binary, and never run a pre-60 export after that
+row has become authoritative.
 
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar
