@@ -3125,11 +3125,17 @@ yet be integrated, while an installed integration may remain after its provider
 executable becomes unavailable. Human output is a concise per-runtime status
 view; `--json` exposes the same distinction for scripts.
 
+GitHub Copilot is reported under its canonical `copilot` runtime name and is
+detected when the discovered CLI is version 1.0.73 or newer and passes the
+current MCP capability probe. The `github-copilot` alias resolves to that same
+integration. Copilot is included in both the detected target set for `install
+all` and the installed target set for `uninstall all`.
+
 ## `witself install`
 
 Install MCP access and managed memory routing for a supported local agent
 runtime. Codex, Claude Code, Grok Build, and Cursor also install transcript
-hooks; the OpenClaw and Antigravity previews do not:
+hooks; the OpenClaw, Antigravity, and GitHub Copilot previews do not:
 
 ```sh
 witself install codex
@@ -3138,6 +3144,8 @@ witself install grok
 witself install cursor
 witself install openclaw
 witself install antigravity
+witself install copilot
+witself install copilot --routing-only
 witself install all --agent scott --location home --dry-run
 witself install all --agent scott --location home
 witself install claude,codex --routing-only
@@ -3248,6 +3256,39 @@ the legacy-to-current transition: it commits only a complete exact tuple,
 restores a previous complete tuple when safe, and refuses ambiguous foreign
 state.
 
+GitHub Copilot phase 1 requires GitHub Copilot CLI 1.0.73 or newer. Witself
+discovers `copilot` on `PATH` or uses `COPILOT_CLI_PATH`, parses its semantic
+version, and requires the current MCP capability probe to pass. The canonical runtime
+selector is `copilot`; `github-copilot` is an accepted alias. Install merges one
+collision-resistant `witself-managed-<24-hex>` stdio server into
+`$COPILOT_HOME/mcp-config.json` and writes one dedicated exact-owned global
+instruction file at
+`$COPILOT_HOME/instructions/witself-memory-routing.instructions.md` (normally
+under `~/.copilot`). The instruction frontmatter has `applyTo: "**"`. The 24
+lowercase hex characters are derived from stable account, realm, agent, and
+location identifiers. The MCP entry pins the absolute Witself executable, exact
+agent identity and optional location, and only an absolute non-secret
+`WITSELF_HOME`. Credentials, `HOME`, `PATH`, and arbitrary environment values
+are never persisted.
+
+Copilot installation pins the canonical effective `COPILOT_HOME`, uses
+Copilot's persisted MCP CLI for list/add/remove, and accepts its `type: local`
+spelling as the documented stdio transport. Provider CLI calls run from an
+isolated temporary directory so workspace MCP configuration cannot shadow the
+user registry. It preserves unrelated MCP root
+fields, sibling servers, and every other instruction file. A foreign or
+case-colliding managed key,
+malformed or duplicate-key JSON, unknown binding field, disabled or non-user
+binding, or selector drift fails closed rather than being overwritten. An
+MCP registry symlink is refused, and semantic snapshots verify preservation of
+every unrelated root field and sibling server. An existing instruction file
+must contain only the marked Witself block. The
+`--capture`, `--managed-hooks`, and `--user-hooks` flags are rejected because
+phase 1 has no
+Witself transcript hooks. `witself install copilot --routing-only` refreshes
+only the exact-owned instruction file without invoking Copilot, resolving
+credentials, or changing the MCP binding.
+
 `--routing-only` atomically refreshes only the runtime's managed static
 instruction block. It does not resolve credentials, contact Witself, invoke a
 provider CLI, change the integration binding, register MCP, or install/remove
@@ -3300,6 +3341,12 @@ Antigravity hooks are deferred until their synchronous payload and transcript
 path have a validated direct-message and prompt-context contract; phase 1 does
 not infer automatic capture or injection from hook availability.
 
+GitHub Copilot also reports `guided_mcp_fallback`. Its exact-owned global
+instruction file covers the full safety contract and directs the active agent
+to call the collision-resistant Witself MCP server's `self.show` and
+`memory.recall` tools. Copilot transcript hooks and direct prompt-context
+injection are not installed in phase 1.
+
 The injected checkpoint is a point-in-time snapshot, not same-turn synthesis.
 The current prompt may still be flushing and the current assistant response does
 not yet exist, so that evidence can be reviewed on a later interaction. Runtime
@@ -3328,6 +3375,14 @@ Witself verifies the installed plugin, its immutable recovery source, and the
 exact managed entry in the canonical shared MCP config; drift in any owned
 surface prevents the credential-bound server from exposing tools.
 
+GitHub Copilot loads the policy from
+`$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`. Before
+every `mcp serve --runtime copilot` startup, Witself verifies the recorded
+configuration root, `WITSELF_HOME`, and exact managed server entry; binding
+drift prevents credential-bound tools from being exposed. It also requires the
+exact current managed instruction content; stale, missing, unmarked, or
+extra-content instructions prevent server startup.
+
 Administrator-managed hooks are the default for Codex and Claude Code while
 identity and MCP registration remain user-scoped. The command prompts for
 administrator access only for that system policy write. Codex uses
@@ -3345,6 +3400,7 @@ witself uninstall grok
 witself uninstall cursor
 witself uninstall openclaw
 witself uninstall antigravity
+witself uninstall copilot
 witself uninstall all --dry-run
 witself uninstall all
 ```
@@ -3386,6 +3442,16 @@ For a recorded v0.0.198 binding it removes the exact three-file plugin without
 touching the shared file. Any ownership mismatch retains the binding. If a
 later step fails, transaction rollback or recovery restores the complete exact
 plugin-and-server tuple before the journal is cleared.
+
+GitHub Copilot uninstall removes only the exact recorded collision-resistant
+server entry and the managed block in the dedicated instruction path; an empty
+regular instruction file is removed. It preserves sibling MCP servers, other
+instructions, credentials, settings, permissions, sessions, and application
+state. It uses the configuration root recorded at installation and fails closed
+on MCP-entry drift or an unmarked/extra-content instruction file instead of
+deleting uncertain user-owned state. The value-free `0600`
+`.witself-copilot-operation.lock` remains under `COPILOT_HOME` as the stable
+cross-process fence for future install, uninstall, and routing-only operations.
 
 ## `witself message`
 

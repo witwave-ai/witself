@@ -39,8 +39,9 @@ plane.
 - [fact-service.md](fact-service.md): the implemented subject/predicate core,
   typed assertions, provenance/history, CLI/API/MCP surfaces, and deferred work.
 - [agent-memory-routing.md](agent-memory-routing.md): the implemented Codex,
-  Claude Code, Grok Build, and Cursor policies plus the OpenClaw MCP/workspace
-  and Antigravity rules-plugin/shared-MCP previews for portable
+  Claude Code, Grok Build, and Cursor policies plus phase-one previews for
+  OpenClaw MCP/workspace, Antigravity rules-plugin/shared-MCP, and GitHub
+  Copilot global-instructions/user-MCP routing for portable
   fact-and-narrative-memory routing and explicitly selected provider-native
   coexistence.
 - [client-custodied-agent-vault.md](client-custodied-agent-vault.md): the
@@ -97,7 +98,8 @@ plane.
 - [agent-avatars.md](agent-avatars.md): portable versioned agent portraits,
   deterministic placeholders, realm style packs, client-side AI generation,
   autonomy policy, safe SVG validation, evolution, and CLI/API/MCP routing for
-  Codex, Claude Code, Grok Build, and Cursor.
+  Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub
+  Copilot.
 - [operator-auth.md](operator-auth.md): CLI-initiated human/operator auth,
   device-code fallback, self-hosted bootstrap, and unattended token posture.
 - [threat-model.md](threat-model.md): assets, principals, trust boundaries,

@@ -607,8 +607,8 @@ witself message read msg_124 --json
 ```
 
 Codex and Claude Code may receive the value-free checkpoint automatically
-through supported hooks. Cursor and Grok Build use the installed guidance and
-MCP fallback to call `self.show`. The installed policy instructs every active
+through supported hooks. Cursor, Grok Build, OpenClaw, Antigravity, and Copilot
+use installed guidance and MCP fallback to call `self.show`. The installed policy instructs every active
 runtime to call `message.listen(wait_seconds=0)` to retrieve unread metadata;
 model compliance is not forced by a hook or the backend. No hook exposes a
 message body, marks a delivery read, acknowledges it, starts inference, or wakes
@@ -963,15 +963,21 @@ Expected behavior:
 
 ## 16. MCP Stdio For An Agent Runtime
 
-Install the current read-only MCP and transcript-capture slice for a local
-runtime:
+Install the current MCP integration for a local runtime. The first four
+runtimes below also receive transcript hooks; the phase-one OpenClaw,
+Antigravity, and GitHub Copilot adapters use managed instructions plus guided
+MCP fallback:
 
 ```sh
 witself install codex
 witself install claude
 witself install grok
 witself install cursor
-witself install claude,codex,grok,cursor --agent scott --location home
+witself install openclaw
+witself install antigravity
+witself install copilot
+witself install all --agent scott --location home --dry-run
+witself install all --agent scott --location home
 ```
 
 The installer reuses an existing binding or the only local agent credential.
@@ -1001,15 +1007,20 @@ witself uninstall codex
 witself uninstall claude
 witself uninstall grok
 witself uninstall cursor
-witself uninstall claude,codex,grok,cursor
+witself uninstall openclaw
+witself uninstall antigravity
+witself uninstall copilot
+witself uninstall all --dry-run
+witself uninstall all
 ```
 
 The command validates the token-bound agent, stores only account/realm/agent
 selectors and an optional token-file path under `~/.witself`, registers the
-`witself` stdio server with the runtime, and merges the transcript hooks. It
+`witself` stdio server with the runtime, and merges transcript hooks where the
+runtime has a validated hook contract. It
 never embeds the token in the MCP registration. The installed server command is
 equivalent to `witself mcp serve --runtime` with `codex`, `claude-code`,
-`grok-build`, or `cursor`.
+`grok-build`, `cursor`, `openclaw`, `antigravity`, or `copilot`.
 
 Each runtime also receives managed fact-versus-portable-narrative-memory
 routing guidance. Atomic assertions go to Witself facts. Narrative remember
@@ -1028,6 +1039,18 @@ required `Mcp(witself:*)` allowlist permission into
 Witself integration record says the installer created it. Cursor Memories remain
 project-scoped; when a user explicitly includes native Cursor memory in broad
 recall, its coverage is reported as partial.
+
+GitHub Copilot phase one requires CLI 1.0.73 or newer and detects the runtime
+through its semantic version plus current MCP capability probe. It uses one collision-resistant
+`witself-managed-<24-hex>` server in `$COPILOT_HOME/mcp-config.json` and the
+exact-owned global instruction file
+`$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`. The
+canonical runtime is `copilot`; `github-copilot` is an alias. Sibling servers
+and other instruction files are preserved, and the instruction frontmatter
+applies globally with `applyTo: "**"`. MCP binding drift and an unmarked or
+extra-content dedicated instruction file fail closed.
+`witself install copilot --routing-only` refreshes only the
+instruction file. Phase one installs no Copilot transcript hook.
 
 Expected behavior:
 

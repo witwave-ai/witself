@@ -82,8 +82,9 @@ V0 should prove the end-to-end product boundary:
   helpers and the file bridge remain explicit future work. The opportunistic
   request/run/plan/apply/rollback protocol and foreground pending-checkpoint
   handling are implemented. PostgreSQL stores due state; Codex/Claude can inject
-  it when already durable at hook read time, while Cursor/Grok use guided
-  `self.show`. The older `memory curate auto service` path remains explicit
+  it when already durable at hook read time, while Cursor, Grok Build, OpenClaw,
+  Antigravity, and Copilot use guided `self.show`. The older `memory curate auto
+  service` path remains explicit
   legacy/manual compatibility tooling and is never launched by runtime hooks.
 - `memory recall` performs deterministic PostgreSQL lexical/structured ranking
   over the caller's accessible memories. Optional vectors are supplied by the
@@ -401,7 +402,8 @@ V0 is credible when:
   curation requests, leases/fences, frozen inputs, strict plans, atomic apply,
   cancel/abandon, and rollback round-trip through CLI/HTTP, with fifteen MCP
   tools; pending state is surfaced value-free through `self show`, Codex/Claude
-  inject it when already durable, and Cursor/Grok use guided MCP fallback; the
+  inject it when already durable, and Cursor, Grok Build, OpenClaw, Antigravity,
+  and Copilot use guided MCP fallback; the
   optional legacy/manual client worker is explicitly configurable through
   `memory curate auto`, is never launched by hooks, and keeps credentials out of
   inference;

@@ -363,7 +363,8 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
   candidates to offer/decline, the exact coordinator to rank durable offers, and
   selected agents to execute fenced claims. Supported Codex and Claude Code
   hooks automatically attempt content-free checkpoint injection and fail open;
-  Cursor and Grok Build use guided MCP calls. Every runtime's policy
+  Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use guided MCP calls.
+  Every runtime's policy
   directs it to obtain unread metadata through listen, but cannot force model
   compliance. No daemon, provider child, or captured provider credential
   participates.

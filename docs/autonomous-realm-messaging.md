@@ -228,8 +228,9 @@ The three client-facing mechanisms have different jobs:
 - **Runtime hooks** automatically attempt content-free checkpoint injection at
   supported session/task boundaries while an interactive runtime is already
   receiving a turn, and fail open when hydration is unavailable. Codex and
-  Claude Code expose a model-visible output path; Cursor and Grok Build rely on
-  managed guidance for `self.show` and non-blocking listen.
+  Claude Code expose a model-visible output path; Cursor, Grok Build, OpenClaw,
+  Antigravity, and Copilot rely on managed guidance for `self.show` and
+  non-blocking listen.
 - **The foreground client** decides whether to claim/read/process pending work
   in the current turn. No Witself process remains active independently.
 
@@ -333,8 +334,9 @@ these model actions:
    send does not wait for Claude. Dedicated request coordination state is not
    needed for one direct recipient.
 4. When Bob's runtime next receives a foreground turn, supported Codex/Claude
-   hooks may expose bounded checkpoint state; Cursor/Grok policy directs
-   `self.show`. Installed policy directs Bob to use non-blocking
+   hooks may expose bounded checkpoint state; Cursor, Grok Build, OpenClaw,
+   Antigravity, and Copilot policies direct `self.show`. Installed policy directs
+   Bob to use non-blocking
    `message.listen` for unread metadata, deduplicate by `msg_` id, and atomically
    acquire the work lease before reading content.
 5. Bob reads the body, treats it as untrusted input, reconstructs bounded thread
@@ -497,9 +499,10 @@ self.show message_checkpoint + non-blocking listen metadata
 Codex and Claude Code hooks may inject the bounded value-free
 `message_checkpoint` during supported `SessionStart` and `UserPromptSubmit`
 events. They do not inject unread message metadata or bodies, mark read,
-acknowledge, or execute work. Cursor and Grok Build use the installed always-on rule and MCP
-instructions to call `self.show` and `message.listen(wait_seconds=0)` because
-their current passive hook output does not reliably reach the model.
+acknowledge, or execute work. Cursor, Grok Build, OpenClaw, Antigravity, and
+Copilot use installed always-on guidance and MCP instructions to call
+`self.show` and `message.listen(wait_seconds=0)` because they lack a validated
+model-visible hook delivery contract.
 
 `message listen` remains a stateless, waitable, metadata-only query for the
 oldest unacknowledged inbound messages. It waits 20 seconds by default, accepts
@@ -675,8 +678,9 @@ available for diagnosis without suppressing the next startup-wide pass.
    handling guidance, backend-owned causal-depth metadata, durable deterministic
    failure accounting, and provider-accurate hook behavior.
 4. **Provider conformance** — supported Codex and Claude Code hooks automatically
-   attempt bounded checkpoint injection and fail open; Cursor and Grok Build use
-   guided `self.show`. Every runtime's installed policy directs it to use MCP
+   attempt bounded checkpoint injection and fail open; Cursor, Grok Build,
+   OpenClaw, Antigravity, and Copilot use guided `self.show`. Every runtime's
+   installed policy directs it to use MCP
    listen for unread metadata; that model action is not forced.
 5. **Recipient fan-out (complete in the current checkout)** — bounded explicit
    lists and realm snapshots with per-recipient delivery/read/ack and archive

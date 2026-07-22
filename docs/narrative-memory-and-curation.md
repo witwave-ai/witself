@@ -5,7 +5,8 @@ handling (2026-07-15). Direct storage, atomic supersede, lexical recall, the
 fenced client-curation protocol, restricted curator credentials, authenticated
 preflight, a provider-neutral runner/CLI driver, PostgreSQL due state, and
 model-visible pending-checkpoint delivery for Codex/Claude are implemented in
-the current checkout. Cursor/Grok use an explicitly guided `self.show` fallback.
+the current checkout. Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use
+an explicitly guided `self.show` fallback.
 The older `memory curate auto` and launchd/systemd surfaces remain explicit
 legacy/manual compatibility tooling and are never invoked by runtime hooks.
 Bounded automatic hydration, optional client-authored vectors, and the executable
@@ -128,8 +129,9 @@ model-visible per-prompt hook injection in runtimes that do not expose it,
 live managed cross-cloud certification, and performance/evaluation tuning.
 Automatic hydration is implemented against the real current contracts: Codex
 and Claude Code receive session and history-dependent task context plus any
-pending checkpoint already durable at hook read time. Cursor and Grok Build use
-an explicitly labeled managed-instruction/MCP `self.show` fallback for session,
+pending checkpoint already durable at hook read time. Cursor, Grok Build,
+OpenClaw, Antigravity, and Copilot use an explicitly labeled
+managed-instruction/MCP `self.show` fallback for session,
 task recall, and checkpoint control.
 Native Claude Code and Grok Build planners are
 conditionally usable only when their installed CLIs advertise every required
@@ -172,7 +174,8 @@ isolation contract, so both native paths intentionally report unsupported.
   runtimes may coexist as a provider-local convenience. Witself is the portable
   system of record. The same information is targeted to both only when the user
   explicitly requests both; native persistence keeps that provider's
-  guarantees. Gemini and GitHub Copilot adapters remain deferred and disabled.
+  guarantees. Gemini remains deferred. GitHub Copilot phase 1 uses managed
+  instructions and guided stdio MCP without transcript hooks.
 - The protocol does not depend on native subagents. A subagent is an
   optimization; every adapter must also work in the main agent or a separate
   client process.
@@ -295,8 +298,9 @@ semantic judgment:
    or coalesces durable curation work in PostgreSQL.
 2. At prompt submission, Codex and Claude read the bounded self digest and
    automatically inject a value-free `memory_checkpoint` when work is already
-   pending. Cursor and Grok rely on an always-on managed rule that tells the
-   active agent to call `self.show`; this is guided behavior.
+   pending. Cursor, Grok Build, OpenClaw, Antigravity, and Copilot rely on an
+   always-on managed rule that tells the active agent to call `self.show`; this
+   is guided behavior.
 3. Near turn end, the active agent processes at most one fenced request. It
    submits only reversible narrative operations or fact proposals. If nothing
    merits memory, it submits and applies an empty actions plan so the exact
@@ -1177,9 +1181,10 @@ cross-product recall. It does not need to disable native memory.
   Witself controls only what its integration intentionally invokes and cannot
   guarantee that a provider will not create a duplicate.
 - The same logical Witself agent id should normally be used from the current
-  adapters: Codex, Claude Code, Grok Build, and Cursor. Runtime, installation,
-  location, model, session, and run remain provenance. Gemini and GitHub
-  Copilot have no current adapter and are outside this release.
+  adapters: Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and
+  GitHub Copilot. Runtime, installation, location, model, session, and run remain
+  provenance. The latter three are phase-one guided-MCP adapters without
+  transcript hooks; Gemini has no current adapter.
 - Separate Witself agents are used when the user wants isolation. Explicit
   sharing later uses group ownership and policy rather than pretending two
   agents are one.
@@ -1377,11 +1382,13 @@ Each runtime adapter implements the same logical operations:
 5. optional native-subagent or explicit legacy headless-worker optimization;
 6. explicit native-memory coexistence and dual-write reporting.
 
-The first four integration targets are Codex, Claude Code, Grok Build, and
-Cursor, but each native headless path remains subject to the fail-closed probe
-above. Gemini and GitHub Copilot are explicitly deferred and disabled. A future
-runtime needs only an adapter when it is deliberately brought into scope; it
-does not change the database or plan protocol.
+The first four native-planner and transcript-hook integration targets are Codex,
+Claude Code, Grok Build, and Cursor, but each native headless path remains
+subject to the fail-closed probe above. GitHub Copilot now has a phase-one
+managed-instructions and stdio-MCP adapter, but remains disabled as a native
+curation planner until its isolation controls are certified. Gemini remains
+deferred. A future runtime needs only an adapter when it is deliberately brought
+into scope; it does not change the database or plan protocol.
 
 ## Delivery Plan
 
@@ -1428,9 +1435,9 @@ backend.
 
 All four items are implemented to each runtime's real capability boundary.
 Codex and Claude Code inject session and focused task context plus an
-already-durable pending checkpoint automatically; Cursor and Grok Build use
-guided MCP recall and `self.show` because their current passive-hook paths are
-not reliably model-visible.
+already-durable pending checkpoint automatically; Cursor, Grok Build, OpenClaw,
+Antigravity, and Copilot use guided MCP recall and `self.show` because they lack
+a validated model-visible hook path for this delivery.
 
 Exit: repeatable golden tests pass without an embedding provider, and a user
 does not need to invoke search manually in normal runtime use.
@@ -1456,7 +1463,8 @@ is attributable to an exact client plan.
   effective preflight. (implemented)
 - Make source commits mark due without blocking. (implemented)
 - Surface value-free pending state through `self.show`; inject it automatically
-  for Codex/Claude and teach Cursor/Grok the guided fallback. (implemented)
+  for Codex/Claude and teach Cursor, Grok Build, OpenClaw, Antigravity, and
+  Copilot the guided fallback. (implemented)
 - Instruct the active foreground agent to process at most one fenced request,
   including applying an empty plan when no input merits memory. (implemented)
 - Add bounded budgets, sensitive exclusion, feedback-loop exclusion, value-free
@@ -1480,8 +1488,9 @@ only client inference. Work remains pending when no compatible turn occurs.
 - Verify and package the conditionally supported Claude Code and Grok Build
   native planners. Keep the Codex and Cursor paths failed closed until their
   installed CLIs advertise every required prompt, no-tools/no-shell,
-  customization, session, and filesystem-isolation control. Gemini and GitHub
-  Copilot are explicitly outside the current release and remain disabled.
+  customization, session, and filesystem-isolation control. Gemini remains
+  outside the current release; GitHub Copilot's phase-one runtime adapter is
+  available, but its native planner remains disabled pending the same probe.
 - Add client-supplied memory/query vector profiles and portable deterministic
   hybrid ranking without requiring pgvector. (implemented)
 - Keep full lexical functionality and report vector coverage/degradation.
@@ -1549,7 +1558,8 @@ The current checkout implements:
     verification, deterministic history-dependent query gate, authenticated
     value-free checkpoint envelope, foreground one-request policy, open-plane
     advisory boundary, hard timeout/byte/candidate ceilings, fail-open Codex/
-    Claude hook delivery, guided Cursor/Grok fallback, and current-runtime
+    Claude hook delivery, guided fallback for Cursor, Grok Build, OpenClaw,
+    Antigravity, and Copilot, and current-runtime
     conformance matrix; and
 13. migration `0032`, immutable owner-scoped vector profiles, exact
     memory-version vector writes, deterministic hybrid recall, exact lexical
@@ -1564,8 +1574,9 @@ The current checkout implements:
 Model-visible Cursor session/task and Grok session/task injection, live managed
 three-cloud move certification, and production performance/evaluation tuning
 are not complete.
-Cursor and Grok keep the managed-instruction/MCP fallback until their runtime
-contracts provide a dependable injection channel. Claude Code and Grok Build
+Cursor, Grok Build, OpenClaw, Antigravity, and Copilot keep the
+managed-instruction/MCP fallback until their runtime contracts provide a
+dependable injection channel. Claude Code and Grok Build
 native curator planners remain conditional on their installed safety controls;
 the Codex and Cursor native curator paths are unsupported rather than weakened.
 Those gaps are deliberately visible; the backend does not substitute autonomous
@@ -1609,9 +1620,10 @@ not optional post-v0 product features.
   and commit, delivery mode, test identity, timestamp, and outcome.
 
 The accepted delivery contract remains capability-accurate: Codex and Claude
-Code receive automatic model-visible hook hydration, while Cursor and Grok Build
-use the managed always-on instruction plus MCP `self.show` and `memory.recall`
-fallback. The guided fallback is not a backend blocker and must not be reported
+Code receive automatic model-visible hook hydration, while Cursor, Grok Build,
+OpenClaw, Antigravity, and Copilot use the managed always-on instruction plus MCP
+`self.show` and `memory.recall` fallback. The guided fallback is not a backend
+blocker and must not be reported
 as automatic injection. A future runtime contract can upgrade that row only
 after a live, version-gated conformance test passes.
 
@@ -1648,8 +1660,9 @@ Production readiness is complete only when issues
 [#46](https://github.com/witwave-ai/witself/issues/46) are closed with retained
 evidence, the certified release and commit are identified, and this checklist
 links the results. Optional conveniences and intelligence work remain in
-[post-v0-roadmap.md](post-v0-roadmap.md); Gemini and GitHub Copilot remain
-intentionally deferred and are not part of this closeout.
+[post-v0-roadmap.md](post-v0-roadmap.md); Gemini and Copilot transcript-hook or
+native-planner certification remain intentionally deferred and are not part of
+this closeout.
 
 ## Related Documents
 

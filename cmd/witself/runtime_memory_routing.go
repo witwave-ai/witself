@@ -111,6 +111,9 @@ func runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace string) (managedIn
 		// exact-owned plugin directory. Its adapter installs that ownership unit
 		// atomically instead of editing an independent routing file here.
 		return managedInstructionsSpec{}, "Antigravity", false, nil
+	case transcriptcapture.RuntimeCopilot:
+		spec, err := copilotManagedInstructionsSpec()
+		return spec, "GitHub Copilot", true, err
 	default:
 		return managedInstructionsSpec{}, "", false, fmt.Errorf("unsupported runtime %q", runtimeName)
 	}

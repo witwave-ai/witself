@@ -17,9 +17,11 @@ portable ciphertext store plus deterministic authorization, audit, and search.
 Only an active client with both an authorized agent token and the agent's
 separate vault key can turn a sensitive envelope into plaintext.
 
-The first runtime set is Codex, Claude Code, Cursor, and Grok Build. Gemini and
-GitHub Copilot remain future adapters. The backend and archive format behave the
-same on AWS, Google Cloud, and Azure.
+The first hook-capable runtime set is Codex, Claude Code, Cursor, and Grok Build.
+GitHub Copilot is now a phase-one managed-instructions and stdio-MCP adapter, so
+it can use the same sealed-plane tools through guided MCP fallback; Gemini
+remains a future adapter. The backend and archive format behave the same on AWS,
+Google Cloud, and Azure.
 
 ## Current Implementation Boundary
 
@@ -703,9 +705,9 @@ reference injection, dedicated TOTP enrollment/removal commands, permanent
 secret deletion, attachments, OS keychain/secure-enclave integration,
 additional installation proof-of-possession, and browser-native filling remain
 separate slices. Versioned key epochs and immutable bindings keep them
-additive. Gemini and GitHub Copilot adapters and the live four-runtime by
-three-cloud certification matrix also remain release work, not backend schema
-variants.
+additive. Gemini adapter work, Copilot transcript-hook conformance, and the live
+four-runtime by three-cloud certification matrix also remain release work, not
+backend schema variants.
 
 ## Full Product Done Means
 

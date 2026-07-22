@@ -351,7 +351,8 @@ These are **decided** invariants for the collaboration substrate.
   push/streaming is not required and model compliance is not forced.
 - **Agent directive and hook split.** Managed instructions tell every active
   client how to check its mailbox; supported Codex/Claude hooks can inject
-  the content-free checkpoint, while Cursor/Grok use guided MCP calls. Every
+  the content-free checkpoint, while Cursor, Grok Build, OpenClaw, Antigravity,
+  and Copilot use guided MCP calls. Every
   runtime's policy directs it to use listen for unread metadata. Neither path
   forces that model action or wakes a provider. See
   [context-hydration.md](context-hydration.md) and

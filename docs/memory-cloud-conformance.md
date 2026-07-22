@@ -178,8 +178,9 @@ artifact, and do not close the 3-by-3 certification gate.
 
 This is the backend and account-move gate. Runtime capture/recall conformance is
 separate and currently covers Codex, Claude Code, Grok Build, and Cursor with
-capability-accurate fallbacks. Gemini and GitHub Copilot are intentionally not
-part of the current release gate.
+capability-accurate fallbacks. GitHub Copilot has a phase-one guided-MCP adapter
+but no transcript hooks, so it and Gemini are intentionally not part of the
+current release gate.
 
 The managed-cloud certification is tracked by
 [issue #44](https://github.com/witwave-ai/witself/issues/44) under the canonical

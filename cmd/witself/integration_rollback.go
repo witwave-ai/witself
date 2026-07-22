@@ -89,6 +89,55 @@ func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previo
 		}
 		return registerOpenClawMCPBinding(runtimeCLI, previousBinding)
 	}
+	if runtimeName == transcriptcapture.RuntimeCopilot {
+		if attempted == nil {
+			return errors.New("attempted GitHub Copilot integration binding is required for safe MCP rollback")
+		}
+		attemptedName, attemptedBinding, err := copilotMCPBindingFromConfig(executable, *attempted)
+		if err != nil {
+			return err
+		}
+		current, exists, err := inspectCopilotMCP(runtimeCLI, *attempted)
+		if err != nil {
+			return err
+		}
+
+		previousName := ""
+		var previousBinding copilotMCPBinding
+		if previous != nil {
+			previousName, previousBinding, err = copilotMCPBindingFromConfig(previous.MCPCommand, *previous)
+			if err != nil {
+				return err
+			}
+			if exists && attemptedName == previousName && equalCopilotMCPBinding(current, previousBinding) {
+				return nil
+			}
+		}
+
+		if exists {
+			if !equalCopilotMCPBinding(current, attemptedBinding) {
+				return fmt.Errorf("GitHub Copilot MCP server %s changed during rollback; refusing to modify it", attemptedName)
+			}
+			if err := unregisterCopilotMCP(runtimeCLI, attempted); err != nil {
+				return err
+			}
+		}
+		if previous == nil {
+			return nil
+		}
+
+		currentPrevious, previousExists, err := inspectCopilotMCP(runtimeCLI, *previous)
+		if err != nil {
+			return err
+		}
+		if previousExists {
+			if equalCopilotMCPBinding(currentPrevious, previousBinding) {
+				return nil
+			}
+			return fmt.Errorf("GitHub Copilot MCP server %s changed during rollback; refusing to replace it", previousName)
+		}
+		return registerCopilotMCP(runtimeCLI, *previous)
+	}
 	if previous == nil {
 		return unregisterMCP(runtimeName, runtimeCLI)
 	}

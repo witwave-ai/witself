@@ -17,8 +17,9 @@ cloud-dependent.
 
 The product needs one memory layer that follows an account across the currently
 supported Codex, Claude Code, Grok Build, and Cursor integrations and deployment
-cells on AWS, Azure, and Google Cloud. Gemini and GitHub Copilot adapters are
-explicitly deferred. The portable core must preserve facts as canonical
+cells on AWS, Azure, and Google Cloud. Gemini was deferred; GitHub Copilot later
+entered scope as a phase-one managed-instructions and stdio-MCP adapter without
+transcript hooks. The portable core must preserve facts as canonical
 assertions, allow native memories to coexist, use the client's existing
 inference, and round-trip through account export/import.
 

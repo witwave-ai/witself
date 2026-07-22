@@ -222,6 +222,7 @@ Current conformance is deliberately asymmetric:
 | Grok Build | Guided fallback | Guided fallback | Guided through `self.show` | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
 | OpenClaw preview | Guided fallback | Guided fallback | Guided through `self.show` | No supported Witself transcript or prompt hook; the managed workspace `AGENTS.md` supplies the full-catalog safety policy |
 | Antigravity preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 installs a canonical shared MCP entry and a full-catalog always-on rules plugin; native hooks are deferred until their payload and transcript contract is conformantly validated |
+| GitHub Copilot preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 installs a `witself-managed-<24-hex>` user MCP entry and exact-owned global instruction file; transcript hooks are deferred until their payload contract is conformantly validated |
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
@@ -260,7 +261,8 @@ value-free curation lifecycle state, and value-free message, email, and avatar
 checkpoints. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
 include those checkpoints but never unread message/email metadata. Cursor, Grok
-Build, OpenClaw, and Antigravity use guided `self.show`. Every runtime's installed policy
+Build, OpenClaw, Antigravity, and Copilot use guided `self.show`. Every
+runtime's installed policy
 directs it to use non-blocking `message.listen` or `email.listen` to retrieve
 metadata; that model action is not forced. Bodies remain behind explicit read
 and no hook marks read, acknowledges, starts inference, or wakes a client. See
@@ -354,6 +356,11 @@ message, and direct narrative-memory protocol documented in
   names retain dotted declared names behind the collision-resistant per-binding
   `mcp_ws-<server-id>_` prefix, such as
   `mcp_ws-<server-id>_witself.memory.recall`.
+- GitHub Copilot receives the protocol through a collision-resistant
+  `witself-managed-<24-hex>` user MCP entry and exact-owned global instruction
+  file at
+  `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`. Phase 1
+  claims guided MCP fallback, not automatic hook delivery.
 
 In every case, an explicit atomic assertion uses `witself.fact.set`, while an
 explicit narrative remember uses `witself.memory.capture` in the same turn.
@@ -397,9 +404,9 @@ dominates. The canonical per-tool wording lives in
 
 The bootstrap-instructions/file-bridge command remains a target surface. The
 implemented paths are `witself install codex|claude|grok|cursor` plus the
-`witself install openclaw|antigravity` previews. Each installs managed routing
-guidance and the MCP server; OpenClaw and Antigravity phase 1 have no Witself
-transcript or prompt hooks. A future
+`witself install openclaw|antigravity|copilot` previews. Each installs managed
+routing guidance and the MCP server; OpenClaw, Antigravity, and GitHub Copilot
+phase 1 have no Witself transcript or prompt hooks. A future
 paste-able stanza must express the same contract:
 
 ```markdown
@@ -546,7 +553,7 @@ Parser rules:
 
 | Concern | CLAUDE.md / AGENTS.md | Witself |
 | --- | --- | --- |
-| Loaded automatically | Yes, by the harness at session start | Session, recall, and pending-checkpoint context is hook-injected for Codex/Claude; Grok and Cursor use a guided MCP/`self.show` fallback |
+| Loaded automatically | Yes, by the harness at session start | Session, recall, and pending-checkpoint context is hook-injected for Codex/Claude; Grok, Cursor, OpenClaw, Antigravity, and Copilot use guided MCP/`self.show` fallback |
 | Authority | Static file, edited by hand | Live store, mutated through an audited, versioned lifecycle |
 | Recall | Whole file injected every time | Bounded digest + deterministic lexical/structured `recall`; optional implemented client-supplied hybrid vectors |
 | Provenance | None (flat text) | First-class `source` on every fact and memory |
