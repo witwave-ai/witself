@@ -81,6 +81,18 @@ func TestParseMessageDefaultsMissingContentTypeToPlainText(t *testing.T) {
 	}
 }
 
+func TestMIMEBodyUsesEarliestHeaderSeparator(t *testing.T) {
+	t.Parallel()
+	raw := []byte("Subject: mixed\n\nfirst\r\n\r\nsecond")
+	body, err := MIMEBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(body), "first\r\n\r\nsecond"; got != want {
+		t.Fatalf("MIME body = %q, want %q", got, want)
+	}
+}
+
 func TestParseMessageReturnsStableBoundedErrorCodes(t *testing.T) {
 	raw := []byte("Subject: test\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: attacker-chosen\r\n\r\nbody")
 	_, err := ParseMessage(raw, true)

@@ -134,7 +134,10 @@ mutation.
 owner-only retry-canary endpoint, then sends the synthetic message through
 Cloudflare Email Sending with `X-Witself-Canary-Retry`. The cell commits the
 first matching attempt as a deliberate temporary result without storing a
-message; the identical provider retry is accepted once. The runner requires
+message; a provider retry with the same normalized envelope, stable parsed
+projection, and exact MIME body is accepted once even when Cloudflare adds or
+changes transport/authentication headers. Parse-invalid attempts still require
+an exact raw-body/envelope retry. The runner requires
 the cumulative tempfail-then-accepted checkpoint before it passively scans the
 owner mailbox newest-first through bounded cursor pages, verifies the exact
 subject and parsed synthetic code, claims, marks the code used, completes, and

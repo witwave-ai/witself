@@ -114,14 +114,17 @@ var (
 // ParsedMessage is a bounded deterministic MIME projection. Header values and
 // text remain untrusted external content. Attachment bytes are never returned.
 type ParsedMessage struct {
-	HeaderFrom      string
-	HeaderTo        string
-	HeaderSubject   string
-	MIMEMessageID   string
-	MessageDate     *time.Time
-	AttachmentCount int64
-	Text            string
-	TextKind        string
+	HeaderFrom           string
+	HeaderTo             string
+	HeaderSubject        string
+	MIMEMessageID        string
+	MIMEContentType      string
+	MIMETransferEncoding string
+	MIMEVersion          string
+	MessageDate          *time.Time
+	AttachmentCount      int64
+	Text                 string
+	TextKind             string
 }
 
 // ParseMessage extracts bounded metadata and, when includeText is true, one
@@ -142,10 +145,13 @@ func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
 		return ParsedMessage{}, fmt.Errorf("%w: read message", ErrMIMEInvalid)
 	}
 	parsed := ParsedMessage{
-		HeaderFrom:    decodedHeader(message.Header.Get("From"), maximumHeaderValue),
-		HeaderTo:      decodedHeader(message.Header.Get("To"), maximumHeaderValue),
-		HeaderSubject: decodedHeader(message.Header.Get("Subject"), maximumHeaderValue),
-		MIMEMessageID: boundedText(message.Header.Get("Message-ID"), maximumMessageID),
+		HeaderFrom:           decodedHeader(message.Header.Get("From"), maximumHeaderValue),
+		HeaderTo:             decodedHeader(message.Header.Get("To"), maximumHeaderValue),
+		HeaderSubject:        decodedHeader(message.Header.Get("Subject"), maximumHeaderValue),
+		MIMEMessageID:        boundedText(message.Header.Get("Message-ID"), maximumMessageID),
+		MIMEContentType:      canonicalMIMEContentType(message.Header.Get("Content-Type")),
+		MIMETransferEncoding: strings.ToLower(strings.TrimSpace(message.Header.Get("Content-Transfer-Encoding"))),
+		MIMEVersion:          strings.TrimSpace(message.Header.Get("MIME-Version")),
 	}
 	if rawDate := strings.TrimSpace(message.Header.Get("Date")); rawDate != "" {
 		if parsedDate, err := mail.ParseDate(rawDate); err == nil {
@@ -170,6 +176,27 @@ func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
 		}
 	}
 	return parsed, nil
+}
+
+// MIMEBody returns the exact bytes after the top-level RFC 5322 header
+// separator. The returned slice aliases raw. Callers that retain it must copy
+// it; the retry-canary fingerprint consumes it synchronously.
+func MIMEBody(raw []byte) ([]byte, error) {
+	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+		return nil, ErrMIMEInvalid
+	}
+	end := headerEnd(raw)
+	if end < 0 {
+		return nil, ErrMIMEInvalid
+	}
+	if end > maximumMIMEHeaderBytes {
+		return nil, ErrMIMEHeaderLimit
+	}
+	separatorBytes := 2
+	if bytes.HasPrefix(raw[end:], []byte("\r\n\r\n")) {
+		separatorBytes = 4
+	}
+	return raw[end+separatorBytes:], nil
 }
 
 // ParseErrorCode converts parser failures into bounded value-free storage and
@@ -318,10 +345,31 @@ func decodedTransferReader(encoding string, body io.Reader) (io.Reader, error) {
 }
 
 func headerEnd(raw []byte) int {
-	if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
-		return i
+	crlf := bytes.Index(raw, []byte("\r\n\r\n"))
+	lf := bytes.Index(raw, []byte("\n\n"))
+	switch {
+	case crlf < 0:
+		return lf
+	case lf < 0 || crlf < lf:
+		return crlf
+	default:
+		return lf
 	}
-	return bytes.Index(raw, []byte("\n\n"))
+}
+
+func canonicalMIMEContentType(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "text/plain"
+	}
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return boundedText(value, maximumHeaderValue)
+	}
+	mediaType = strings.ToLower(mediaType)
+	if charset, ok := params["charset"]; ok {
+		params["charset"] = strings.ToLower(strings.TrimSpace(charset))
+	}
+	return mime.FormatMediaType(mediaType, params)
 }
 
 func decodedHeader(value string, limit int) string {

@@ -283,11 +283,16 @@ only in the synthetic `X-Witself-Canary-Retry` header; a separate random
 correlation nonce identifies the message through its subject, so neither the
 subject nor body copies the challenge. After the retry is accepted, the opaque
 UUID header remains ordinary synthetic `raw_mime` and is covered by normal
-mailbox/archive policy. The first exact signed delivery
-atomically records a value-free body/envelope fingerprint and returns a
-deliberate temporary verdict without inserting a message. The identical retry
-inserts exactly one message and marks the proof accepted in the same
-transaction; later identical replays return that message without duplication.
+mailbox/archive policy. The first matching signed delivery atomically records a
+value-free fingerprint over the normalized envelope, stable parsed fields,
+decoded text projection, attachment count, and exact MIME body, then returns a
+deliberate temporary verdict without inserting a message. A provider retry may
+change volatile transport/authentication headers such as `Received`,
+`DKIM-Signature`, or `Authentication-Results`; if the fingerprint is otherwise
+unchanged, it inserts exactly one message and marks the proof accepted in the
+same transaction. Later matching replays return that message without
+duplication. Parse-invalid canary deliveries fail closed to the legacy exact
+raw-body/envelope fingerprint rather than using the stable parsed projection.
 While an arm is live, missing, malformed, mismatched, or changed-body attempts
 tempfail. Once no unused arm is live, a malformed, unknown, expired, or
 wrong-body `X-Witself-Canary-Retry` marker gets the fixed terminal cell verdict
