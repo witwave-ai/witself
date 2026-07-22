@@ -298,7 +298,7 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 			return errors.New("runtime plugin fields are not supported for OpenClaw")
 		}
 		if hookMode != HookModeNone {
-			return errors.New("OpenClaw hook_mode must be none")
+			return errors.New("openclaw hook_mode must be none")
 		}
 		if mcpCommand == "" {
 			return errors.New("mcp_command is required for OpenClaw")
@@ -322,7 +322,7 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 	}
 	if runtime == RuntimeAntigravity {
 		if hookMode != HookModeNone {
-			return errors.New("Antigravity hook_mode must be none")
+			return errors.New("antigravity hook_mode must be none")
 		}
 		if runtimeCLICommand == "" {
 			return errors.New("runtime_cli_command is required for Antigravity")

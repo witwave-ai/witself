@@ -16,14 +16,10 @@ func mcpRegistrationAlreadyMissing(output []byte) bool {
 	return strings.Contains(message, "no mcp server named") && strings.Contains(message, "witself")
 }
 
-// preflightRuntimeMemoryRoutingRemoval validates that the managed routing block
-// can be parsed without changing it. Uninstall uses this before probing the
-// runtime CLI so malformed local state wins deterministically and no external
-// command runs until local teardown is known to be safe.
-func preflightRuntimeMemoryRoutingRemoval(runtimeName string) error {
-	return preflightRuntimeMemoryRoutingRemovalAt(runtimeName, "")
-}
-
+// preflightRuntimeMemoryRoutingRemovalAt validates that the managed routing
+// block can be parsed without changing it. Uninstall uses this before probing
+// the runtime CLI so malformed local state wins deterministically and no
+// external command runs until local teardown is known to be safe.
 func preflightRuntimeMemoryRoutingRemovalAt(runtimeName, runtimeWorkspace string) error {
 	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
 	if err != nil {
@@ -82,7 +78,7 @@ func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previo
 		}
 		if exists {
 			if !equalOpenClawMCPBinding(current, attemptedBinding) {
-				return errors.New("OpenClaw-managed mcp.servers.witself changed during rollback; refusing to modify it")
+				return errors.New("openclaw-managed mcp.servers.witself changed during rollback; refusing to modify it")
 			}
 			if err := unregisterOpenClawMCP(runtimeCLI, &attemptedBinding); err != nil {
 				return err

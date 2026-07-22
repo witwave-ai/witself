@@ -1213,9 +1213,10 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		if profile == mcpProfileCuratorApply {
 			instructions = curatorApplyWitselfMCPInstructions
 		}
-		if runtimeName == transcriptcapture.RuntimeGrokBuild {
+		switch runtimeName {
+		case transcriptcapture.RuntimeGrokBuild:
 			instructions = grokPortableMCPInstructions(instructions, "", "")
-		} else if runtimeName == transcriptcapture.RuntimeAntigravity {
+		case transcriptcapture.RuntimeAntigravity:
 			instructions = antigravityMCPInstructions(instructions, opts.ProviderServerName)
 		}
 		server := mcp.NewServer(

@@ -52,7 +52,7 @@ func beginAntigravityTransaction(operation string, previous, desired *transcript
 		binding = previous
 	}
 	if binding == nil {
-		return antigravityTransactionJournal{}, errors.New("Antigravity transaction has no binding")
+		return antigravityTransactionJournal{}, errors.New("antigravity transaction has no binding")
 	}
 	if err := validateAntigravityTransactionConfig(binding.RuntimeConfigRoot, *binding); err != nil {
 		return antigravityTransactionJournal{}, err
@@ -79,17 +79,17 @@ func beginAntigravityTransaction(operation string, previous, desired *transcript
 		desiredServer, desiredErr := antigravityMCPServerName(*desired)
 		if previousErr != nil || desiredErr != nil || previous.RuntimeConfigRoot != desired.RuntimeConfigRoot ||
 			previous.RuntimePluginPath != desired.RuntimePluginPath || previousServer != desiredServer {
-			return antigravityTransactionJournal{}, errors.New("Antigravity transaction cannot change its config root or collision-resistant binding identity")
+			return antigravityTransactionJournal{}, errors.New("antigravity transaction cannot change its config root or collision-resistant binding identity")
 		}
 	}
 	switch operation {
 	case antigravityTransactionInstall:
 		if desired == nil {
-			return antigravityTransactionJournal{}, errors.New("Antigravity install transaction has no desired binding")
+			return antigravityTransactionJournal{}, errors.New("antigravity install transaction has no desired binding")
 		}
 	case antigravityTransactionUninstall:
 		if previous == nil || desired != nil {
-			return antigravityTransactionJournal{}, errors.New("Antigravity uninstall transaction must contain only the installed binding")
+			return antigravityTransactionJournal{}, errors.New("antigravity uninstall transaction must contain only the installed binding")
 		}
 	default:
 		return antigravityTransactionJournal{}, errors.New("unknown Antigravity transaction operation")
@@ -160,7 +160,7 @@ func loadAntigravityTransactionJournal(configRoot string) (antigravityTransactio
 		return antigravityTransactionJournal{}, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
-		return antigravityTransactionJournal{}, errors.New("Antigravity transaction journal must be a real 0600 regular file")
+		return antigravityTransactionJournal{}, errors.New("antigravity transaction journal must be a real 0600 regular file")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -187,7 +187,7 @@ func clearAntigravityTransaction(configRoot string, expected antigravityTransact
 	currentRaw, currentErr := json.Marshal(current)
 	expectedRaw, expectedErr := json.Marshal(expected)
 	if currentErr != nil || expectedErr != nil || !bytes.Equal(currentRaw, expectedRaw) {
-		return errors.New("Antigravity transaction journal changed; refusing to clear it")
+		return errors.New("antigravity transaction journal changed; refusing to clear it")
 	}
 	if err := syncAntigravityCommittedState(current); err != nil {
 		return fmt.Errorf("durably fence Antigravity transaction state: %w", err)
@@ -258,7 +258,7 @@ func syncAntigravityCommittedState(journal antigravityTransactionJournal) error 
 
 	if committed == nil {
 		if _, statErr := os.Lstat(binding.RuntimePluginPath); statErr == nil {
-			return errors.New("Antigravity plugin remains without its integration config")
+			return errors.New("antigravity plugin remains without its integration config")
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
@@ -360,10 +360,10 @@ func syncAntigravityConfigRoot(configRoot string) error {
 
 func validateAntigravityTransactionConfig(configRoot string, cfg transcriptcapture.Config) error {
 	if cfg.Runtime != transcriptcapture.RuntimeAntigravity || cfg.SchemaVersion != transcriptcapture.SchemaVersion {
-		return errors.New("Antigravity transaction binding has an invalid runtime or schema")
+		return errors.New("antigravity transaction binding has an invalid runtime or schema")
 	}
 	if cfg.RuntimeConfigRoot != configRoot || !filepath.IsAbs(configRoot) || filepath.Clean(configRoot) != configRoot {
-		return errors.New("Antigravity transaction config root is invalid")
+		return errors.New("antigravity transaction config root is invalid")
 	}
 	if err := validateAntigravityCanonicalOwnershipPaths(cfg); err != nil {
 		return err
@@ -373,23 +373,23 @@ func validateAntigravityTransactionConfig(configRoot string, cfg transcriptcaptu
 		return err
 	}
 	if cfg.RuntimePluginPath != filepath.Join(configRoot, "plugins", pluginName) {
-		return errors.New("Antigravity transaction plugin path is invalid")
+		return errors.New("antigravity transaction plugin path is invalid")
 	}
 	if len(cfg.MCPEnvironment) != 1 {
-		return errors.New("Antigravity transaction environment is invalid")
+		return errors.New("antigravity transaction environment is invalid")
 	}
 	witselfHome, err := cleanAntigravityAbsolutePath("WITSELF_HOME", cfg.MCPEnvironment["WITSELF_HOME"])
 	if err != nil || witselfHome != cfg.MCPEnvironment["WITSELF_HOME"] {
-		return errors.New("Antigravity transaction WITSELF_HOME is invalid")
+		return errors.New("antigravity transaction WITSELF_HOME is invalid")
 	}
 	if cfg.RuntimePluginSource != filepath.Join(witselfHome, "integrations", transcriptcapture.RuntimeAntigravity, "bundles", cfg.RuntimePluginDigest) {
-		return errors.New("Antigravity transaction recovery source is invalid")
+		return errors.New("antigravity transaction recovery source is invalid")
 	}
 	if len(cfg.RuntimePluginDigest) != 64 {
-		return errors.New("Antigravity transaction bundle digest is invalid")
+		return errors.New("antigravity transaction bundle digest is invalid")
 	}
 	if _, err := hex.DecodeString(cfg.RuntimePluginDigest); err != nil {
-		return errors.New("Antigravity transaction bundle digest is invalid")
+		return errors.New("antigravity transaction bundle digest is invalid")
 	}
 	return nil
 }
@@ -409,7 +409,7 @@ func recoverAntigravityTransaction(configRoot string) error {
 		binding = journal.Previous
 	}
 	if binding == nil {
-		return errors.New("Antigravity transaction journal has no binding")
+		return errors.New("antigravity transaction journal has no binding")
 	}
 	if err := validateAntigravityTransactionConfig(configRoot, *binding); err != nil {
 		return err
@@ -422,11 +422,11 @@ func recoverAntigravityTransaction(configRoot string) error {
 	switch journal.Operation {
 	case antigravityTransactionInstall:
 		if journal.Desired == nil {
-			return errors.New("Antigravity install journal has no desired binding")
+			return errors.New("antigravity install journal has no desired binding")
 		}
 	case antigravityTransactionUninstall:
 		if journal.Previous == nil || journal.Desired != nil {
-			return errors.New("Antigravity uninstall journal has an invalid binding shape")
+			return errors.New("antigravity uninstall journal has an invalid binding shape")
 		}
 	default:
 		return errors.New("unknown Antigravity transaction operation")
@@ -438,7 +438,7 @@ func recoverAntigravityTransaction(configRoot string) error {
 			journal.Previous.RuntimeConfigRoot != journal.Desired.RuntimeConfigRoot ||
 			journal.Previous.RuntimePluginPath != journal.Desired.RuntimePluginPath ||
 			previousServer != desiredServer {
-			return errors.New("Antigravity transaction journal changes its config root or binding identity")
+			return errors.New("antigravity transaction journal changes its config root or binding identity")
 		}
 	}
 	currentHome, err := local.Home()
@@ -463,7 +463,7 @@ func recoverAntigravityTransaction(configRoot string) error {
 
 func recoverAntigravityInstallTransaction(configRoot string, journal antigravityTransactionJournal) error {
 	if journal.Desired == nil {
-		return errors.New("Antigravity install journal has no desired binding")
+		return errors.New("antigravity install journal has no desired binding")
 	}
 	desired := *journal.Desired
 	desiredBundle, err := verifiedAntigravitySourceBundle(desired)
@@ -562,7 +562,7 @@ func recoverAntigravityInstallTransaction(configRoot string, journal antigravity
 
 func recoverAntigravityUninstallTransaction(configRoot string, journal antigravityTransactionJournal) error {
 	if journal.Previous == nil {
-		return errors.New("Antigravity uninstall journal has no installed binding")
+		return errors.New("antigravity uninstall journal has no installed binding")
 	}
 	previous := *journal.Previous
 	bundle, err := verifiedAntigravitySourceBundle(previous)
@@ -577,7 +577,7 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 	removalPath := antigravityBundleRemovalPath(previous.RuntimePluginPath, bundle)
 	removalState := antigravityBundlePathState(removalPath, bundle)
 	if liveState == antigravityPathForeign {
-		return errors.New("Antigravity plugin changed during interrupted uninstall; refusing automatic recovery")
+		return errors.New("antigravity plugin changed during interrupted uninstall; refusing automatic recovery")
 	}
 	if removalState == antigravityPathForeign {
 		if err := os.RemoveAll(removalPath); err != nil {
@@ -608,7 +608,7 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 		}
 	case antigravityConfigMissing:
 		if liveState == antigravityPathExact {
-			return errors.New("Antigravity config is missing while its plugin is still live; refusing ambiguous recovery")
+			return errors.New("antigravity config is missing while its plugin is still live; refusing ambiguous recovery")
 		}
 		if removalState == antigravityPathExact {
 			if err := removeVerifiedAntigravityScratch(removalPath, bundle); err != nil {

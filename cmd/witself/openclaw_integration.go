@@ -68,15 +68,15 @@ func inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI string, environment m
 		return openClawAgent{}, fmt.Errorf("parse OpenClaw agent list: %w", err)
 	}
 	if len(agents) != 1 {
-		return openClawAgent{}, fmt.Errorf("OpenClaw has %d configured agents; Witself phase-1 integration requires exactly one default agent", len(agents))
+		return openClawAgent{}, fmt.Errorf("openclaw has %d configured agents; Witself phase-1 integration requires exactly one default agent", len(agents))
 	}
 	agent := agents[0]
 	workspace := strings.TrimSpace(agent.Workspace)
 	if strings.TrimSpace(agent.ID) == "" || !agent.IsDefault || workspace == "" {
-		return openClawAgent{}, errors.New("OpenClaw's sole agent is not an unambiguous default agent with a workspace")
+		return openClawAgent{}, errors.New("openclaw's sole agent is not an unambiguous default agent with a workspace")
 	}
 	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
-		return openClawAgent{}, fmt.Errorf("OpenClaw default workspace must be a clean absolute path, got %q", workspace)
+		return openClawAgent{}, fmt.Errorf("openclaw default workspace must be a clean absolute path, got %q", workspace)
 	}
 	agent.ID = strings.TrimSpace(agent.ID)
 	agent.Workspace = workspace
@@ -86,19 +86,15 @@ func inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI string, environment m
 func validateOpenClawInstalledTopology(cfg transcriptcapture.Config) error {
 	agent, err := inspectOpenClawDefaultAgentWithEnvironment(cfg.RuntimeCLICommand, cfg.MCPEnvironment)
 	if err != nil {
-		return fmt.Errorf("OpenClaw topology no longer matches the installed single-agent binding: %w", err)
+		return fmt.Errorf("openclaw topology no longer matches the installed single-agent binding: %w", err)
 	}
 	if agent.ID != cfg.RuntimeAgentID {
-		return fmt.Errorf("OpenClaw default agent changed from installed %s to %s; refusing to expose the credential-bound MCP server", cfg.RuntimeAgentID, agent.ID)
+		return fmt.Errorf("openclaw default agent changed from installed %s to %s; refusing to expose the credential-bound MCP server", cfg.RuntimeAgentID, agent.ID)
 	}
 	if agent.Workspace != cfg.RuntimeWorkspace {
-		return fmt.Errorf("OpenClaw default workspace changed from installed %s to %s; refusing to expose the credential-bound MCP server", cfg.RuntimeWorkspace, agent.Workspace)
+		return fmt.Errorf("openclaw default workspace changed from installed %s to %s; refusing to expose the credential-bound MCP server", cfg.RuntimeWorkspace, agent.Workspace)
 	}
 	return nil
-}
-
-func openClawCLIJSON(runtimeCLI string, args ...string) ([]byte, error) {
-	return openClawCLIJSONWithEnvironment(runtimeCLI, nil, args...)
 }
 
 func openClawCLIJSONWithEnvironment(runtimeCLI string, environment map[string]string, args ...string) ([]byte, error) {
@@ -114,7 +110,7 @@ func openClawCLIJSONWithTimeout(runtimeCLI string, environment map[string]string
 	raw, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("OpenClaw CLI timed out after %s: %w", timeout, ctx.Err())
+			return nil, fmt.Errorf("openclaw CLI timed out after %s: %w", timeout, ctx.Err())
 		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
@@ -123,7 +119,7 @@ func openClawCLIJSONWithTimeout(runtimeCLI string, environment map[string]string
 		return nil, errors.New(message)
 	}
 	if len(raw) > openClawCLIJSONLimit {
-		return nil, fmt.Errorf("OpenClaw JSON output exceeds %d bytes", openClawCLIJSONLimit)
+		return nil, fmt.Errorf("openclaw JSON output exceeds %d bytes", openClawCLIJSONLimit)
 	}
 	return raw, nil
 }
@@ -190,7 +186,7 @@ func captureOpenClawMCPEnvironment() (map[string]string, error) {
 		return nil, fmt.Errorf("resolve WITSELF_HOME: %w", err)
 	}
 	if strings.TrimSpace(witselfHome) != witselfHome {
-		return nil, errors.New("WITSELF_HOME must not have leading or trailing whitespace for OpenClaw integration")
+		return nil, errors.New("`WITSELF_HOME` must not have leading or trailing whitespace for OpenClaw integration")
 	}
 	witselfHome, err = cleanAbsoluteOpenClawEnvironmentPath("WITSELF_HOME", witselfHome)
 	if err != nil {
@@ -256,11 +252,11 @@ func cleanAbsoluteOpenClawEnvironmentPath(key, value string) (string, error) {
 
 func validateOpenClawProfile(profile string) error {
 	if len(profile) == 0 || len(profile) > 64 || !isOpenClawProfileLetterOrDigit(profile[0]) {
-		return errors.New("OPENCLAW_PROFILE must start with an ASCII letter or digit and contain at most 64 letters, digits, hyphens, or underscores")
+		return errors.New("`OPENCLAW_PROFILE` must start with an ASCII letter or digit and contain at most 64 letters, digits, hyphens, or underscores")
 	}
 	for _, value := range []byte(profile) {
 		if !isOpenClawProfileLetterOrDigit(value) && value != '-' && value != '_' {
-			return errors.New("OPENCLAW_PROFILE must start with an ASCII letter or digit and contain at most 64 letters, digits, hyphens, or underscores")
+			return errors.New("`OPENCLAW_PROFILE` must start with an ASCII letter or digit and contain at most 64 letters, digits, hyphens, or underscores")
 		}
 	}
 	return nil
@@ -284,22 +280,18 @@ func openClawMCPBindingFromServeArgsAndEnvironment(serveArgs []string, environme
 
 func openClawMCPBindingFromServeArgsEnvironmentAndTimeout(serveArgs []string, environment map[string]string, connectTimeout int) (openClawMCPBinding, error) {
 	if len(serveArgs) == 0 || !filepath.IsAbs(serveArgs[0]) || filepath.Clean(serveArgs[0]) != serveArgs[0] {
-		return openClawMCPBinding{}, errors.New("OpenClaw MCP command must use a clean absolute executable path")
+		return openClawMCPBinding{}, errors.New("openclaw MCP command must use a clean absolute executable path")
 	}
 	if err := validateOpenClawBindingEnvironment(environment, true); err != nil {
 		return openClawMCPBinding{}, err
 	}
 	if connectTimeout <= 0 || connectTimeout > 3600 {
-		return openClawMCPBinding{}, errors.New("OpenClaw MCP connect timeout must be between 1 and 3600 seconds")
+		return openClawMCPBinding{}, errors.New("openclaw MCP connect timeout must be between 1 and 3600 seconds")
 	}
 	return openClawMCPBinding{
 		Command: serveArgs[0], Args: append([]string(nil), serveArgs[1:]...),
 		Env: cloneOpenClawEnvironment(environment), ConnectTimeout: connectTimeout,
 	}, nil
-}
-
-func inspectOpenClawMCP(runtimeCLI string) (openClawMCPBinding, bool, error) {
-	return inspectOpenClawMCPWithEnvironment(runtimeCLI, nil)
 }
 
 func inspectOpenClawMCPWithEnvironment(runtimeCLI string, environment map[string]string) (openClawMCPBinding, bool, error) {
@@ -323,21 +315,21 @@ func inspectOpenClawMCPWithEnvironment(runtimeCLI string, environment map[string
 		switch field {
 		case "command", "args", "env", "connectTimeout":
 		default:
-			return openClawMCPBinding{}, false, errors.New("OpenClaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it")
+			return openClawMCPBinding{}, false, errors.New("openclaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it")
 		}
 	}
 	if fields["command"] == nil || fields["args"] == nil {
-		return openClawMCPBinding{}, false, errors.New("OpenClaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it")
+		return openClawMCPBinding{}, false, errors.New("openclaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it")
 	}
 	var binding openClawMCPBinding
 	if err := json.Unmarshal(definition, &binding); err != nil {
 		return openClawMCPBinding{}, false, fmt.Errorf("parse OpenClaw-managed mcp.servers.witself registration: %w", err)
 	}
 	if strings.TrimSpace(binding.Command) == "" || binding.Args == nil || !filepath.IsAbs(binding.Command) || filepath.Clean(binding.Command) != binding.Command {
-		return openClawMCPBinding{}, false, errors.New("OpenClaw-managed mcp.servers.witself has an incomplete registration; refusing to modify it")
+		return openClawMCPBinding{}, false, errors.New("openclaw-managed mcp.servers.witself has an incomplete registration; refusing to modify it")
 	}
 	if err := validateOpenClawBindingEnvironment(binding.Env, false); err != nil {
-		return openClawMCPBinding{}, false, fmt.Errorf("OpenClaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it: %w", err)
+		return openClawMCPBinding{}, false, fmt.Errorf("openclaw-managed mcp.servers.witself has a non-standard registration; refusing to modify it: %w", err)
 	}
 	return binding, true, nil
 }
@@ -376,20 +368,20 @@ func cloneOpenClawEnvironment(environment map[string]string) map[string]string {
 
 func validateOpenClawBindingEnvironment(environment map[string]string, requireWitselfHome bool) error {
 	if requireWitselfHome && strings.TrimSpace(environment["WITSELF_HOME"]) == "" {
-		return errors.New("OpenClaw MCP environment requires WITSELF_HOME")
+		return errors.New("openclaw MCP environment requires WITSELF_HOME")
 	}
 	for key, value := range environment {
 		switch key {
 		case "WITSELF_HOME", "OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR":
 			if value == "" || len(value) > openClawMCPEnvironmentValueMaxBytes || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) || filepath.Clean(value) != value {
-				return fmt.Errorf("OpenClaw MCP environment %s must be a clean absolute path", key)
+				return fmt.Errorf("openclaw MCP environment %s must be a clean absolute path", key)
 			}
 		case "OPENCLAW_PROFILE":
 			if err := validateOpenClawProfile(value); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("OpenClaw MCP environment key %q is not allowed", key)
+			return fmt.Errorf("openclaw MCP environment key %q is not allowed", key)
 		}
 	}
 	return nil
@@ -433,7 +425,7 @@ func prepareOpenClawMCPInstall(runtimeCLI, executable string, desired transcript
 		return false, err
 	}
 	if previous == nil {
-		return false, errors.New("OpenClaw-managed mcp.servers.witself exists without a Witself integration record; refusing to claim or replace it")
+		return false, errors.New("openclaw-managed mcp.servers.witself exists without a Witself integration record; refusing to claim or replace it")
 	}
 	desiredBinding, err := openClawMCPBindingFromConfig(executable, desired)
 	if err != nil {
@@ -447,7 +439,7 @@ func prepareOpenClawMCPInstall(runtimeCLI, executable string, desired transcript
 		return false, err
 	}
 	if !equalOpenClawMCPBinding(current, previousBinding) {
-		return false, errors.New("OpenClaw-managed mcp.servers.witself differs from both the prior and requested bindings; refusing to replace it")
+		return false, errors.New("openclaw-managed mcp.servers.witself differs from both the prior and requested bindings; refusing to replace it")
 	}
 	if err := unregisterOpenClawMCP(runtimeCLI, &previousBinding); err != nil {
 		return true, err
@@ -468,7 +460,7 @@ func registerOpenClawMCPBinding(runtimeCLI string, desired openClawMCPBinding) e
 		return err
 	}
 	if desired.ConnectTimeout <= 0 {
-		return errors.New("OpenClaw MCP connect timeout must be positive")
+		return errors.New("openclaw MCP connect timeout must be positive")
 	}
 	current, exists, err := inspectOpenClawMCPWithEnvironment(runtimeCLI, desired.Env)
 	if err != nil {
@@ -478,7 +470,7 @@ func registerOpenClawMCPBinding(runtimeCLI string, desired openClawMCPBinding) e
 		if equalOpenClawMCPBinding(current, desired) {
 			return nil
 		}
-		return errors.New("OpenClaw-managed mcp.servers.witself has a foreign registration; refusing to replace it")
+		return errors.New("openclaw-managed mcp.servers.witself has a foreign registration; refusing to replace it")
 	}
 	args := []string{
 		"mcp", "add", "witself", "--command", desired.Command, "--no-probe",
@@ -509,7 +501,7 @@ func registerOpenClawMCPBinding(runtimeCLI string, desired openClawMCPBinding) e
 		return fmt.Errorf("verify OpenClaw MCP registration: %w", err)
 	}
 	if !exists || !equalOpenClawMCPBinding(current, desired) {
-		return errors.New("OpenClaw did not persist the exact Witself stdio MCP registration")
+		return errors.New("openclaw did not persist the exact Witself stdio MCP registration")
 	}
 	return nil
 }
@@ -527,7 +519,7 @@ func unregisterOpenClawMCP(runtimeCLI string, expected *openClawMCPBinding) erro
 		return nil
 	}
 	if expected == nil || !equalOpenClawMCPBinding(current, *expected) {
-		return errors.New("OpenClaw-managed mcp.servers.witself does not match the installed binding; refusing to remove it")
+		return errors.New("openclaw-managed mcp.servers.witself does not match the installed binding; refusing to remove it")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), openClawCLIMutationTimeout)
 	defer cancel()
@@ -544,7 +536,7 @@ func unregisterOpenClawMCP(runtimeCLI string, expected *openClawMCPBinding) erro
 	if _, exists, err := inspectOpenClawMCPWithEnvironment(runtimeCLI, environment); err != nil {
 		return fmt.Errorf("verify OpenClaw MCP removal: %w", err)
 	} else if exists {
-		return errors.New("OpenClaw retained the Witself MCP registration after removal")
+		return errors.New("openclaw retained the Witself MCP registration after removal")
 	}
 	return nil
 }

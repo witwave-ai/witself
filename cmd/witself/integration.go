@@ -371,8 +371,8 @@ func installCmd(args []string) int {
 		}
 		var previous *transcriptcapture.Config
 		if previousConfigErr == nil {
-			copy := previousConfig
-			previous = &copy
+			previousConfigCopy := previousConfig
+			previous = &previousConfigCopy
 		}
 		if err := preflightAntigravityInstall(cfg, previous); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: preflight Antigravity integration: %v\n", err)
@@ -600,7 +600,8 @@ func installCmd(args []string) int {
 	}
 	var registerErr error
 	registerTouched := false
-	if runtime == transcriptcapture.RuntimeOpenClaw {
+	switch runtime {
+	case transcriptcapture.RuntimeOpenClaw:
 		desiredBinding, bindingErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
 		if bindingErr != nil {
 			registerErr = bindingErr
@@ -608,9 +609,9 @@ func installCmd(args []string) int {
 			registerErr = registerOpenClawMCPBinding(runtimeCLI, desiredBinding)
 		}
 		registerTouched = true
-	} else if runtime == transcriptcapture.RuntimeAntigravity {
+	case transcriptcapture.RuntimeAntigravity:
 		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
-	} else {
+	default:
 		registerErr = registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
 		registerTouched = true
 	}
@@ -620,18 +621,19 @@ func installCmd(args []string) int {
 		return 1
 	}
 	var hookPath string
-	if !supportsTranscriptHooks(runtime) {
-		// OpenClaw's first integration phase is MCP plus static routing only.
-		// Keep the explicit none mode durable so later code never infers hooks.
-	} else if useManagedHooks {
-		hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-		if err == nil {
-			_, err = transcriptcapture.RemoveHooks(runtime)
-		}
-	} else {
-		hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-		if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
-			_, err = removeManagedRuntimeHooks(runtime)
+	// Phase-one OpenClaw and Antigravity integrations intentionally retain
+	// HookModeNone and install no transcript hooks.
+	if supportsTranscriptHooks(runtime) {
+		if useManagedHooks {
+			hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+			if err == nil {
+				_, err = transcriptcapture.RemoveHooks(runtime)
+			}
+		} else {
+			hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+			if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
+				_, err = removeManagedRuntimeHooks(runtime)
+			}
 		}
 	}
 	if err != nil {
@@ -876,18 +878,19 @@ func uninstallCmd(args []string) int {
 	}
 	runtimeCLI := ""
 	var runtimeCLIErr error
-	if runtime == transcriptcapture.RuntimeOpenClaw {
+	switch runtime {
+	case transcriptcapture.RuntimeOpenClaw:
 		// The OpenClaw namespace is selected by the installed CLI binding.
 		// Uninstall through that exact persisted command instead of whichever
 		// `openclaw` binary now happens to win PATH lookup.
 		runtimeCLI = cfg.RuntimeCLICommand
 		_, _, runtimeCLIErr = inspectOpenClawMCPWithEnvironment(runtimeCLI, cfg.MCPEnvironment)
-	} else if runtime == transcriptcapture.RuntimeAntigravity {
+	case transcriptcapture.RuntimeAntigravity:
 		// The plugin is an exact-owned directory and does not require a provider
 		// CLI mutation to remove. Keep using the persisted CLI path only as part
 		// of the durable binding; uninstall remains possible if agy was removed.
 		runtimeCLI = cfg.RuntimeCLICommand
-	} else {
+	default:
 		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
 	}
 	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity && runtimeCLIErr != nil {

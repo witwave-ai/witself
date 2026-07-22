@@ -60,7 +60,7 @@ type antigravityMCPServer struct {
 // copy in its standard automatically discovered plugin root.
 func configureAntigravityBinding(cfg *transcriptcapture.Config, runtimeCLI, executable string) error {
 	if cfg == nil {
-		return errors.New("Antigravity integration config is required")
+		return errors.New("antigravity integration config is required")
 	}
 	witselfHome, err := local.Home()
 	if err != nil {
@@ -115,7 +115,7 @@ func stageAntigravitySourceBundle(cfg transcriptcapture.Config) error {
 		return err
 	}
 	if bundle.digest() != cfg.RuntimePluginDigest {
-		return errors.New("Antigravity plugin digest changed before staging")
+		return errors.New("antigravity plugin digest changed before staging")
 	}
 	if err := writeAntigravitySourceBundle(cfg.RuntimePluginSource, bundle); err != nil {
 		return fmt.Errorf("stage Antigravity plugin source: %w", err)
@@ -137,7 +137,7 @@ func preflightAntigravityInstall(cfg transcriptcapture.Config, previous *transcr
 		return err
 	}
 	if _, err := os.Lstat(cfg.RuntimePluginPath); err == nil {
-		return errors.New("Antigravity managed plugin path exists without a Witself integration record; refusing to claim or replace it")
+		return errors.New("antigravity managed plugin path exists without a Witself integration record; refusing to claim or replace it")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Antigravity managed plugin path: %w", err)
 	}
@@ -230,7 +230,7 @@ func antigravityBundleFromConfig(cfg transcriptcapture.Config) (antigravityPlugi
 		return antigravityPluginBundle{}, err
 	}
 	if filepath.Base(cfg.RuntimePluginPath) != pluginName {
-		return antigravityPluginBundle{}, errors.New("Antigravity plugin path does not match its collision-resistant binding name")
+		return antigravityPluginBundle{}, errors.New("antigravity plugin path does not match its collision-resistant binding name")
 	}
 	manifestRaw, err := json.MarshalIndent(antigravityPluginManifest{Name: pluginName}, "", "  ")
 	if err != nil {
@@ -248,7 +248,7 @@ func antigravityBundleFromConfig(cfg transcriptcapture.Config) (antigravityPlugi
 	}
 	rule := antigravityRoutingInstructions(serverName) + "\n"
 	if len(rule) > antigravityRuleCharacterLimit || utf8.RuneCountInString(rule) > antigravityRuleCharacterLimit {
-		return antigravityPluginBundle{}, fmt.Errorf("Antigravity managed rule exceeds the %d-character provider limit", antigravityRuleCharacterLimit)
+		return antigravityPluginBundle{}, fmt.Errorf("antigravity managed rule exceeds the %d-character provider limit", antigravityRuleCharacterLimit)
 	}
 	return antigravityPluginBundle{files: map[string][]byte{
 		"plugin.json":      append(manifestRaw, '\n'),
@@ -262,7 +262,7 @@ func antigravityBindingSuffix(cfg transcriptcapture.Config) (string, error) {
 	values := []string{cfg.AccountID, cfg.RealmID, cfg.AgentID, witselfHome}
 	for _, value := range values {
 		if strings.TrimSpace(value) == "" || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") {
-			return "", errors.New("Antigravity binding identity is incomplete")
+			return "", errors.New("antigravity binding identity is incomplete")
 		}
 	}
 	hash := sha256.New()
@@ -418,16 +418,16 @@ func installAntigravityPlugin(desired transcriptcapture.Config, previous *transc
 	// or concurrent writer cannot leave a successful install without an exact
 	// rollback source.
 	if err := verifyAntigravityBundleDirectory(desired.RuntimePluginSource, desiredBundle); err != nil {
-		return false, fmt.Errorf("Antigravity plugin source changed during validation: %w", err)
+		return false, fmt.Errorf("antigravity plugin source changed during validation: %w", err)
 	}
 	if err := rejectAntigravityDiscoveryCollisions(desired); err != nil {
-		return false, fmt.Errorf("Antigravity discovery state changed during validation: %w", err)
+		return false, fmt.Errorf("antigravity discovery state changed during validation: %w", err)
 	}
 
 	var previousBundle *antigravityPluginBundle
 	if previous == nil {
 		if _, err := os.Lstat(desired.RuntimePluginPath); err == nil {
-			return false, errors.New("Antigravity plugin witself exists without a Witself integration record; refusing to claim or replace it")
+			return false, errors.New("antigravity plugin witself exists without a Witself integration record; refusing to claim or replace it")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("inspect Antigravity plugin: %w", err)
 		}
@@ -452,7 +452,7 @@ func installAntigravityPlugin(desired transcriptcapture.Config, previous *transc
 		return true, err
 	}
 	if err := rejectAntigravityDiscoveryCollisions(desired); err != nil {
-		return true, fmt.Errorf("Antigravity discovery state changed during installation: %w", err)
+		return true, fmt.Errorf("antigravity discovery state changed during installation: %w", err)
 	}
 	return true, nil
 }
@@ -479,7 +479,7 @@ func validateAntigravityPluginWithCLI(runtimeCLI string, bundle antigravityPlugi
 	err = cmd.Run()
 	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("Antigravity plugin validation timed out after %s: %w", antigravityPluginValidationTimeout, ctx.Err())
+			return fmt.Errorf("antigravity plugin validation timed out after %s: %w", antigravityPluginValidationTimeout, ctx.Err())
 		}
 		return fmt.Errorf("validate Antigravity plugin: %w: %s", err, strings.TrimSpace(output.String()))
 	}
@@ -524,7 +524,7 @@ func verifiedAntigravitySourceBundle(cfg transcriptcapture.Config) (antigravityP
 		return antigravityPluginBundle{}, fmt.Errorf("read Antigravity plugin source: %w", err)
 	}
 	if bundle.digest() != cfg.RuntimePluginDigest {
-		return antigravityPluginBundle{}, errors.New("Antigravity plugin source digest does not match its integration record")
+		return antigravityPluginBundle{}, errors.New("antigravity plugin source digest does not match its integration record")
 	}
 	if err := validateRecordedAntigravityBundle(cfg, bundle); err != nil {
 		return antigravityPluginBundle{}, fmt.Errorf("validate Antigravity plugin source: %w", err)
@@ -594,7 +594,7 @@ func validateAntigravityInstalledArtifacts(cfg transcriptcapture.Config) error {
 		return err
 	}
 	if err := verifyAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
-		return fmt.Errorf("Antigravity Witself plugin no longer matches the installed binding: %w", err)
+		return fmt.Errorf("antigravity Witself plugin no longer matches the installed binding: %w", err)
 	}
 	return nil
 }
@@ -640,7 +640,7 @@ func restoreAntigravityPlugin(previous, attempted *transcriptcapture.Config) err
 		return nil
 	}
 	if previous.RuntimePluginPath != attempted.RuntimePluginPath {
-		return errors.New("Antigravity plugin path changed during rollback; refusing to modify either location")
+		return errors.New("antigravity plugin path changed during rollback; refusing to modify either location")
 	}
 	if _, statErr := os.Lstat(attempted.RuntimePluginPath); errors.Is(statErr, os.ErrNotExist) {
 		return installAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle, nil)
@@ -648,7 +648,7 @@ func restoreAntigravityPlugin(previous, attempted *transcriptcapture.Config) err
 		return statErr
 	}
 	if err := verifyAntigravityBundleDirectory(attempted.RuntimePluginPath, attemptedBundle); err != nil {
-		return errors.New("Antigravity plugin changed during rollback; refusing to overwrite it")
+		return errors.New("antigravity plugin changed during rollback; refusing to overwrite it")
 	}
 	return installAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle, &attemptedBundle)
 }
@@ -672,7 +672,7 @@ func rejectAntigravityManifestCollision(configRoot, pluginName string) error {
 	}
 	for _, imported := range root.Imports {
 		if strings.EqualFold(strings.TrimSpace(imported.Name), pluginName) {
-			return errors.New("Antigravity import manifest already owns a witself plugin entry; refusing to create a second ownership path")
+			return errors.New("antigravity import manifest already owns a witself plugin entry; refusing to create a second ownership path")
 		}
 	}
 	return nil
@@ -719,7 +719,7 @@ func rejectAntigravityDiscoveryCollisions(cfg transcriptcapture.Config) error {
 	}
 	for name := range servers {
 		if strings.EqualFold(strings.TrimSpace(name), serverName) {
-			return errors.New("Antigravity shared MCP config already owns a witself server entry; refusing to create a second credential-bound tool namespace")
+			return errors.New("antigravity shared MCP config already owns a witself server entry; refusing to create a second credential-bound tool namespace")
 		}
 	}
 	return nil
@@ -845,7 +845,7 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 
 	if expectedCurrent == nil {
 		if _, err := os.Lstat(path); err == nil {
-			return errors.New("Antigravity plugin appeared during installation; refusing to replace it")
+			return errors.New("antigravity plugin appeared during installation; refusing to replace it")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -868,7 +868,7 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 	}
 	if err := verifyAntigravityBundleDirectory(stage, *expectedCurrent); err != nil {
 		_ = exchangeManagedInstructionFiles(path, stage)
-		return errors.New("Antigravity plugin changed during atomic exchange; prior state was restored")
+		return errors.New("antigravity plugin changed during atomic exchange; prior state was restored")
 	}
 	if err := os.RemoveAll(stage); err != nil {
 		return fmt.Errorf("remove verified Antigravity plugin backup: %w", err)
@@ -918,7 +918,7 @@ func removeExactAntigravityBundleDirectory(path string, expected antigravityPlug
 		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
 			_ = os.Rename(quarantine, path)
 		}
-		return errors.New("Antigravity plugin changed during removal; refusing to delete it")
+		return errors.New("antigravity plugin changed during removal; refusing to delete it")
 	}
 	if err := os.RemoveAll(quarantine); err != nil {
 		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {

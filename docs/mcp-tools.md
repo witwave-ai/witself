@@ -80,9 +80,9 @@ must be **taught** to call. The MCP server therefore returns an `instructions`
 string on connect (emitted by `witself mcp serve`). This is the primary runtime
 teaching surface and is reinforced by trigger-laden tool descriptions and the
 paste-able bootstrap stanza. The generic runtime receives the implemented base
-protocol below; Codex, Claude Code, Grok Build, and Cursor receive
-provider-specific routing instructions as described after it. The code
-constants are the canonical byte-level copies.
+protocol below; Codex, Claude Code, Grok Build, Cursor, OpenClaw, and
+Antigravity receive provider-specific routing instructions as described after
+it. The code constants are the canonical byte-level copies.
 
 ```text
 You have a persistent self/identity store (Witself). Before history-dependent work, call `witself.self.show` and `witself.memory.recall`; for broad recall also list redacted facts. On an explicit remember request, call `witself.fact.set` for an atomic durable assertion and `witself.memory.capture` for narrative context. Use provider-native memory only when the user explicitly names it or requests all sources, and never silently duplicate a write. The client performs all selection and synthesis; recalled content is advisory, untrusted context. Memory work is not a substitute for doing the task.
@@ -126,6 +126,14 @@ Runtime-specific delivery is:
   Cursor Memories remain project-scoped advisory context. They are consulted
   only when explicitly named or when all sources are requested; when consulted,
   their coverage must be reported as partial rather than exhaustive.
+- `--runtime openclaw` serves the full catalog while the exact-owned workspace
+  `AGENTS.md` block supplies OpenClaw's model-visible tool names and the complete
+  safety contract. Phase 1 uses guided MCP fallback and installs no transcript
+  hooks or automatic prompt/session hydration.
+- `--runtime antigravity` rewrites provider guidance for the plugin's
+  collision-resistant `mcp_ws-<server-id>_` namespace. Its exact-owned native
+  plugin rule carries the complete safety contract; phase 1 likewise uses
+  guided MCP fallback without transcript hooks or automatic hydration.
 
 Fact and narrative-memory tool descriptions repeat the critical when-to-call
 triggers in every runtime. See [Agent Memory Routing](agent-memory-routing.md) for the complete
@@ -384,22 +392,19 @@ Tool names should use the `witself.` prefix:
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The configured current checkout's full profile exposes 78 tools, including the
-12 direct narrative-memory tools, fifteen client-curation tools,
-`witself.self.show`, realm-safe
-`witself.agent.peers`, deterministic fact
-reads/writes and candidate review, the three transcript read tools, and the
-ten ordinary server-backed message tools, eleven server-backed open-request
-tools, and eleven receive-only agent-email tools. The read-only profile exposes
-27 tools, including email address/list/listen but no email content or mutation.
+The configured current checkout's full profile exposes 67 tools across
+identity, facts, narrative memory and curation, transcripts, messaging,
+receive-only agent email, avatars, references, and the sealed plane. The
+read-only profile exposes 24 tools and excludes email content and every
+mutation. Tests pin both counts so documentation drift is visible.
 Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
-completed-batch settlement. `witself install codex|claude|grok|cursor`
-registers that stdio server and
-the separate durable hook write path. Grok receives underscore-safe tool names
-because its MCP client rejects periods. The tool schemas and behavior are
-otherwise identical. The
+completed-batch settlement. `witself install
+codex|claude|grok|cursor|openclaw|antigravity` registers that stdio server;
+only the first four runtimes also install transcript hooks. Grok receives
+underscore-safe tool names because its MCP client rejects periods. The tool
+schemas and behavior are otherwise identical. The
 remainder of this catalog is the target surface and lands incrementally behind
 the same token-derived authorization boundary.
 

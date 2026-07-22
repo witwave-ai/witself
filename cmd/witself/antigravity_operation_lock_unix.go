@@ -42,7 +42,7 @@ func acquireAntigravityOperationLock() (func(), error) {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, errors.New("Antigravity integration lock is not a regular file")
+		return nil, errors.New("antigravity integration lock is not a regular file")
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return nil, err

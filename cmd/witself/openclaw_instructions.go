@@ -76,7 +76,7 @@ func openClawManagedInstructionsSpec() (managedInstructionsSpec, error) {
 
 func openClawManagedInstructionsSpecAt(workspace string) (managedInstructionsSpec, error) {
 	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
-		return managedInstructionsSpec{}, fmt.Errorf("OpenClaw workspace must be a clean absolute path, got %q", workspace)
+		return managedInstructionsSpec{}, fmt.Errorf("openclaw workspace must be a clean absolute path, got %q", workspace)
 	}
 	return managedInstructionsSpec{
 		path:         filepath.Join(workspace, "AGENTS.md"),

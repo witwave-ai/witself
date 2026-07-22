@@ -1160,9 +1160,9 @@ func TestAntigravityTransactionJournalCannotBeClearedAfterMutation(t *testing.T)
 	}
 	path := antigravityTransactionPath(cfg.RuntimeConfigRoot)
 	mutated := journal
-	copy := *mutated.Previous
-	copy.Endpoint = "https://foreign.invalid"
-	mutated.Previous = &copy
+	mutatedPrevious := *mutated.Previous
+	mutatedPrevious.Endpoint = "https://foreign.invalid"
+	mutated.Previous = &mutatedPrevious
 	raw, err := json.MarshalIndent(mutated, "", "  ")
 	if err != nil {
 		t.Fatal(err)
