@@ -32,9 +32,10 @@ witself version
 
 Once an agent token exists under the normal `~/.witself` account layout, one
 command installs the Witself stdio MCP server. Codex, Claude Code, Grok Build,
-and Cursor also receive durable transcript hooks. The OpenClaw and Antigravity
-phase-1 integrations instead install stdio MCP plus managed static routing;
-they have no Witself transcript hooks or automatic prompt-context injection. All six runtimes
+and Cursor also receive durable transcript hooks. The OpenClaw, Antigravity,
+and GitHub Copilot phase-1 integrations instead install stdio MCP plus managed
+static routing; they have no Witself transcript hooks or automatic
+prompt-context injection. All seven runtimes
 receive managed safety and routing guidance for the full configured MCP catalog,
 including identity, facts, narrative memory, curation, messaging and email,
 avatars, and secrets. Witself is the default narrative destination;
@@ -53,6 +54,10 @@ explicitly requested. See the
 - Antigravity preview: an exact-owned, automatically discovered rules plugin at
   `~/.gemini/config/plugins/witself-managed-<binding-id>/` plus one exact
   collision-resistant server entry in `~/.gemini/config/mcp_config.json`
+- GitHub Copilot preview: `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`
+  (normally `~/.copilot/instructions/witself-memory-routing.instructions.md`)
+  plus one `witself-managed-<24-hex>` server entry in
+  `$COPILOT_HOME/mcp-config.json`
 
 Cursor installation also merges `Mcp(witself:*)` into
 `$CURSOR_CONFIG_DIR/cli-config.json` so the approved server's tools can run in
@@ -68,6 +73,8 @@ witself install grok
 witself install cursor
 witself install openclaw
 witself install antigravity
+witself install copilot
+witself install copilot --routing-only
 
 # Preview, then install every supported runtime detected on this machine.
 witself install all --agent scott --location home --dry-run
@@ -83,6 +90,11 @@ per-runtime summary. It continues after an individual failure, preserves earlier
 successful installs, and exits nonzero when any target fails. An explicit
 `--agent` also applies to already installed targets, so preview first when those
 integrations may be bound to different agents.
+
+GitHub Copilot appears as the canonical `copilot` row in `witself integrations`
+and participates in both `install all` detection and `uninstall all` cleanup.
+The `github-copilot` alias resolves to the same row rather than creating a
+second integration.
 
 Bulk refreshes preserve each installed runtime's existing hook ownership. New
 Codex and Claude Code integrations use their normal administrator-managed hook
@@ -127,6 +139,29 @@ Witself mutations recoverable on the next install or uninstall.
 `--routing-only` is unavailable because the exact-owned MCP entry and always-on
 safety rule are maintained as one transaction across two provider surfaces.
 
+GitHub Copilot phase 1 requires GitHub Copilot CLI 1.0.73 or newer. Witself
+discovers `copilot` on `PATH` or uses `COPILOT_CLI_PATH`, parses its semantic
+version, and requires the current MCP capability probe to pass. The canonical
+Witself runtime name is `copilot`;
+`github-copilot` is an accepted alias. The
+installer writes one exact-owned global instruction file with `applyTo: "**"` at
+`$COPILOT_HOME/instructions/witself-memory-routing.instructions.md` and merges
+one collision-resistant `witself-managed-<24-hex>` stdio server into
+`$COPILOT_HOME/mcp-config.json` (normally under `~/.copilot`). Unrelated
+instruction files, root fields, and sibling MCP servers are preserved. The
+managed server pins the absolute Witself binary, agent identity, optional
+location, and only the non-secret absolute `WITSELF_HOME`; it never persists
+credentials, `HOME`, or `PATH`. Reinstall and uninstall refuse foreign
+or case-colliding exact-key ownership, malformed or unexpected MCP bindings,
+and configuration-root or selector drift rather than overwriting uncertain
+state. A symlinked user MCP registry is refused. An existing instruction file
+must consist only of the marked Witself
+block. Mutating commands serialize through a value-free `0600`
+`$COPILOT_HOME/.witself-copilot-operation.lock`; the lock file remains after
+uninstall so later operations keep the same cross-process fence. Phase 1 has no Witself transcript hooks and uses the managed instructions
+plus guided MCP fallback. Use `witself install copilot --routing-only` to refresh only the
+exact-owned instruction file without touching the MCP binding.
+
 The installer reuses an existing integration or the only local agent credential.
 When more than one agent is available, select one explicitly; a location label
 is optional:
@@ -138,8 +173,8 @@ witself install all --agent scott --location home
 
 The resolved account, realm, and agent are pinned explicitly in every installed
 MCP command and, where supported, every hook command. A supplied location is
-pinned in both places for hook-capable runtimes and in the OpenClaw or
-Antigravity MCP command;
+pinned in both places for hook-capable runtimes and in the OpenClaw,
+Antigravity, or Copilot MCP command;
 when omitted, no `--location` argument is written. The installer verifies that
 token-bound identity, preserves unrelated runtime configuration, and never
 copies a token into the MCP or hook command. Local
@@ -152,6 +187,8 @@ unrelated content in their shared `AGENTS.md` files; Claude and Cursor use
 dedicated rule files that uninstall removes when empty. OpenClaw preserves
 unrelated content in the default workspace's shared `AGENTS.md`; if that
 workspace changes, uninstall the existing integration before reinstalling.
+Copilot uses a dedicated exact-owned global instruction file; Witself never
+edits Copilot's shared instruction files.
 Cursor's MDC rule has
 `alwaysApply: true` frontmatter and is discovered as an ancestor rule for
 workspaces below the normal user home. `CURSOR_CONFIG_DIR` relocates the files
@@ -194,6 +231,26 @@ shared entry. Antigravity's synchronous hooks and transcript-path payload remain
 a phase-2 conformance task because they do not yet provide a validated direct
 message or prompt-context contract.
 
+The GitHub Copilot preview uses its user MCP file and globally loaded personal
+instruction directory. Its collision-resistant server name prevents an
+ordinary user or workspace server named `witself` from being mistaken for the
+recorded binding. The 24 lowercase hex characters are derived from the stable
+account, realm, agent, and location identifiers, not their display names.
+Witself pins the exact effective `COPILOT_HOME`, uses Copilot's persisted MCP
+CLI for add/remove/list, and accepts the CLI's `type: local` spelling as the
+documented stdio transport. Those provider CLI calls run from an isolated
+temporary directory so workspace configuration cannot shadow the user registry.
+Reinstall and uninstall require the exact recorded
+managed MCP entry. The dedicated instruction lifecycle refuses an unmarked file
+or content outside its Witself block; sibling servers and other instruction
+files remain untouched. Before every
+`mcp serve --runtime copilot` startup, Witself revalidates the recorded
+configuration root, `WITSELF_HOME`, and exact user MCP entry so changed binding
+state cannot expose a credential-bound server under uncertain ownership. It
+also requires the exact current managed instruction content.
+Copilot phase 1 deliberately installs no transcript hooks; conformant hook
+capture remains phase-2 work.
+
 Grok Build enables Claude and Cursor compatibility by default, including their
 hooks and MCP servers. During `witself install grok`, Witself inspects Grok's
 effective configuration before making changes. Imported Witself hooks are
@@ -216,7 +273,8 @@ that preserves the generated retry key. Deletion removes values, assertion/evide
 candidates; it retains only a non-restorable value-free tombstone plus immutable
 usage history so retries, audit, billing, and exports remain consistent. The
 MCP tool `witself.fact.delete` uses the same preview/apply contract across
-Codex, Claude Code, Grok Build, Cursor, OpenClaw, and Antigravity. Plain “forget” remains
+Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub
+Copilot. Plain “forget” remains
 ambiguous with each runtime's native memory and is clarified before any
 destructive call.
 
@@ -231,6 +289,7 @@ through `/hooks` once.
 Remove an integration without deleting tokens or queued transcript events:
 
 ```sh
+witself uninstall copilot
 witself uninstall all --dry-run
 witself uninstall all
 ```
@@ -388,8 +447,9 @@ There is no background Witself messaging process. At the beginning of a
 non-trivial foreground turn, the installed policy instructs a client to inspect
 the bounded `self.show.message_checkpoint` and call
 `message.listen(wait_seconds=0)`. Codex and Claude Code can receive the
-content-free checkpoint automatically through supported hooks; Cursor and Grok
-Build use the installed guidance and MCP fallback. The policy cannot force model
+content-free checkpoint automatically through supported hooks; Cursor, Grok
+Build, OpenClaw, Antigravity, and Copilot use installed guidance and MCP
+fallback. The policy cannot force model
 compliance. In every runtime, listen is the operation that retrieves unread
 message metadata. An active client may then claim, read, handle, complete or
 reply, and acknowledge the canonical message. If the client is closed, the

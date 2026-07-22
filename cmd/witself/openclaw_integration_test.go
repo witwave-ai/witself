@@ -780,6 +780,7 @@ func TestTranscriptHookSupportIsExplicitlyAllowlisted(t *testing.T) {
 	for _, runtimeName := range []string{
 		transcriptcapture.RuntimeOpenClaw,
 		transcriptcapture.RuntimeAntigravity,
+		transcriptcapture.RuntimeCopilot,
 		"future-runtime",
 	} {
 		if supportsTranscriptHooks(runtimeName) {

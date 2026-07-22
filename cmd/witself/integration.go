@@ -104,6 +104,14 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s uses approval-free global user hooks; --managed-hooks is not supported\n", runtime)
 		return 2
 	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		release, lockErr := acquireCopilotOperationLock()
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: acquire GitHub Copilot integration lock: %v\n", lockErr)
+			return 1
+		}
+		defer release()
+	}
 	if *routingOnly {
 		if runtime == transcriptcapture.RuntimeAntigravity {
 			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one transactionally managed integration unit")
@@ -142,6 +150,22 @@ func installCmd(args []string) int {
 				runtimeWorkspace = openClawAgent.Workspace
 			}
 		}
+		if runtime == transcriptcapture.RuntimeCopilot {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				currentRoot, rootErr := currentCopilotConfigRoot()
+				if rootErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot config root: %v\n", rootErr)
+					return 1
+				}
+				if currentRoot != installed.RuntimeConfigRoot {
+					fmt.Fprintf(os.Stderr, "witself: COPILOT_HOME changed from installed %s to %s; restore the installed value before refreshing routing\n", installed.RuntimeConfigRoot, currentRoot)
+					return 1
+				}
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			}
+		}
 		routing, err := installRuntimeMemoryRoutingInstructionsAt(runtime, runtimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -174,7 +198,6 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
-
 	previousConfig, previousConfigErr := transcriptcapture.LoadConfig(runtime)
 	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", previousConfigErr)
@@ -391,6 +414,28 @@ func installCmd(args []string) int {
 		}
 		cfg.SchemaVersion = transcriptcapture.SchemaVersion
 	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		if err := configureCopilotBinding(&cfg, runtimeCLI, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: configure GitHub Copilot integration: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: GitHub Copilot CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeConfigRoot != cfg.RuntimeConfigRoot:
+				fmt.Fprintf(os.Stderr, "witself: COPILOT_HOME changed from %s to %s; restore the installed value before reinstalling or uninstall the existing integration first\n", previousConfig.RuntimeConfigRoot, cfg.RuntimeConfigRoot)
+				return 1
+			case previousConfig.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath:
+				fmt.Fprintln(os.Stderr, "witself: GitHub Copilot MCP config path changed; uninstall the existing integration before reinstalling it")
+				return 1
+			case !equalCopilotEnvironment(previousConfig.MCPEnvironment, cfg.MCPEnvironment):
+				fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed since GitHub Copilot installation; restore it before reinstalling or uninstall the existing integration first")
+				return 1
+			}
+		}
+	}
 	var antigravityJournal *antigravityTransactionJournal
 	var antigravityPreviousBinding *transcriptcapture.Config
 	if runtime == transcriptcapture.RuntimeAntigravity {
@@ -434,7 +479,8 @@ func installCmd(args []string) int {
 	if previousConfigErr == nil && supportsTranscriptHooks(runtime) {
 		stagedConfig.HookMode = previousConfig.HookMode
 	}
-	if runtime != transcriptcapture.RuntimeOpenClaw || errors.Is(previousConfigErr, os.ErrNotExist) {
+	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot) ||
+		errors.Is(previousConfigErr, os.ErrNotExist) {
 		if err := saveRuntimeIntegrationConfig(stagedConfig); err != nil {
 			journalCleared := antigravityJournal == nil
 			if antigravityJournal != nil {
@@ -512,14 +558,14 @@ func installCmd(args []string) int {
 			}
 			return
 		}
-		if runtime == transcriptcapture.RuntimeOpenClaw {
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
 			if previousBinding != nil {
 				// Keep the newly installed policy in place until the previous exact
 				// MCP binding is restored. An older policy may not cover tools added
 				// by the attempted binding if MCP rollback itself fails.
 				if mcpTouched {
 					if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
-						fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current OpenClaw routing and integration recovery state\n", rollbackErr)
+						fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
 						return
 					}
 				}
@@ -540,7 +586,7 @@ func installCmd(args []string) int {
 			// still be live. Remove neither until exact MCP absence is proven.
 			if mcpTouched {
 				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, nil, &cfg); rollbackErr != nil {
-					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving OpenClaw routing and integration recovery state\n", rollbackErr)
+					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
 					return
 				}
 			}
@@ -605,6 +651,15 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	copilotMCPPreTouched := false
+	if runtime == transcriptcapture.RuntimeCopilot {
+		copilotMCPPreTouched, err = prepareCopilotMCPInstall(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		if err != nil {
+			rollbackInstall(copilotMCPPreTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+			return 1
+		}
+	}
 	var registerErr error
 	registerTouched := false
 	switch runtime {
@@ -618,6 +673,9 @@ func installCmd(args []string) int {
 		registerTouched = true
 	case transcriptcapture.RuntimeAntigravity:
 		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
+	case transcriptcapture.RuntimeCopilot:
+		registerErr = registerCopilotMCP(runtimeCLI, cfg)
+		registerTouched = true
 	default:
 		registerErr = registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
 		registerTouched = true
@@ -628,7 +686,7 @@ func installCmd(args []string) int {
 		return 1
 	}
 	var hookPath string
-	// Phase-one OpenClaw and Antigravity integrations intentionally retain
+	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally retain
 	// HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
 		if useManagedHooks {
@@ -664,6 +722,13 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		if err := validateCopilotInstalledTopology(cfg); err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot topology: %v\n", err)
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeAntigravity && previousBinding != nil &&
 		previousBinding.RuntimePluginSource != cfg.RuntimePluginSource {
 		if cleanupErr := removeAntigravitySourceBundle(*previousBinding); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
@@ -684,7 +749,16 @@ func installCmd(args []string) int {
 	} else {
 		fmt.Printf("transcript capture: unavailable (no supported %s hooks)\n", runtime)
 	}
-	fmt.Println("mcp: witself")
+	if runtime == transcriptcapture.RuntimeCopilot {
+		serverName, nameErr := copilotMCPServerName(cfg)
+		if nameErr != nil {
+			fmt.Println("mcp: Witself-managed server")
+		} else {
+			fmt.Printf("mcp: %s\n", serverName)
+		}
+	} else {
+		fmt.Println("mcp: witself")
+	}
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		fmt.Printf("plugin: %s (managed)\n", cfg.RuntimePluginPath)
 	}
@@ -707,6 +781,8 @@ func installCmd(args []string) int {
 		fmt.Println("next: start a new OpenClaw task to load the managed memory-routing instructions and guided MCP fallback")
 	} else if runtime == transcriptcapture.RuntimeAntigravity {
 		fmt.Println("next: refresh MCP servers in Antigravity (or run /mcp in agy), then start a new task to load the managed plugin rule and guided MCP fallback")
+	} else if runtime == transcriptcapture.RuntimeCopilot {
+		fmt.Println("next: start a new GitHub Copilot CLI session to load the managed instructions and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -801,6 +877,14 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks\n", runtime)
 		return 2
 	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		release, lockErr := acquireCopilotOperationLock()
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: acquire GitHub Copilot integration lock: %v\n", lockErr)
+			return 1
+		}
+		defer release()
+	}
 	antigravityCurrentConfigRoot := ""
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		release, lockErr := acquireAntigravityOperationLock()
@@ -858,6 +942,26 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		currentRoot, rootErr := currentCopilotConfigRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot config root: %v\n", rootErr)
+			return 1
+		}
+		if currentRoot != cfg.RuntimeConfigRoot {
+			fmt.Fprintf(os.Stderr, "witself: COPILOT_HOME changed from installed %s to %s; restore the installed value before uninstalling\n", cfg.RuntimeConfigRoot, currentRoot)
+			return 1
+		}
+		currentEnvironment, environmentErr := captureCopilotMCPEnvironment()
+		if environmentErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot MCP environment: %v\n", environmentErr)
+			return 1
+		}
+		if !equalCopilotEnvironment(currentEnvironment, cfg.MCPEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed from the installed GitHub Copilot binding; restore it before uninstalling")
+			return 1
+		}
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	cursorPermissionManaged := runtime == transcriptcapture.RuntimeCursor &&
 		cursorConfigManagesWitselfMCPPermission(cfg.ManagedPermissions)
@@ -909,6 +1013,11 @@ func uninstallCmd(args []string) int {
 		// CLI mutation to remove. Keep using the persisted CLI path only as part
 		// of the durable binding; uninstall remains possible if agy was removed.
 		runtimeCLI = cfg.RuntimeCLICommand
+	case transcriptcapture.RuntimeCopilot:
+		// Use the exact CLI and COPILOT_HOME recorded at installation instead of
+		// whichever binary or profile happens to win the current shell lookup.
+		runtimeCLI = cfg.RuntimeCLICommand
+		runtimeCLIErr = validateCopilotCLISelection(runtimeCLI, cfg)
 	default:
 		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
 	}
@@ -918,12 +1027,11 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
 		return 1
 	}
-	// OpenClaw ignores MCP initialization instructions, so its AGENTS.md block
-	// is the only model-visible policy surface. Keep that block in place until
-	// after its credential-bound MCP registration is gone. Other runtimes retain
-	// the existing routing-first teardown, whose snapshot supports rollback.
+	// OpenClaw and Copilot retain their static policy until the exact
+	// credential-bound MCP registration is gone. Other runtimes retain the
+	// existing routing-first teardown, whose snapshot supports rollback.
 	var memoryRouting runtimeMemoryRoutingSnapshot
-	if runtime != transcriptcapture.RuntimeOpenClaw {
+	if runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot {
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -948,7 +1056,7 @@ func uninstallCmd(args []string) int {
 		}
 		routingHandled := false
 		mcpRestoreAllowed := true
-		if runtime == transcriptcapture.RuntimeOpenClaw && memoryRouting.managed {
+		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot) && memoryRouting.managed {
 			routingHandled = true
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
@@ -1022,6 +1130,20 @@ func uninstallCmd(args []string) int {
 		if err != nil {
 			// A failed removal returns no trustworthy snapshot. Leave MCP absent
 			// rather than risk restoring credential-bound tools without policy.
+			rollbackUninstall(false, false)
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+	} else if runtime == transcriptcapture.RuntimeCopilot {
+		if err := unregisterCopilotMCP(runtimeCLI, &cfg); err != nil {
+			rollbackUninstall(true, true)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			// Preserve the integration record when exact policy removal cannot be
+			// proven. MCP stays absent so no credential-bound tools lack policy.
 			rollbackUninstall(false, false)
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
@@ -1719,6 +1841,17 @@ func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 }
 
 func detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI string, environment map[string]string) string {
+	if runtimeName == transcriptcapture.RuntimeCopilot {
+		configRoot, err := currentCopilotConfigRoot()
+		if err != nil {
+			return ""
+		}
+		raw, err := runCopilotCLI(runtimeCLI, configRoot, runtimeVersionProbeTimeout, "--version")
+		if err != nil {
+			return ""
+		}
+		return parseRuntimeVersionOutput(raw)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), runtimeVersionProbeTimeout)
 	defer cancel()
 	// Version output is part of the executable's stdout contract. Keep stderr
@@ -1742,7 +1875,10 @@ func detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI string, environ
 	if err != nil {
 		return ""
 	}
-	raw := []byte(output.String())
+	return parseRuntimeVersionOutput([]byte(output.String()))
+}
+
+func parseRuntimeVersionOutput(raw []byte) string {
 	if match := semanticVersionPattern.FindSubmatch(raw); len(match) == 2 {
 		return string(match[1])
 	}
@@ -1810,6 +1946,12 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 		// --help handling; `plugin uninstall --help` targets a plugin literally
 		// named --help. Probe only the read-only top-level version contract.
 		probeArgs = []string{"--version"}
+	case transcriptcapture.RuntimeCopilot:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("COPILOT_CLI_PATH")))
+		if path, err := exec.LookPath("copilot"); err == nil {
+			candidates = append(candidates, path)
+		}
+		probeArgs = []string{"mcp", "add", "--help"}
 	}
 	seen := map[string]bool{}
 	probeTimeout := runtimeCLICapabilityProbeTimeout
@@ -1833,6 +1975,17 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 		cmd := exec.CommandContext(ctx, candidatePath, probeArgs...)
 		if runtime == transcriptcapture.RuntimeOpenClaw && environment != nil {
 			cmd = openClawCommandContext(ctx, candidate, environment, probeArgs...)
+		}
+		if runtime == transcriptcapture.RuntimeCopilot {
+			cancel()
+			configRoot, rootErr := currentCopilotConfigRoot()
+			if rootErr != nil {
+				continue
+			}
+			if _, probeErr := runCopilotCLI(candidatePath, configRoot, probeTimeout, probeArgs...); probeErr == nil {
+				return candidatePath, nil
+			}
+			continue
 		}
 		err := cmd.Run()
 		cancel()

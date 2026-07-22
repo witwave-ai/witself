@@ -27,6 +27,7 @@ const (
 	RuntimeCursor      = "cursor"
 	RuntimeOpenClaw    = "openclaw"
 	RuntimeAntigravity = "antigravity"
+	RuntimeCopilot     = "copilot"
 	// HookEventCodexPermissionReview is Codex's normalized internal approval-review event.
 	HookEventCodexPermissionReview = "PermissionReview"
 
@@ -49,6 +50,7 @@ func SupportedRuntimes() []string {
 		RuntimeCursor,
 		RuntimeOpenClaw,
 		RuntimeAntigravity,
+		RuntimeCopilot,
 	}
 }
 
@@ -112,8 +114,10 @@ func NormalizeRuntime(runtime string) (string, error) {
 		return RuntimeOpenClaw, nil
 	case "agy", RuntimeAntigravity:
 		return RuntimeAntigravity, nil
+	case "github-copilot", RuntimeCopilot:
+		return RuntimeCopilot, nil
 	default:
-		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity)
+		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity, RuntimeCopilot)
 	}
 }
 
@@ -374,6 +378,33 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		}
 		return nil
 	}
+	if runtime == RuntimeCopilot {
+		if hookMode != HookModeNone {
+			return errors.New("copilot hook_mode must be none")
+		}
+		if runtimeCLICommand == "" {
+			return errors.New("runtime_cli_command is required for Copilot")
+		}
+		if mcpCommand == "" {
+			return errors.New("mcp_command is required for Copilot")
+		}
+		if configRoot == "" {
+			return errors.New("runtime_config_root is required for Copilot")
+		}
+		if mcpConfigPath != filepath.Join(configRoot, "mcp-config.json") {
+			return errors.New("runtime_mcp_config_path must be the canonical Copilot MCP config under runtime_config_root")
+		}
+		if workspace != "" || strings.TrimSpace(runtimeAgentID) != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+			return errors.New("runtime workspace, agent, and plugin fields are not supported for Copilot")
+		}
+		if mcpConnectTimeoutSeconds != 0 {
+			return errors.New("mcp_connect_timeout_seconds is not supported for Copilot")
+		}
+		if err := validateCopilotMCPEnvironment(mcpEnvironment); err != nil {
+			return err
+		}
+		return nil
+	}
 	if configRoot != "" || mcpConfigPath != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
 		return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
 	}
@@ -385,6 +416,17 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 	}
 	if hookMode == HookModeNone {
 		return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+	}
+	return nil
+}
+
+func validateCopilotMCPEnvironment(environment map[string]string) error {
+	if len(environment) != 1 {
+		return errors.New("mcp_environment must contain only WITSELF_HOME for Copilot")
+	}
+	home := environment["WITSELF_HOME"]
+	if home == "" || len(home) > 4096 || strings.ContainsAny(home, "\x00\r\n") || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return errors.New("mcp_environment WITSELF_HOME must be a clean absolute path for Copilot")
 	}
 	return nil
 }

@@ -39,6 +39,7 @@ func TestSecretMCPProfilesCoverEverySupportedRuntime(t *testing.T) {
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeOpenClaw,
 		transcriptcapture.RuntimeAntigravity,
+		transcriptcapture.RuntimeCopilot,
 	}
 	readTools := []string{"witself.secret.search", "witself.secret.show"}
 	valueOrWriteTools := []string{

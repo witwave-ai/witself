@@ -16,6 +16,7 @@ func TestSupportedRuntimesOrderAndMutationIsolation(t *testing.T) {
 		RuntimeCursor,
 		RuntimeOpenClaw,
 		RuntimeAntigravity,
+		RuntimeCopilot,
 	}
 
 	got := SupportedRuntimes()
@@ -30,6 +31,71 @@ func TestSupportedRuntimesOrderAndMutationIsolation(t *testing.T) {
 	}
 	if fresh := SupportedRuntimes(); !reflect.DeepEqual(fresh, want) {
 		t.Fatalf("SupportedRuntimes() after caller mutation = %v, want %v", fresh, want)
+	}
+}
+
+func TestCopilotConfigRequiresAndRoundTripsOwnedUserBinding(t *testing.T) {
+	witselfHome := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configRoot := "/Users/test/.copilot"
+	cfg := Config{
+		Runtime:              RuntimeCopilot,
+		RuntimeVersion:       "1.0.73",
+		RuntimeCLICommand:    "/opt/homebrew/bin/copilot",
+		MCPCommand:           "/opt/homebrew/bin/witself",
+		MCPEnvironment:       map[string]string{"WITSELF_HOME": witselfHome},
+		RuntimeConfigRoot:    configRoot,
+		RuntimeMCPConfigPath: filepath.Join(configRoot, "mcp-config.json"),
+		CaptureMode:          ModeRaw,
+		HookMode:             HookModeNone,
+		Account:              "default",
+		Realm:                "default",
+		Agent:                "copilot-test-bot",
+		AgentID:              "agent_copilot",
+		AgentName:            "copilot-test-bot",
+		Location:             loc,
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig("github-copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Runtime != RuntimeCopilot || loaded.HookMode != HookModeNone ||
+		loaded.RuntimeCLICommand != cfg.RuntimeCLICommand || loaded.MCPCommand != cfg.MCPCommand ||
+		loaded.MCPEnvironment["WITSELF_HOME"] != witselfHome || loaded.RuntimeConfigRoot != configRoot ||
+		loaded.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath {
+		t.Fatalf("Copilot config = %#v", loaded)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"hooks", func(value *Config) { value.HookMode = HookModeUser }, "hook_mode must be none"},
+		{"missing CLI", func(value *Config) { value.RuntimeCLICommand = "" }, "runtime_cli_command is required"},
+		{"missing MCP command", func(value *Config) { value.MCPCommand = "" }, "mcp_command is required"},
+		{"extra env", func(value *Config) { value.MCPEnvironment["PATH"] = "/bin" }, "only WITSELF_HOME"},
+		{"relative home", func(value *Config) { value.MCPEnvironment["WITSELF_HOME"] = "relative" }, "clean absolute"},
+		{"config path", func(value *Config) { value.RuntimeMCPConfigPath = filepath.Join(configRoot, "other.json") }, "canonical Copilot MCP config"},
+		{"workspace", func(value *Config) { value.RuntimeWorkspace = "/tmp/work" }, "not supported"},
+		{"plugin", func(value *Config) { value.RuntimePluginPath = "/tmp/plugin" }, "not supported"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cfg
+			candidate.MCPEnvironment = map[string]string{"WITSELF_HOME": witselfHome}
+			test.edit(&candidate)
+			if err := SaveConfig(candidate); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

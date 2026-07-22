@@ -80,8 +80,8 @@ must be **taught** to call. The MCP server therefore returns an `instructions`
 string on connect (emitted by `witself mcp serve`). This is the primary runtime
 teaching surface and is reinforced by trigger-laden tool descriptions and the
 paste-able bootstrap stanza. The generic runtime receives the implemented base
-protocol below; Codex, Claude Code, Grok Build, Cursor, OpenClaw, and
-Antigravity receive provider-specific routing instructions as described after
+protocol below; Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity,
+and GitHub Copilot receive provider-specific routing instructions as described after
 it. The code constants are the canonical byte-level copies.
 
 ```text
@@ -134,6 +134,13 @@ Runtime-specific delivery is:
   collision-resistant `mcp_ws-<server-id>_` namespace. Its exact-owned native
   plugin rule carries the complete safety contract; phase 1 likewise uses
   guided MCP fallback without transcript hooks or automatic hydration.
+- `--runtime copilot` serves the full catalog through a collision-resistant
+  `witself-managed-<24-hex>` user MCP entry and reinforces its Copilot-specific
+  policy with the exact-owned global
+  `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`. The
+  canonical runtime name is `copilot` and `github-copilot` is an accepted
+  alias. Phase 1 uses guided MCP fallback without transcript hooks or automatic
+  hydration.
 
 Fact and narrative-memory tool descriptions repeat the critical when-to-call
 triggers in every runtime. See [Agent Memory Routing](agent-memory-routing.md) for the complete
@@ -401,7 +408,7 @@ Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
 completed-batch settlement. `witself install
-codex|claude|grok|cursor|openclaw|antigravity` registers that stdio server;
+codex|claude|grok|cursor|openclaw|antigravity|copilot` registers that stdio server;
 only the first four runtimes also install transcript hooks. Grok receives
 underscore-safe tool names because its MCP client rejects periods. The tool
 schemas and behavior are otherwise identical. The
@@ -660,7 +667,8 @@ visible limits. The current server reports `memories`, `memory_recall`,
 the backend and MCP cannot launch or supervise inference. Runtime hooks likewise
 never launch a curator: PostgreSQL stores due state, Codex and Claude can inject
 an already-durable pending checkpoint into model-visible hook context, and
-Cursor/Grok use guided `self.show`. The explicit legacy/manual `witself memory
+Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use guided `self.show`.
+The explicit legacy/manual `witself memory
 curate auto` worker and user-owned scheduler remain client state; their provider,
 policy, credential boundary, and process health are not asserted by this server
 response.

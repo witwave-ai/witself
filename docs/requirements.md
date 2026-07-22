@@ -477,7 +477,8 @@ share the existing memory/fact validation, limits, scopes, and audit boundary:
 - Client-run curation requests, leases/fences, frozen input pages, strict plans,
   atomic apply, cancellation/abandonment, and rollback are implemented. Source
   writes queue or coalesce due work in PostgreSQL. Codex/Claude inject pending
-  state already durable at hook read time; Cursor/Grok use guided `self.show`.
+  state already durable at hook read time; Cursor, Grok Build, OpenClaw,
+  Antigravity, and Copilot use guided `self.show`.
   One foreground agent processes at most one fenced request and applies an empty
   plan when no memory is justified. Runtime hooks never launch inference. The
   optional `memory curate auto` and per-user launchd/systemd `auto service`
@@ -498,7 +499,8 @@ Teaching layer (three reinforcing surfaces that all say the same thing, because 
 service the agent forgets to call is worthless):
 
 1. **MCP server `instructions` field** — returned on connect by `witself mcp
-   serve`. Codex, Claude Code, Grok Build, and Cursor each receive the provider
+   serve`. Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and
+   GitHub Copilot each receive the provider
    policy from [Agent Memory Routing](agent-memory-routing.md): explicitly
    requested atomic assertions use `fact.set`, narrative capture uses
    `memory.capture`, and broad recall combines redacted facts with Witself
@@ -506,7 +508,9 @@ service the agent forgets to call is worthless):
    requested. Codex prepends its full provider contract; Claude uses a compact
    suffix to stay within its 2 KiB limit; Grok uses that suffix with
    underscore-safe tool names; Cursor uses the suffix with standard dotted tool
-   names and project-scoped Memories semantics. At non-trivial task startup,
+   names and project-scoped Memories semantics. OpenClaw, Antigravity, and
+   Copilot reinforce their provider instructions with phase-one managed static
+   guidance and guided MCP fallback. At non-trivial task startup,
    full and read-only profiles teach `self.show` message-checkpoint inspection
    and non-blocking `message.listen(wait_seconds=0)`. The canonical mailbox check
    exposes no content and cannot wake an idle model. Direct permanent Witself fact
@@ -581,8 +585,9 @@ backend AI dependency. The backend must:
 Normal curation runs in the foreground agent through the same CLI/MCP/HTTP
 protocol. PostgreSQL stores due work; `self.show` exposes an authenticated,
 value-free pending checkpoint. Codex and Claude inject already-durable pending
-state through a model-visible hook channel, while Cursor and Grok use guided
-`self.show` because their hook output is not reliably model-visible. The active
+state through a model-visible hook channel, while Cursor, Grok Build, OpenClaw,
+Antigravity, and Copilot use guided `self.show` because they lack a validated
+model-visible hook output contract. The active
 agent processes at most one fenced request and applies an empty actions plan when
 nothing merits memory so reviewed cursors advance. Runtime hooks, the backend,
 and MCP never launch or schedule inference. Because hook capture flushes
@@ -895,9 +900,10 @@ Autonomous delegation:
   currently codified, and payload fields cannot reset either persisted value.
 - Supported Codex and Claude Code hooks automatically attempt to inject the
   bounded content-free message checkpoint at foreground hook boundaries and
-  fail open on hydration failure. Cursor and Grok Build use installed
-  guidance to call `self.show`. Every runtime's installed policy directs it to
-  use non-blocking `message.listen` to retrieve unread metadata; model compliance
+  fail open on hydration failure. Cursor, Grok Build, OpenClaw, Antigravity, and
+  Copilot use installed guidance to call `self.show`. Every runtime's installed
+  policy directs it to use non-blocking `message.listen` to retrieve unread
+  metadata; model compliance
   is not forced. No provider receives a Witself-managed headless child process
   or captured provider credential.
 - Every message kind remains a canonical unacknowledged delivery until an active

@@ -2,9 +2,9 @@
 
 Status: portable fact, direct narrative-memory, automatic-recall, and foreground
 checkpoint guidance is implemented for Codex, Claude Code, Grok Build, and
-Cursor. OpenClaw and Antigravity phase 1 are previews with the same managed
-routing contract over stdio MCP and static runtime guidance, but without
-transcript hooks or automatic prompt-context injection. Provider aggregation remains an agent behavior
+Cursor. OpenClaw, Antigravity, and GitHub Copilot phase 1 are previews with the
+same managed routing contract over stdio MCP and static runtime guidance, but
+without transcript hooks or automatic prompt-context injection. Provider aggregation remains an agent behavior
 contract, not a new Witself API. Witself narrative memory is the portable
 default; native memory is an optional explicitly selected second destination.
 PostgreSQL stores the due state, and the active agent performs synthesis.
@@ -28,6 +28,7 @@ classifier.
 | Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 | OpenClaw preview | `AGENTS.md` in the sole default agent's configured workspace | OpenClaw exposes the full configured stdio MCP catalog under its own transformed names; the managed workspace block carries its safety and routing contract because no Witself prompt hook injects it automatically. |
 | Antigravity preview | A rules-only plugin at `~/.gemini/config/plugins/witself-managed-<binding-id>/` with `plugin.json` and `rules/witself.md`, plus one exact server entry in `~/.gemini/config/mcp_config.json` | Antigravity loads the native plugin's always-on rule and the collision-resistant shared MCP entry. The rule uses names such as `mcp_ws-<server-id>_witself.memory.recall`; the server entry pins the absolute Witself binary and identity. |
+| GitHub Copilot preview | `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`, normally `~/.copilot/instructions/witself-memory-routing.instructions.md`, plus one exact `witself-managed-<24-hex>` server entry in `$COPILOT_HOME/mcp-config.json` | Copilot loads the dedicated global instruction file and collision-resistant user MCP entry. The server entry pins the absolute Witself binary and identity; phase 1 uses guided MCP fallback. |
 
 Codex's installed block and MCP policy use the same Codex-specific contract.
 Grok's installed block preserves the same Grok behavior with underscore-safe
@@ -112,6 +113,35 @@ email, avatars, and client-custodied secrets. Antigravity retains Witself's
 dotted declared names behind the runtime prefix, for example
 `mcp_ws-<server-id>_witself.self.show`.
 
+GitHub Copilot phase 1 requires GitHub Copilot CLI 1.0.73 or newer. Witself
+discovers `copilot` on `PATH` or honors `COPILOT_CLI_PATH`, parses its semantic
+version, and requires the current MCP capability probe to pass. `copilot` is the canonical runtime name and
+`github-copilot` is an accepted alias. The effective
+configuration root is `$COPILOT_HOME`, normally `~/.copilot`. Installation
+uses Copilot's persisted MCP CLI to manage one collision-resistant
+`witself-managed-<24-hex>` stdio server in
+`$COPILOT_HOME/mcp-config.json` and writes one dedicated exact-owned global
+instruction file at
+`$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`.
+The instruction file's frontmatter has `applyTo: "**"`, making the safety
+contract global without editing Copilot's shared instruction files. The 24
+lowercase hex characters come from a versioned hash of stable account, realm,
+agent, and location identifiers.
+
+The Copilot MCP entry persists only the absolute Witself executable, exact
+account/realm/agent and optional location arguments, and an absolute non-secret
+`WITSELF_HOME`. It never copies credentials, `HOME`, `PATH`, or arbitrary
+ambient variables. Unrelated root fields and sibling user MCP servers are
+preserved. Witself pins the exact canonical `COPILOT_HOME` used at install and
+accepts Copilot's persisted `type: local` form as the documented stdio
+transport. Provider CLI operations run in an isolated temporary directory so
+workspace MCP files cannot shadow the user registry. A collision-resistant server name avoids claiming an ordinary
+server named `witself`; workspace MCP configuration may coexist without
+becoming Witself-owned. The dedicated instruction file carries the complete
+safety and lifecycle contract without editing Copilot's shared instruction
+files. Phase 1 installs no transcript hook and reports guided MCP fallback for
+session hydration and task recall.
+
 Every managed file contains routing policy only. Personal facts and memory
 content never belong in it. Installation is idempotent and replaces only the
 marker-delimited Witself block. Uninstall removes only that block. Shared Codex,
@@ -122,6 +152,23 @@ unmarked pre-existing file at Witself's dedicated rule path, because prepending
 another MDC document could silently change the existing rule's frontmatter.
 Codex installation also refuses to write when a non-empty global
 `AGENTS.override.md` would shadow its `AGENTS.md`.
+
+The Copilot instruction file and managed user MCP entry are exact-owned. The
+live MCP binding must match its recorded command, arguments, environment, tool
+allowlist, source, and enabled state; malformed or duplicate-key JSON, unknown
+fields, selector drift, or case-insensitive foreign exact-key ownership fail
+closed. A symlinked MCP registry is refused, and pre/post snapshots verify that
+unrelated root fields and sibling servers remain byte-semantically unchanged.
+The dedicated instruction path may contain only the marked Witself
+block; an unmarked file or content outside that block is refused.
+Provider content mutations are limited to the managed entry and dedicated
+instruction file. Install, uninstall, and routing-only refreshes serialize on a
+value-free `0600` `.witself-copilot-operation.lock` under `COPILOT_HOME`; that
+operational fence remains after uninstall. Sibling MCP
+servers, other instruction files, settings, credentials, permissions, sessions,
+and application state remain outside Witself ownership. `--routing-only`
+refreshes only the exact-owned instruction file and leaves the MCP binding and
+integration identity unchanged.
 
 The Antigravity plugin is a dedicated exact-owned directory, while the shared
 MCP file is entry-owned. A plain plugin or MCP server named `witself` may
@@ -154,6 +201,14 @@ synchronizes the selected integration config, plugin, shared MCP state,
 recovery bundle, and their parent directories before clearing the journal, and
 never infers ownership of another scratch path.
 
+Before exposing tools, `witself mcp serve --runtime copilot` revalidates the
+recorded Copilot configuration root, `WITSELF_HOME`, exact managed MCP entry,
+and exact current managed instruction content. Binding or instruction drift
+prevents credential-bound tools from being exposed.
+Because the routing file is an independent exact-owned surface,
+`witself install copilot --routing-only` may safely refresh it without invoking
+the provider CLI or changing the existing MCP registration.
+
 OpenClaw reinstall owns only the exact `witself` MCP registration recorded in
 the local integration, including its allowlisted environment and connection
 timeout. It is idempotent when the live definition already
@@ -175,9 +230,8 @@ PostgreSQL. `GET /v1/self` and `witself.self.show` expose only an authenticated,
 value-free `memory_checkpoint` pointer to that lifecycle state. Codex and Claude
 Code prompt hooks inject a pending checkpoint through model-visible structured
 context when it is already durable at read time. Cursor's context delivery is
-not reliably model-visible, Grok ignores passive-hook output, and OpenClaw and
-Antigravity have
-no supported Witself prompt hook. Their always-on managed rules instruct the
+not reliably model-visible, Grok ignores passive-hook output, and OpenClaw,
+Antigravity, and Copilot have no supported Witself prompt hook. Their always-on managed rules instruct the
 foreground agent to call `self.show`; that is a guided fallback, not automatic
 hook injection.
 
@@ -278,7 +332,8 @@ Re-creation is a separate explicit store request and receives a new fact id.
 
 This routing is scoped: deleting a Witself fact does not delete Codex memory,
 Claude auto memory, Grok memory, Cursor Memories, OpenClaw's native workspace
-memory, Antigravity-native context, transcripts, prior exports, or backups still within retention. After an
+memory, Antigravity-native context, Copilot-native context, transcripts, prior
+exports, or backups still within retention. After an
 exact Witself deletion, the agent must not silently answer from native memory as
 though the canonical fact still existed. It may surface separately requested
 native context only with its provider and advisory status named.
@@ -321,6 +376,10 @@ native context only with its provider and advisory status named.
   surfaced and confirmed Antigravity-native facility when the user selects it;
   never substitute the managed plugin rule or claim a native write from MCP
   installation.
+- **GitHub Copilot:** The Witself instruction file and MCP configuration are not
+  a Copilot-native memory write API. Use only an explicitly surfaced and
+  confirmed Copilot-native facility when the user selects it; never substitute
+  the managed instruction file or claim a native write from MCP installation.
 
 ## Retrieval contract
 
@@ -356,6 +415,9 @@ Native retrieval inherits each runtime's boundary:
 - Antigravity phase 1 likewise adds no native-memory search adapter. Use only
   context Antigravity actually supplies and report partial coverage rather than
   inferring a complete native-memory search from its rule or artifact files.
+- GitHub Copilot phase 1 likewise adds no native-memory search adapter. Use only
+  context Copilot actually supplies and report partial coverage rather than
+  inferring a complete native-memory search from its instruction or MCP files.
 
 If a requested provider is unavailable or cannot be queried, the answer names
 that provider and marks the result partial instead of claiming comprehensive
@@ -388,20 +450,22 @@ memory route ever includes sealed secret or TOTP values.
 A future federating interface should use `provider`, not `source`, because
 Witself records already use `source_kind` and `source_ref` for provenance. A
 request may eventually accept selectors such as
-`provider=auto|witself|native|codex|claude|grok|cursor|openclaw|antigravity|all`, with an
+`provider=auto|witself|native|codex|claude|grok|cursor|openclaw|antigravity|copilot|all`, with an
 envelope that reports requested providers, provider statuses, results,
 conflicts, and a top-level `partial` flag.
 
 That wire contract should be added only when each selected runtime exposes a
 supported retrieval boundary or a deliberate local federation adapter exists.
-Witself must not scrape generated Codex, Claude, Grok, Cursor, OpenClaw, or Antigravity files
+Witself must not scrape generated Codex, Claude, Grok, Cursor, OpenClaw,
+Antigravity, or Copilot files
 as if they were stable cross-provider APIs.
 
 ## Runtime expectations
 
 The four hook-capable managed runtimes load file guidance and MCP server
 instructions at runtime initialization. OpenClaw phase 1 relies on its managed
-workspace `AGENTS.md`; Antigravity relies on its managed plugin rule. Both use
+workspace `AGENTS.md`; Antigravity relies on its managed plugin rule; GitHub
+Copilot relies on its exact-owned global instruction file. All three use
 registered MCP tools and claim no automatic prompt injection. Start a new task
 after installing or upgrading so the runtime
 reloads the available instruction and tool surfaces.
@@ -426,3 +490,6 @@ Official runtime documentation:
 - Antigravity: [IDE getting started](https://antigravity.google/docs/ide-getting-started),
   [plugins](https://antigravity.google/docs/plugins), and
   [MCP](https://antigravity.google/docs/mcp)
+- GitHub Copilot CLI: [custom instructions](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions),
+  [MCP servers](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers),
+  and [configuration directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)

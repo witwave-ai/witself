@@ -204,7 +204,7 @@ func TestInferInstallAgentRequiresOnlyAmbiguousChoice(t *testing.T) {
 }
 
 func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
-	got, err := runtimeTargets("claude,codex,grok,cursor,agy,claude-code,antigravity")
+	got, err := runtimeTargets("claude,codex,grok,cursor,agy,github-copilot,claude-code,antigravity,copilot")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +214,7 @@ func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeCursor,
 		transcriptcapture.RuntimeAntigravity,
+		transcriptcapture.RuntimeCopilot,
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("targets = %v, want %v", got, want)
@@ -681,6 +682,7 @@ func TestDetectRuntimeVersion(t *testing.T) {
 		{"grok", transcriptcapture.RuntimeGrokBuild, "grok 0.2.93 (f00f96316d4b) [stable]", "", "0.2.93"},
 		{"cursor", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "", "2026.07.16-899851b"},
 		{"cursor diagnostic", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "[0716/234658.202288:ERROR:electron] failure", "2026.07.16-899851b"},
+		{"copilot", transcriptcapture.RuntimeCopilot, "GitHub Copilot CLI 1.0.73.", "", "1.0.73"},
 		{"fallback", transcriptcapture.RuntimeCodex, "development-build", "", "development-build"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

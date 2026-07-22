@@ -326,13 +326,17 @@ Deliverables:
   durable assertion calls `witself.fact.set` in the same turn; a merely stated
   fact follows the candidate/review path; narrative context stays eligible for
   runtime-native memory; mixed requests split; and explicit destinations win.
-  Codex, Claude Code, Grok Build, and Cursor receive this contract through
-  managed file guidance and provider-specific MCP runtime instructions.
+  Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub
+  Copilot receive this contract through managed file guidance and
+  provider-specific MCP runtime instructions.
   Claude's installed rule is runtime-neutral for compatibility loading while
   its MCP policy carries Claude auto-memory semantics; Grok's installed and MCP
   guidance uses underscore-safe tool names. Cursor's always-applied ancestor MDC
   rule and MCP guidance retain dotted tool names, treat Cursor Memories as
   project-scoped advisory context, and report broad native recall as partial.
+  OpenClaw uses its managed workspace block, Antigravity uses its rules plugin,
+  and Copilot uses its exact-owned global instruction file; all three are
+  phase-one guided-MCP adapters without transcript hooks.
   `witself remember`, `witself.remember`, and `POST
   /v1/remember` remain deferred; if implemented, invoking them explicitly
   selects Witself and never masquerades as the runtime's native-memory path.
@@ -391,7 +395,8 @@ Deliverables:
 
 Exit criteria:
 
-- For Codex, Claude Code, Grok Build, and Cursor, a natural explicit fact-capture
+- For Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub
+  Copilot, a natural explicit fact-capture
   request reaches `fact.set` in the same turn, a narrative request is not
   converted into a Witself fact or transcript fallback, and merely stated facts
   remain candidates rather than canonical truth. Each runtime's managed file
@@ -532,8 +537,9 @@ migration-0038 client-ranked open requests and fenced multi-assignee claims,
 content-free audit, archive/restore with active-claim interruption, and
 API/CLI/MCP adapters. Installed policy instructs active clients to inspect a
 bounded message checkpoint and use non-blocking listen. Supported Codex/Claude
-hooks automatically attempt bounded checkpoint injection and fail open;
-Cursor/Grok use guided MCP fallback. That policy cannot force model compliance.
+hooks automatically attempt bounded checkpoint injection and fail open; Cursor,
+Grok Build, OpenClaw, Antigravity, and Copilot use guided MCP fallback. That
+policy cannot force model compliance.
 No persistent message process or provider-credential capture participates.
 Named-group fanout, policy
 scopes, responsibility/directive-aware eligibility, rate/meter enforcement, and
@@ -610,7 +616,8 @@ Implementation slices:
    (**complete in the current checkout**): bounded message checkpoint, zero-wait
    listen, portable causal-depth/failure-count inputs, supported Codex/Claude
    hooks that automatically attempt checkpoint injection and fail open, and
-   guided Cursor/Grok MCP fallback. Installed policy directs deterministic
+   guided MCP fallback for Cursor, Grok Build, OpenClaw, Antigravity, and
+   Copilot. Installed policy directs deterministic
    retry/escalation, but no fixed causal-depth turn ceiling or backend
    fifth-attempt threshold is enforced.
 4. Bounded explicit-list and realm fan-out with archive/audit coverage

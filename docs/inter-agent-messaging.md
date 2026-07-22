@@ -152,7 +152,8 @@ Mailbox delivery and model execution are deliberately separate:
   message checkpoint and call non-blocking listen for unread metadata at the
   beginning of non-trivial work.
 - Supported Codex/Claude session/task hooks may inject the bounded checkpoint
-  automatically. Cursor and Grok use guided `self.show`. Every runtime's
+  automatically. Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use
+  guided `self.show`. Every runtime's
   installed policy directs it to use listen for unread message metadata, but
   that model action is not forced; no hook injects the metadata. No path injects
   the body, marks it read, acknowledges it, or invokes a model.

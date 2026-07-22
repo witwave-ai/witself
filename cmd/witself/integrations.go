@@ -209,10 +209,21 @@ func probeIntegrationRuntime(runtimeName string) integrationDetection {
 	if err != nil {
 		return integrationDetection{State: integrationDetectionNotFound, Message: err.Error()}
 	}
+	version := detectRuntimeVersionWithEnvironment(runtimeName, executable, environment)
+	if runtimeName == transcriptcapture.RuntimeCopilot {
+		if err := validateCopilotRuntimeVersion(version); err != nil {
+			return integrationDetection{
+				State:      integrationDetectionError,
+				Executable: executable,
+				Version:    version,
+				Message:    err.Error(),
+			}
+		}
+	}
 	return integrationDetection{
 		State:      integrationDetectionAvailable,
 		Executable: executable,
-		Version:    detectRuntimeVersionWithEnvironment(runtimeName, executable, environment),
+		Version:    version,
 	}
 }
 
@@ -230,6 +241,8 @@ func integrationDisplayName(runtimeName string) string {
 		return "OpenClaw"
 	case transcriptcapture.RuntimeAntigravity:
 		return "Antigravity"
+	case transcriptcapture.RuntimeCopilot:
+		return "GitHub Copilot"
 	default:
 		return runtimeName
 	}

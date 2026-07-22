@@ -2,8 +2,9 @@
 
 Status: executable four-runtime acceptance harness for production-readiness
 gate [#45](https://github.com/witwave-ai/witself/issues/45). The harness covers
-Codex, Claude Code, Cursor, and Grok Build. Gemini and GitHub Copilot are not in
-this gate.
+Codex, Claude Code, Cursor, and Grok Build. GitHub Copilot's phase-one
+guided-MCP adapter has no transcript hooks and remains outside this gate, as
+does Gemini.
 
 This is a live-client test, not a backend simulation. `witself` prepares
 isolated synthetic fixtures and exact prompts, the operator gives each prompt

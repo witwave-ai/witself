@@ -152,8 +152,9 @@ as "start my avatar over from scratch"; ordinary dissatisfaction or a request
 for gradual improvement remains an evolution, not a reset.
 
 Codex and Claude can receive the checkpoint through model-visible hook
-additional context. Cursor and Grok use the managed-instruction/MCP fallback
-until their passive hooks can reliably inject model-visible context. Neither a
+additional context. Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use
+the managed-instruction/MCP fallback until their runtime contracts provide
+reliable model-visible context. Neither a
 hook, MCP server, webhook, nor Witself itself wakes an idle model.
 
 ## SVG safety

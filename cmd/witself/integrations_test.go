@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -75,7 +76,7 @@ func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 	if !reflect.DeepEqual(gotOrder, runtimes) {
 		t.Fatalf("runtime order = %v, want %v", gotOrder, runtimes)
 	}
-	wantSummary := integrationsSummary{Supported: 6, Detected: 3, Installed: 1, Attention: 2}
+	wantSummary := integrationsSummary{Supported: 7, Detected: 3, Installed: 1, Attention: 2}
 	if report.Summary != wantSummary {
 		t.Fatalf("summary = %#v, want %#v", report.Summary, wantSummary)
 	}
@@ -84,6 +85,37 @@ func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 	}
 	if got := report.Runtimes[3].Integration; got.State != integrationStateError || !strings.Contains(got.Message, "corrupt") {
 		t.Fatalf("cursor integration = %#v", got)
+	}
+}
+
+func TestProbeIntegrationRuntimeEnforcesCopilotMinimumVersion(t *testing.T) {
+	home := t.TempDir()
+	cli := filepath.Join(home, "copilot")
+	t.Setenv("COPILOT_HOME", filepath.Join(home, ".copilot"))
+	t.Setenv("COPILOT_CLI_PATH", cli)
+
+	writeCLI := func(version string) {
+		t.Helper()
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'GitHub Copilot CLI " + version + "'; exit 0; fi\n" +
+			"if [ \"$1 $2 $3\" = \"mcp add --help\" ]; then exit 0; fi\n" +
+			"exit 2\n"
+		if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeCLI("1.0.72")
+	old := probeIntegrationRuntime(transcriptcapture.RuntimeCopilot)
+	if old.State != integrationDetectionError || old.Version != "1.0.72" ||
+		!strings.Contains(old.Message, "1.0.73 or newer") {
+		t.Fatalf("old Copilot detection = %#v", old)
+	}
+
+	writeCLI("1.0.73")
+	current := probeIntegrationRuntime(transcriptcapture.RuntimeCopilot)
+	if current.State != integrationDetectionAvailable || current.Version != "1.0.73" || current.Executable != cli {
+		t.Fatalf("current Copilot detection = %#v", current)
 	}
 }
 
@@ -179,7 +211,7 @@ func TestInstallAllDryRunDoesNotMutateAndReportsRebind(t *testing.T) {
 	if mutations != 0 {
 		t.Fatalf("dry run performed %d install mutations", mutations)
 	}
-	for _, want := range []string{"codex", "would rebind", "openclaw", "would install", "2 planned, 0 failed, 4 skipped"} {
+	for _, want := range []string{"codex", "would rebind", "openclaw", "would install", "2 planned, 0 failed, 5 skipped"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, stdout)
 		}
@@ -252,7 +284,7 @@ func TestInstallAllContinuesAfterFailureAndForwardsCommonFlags(t *testing.T) {
 		"codex", "rebound",
 		"cursor", "failed",
 		"antigravity", "installed",
-		"2 succeeded, 1 failed, 3 skipped",
+		"2 succeeded, 1 failed, 4 skipped",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("install output missing %q:\n%s", want, stdout)
@@ -401,7 +433,7 @@ func TestUninstallAllUsesInstalledRecordsAndContinuesAfterFailure(t *testing.T) 
 		"codex", "failed",
 		"cursor", "cannot read integration record",
 		"openclaw", "uninstalled",
-		"1 succeeded, 2 failed, 3 skipped",
+		"1 succeeded, 2 failed, 4 skipped",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, stdout)
@@ -433,7 +465,7 @@ func TestUninstallAllDryRunDoesNotMutate(t *testing.T) {
 		t.Fatalf("dry run performed %d uninstall mutations", mutations)
 	}
 	if !strings.Contains(stdout, "openclaw") || !strings.Contains(stdout, "would uninstall") ||
-		!strings.Contains(stdout, "1 planned, 0 failed, 5 skipped") {
+		!strings.Contains(stdout, "1 planned, 0 failed, 6 skipped") {
 		t.Fatalf("unexpected uninstall dry-run output:\n%s", stdout)
 	}
 }

@@ -290,8 +290,9 @@ unsupported with reason `not_implemented`; clients must not infer either from
 basic memory or curation support. Those flags describe the backend, not the
 foreground integration: PostgreSQL stores due work, Codex and Claude can inject
 an already-durable pending checkpoint into model-visible hook context, and
-Cursor/Grok use guided `self.show`. Runtime hooks never launch inference or a
-curator. The optional client-owned `memory curate auto` process is retained only
+Cursor, Grok Build, OpenClaw, Antigravity, and Copilot use guided `self.show`.
+Runtime hooks never launch inference or a curator. The optional client-owned
+`memory curate auto` process is retained only
 as explicit legacy/manual or user-scheduled compatibility tooling.
 `memory_recall` includes the
 deterministic lexical/structured baseline. `memory_vector_profiles`,

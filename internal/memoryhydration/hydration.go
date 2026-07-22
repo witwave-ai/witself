@@ -118,6 +118,14 @@ func CapabilityFor(runtime string) Capability {
 			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
 				Reason: "Antigravity hooks do not expose a validated direct prompt context contract"},
 		}
+	case transcriptcapture.RuntimeCopilot:
+		return Capability{
+			Runtime: runtime,
+			SessionHydration: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "Copilot transcript-hook hydration is deferred until its native payload contract is conformantly validated"},
+			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "Copilot has no validated direct prompt context injection contract"},
+		}
 	default:
 		return Capability{
 			Runtime:          runtime,
