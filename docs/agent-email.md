@@ -1,13 +1,12 @@
 # Witself Agent Email
 
 Status: capability-limited receive pilot live in the GCP sandbox as of
-2026-07-21 (`v0.0.194`). One internal realm and six exact-address routes are
-enabled; durable receipt, provider-managed retry, owner processing, and
-disable/re-enable rollback have been exercised without changing the existing
-Cloudflare catch-all. That live receive deployment remains `v0.0.194`; the
-current checkout adds receive controls and a default-off, exact-agent synthetic
-provider-retry proof. Those additions are not live until the ordered schema-61
-rollout below is complete. They do not add a sender-trust claim or automatic
+2026-07-22 (`v0.0.197`). One internal realm and seven exact-address routes are
+enabled; durable receipt, provider-managed retry, owner processing,
+disable/re-enable rollback, and the default-off exact-agent synthetic retry
+proof have been exercised without changing the existing Cloudflare catch-all.
+Schema 61 and the receive controls are live. The scheduled retry canary remains
+disabled by default. This pilot does not add a sender-trust claim or automatic
 code use.
 
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
@@ -821,11 +820,12 @@ archive export/import, and cell moves until every replica is schema-60 capable.
 Do not roll an account back across that barrier after relying on a realm
 disable; first disable the edge/process pilot and drain the older replicas.
 
-The checkpoint was deployed on 2026-07-21 and is currently live in `v0.0.194`: the isolated Worker
-and KV, six exact routes, matching cell feature configuration, synthetic
-durable-accept canary, delayed provider retries, and disable/re-enable rollback
-were all verified live. The existing catch-all and control-plane KV remained
-unchanged. Production remains blocked on the strict capability gaps above.
+The checkpoint was deployed on 2026-07-21 and hardened through `v0.0.197` on
+2026-07-22: the isolated Worker and KV, seven exact routes, matching cell
+feature configuration, synthetic durable-accept canary, stable provider-retry
+proof, delayed provider retries, and disable/re-enable rollback were all
+verified live. The existing catch-all and control-plane KV remained unchanged.
+Production remains blocked on the strict capability gaps above.
 Plan-tier retention, quarantine, trusted sender authentication, provider-id
 idempotency, and billable receive remain production work rather than features
 silently simulated by the pilot.
