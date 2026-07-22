@@ -11,6 +11,33 @@ import (
 	"github.com/witwave-ai/witself/internal/agentemail"
 )
 
+func TestAgentEmailRetryCanaryDeliveryFingerprintV1Golden(t *testing.T) {
+	t.Parallel()
+	const (
+		sender    = "canary-sender@example.com"
+		recipient = "canary.abcdefghijkl2345@agent-mail.witwave.ai"
+		want      = "0a9be96e2128380ffeaca4096c8154e8ad81306a3b912884a9d611df82a18d73"
+	)
+	raw := []byte(strings.Join([]string{
+		"From: Canary Sender <canary-sender@example.com>",
+		"To: Canary Agent <canary.abcdefghijkl2345@agent-mail.witwave.ai>",
+		"Subject: retry canary golden",
+		"Message-ID: <retry-canary-golden@example.com>",
+		"Date: Tue, 21 Jul 2026 20:00:00 -0600",
+		agentemail.RetryCanaryHeader + ": aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=utf-8",
+		"Content-Transfer-Encoding: quoted-printable",
+		"",
+		"code=20123456",
+	}, "\r\n"))
+
+	got, _ := mustAgentEmailRetryCanaryFingerprint(t, raw, sender, recipient)
+	if got != want {
+		t.Fatalf("retry fingerprint v1 = %q, want %q", got, want)
+	}
+}
+
 func TestAgentEmailRetryCanaryDeliveryFingerprintIgnoresTransportHeaders(t *testing.T) {
 	t.Parallel()
 	const (
