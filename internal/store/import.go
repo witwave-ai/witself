@@ -655,17 +655,18 @@ type agentEmailMailboxImportScope struct {
 }
 
 type agentEmailMessageImportScope struct {
-	realmID             string
-	mailboxID           string
-	ownerAgentID        string
-	addressID           string
-	provider            string
-	providerMessageID   string
-	duplicateGroup      string
-	possibleDuplicateID string
-	receivedAt          time.Time
-	createdAt           time.Time
-	retryCanaryHash     string
+	realmID                string
+	mailboxID              string
+	ownerAgentID           string
+	addressID              string
+	provider               string
+	providerMessageID      string
+	duplicateGroup         string
+	retryCanaryFingerprint string
+	possibleDuplicateID    string
+	receivedAt             time.Time
+	createdAt              time.Time
+	retryCanaryHash        string
 }
 
 type agentEmailDeliveryImportScope struct {
@@ -3860,8 +3861,15 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("MIME parse projection does not match raw_mime")
 	}
 	retryCanaryHash := ""
+	retryCanaryFingerprint := ""
 	if challenge, present, challengeErr := agentemail.RetryCanaryChallenge(raw); challengeErr == nil && present {
 		retryCanaryHash = agentEmailRetryCanaryChallengeHash(challenge)
+		retryCanaryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
+			raw, envelopeSender, envelopeRecipient, parseState, parseError, parsed,
+		)
+		if err != nil {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("retry canary fingerprint is invalid")
+		}
 	}
 	for _, field := range []struct {
 		name     string
@@ -3929,8 +3937,9 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		realmID: realmID, mailboxID: mailboxID, ownerAgentID: ownerID,
 		addressID: addressID, provider: provider,
 		providerMessageID: providerMessageID, duplicateGroup: duplicateGroup,
-		possibleDuplicateID: possibleDuplicateID,
-		receivedAt:          *receivedAt, createdAt: *createdAt,
+		retryCanaryFingerprint: retryCanaryFingerprint,
+		possibleDuplicateID:    possibleDuplicateID,
+		receivedAt:             *receivedAt, createdAt: *createdAt,
 		retryCanaryHash: retryCanaryHash,
 	}, nil
 }
@@ -4013,7 +4022,8 @@ func (ic *importCtx) validateImportedAgentEmailRetryCanary(
 	if err != nil || !isSHA256Hex(fingerprint) || messageErr != nil || !messageExists ||
 		message.realmID != realmID || message.mailboxID != mailboxID ||
 		message.ownerAgentID != ownerID || message.provider != agentEmailPilotProvider ||
-		message.duplicateGroup != fingerprint || message.retryCanaryHash != challengeHash {
+		(message.duplicateGroup != fingerprint && message.retryCanaryFingerprint != fingerprint) ||
+		message.retryCanaryHash != challengeHash {
 		return "", agentEmailRetryCanaryImportScope{}, fmt.Errorf("accepted message proof is invalid")
 	}
 	if _, delivered := ic.agentEmailDeliveries[messageID+"\x00"+mailboxID]; !delivered {

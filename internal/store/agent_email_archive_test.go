@@ -229,7 +229,7 @@ func TestAgentEmailArchiveAcceptsOnlyMessageBoundTerminalCanaryProof(t *testing.
 		messageID = "emsg_aaaaaaaaaaaaaaaa"
 		challenge = "11111111-2222-4333-8444-555555555555"
 	)
-	newContext := func(t *testing.T) (*importCtx, string, string) {
+	newContext := func(t *testing.T) (*importCtx, string, string, string) {
 		t.Helper()
 		ic := newImportCtx(accountID)
 		ic.exportedAt = time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
@@ -244,15 +244,17 @@ func TestAgentEmailArchiveAcceptsOnlyMessageBoundTerminalCanaryProof(t *testing.
 			accountID, realmID, agentID, addressID, mailboxID,
 		))
 		raw := []byte("X-Witself-Canary-Retry: " + challenge + "\r\nSubject: retry\r\n\r\nbody")
-		fingerprint := agentEmailArchiveDuplicateGroup(raw)
+		legacyFingerprint := agentEmailArchiveDuplicateGroup(raw)
+		stableFingerprint, _ := mustAgentEmailRetryCanaryFingerprint(t, raw,
+			"sender@example.com", "owner.abcdefghijkl2345@agent-mail.witwave.ai")
 		feedAgentEmailArchiveRow(t, ic, "agent_email_messages", agentEmailArchiveMessageRow(
-			accountID, realmID, agentID, addressID, mailboxID, messageID, raw, fingerprint, "",
+			accountID, realmID, agentID, addressID, mailboxID, messageID, raw, legacyFingerprint, "",
 		))
 		feedAgentEmailArchiveRow(t, ic, "agent_email_deliveries", agentEmailArchiveDeliveryRow(
 			accountID, realmID, agentID, mailboxID, messageID,
 		))
 		digest := sha256.Sum256([]byte(challenge))
-		return ic, hex.EncodeToString(digest[:]), fingerprint
+		return ic, hex.EncodeToString(digest[:]), legacyFingerprint, stableFingerprint
 	}
 	row := func(challengeHash, fingerprint string) map[string]any {
 		return map[string]any{
@@ -265,10 +267,21 @@ func TestAgentEmailArchiveAcceptsOnlyMessageBoundTerminalCanaryProof(t *testing.
 			"accepted_at": "2026-07-21T12:00:02Z",
 		}
 	}
-	ic, challengeHash, fingerprint := newContext(t)
-	feedAgentEmailArchiveRow(t, ic, "agent_email_retry_canary_arms", row(challengeHash, fingerprint))
+	ic, challengeHash, legacyFingerprint, stableFingerprint := newContext(t)
+	feedAgentEmailArchiveRow(t, ic, "agent_email_retry_canary_arms", row(challengeHash, stableFingerprint))
 	if len(ic.agentEmailRetryCanaries) != 1 {
 		t.Fatalf("accepted retry proofs = %#v", ic.agentEmailRetryCanaries)
+	}
+	t.Run("legacy exact raw fingerprint", func(t *testing.T) {
+		ic, challengeHash, legacyFingerprint, _ := newContext(t)
+		feedAgentEmailArchiveRow(t, ic, "agent_email_retry_canary_arms",
+			row(challengeHash, legacyFingerprint))
+		if len(ic.agentEmailRetryCanaries) != 1 {
+			t.Fatalf("legacy accepted retry proofs = %#v", ic.agentEmailRetryCanaries)
+		}
+	})
+	if legacyFingerprint == stableFingerprint {
+		t.Fatal("legacy and stable retry fingerprints unexpectedly match")
 	}
 
 	for name, mutate := range map[string]func(map[string]any){
@@ -281,8 +294,8 @@ func TestAgentEmailArchiveAcceptsOnlyMessageBoundTerminalCanaryProof(t *testing.
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ic, challengeHash, fingerprint := newContext(t)
-			candidate := row(challengeHash, fingerprint)
+			ic, challengeHash, _, stableFingerprint := newContext(t)
+			candidate := row(challengeHash, stableFingerprint)
 			mutate(candidate)
 			if err := ic.validateAndRecord("agent_email_retry_canary_arms", candidate); !errors.Is(err, ErrArchiveContent) {
 				t.Fatalf("error = %v", err)

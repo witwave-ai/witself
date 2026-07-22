@@ -15,7 +15,7 @@ import (
 	"github.com/witwave-ai/witself/internal/agentemail"
 )
 
-func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
+func TestAgentEmailRetryCanaryPostgresStableRetry(t *testing.T) {
 	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
@@ -100,6 +100,21 @@ func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
 		t.Fatalf("mismatched header while armed = %v", err)
 	}
 	raw := []byte(strings.Join([]string{
+		"Received: from first.example by edge.example; Tue, 21 Jul 2026 20:00:01 -0600",
+		"DKIM-Signature: v=1; a=rsa-sha256; b=first",
+		"Authentication-Results: edge.example; dkim=pass",
+		"From: canary-sender@example.com",
+		agentemail.RetryCanaryHeader + ": " + challenge,
+		"Subject: retry canary",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"code 123456",
+	}, "\r\n"))
+	transportRetry := []byte(strings.Join([]string{
+		"Received: from retry.example by edge.example; Tue, 21 Jul 2026 20:05:01 -0600",
+		"Received: by another-hop.example; Tue, 21 Jul 2026 20:05:00 -0600",
+		"DKIM-Signature: v=1; a=rsa-sha256; b=second",
+		"Authentication-Results: edge.example; dkim=pass; spf=pass",
 		"From: canary-sender@example.com",
 		agentemail.RetryCanaryHeader + ": " + challenge,
 		"Subject: retry canary",
@@ -133,13 +148,13 @@ func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
 		replacementArmed.Tempfailed || replacementArmed.Accepted {
 		t.Fatalf("replacement arm beside tempfailed proof = %#v / %v", replacementArmed, err)
 	}
-	changed := append(append([]byte(nil), raw...), []byte("changed")...)
+	changed := append(append([]byte(nil), transportRetry...), []byte("changed")...)
 	if _, err := ingest(changed); !errors.Is(err, ErrAgentEmailRetryCanaryTemporary) {
 		t.Fatalf("changed retry body = %v", err)
 	}
-	acceptedMessage, err := ingest(raw)
+	acceptedMessage, err := ingest(transportRetry)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("transport-header-only provider retry = %v", err)
 	}
 	accepted, err := st.GetAgentEmailRetryCanaryStatus(ctx, scope, canary, challenge)
 	if err != nil || accepted.State != agentEmailRetryCanaryAccepted ||
@@ -252,14 +267,55 @@ func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
 			messages, deliveries, acceptedProofs)
 	}
 
+	// A proof created by a pre-stable-fingerprint server stores the ordinary
+	// raw-SHA duplicate group. Its exact retry must remain acceptable across an
+	// upgrade, and later exact replays must still return the one accepted row.
+	const legacyChallenge = "99999999-9999-4999-8999-999999999999"
+	legacyRaw := []byte(agentemail.RetryCanaryHeader + ": " + legacyChallenge +
+		"\r\nSubject: legacy retry\r\n\r\nbody")
+	legacyRawDigest := sha256.Sum256(legacyRaw)
+	legacyFingerprint := agentEmailDuplicateGroup(hex.EncodeToString(legacyRawDigest[:]),
+		address.Address, "canary-sender@example.com")
+	legacyChallengeDigest := sha256.Sum256([]byte(legacyChallenge))
+	if _, err := st.pool.Exec(ctx, `
+		WITH anchor AS (SELECT clock_timestamp()-interval '1 minute' AS at)
+		INSERT INTO agent_email_retry_canary_arms
+		  (account_id,realm_id,mailbox_id,owner_agent_id,challenge_sha256,state,
+		   delivery_fingerprint_sha256,tempfail_count,row_version,armed_at,
+		   expires_at,tempfailed_at,retry_expires_at)
+		SELECT $1,$2,$3,$4,$5,'tempfailed',$6,1,2,at,
+		       at+interval '15 minutes',at+interval '1 second',
+		       at+interval '24 hours 1 second'
+		FROM anchor`, provisioned.AccountID, realm.ID, address.MailboxID,
+		agents[0].ID, hex.EncodeToString(legacyChallengeDigest[:]), legacyFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	legacyMessage, err := ingest(legacyRaw)
+	if err != nil {
+		t.Fatalf("legacy tempfailed proof retry = %v", err)
+	}
+	legacyReplay, err := ingest(legacyRaw)
+	if err != nil || legacyReplay.ID != legacyMessage.ID {
+		t.Fatalf("legacy accepted proof replay = %#v / %v, want id %s",
+			legacyReplay, err, legacyMessage.ID)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT delivery_fingerprint_sha256
+		FROM agent_email_retry_canary_arms
+		WHERE account_id=$1 AND challenge_sha256=$2`, provisioned.AccountID,
+		hex.EncodeToString(legacyChallengeDigest[:])).Scan(&fingerprint); err != nil ||
+		fingerprint != legacyFingerprint {
+		t.Fatalf("legacy accepted fingerprint = %q / %v, want %q",
+			fingerprint, err, legacyFingerprint)
+	}
+
 	// A late exact retry after its grace is terminally rejected. It must not
 	// become ordinary mail or trigger an unbounded provider retry loop.
 	const expiredChallenge = "01234567-89ab-4def-8abc-0123456789ab"
 	expiredRaw := []byte(agentemail.RetryCanaryHeader + ": " + expiredChallenge +
 		"\r\nSubject: expired retry\r\n\r\nbody")
-	expiredRawDigest := sha256.Sum256(expiredRaw)
-	expiredFingerprint := agentEmailDuplicateGroup(hex.EncodeToString(expiredRawDigest[:]),
-		address.Address, "canary-sender@example.com")
+	expiredFingerprint, _ := mustAgentEmailRetryCanaryFingerprint(t, expiredRaw,
+		"canary-sender@example.com", address.Address)
 	expiredChallengeDigest := sha256.Sum256([]byte(expiredChallenge))
 	if _, err := st.pool.Exec(ctx, `
 		WITH anchor AS (SELECT clock_timestamp()-interval '25 hours 1 minute' AS at)
@@ -290,9 +346,8 @@ func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
 	const staleChallenge = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 	staleRaw := []byte(agentemail.RetryCanaryHeader + ": " + staleChallenge +
 		"\r\nSubject: stale retry\r\n\r\nbody")
-	staleRawDigest := sha256.Sum256(staleRaw)
-	staleFingerprint := agentEmailDuplicateGroup(hex.EncodeToString(staleRawDigest[:]),
-		address.Address, "canary-sender@example.com")
+	staleFingerprint, _ := mustAgentEmailRetryCanaryFingerprint(t, staleRaw,
+		"canary-sender@example.com", address.Address)
 	staleChallengeDigest := sha256.Sum256([]byte(staleChallenge))
 	if _, err := st.pool.Exec(ctx, `
 		WITH anchor AS (SELECT clock_timestamp()-interval '9 days' AS at)
@@ -331,8 +386,8 @@ func TestAgentEmailRetryCanaryPostgresExactRetry(t *testing.T) {
 		provisioned.AccountID).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if messages != 3 {
-		t.Fatalf("terminal retry markers created messages = %d, want 3", messages)
+	if messages != 4 {
+		t.Fatalf("terminal retry markers created messages = %d, want 4", messages)
 	}
 
 	// Exercise the real arm -> tempfail -> accepted row through account export

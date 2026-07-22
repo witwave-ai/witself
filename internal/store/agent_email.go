@@ -849,6 +849,15 @@ func (s *Store) IngestAgentEmailPilot(
 	retryCanaryChallenge, retryCanaryHeaderPresent, retryCanaryHeaderErr :=
 		agentemail.RetryCanaryChallenge(in.Raw)
 	duplicateGroup := agentEmailDuplicateGroup(rawSHA, parts.Address, relay.EnvelopeSender)
+	retryCanaryDeliveryFingerprint := ""
+	if retryCanaryHeaderPresent && retryCanaryHeaderErr == nil {
+		retryCanaryDeliveryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
+			in.Raw, relay.EnvelopeSender, parts.Address, parseState, parseErrorCode, parsed,
+		)
+		if err != nil {
+			return AgentEmailMessage{}, fmt.Errorf("%w: retry canary body is invalid", ErrAgentEmailInputInvalid)
+		}
+	}
 	messageID, err := id.New("emsg")
 	if err != nil {
 		return AgentEmailMessage{}, err
@@ -894,7 +903,7 @@ func (s *Store) IngestAgentEmailPilot(
 	}
 	canaryGate, err := applyAgentEmailRetryCanaryGateTx(
 		ctx, tx, scope, address, retryCanaryChallenge, retryCanaryHeaderPresent,
-		retryCanaryHeaderErr, duplicateGroup,
+		retryCanaryHeaderErr, retryCanaryDeliveryFingerprint, duplicateGroup,
 	)
 	if err != nil {
 		return AgentEmailMessage{}, err
@@ -996,7 +1005,7 @@ func (s *Store) IngestAgentEmailPilot(
 			  AND delivery_fingerprint_sha256=$7`,
 			address.AccountID, address.RealmID, address.MailboxID,
 			address.OwnerAgentID, canaryGate.challengeHash, messageID,
-			duplicateGroup)
+			canaryGate.deliveryFingerprint)
 		if err != nil {
 			return AgentEmailMessage{}, fmt.Errorf("accept retry canary: %w", err)
 		}
@@ -2121,11 +2130,72 @@ func agentEmailDuplicateGroup(rawSHA, recipient, sender string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// agentEmailRetryCanaryDeliveryFingerprint binds the retry proof to the
+// normalized SMTP envelope, the bounded parsed projection, and the exact MIME
+// body while deliberately excluding top-level transport/authentication header
+// churn (for example Received, DKIM-Signature, and Authentication-Results).
+// Parse failures fall back to the legacy exact-raw/envelope fingerprint.
+// Ordinary suspected-duplicate grouping remains raw-SHA based.
+func agentEmailRetryCanaryDeliveryFingerprint(
+	raw []byte,
+	envelopeSender, envelopeRecipient, parseState, parseErrorCode string,
+	parsed agentemail.ParsedMessage,
+) (string, error) {
+	if parseState != AgentEmailParseParsed {
+		digest := sha256.Sum256(raw)
+		return agentEmailDuplicateGroup(
+			hex.EncodeToString(digest[:]), envelopeRecipient, envelopeSender,
+		), nil
+	}
+	body, err := agentemail.MIMEBody(raw)
+	if err != nil {
+		return "", err
+	}
+	messageDate := ""
+	if parsed.MessageDate != nil {
+		messageDate = parsed.MessageDate.UTC().Format(time.RFC3339Nano)
+	}
+	fields := []struct {
+		name  string
+		value []byte
+	}{
+		{name: "version", value: []byte("witself-agent-email-retry-canary-delivery-v1")},
+		{name: "envelope_sender", value: []byte(envelopeSender)},
+		{name: "envelope_recipient", value: []byte(envelopeRecipient)},
+		{name: "parse_state", value: []byte(parseState)},
+		{name: "parse_error_code", value: []byte(parseErrorCode)},
+		{name: "header_from", value: []byte(parsed.HeaderFrom)},
+		{name: "header_to", value: []byte(parsed.HeaderTo)},
+		{name: "header_subject", value: []byte(parsed.HeaderSubject)},
+		{name: "mime_message_id", value: []byte(parsed.MIMEMessageID)},
+		{name: "mime_content_type", value: []byte(parsed.MIMEContentType)},
+		{name: "mime_transfer_encoding", value: []byte(parsed.MIMETransferEncoding)},
+		{name: "mime_version", value: []byte(parsed.MIMEVersion)},
+		{name: "message_date", value: []byte(messageDate)},
+		{name: "text_kind", value: []byte(parsed.TextKind)},
+		{name: "text", value: []byte(parsed.Text)},
+		{name: "attachment_count", value: []byte(strconv.FormatInt(parsed.AttachmentCount, 10))},
+		{name: "mime_body", value: body},
+	}
+	hasher := sha256.New()
+	var length [8]byte
+	for _, field := range fields {
+		binary.BigEndian.PutUint64(length[:], uint64(len(field.name)))
+		_, _ = hasher.Write(length[:])
+		_, _ = hasher.Write([]byte(field.name))
+		binary.BigEndian.PutUint64(length[:], uint64(len(field.value)))
+		_, _ = hasher.Write(length[:])
+		_, _ = hasher.Write(field.value)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 type agentEmailRetryCanaryGate struct {
 	temporary               bool
 	permanent               bool
 	acceptAfterInsert       bool
 	challengeHash           string
+	deliveryFingerprint     string
 	acceptedReplayMessageID string
 }
 
@@ -2138,6 +2208,7 @@ func applyAgentEmailRetryCanaryGateTx(
 	headerPresent bool,
 	headerErr error,
 	deliveryFingerprint string,
+	legacyDeliveryFingerprint string,
 ) (agentEmailRetryCanaryGate, error) {
 	if scope.RetryCanaryAgentID == "" || address.OwnerAgentID != scope.RetryCanaryAgentID {
 		return agentEmailRetryCanaryGate{}, nil
@@ -2184,14 +2255,17 @@ func applyAgentEmailRetryCanaryGateTx(
 				}
 				return agentEmailRetryCanaryGate{temporary: true}, nil
 			case agentEmailRetryCanaryTempfailed:
-				if fingerprint != deliveryFingerprint {
+				if fingerprint != deliveryFingerprint && fingerprint != legacyDeliveryFingerprint {
 					return agentEmailRetryCanaryGate{temporary: true}, nil
 				}
 				return agentEmailRetryCanaryGate{
-					acceptAfterInsert: true, challengeHash: challengeHash,
+					acceptAfterInsert:   true,
+					challengeHash:       challengeHash,
+					deliveryFingerprint: fingerprint,
 				}, nil
 			case agentEmailRetryCanaryAccepted:
-				if acceptedMessageID != nil && fingerprint == deliveryFingerprint {
+				if acceptedMessageID != nil &&
+					(fingerprint == deliveryFingerprint || fingerprint == legacyDeliveryFingerprint) {
 					return agentEmailRetryCanaryGate{
 						acceptedReplayMessageID: *acceptedMessageID,
 					}, nil
