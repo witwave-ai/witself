@@ -22,6 +22,7 @@ const (
 	openClawCLIJSONLimit                = 1024 * 1024
 	openClawCLIReadTimeout              = 45 * time.Second
 	openClawCLIMutationTimeout          = 45 * time.Second
+	openClawCLIWaitDelay                = 250 * time.Millisecond
 	openClawMCPConnectTimeoutSeconds    = 60
 	openClawMCPEnvironmentValueMaxBytes = 4096
 )
@@ -126,6 +127,7 @@ func openClawCLIJSONWithTimeout(runtimeCLI string, environment map[string]string
 
 func openClawCommandContext(ctx context.Context, runtimeCLI string, environment map[string]string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	cmd.WaitDelay = openClawCLIWaitDelay
 	if environment == nil {
 		return cmd
 	}
