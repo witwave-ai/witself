@@ -90,7 +90,7 @@ func configureCopilotBinding(cfg *transcriptcapture.Config, runtimeCLI, witselfE
 	if err != nil {
 		return err
 	}
-	witselfExecutable, err = cleanCopilotAbsolutePath("Witself executable", witselfExecutable)
+	witselfExecutable, err = cleanCopilotInvocationPath("Witself executable", witselfExecutable)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func copilotMCPBindingFromConfig(executable string, cfg transcriptcapture.Config
 	if strings.TrimSpace(cfg.MCPCommand) != "" {
 		executable = cfg.MCPCommand
 	}
-	executable, err = cleanCopilotAbsolutePath("Copilot MCP command", executable)
+	executable, err = cleanCopilotCommandPath("Copilot MCP command", executable)
 	if err != nil {
 		return "", copilotMCPBinding{}, err
 	}
@@ -846,13 +846,11 @@ func validateCopilotCLISelection(runtimeCLI string, cfg transcriptcapture.Config
 	return nil
 }
 
-// cleanCopilotInvocationPath deliberately preserves the final executable
-// symlink. Package managers such as Homebrew keep /opt/homebrew/bin/copilot
-// stable while replacing its versioned Caskroom target during upgrades.
-// Persisting the stable invocation path lets an installed binding survive that
-// provider upgrade without weakening canonicalization of COPILOT_HOME or the
-// Witself data and executable paths.
-func cleanCopilotInvocationPath(label, value string) (string, error) {
+// cleanCopilotCommandPath validates persisted command syntax without resolving
+// the final symlink or requiring the target to still exist. Missing legacy
+// Cellar paths must remain reconstructable so repair and uninstall can match
+// and remove the exact prior Copilot registration after package cleanup.
+func cleanCopilotCommandPath(label, value string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value ||
 		strings.ContainsAny(value, "\x00\r\n") || len(value) > 4096 {
 		return "", fmt.Errorf("%s must be a non-empty path without surrounding whitespace", label)
@@ -864,6 +862,17 @@ func cleanCopilotInvocationPath(label, value string) (string, error) {
 	absolute = filepath.Clean(absolute)
 	if !filepath.IsAbs(absolute) {
 		return "", fmt.Errorf("%s must resolve to an absolute path", label)
+	}
+	return absolute, nil
+}
+
+// cleanCopilotInvocationPath deliberately preserves the final executable
+// symlink while verifying the current target. Package managers such as
+// Homebrew keep stable entrypoints while replacing versioned targets.
+func cleanCopilotInvocationPath(label, value string) (string, error) {
+	absolute, err := cleanCopilotCommandPath(label, value)
+	if err != nil {
+		return "", err
 	}
 	info, err := os.Stat(absolute)
 	if err != nil {
