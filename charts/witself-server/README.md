@@ -73,11 +73,11 @@ a temporary result.
 Use a two-phase rollout: first deploy schema-61-capable code with
 `retryCanaryAgentID` empty and wait for every pod to converge; then set the
 exact enrolled agent in a config-only rollout and wait for convergence again.
-Keep the external canary schedule off until a manual run succeeds. For
-rollback, turn the schedule off and settle the unused arm or let its 15-minute
-TTL expire before clearing this value or downgrading code. The 15-minute schedule retains about
-96 acknowledged synthetic messages per day until ordinary mailbox retention
-or deletion is implemented.
+Keep canary automation manual-only until a manual run succeeds. For rollback,
+turn off any recurring schedule that has been added and settle the unused arm
+or let its 15-minute TTL expire before clearing this value or downgrading code.
+A future 15-minute cadence would retain about 96 acknowledged synthetic
+messages per day until ordinary mailbox retention or deletion is implemented.
 
 The Ed25519 relay private key is not a chart value, Secret reference, or server
 environment variable. It remains exclusively in the isolated Cloudflare Email
