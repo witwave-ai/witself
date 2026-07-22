@@ -32,7 +32,7 @@ func TestConfigureCopilotBindingPinsRootsAndEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	canonicalCLI, _ := cleanCopilotInvocationPath("test CLI", runtimeCLI)
-	canonicalExecutable, _ := cleanCopilotAbsolutePath("test executable", executable)
+	canonicalExecutable, _ := cleanCopilotInvocationPath("test executable", executable)
 	canonicalCopilotHome, _ := cleanCopilotAbsolutePath("test COPILOT_HOME", copilotHome)
 	canonicalWitselfHome, _ := cleanCopilotAbsolutePath("test WITSELF_HOME", witselfHome)
 	if cfg.RuntimeCLICommand != canonicalCLI || cfg.MCPCommand != canonicalExecutable ||
@@ -79,6 +79,90 @@ func TestConfigureCopilotBindingPreservesStableCLISymlink(t *testing.T) {
 	}
 	if second.RuntimeCLICommand != first.RuntimeCLICommand {
 		t.Fatalf("provider upgrade changed stable CLI binding from %q to %q", first.RuntimeCLICommand, second.RuntimeCLICommand)
+	}
+}
+
+func TestCopilotMCPBindingPreservesStableWitselfSymlinkAcrossUpgrade(t *testing.T) {
+	base := t.TempDir()
+	copilotHome := filepath.Join(base, "copilot-home")
+	witselfHome := filepath.Join(base, "witself-home")
+	runtimeCLI := copilotTestFile(t, base, "bin", "copilot")
+	firstTarget := copilotTestFile(t, base, "Cellar", "witself", "0.0.200", "bin", "witself")
+	secondTarget := copilotTestFile(t, base, "Cellar", "witself", "0.0.201", "bin", "witself")
+	stableWitself := filepath.Join(base, "bin", "witself")
+	if err := os.Symlink(firstTarget, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COPILOT_HOME", copilotHome)
+	t.Setenv("WITSELF_HOME", witselfHome)
+
+	first := copilotTestConfig()
+	if err := configureCopilotBinding(&first, runtimeCLI, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if first.MCPCommand != stableWitself {
+		t.Fatalf("persisted MCP command = %q, want stable symlink %q", first.MCPCommand, stableWitself)
+	}
+	fixture := installCopilotCLIFixture(t)
+	if err := registerCopilotMCP(first.RuntimeCLICommand, first); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(firstTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondTarget, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	second := copilotTestConfig()
+	if err := configureCopilotBinding(&second, runtimeCLI, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if second.MCPCommand != first.MCPCommand {
+		t.Fatalf("Witself upgrade changed stable MCP command from %q to %q", first.MCPCommand, second.MCPCommand)
+	}
+	touched, err := prepareCopilotMCPInstall(second.RuntimeCLICommand, second.MCPCommand, second, &first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if touched {
+		t.Fatal("stable Witself upgrade unexpectedly removed the Copilot MCP binding")
+	}
+	if err := registerCopilotMCP(second.RuntimeCLICommand, second); err != nil {
+		t.Fatal(err)
+	}
+	current, exists, err := inspectCopilotMCP(second.RuntimeCLICommand, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || current.Command != stableWitself {
+		t.Fatalf("upgraded MCP binding = %#v exists=%t, want stable command %q", current, exists, stableWitself)
+	}
+
+	addCalls := 0
+	for _, call := range fixture.calls {
+		if len(call) >= 2 && call[0] == "mcp" && call[1] == "add" {
+			addCalls++
+		}
+	}
+	if addCalls != 1 {
+		t.Fatalf("Copilot MCP add calls = %d, want one initial registration", addCalls)
+	}
+}
+
+func TestCopilotMCPBindingAllowsMissingLegacyCommandForRecovery(t *testing.T) {
+	cfg := configuredCopilotTestConfig(t)
+	missing := filepath.Join(t.TempDir(), "Cellar", "witself", "0.0.199", "bin", "witself")
+	cfg.MCPCommand = missing
+	_, binding, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Command != missing {
+		t.Fatalf("legacy MCP command = %q, want %q", binding.Command, missing)
 	}
 }
 

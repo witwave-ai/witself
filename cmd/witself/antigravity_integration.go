@@ -78,11 +78,11 @@ func configureAntigravityBinding(cfg *transcriptcapture.Config, runtimeCLI, exec
 	if err != nil {
 		return err
 	}
-	runtimeCLI, err = cleanAntigravityAbsolutePath("Antigravity CLI", runtimeCLI)
+	runtimeCLI, err = cleanAntigravityInvocationPath("Antigravity CLI", runtimeCLI)
 	if err != nil {
 		return err
 	}
-	executable, err = cleanAntigravityAbsolutePath("Witself executable", executable)
+	executable, err = cleanAntigravityInvocationPath("Witself executable", executable)
 	if err != nil {
 		return err
 	}
@@ -183,6 +183,30 @@ func cleanAntigravityAbsolutePath(label, value string) (string, error) {
 		missing = append(missing, filepath.Base(probe))
 		probe = parent
 	}
+}
+
+// Invocation paths intentionally preserve the final symlink. Package managers
+// keep that entrypoint stable while replacing versioned installation targets.
+func cleanAntigravityInvocationPath(label, value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") || len(value) > 4096 {
+		return "", fmt.Errorf("%s must be a non-empty path without surrounding whitespace", label)
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", label, err)
+	}
+	absolute = filepath.Clean(absolute)
+	if !filepath.IsAbs(absolute) {
+		return "", fmt.Errorf("%s must resolve to an absolute path", label)
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%s must resolve to an executable regular file", label)
+	}
+	return absolute, nil
 }
 
 func validateAntigravityCanonicalOwnershipPaths(cfg transcriptcapture.Config) error {

@@ -29,6 +29,68 @@ type antigravityIntegrationFixture struct {
 	serverURL string
 }
 
+func TestConfigureAntigravityBindingPreservesStableInvocationSymlinks(t *testing.T) {
+	base := t.TempDir()
+	realHome := filepath.Join(base, "home")
+	if err := os.MkdirAll(realHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstCLI := copilotTestFile(t, base, "versions", "1.1.5", "agy")
+	secondCLI := copilotTestFile(t, base, "versions", "1.1.6", "agy")
+	firstWitself := copilotTestFile(t, base, "Cellar", "witself", "0.0.200", "bin", "witself")
+	secondWitself := copilotTestFile(t, base, "Cellar", "witself", "0.0.201", "bin", "witself")
+	stableCLI := filepath.Join(base, "bin", "agy")
+	stableWitself := filepath.Join(base, "bin", "witself")
+	if err := os.MkdirAll(filepath.Dir(stableCLI), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(firstCLI, stableCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(firstWitself, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", realHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(realHome, ".witself"))
+
+	first := copilotTestConfig()
+	first.Runtime = transcriptcapture.RuntimeAntigravity
+	if err := configureAntigravityBinding(&first, stableCLI, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if first.RuntimeCLICommand != stableCLI || first.MCPCommand != stableWitself {
+		t.Fatalf("stable Antigravity binding = %#v", first)
+	}
+
+	if err := os.Remove(stableCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(firstCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(firstWitself); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondCLI, stableCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondWitself, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+
+	second := copilotTestConfig()
+	second.Runtime = transcriptcapture.RuntimeAntigravity
+	if err := configureAntigravityBinding(&second, stableCLI, stableWitself); err != nil {
+		t.Fatal(err)
+	}
+	if second.RuntimeCLICommand != first.RuntimeCLICommand || second.MCPCommand != first.MCPCommand {
+		t.Fatalf("package upgrade changed stable Antigravity binding from %#v to %#v", first, second)
+	}
+}
+
 func setupAntigravityIntegrationFixture(t *testing.T) antigravityIntegrationFixture {
 	t.Helper()
 	home := t.TempDir()
