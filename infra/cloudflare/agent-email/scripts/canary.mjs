@@ -108,10 +108,18 @@ function witselfClient(config, fetchAPI) {
   };
 }
 
-function acceptedBySendingAPI(result, recipient) {
-  const normalized = recipient.toLowerCase();
-  return [result?.delivered, result?.queued].some((values) =>
-    Array.isArray(values) && values.some((value) => String(value).toLowerCase() === normalized));
+function permanentlyBouncedBySendingAPI(result) {
+  // This canary submits exactly one envelope recipient, so any explicit
+  // permanent bounce rejects the submission even if the provider normalized
+  // the returned address differently.
+  return Array.isArray(result?.permanent_bounces) && result.permanent_bounces.length > 0;
+}
+
+function acceptedBySendingAPI(result) {
+  if ([result?.delivered, result?.queued].some((values) =>
+    Array.isArray(values) && values.length > 0)) return true;
+  const messageID = result?.message_id;
+  return typeof messageID === "string" && messageID.trim() !== "" && !/[\r\n\0]/.test(messageID);
 }
 
 function checkpoint(value, expectedState = "") {
@@ -242,8 +250,11 @@ export async function runCanary(config, runtime = {}) {
       "X-Witself-Canary-Retry": retryChallenge,
     },
   });
-  if (!acceptedBySendingAPI(submitted, config.to)) {
-    throw new Error("Cloudflare did not accept the synthetic canary for delivery");
+  if (permanentlyBouncedBySendingAPI(submitted)) {
+    throw new Error("Cloudflare permanently bounced the synthetic canary");
+  }
+  if (!acceptedBySendingAPI(submitted)) {
+    throw new Error("Cloudflare did not confirm the synthetic canary submission");
   }
   const deadlineAt = startedAt + config.timeoutSeconds * 1000;
   let sawTemporary = false;
