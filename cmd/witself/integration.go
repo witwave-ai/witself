@@ -39,6 +39,12 @@ const runtimeCLICapabilityProbeTimeout = 30 * time.Second
 
 const witselfExecutableTestEnv = "WITSELF_TEST_EXECUTABLE_PATH"
 
+var (
+	saveRuntimeIntegrationConfig     = transcriptcapture.SaveConfig
+	finalizeRuntimeIntegrationConfig = transcriptcapture.SaveConfig
+	removeRuntimeIntegrationConfig   = transcriptcapture.RemoveConfig
+)
+
 func installCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...] [--agent NAME] [--location home|work]")
@@ -75,6 +81,14 @@ func installCmd(args []string) int {
 	}
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	if !supportsTranscriptHooks(runtime) {
+		for _, name := range []string{"capture", "managed-hooks", "user-hooks"} {
+			if setFlags[name] {
+				fmt.Fprintf(os.Stderr, "witself: --%s is not supported for %s because this integration has no transcript hooks\n", name, runtime)
+				return 2
+			}
+		}
+	}
 	if *userHooks && setFlags["managed-hooks"] && *managedHooks {
 		fmt.Fprintln(os.Stderr, "witself: --user-hooks conflicts with --managed-hooks")
 		return 2
@@ -84,13 +98,44 @@ func installCmd(args []string) int {
 		return 2
 	}
 	if *routingOnly {
+		if runtime == transcriptcapture.RuntimeAntigravity {
+			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one exact plugin ownership unit")
+			return 2
+		}
 		for name := range setFlags {
 			if name != "routing-only" {
 				fmt.Fprintf(os.Stderr, "witself: --routing-only conflicts with --%s\n", name)
 				return 2
 			}
 		}
-		routing, err := installRuntimeMemoryRoutingInstructions(runtime)
+		runtimeWorkspace := ""
+		if runtime == transcriptcapture.RuntimeOpenClaw {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				runtimeWorkspace = installed.RuntimeWorkspace
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			} else {
+				environment, environmentErr := captureOpenClawMCPEnvironment()
+				if environmentErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", environmentErr)
+					return 1
+				}
+				runtimeCLI, cliErr := findRuntimeCLIWithEnvironment(runtime, environment)
+				if cliErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", cliErr)
+					return 1
+				}
+				openClawAgent, inspectErr := inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI, environment)
+				cliErr = inspectErr
+				if cliErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", cliErr)
+					return 1
+				}
+				runtimeWorkspace = openClawAgent.Workspace
+			}
+		}
+		routing, err := installRuntimeMemoryRoutingInstructionsAt(runtime, runtimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
@@ -105,6 +150,23 @@ func installCmd(args []string) int {
 		return 0
 	}
 	useManagedHooks := *managedHooks && !*userHooks
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		release, lockErr := acquireAntigravityOperationLock()
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: acquire Antigravity integration lock: %v\n", lockErr)
+			return 1
+		}
+		defer release()
+		configRoot, rootErr := currentAntigravityConfigRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve Antigravity config root: %v\n", rootErr)
+			return 1
+		}
+		if recoveryErr := recoverAntigravityTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted Antigravity transaction: %v\n", recoveryErr)
+			return 1
+		}
+	}
 
 	previousConfig, previousConfigErr := transcriptcapture.LoadConfig(runtime)
 	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
@@ -152,16 +214,54 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
-	hookMode := transcriptcapture.HookModeUser
+	hookMode := transcriptcapture.HookModeNone
+	if supportsTranscriptHooks(runtime) {
+		hookMode = transcriptcapture.HookModeUser
+	}
 	if useManagedHooks {
 		hookMode = transcriptcapture.HookModeManaged
 	}
-	runtimeCLI, err := findRuntimeCLI(runtime)
+	var openClawEnvironment map[string]string
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		openClawEnvironment, err = captureOpenClawMCPEnvironment()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil && !equalOpenClawMCPEnvironment(previousConfig.MCPEnvironment, openClawEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw selector environment changed since installation; restore the installed OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, and OPENCLAW_PROFILE values before reinstalling or uninstall the existing integration first")
+			return 1
+		}
+	}
+	runtimeCLI, err := findRuntimeCLIWithEnvironment(runtime, openClawEnvironment)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	runtimeVersion := detectRuntimeVersion(runtime, runtimeCLI)
+	openClawWorkspace := ""
+	openClawAgentID := ""
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		var openClawAgent openClawAgent
+		openClawAgent, err = inspectOpenClawDefaultAgentWithEnvironment(runtimeCLI, openClawEnvironment)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		openClawWorkspace = openClawAgent.Workspace
+		openClawAgentID = openClawAgent.ID
+		if errors.Is(previousConfigErr, os.ErrNotExist) {
+			_, exists, inspectErr := inspectOpenClawMCPWithEnvironment(runtimeCLI, openClawEnvironment)
+			if inspectErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: inspect OpenClaw-managed mcp.servers before install: %v\n", inspectErr)
+				return 1
+			}
+			if exists {
+				fmt.Fprintln(os.Stderr, "witself: OpenClaw-managed mcp.servers.witself exists without a Witself integration record; refusing to claim or replace it")
+				return 1
+			}
+		}
+	}
+	runtimeVersion := detectRuntimeVersionWithEnvironment(runtime, runtimeCLI, openClawEnvironment)
 	if runtimeVersion == "" && previousConfigErr == nil {
 		runtimeVersion = previousConfig.RuntimeVersion
 	}
@@ -227,6 +327,86 @@ func installCmd(args []string) int {
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		cfg.RuntimeCLICommand = runtimeCLI
+		cfg.MCPCommand = witselfExecutable
+		cfg.MCPEnvironment = cloneOpenClawEnvironment(openClawEnvironment)
+		cfg.MCPConnectTimeoutSeconds = openClawMCPConnectTimeoutSeconds
+		cfg.RuntimeWorkspace = openClawWorkspace
+		cfg.RuntimeAgentID = openClawAgentID
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeAgentID != cfg.RuntimeAgentID:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw default agent changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeAgentID, cfg.RuntimeAgentID)
+				return 1
+			case previousConfig.RuntimeWorkspace != cfg.RuntimeWorkspace:
+				fmt.Fprintf(os.Stderr, "witself: OpenClaw default workspace changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeWorkspace, cfg.RuntimeWorkspace)
+				return 1
+			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		if err := configureAntigravityBinding(&cfg, runtimeCLI, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: configure Antigravity plugin: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: Antigravity CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeConfigRoot != cfg.RuntimeConfigRoot:
+				fmt.Fprintf(os.Stderr, "witself: Antigravity config root changed from %s to %s; restore the installed HOME before reinstalling or uninstall the existing integration first\n", previousConfig.RuntimeConfigRoot, cfg.RuntimeConfigRoot)
+				return 1
+			case previousConfig.RuntimePluginPath != cfg.RuntimePluginPath:
+				fmt.Fprintln(os.Stderr, "witself: Antigravity plugin path changed; uninstall the existing integration before reinstalling it")
+				return 1
+			case previousConfig.MCPEnvironment["WITSELF_HOME"] != cfg.MCPEnvironment["WITSELF_HOME"]:
+				fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed since Antigravity installation; restore it before reinstalling or uninstall the existing integration first")
+				return 1
+			}
+		}
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousConfigCopy := previousConfig
+			previous = &previousConfigCopy
+		}
+		if err := preflightAntigravityInstall(cfg, previous); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: preflight Antigravity integration: %v\n", err)
+			return 1
+		}
+		if err := stageAntigravitySourceBundle(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		cfg.SchemaVersion = transcriptcapture.SchemaVersion
+	}
+	var antigravityJournal *antigravityTransactionJournal
+	var antigravityPreviousBinding *transcriptcapture.Config
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		if previousConfigErr == nil {
+			previous := previousConfig
+			antigravityPreviousBinding = &previous
+		}
+		journal, journalErr := beginAntigravityTransaction(
+			antigravityTransactionInstall,
+			antigravityPreviousBinding,
+			&cfg,
+		)
+		if journalErr != nil {
+			_, journalStatErr := os.Lstat(antigravityTransactionPath(cfg.RuntimeConfigRoot))
+			if errors.Is(journalStatErr, os.ErrNotExist) &&
+				(antigravityPreviousBinding == nil || antigravityPreviousBinding.RuntimePluginSource != cfg.RuntimePluginSource) {
+				_ = removeAntigravitySourceBundle(cfg)
+			}
+			fmt.Fprintf(os.Stderr, "witself: begin Antigravity transaction: %v\n", journalErr)
+			return 1
+		}
+		antigravityJournal = &journal
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	if runtime == transcriptcapture.RuntimeCursor {
 		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
@@ -244,12 +424,28 @@ func installCmd(args []string) int {
 		return 1
 	}
 	stagedConfig := cfg
-	if previousConfigErr == nil {
+	if previousConfigErr == nil && supportsTranscriptHooks(runtime) {
 		stagedConfig.HookMode = previousConfig.HookMode
 	}
-	if err := transcriptcapture.SaveConfig(stagedConfig); err != nil {
-		fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
-		return 1
+	if runtime != transcriptcapture.RuntimeOpenClaw || errors.Is(previousConfigErr, os.ErrNotExist) {
+		if err := saveRuntimeIntegrationConfig(stagedConfig); err != nil {
+			journalCleared := antigravityJournal == nil
+			if antigravityJournal != nil {
+				if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed Antigravity transaction: %v\n", clearErr)
+				} else {
+					journalCleared = true
+				}
+			}
+			if journalCleared && runtime == transcriptcapture.RuntimeAntigravity &&
+				(previousConfigErr != nil || previousConfig.RuntimePluginSource != cfg.RuntimePluginSource) {
+				if cleanupErr := removeAntigravitySourceBundle(cfg); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "witself: warning: remove unrecorded Antigravity recovery bundle: %v\n", cleanupErr)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
+			return 1
+		}
 	}
 	restoreConfig := func() error {
 		if previousConfigErr == nil {
@@ -257,21 +453,101 @@ func installCmd(args []string) int {
 		}
 		return transcriptcapture.RemoveConfig(runtime)
 	}
-	memoryRouting, err := installRuntimeMemoryRoutingInstructions(runtime)
+	memoryRouting, err := installRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 	if err != nil {
-		if rollbackErr := restoreConfig(); rollbackErr != nil {
+		rollbackErr := restoreConfig()
+		if rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+		} else if antigravityJournal != nil {
+			if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed Antigravity transaction: %v\n", clearErr)
+			} else if previousConfigErr != nil || previousConfig.RuntimePluginSource != cfg.RuntimePluginSource {
+				if cleanupErr := removeAntigravitySourceBundle(cfg); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "witself: warning: remove unrecorded Antigravity recovery bundle: %v\n", cleanupErr)
+				}
+			}
 		}
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 	var previousBinding *transcriptcapture.Config
 	if previousConfigErr == nil {
-		previous := previousConfig
-		previousBinding = &previous
+		if antigravityPreviousBinding != nil {
+			previousBinding = antigravityPreviousBinding
+		} else {
+			previous := previousConfig
+			previousBinding = &previous
+		}
 	}
 	cursorPermissionTouched := false
 	rollbackInstall := func(mcpTouched, hooksTouched bool) {
+		if runtime == transcriptcapture.RuntimeAntigravity {
+			if mcpTouched {
+				if rollbackErr := restoreAntigravityPlugin(previousBinding, &cfg); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore Antigravity plugin: %v; preserving the current safety policy and integration recovery state\n", rollbackErr)
+					return
+				}
+			}
+			if rollbackErr := restoreConfig(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+				return
+			}
+			if antigravityJournal != nil {
+				if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed Antigravity transaction: %v\n", clearErr)
+					return
+				}
+			}
+			if previousBinding == nil || previousBinding.RuntimePluginSource != cfg.RuntimePluginSource {
+				if cleanupErr := removeAntigravitySourceBundle(cfg); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted Antigravity recovery bundle: %v\n", cleanupErr)
+				}
+			}
+			return
+		}
+		if runtime == transcriptcapture.RuntimeOpenClaw {
+			if previousBinding != nil {
+				// Keep the newly installed policy in place until the previous exact
+				// MCP binding is restored. An older policy may not cover tools added
+				// by the attempted binding if MCP rollback itself fails.
+				if mcpTouched {
+					if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current OpenClaw routing and integration recovery state\n", rollbackErr)
+						return
+					}
+				}
+				if memoryRouting.managed {
+					if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+						return
+					}
+				}
+				if rollbackErr := restoreConfig(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+				}
+				return
+			}
+
+			// On a first install, the newly installed policy and staged config are
+			// the only durable recovery fence for a credential-bound MCP that may
+			// still be live. Remove neither until exact MCP absence is proven.
+			if mcpTouched {
+				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, nil, &cfg); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving OpenClaw routing and integration recovery state\n", rollbackErr)
+					return
+				}
+			}
+			if memoryRouting.managed {
+				if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+					return
+				}
+			}
+			if rollbackErr := restoreConfig(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+			}
+			return
+		}
 		if rollbackErr := restoreConfig(); rollbackErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
 		}
@@ -291,7 +567,7 @@ func installCmd(args []string) int {
 			}
 		}
 		if mcpTouched {
-			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
 			}
 		}
@@ -313,32 +589,79 @@ func installCmd(args []string) int {
 			cfg.ManagedPermissions = addManagedCursorMCPPermission(cfg.ManagedPermissions)
 		}
 	}
-	if err := registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name); err != nil {
-		rollbackInstall(true, false)
-		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+	openClawMCPPreTouched := false
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		openClawMCPPreTouched, err = prepareOpenClawMCPInstall(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		if err != nil {
+			rollbackInstall(openClawMCPPreTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+			return 1
+		}
+	}
+	var registerErr error
+	registerTouched := false
+	switch runtime {
+	case transcriptcapture.RuntimeOpenClaw:
+		desiredBinding, bindingErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
+		if bindingErr != nil {
+			registerErr = bindingErr
+		} else {
+			registerErr = registerOpenClawMCPBinding(runtimeCLI, desiredBinding)
+		}
+		registerTouched = true
+	case transcriptcapture.RuntimeAntigravity:
+		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
+	default:
+		registerErr = registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+		registerTouched = true
+	}
+	if registerErr != nil {
+		rollbackInstall(registerTouched, false)
+		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
 	var hookPath string
-	if useManagedHooks {
-		hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-		if err == nil {
-			_, err = transcriptcapture.RemoveHooks(runtime)
-		}
-	} else {
-		hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-		if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
-			_, err = removeManagedRuntimeHooks(runtime)
+	// Phase-one OpenClaw and Antigravity integrations intentionally retain
+	// HookModeNone and install no transcript hooks.
+	if supportsTranscriptHooks(runtime) {
+		if useManagedHooks {
+			hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+			if err == nil {
+				_, err = transcriptcapture.RemoveHooks(runtime)
+			}
+		} else {
+			hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
+			if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
+				_, err = removeManagedRuntimeHooks(runtime)
+			}
 		}
 	}
 	if err != nil {
-		rollbackInstall(true, true)
+		rollbackInstall(registerTouched, true)
 		fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
 		return 1
 	}
-	if err := transcriptcapture.SaveConfig(cfg); err != nil {
-		rollbackInstall(true, true)
+	if err := finalizeRuntimeIntegrationConfig(cfg); err != nil {
+		rollbackInstall(registerTouched, true)
 		fmt.Fprintf(os.Stderr, "witself: finalize integration: %v\n", err)
 		return 1
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity && antigravityJournal != nil {
+		if err := validateAntigravityInstalledArtifacts(cfg); err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize Antigravity topology: %v\n", err)
+			return 1
+		}
+		if err := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize Antigravity transaction: %v\n", err)
+			return 1
+		}
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity && previousBinding != nil &&
+		previousBinding.RuntimePluginSource != cfg.RuntimePluginSource {
+		if cleanupErr := removeAntigravitySourceBundle(*previousBinding); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: warning: remove superseded Antigravity recovery bundle: %v\n", cleanupErr)
+		}
 	}
 
 	if loc.Name == "" {
@@ -346,8 +669,15 @@ func installCmd(args []string) int {
 	} else {
 		fmt.Printf("installed %s for agent %s at %s\n", runtime, self.Identity.AgentName, loc.Name)
 	}
-	fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
+	if supportsTranscriptHooks(runtime) {
+		fmt.Printf("hooks: %s (%s)\n", hookPath, hookMode)
+	} else {
+		fmt.Printf("transcript capture: unavailable (no supported %s hooks)\n", runtime)
+	}
 	fmt.Println("mcp: witself")
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		fmt.Printf("plugin: %s (managed)\n", cfg.RuntimePluginPath)
+	}
 	hydrationCapability := memoryhydration.CapabilityFor(runtime)
 	fmt.Printf("memory hydration: session=%s automatic=%t task=%s automatic=%t\n",
 		hydrationCapability.SessionHydration.Delivery, hydrationCapability.SessionHydration.Automatic,
@@ -363,6 +693,10 @@ func installCmd(args []string) int {
 		}
 	} else if runtime == transcriptcapture.RuntimeCodex {
 		fmt.Println("next: open /hooks in Codex once to review and trust the installed command hook; then start a new Codex task (or restart Codex) to load the managed memory-routing instructions")
+	} else if runtime == transcriptcapture.RuntimeOpenClaw {
+		fmt.Println("next: start a new OpenClaw task to load the managed memory-routing instructions and guided MCP fallback")
+	} else if runtime == transcriptcapture.RuntimeAntigravity {
+		fmt.Println("next: refresh MCP servers in Antigravity (or run /mcp in agy), then start a new task to load the managed plugin rule and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -450,6 +784,38 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks\n", runtime)
 		return 2
 	}
+	antigravityCurrentConfigRoot := ""
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		release, lockErr := acquireAntigravityOperationLock()
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: acquire Antigravity integration lock: %v\n", lockErr)
+			return 1
+		}
+		defer release()
+		configRoot, rootErr := currentAntigravityConfigRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve Antigravity config root: %v\n", rootErr)
+			return 1
+		}
+		antigravityCurrentConfigRoot = configRoot
+		pendingOperation := ""
+		if pending, pendingErr := loadAntigravityTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted Antigravity transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverAntigravityTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted Antigravity transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if pendingOperation == antigravityTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Println("recovered and completed interrupted antigravity uninstall; tokens and pending transcript events were preserved")
+				return 0
+			}
+		}
+	}
 	cfg, cfgErr := transcriptcapture.LoadConfig(runtime)
 	if cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "witself: read integration: %v\n", cfgErr)
@@ -462,6 +828,16 @@ func uninstallCmd(args []string) int {
 			runtime,
 		)
 		return 1
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		if cfg.RuntimeConfigRoot != antigravityCurrentConfigRoot {
+			fmt.Fprintf(os.Stderr, "witself: Antigravity config root changed from %s to %s; restore the HOME used for installation before uninstalling\n", cfg.RuntimeConfigRoot, antigravityCurrentConfigRoot)
+			return 1
+		}
+		if err := validateAntigravityInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: preflight Antigravity integration: %v\n", err)
+			return 1
+		}
 	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	cursorPermissionManaged := runtime == transcriptcapture.RuntimeCursor &&
@@ -476,7 +852,7 @@ func uninstallCmd(args []string) int {
 	// Reject malformed managed routing before invoking any runtime CLI. This is
 	// intentionally read-only: CLI availability is the second preflight, and no
 	// local integration state is changed unless both checks pass.
-	if err := preflightRuntimeMemoryRoutingRemoval(runtime); err != nil {
+	if err := preflightRuntimeMemoryRoutingRemovalAt(runtime, cfg.RuntimeWorkspace); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
@@ -486,6 +862,7 @@ func uninstallCmd(args []string) int {
 		return 1
 	}
 	var previousBinding *transcriptcapture.Config
+	var antigravityJournal *antigravityTransactionJournal
 	witselfExecutable := ""
 	if cfgErr == nil {
 		previous := cfg
@@ -499,30 +876,73 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
-	runtimeCLI, runtimeCLIErr := findRuntimeCLI(runtime)
-	if runtime != transcriptcapture.RuntimeCursor && runtimeCLIErr != nil {
+	runtimeCLI := ""
+	var runtimeCLIErr error
+	switch runtime {
+	case transcriptcapture.RuntimeOpenClaw:
+		// The OpenClaw namespace is selected by the installed CLI binding.
+		// Uninstall through that exact persisted command instead of whichever
+		// `openclaw` binary now happens to win PATH lookup.
+		runtimeCLI = cfg.RuntimeCLICommand
+		_, _, runtimeCLIErr = inspectOpenClawMCPWithEnvironment(runtimeCLI, cfg.MCPEnvironment)
+	case transcriptcapture.RuntimeAntigravity:
+		// The plugin is an exact-owned directory and does not require a provider
+		// CLI mutation to remove. Keep using the persisted CLI path only as part
+		// of the durable binding; uninstall remains possible if agy was removed.
+		runtimeCLI = cfg.RuntimeCLICommand
+	default:
+		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
+	}
+	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity && runtimeCLIErr != nil {
 		// Non-Cursor MCP registrations are owned by the runtime CLI. Preserve all
 		// local state so a later retry can remove the complete integration.
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
 		return 1
 	}
-	// Remove the preflighted managed instruction block before irreversible
-	// teardown. Its snapshot is cheap to restore if a later hook, MCP, or config
-	// operation fails.
-	memoryRouting, err := removeRuntimeMemoryRoutingInstructions(runtime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
-		return 1
+	// OpenClaw ignores MCP initialization instructions, so its AGENTS.md block
+	// is the only model-visible policy surface. Keep that block in place until
+	// after its credential-bound MCP registration is gone. Other runtimes retain
+	// the existing routing-first teardown, whose snapshot supports rollback.
+	var memoryRouting runtimeMemoryRoutingSnapshot
+	if runtime != transcriptcapture.RuntimeOpenClaw {
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
 	}
 	cursorPermissionTouched := false
 	rollbackUninstall := func(hooksTouched, mcpTouched bool) {
+		if runtime == transcriptcapture.RuntimeAntigravity {
+			if mcpTouched && previousBinding != nil {
+				if rollbackErr := restoreAntigravityPlugin(previousBinding, previousBinding); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore Antigravity plugin: %v; preserving the transaction journal for recovery\n", rollbackErr)
+					return
+				}
+			}
+			if antigravityJournal != nil {
+				if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed Antigravity transaction: %v\n", clearErr)
+				}
+			}
+			return
+		}
+		routingHandled := false
+		mcpRestoreAllowed := true
+		if runtime == transcriptcapture.RuntimeOpenClaw && memoryRouting.managed {
+			routingHandled = true
+			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+				mcpRestoreAllowed = false
+			}
+		}
 		if cursorPermissionTouched {
 			if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
 			}
 		}
-		if mcpTouched && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
-			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding); rollbackErr != nil {
+		if mcpTouched && mcpRestoreAllowed && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
+			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
 			}
 		}
@@ -531,7 +951,7 @@ func uninstallCmd(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
 			}
 		}
-		if memoryRouting.managed {
+		if memoryRouting.managed && !routingHandled {
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
 			}
@@ -545,12 +965,49 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
-	if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
-		rollbackUninstall(true, false)
-		fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
-		return 1
+	if supportsTranscriptHooks(runtime) {
+		if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
+			rollbackUninstall(true, false)
+			fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
+			return 1
+		}
 	}
-	if runtime == transcriptcapture.RuntimeCursor {
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		previous := cfg
+		journal, journalErr := beginAntigravityTransaction(antigravityTransactionUninstall, &previous, nil)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin Antigravity transaction: %v\n", journalErr)
+			return 1
+		}
+		antigravityJournal = &journal
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		if _, err := removeAntigravityPlugin(cfg); err != nil {
+			rollbackUninstall(true, true)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+	} else if runtime == transcriptcapture.RuntimeOpenClaw {
+		expected, expectedErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
+		if expectedErr != nil {
+			rollbackUninstall(true, false)
+			fmt.Fprintf(os.Stderr, "witself: resolve installed MCP binding: %v\n", expectedErr)
+			return 1
+		}
+		if err := unregisterOpenClawMCP(runtimeCLI, &expected); err != nil {
+			rollbackUninstall(true, true)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			// A failed removal returns no trustworthy snapshot. Leave MCP absent
+			// rather than risk restoring credential-bound tools without policy.
+			rollbackUninstall(false, false)
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+	} else if runtime == transcriptcapture.RuntimeCursor {
 		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
 			rollbackUninstall(true, true)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
@@ -573,10 +1030,21 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
-	if err := transcriptcapture.RemoveConfig(runtime); err != nil {
+	if err := removeRuntimeIntegrationConfig(runtime); err != nil {
 		rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
 		fmt.Fprintf(os.Stderr, "witself: remove integration: %v\n", err)
 		return 1
+	}
+	if runtime == transcriptcapture.RuntimeAntigravity {
+		if antigravityJournal != nil {
+			if clearErr := clearAntigravityTransaction(cfg.RuntimeConfigRoot, *antigravityJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: finalize Antigravity transaction: %v\n", clearErr)
+				return 1
+			}
+		}
+		if cleanupErr := removeAntigravitySourceBundle(cfg); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: warning: remove Antigravity recovery bundle: %v\n", cleanupErr)
+		}
 	}
 	fmt.Printf("uninstalled %s integration; tokens and pending transcript events were preserved\n", runtime)
 	return 0
@@ -1189,10 +1657,31 @@ func supportsManagedHooks(runtime string) bool {
 	return runtime == transcriptcapture.RuntimeCodex || runtime == transcriptcapture.RuntimeClaudeCode
 }
 
+func supportsTranscriptHooks(runtime string) bool {
+	switch runtime {
+	case transcriptcapture.RuntimeCodex,
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeCursor:
+		return true
+	default:
+		return false
+	}
+}
+
 var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-+][0-9a-z][0-9a-z.-]*)?)\b`)
 
+var (
+	runtimeVersionProbeTimeout = 5 * time.Second
+	runtimeVersionProbeWait    = 2 * time.Second
+)
+
 func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI, nil)
+}
+
+func detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI string, environment map[string]string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeVersionProbeTimeout)
 	defer cancel()
 	// Version output is part of the executable's stdout contract. Keep stderr
 	// separate: GUI-backed CLIs such as Cursor can emit unrelated diagnostics
@@ -1204,14 +1693,22 @@ func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 		// so bind and verify that same executable surface.
 		args = []string{"agent", "--version"}
 	}
-	output, err := exec.CommandContext(ctx, runtimeCLI, args...).Output()
+	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	if runtimeName == transcriptcapture.RuntimeOpenClaw && environment != nil {
+		cmd = openClawCommandContext(ctx, runtimeCLI, environment, args...)
+	}
+	output := &antigravityValidationOutput{limit: antigravityPluginValidationOutputLimit}
+	cmd.Stdout = output
+	cmd.WaitDelay = runtimeVersionProbeWait
+	err := cmd.Run()
 	if err != nil {
 		return ""
 	}
-	if match := semanticVersionPattern.FindSubmatch(output); len(match) == 2 {
+	raw := []byte(output.String())
+	if match := semanticVersionPattern.FindSubmatch(raw); len(match) == 2 {
 		return string(match[1])
 	}
-	for _, line := range strings.Split(string(output), "\n") {
+	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -1225,6 +1722,10 @@ func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
 }
 
 func findRuntimeCLI(runtime string) (string, error) {
+	return findRuntimeCLIWithEnvironment(runtime, nil)
+}
+
+func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string) (string, error) {
 	candidates := []string{}
 	var probeArgs []string
 	switch runtime {
@@ -1253,31 +1754,59 @@ func findRuntimeCLI(runtime string) (string, error) {
 			candidates = append(candidates, path)
 		}
 		probeArgs = []string{"agent", "mcp", "list", "--help"}
+	case transcriptcapture.RuntimeOpenClaw:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("OPENCLAW_CLI_PATH")))
+		if path, err := exec.LookPath("openclaw"); err == nil {
+			candidates = append(candidates, path)
+		}
+		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeAntigravity:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("ANTIGRAVITY_CLI_PATH")))
+		if path, err := exec.LookPath("agy"); err == nil {
+			candidates = append(candidates, path)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, filepath.Join(home, ".local", "bin", "agy"))
+		}
+		// Antigravity plugin subcommands do not implement conventional nested
+		// --help handling; `plugin uninstall --help` targets a plugin literally
+		// named --help. Probe only the read-only top-level version contract.
+		probeArgs = []string{"--version"}
 	}
 	seen := map[string]bool{}
+	probeTimeout := runtimeCLICapabilityProbeTimeout
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		probeTimeout = openClawCLIReadTimeout
+	}
 	for _, candidate := range candidates {
 		if candidate == "" || seen[candidate] {
 			continue
 		}
 		seen[candidate] = true
-		ctx, cancel := context.WithTimeout(context.Background(), runtimeCLICapabilityProbeTimeout)
-		err := exec.CommandContext(ctx, candidate, probeArgs...).Run()
+		candidatePath := candidate
+		if runtime == transcriptcapture.RuntimeAntigravity {
+			absolute, absoluteErr := filepath.Abs(candidate)
+			if absoluteErr != nil {
+				continue
+			}
+			candidatePath = filepath.Clean(absolute)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		cmd := exec.CommandContext(ctx, candidatePath, probeArgs...)
+		if runtime == transcriptcapture.RuntimeOpenClaw && environment != nil {
+			cmd = openClawCommandContext(ctx, candidate, environment, probeArgs...)
+		}
+		err := cmd.Run()
 		cancel()
 		if err == nil {
-			return candidate, nil
+			return candidatePath, nil
 		}
 	}
 	return "", fmt.Errorf("no %s executable with MCP support was found", runtime)
 }
 
 func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, location string) error {
-	serveArgs := []string{
-		witselfExecutable, "mcp", "serve", "--runtime", runtime,
-		"--account", account, "--realm", realm, "--agent", agent,
-	}
-	if location != "" {
-		serveArgs = append(serveArgs, "--location", location)
-	}
+	serveArgs := runtimeMCPServeArgs(runtime, witselfExecutable, account, realm, agent, location)
 	if runtime == transcriptcapture.RuntimeCursor {
 		if err := registerCursorMCP(serveArgs); err != nil {
 			return err
@@ -1304,6 +1833,8 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	case transcriptcapture.RuntimeGrokBuild:
 		removeArgs = []string{"mcp", "remove", "--scope", "user", "witself"}
 		addArgs = append([]string{"mcp", "add", "--scope", "user", "witself", "--"}, serveArgs...)
+	case transcriptcapture.RuntimeOpenClaw:
+		return registerOpenClawMCP(runtimeCLI, serveArgs)
 	default:
 		return fmt.Errorf("unsupported runtime %q", runtime)
 	}
@@ -1321,6 +1852,17 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	return nil
 }
 
+func runtimeMCPServeArgs(runtime, witselfExecutable, account, realm, agent, location string) []string {
+	serveArgs := []string{
+		witselfExecutable, "mcp", "serve", "--runtime", runtime,
+		"--account", account, "--realm", realm, "--agent", agent,
+	}
+	if location != "" {
+		serveArgs = append(serveArgs, "--location", location)
+	}
+	return serveArgs
+}
+
 func unregisterMCP(runtime, runtimeCLI string) error {
 	if runtime == transcriptcapture.RuntimeCursor {
 		if runtimeCLI != "" {
@@ -1333,6 +1875,9 @@ func unregisterMCP(runtime, runtimeCLI string) error {
 			return removeErr
 		}
 		return nil
+	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		return unregisterOpenClawMCP(runtimeCLI, nil)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

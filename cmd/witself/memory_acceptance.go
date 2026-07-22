@@ -73,6 +73,10 @@ func memoryAcceptancePrepare(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
+	if !supportsTranscriptHooks(runtimeName) {
+		fmt.Fprintf(os.Stderr, "witself: memory acceptance is unsupported for %s because it has no transcript hooks\n", runtimeName)
+		return 2
+	}
 
 	var state runtimeacceptance.RunState
 	resume := false

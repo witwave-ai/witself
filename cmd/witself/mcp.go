@@ -1058,11 +1058,11 @@ type mcpMessage struct {
 
 func mcpCmd(args []string) int {
 	if commandHelpRequested(args) {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 2
 	}
 	command, err := parseMCPServeCommandOptions(args[1:], os.Stderr)
@@ -1076,6 +1076,23 @@ func mcpCmd(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
+	}
+	if cfg.Runtime == transcriptcapture.RuntimeOpenClaw {
+		if err := validateOpenClawInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
+	}
+	if cfg.Runtime == transcriptcapture.RuntimeAntigravity {
+		if err := validateAntigravityInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
+		command.Server.ProviderServerName, err = antigravityMCPServerName(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: resolve Antigravity server name: %v\n", err)
+			return 1
+		}
 	}
 	if expected := strings.TrimSpace(command.Account); expected != "" && expected != cfg.Account {
 		fmt.Fprintf(os.Stderr, "witself mcp: account %q does not match installed account %q\n", expected, cfg.Account)
@@ -1133,8 +1150,8 @@ type mcpServeCommandOptions struct {
 func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeCommandOptions, error) {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(output)
-	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
-	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor")
+	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor|openclaw|antigravity")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
@@ -1183,9 +1200,10 @@ func newWitselfMCPServerForRuntime(backend witselfMCPBackend, runtimeName string
 }
 
 type mcpServerOptions struct {
-	ReadOnly     bool
-	Profile      string
-	NoValueTools bool
+	ReadOnly           bool
+	Profile            string
+	NoValueTools       bool
+	ProviderServerName string
 }
 
 func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName string, opts mcpServerOptions) *mcp.Server {
@@ -1195,8 +1213,11 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		if profile == mcpProfileCuratorApply {
 			instructions = curatorApplyWitselfMCPInstructions
 		}
-		if runtimeName == transcriptcapture.RuntimeGrokBuild {
+		switch runtimeName {
+		case transcriptcapture.RuntimeGrokBuild:
 			instructions = grokPortableMCPInstructions(instructions, "", "")
+		case transcriptcapture.RuntimeAntigravity:
+			instructions = antigravityMCPInstructions(instructions, opts.ProviderServerName)
 		}
 		server := mcp.NewServer(
 			&mcp.Implementation{Name: "witself", Version: version.Version},
@@ -1218,6 +1239,9 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	selfTool := mcpToolName(runtimeName, "witself.self.show")
 	messageListTool := mcpToolName(runtimeName, "witself.message.list")
 	instructions := mcpInstructionsForMode(runtimeName, selfTool, messageListTool, profile == mcpProfileReadOnly)
+	if runtimeName == transcriptcapture.RuntimeAntigravity {
+		instructions = antigravityMCPInstructions(instructions, opts.ProviderServerName)
+	}
 	if opts.NoValueTools {
 		instructions += "\n\nThis MCP server has value-returning secret tools disabled. It may search, show, and create redacted secret records when the selected profile permits, but it cannot reveal a field, generate a password for model context, or calculate a TOTP code. Never use another Witself surface to bypass that value-egress boundary."
 	}

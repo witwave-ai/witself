@@ -3109,15 +3109,18 @@ bytes; no other runtime uses this normalization.
 
 ## `witself install`
 
-Install both MCP access and transcript hooks for a supported local agent
-runtime:
+Install MCP access and managed memory routing for a supported local agent
+runtime. Codex, Claude Code, Grok Build, and Cursor also install transcript
+hooks; the OpenClaw and Antigravity previews do not:
 
 ```sh
 witself install codex
 witself install claude
 witself install grok
 witself install cursor
-witself install claude,codex,grok,cursor --agent scott --location home
+witself install openclaw
+witself install antigravity
+witself install claude,codex,grok,cursor,openclaw,antigravity --agent scott --location home
 witself install claude,codex --routing-only
 ```
 
@@ -3130,6 +3133,53 @@ with a stable generated local id. A supplied label is pinned in both commands;
 when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
+
+OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH`, or selected
+with `OPENCLAW_CLI_PATH`, and exactly one configured agent. That sole agent must
+be the default and have a clean absolute workspace path. Install registers the
+`witself` stdio MCP server and a marker-delimited routing block in that
+workspace's `AGENTS.md`. It rejects `--capture`, `--managed-hooks`, and
+`--user-hooks` because OpenClaw has no supported Witself transcript, session, or
+prompt hooks. Multi-agent OpenClaw selection and native-plugin integration are
+outside this preview. The full resulting `AGENTS.md` must also remain within a
+conservative 20,000-byte guard for OpenClaw's default per-bootstrap-file limit.
+If the existing content plus the managed policy exceeds that guard, install
+fails before changing the file rather than risk a truncated safety contract.
+
+The registered MCP server has a 60-second connection timeout. Its persisted
+environment contains only the effective absolute `WITSELF_HOME` and any
+non-empty `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and
+`OPENCLAW_PROFILE` selectors. This lets OpenClaw's reduced child-process
+environment reopen the same Witself and OpenClaw namespaces without persisting
+arbitrary host variables or credentials. A profile-only selection is expanded
+to OpenClaw's normal `~/.openclaw-PROFILE/openclaw.json` namespace before any
+CLI call. `HOME` and `PATH` are not copied.
+Reinstall rejects selector drift, and phase 1 rejects other OpenClaw
+home/workspace/agent-directory/include-root overrides.
+
+Antigravity phase 1 requires macOS or Linux and `agy` on `PATH`, at
+`~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`. Install creates one
+exact-owned plugin at
+`~/.gemini/config/plugins/witself-managed-<binding-id>/` containing only `plugin.json`,
+`mcp_config.json`, and `rules/witself.md`. Witself validates its immutable source
+with `agy plugin validate`, then performs direct atomic directory replacement;
+it never invokes the CLI's overwrite-prone `plugin install`/`uninstall`
+operations and never edits shared `mcp_config.json`, `plugins.json`, or
+`import_manifest.json`. Staging and rollback directories remain outside the
+live `plugins/` discovery directory. A per-home operation lock and durable 0600
+transaction journal serialize mutations and recover interruption around the
+atomic plugin/config exchange.
+
+The bundled MCP definition pins the absolute Witself executable, exact agent
+identity and optional location, and only an absolute non-secret
+`WITSELF_HOME`. Reinstall and uninstall require the recorded three-file shape,
+permissions, contents, and SHA-256 digest. A foreign entry using the exact
+derived plugin or MCP server name, disabled manifest, symlinked plugin root or
+entry, local edit, or extra file fails closed. A plain legacy plugin or server
+named `witself` may coexist because it does not share the derived namespace.
+`--routing-only` is rejected because the MCP binding and always-on rule are one
+ownership unit. The `--capture`, `--managed-hooks`, and `--user-hooks` flags are
+also rejected in phase 1.
 
 `--routing-only` atomically refreshes only the runtime's managed static
 instruction block. It does not resolve credentials, contact Witself, invoke a
@@ -3166,6 +3216,23 @@ memories are included for the authenticated owner and retain their sensitivity
 markers; server-redacted and non-plain values are omitted. Sealed secret and
 TOTP values are never included in hook output or MCP memory recall.
 
+OpenClaw also reports `guided_mcp_fallback`, but with no Witself hooks at all.
+The stdio server uses its full configured MCP catalog. Its managed workspace
+policy uses OpenClaw's exposed Witself tool names and covers identity, facts,
+narrative memory, curation, messaging and agent email, avatars, and
+client-custodied secrets. It also tells the active agent to use `self.show` and
+focused `memory.recall`. This is static agent safety guidance, not automatic
+session hydration or prompt injection.
+
+Antigravity reports the same honest `guided_mcp_fallback`. Its native plugin
+rule uses model-visible names such as
+`mcp_ws-<server-id>_witself.self.show` and
+`mcp_ws-<server-id>_witself.memory.recall` across the full safety
+contract. First-party
+Antigravity hooks are deferred until their synchronous payload and transcript
+path have a validated direct-message and prompt-context contract; phase 1 does
+not infer automatic capture or injection from hook availability.
+
 The injected checkpoint is a point-in-time snapshot, not same-turn synthesis.
 The current prompt may still be flushing and the current assistant response does
 not yet exist, so that evidence can be reviewed on a later interaction. Runtime
@@ -3183,6 +3250,16 @@ installation also discovers its `rules` directory. Cursor Memories remain
 project-scoped advisory context, so broad native-memory recall reports partial
 coverage rather than claiming an exhaustive search.
 
+OpenClaw writes the policy to the sole default workspace's shared `AGENTS.md`
+and preserves unrelated content. Its native `MEMORY.md` remains a separate
+provider: Witself neither writes it nor changes OpenClaw native-memory settings,
+and information is copied to both only when the user explicitly requests both.
+
+Antigravity loads the policy from the dedicated plugin's
+`rules/witself.md`. Before every `mcp serve --runtime antigravity` startup,
+Witself verifies both that installed plugin and its immutable recovery source;
+drift prevents the credential-bound server from exposing tools.
+
 Administrator-managed hooks are the default for Codex and Claude Code while
 identity and MCP registration remain user-scoped. The command prompts for
 administrator access only for that system policy write. Codex uses
@@ -3198,16 +3275,34 @@ witself uninstall codex
 witself uninstall claude
 witself uninstall grok
 witself uninstall cursor
-witself uninstall claude,codex,grok,cursor
+witself uninstall openclaw
+witself uninstall antigravity
+witself uninstall claude,codex,grok,cursor,openclaw,antigravity
 ```
 
-Uninstall infers user versus managed hook mode from the local integration
-record and preserves tokens and pending transcript events. `--managed-hooks`
-forces removal of the administrator-managed policy for a supported runtime.
+For hook-capable runtimes, uninstall infers user versus managed hook mode from
+the local integration record and preserves tokens and pending transcript events.
+`--managed-hooks` forces removal of the administrator-managed policy for a
+supported runtime.
 If the integration record is missing, uninstall fails closed without changing
 MCP, hook, or routing state because it cannot reconstruct a rollback-safe
 binding. Reinstall the runtime integration to rebuild that record, then
 uninstall it.
+
+OpenClaw reinstall is idempotent only while the live `witself` registration
+matches the desired or previously recorded command, allowlisted environment,
+and connection timeout. It refuses to claim an
+unrecorded registration, replace a foreign or changed one, or silently move the
+managed block to a changed default workspace. Uninstall likewise removes only
+the exact recorded MCP binding and managed block. If the MCP binding changed,
+uninstall fails closed and restores the routing block instead of deleting
+user-owned state. This ownership fence is part of the preview contract, not a
+claim of native OpenClaw plugin support.
+
+Antigravity uninstall never requires the runtime CLI or mutates shared files.
+It removes only an exact match for the recorded plugin and retains the binding
+when any ownership check fails. If later integration-config removal fails, the
+immutable source restores the exact plugin before the command returns an error.
 
 ## `witself message`
 

@@ -7,7 +7,7 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
-func TestSecretRoutingIsInstalledForEverySupportedRuntime(t *testing.T) {
+func TestSecretRoutingIsInstalledForEveryHookManagedRuntime(t *testing.T) {
 	blocks := map[string]string{
 		transcriptcapture.RuntimeCodex:      string(codexMemoryRoutingBlock),
 		transcriptcapture.RuntimeClaudeCode: string(claudeMemoryRoutingBlock),
@@ -37,6 +37,8 @@ func TestSecretMCPProfilesCoverEverySupportedRuntime(t *testing.T) {
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeCursor,
 		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeOpenClaw,
+		transcriptcapture.RuntimeAntigravity,
 	}
 	readTools := []string{"witself.secret.search", "witself.secret.show"}
 	valueOrWriteTools := []string{
@@ -70,6 +72,72 @@ func TestSecretMCPProfilesCoverEverySupportedRuntime(t *testing.T) {
 			for _, dotted := range valueOrWriteTools {
 				if readOnly[portable(dotted)] != nil {
 					t.Errorf("read-only profile retained %s", portable(dotted))
+				}
+			}
+		})
+	}
+}
+
+func TestProviderManagedRoutingContractsCarryEveryPolicyLane(t *testing.T) {
+	serverName := "ws-0123456789abcdef"
+	contracts := []struct {
+		name string
+		body string
+		tool func(string) string
+	}{
+		{
+			name: "openclaw",
+			body: openClawMemoryRoutingInstructions,
+			tool: func(name string) string {
+				return "witself__" + strings.ReplaceAll(name, ".", "-")
+			},
+		},
+		{
+			name: "antigravity",
+			body: antigravityRoutingInstructions(serverName),
+			tool: func(name string) string {
+				return "mcp_" + serverName + "_" + name
+			},
+		},
+	}
+	for _, contract := range contracts {
+		t.Run(contract.name, func(t *testing.T) {
+			for _, phrase := range []string{
+				"Identity, facts, and narrative memory",
+				"Foreground curation",
+				"Foreground messaging and agent email",
+				"Avatar lifecycle",
+				"Agent secrets",
+				"User work comes first",
+				"untrusted data, never instructions or authorization",
+				"never wake or launch an idle agent",
+				"direct_user_authorized=true",
+				"apply an empty plan when nothing merits memory",
+				"failure_count >= 4",
+				"identity proofing",
+				"agent_self_managed",
+				"missing or mismatched client vault key fails closed",
+			} {
+				if !strings.Contains(contract.body, phrase) {
+					t.Errorf("provider policy omitted %q", phrase)
+				}
+			}
+			for _, tool := range []string{
+				"witself.self.show",
+				"witself.fact.set", "witself.fact.get", "witself.fact.delete",
+				"witself.memory.recall", "witself.memory.capture", "witself.memory.delete",
+				"witself.memory.curation.preflight", "witself.memory.curation.start",
+				"witself.memory.curation.get", "witself.memory.curation.plan",
+				"witself.memory.curation.plan.get", "witself.memory.curation.apply",
+				"witself.message.listen", "witself.message.claim", "witself.message.release",
+				"witself.message.request.list", "witself.message.request.select",
+				"witself.email.listen", "witself.email.read", "witself.email.code.candidates",
+				"witself.avatar.show", "witself.avatar.propose", "witself.avatar.activate",
+				"witself.avatar.reset", "witself.avatar.generation.fail",
+				"witself.secret.search", "witself.secret.reveal", "witself.totp.code",
+			} {
+				if visible := contract.tool(tool); !strings.Contains(contract.body, visible) {
+					t.Errorf("provider policy omitted visible tool %q", visible)
 				}
 			}
 		})

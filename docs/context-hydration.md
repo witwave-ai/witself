@@ -220,6 +220,8 @@ Current conformance is deliberately asymmetric:
 | Claude Code | Automatic | Automatic | Automatic when pending at hook read time | Structured `additionalContext` hook output |
 | Cursor | Guided fallback | Guided fallback | Guided through `self.show` | Current IDE releases can accept and log `sessionStart.additional_context` without reliably delivering it to the model; both paths use MCP guidance until a live version-gated conformance test passes |
 | Grok Build | Guided fallback | Guided fallback | Guided through `self.show` | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
+| OpenClaw preview | Guided fallback | Guided fallback | Guided through `self.show` | No supported Witself transcript or prompt hook; the managed workspace `AGENTS.md` supplies the full-catalog safety policy |
+| Antigravity preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 bundles MCP and a full-catalog always-on plugin rule; native hooks are deferred until their payload and transcript contract is conformantly validated |
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
@@ -257,11 +259,11 @@ This automatic hydration path reads identity, facts, narrative memory,
 value-free curation lifecycle state, and value-free message, email, and avatar
 checkpoints. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
-include those checkpoints but never unread message/email metadata. Cursor and Grok Build
-use guided `self.show`. Every runtime's installed policy directs it to use
-non-blocking `message.listen` or `email.listen` to retrieve metadata; that model
-action is not forced. Bodies remain behind explicit read and no hook marks read,
-acknowledges, starts inference, or wakes a client. See
+include those checkpoints but never unread message/email metadata. Cursor, Grok
+Build, OpenClaw, and Antigravity use guided `self.show`. Every runtime's installed policy
+directs it to use non-blocking `message.listen` or `email.listen` to retrieve
+metadata; that model action is not forced. Bodies remain behind explicit read
+and no hook marks read, acknowledges, starts inference, or wakes a client. See
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md).
 
 `GET /v1/self` keeps `include_sensitive=false` as its ordinary API default.
@@ -344,6 +346,14 @@ message, and direct narrative-memory protocol documented in
   suffix, kept within its 2 KiB MCP server-instruction limit.
 - Grok Build receives its provider policy plus the suffix, with tool names
   rewritten to the runtime's underscore-safe namespace.
+- OpenClaw does not consume the MCP initialization string. Its managed workspace
+  `AGENTS.md` carries the guided safety and lifecycle policy for the full
+  configured MCP catalog under OpenClaw's exposed tool names.
+- Antigravity receives the protocol through MCP and also loads a bundled
+  always-on plugin rule for the full catalog. Its model-visible names retain
+  dotted declared names behind the collision-resistant per-binding
+  `mcp_ws-<server-id>_` prefix, such as
+  `mcp_ws-<server-id>_witself.memory.recall`.
 
 In every case, an explicit atomic assertion uses `witself.fact.set`, while an
 explicit narrative remember uses `witself.memory.capture` in the same turn.
@@ -386,9 +396,11 @@ dominates. The canonical per-tool wording lives in
 ### 3. The Bootstrap Stanza (paste-able file teaching)
 
 The bootstrap-instructions/file-bridge command remains a target surface. The
-implemented integration path is `witself install codex|claude|grok|cursor`,
-which installs managed routing guidance and the MCP server. A future paste-able
-stanza must express the same contract:
+implemented paths are `witself install codex|claude|grok|cursor` plus the
+`witself install openclaw|antigravity` previews. Each installs managed routing
+guidance and the MCP server; OpenClaw and Antigravity phase 1 have no Witself
+transcript or prompt hooks. A future
+paste-able stanza must express the same contract:
 
 ```markdown
 ## Self / Memory (Witself)

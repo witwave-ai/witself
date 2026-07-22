@@ -74,6 +74,10 @@ func memoryCurateAutoEnable(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
+	if !supportsTranscriptHooks(runtimeName) {
+		fmt.Fprintf(os.Stderr, "witself: automatic curation is unsupported for %s because it has no transcript hooks\n", runtimeName)
+		return 2
+	}
 	provider, err := parseCuratorNativeProvider(*providerFlag)
 	if err != nil || provider == "" {
 		if err == nil {
@@ -474,6 +478,10 @@ func parseMemoryCurateAutoRuntime(command string, args []string, allowSupervisor
 	runtimeName, err := transcriptcapture.NormalizeRuntime(*runtimeFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return memoryCurateAutoRuntimeFlags{}, 2
+	}
+	if !supportsTranscriptHooks(runtimeName) {
+		fmt.Fprintf(os.Stderr, "witself: automatic curation is unsupported for %s because it has no transcript hooks\n", runtimeName)
 		return memoryCurateAutoRuntimeFlags{}, 2
 	}
 	result := memoryCurateAutoRuntimeFlags{Runtime: runtimeName, JSON: *jsonOut}

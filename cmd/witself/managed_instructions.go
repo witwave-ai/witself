@@ -15,12 +15,13 @@ import (
 // a runtime-owned Markdown file. The filename and temporary-file pattern are
 // kept explicit so diagnostics and atomic writes use the runtime's own names.
 type managedInstructionsSpec struct {
-	path        string
-	fileName    string
-	tempPattern string
-	beginMarker string
-	endMarker   string
-	block       []byte
+	path         string
+	fileName     string
+	tempPattern  string
+	beginMarker  string
+	endMarker    string
+	block        []byte
+	maximumBytes int
 
 	// removeEmpty is for dedicated Witself-owned files. Shared instruction
 	// files such as AGENTS.md retain an empty file after removing the block.
@@ -68,6 +69,14 @@ func installManagedInstructions(spec managedInstructionsSpec) (managedInstructio
 	updated, changed, err := upsertManagedInstructionsBlock(snapshot.data, spec)
 	if err != nil {
 		return managedInstructionsSnapshot{}, err
+	}
+	if spec.maximumBytes > 0 && len(updated) > spec.maximumBytes {
+		return managedInstructionsSnapshot{}, fmt.Errorf(
+			"refuse to install %s because the resulting file is %d bytes and the runtime bootstrap limit is %d",
+			spec.fileName,
+			len(updated),
+			spec.maximumBytes,
+		)
 	}
 	if !changed {
 		return snapshot, nil

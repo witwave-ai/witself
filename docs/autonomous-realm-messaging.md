@@ -51,7 +51,7 @@ provider installation policy, account export/import, and legacy-runner upgrade:
 - reply/list/listen/read/ack plus fenced claim/renew/release/complete;
 - realm-open requests, bounded offers, client-ranked selection,
   multi-assignee reservations, claims, reassignment, and results; and
-- foreground discovery for all four supported runtimes, with automatic
+- foreground discovery for the four runtimes certified in that release, with automatic
   checkpoint hydration where the provider supports it and guided `self.show`
   elsewhere.
 

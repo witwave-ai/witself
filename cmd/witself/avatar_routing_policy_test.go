@@ -7,7 +7,7 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
-func TestManagedRuntimeContractsCarryAvatarLifecyclePolicy(t *testing.T) {
+func TestHookManagedRuntimeContractsCarryAvatarLifecyclePolicy(t *testing.T) {
 	contracts := map[string]string{
 		"codex":  string(codexMemoryRoutingBlock),
 		"claude": string(claudeMemoryRoutingBlock),
