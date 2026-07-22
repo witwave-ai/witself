@@ -64,6 +64,7 @@ type Config struct {
 	RuntimeWorkspace         string            `json:"runtime_workspace,omitempty"`
 	RuntimeAgentID           string            `json:"runtime_agent_id,omitempty"`
 	RuntimeConfigRoot        string            `json:"runtime_config_root,omitempty"`
+	RuntimeMCPConfigPath     string            `json:"runtime_mcp_config_path,omitempty"`
 	RuntimePluginPath        string            `json:"runtime_plugin_path,omitempty"`
 	RuntimePluginSource      string            `json:"runtime_plugin_source,omitempty"`
 	RuntimePluginDigest      string            `json:"runtime_plugin_digest,omitempty"`
@@ -203,10 +204,11 @@ func SaveConfig(cfg Config) error {
 	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
 	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
 	cfg.RuntimeConfigRoot = strings.TrimSpace(cfg.RuntimeConfigRoot)
+	cfg.RuntimeMCPConfigPath = strings.TrimSpace(cfg.RuntimeMCPConfigPath)
 	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
 	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
 	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
-	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
+	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimeMCPConfigPath, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return err
 	}
 	cfg.CaptureMode = mode
@@ -265,16 +267,17 @@ func LoadConfig(runtime string) (Config, error) {
 	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
 	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
 	cfg.RuntimeConfigRoot = strings.TrimSpace(cfg.RuntimeConfigRoot)
+	cfg.RuntimeMCPConfigPath = strings.TrimSpace(cfg.RuntimeMCPConfigPath)
 	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
 	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
 	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
-	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
+	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimeMCPConfigPath, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID, configRoot, pluginPath, pluginSource, pluginDigest string) error {
+func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID, configRoot, mcpConfigPath, pluginPath, pluginSource, pluginDigest string) error {
 	if runtimeCLICommand != "" && (!filepath.IsAbs(runtimeCLICommand) || filepath.Clean(runtimeCLICommand) != runtimeCLICommand) {
 		return errors.New("runtime_cli_command must be a clean absolute path")
 	}
@@ -285,16 +288,17 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		return errors.New("runtime_workspace must be a clean absolute path")
 	}
 	for field, value := range map[string]string{
-		"runtime_config_root":   configRoot,
-		"runtime_plugin_path":   pluginPath,
-		"runtime_plugin_source": pluginSource,
+		"runtime_config_root":     configRoot,
+		"runtime_mcp_config_path": mcpConfigPath,
+		"runtime_plugin_path":     pluginPath,
+		"runtime_plugin_source":   pluginSource,
 	} {
 		if value != "" && (len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) || filepath.Clean(value) != value) {
 			return fmt.Errorf("%s must be a clean absolute path", field)
 		}
 	}
 	if runtime == RuntimeOpenClaw {
-		if configRoot != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+		if configRoot != "" || mcpConfigPath != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
 			return errors.New("runtime plugin fields are not supported for OpenClaw")
 		}
 		if hookMode != HookModeNone {
@@ -333,6 +337,9 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		if configRoot == "" || pluginPath == "" || pluginSource == "" {
 			return errors.New("runtime_config_root, runtime_plugin_path, and runtime_plugin_source are required for Antigravity")
 		}
+		if mcpConfigPath != "" && mcpConfigPath != filepath.Join(configRoot, "mcp_config.json") {
+			return errors.New("runtime_mcp_config_path must be the canonical Antigravity MCP config under runtime_config_root")
+		}
 		if filepath.Dir(pluginPath) != filepath.Join(configRoot, "plugins") || !antigravityPluginNamePattern.MatchString(filepath.Base(pluginPath)) {
 			return errors.New("runtime_plugin_path must be a collision-resistant Witself-managed plugin under runtime_config_root")
 		}
@@ -354,7 +361,7 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		}
 		return nil
 	}
-	if configRoot != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+	if configRoot != "" || mcpConfigPath != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
 		return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
 	}
 	if len(mcpEnvironment) != 0 {

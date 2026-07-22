@@ -3160,26 +3160,41 @@ home/workspace/agent-directory/include-root overrides.
 Antigravity phase 1 requires macOS or Linux and `agy` on `PATH`, at
 `~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`. Install creates one
 exact-owned plugin at
-`~/.gemini/config/plugins/witself-managed-<binding-id>/` containing only `plugin.json`,
-`mcp_config.json`, and `rules/witself.md`. Witself validates its immutable source
-with `agy plugin validate`, then performs direct atomic directory replacement;
-it never invokes the CLI's overwrite-prone `plugin install`/`uninstall`
-operations and never edits shared `mcp_config.json`, `plugins.json`, or
+`~/.gemini/config/plugins/witself-managed-<binding-id>/` containing only
+`plugin.json` and `rules/witself.md`. Witself validates its immutable source with
+`agy plugin validate`, then performs direct atomic directory replacement; it
+never invokes the CLI's overwrite-prone `plugin install`/`uninstall`
+operations. Install also merges one exact collision-resistant server entry into
+the canonical `~/.gemini/config/mcp_config.json`, preserving unrelated root
+fields and sibling servers. Witself never edits `plugins.json` or
 `import_manifest.json`. Staging and rollback directories remain outside the
 live `plugins/` discovery directory. A per-home operation lock and durable 0600
-transaction journal serialize mutations and recover interruption around the
-atomic plugin/config exchange.
+transaction journal serialize mutations and recover interruption across the
+integration config, plugin, shared MCP entry, and immutable recovery bundle.
 
-The bundled MCP definition pins the absolute Witself executable, exact agent
+The managed shared entry pins the absolute Witself executable, exact agent
 identity and optional location, and only an absolute non-secret
-`WITSELF_HOME`. Reinstall and uninstall require the recorded three-file shape,
-permissions, contents, and SHA-256 digest. A foreign entry using the exact
-derived plugin or MCP server name, disabled manifest, symlinked plugin root or
-entry, local edit, or extra file fails closed. A plain legacy plugin or server
-named `witself` may coexist because it does not share the derived namespace.
-`--routing-only` is rejected because the MCP binding and always-on rule are one
-ownership unit. The `--capture`, `--managed-hooks`, and `--user-hooks` flags are
-also rejected in phase 1.
+`WITSELF_HOME`. Reinstall and uninstall require the recorded two-file plugin
+shape, permissions, contents, and SHA-256 digest plus the exact managed server
+entry in a real 0600 shared config. A foreign entry using the exact derived
+plugin or MCP server name, disabled manifest, malformed or duplicate-key JSON,
+symlinked owned state, local edit, permission drift, or extra plugin file fails
+closed. Shared-config writes compare the file again before atomic replacement
+and change only the managed entry; unrelated server entries and root fields are
+retained. A plain legacy plugin or server named `witself` may coexist because it
+does not share the derived namespace. `--routing-only` is rejected because the
+MCP binding and always-on rule move as one transaction across two provider
+surfaces. The `--capture`, `--managed-hooks`, and `--user-hooks` flags are also
+rejected in phase 1.
+
+Reinstall recognizes an exact v0.0.198 three-file plugin containing
+`mcp_config.json` and migrates it to the rules-only plugin plus canonical shared
+entry. Direct uninstall of that recorded legacy shape removes only its exact
+plugin and recovery source, does not create or edit the shared MCP file, and
+does not require `agy`. Transaction recovery covers both current surfaces and
+the legacy-to-current transition: it commits only a complete exact tuple,
+restores a previous complete tuple when safe, and refuses ambiguous foreign
+state.
 
 `--routing-only` atomically refreshes only the runtime's managed static
 instruction block. It does not resolve credentials, contact Witself, invoke a
@@ -3257,8 +3272,9 @@ and information is copied to both only when the user explicitly requests both.
 
 Antigravity loads the policy from the dedicated plugin's
 `rules/witself.md`. Before every `mcp serve --runtime antigravity` startup,
-Witself verifies both that installed plugin and its immutable recovery source;
-drift prevents the credential-bound server from exposing tools.
+Witself verifies the installed plugin, its immutable recovery source, and the
+exact managed entry in the canonical shared MCP config; drift in any owned
+surface prevents the credential-bound server from exposing tools.
 
 Administrator-managed hooks are the default for Codex and Claude Code while
 identity and MCP registration remain user-scoped. The command prompts for
@@ -3299,10 +3315,13 @@ uninstall fails closed and restores the routing block instead of deleting
 user-owned state. This ownership fence is part of the preview contract, not a
 claim of native OpenClaw plugin support.
 
-Antigravity uninstall never requires the runtime CLI or mutates shared files.
-It removes only an exact match for the recorded plugin and retains the binding
-when any ownership check fails. If later integration-config removal fails, the
-immutable source restores the exact plugin before the command returns an error.
+Antigravity uninstall never requires the runtime CLI. For a current binding it
+removes only the exact managed server entry from the shared MCP file, preserving
+unrelated fields and servers, and then removes only the exact recorded plugin.
+For a recorded v0.0.198 binding it removes the exact three-file plugin without
+touching the shared file. Any ownership mismatch retains the binding. If a
+later step fails, transaction rollback or recovery restores the complete exact
+plugin-and-server tuple before the journal is cleared.
 
 ## `witself message`
 

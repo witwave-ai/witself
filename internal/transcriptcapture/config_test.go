@@ -147,11 +147,12 @@ func TestAntigravityConfigRequiresAndRoundTripsOwnedPluginBinding(t *testing.T) 
 	configRoot := "/Users/test/.gemini/config"
 	cfg := Config{
 		Runtime: RuntimeAntigravity, RuntimeVersion: "1.1.1",
-		RuntimeCLICommand: "/Users/test/.local/bin/agy",
-		MCPCommand:        "/usr/local/bin/witself",
-		MCPEnvironment:    map[string]string{"WITSELF_HOME": witselfHome},
-		RuntimeConfigRoot: configRoot,
-		RuntimePluginPath: filepath.Join(configRoot, "plugins", "witself-managed-0123456789abcdef01234567"),
+		RuntimeCLICommand:    "/Users/test/.local/bin/agy",
+		MCPCommand:           "/usr/local/bin/witself",
+		MCPEnvironment:       map[string]string{"WITSELF_HOME": witselfHome},
+		RuntimeConfigRoot:    configRoot,
+		RuntimeMCPConfigPath: filepath.Join(configRoot, "mcp_config.json"),
+		RuntimePluginPath:    filepath.Join(configRoot, "plugins", "witself-managed-0123456789abcdef01234567"),
 		RuntimePluginSource: filepath.Join(
 			witselfHome, "integrations", RuntimeAntigravity, "bundles", digest,
 		),
@@ -171,6 +172,7 @@ func TestAntigravityConfigRequiresAndRoundTripsOwnedPluginBinding(t *testing.T) 
 	if loaded.Runtime != RuntimeAntigravity || loaded.HookMode != HookModeNone ||
 		loaded.RuntimeCLICommand != cfg.RuntimeCLICommand || loaded.MCPCommand != cfg.MCPCommand ||
 		loaded.MCPEnvironment["WITSELF_HOME"] != witselfHome || loaded.RuntimeConfigRoot != configRoot ||
+		loaded.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath ||
 		loaded.RuntimePluginPath != cfg.RuntimePluginPath || loaded.RuntimePluginSource != cfg.RuntimePluginSource ||
 		loaded.RuntimePluginDigest != digest {
 		t.Fatalf("Antigravity config = %#v", loaded)
@@ -210,6 +212,7 @@ func TestAntigravityConfigRequiresAndRoundTripsOwnedPluginBinding(t *testing.T) 
 		{"hooks", func(value *Config) { value.HookMode = HookModeUser }, "hook_mode must be none"},
 		{"relative CLI", func(value *Config) { value.RuntimeCLICommand = "agy" }, "clean absolute"},
 		{"extra env", func(value *Config) { value.MCPEnvironment["PATH"] = "/bin" }, "only WITSELF_HOME"},
+		{"MCP config path", func(value *Config) { value.RuntimeMCPConfigPath = filepath.Join(configRoot, "other.json") }, "canonical Antigravity MCP config"},
 		{"plugin path", func(value *Config) { value.RuntimePluginPath = filepath.Join(configRoot, "plugins", "other") }, "collision-resistant Witself-managed plugin"},
 		{"digest", func(value *Config) { value.RuntimePluginDigest = "ABC" }, "lowercase SHA-256"},
 		{"source", func(value *Config) { value.RuntimePluginSource = filepath.Join(witselfHome, "other") }, "digest-addressed"},
