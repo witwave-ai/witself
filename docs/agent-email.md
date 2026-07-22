@@ -5,9 +5,9 @@ Status: capability-limited receive pilot live in the GCP sandbox as of
 enabled; durable receipt, provider-managed retry, owner processing,
 disable/re-enable rollback, and the default-off exact-agent synthetic retry
 proof have been exercised without changing the existing Cloudflare catch-all.
-Schema 61 and the receive controls are live. The scheduled retry canary remains
-disabled by default. This pilot does not add a sender-trust claim or automatic
-code use.
+Schema 61 and the receive controls are live. The retry-canary workflow is
+manual-only; add a schedule only when continuous monitoring is intentionally
+enabled. This pilot does not add a sender-trust claim or automatic code use.
 
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
@@ -321,18 +321,18 @@ an opaque cursor; it does not use the oldest-first listen surface, so more than
 100 older unacknowledged messages cannot hide the new canary.
 
 Mixed versions are unsafe for arming: a replica without the exact canary config
-would ordinary-accept the first delivery. Keep the schedule off, deploy
+would ordinary-accept the first delivery. Keep automation manual-only, deploy
 schema-61-capable code with the canary agent unset, wait for every pod to
 converge, then add the exact agent in a config-only rollout and wait again.
-Only then arm/send manually; enable the schedule only after that run proves the
-fixed edge sequence `tempfail_cell_response` / `response` / `503`, then
-`accepted`. Rollback reverses this carefully: disable the schedule, settle the
-unused arm or let its 15-minute TTL expire, and only then unset the agent or
-downgrade.
+Only then arm/send manually; add a schedule only after that run proves the fixed
+edge sequence `tempfail_cell_response` / `response` / `503`, then `accepted`.
+Rollback reverses this carefully: disable any schedule that has been added,
+settle the unused arm or let its 15-minute TTL expire, and only then unset the
+agent or downgrade.
 
-The 15-minute workflow schedule is intentionally gated off. A successful run
-acknowledges but does not delete its synthetic message, so enabling that cadence
-retains about 96 messages per day until mailbox retention/delete is settled.
+The workflow is manual-only. A successful run acknowledges but does not delete
+its synthetic message, so a future 15-minute cadence would retain about 96
+messages per day until mailbox retention/delete is settled.
 
 **Production receive-only contract:** the Inbound SMTP Transaction Contract
 below remains the target. Promotion beyond the internal pilot, catch-all Worker
