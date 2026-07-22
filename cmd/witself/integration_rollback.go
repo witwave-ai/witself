@@ -55,6 +55,9 @@ func preflightRuntimeMemoryRoutingRemovalAt(runtimeName, runtimeWorkspace string
 }
 
 func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previous, attempted *transcriptcapture.Config) error {
+	if runtimeName == transcriptcapture.RuntimeAntigravity {
+		return restoreAntigravityPlugin(previous, attempted)
+	}
 	if runtimeName == transcriptcapture.RuntimeOpenClaw {
 		if attempted == nil {
 			return errors.New("attempted OpenClaw integration binding is required for safe MCP rollback")

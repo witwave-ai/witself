@@ -777,7 +777,11 @@ func TestTranscriptHookSupportIsExplicitlyAllowlisted(t *testing.T) {
 			t.Errorf("%s should support transcript hooks", runtimeName)
 		}
 	}
-	for _, runtimeName := range []string{transcriptcapture.RuntimeOpenClaw, "future-runtime"} {
+	for _, runtimeName := range []string{
+		transcriptcapture.RuntimeOpenClaw,
+		transcriptcapture.RuntimeAntigravity,
+		"future-runtime",
+	} {
 		if supportsTranscriptHooks(runtimeName) {
 			t.Errorf("%s unexpectedly supports transcript hooks", runtimeName)
 		}

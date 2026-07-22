@@ -7,7 +7,7 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
-func TestForegroundMessagingPolicyIsInstalledForEveryRuntime(t *testing.T) {
+func TestForegroundMessagingPolicyIsInstalledForEveryHookManagedRuntime(t *testing.T) {
 	for _, want := range []string{
 		"message_checkpoint",
 		"witself.self.show",
@@ -47,7 +47,7 @@ func TestForegroundMessagingPolicyIsInstalledForEveryRuntime(t *testing.T) {
 	}
 }
 
-func TestForegroundAgentEmailPolicyIsInstalledForEveryRuntime(t *testing.T) {
+func TestForegroundAgentEmailPolicyIsInstalledForEveryHookManagedRuntime(t *testing.T) {
 	for _, want := range []string{
 		"email_checkpoint",
 		"witself.email.listen",
@@ -92,6 +92,8 @@ func TestMCPMessagingPolicyHasNoRetiredNotificationBridge(t *testing.T) {
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeCursor,
 		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeOpenClaw,
+		transcriptcapture.RuntimeAntigravity,
 	} {
 		instructions := mcpInstructions(
 			runtimeName,

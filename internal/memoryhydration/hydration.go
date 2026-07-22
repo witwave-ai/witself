@@ -110,6 +110,14 @@ func CapabilityFor(runtime string) Capability {
 			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
 				Reason: "OpenClaw has no supported Witself prompt hook context channel"},
 		}
+	case transcriptcapture.RuntimeAntigravity:
+		return Capability{
+			Runtime: runtime,
+			SessionHydration: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "Antigravity hook hydration is deferred until its native payload and transcript contract are conformantly validated"},
+			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "Antigravity hooks do not expose a validated direct prompt context contract"},
+		}
 	default:
 		return Capability{
 			Runtime:          runtime,

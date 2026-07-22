@@ -32,9 +32,9 @@ witself version
 
 Once an agent token exists under the normal `~/.witself` account layout, one
 command installs the Witself stdio MCP server. Codex, Claude Code, Grok Build,
-and Cursor also receive durable transcript hooks. The OpenClaw preview instead
-installs stdio MCP plus managed workspace routing only; it has no Witself
-transcript hooks or automatic prompt-context injection. All five runtimes
+and Cursor also receive durable transcript hooks. The OpenClaw and Antigravity
+phase-1 integrations instead install stdio MCP plus managed static routing;
+they have no Witself transcript hooks or automatic prompt-context injection. All six runtimes
 receive managed safety and routing guidance for the full configured MCP catalog,
 including identity, facts, narrative memory, curation, messaging and email,
 avatars, and secrets. Witself is the default narrative destination;
@@ -50,6 +50,8 @@ explicitly requested. See the
   `~/.cursor/rules/witself-memory-routing.mdc`)
 - OpenClaw preview: `AGENTS.md` in the sole default agent's configured
   workspace
+- Antigravity preview: an exact-owned, automatically discovered plugin at
+  `~/.gemini/config/plugins/witself-managed-<binding-id>/`
 
 Cursor installation also merges `Mcp(witself:*)` into
 `$CURSOR_CONFIG_DIR/cli-config.json` so the approved server's tools can run in
@@ -63,6 +65,7 @@ witself install claude
 witself install grok
 witself install cursor
 witself install openclaw
+witself install antigravity
 ```
 
 OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH` (or selected
@@ -84,6 +87,23 @@ Witself never copies arbitrary environment variables, credentials, `HOME`, or
 fails closed on other OpenClaw home, workspace, agent-directory, or include-root
 overrides instead of guessing how to reproduce them in the spawned MCP server.
 
+Antigravity phase 1 requires the `agy` CLI on `PATH`, at
+`~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`, and currently
+supports macOS and Linux because installation depends on native file locking
+and no-replace/exchange renames. Witself validates
+an immutable source bundle, then atomically installs exactly `plugin.json`,
+`mcp_config.json`, and `rules/witself.md` beneath Antigravity's standard global
+plugin root. It never edits the shared `~/.gemini/config/mcp_config.json`,
+`plugins.json`, or import manifest. The plugin pins the absolute Witself binary,
+agent identity, optional location, and only the non-secret absolute
+`WITSELF_HOME`; it never persists credentials, `HOME`, or `PATH`. Reinstall and
+uninstall refuse foreign, disabled, symlinked plugin roots or entries, locally
+edited, or extra-file plugin state instead of overwriting it. A per-home lock,
+durable transaction journal, and atomic directory exchange make interrupted or
+concurrent Witself mutations recoverable on the next install or uninstall.
+`--routing-only` is unavailable because
+the MCP definition and always-on safety rule are one exact ownership unit.
+
 The installer reuses an existing integration or the only local agent credential.
 When more than one agent is available, select one explicitly; a location label
 is optional:
@@ -94,7 +114,8 @@ witself install claude,codex,grok,cursor --agent scott --location home
 
 The resolved account, realm, and agent are pinned explicitly in every installed
 MCP command and, where supported, every hook command. A supplied location is
-pinned in both places for hook-capable runtimes and in OpenClaw's MCP command;
+pinned in both places for hook-capable runtimes and in the OpenClaw or
+Antigravity MCP command;
 when omitted, no `--location` argument is written. The installer verifies that
 token-bound identity, preserves unrelated runtime configuration, and never
 copies a token into the MCP or hook command. Local
@@ -128,6 +149,23 @@ session or prompt injection remain unavailable. The managed workspace block is
 therefore the safety contract for OpenClaw's full Witself MCP catalog, not just
 its memory tools.
 
+The Antigravity preview uses its native plugin format rather than splicing a
+shared global rule or MCP file. Antigravity automatically discovers the owned
+plugin directory and exposes dotted declared tool names under its
+collision-resistant per-binding namespace
+`mcp_ws-<server-id>_`, such as
+`mcp_ws-<server-id>_witself.memory.recall`. The 16-hex server id is a shortened
+form of the plugin's 24-hex binding id, preventing an
+ordinary workspace or global plugin named `witself` from shadowing this binding.
+Atomic install, upgrade, and uninstall are fenced by a 0600 transaction journal;
+Witself synchronizes the selected plugin, integration config, immutable recovery
+bundle, and their parent directories before clearing it. Before every MCP server startup, Witself
+revalidates the installed plugin and immutable recovery source against the
+recorded SHA-256 binding; any drift prevents credential-bound tools from being
+exposed. Antigravity's synchronous hooks and transcript-path payload remain a
+phase-2 conformance task because they do not yet provide a validated direct
+message or prompt-context contract.
+
 Grok Build enables Claude and Cursor compatibility by default, including their
 hooks and MCP servers. During `witself install grok`, Witself inspects Grok's
 effective configuration before making changes. Imported Witself hooks are
@@ -150,7 +188,7 @@ that preserves the generated retry key. Deletion removes values, assertion/evide
 candidates; it retains only a non-restorable value-free tombstone plus immutable
 usage history so retries, audit, billing, and exports remain consistent. The
 MCP tool `witself.fact.delete` uses the same preview/apply contract across
-Codex, Claude Code, Grok Build, Cursor, and OpenClaw. Plain “forget” remains
+Codex, Claude Code, Grok Build, Cursor, OpenClaw, and Antigravity. Plain “forget” remains
 ambiguous with each runtime's native memory and is clarified before any
 destructive call.
 
@@ -165,7 +203,7 @@ through `/hooks` once.
 Remove an integration without deleting tokens or queued transcript events:
 
 ```sh
-witself uninstall claude,codex,grok,cursor,openclaw
+witself uninstall claude,codex,grok,cursor,openclaw,antigravity
 ```
 
 `messages` captures visible conversation and lifecycle events, `trace` adds

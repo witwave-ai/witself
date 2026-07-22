@@ -2,9 +2,9 @@
 
 Status: portable fact, direct narrative-memory, automatic-recall, and foreground
 checkpoint guidance is implemented for Codex, Claude Code, Grok Build, and
-Cursor. OpenClaw phase 1 is a preview with the same managed routing contract
-over stdio MCP and workspace guidance, but without transcript hooks or automatic
-prompt-context injection. Provider aggregation remains an agent behavior
+Cursor. OpenClaw and Antigravity phase 1 are previews with the same managed
+routing contract over stdio MCP and static runtime guidance, but without
+transcript hooks or automatic prompt-context injection. Provider aggregation remains an agent behavior
 contract, not a new Witself API. Witself narrative memory is the portable
 default; native memory is an optional explicitly selected second destination.
 PostgreSQL stores the due state, and the active agent performs synthesis.
@@ -27,6 +27,7 @@ classifier.
 | Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
 | Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 | OpenClaw preview | `AGENTS.md` in the sole default agent's configured workspace | OpenClaw exposes the full configured stdio MCP catalog under its own transformed names; the managed workspace block carries its safety and routing contract because no Witself prompt hook injects it automatically. |
+| Antigravity preview | `~/.gemini/config/plugins/witself-managed-<binding-id>/` with `plugin.json`, `mcp_config.json`, and `rules/witself.md` | Antigravity loads one native plugin ownership unit. Its always-on rule uses names such as `mcp_ws-<server-id>_witself.memory.recall`; the bundled MCP definition pins the absolute Witself binary and identity. |
 
 Codex's installed block and MCP policy use the same Codex-specific contract.
 Grok's installed block preserves the same Grok behavior with underscore-safe
@@ -79,6 +80,33 @@ to the complete resulting `AGENTS.md`. If the existing file plus the managed
 block would exceed the guard, installation fails closed before changing the file
 instead of allowing partial safety policy through truncation.
 
+Antigravity phase 1 requires macOS or Linux and `agy` on `PATH`, at
+`~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`. Witself first validates an immutable,
+digest-addressed source bundle with `agy plugin validate`, then atomically
+installs a copy at
+`~/.gemini/config/plugins/witself-managed-<binding-id>`. Plugins in that standard
+customization root are automatically discovered, so Witself never edits the
+shared global `mcp_config.json`, `plugins.json`, or `import_manifest.json`.
+Staging, backup, and removal quarantine directories live outside the active
+`plugins/` discovery directory, preventing a watcher from briefly loading a
+second credential-bound server during replacement. The binding id is the first
+24 lowercase hex characters of a domain-separated hash over immutable account,
+realm, agent, and `WITSELF_HOME` selectors; raw selectors are not exposed in the
+plugin name. The MCP server uses the first 16 hex characters as a shorter
+server id so every prefixed Witself tool remains within a 64-character provider
+ceiling. A non-blocking per-home operation lock serializes Witself
+mutations, while a 0600 transaction journal and native atomic directory exchange
+recover process interruption at config/plugin boundaries.
+
+The Antigravity MCP definition persists only the absolute Witself executable,
+the exact account/realm/agent and optional location arguments, and an absolute
+non-secret `WITSELF_HOME`. Credentials, `HOME`, `PATH`, and arbitrary ambient
+variables are never copied. The bundled always-on rule carries the full safety
+and lifecycle policy for facts, narrative memory, curation, messaging and agent
+email, avatars, and client-custodied secrets. Antigravity retains Witself's
+dotted declared names behind the runtime prefix, for example
+`mcp_ws-<server-id>_witself.self.show`.
+
 Every managed file contains routing policy only. Personal facts and memory
 content never belong in it. Installation is idempotent and replaces only the
 marker-delimited Witself block. Uninstall removes only that block. Shared Codex,
@@ -89,6 +117,21 @@ unmarked pre-existing file at Witself's dedicated rule path, because prepending
 another MDC document could silently change the existing rule's frontmatter.
 Codex installation also refuses to write when a non-empty global
 `AGENTS.override.md` would shadow its `AGENTS.md`.
+
+The Antigravity plugin is a dedicated exact-owned directory rather than a block
+inside a shared file. A plain plugin or MCP server named `witself` may coexist;
+install refuses only a foreign entry using the exact derived plugin or server
+name. Reinstall and uninstall require the recorded three-file shape,
+0600 files, 0700 directories, and exact SHA-256-bound content; disabled,
+symlinked, locally changed, or extra-file state fails closed. Before exposing
+tools, `witself mcp serve --runtime antigravity` revalidates both the installed
+plugin and its immutable recovery source. `--routing-only` is unsupported
+because the MCP definition and safety rule must move as one ownership unit.
+Install and uninstall also use a 0600 transaction journal plus exact reserved
+`.witself-plugin-swap-<digest>` and `.witself-plugin-remove-<digest>` scratch
+paths outside the live plugin discovery directory. Witself synchronizes the
+selected config, plugin, recovery bundle, and their parent directories before
+clearing that journal, and never infers ownership of another scratch path.
 
 OpenClaw reinstall owns only the exact `witself` MCP registration recorded in
 the local integration, including its allowlisted environment and connection
@@ -111,7 +154,8 @@ PostgreSQL. `GET /v1/self` and `witself.self.show` expose only an authenticated,
 value-free `memory_checkpoint` pointer to that lifecycle state. Codex and Claude
 Code prompt hooks inject a pending checkpoint through model-visible structured
 context when it is already durable at read time. Cursor's context delivery is
-not reliably model-visible, Grok ignores passive-hook output, and OpenClaw has
+not reliably model-visible, Grok ignores passive-hook output, and OpenClaw and
+Antigravity have
 no supported Witself prompt hook. Their always-on managed rules instruct the
 foreground agent to call `self.show`; that is a guided fallback, not automatic
 hook injection.
@@ -213,7 +257,7 @@ Re-creation is a separate explicit store request and receives a new fact id.
 
 This routing is scoped: deleting a Witself fact does not delete Codex memory,
 Claude auto memory, Grok memory, Cursor Memories, OpenClaw's native workspace
-memory, transcripts, prior exports, or backups still within retention. After an
+memory, Antigravity-native context, transcripts, prior exports, or backups still within retention. After an
 exact Witself deletion, the agent must not silently answer from native memory as
 though the canonical fact still existed. It may surface separately requested
 native context only with its provider and advisory status named.
@@ -251,6 +295,11 @@ native context only with its provider and advisory status named.
   OpenClaw's native-memory settings. An explicitly selected native destination
   must use behavior supported by OpenClaw and must not be reported as stored
   unless that operation is confirmed.
+- **Antigravity:** The Witself plugin does not treat Antigravity rules, artifacts,
+  or conversation state as a native-memory write API. Use only an explicitly
+  surfaced and confirmed Antigravity-native facility when the user selects it;
+  never substitute the managed plugin rule or claim a native write from MCP
+  installation.
 
 ## Retrieval contract
 
@@ -283,6 +332,9 @@ Native retrieval inherits each runtime's boundary:
 - OpenClaw phase 1 does not add a native-memory search adapter. Use only native
   context OpenClaw actually makes available, keep it distinct from Witself, and
   report partial coverage when completeness cannot be established.
+- Antigravity phase 1 likewise adds no native-memory search adapter. Use only
+  context Antigravity actually supplies and report partial coverage rather than
+  inferring a complete native-memory search from its rule or artifact files.
 
 If a requested provider is unavailable or cannot be queried, the answer names
 that provider and marks the result partial instead of claiming comprehensive
@@ -315,21 +367,22 @@ memory route ever includes sealed secret or TOTP values.
 A future federating interface should use `provider`, not `source`, because
 Witself records already use `source_kind` and `source_ref` for provenance. A
 request may eventually accept selectors such as
-`provider=auto|witself|native|codex|claude|grok|cursor|openclaw|all`, with an
+`provider=auto|witself|native|codex|claude|grok|cursor|openclaw|antigravity|all`, with an
 envelope that reports requested providers, provider statuses, results,
 conflicts, and a top-level `partial` flag.
 
 That wire contract should be added only when each selected runtime exposes a
 supported retrieval boundary or a deliberate local federation adapter exists.
-Witself must not scrape generated Codex, Claude, Grok, Cursor, or OpenClaw files
+Witself must not scrape generated Codex, Claude, Grok, Cursor, OpenClaw, or Antigravity files
 as if they were stable cross-provider APIs.
 
 ## Runtime expectations
 
 The four hook-capable managed runtimes load file guidance and MCP server
 instructions at runtime initialization. OpenClaw phase 1 relies on its managed
-workspace `AGENTS.md` plus the registered MCP tools and does not claim automatic
-prompt injection. Start a new task after installing or upgrading so the runtime
+workspace `AGENTS.md`; Antigravity relies on its managed plugin rule. Both use
+registered MCP tools and claim no automatic prompt injection. Start a new task
+after installing or upgrading so the runtime
 reloads the available instruction and tool surfaces.
 
 Official runtime documentation:
@@ -349,3 +402,6 @@ Official runtime documentation:
   [CLI rules and MCP](https://docs.cursor.com/en/cli/using)
 - OpenClaw: [agent workspace](https://docs.openclaw.ai/concepts/agent-workspace)
   and [MCP CLI](https://docs.openclaw.ai/cli/mcp)
+- Antigravity: [IDE getting started](https://antigravity.google/docs/ide-getting-started),
+  [plugins](https://antigravity.google/docs/plugins), and
+  [MCP](https://antigravity.google/docs/mcp)

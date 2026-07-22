@@ -221,6 +221,7 @@ Current conformance is deliberately asymmetric:
 | Cursor | Guided fallback | Guided fallback | Guided through `self.show` | Current IDE releases can accept and log `sessionStart.additional_context` without reliably delivering it to the model; both paths use MCP guidance until a live version-gated conformance test passes |
 | Grok Build | Guided fallback | Guided fallback | Guided through `self.show` | Passive-hook stdout is ignored; managed instructions tell the active agent to use MCP |
 | OpenClaw preview | Guided fallback | Guided fallback | Guided through `self.show` | No supported Witself transcript or prompt hook; the managed workspace `AGENTS.md` supplies the full-catalog safety policy |
+| Antigravity preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 bundles MCP and a full-catalog always-on plugin rule; native hooks are deferred until their payload and transcript contract is conformantly validated |
 
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
@@ -259,7 +260,7 @@ value-free curation lifecycle state, and value-free message, email, and avatar
 checkpoints. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
 include those checkpoints but never unread message/email metadata. Cursor, Grok
-Build, and OpenClaw use guided `self.show`. Every runtime's installed policy
+Build, OpenClaw, and Antigravity use guided `self.show`. Every runtime's installed policy
 directs it to use non-blocking `message.listen` or `email.listen` to retrieve
 metadata; that model action is not forced. Bodies remain behind explicit read
 and no hook marks read, acknowledges, starts inference, or wakes a client. See
@@ -348,6 +349,11 @@ message, and direct narrative-memory protocol documented in
 - OpenClaw does not consume the MCP initialization string. Its managed workspace
   `AGENTS.md` carries the guided safety and lifecycle policy for the full
   configured MCP catalog under OpenClaw's exposed tool names.
+- Antigravity receives the protocol through MCP and also loads a bundled
+  always-on plugin rule for the full catalog. Its model-visible names retain
+  dotted declared names behind the collision-resistant per-binding
+  `mcp_ws-<server-id>_` prefix, such as
+  `mcp_ws-<server-id>_witself.memory.recall`.
 
 In every case, an explicit atomic assertion uses `witself.fact.set`, while an
 explicit narrative remember uses `witself.memory.capture` in the same turn.
@@ -390,9 +396,10 @@ dominates. The canonical per-tool wording lives in
 ### 3. The Bootstrap Stanza (paste-able file teaching)
 
 The bootstrap-instructions/file-bridge command remains a target surface. The
-implemented paths are `witself install codex|claude|grok|cursor` and the
-`witself install openclaw` preview. Each installs managed routing guidance and
-the MCP server; OpenClaw has no Witself transcript or prompt hooks. A future
+implemented paths are `witself install codex|claude|grok|cursor` plus the
+`witself install openclaw|antigravity` previews. Each installs managed routing
+guidance and the MCP server; OpenClaw and Antigravity phase 1 have no Witself
+transcript or prompt hooks. A future
 paste-able stanza must express the same contract:
 
 ```markdown

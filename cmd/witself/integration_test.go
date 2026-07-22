@@ -204,7 +204,7 @@ func TestInferInstallAgentRequiresOnlyAmbiguousChoice(t *testing.T) {
 }
 
 func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
-	got, err := runtimeTargets("claude,codex,grok,cursor,claude-code")
+	got, err := runtimeTargets("claude,codex,grok,cursor,agy,claude-code,antigravity")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +213,7 @@ func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
 		transcriptcapture.RuntimeCodex,
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeAntigravity,
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("targets = %v, want %v", got, want)

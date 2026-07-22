@@ -545,6 +545,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 	for _, runtimeName := range []string{
 		transcriptcapture.RuntimeCursor,
 		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeAntigravity,
 	} {
 		t.Run(runtimeName, func(t *testing.T) {
 			portable := func(name string) string {
@@ -1868,6 +1869,69 @@ func TestProviderMCPHandshakeAdvertisesRuntimeRouting(t *testing.T) {
 			)
 			if got := clientSession.InitializeResult().Instructions; got != want {
 				t.Fatalf("handshake instructions = %q, want %q", got, want)
+			}
+		})
+	}
+
+	serverName := "ws-0123456789abcdef"
+	for _, test := range []struct {
+		name string
+		opts mcpServerOptions
+		want string
+	}{
+		{
+			name: "antigravity-full",
+			opts: mcpServerOptions{ProviderServerName: serverName},
+			want: antigravityMCPInstructions(mcpInstructionsForMode(
+				transcriptcapture.RuntimeAntigravity, "witself.self.show", "witself.message.list", false,
+			), serverName),
+		},
+		{
+			name: "antigravity-read-only",
+			opts: mcpServerOptions{ReadOnly: true, Profile: mcpProfileReadOnly, ProviderServerName: serverName},
+			want: antigravityMCPInstructions(mcpInstructionsForMode(
+				transcriptcapture.RuntimeAntigravity, "witself.self.show", "witself.message.list", true,
+			), serverName),
+		},
+		{
+			name: "antigravity-curator",
+			opts: mcpServerOptions{Profile: mcpProfileCuratorPreview, ProviderServerName: serverName},
+			want: antigravityMCPInstructions(curatorPreviewWitselfMCPInstructions, serverName),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newWitselfMCPServerForRuntimeOptions(&fakeMCPBackend{}, transcriptcapture.RuntimeAntigravity, test.opts)
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			serverSession, err := server.Connect(ctx, serverTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = serverSession.Close() }()
+			mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = clientSession.Close() }()
+			got := clientSession.InitializeResult().Instructions
+			if got != test.want {
+				t.Fatalf("handshake instructions = %q, want %q", got, test.want)
+			}
+			prefix := "mcp_" + serverName + "_"
+			if (strings.Contains(test.want, prefix) && !strings.Contains(got, prefix)) || strings.Contains(got, "mcp_witself_witself.") {
+				t.Fatalf("handshake does not use only the derived Antigravity prefix %q", prefix)
+			}
+			if test.name == "antigravity-full" {
+				page, err := clientSession.ListTools(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, tool := range page.Tools {
+					exposed := prefix + tool.Name
+					if len(exposed) > 64 {
+						t.Errorf("Antigravity model-visible tool name exceeds 64 characters (%d): %s", len(exposed), exposed)
+					}
+				}
 			}
 		})
 	}

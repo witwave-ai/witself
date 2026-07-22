@@ -685,7 +685,7 @@ act as durable proof of resource identity by itself.
 
 The verifier may emit `status: "pass"` only when all of these are true:
 
-1. The evidence names exactly four supported runtimes and three attested cloud
+1. The evidence names exactly the four runtimes fixed by this acceptance version and three attested cloud
    providers, all on the same released Witself commit and compatible schema.
 2. All 12 fixed runtime/cloud case ids are present exactly once with `pass`.
 3. All nine fixed move case ids are present exactly once with `pass`.

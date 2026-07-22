@@ -21,11 +21,12 @@ const SchemaVersion = "witself.capture.v1"
 
 // Runtime and capture-mode names form the local integration contract.
 const (
-	RuntimeCodex      = "codex"
-	RuntimeClaudeCode = "claude-code"
-	RuntimeGrokBuild  = "grok-build"
-	RuntimeCursor     = "cursor"
-	RuntimeOpenClaw   = "openclaw"
+	RuntimeCodex       = "codex"
+	RuntimeClaudeCode  = "claude-code"
+	RuntimeGrokBuild   = "grok-build"
+	RuntimeCursor      = "cursor"
+	RuntimeOpenClaw    = "openclaw"
+	RuntimeAntigravity = "antigravity"
 	// HookEventCodexPermissionReview is Codex's normalized internal approval-review event.
 	HookEventCodexPermissionReview = "PermissionReview"
 
@@ -38,7 +39,11 @@ const (
 	HookModeManaged = "managed"
 )
 
-var locationNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+var (
+	locationNamePattern            = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	antigravityPluginDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	antigravityPluginNamePattern   = regexp.MustCompile(`^witself-managed-[0-9a-f]{24}$`)
+)
 
 // Location identifies one local installation without relying on mutable host
 // names, IP addresses, or filesystem paths.
@@ -58,6 +63,10 @@ type Config struct {
 	MCPConnectTimeoutSeconds int               `json:"mcp_connect_timeout_seconds,omitempty"`
 	RuntimeWorkspace         string            `json:"runtime_workspace,omitempty"`
 	RuntimeAgentID           string            `json:"runtime_agent_id,omitempty"`
+	RuntimeConfigRoot        string            `json:"runtime_config_root,omitempty"`
+	RuntimePluginPath        string            `json:"runtime_plugin_path,omitempty"`
+	RuntimePluginSource      string            `json:"runtime_plugin_source,omitempty"`
+	RuntimePluginDigest      string            `json:"runtime_plugin_digest,omitempty"`
 	CaptureMode              string            `json:"capture_mode"`
 	HookMode                 string            `json:"hook_mode"`
 	Account                  string            `json:"account"`
@@ -87,8 +96,10 @@ func NormalizeRuntime(runtime string) (string, error) {
 		return RuntimeCursor, nil
 	case RuntimeOpenClaw:
 		return RuntimeOpenClaw, nil
+	case "agy", RuntimeAntigravity:
+		return RuntimeAntigravity, nil
 	default:
-		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw)
+		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity)
 	}
 }
 
@@ -191,7 +202,11 @@ func SaveConfig(cfg Config) error {
 	cfg.RuntimeWorkspace = strings.TrimSpace(cfg.RuntimeWorkspace)
 	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
 	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
-	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID); err != nil {
+	cfg.RuntimeConfigRoot = strings.TrimSpace(cfg.RuntimeConfigRoot)
+	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
+	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
+	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
+	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return err
 	}
 	cfg.CaptureMode = mode
@@ -230,6 +245,14 @@ func LoadConfig(runtime string) (Config, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
+	storedRuntime, err := NormalizeRuntime(cfg.Runtime)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
+	}
+	if storedRuntime != runtime {
+		return Config{}, fmt.Errorf("parse integration config %s: stored runtime %q does not match requested runtime %q", path, storedRuntime, runtime)
+	}
+	cfg.Runtime = storedRuntime
 	if cfg.SchemaVersion != SchemaVersion {
 		return Config{}, fmt.Errorf("unsupported integration config schema %q", cfg.SchemaVersion)
 	}
@@ -241,13 +264,17 @@ func LoadConfig(runtime string) (Config, error) {
 	cfg.RuntimeWorkspace = strings.TrimSpace(cfg.RuntimeWorkspace)
 	cfg.RuntimeAgentID = strings.TrimSpace(cfg.RuntimeAgentID)
 	cfg.RuntimeCLICommand = strings.TrimSpace(cfg.RuntimeCLICommand)
-	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID); err != nil {
+	cfg.RuntimeConfigRoot = strings.TrimSpace(cfg.RuntimeConfigRoot)
+	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
+	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
+	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
+	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID string) error {
+func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID, configRoot, pluginPath, pluginSource, pluginDigest string) error {
 	if runtimeCLICommand != "" && (!filepath.IsAbs(runtimeCLICommand) || filepath.Clean(runtimeCLICommand) != runtimeCLICommand) {
 		return errors.New("runtime_cli_command must be a clean absolute path")
 	}
@@ -257,7 +284,19 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 	if workspace != "" && (!filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace) {
 		return errors.New("runtime_workspace must be a clean absolute path")
 	}
+	for field, value := range map[string]string{
+		"runtime_config_root":   configRoot,
+		"runtime_plugin_path":   pluginPath,
+		"runtime_plugin_source": pluginSource,
+	} {
+		if value != "" && (len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) || filepath.Clean(value) != value) {
+			return fmt.Errorf("%s must be a clean absolute path", field)
+		}
+	}
 	if runtime == RuntimeOpenClaw {
+		if configRoot != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+			return errors.New("runtime plugin fields are not supported for OpenClaw")
+		}
 		if hookMode != HookModeNone {
 			return errors.New("OpenClaw hook_mode must be none")
 		}
@@ -281,6 +320,43 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		}
 		return nil
 	}
+	if runtime == RuntimeAntigravity {
+		if hookMode != HookModeNone {
+			return errors.New("Antigravity hook_mode must be none")
+		}
+		if runtimeCLICommand == "" {
+			return errors.New("runtime_cli_command is required for Antigravity")
+		}
+		if mcpCommand == "" {
+			return errors.New("mcp_command is required for Antigravity")
+		}
+		if configRoot == "" || pluginPath == "" || pluginSource == "" {
+			return errors.New("runtime_config_root, runtime_plugin_path, and runtime_plugin_source are required for Antigravity")
+		}
+		if filepath.Dir(pluginPath) != filepath.Join(configRoot, "plugins") || !antigravityPluginNamePattern.MatchString(filepath.Base(pluginPath)) {
+			return errors.New("runtime_plugin_path must be a collision-resistant Witself-managed plugin under runtime_config_root")
+		}
+		if !antigravityPluginDigestPattern.MatchString(pluginDigest) {
+			return errors.New("runtime_plugin_digest must be a lowercase SHA-256 digest for Antigravity")
+		}
+		if workspace != "" || strings.TrimSpace(runtimeAgentID) != "" {
+			return errors.New("runtime_workspace and runtime_agent_id are not supported for Antigravity")
+		}
+		if mcpConnectTimeoutSeconds != 0 {
+			return errors.New("mcp_connect_timeout_seconds is not supported for Antigravity")
+		}
+		if err := validateAntigravityMCPEnvironment(mcpEnvironment); err != nil {
+			return err
+		}
+		expectedSource := filepath.Join(mcpEnvironment["WITSELF_HOME"], "integrations", RuntimeAntigravity, "bundles", pluginDigest)
+		if pluginSource != expectedSource {
+			return errors.New("runtime_plugin_source must be the digest-addressed Antigravity bundle under WITSELF_HOME")
+		}
+		return nil
+	}
+	if configRoot != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+		return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
+	}
 	if len(mcpEnvironment) != 0 {
 		return fmt.Errorf("mcp_environment is not supported for %s", runtime)
 	}
@@ -289,6 +365,17 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 	}
 	if hookMode == HookModeNone {
 		return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+	}
+	return nil
+}
+
+func validateAntigravityMCPEnvironment(environment map[string]string) error {
+	if len(environment) != 1 {
+		return errors.New("mcp_environment must contain only WITSELF_HOME for Antigravity")
+	}
+	home := environment["WITSELF_HOME"]
+	if home == "" || len(home) > 4096 || strings.ContainsAny(home, "\x00\r\n") || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return errors.New("mcp_environment WITSELF_HOME must be a clean absolute path for Antigravity")
 	}
 	return nil
 }

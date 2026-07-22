@@ -135,3 +135,94 @@ func TestOpenClawConfigRequiresAndRoundTripsNoHookBinding(t *testing.T) {
 		}
 	}
 }
+
+func TestAntigravityConfigRequiresAndRoundTripsOwnedPluginBinding(t *testing.T) {
+	witselfHome := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	configRoot := "/Users/test/.gemini/config"
+	cfg := Config{
+		Runtime: RuntimeAntigravity, RuntimeVersion: "1.1.1",
+		RuntimeCLICommand: "/Users/test/.local/bin/agy",
+		MCPCommand:        "/usr/local/bin/witself",
+		MCPEnvironment:    map[string]string{"WITSELF_HOME": witselfHome},
+		RuntimeConfigRoot: configRoot,
+		RuntimePluginPath: filepath.Join(configRoot, "plugins", "witself-managed-0123456789abcdef01234567"),
+		RuntimePluginSource: filepath.Join(
+			witselfHome, "integrations", RuntimeAntigravity, "bundles", digest,
+		),
+		RuntimePluginDigest: digest,
+		CaptureMode:         ModeRaw,
+		HookMode:            HookModeNone,
+		Account:             "default", Realm: "default", Agent: "scott",
+		AgentID: "agt_1", AgentName: "scott", Location: loc,
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig("agy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Runtime != RuntimeAntigravity || loaded.HookMode != HookModeNone ||
+		loaded.RuntimeCLICommand != cfg.RuntimeCLICommand || loaded.MCPCommand != cfg.MCPCommand ||
+		loaded.MCPEnvironment["WITSELF_HOME"] != witselfHome || loaded.RuntimeConfigRoot != configRoot ||
+		loaded.RuntimePluginPath != cfg.RuntimePluginPath || loaded.RuntimePluginSource != cfg.RuntimePluginSource ||
+		loaded.RuntimePluginDigest != digest {
+		t.Fatalf("Antigravity config = %#v", loaded)
+	}
+	configPath, err := ConfigPath(RuntimeAntigravity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasRaw := strings.Replace(string(raw), `"runtime": "antigravity"`, `"runtime": "agy"`, 1)
+	if aliasRaw == string(raw) {
+		t.Fatal("could not rewrite stored runtime alias")
+	}
+	if err := os.WriteFile(configPath, []byte(aliasRaw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliased, err := LoadConfig(RuntimeAntigravity)
+	if err != nil || aliased.Runtime != RuntimeAntigravity {
+		t.Fatalf("stored alias did not canonicalize: runtime=%q err=%v", aliased.Runtime, err)
+	}
+	mismatchRaw := strings.Replace(aliasRaw, `"runtime": "agy"`, `"runtime": "codex"`, 1)
+	if err := os.WriteFile(configPath, []byte(mismatchRaw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(RuntimeAntigravity); err == nil || !strings.Contains(err.Error(), "does not match requested runtime") {
+		t.Fatalf("stored runtime mismatch error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"hooks", func(value *Config) { value.HookMode = HookModeUser }, "hook_mode must be none"},
+		{"relative CLI", func(value *Config) { value.RuntimeCLICommand = "agy" }, "clean absolute"},
+		{"extra env", func(value *Config) { value.MCPEnvironment["PATH"] = "/bin" }, "only WITSELF_HOME"},
+		{"plugin path", func(value *Config) { value.RuntimePluginPath = filepath.Join(configRoot, "plugins", "other") }, "collision-resistant Witself-managed plugin"},
+		{"digest", func(value *Config) { value.RuntimePluginDigest = "ABC" }, "lowercase SHA-256"},
+		{"source", func(value *Config) { value.RuntimePluginSource = filepath.Join(witselfHome, "other") }, "digest-addressed"},
+		{"workspace", func(value *Config) { value.RuntimeWorkspace = "/tmp/work" }, "not supported"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cfg
+			candidate.MCPEnvironment = map[string]string{"WITSELF_HOME": witselfHome}
+			test.edit(&candidate)
+			if err := SaveConfig(candidate); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
