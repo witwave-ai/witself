@@ -47,8 +47,11 @@ var (
 
 func installCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...] [--agent NAME] [--location home|work]")
+		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...]|all [--agent NAME] [--location home|work]")
 		return 2
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "all") {
+		return installAllCmd(args[1:])
 	}
 	targets, err := runtimeTargets(args[0])
 	if err != nil {
@@ -77,6 +80,10 @@ func installCmd(args []string) int {
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing an agent token")
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...] [flags]")
 		return 2
 	}
 	setFlags := map[string]bool{}
@@ -664,6 +671,9 @@ func installCmd(args []string) int {
 		}
 	}
 
+	if suppressIntegrationSuccessOutput {
+		return 0
+	}
 	if loc.Name == "" {
 		fmt.Printf("installed %s for agent %s\n", runtime, self.Identity.AgentName)
 	} else {
@@ -756,8 +766,11 @@ func inferInstallAgent(accountName, realmName string) (string, error) {
 
 func uninstallCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]")
+		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...]|all [--managed-hooks]")
 		return 2
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "all") {
+		return uninstallAllCmd(args[1:])
 	}
 	targets, err := runtimeTargets(args[0])
 	if err != nil {
@@ -778,6 +791,10 @@ func uninstallCmd(args []string) int {
 	fs.SetOutput(os.Stderr)
 	managedHooks := fs.Bool("managed-hooks", false, "also remove administrator-managed hooks")
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]")
 		return 2
 	}
 	if *managedHooks && !supportsManagedHooks(runtime) {
@@ -811,7 +828,9 @@ func uninstallCmd(args []string) int {
 		}
 		if pendingOperation == antigravityTransactionUninstall {
 			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); errors.Is(loadErr, os.ErrNotExist) {
-				fmt.Println("recovered and completed interrupted antigravity uninstall; tokens and pending transcript events were preserved")
+				if !suppressIntegrationSuccessOutput {
+					fmt.Println("recovered and completed interrupted antigravity uninstall; tokens and pending transcript events were preserved")
+				}
 				return 0
 			}
 		}
@@ -1063,7 +1082,9 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
-	fmt.Printf("uninstalled %s integration; tokens and pending transcript events were preserved\n", runtime)
+	if !suppressIntegrationSuccessOutput {
+		fmt.Printf("uninstalled %s integration; tokens and pending transcript events were preserved\n", runtime)
+	}
 	return 0
 }
 

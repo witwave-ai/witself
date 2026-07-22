@@ -170,7 +170,8 @@ plane.
   for install, setup, billing, memories, facts, policy, groups, messaging, MCP,
   self-hosted, and local mode.
 - [cli-command-surface.md](cli-command-surface.md): human and agent CLI command
-  design.
+  design, including local runtime discovery and bulk integration lifecycle
+  operations.
 - [mcp-tools.md](mcp-tools.md): MCP tool surface and safety posture.
 - [json-contracts.md](json-contracts.md): shared machine-readable response
   shapes, `witself://` references, and resource contracts for CLI, MCP, managed

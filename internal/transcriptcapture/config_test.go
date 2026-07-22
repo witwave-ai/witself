@@ -3,9 +3,35 @@ package transcriptcapture
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestSupportedRuntimesOrderAndMutationIsolation(t *testing.T) {
+	want := []string{
+		RuntimeCodex,
+		RuntimeClaudeCode,
+		RuntimeGrokBuild,
+		RuntimeCursor,
+		RuntimeOpenClaw,
+		RuntimeAntigravity,
+	}
+
+	got := SupportedRuntimes()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SupportedRuntimes() = %v, want %v", got, want)
+	}
+
+	got[0] = "mutated"
+	got = append(got, "extra")
+	if len(got) != len(want)+1 {
+		t.Fatalf("caller append length = %d, want %d", len(got), len(want)+1)
+	}
+	if fresh := SupportedRuntimes(); !reflect.DeepEqual(fresh, want) {
+		t.Fatalf("SupportedRuntimes() after caller mutation = %v, want %v", fresh, want)
+	}
+}
 
 func TestConfigScopeIDsAreOptionalAndRoundTrip(t *testing.T) {
 	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
