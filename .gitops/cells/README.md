@@ -44,11 +44,12 @@ For DNS, keep the stable names here:
   mutation/import/export while all old writers drain, and flip it to `true`
   only in a later config-only commit. That Phase-B change restarts the pods via
   the nested chart's ConfigMap checksum; never combine it with a version pin.
-- `apps.witselfServer.avatarStyleRollout` pins the bounded profile propagation
-  worker for the cell. Managed defaults are enabled with batch size `100`,
-  interval `2s`, and batch timeout `30s`; change them deliberately and keep the
-  values within the server/chart bounds rather than inheriting downstream
-  defaults accidentally.
+- `apps.witselfServer.worker` controls the separately scalable cell worker.
+  `worker.avatarStyleRollout` pins bounded profile propagation; managed
+  defaults use batch size `100`, interval `2s`, and batch timeout `30s`.
+  `worker.transcriptRetention` pins the retention phase, batch size, cadence,
+  and timeout. Change these deliberately within the worker/chart bounds rather
+  than inheriting downstream defaults accidentally.
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.
