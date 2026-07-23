@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	runtimepkg "runtime"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/local"
@@ -444,55 +443,27 @@ func clearGenericProviderTransaction(expected genericProviderTransactionJournal)
 }
 
 func syncGenericProviderTransactionState(journal genericProviderTransactionJournal) error {
-	if info, err := os.Lstat(journal.Desired.RuntimeMCPConfigPath); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("generic provider config is not a real regular file")
-		}
-		file, err := os.Open(journal.Desired.RuntimeMCPConfigPath)
-		if err != nil {
-			return err
-		}
-		err = file.Sync()
-		_ = file.Close()
-		if err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	configPath, err := transcriptcapture.ConfigPath(journal.Runtime)
 	if err != nil {
 		return err
 	}
-	if info, err := os.Lstat(configPath); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("generic provider integration config is not a real regular file")
-		}
-		file, err := os.Open(configPath)
-		if err != nil {
+	states := []struct {
+		path  string
+		label string
+	}{
+		{journal.Desired.RuntimeMCPConfigPath, "generic provider MCP config"},
+		{configPath, "generic provider integration config"},
+	}
+	for _, state := range states {
+		if err := syncIntegrationTransactionFileState(state.path, state.label); err != nil {
 			return err
 		}
-		err = file.Sync()
-		_ = file.Close()
-		if err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	return nil
 }
 
 func syncGenericProviderTransactionDirectory(path string) error {
-	if runtimepkg.GOOS == "windows" {
-		return nil
-	}
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
+	return syncIntegrationTransactionDirectory(path)
 }
 
 func recoverGenericProviderTransaction(runtimeName string) error {

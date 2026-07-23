@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	runtimepkg "runtime"
 
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
@@ -384,15 +383,7 @@ func syncOpenClawCommittedState(journal openClawTransactionJournal) error {
 }
 
 func syncOpenClawTransactionRoot(path string) error {
-	if runtimepkg.GOOS == "windows" {
-		return nil
-	}
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
+	return syncIntegrationTransactionDirectory(path)
 }
 
 func validateOpenClawTransactionProviderBefore(journal openClawTransactionJournal) error {

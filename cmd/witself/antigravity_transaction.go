@@ -384,12 +384,7 @@ func syncAntigravityRegularFile(path string) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s must be a real regular file", path)
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = file.Close() }()
-	return file.Sync()
+	return syncIntegrationTransactionFileState(path, path)
 }
 
 func syncAntigravityDirectoryIfPresent(path string) error {
@@ -403,21 +398,11 @@ func syncAntigravityDirectoryIfPresent(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s must be a real directory", path)
 	}
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
+	return syncIntegrationTransactionDirectory(path)
 }
 
 func syncAntigravityConfigRoot(configRoot string) error {
-	directory, err := os.Open(configRoot)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
+	return syncIntegrationTransactionDirectory(configRoot)
 }
 
 func validateAntigravityTransactionConfig(configRoot string, cfg transcriptcapture.Config) error {

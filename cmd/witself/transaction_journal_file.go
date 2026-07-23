@@ -111,7 +111,7 @@ func syncIntegrationTransactionFileState(path, displayName string) error {
 	if !linked.Mode().IsRegular() || linked.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s must be a real regular file before transaction commit", displayName)
 	}
-	file, err := os.Open(path)
+	file, err := openIntegrationTransactionFileForSync(path)
 	if err != nil {
 		return err
 	}

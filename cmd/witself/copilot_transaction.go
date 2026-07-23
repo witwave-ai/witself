@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	runtimepkg "runtime"
 
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
@@ -351,15 +350,7 @@ func syncCopilotCommittedState(journal copilotTransactionJournal) error {
 }
 
 func syncCopilotTransactionRoot(path string) error {
-	if runtimepkg.GOOS == "windows" {
-		return nil
-	}
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
+	return syncIntegrationTransactionDirectory(path)
 }
 
 func validateCopilotTransactionProviderBefore(journal copilotTransactionJournal) error {
