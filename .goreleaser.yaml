@@ -94,24 +94,35 @@ archives:
         formats:
           - zip
     name_template: "witself_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # The universal installers intentionally accept exactly one regular root
+    # executable. GoReleaser otherwise adds matching README/LICENSE files by
+    # default when this list is empty.
+    files:
+      - none*
   - id: witself-server
     ids:
       - witself-server
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
   - id: witself-admin
     ids:
       - witself-admin
     formats:
       - tar.gz
     name_template: "witself-admin_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
   - id: witself-infra
     ids:
       - witself-infra
     formats:
       - tar.gz
     name_template: "witself-infra_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
 
 checksum:
   name_template: "checksums.txt"

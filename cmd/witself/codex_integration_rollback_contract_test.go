@@ -91,7 +91,13 @@ func TestProviderIntegrationContractCodexRollbackRestoresPriorInstall(t *testing
 	callFence := len(provider.invocations(t))
 	failureSentinel := provider.failNextMCPAdd(t)
 
-	if code := installCmd(installArgs); code != 1 {
+	failedInstallArgs := append([]string(nil), installArgs...)
+	for index := range failedInstallArgs {
+		if failedInstallArgs[index] == "acceptance" && index > 0 && failedInstallArgs[index-1] == "--location" {
+			failedInstallArgs[index] = "acceptance-upgraded"
+		}
+	}
+	if code := installCmd(failedInstallArgs); code != 1 {
 		t.Fatalf("failed reinstall code = %d, want 1", code)
 	}
 	if _, err := os.Stat(failureSentinel); !os.IsNotExist(err) {
@@ -126,13 +132,23 @@ func TestProviderIntegrationContractCodexRollbackRestoresPriorInstall(t *testing
 			removes = append(removes, call.Args)
 		}
 	}
-	wantAdd := append([]string{"mcp", "add", "witself", "--"}, priorMCP...)
-	if len(adds) != 2 || !slices.Equal(adds[0], wantAdd) || !slices.Equal(adds[1], wantAdd) {
-		t.Fatalf("failed add and rollback add = %#v, want two exact %#v", adds, wantAdd)
+	stored, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedMCP := append([]string(nil), priorMCP...)
+	for index := range failedMCP {
+		if failedMCP[index] == "acceptance" && index > 0 && failedMCP[index-1] == "--location" {
+			failedMCP[index] = "acceptance-upgraded"
+		}
+	}
+	wantAdd := append([]string{"mcp", "add", "witself", "--env", "WITSELF_HOME=" + stored.MCPEnvironment["WITSELF_HOME"], "--"}, failedMCP...)
+	if len(adds) != 1 || !slices.Equal(adds[0], wantAdd) {
+		t.Fatalf("failed add = %#v, want one exact %#v", adds, wantAdd)
 	}
 	wantRemove := []string{"mcp", "remove", "witself"}
-	if len(removes) != 2 || !slices.Equal(removes[0], wantRemove) || !slices.Equal(removes[1], wantRemove) {
-		t.Fatalf("reinstall rollback removes = %#v, want two exact %#v", removes, wantRemove)
+	if len(removes) != 1 || !slices.Equal(removes[0], wantRemove) {
+		t.Fatalf("reinstall remove = %#v, want one exact %#v", removes, wantRemove)
 	}
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Fatalf("rollback removed token file: %v", err)

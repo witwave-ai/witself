@@ -12,6 +12,7 @@ import (
 func TestCopilotOperationLockSerializesMutations(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "copilot-home")
 	t.Setenv("COPILOT_HOME", root)
+	t.Setenv("WITSELF_HOME", filepath.Join(filepath.Dir(root), "witself-home"))
 
 	firstRelease, err := acquireCopilotOperationLock()
 	if err != nil {
@@ -48,6 +49,7 @@ func TestCopilotOperationLockRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("COPILOT_HOME", root)
+	t.Setenv("WITSELF_HOME", filepath.Join(filepath.Dir(root), "witself-home"))
 
 	target := filepath.Join(t.TempDir(), "foreign-lock")
 	if err := os.WriteFile(target, []byte("foreign\n"), 0o644); err != nil {
@@ -84,6 +86,7 @@ func TestCopilotOperationLockRepairsFileMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("COPILOT_HOME", root)
+	t.Setenv("WITSELF_HOME", filepath.Join(filepath.Dir(root), "witself-home"))
 	path := filepath.Join(root, copilotOperationLockFile)
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -106,6 +109,7 @@ func TestCopilotOperationLockRepairsFileMode(t *testing.T) {
 func TestCopilotCommandsRespectOperationLock(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "copilot-home")
 	t.Setenv("COPILOT_HOME", root)
+	t.Setenv("WITSELF_HOME", filepath.Join(filepath.Dir(root), "witself-home"))
 
 	release, err := acquireCopilotOperationLock()
 	if err != nil {

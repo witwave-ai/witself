@@ -49,6 +49,8 @@ extract_section() {
 [[ $(grep -c '^  - id: witself$' "$output") -eq 2 ]]
 grep -q '^      - windows$' "$output"
 grep -q '^          - zip$' "$output"
+grep -q '^    files:$' "$output"
+grep -q '^      - none\*$' "$output"
 if grep -q 'witself-server\|witself-admin\|witself-infra\|dockers' "$output"; then
   echo "rendered smoke config contains a non-CLI release pipeline" >&2
   exit 1

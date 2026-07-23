@@ -40,6 +40,11 @@ const runtimeCLICapabilityProbeTimeout = 30 * time.Second
 
 const witselfExecutableTestEnv = "WITSELF_TEST_EXECUTABLE_PATH"
 
+// Kept as a narrow test seam for the selector-drift race immediately after
+// transaction recovery. Ordinary provider-root selection and lock acquisition
+// always call genericProviderOperationLockRoot directly.
+var genericProviderOperationLockRootAfterRecovery = genericProviderOperationLockRoot
+
 var (
 	saveRuntimeIntegrationConfig     = transcriptcapture.SaveConfig
 	finalizeRuntimeIntegrationConfig = transcriptcapture.SaveConfig
@@ -47,8 +52,17 @@ var (
 )
 
 func installCmd(args []string) int {
+	const groupUsage = "usage: witself install RUNTIME[,RUNTIME...]|all [flags]"
+	if commandHelpRequested(args) {
+		printCommandGroupHelp(os.Stdout, groupUsage,
+			"witself install RUNTIME[,RUNTIME...] [flags]",
+			"witself install all [flags]",
+			"witself integrations [--verify] [--json]  # show available AI runtimes",
+		)
+		return 0
+	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...]|all [--agent NAME] [--location home|work]")
+		fmt.Fprintln(os.Stderr, groupUsage)
 		return 2
 	}
 	if strings.EqualFold(strings.TrimSpace(args[0]), "all") {
@@ -70,6 +84,7 @@ func installCmd(args []string) int {
 	runtime := targets[0]
 	fs := flag.NewFlagSet("install "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself install RUNTIME[,RUNTIME...] [flags]")
 	account := accountFlag(fs)
 	realm := fs.String("realm", "", `local realm name (default: WITSELF_REALM or "default")`)
 	agent := fs.String("agent", "", "local agent name")
@@ -80,11 +95,19 @@ func installCmd(args []string) int {
 	routingOnly := fs.Bool("routing-only", false, "refresh only managed static routing instructions; leave hooks, MCP, and the integration binding unchanged")
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing an agent token")
-	if err := fs.Parse(args[1:]); err != nil {
-		return 2
+	flagArgs := args[1:]
+	if commandHelpRequested(flagArgs) {
+		flagArgs = []string{"--help"}
+	}
+	if parsed, code := parseCommandFlags(fs, flagArgs); !parsed {
+		return code
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself install RUNTIME[,RUNTIME...] [flags]")
+		return 2
+	}
+	if err := validateIntegrationInstallPlatform(runtime, runtimepkg.GOOS); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 2
 	}
 	setFlags := map[string]bool{}
@@ -105,13 +128,106 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks on %s; use user-scoped hooks\n", runtime, runtimepkg.GOOS)
 		return 2
 	}
-	if runtime == transcriptcapture.RuntimeCopilot {
-		release, lockErr := acquireCopilotOperationLock()
-		if lockErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: acquire GitHub Copilot integration lock: %v\n", lockErr)
+	releaseOperationLock, lockedProviderRoot, lockErr := acquireRuntimeIntegrationOperationLockWithProviderRoot(runtime)
+	if lockErr != nil {
+		fmt.Fprintf(os.Stderr, "witself: acquire %s integration lock: %v\n", integrationDisplayName(runtime), lockErr)
+		return 1
+	}
+	defer releaseOperationLock()
+	if isGenericProviderRuntime(runtime) {
+		configRoot := lockedProviderRoot
+		pendingOperation := ""
+		if pending, pendingErr := loadGenericProviderTransactionJournal(runtime); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted %s transaction: %v\n", integrationDisplayName(runtime), pendingErr)
 			return 1
 		}
-		defer release()
+		if recoveryErr := recoverGenericProviderTransaction(runtime); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted %s transaction: %v\n", integrationDisplayName(runtime), recoveryErr)
+			return 1
+		}
+		recoveredRoot, recoveredRootErr := genericProviderOperationLockRootAfterRecovery(runtime)
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve %s provider lock root after recovery: %v\n", integrationDisplayName(runtime), recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintf(os.Stderr, "witself: %s recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation\n", integrationDisplayName(runtime))
+			return 1
+		}
+		if pendingOperation == genericProviderTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(runtime); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: recovered an interrupted %s uninstall; rerun install so the current provider selector is locked before any new mutation\n", integrationDisplayName(runtime))
+				return 1
+			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		configRoot, rootErr := openClawOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve OpenClaw transaction root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadOpenClawTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted OpenClaw transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverOpenClawTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted OpenClaw transaction: %v\n", recoveryErr)
+			return 1
+		}
+		recoveredRoot, recoveredRootErr := openClawOperationLockRoot()
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve OpenClaw transaction root after recovery: %v\n", recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation")
+			return 1
+		}
+		if pendingOperation == openClawTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeOpenClaw); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "witself: recovered an interrupted OpenClaw uninstall; rerun install so the current provider selector is locked before any new mutation")
+				return 1
+			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		configRoot, rootErr := copilotOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadCopilotTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted GitHub Copilot transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverCopilotTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted GitHub Copilot transaction: %v\n", recoveryErr)
+			return 1
+		}
+		recoveredRoot, recoveredRootErr := copilotOperationLockRoot()
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot config root after recovery: %v\n", recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintln(os.Stderr, "witself: GitHub Copilot recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation")
+			return 1
+		}
+		if pendingOperation == copilotTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "witself: recovered an interrupted GitHub Copilot uninstall; rerun install so the current provider selector is locked before any new mutation")
+				return 1
+			}
+		}
 	}
 	if *routingOnly {
 		if runtime == transcriptcapture.RuntimeAntigravity {
@@ -125,6 +241,20 @@ func installCmd(args []string) int {
 			}
 		}
 		runtimeWorkspace := ""
+		if isGenericProviderRuntime(runtime) {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				if err := validateGenericProviderCurrentRoots(installed); err != nil {
+					fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+					return 1
+				}
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			} else if _, _, err := genericProviderConfigPaths(runtime); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: resolve %s provider config: %v\n", runtime, err)
+				return 1
+			}
+		}
 		if runtime == transcriptcapture.RuntimeOpenClaw {
 			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
 				runtimeWorkspace = installed.RuntimeWorkspace
@@ -183,23 +313,40 @@ func installCmd(args []string) int {
 	}
 	useManagedHooks := *managedHooks && !*userHooks
 	if runtime == transcriptcapture.RuntimeAntigravity {
-		release, lockErr := acquireAntigravityOperationLock()
-		if lockErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: acquire Antigravity integration lock: %v\n", lockErr)
-			return 1
-		}
-		defer release()
-		configRoot, rootErr := currentAntigravityConfigRoot()
+		configRoot, rootErr := antigravityOperationLockRoot()
 		if rootErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: resolve Antigravity config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadAntigravityTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted Antigravity transaction: %v\n", pendingErr)
 			return 1
 		}
 		if recoveryErr := recoverAntigravityTransaction(configRoot); recoveryErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: recover interrupted Antigravity transaction: %v\n", recoveryErr)
 			return 1
 		}
+		recoveredRoot, recoveredRootErr := antigravityOperationLockRoot()
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve Antigravity config root after recovery: %v\n", recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintln(os.Stderr, "witself: Antigravity recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation")
+			return 1
+		}
+		if pendingOperation == antigravityTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "witself: recovered an interrupted Antigravity uninstall; rerun install so the current provider selector is locked before any new mutation")
+				return 1
+			}
+		}
 	}
 	previousConfig, previousConfigErr := transcriptcapture.LoadConfig(runtime)
+	previousConfigOriginal := previousConfig
 	if previousConfigErr != nil && !errors.Is(previousConfigErr, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", previousConfigErr)
 		return 1
@@ -259,7 +406,9 @@ func installCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
-		if previousConfigErr == nil && !equalOpenClawMCPEnvironment(previousConfig.MCPEnvironment, openClawEnvironment) {
+		if previousConfigErr == nil &&
+			!equalOpenClawMCPEnvironment(previousConfig.MCPEnvironment, openClawEnvironment) &&
+			!legacyOpenClawDefaultEnvironmentCanMigrate(previousConfig.MCPEnvironment, openClawEnvironment) {
 			fmt.Fprintln(os.Stderr, "witself: OpenClaw selector environment changed since installation; restore the installed OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, and OPENCLAW_PROFILE values before reinstalling or uninstall the existing integration first")
 			return 1
 		}
@@ -358,6 +507,33 @@ func installCmd(args []string) int {
 		Endpoint: strings.TrimSpace(*endpoint), TokenFile: tokenPath,
 		Location: loc, InstalledAt: time.Now().UTC(),
 	}
+	var genericPreviousBinding *transcriptcapture.Config
+	var genericProviderBefore genericMCPConfigSnapshot
+	if isGenericProviderRuntime(runtime) {
+		if err := configureGenericProviderBinding(&cfg, runtimeCLI, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: configure %s provider binding: %v\n", runtime, err)
+			return 1
+		}
+		runtimeCLI = cfg.RuntimeCLICommand
+		witselfExecutable = cfg.MCPCommand
+		if previousConfigErr == nil {
+			if err := validateGenericProviderPreviousSelection(cfg, previousConfig); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+				return 1
+			}
+			previous, err := hydrateLegacyGenericProviderConfig(previousConfig, runtimeCLI, witselfExecutable)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: reconstruct existing %s binding: %v\n", runtime, err)
+				return 1
+			}
+			genericPreviousBinding = &previous
+		}
+		genericProviderBefore, err = prepareGenericMCPInstallSnapshot(runtimeCLI, cfg, genericPreviousBinding)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: preflight %s MCP ownership: %v\n", runtime, err)
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeOpenClaw {
 		cfg.RuntimeCLICommand = runtimeCLI
 		cfg.MCPCommand = witselfExecutable
@@ -437,6 +613,34 @@ func installCmd(args []string) int {
 			}
 		}
 	}
+	if previousConfigErr == nil && previousConfig.HookMode != transcriptcapture.HookModeNone {
+		previousForHooks := &previousConfig
+		if genericPreviousBinding != nil {
+			previousForHooks = genericPreviousBinding
+		}
+		if err := hydrateLegacyRuntimeHookOwnership(previousForHooks, previousForHooks.MCPCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: inspect prior runtime hook ownership: %v\n", err)
+			return 1
+		}
+		copyHookOwnership(&previousConfig, *previousForHooks)
+		if genericPreviousBinding != nil {
+			previousHooksCopy := *previousForHooks
+			genericPreviousBinding = &previousHooksCopy
+		}
+	}
+	if supportsTranscriptHooks(runtime) {
+		var previousForHooks *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousForHooks = &previousConfig
+			if genericPreviousBinding != nil {
+				previousForHooks = genericPreviousBinding
+			}
+		}
+		if err := planRuntimeHooksOwned(&cfg, previousForHooks); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: plan runtime hook ownership: %v\n", err)
+			return 1
+		}
+	}
 	var antigravityJournal *antigravityTransactionJournal
 	var antigravityPreviousBinding *transcriptcapture.Config
 	if runtime == transcriptcapture.RuntimeAntigravity {
@@ -460,6 +664,36 @@ func installCmd(args []string) int {
 		}
 		antigravityJournal = &journal
 	}
+	var openClawJournal *openClawTransactionJournal
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousCopy := previousConfigOriginal
+			previous = &previousCopy
+		}
+		desired := cfg
+		journal, journalErr := beginOpenClawTransaction(openClawTransactionInstall, previous, &desired)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin OpenClaw transaction: %v\n", journalErr)
+			return 1
+		}
+		openClawJournal = &journal
+	}
+	var copilotJournal *copilotTransactionJournal
+	if runtime == transcriptcapture.RuntimeCopilot {
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousCopy := previousConfigOriginal
+			previous = &previousCopy
+		}
+		desired := cfg
+		journal, journalErr := beginCopilotTransaction(copilotTransactionInstall, previous, &desired)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin GitHub Copilot transaction: %v\n", journalErr)
+			return 1
+		}
+		copilotJournal = &journal
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	if runtime == transcriptcapture.RuntimeCursor {
 		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
@@ -471,14 +705,30 @@ func installCmd(args []string) int {
 			cfg.ManagedPermissions = append([]string(nil), previousConfig.ManagedPermissions...)
 		}
 	}
-	previousHooks, err := snapshotRuntimeHooks(runtime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: inspect existing runtime hooks: %v\n", err)
-		return 1
-	}
 	stagedConfig := cfg
 	if previousConfigErr == nil && supportsTranscriptHooks(runtime) {
 		stagedConfig.HookMode = previousConfig.HookMode
+		copyHookOwnership(&stagedConfig, previousConfig)
+	}
+	var genericProviderJournal *genericProviderTransactionJournal
+	if isGenericProviderRuntime(runtime) {
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousCopy := previousConfigOriginal
+			previous = &previousCopy
+		}
+		journal, journalErr := beginGenericProviderInstallTransaction(
+			previous,
+			genericPreviousBinding,
+			stagedConfig,
+			cfg,
+			genericProviderBefore,
+		)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin %s transaction: %v\n", integrationDisplayName(runtime), journalErr)
+			return 1
+		}
+		genericProviderJournal = &journal
 	}
 	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot) ||
 		errors.Is(previousConfigErr, os.ErrNotExist) {
@@ -497,13 +747,31 @@ func installCmd(args []string) int {
 					fmt.Fprintf(os.Stderr, "witself: warning: remove unrecorded Antigravity recovery bundle: %v\n", cleanupErr)
 				}
 			}
+			if genericProviderJournal != nil {
+				if recoveryErr := recoverGenericProviderTransaction(runtime); recoveryErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: recover failed %s staging transaction: %v\n", integrationDisplayName(runtime), recoveryErr)
+				}
+			}
+			if openClawJournal != nil {
+				configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+				if rootErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: resolve OpenClaw transaction root: %v\n", rootErr)
+				} else if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed OpenClaw transaction: %v\n", clearErr)
+				}
+			}
+			if copilotJournal != nil {
+				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
 			return 1
 		}
 	}
 	restoreConfig := func() error {
 		if previousConfigErr == nil {
-			return transcriptcapture.SaveConfig(previousConfig)
+			return transcriptcapture.SaveConfig(previousConfigOriginal)
 		}
 		return transcriptcapture.RemoveConfig(runtime)
 	}
@@ -521,12 +789,27 @@ func installCmd(args []string) int {
 				}
 			}
 		}
+		if openClawJournal != nil {
+			configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+			if rootErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: resolve OpenClaw transaction root: %v\n", rootErr)
+			} else if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed OpenClaw transaction: %v\n", clearErr)
+			}
+		}
+		if copilotJournal != nil {
+			if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+			}
+		}
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 	var previousBinding *transcriptcapture.Config
 	if previousConfigErr == nil {
-		if antigravityPreviousBinding != nil {
+		if genericPreviousBinding != nil {
+			previousBinding = genericPreviousBinding
+		} else if antigravityPreviousBinding != nil {
 			previousBinding = antigravityPreviousBinding
 		} else {
 			previous := previousConfig
@@ -578,6 +861,20 @@ func installCmd(args []string) int {
 				}
 				if rollbackErr := restoreConfig(); rollbackErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+					return
+				}
+				if openClawJournal != nil {
+					configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+					if rootErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: resolve OpenClaw transaction root: %v\n", rootErr)
+					} else if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: clear failed OpenClaw transaction: %v\n", clearErr)
+					}
+				}
+				if copilotJournal != nil {
+					if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+					}
 				}
 				return
 			}
@@ -599,6 +896,59 @@ func installCmd(args []string) int {
 			}
 			if rollbackErr := restoreConfig(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+				return
+			}
+			if openClawJournal != nil {
+				configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+				if rootErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: resolve OpenClaw transaction root: %v\n", rootErr)
+				} else if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed OpenClaw transaction: %v\n", clearErr)
+				}
+			}
+			if copilotJournal != nil {
+				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
+			return
+		}
+		if isGenericProviderRuntime(runtime) {
+			// The staged config is the recovery fence for the exact-owned provider
+			// binding. Keep it until MCP, hooks, provider permissions, and routing
+			// have all been restored successfully.
+			if mcpTouched {
+				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
+					return
+				}
+			}
+			if cursorPermissionTouched {
+				if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v; preserving integration recovery state\n", rollbackErr)
+					return
+				}
+			}
+			if hooksTouched {
+				if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+					return
+				}
+			}
+			if memoryRouting.managed {
+				if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v; preserving integration recovery state\n", memoryRouting.displayName, rollbackErr)
+					return
+				}
+			}
+			if rollbackErr := restoreConfig(); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore integration config: %v\n", rollbackErr)
+				return
+			}
+			if genericProviderJournal != nil {
+				if clearErr := clearGenericProviderTransaction(*genericProviderJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed %s transaction: %v\n", integrationDisplayName(runtime), clearErr)
+				}
 			}
 			return
 		}
@@ -611,12 +961,7 @@ func installCmd(args []string) int {
 			}
 		}
 		if hooksTouched {
-			hookBinding := previousBinding
-			if hookBinding == nil && (previousHooks.userPresent || previousHooks.managedPresent) {
-				current := cfg
-				hookBinding = &current
-			}
-			if rollbackErr := restoreRuntimeHooksSnapshot(runtime, witselfExecutable, hookBinding, previousHooks); rollbackErr != nil {
+			if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
 			}
 		}
@@ -644,18 +989,42 @@ func installCmd(args []string) int {
 		}
 	}
 	openClawMCPPreTouched := false
+	var openClawMCPPlan openClawMCPInstallPlan
 	if runtime == transcriptcapture.RuntimeOpenClaw {
-		openClawMCPPreTouched, err = prepareOpenClawMCPInstall(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		if openClawJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw transaction journal is missing before MCP mutation")
+			return 1
+		}
+		if err = validateOpenClawTransactionProviderBefore(*openClawJournal); err == nil {
+			openClawMCPPlan, openClawMCPPreTouched, err = prepareOpenClawMCPInstallPlan(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		}
 		if err != nil {
+			if providerMutationUncertain(err) ||
+				(providerPreflightChanged(err) && openClawMCPPreTouched) {
+				fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving OpenClaw routing and transaction journal\n", err)
+				return 1
+			}
 			rollbackInstall(openClawMCPPreTouched, false)
 			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
 			return 1
 		}
 	}
 	copilotMCPPreTouched := false
+	var copilotMCPPlan copilotMCPInstallPlan
 	if runtime == transcriptcapture.RuntimeCopilot {
-		copilotMCPPreTouched, err = prepareCopilotMCPInstall(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		if copilotJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: GitHub Copilot transaction journal is missing before MCP mutation")
+			return 1
+		}
+		if err = validateCopilotTransactionProviderBefore(*copilotJournal); err == nil {
+			copilotMCPPlan, copilotMCPPreTouched, err = prepareCopilotMCPInstallPlan(runtimeCLI, witselfExecutable, cfg, previousBinding)
+		}
 		if err != nil {
+			if providerMutationUncertain(err) ||
+				(providerPreflightChanged(err) && copilotMCPPreTouched) {
+				fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving GitHub Copilot routing and transaction journal\n", err)
+				return 1
+			}
 			rollbackInstall(copilotMCPPreTouched, false)
 			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
 			return 1
@@ -665,52 +1034,77 @@ func installCmd(args []string) int {
 	registerTouched := false
 	switch runtime {
 	case transcriptcapture.RuntimeOpenClaw:
-		desiredBinding, bindingErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
-		if bindingErr != nil {
-			registerErr = bindingErr
-		} else {
-			registerErr = registerOpenClawMCPBinding(runtimeCLI, desiredBinding)
-		}
-		registerTouched = true
+		registerTouched, registerErr = registerOpenClawMCPBindingWithPlan(runtimeCLI, openClawMCPPlan)
 	case transcriptcapture.RuntimeAntigravity:
 		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
 	case transcriptcapture.RuntimeCopilot:
-		registerErr = registerCopilotMCP(runtimeCLI, cfg)
-		registerTouched = true
+		registerTouched, registerErr = registerCopilotMCPWithPlan(runtimeCLI, copilotMCPPlan)
+	case transcriptcapture.RuntimeCodex,
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeCursor:
+		registerTouched, registerErr = registerGenericMCPWithMutation(runtimeCLI, cfg, previousBinding)
 	default:
-		registerErr = registerMCP(runtime, runtimeCLI, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-		registerTouched = true
+		registerErr = fmt.Errorf("unsupported runtime %q", runtime)
 	}
 	if registerErr != nil {
-		rollbackInstall(registerTouched, false)
+		mcpTouched := registerTouched
+		switch runtime {
+		case transcriptcapture.RuntimeOpenClaw:
+			mcpTouched = mcpTouched || openClawMCPPreTouched
+		case transcriptcapture.RuntimeCopilot:
+			mcpTouched = mcpTouched || copilotMCPPreTouched
+		}
+		if providerMutationUncertain(registerErr) ||
+			(providerPreflightChanged(registerErr) && mcpTouched) {
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving %s routing and integration recovery state\n", registerErr, integrationDisplayName(runtime))
+			return 1
+		}
+		rollbackInstall(mcpTouched, false)
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
+	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched
 	var hookPath string
+	hooksTouched := false
 	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally retain
 	// HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
-		if useManagedHooks {
-			hookPath, err = installManagedRuntimeHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-			if err == nil {
-				_, err = transcriptcapture.RemoveHooks(runtime)
-			}
-		} else {
-			hookPath, err = transcriptcapture.InstallHooks(runtime, captureMode, witselfExecutable, accountName, conn.RealmName, self.Identity.AgentName, loc.Name)
-			if err == nil && previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeManaged {
-				_, err = removeManagedRuntimeHooks(runtime)
-			}
-		}
+		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+	} else if previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeUser {
+		// A prior release could serialize an untested POSIX hook command for a
+		// native Windows Claude or Grok profile. When upgrading to the MCP-only
+		// Windows contract, remove that exact user hook instead of leaving a
+		// stale launcher behind.
+		hooksTouched, err = removeRuntimeHooksOwned(previousConfig)
 	}
 	if err != nil {
-		rollbackInstall(registerTouched, true)
+		rollbackInstall(registerTouched, hooksTouched)
 		fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
 		return 1
 	}
 	if err := finalizeRuntimeIntegrationConfig(cfg); err != nil {
-		rollbackInstall(registerTouched, true)
+		rollbackInstall(registerTouched, hooksTouched)
 		fmt.Fprintf(os.Stderr, "witself: finalize integration: %v\n", err)
 		return 1
+	}
+	if isGenericProviderRuntime(runtime) {
+		if err := validateGenericInstalledTopology(cfg); err != nil {
+			rollbackInstall(registerTouched, hooksTouched)
+			fmt.Fprintf(os.Stderr, "witself: finalize %s topology: %v\n", runtime, err)
+			return 1
+		}
+		if err := verifyRuntimeHooksOwned(cfg); err != nil {
+			rollbackInstall(registerTouched, hooksTouched)
+			fmt.Fprintf(os.Stderr, "witself: finalize %s hooks: %v\n", runtime, err)
+			return 1
+		}
+		if genericProviderJournal != nil {
+			if err := clearGenericProviderTransaction(*genericProviderJournal); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: finalize %s transaction: %v\n", integrationDisplayName(runtime), err)
+				return 1
+			}
+		}
 	}
 	if runtime == transcriptcapture.RuntimeAntigravity && antigravityJournal != nil {
 		if err := validateAntigravityInstalledArtifacts(cfg); err != nil {
@@ -723,10 +1117,38 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		if err := validateOpenClawInstalledIntegration(cfg); err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw topology: %v\n", err)
+			return 1
+		}
+		if openClawJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: finalize OpenClaw transaction: journal is missing")
+			return 1
+		}
+		configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw transaction: %v\n", rootErr)
+			return 1
+		}
+		if err := clearOpenClawTransaction(configRoot, *openClawJournal); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw transaction: %v\n", err)
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeCopilot {
 		if err := validateCopilotInstalledTopology(cfg); err != nil {
 			rollbackInstall(registerTouched, true)
 			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot topology: %v\n", err)
+			return 1
+		}
+		if copilotJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: finalize GitHub Copilot transaction: journal is missing")
+			return 1
+		}
+		if err := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot transaction: %v\n", err)
 			return 1
 		}
 	}
@@ -792,6 +1214,17 @@ func installCmd(args []string) int {
 	return 0
 }
 
+func validateIntegrationInstallPlatform(runtimeName, platform string) error {
+	support := integrationPlatformSupport(runtimeName, platform)
+	if support.SupportedOnPlatform {
+		return nil
+	}
+	if support.Reason != "" {
+		return errors.New(support.Reason)
+	}
+	return fmt.Errorf("%s integration is not supported on %s", runtimeName, platform)
+}
+
 // verifyInstallAgentIdentity pins an integration to the principal selected by
 // the caller instead of merely trusting that the supplied token authenticates.
 // Managed account resolution gives us an exact account id; explicit endpoint
@@ -842,8 +1275,16 @@ func inferInstallAgent(accountName, realmName string) (string, error) {
 }
 
 func uninstallCmd(args []string) int {
+	const groupUsage = "usage: witself uninstall RUNTIME[,RUNTIME...]|all [flags]"
+	if commandHelpRequested(args) {
+		printCommandGroupHelp(os.Stdout, groupUsage,
+			"witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]",
+			"witself uninstall all [--dry-run] [--json]",
+		)
+		return 0
+	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...]|all [--managed-hooks]")
+		fmt.Fprintln(os.Stderr, groupUsage)
 		return 2
 	}
 	if strings.EqualFold(strings.TrimSpace(args[0]), "all") {
@@ -866,9 +1307,14 @@ func uninstallCmd(args []string) int {
 	runtime := targets[0]
 	fs := flag.NewFlagSet("uninstall "+args[0], flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]")
 	managedHooks := fs.Bool("managed-hooks", false, "also remove administrator-managed hooks")
-	if err := fs.Parse(args[1:]); err != nil {
-		return 2
+	flagArgs := args[1:]
+	if commandHelpRequested(flagArgs) {
+		flagArgs = []string{"--help"}
+	}
+	if parsed, code := parseCommandFlags(fs, flagArgs); !parsed {
+		return code
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself uninstall RUNTIME[,RUNTIME...] [--managed-hooks]")
@@ -878,28 +1324,92 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks\n", runtime)
 		return 2
 	}
-	if runtime == transcriptcapture.RuntimeCopilot {
-		release, lockErr := acquireCopilotOperationLock()
-		if lockErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: acquire GitHub Copilot integration lock: %v\n", lockErr)
+	releaseOperationLock, lockErr := acquireRuntimeIntegrationOperationLock(runtime)
+	if lockErr != nil {
+		fmt.Fprintf(os.Stderr, "witself: acquire %s integration lock: %v\n", integrationDisplayName(runtime), lockErr)
+		return 1
+	}
+	defer releaseOperationLock()
+	if isGenericProviderRuntime(runtime) {
+		pendingOperation := ""
+		if pending, pendingErr := loadGenericProviderTransactionJournal(runtime); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted %s transaction: %v\n", integrationDisplayName(runtime), pendingErr)
 			return 1
 		}
-		defer release()
+		if recoveryErr := recoverGenericProviderTransaction(runtime); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted %s transaction: %v\n", integrationDisplayName(runtime), recoveryErr)
+			return 1
+		}
+		if pendingOperation == genericProviderTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(runtime); errors.Is(loadErr, os.ErrNotExist) {
+				if !suppressIntegrationSuccessOutput {
+					fmt.Printf("recovered and completed interrupted %s uninstall; tokens and pending transcript events were preserved\n", runtime)
+				}
+				return 0
+			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		configRoot, rootErr := openClawOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve OpenClaw transaction root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadOpenClawTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted OpenClaw transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverOpenClawTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted OpenClaw transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if pendingOperation == openClawTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeOpenClaw); errors.Is(loadErr, os.ErrNotExist) {
+				if !suppressIntegrationSuccessOutput {
+					fmt.Println("recovered and completed interrupted openclaw uninstall; tokens and pending transcript events were preserved")
+				}
+				return 0
+			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		configRoot, rootErr := copilotOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve GitHub Copilot config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadCopilotTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted GitHub Copilot transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverCopilotTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted GitHub Copilot transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if pendingOperation == copilotTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot); errors.Is(loadErr, os.ErrNotExist) {
+				if !suppressIntegrationSuccessOutput {
+					fmt.Println("recovered and completed interrupted copilot uninstall; tokens and pending transcript events were preserved")
+				}
+				return 0
+			}
+		}
 	}
 	antigravityCurrentConfigRoot := ""
 	if runtime == transcriptcapture.RuntimeAntigravity {
-		release, lockErr := acquireAntigravityOperationLock()
-		if lockErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: acquire Antigravity integration lock: %v\n", lockErr)
-			return 1
-		}
-		defer release()
-		configRoot, rootErr := currentAntigravityConfigRoot()
+		configRoot, rootErr := antigravityOperationLockRoot()
 		if rootErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: resolve Antigravity config root: %v\n", rootErr)
 			return 1
 		}
-		antigravityCurrentConfigRoot = configRoot
 		pendingOperation := ""
 		if pending, pendingErr := loadAntigravityTransactionJournal(configRoot); pendingErr == nil {
 			pendingOperation = pending.Operation
@@ -919,6 +1429,12 @@ func uninstallCmd(args []string) int {
 				return 0
 			}
 		}
+		currentRoot, currentRootErr := currentAntigravityConfigRoot()
+		if currentRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve current Antigravity config root: %v\n", currentRootErr)
+			return 1
+		}
+		antigravityCurrentConfigRoot = currentRoot
 	}
 	cfg, cfgErr := transcriptcapture.LoadConfig(runtime)
 	if cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist) {
@@ -943,6 +1459,17 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		currentEnvironment, environmentErr := captureOpenClawMCPEnvironment()
+		if environmentErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve OpenClaw MCP environment: %v\n", environmentErr)
+			return 1
+		}
+		if !equalOpenClawMCPEnvironment(currentEnvironment, cfg.MCPEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw selector environment changed from the installed namespace; restore OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH, and WITSELF_HOME before uninstalling")
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeCopilot {
 		currentRoot, rootErr := currentCopilotConfigRoot()
 		if rootErr != nil {
@@ -963,6 +1490,42 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
+	witselfExecutable := ""
+	var genericPersistedConfig *transcriptcapture.Config
+	if isGenericProviderRuntime(runtime) {
+		persisted := cfg
+		genericPersistedConfig = &persisted
+		witselfExecutable, err = currentExecutablePath()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: locate current executable for %s ownership verification: %v\n", runtime, err)
+			return 1
+		}
+		currentCLI, selectionErr := validateGenericProviderCurrentSelection(cfg)
+		if selectionErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", selectionErr)
+			return 1
+		}
+		cfg, err = hydrateLegacyGenericProviderConfig(cfg, currentCLI, witselfExecutable)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: reconstruct existing %s binding: %v\n", runtime, err)
+			return 1
+		}
+		witselfExecutable = cfg.MCPCommand
+		if err := validateGenericInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: preflight %s MCP ownership: %v\n", runtime, err)
+			return 1
+		}
+	}
+	if cfg.HookMode != transcriptcapture.HookModeNone {
+		if err := hydrateLegacyRuntimeHookOwnership(&cfg, cfg.MCPCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: inspect installed runtime hook ownership: %v\n", err)
+			return 1
+		}
+	}
+	if *managedHooks && cfg.HookMode != transcriptcapture.HookModeManaged {
+		fmt.Fprintln(os.Stderr, "witself: no administrator-managed hooks are owned by this integration; refusing an unscoped managed-hook removal")
+		return 1
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	cursorPermissionManaged := runtime == transcriptcapture.RuntimeCursor &&
 		cursorConfigManagesWitselfMCPPermission(cfg.ManagedPermissions)
@@ -980,23 +1543,25 @@ func uninstallCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	previousHooks, err := snapshotRuntimeHooks(runtime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: inspect existing runtime hooks: %v\n", err)
-		return 1
-	}
 	var previousBinding *transcriptcapture.Config
 	var antigravityJournal *antigravityTransactionJournal
-	witselfExecutable := ""
+	var openClawJournal *openClawTransactionJournal
+	var copilotJournal *copilotTransactionJournal
+	var genericProviderJournal *genericProviderTransactionJournal
 	if cfgErr == nil {
 		previous := cfg
 		previousBinding = &previous
-		witselfExecutable, err = currentExecutablePath()
-		if err != nil {
-			witselfExecutable, err = os.Executable()
+		if runtime == transcriptcapture.RuntimeOpenClaw {
+			witselfExecutable = cfg.MCPCommand
+		}
+		if witselfExecutable == "" {
+			witselfExecutable, err = currentExecutablePath()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "witself: locate current executable for rollback: %v\n", err)
-				return 1
+				witselfExecutable, err = os.Executable()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "witself: locate current executable for rollback: %v\n", err)
+					return 1
+				}
 			}
 		}
 	}
@@ -1019,6 +1584,11 @@ func uninstallCmd(args []string) int {
 		// whichever binary or profile happens to win the current shell lookup.
 		runtimeCLI = cfg.RuntimeCLICommand
 		runtimeCLIErr = validateCopilotCLISelection(runtimeCLI, cfg)
+	case transcriptcapture.RuntimeCodex,
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeCursor:
+		runtimeCLI = cfg.RuntimeCLICommand
 	default:
 		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
 	}
@@ -1027,6 +1597,26 @@ func uninstallCmd(args []string) int {
 		// local state so a later retry can remove the complete integration.
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
 		return 1
+	}
+	if isGenericProviderRuntime(runtime) {
+		if genericPersistedConfig == nil {
+			fmt.Fprintln(os.Stderr, "witself: generic provider uninstall is missing its persisted integration preimage")
+			return 1
+		}
+		_, exists, providerBefore, inspectErr := inspectGenericMCP(cfg)
+		if inspectErr != nil || !exists {
+			if inspectErr == nil {
+				inspectErr = errors.New("exact-owned MCP registration disappeared before uninstall transaction")
+			}
+			fmt.Fprintf(os.Stderr, "witself: begin %s transaction: %v\n", integrationDisplayName(runtime), inspectErr)
+			return 1
+		}
+		journal, journalErr := beginGenericProviderUninstallTransaction(*genericPersistedConfig, cfg, providerBefore)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin %s transaction: %v\n", integrationDisplayName(runtime), journalErr)
+			return 1
+		}
+		genericProviderJournal = &journal
 	}
 	// OpenClaw and Copilot retain their static policy until the exact
 	// credential-bound MCP registration is gone. Other runtimes retain the
@@ -1057,48 +1647,63 @@ func uninstallCmd(args []string) int {
 		}
 		routingHandled := false
 		mcpRestoreAllowed := true
+		rollbackComplete := true
 		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot) && memoryRouting.managed {
 			routingHandled = true
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
 				mcpRestoreAllowed = false
+				rollbackComplete = false
 			}
 		}
 		if cursorPermissionTouched {
 			if rollbackErr := cursorPermissionSnapshot.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
+				rollbackComplete = false
 			}
 		}
 		if mcpTouched && mcpRestoreAllowed && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
 			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
+				rollbackComplete = false
 			}
 		}
 		if hooksTouched && previousBinding != nil {
-			if rollbackErr := restoreRuntimeHooksSnapshot(runtime, witselfExecutable, previousBinding, previousHooks); rollbackErr != nil {
+			if rollbackErr := restoreRuntimeHooksOwned(nil, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v\n", rollbackErr)
+				rollbackComplete = false
 			}
 		}
 		if memoryRouting.managed && !routingHandled {
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
+				rollbackComplete = false
+			}
+		}
+		if copilotJournal != nil && rollbackComplete {
+			if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+			}
+		}
+		if openClawJournal != nil && rollbackComplete {
+			configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+			if rootErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: resolve failed OpenClaw transaction root: %v\n", rootErr)
+			} else if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed OpenClaw transaction: %v\n", clearErr)
+			}
+		}
+		if genericProviderJournal != nil && rollbackComplete {
+			if clearErr := clearGenericProviderTransaction(*genericProviderJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed %s transaction: %v\n", integrationDisplayName(runtime), clearErr)
 			}
 		}
 	}
-	removeManaged := *managedHooks || (cfgErr == nil && cfg.HookMode == transcriptcapture.HookModeManaged)
-	if removeManaged {
-		if _, err := removeManagedRuntimeHooks(runtime); err != nil {
-			rollbackUninstall(true, false)
-			fmt.Fprintf(os.Stderr, "witself: remove managed hooks: %v\n", err)
-			return 1
-		}
-	}
-	if supportsTranscriptHooks(runtime) {
-		if _, err := transcriptcapture.RemoveHooks(runtime); err != nil {
-			rollbackUninstall(true, false)
-			fmt.Fprintf(os.Stderr, "witself: remove user hooks: %v\n", err)
-			return 1
-		}
+	hooksTouched, err := removeRuntimeHooksOwned(cfg)
+	if err != nil {
+		rollbackUninstall(hooksTouched, false)
+		fmt.Fprintf(os.Stderr, "witself: remove runtime hooks: %v\n", err)
+		return 1
 	}
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		previous := cfg
@@ -1109,54 +1714,110 @@ func uninstallCmd(args []string) int {
 		}
 		antigravityJournal = &journal
 	}
+	if runtime == transcriptcapture.RuntimeOpenClaw {
+		previous := cfg
+		journal, journalErr := beginOpenClawTransaction(openClawTransactionUninstall, &previous, nil)
+		if journalErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: begin OpenClaw transaction: %v\n", journalErr)
+			return 1
+		}
+		openClawJournal = &journal
+	}
+	if runtime == transcriptcapture.RuntimeCopilot {
+		previous := cfg
+		journal, journalErr := beginCopilotTransaction(copilotTransactionUninstall, &previous, nil)
+		if journalErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: begin GitHub Copilot transaction: %v\n", journalErr)
+			return 1
+		}
+		copilotJournal = &journal
+	}
+	mcpMutationTouched := false
 	if runtime == transcriptcapture.RuntimeAntigravity {
-		if _, err := removeAntigravityPlugin(cfg); err != nil {
-			rollbackUninstall(true, true)
-			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+		if _, removeErr := removeAntigravityPlugin(cfg); removeErr != nil {
+			rollbackUninstall(hooksTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", removeErr)
 			return 1
 		}
 	} else if runtime == transcriptcapture.RuntimeOpenClaw {
-		expected, expectedErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
-		if expectedErr != nil {
-			rollbackUninstall(true, false)
-			fmt.Fprintf(os.Stderr, "witself: resolve installed MCP binding: %v\n", expectedErr)
+		if openClawJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: OpenClaw transaction journal is missing before MCP removal")
 			return 1
 		}
-		if err := unregisterOpenClawMCP(runtimeCLI, &expected); err != nil {
-			rollbackUninstall(true, true)
+		if err := validateOpenClawTransactionProviderBefore(*openClawJournal); err != nil {
+			rollbackUninstall(hooksTouched, false)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
+		expected, expectedErr := openClawMCPBindingFromConfig(witselfExecutable, cfg)
+		if expectedErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: resolve installed MCP binding: %v\n", expectedErr)
+			return 1
+		}
+		_, _, removalSnapshot, inspectErr := inspectOpenClawMCPState(runtimeCLI, cfg.MCPEnvironment)
+		if inspectErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", inspectErr)
+			return 1
+		}
+		mcpTouched, removeErr := unregisterOpenClawMCPWithSnapshot(runtimeCLI, &expected, &removalSnapshot)
+		if removeErr != nil {
+			if providerMutationUncertain(removeErr) {
+				fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v; preserving OpenClaw routing and transaction journal\n", removeErr)
+				return 1
+			}
+			rollbackUninstall(hooksTouched, mcpTouched)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", removeErr)
+			return 1
+		}
+		mcpMutationTouched = mcpTouched
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
-			// A failed removal returns no trustworthy snapshot. Leave MCP absent
-			// rather than risk restoring credential-bound tools without policy.
-			rollbackUninstall(false, false)
+			// Preserve the integration record and transaction journal. A retry
+			// can finish the exact removal without restoring credential-bound
+			// tools into a partially removed policy state.
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
 	} else if runtime == transcriptcapture.RuntimeCopilot {
-		if err := unregisterCopilotMCP(runtimeCLI, &cfg); err != nil {
-			rollbackUninstall(true, true)
+		if copilotJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: GitHub Copilot transaction journal is missing before MCP removal")
+			return 1
+		}
+		if err := validateCopilotTransactionProviderBefore(*copilotJournal); err != nil {
+			rollbackUninstall(hooksTouched, false)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
 		}
+		_, _, removalSnapshot, inspectErr := inspectCopilotMCPState(runtimeCLI, cfg)
+		if inspectErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", inspectErr)
+			return 1
+		}
+		mcpTouched, removeErr := unregisterCopilotMCPWithSnapshot(runtimeCLI, &cfg, &removalSnapshot)
+		if removeErr != nil {
+			if providerMutationUncertain(removeErr) {
+				fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v; preserving GitHub Copilot routing and transaction journal\n", removeErr)
+				return 1
+			}
+			rollbackUninstall(hooksTouched, mcpTouched)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", removeErr)
+			return 1
+		}
+		mcpMutationTouched = mcpTouched
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
 			// Preserve the integration record when exact policy removal cannot be
 			// proven. MCP stays absent so no credential-bound tools lack policy.
-			rollbackUninstall(false, false)
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
-	} else if runtime == transcriptcapture.RuntimeCursor {
-		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
-			rollbackUninstall(true, true)
-			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
-			return 1
-		}
-	} else if runtimeCLIErr == nil {
-		if err := unregisterMCP(runtime, runtimeCLI); err != nil {
+	} else if isGenericProviderRuntime(runtime) {
+		if err := unregisterGenericMCP(runtimeCLI, cfg); err != nil {
 			rollbackUninstall(true, true)
 			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
 			return 1
@@ -1176,16 +1837,24 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
-	if cursorPermissionManaged {
+	if cursorPermissionManaged && genericProviderJournal == nil {
 		cursorPermissionTouched, err = cursorPermissionSnapshot.removeWitselfMCPPermission()
 		if err != nil {
-			rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
+			mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
+			if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+				mcpTouched = mcpMutationTouched
+			}
+			rollbackUninstall(hooksTouched, mcpTouched)
 			fmt.Fprintf(os.Stderr, "witself: remove Cursor CLI permissions: %v\n", err)
 			return 1
 		}
 	}
 	if err := removeRuntimeIntegrationConfig(runtime); err != nil {
-		rollbackUninstall(true, runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil)
+		mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+			mcpTouched = mcpMutationTouched
+		}
+		rollbackUninstall(hooksTouched, mcpTouched)
 		fmt.Fprintf(os.Stderr, "witself: remove integration: %v\n", err)
 		return 1
 	}
@@ -1203,6 +1872,37 @@ func uninstallCmd(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: finalize Antigravity transaction: %v\n", recoveryErr)
 				return 1
 			}
+		}
+	}
+	if runtime == transcriptcapture.RuntimeCopilot && copilotJournal != nil {
+		if recoveryErr := recoverCopilotUninstallTransaction(*copilotJournal); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot transaction: %v\n", clearErr)
+			return 1
+		}
+	}
+	if runtime == transcriptcapture.RuntimeOpenClaw && openClawJournal != nil {
+		if recoveryErr := recoverOpenClawUninstallTransaction(*openClawJournal); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw transaction: %v\n", recoveryErr)
+			return 1
+		}
+		configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw transaction: %v\n", rootErr)
+			return 1
+		}
+		if clearErr := clearOpenClawTransaction(configRoot, *openClawJournal); clearErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize OpenClaw transaction: %v\n", clearErr)
+			return 1
+		}
+	}
+	if genericProviderJournal != nil {
+		if recoveryErr := recoverGenericProviderTransaction(runtime); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize %s transaction: %v\n", integrationDisplayName(runtime), recoveryErr)
+			return 1
 		}
 	}
 	if !suppressIntegrationSuccessOutput {
@@ -1247,11 +1947,43 @@ func transcriptHook(args []string) int {
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
 	location := fs.String("location", "", "optional installation location label")
+	witselfHome := fs.String("witself-home", "", "installed Witself state root")
 	if err := fs.Parse(args); err != nil {
 		return 0
 	}
 	if foreignGrokCompatibilityHook(*runtime, os.Getenv(grokHookEventEnv)) {
 		return 0
+	}
+	if strings.TrimSpace(*witselfHome) != "" {
+		canonicalHome, homeErr := cleanCopilotAbsolutePath("hook WITSELF_HOME", *witselfHome)
+		if homeErr != nil || canonicalHome != *witselfHome {
+			if homeErr == nil {
+				homeErr = errors.New("hook WITSELF_HOME must be canonical")
+			}
+			fmt.Fprintf(os.Stderr, "witself capture: %v\n", homeErr)
+			return 0
+		}
+		priorHome, hadPriorHome := os.LookupEnv("WITSELF_HOME")
+		if homeErr = os.Setenv("WITSELF_HOME", canonicalHome); homeErr != nil {
+			fmt.Fprintf(os.Stderr, "witself capture: set WITSELF_HOME: %v\n", homeErr)
+			return 0
+		}
+		defer func() {
+			if hadPriorHome {
+				_ = os.Setenv("WITSELF_HOME", priorHome)
+			} else {
+				_ = os.Unsetenv("WITSELF_HOME")
+			}
+		}()
+		installed, loadErr := transcriptcapture.LoadConfig(*runtime)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "witself capture: verify WITSELF_HOME binding: %v\n", loadErr)
+			return 0
+		}
+		if isGenericProviderRuntime(installed.Runtime) && installed.MCPEnvironment["WITSELF_HOME"] != canonicalHome {
+			fmt.Fprintln(os.Stderr, "witself capture: WITSELF_HOME does not match the installed provider binding")
+			return 0
+		}
 	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
 	if err != nil || len(raw) > maxHookInputBytes {
@@ -1826,12 +2558,23 @@ func supportsManagedHooksForPlatform(runtime, platform string) bool {
 }
 
 func supportsTranscriptHooks(runtime string) bool {
+	return supportsTranscriptHooksForPlatform(runtime, runtimepkg.GOOS)
+}
+
+func supportsTranscriptHooksForPlatform(runtime, platform string) bool {
+	if platform != "darwin" && platform != "linux" && platform != "windows" {
+		return false
+	}
 	switch runtime {
-	case transcriptcapture.RuntimeCodex,
-		transcriptcapture.RuntimeClaudeCode,
+	case transcriptcapture.RuntimeCodex:
+		return true
+	case transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeCursor:
-		return true
+		// Codex has a dedicated commandWindows contract. The other providers'
+		// hook command fields currently use POSIX shell quoting, so advertise
+		// their hook surface only where that execution contract is tested.
+		return platform == "darwin" || platform == "linux"
 	default:
 		return false
 	}
@@ -1842,6 +2585,8 @@ var semanticVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+\.[0-9]+(?:\.[0-
 var (
 	runtimeVersionProbeTimeout = 5 * time.Second
 	runtimeVersionProbeWait    = 2 * time.Second
+	errRuntimeCLIIncompatible  = errors.New("runtime CLI is incompatible with this operating-system boundary")
+	errRuntimeCLICapability    = errors.New("runtime CLI was found but its required integration capability probe failed")
 )
 
 func detectRuntimeVersion(runtimeName, runtimeCLI string) string {
@@ -1866,20 +2611,19 @@ func detectRuntimeVersionWithEnvironment(runtimeName, runtimeCLI string, environ
 	// separate: GUI-backed CLIs such as Cursor can emit unrelated diagnostics
 	// there before printing their real semantic version on stdout.
 	args := []string{"--version"}
-	if runtimeName == transcriptcapture.RuntimeCursor {
-		// Cursor's MCP-capable Agent is shipped and versioned separately from
-		// the desktop launcher. Native hook payloads identify this Agent build,
-		// so bind and verify that same executable surface.
-		args = []string{"agent", "--version"}
-	}
 	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
 	if runtimeName == transcriptcapture.RuntimeOpenClaw && environment != nil {
 		cmd = openClawCommandContext(ctx, runtimeCLI, environment, args...)
 	}
+	cleanup, err := isolateProviderCLIWorkingDirectory(cmd, runtimeName)
+	if err != nil {
+		return ""
+	}
+	defer cleanup()
 	output := &antigravityValidationOutput{limit: antigravityPluginValidationOutputLimit}
 	cmd.Stdout = output
 	cmd.WaitDelay = runtimeVersionProbeWait
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		return ""
 	}
@@ -1923,7 +2667,7 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 		if path, err := exec.LookPath("claude"); err == nil {
 			candidates = append(candidates, path)
 		}
-		probeArgs = []string{"mcp", "add", "--help"}
+		probeArgs = []string{"mcp", "add-json", "--help"}
 	case transcriptcapture.RuntimeGrokBuild:
 		candidates = append(candidates, strings.TrimSpace(os.Getenv("GROK_CLI_PATH")))
 		if path, err := exec.LookPath("grok"); err == nil {
@@ -1932,10 +2676,19 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 		probeArgs = []string{"mcp", "add", "--help"}
 	case transcriptcapture.RuntimeCursor:
 		candidates = append(candidates, strings.TrimSpace(os.Getenv("CURSOR_CLI_PATH")))
+		if path, err := exec.LookPath("cursor-agent"); err == nil {
+			candidates = append(candidates, path)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, filepath.Join(home, ".local", "bin", "cursor-agent"))
+		}
+		// Some installations expose an MCP-capable binary as `cursor`. Keep it
+		// as a compatibility candidate only after the exact capability output
+		// below proves that it is the Agent CLI rather than the desktop launcher.
 		if path, err := exec.LookPath("cursor"); err == nil {
 			candidates = append(candidates, path)
 		}
-		probeArgs = []string{"agent", "mcp", "list", "--help"}
+		probeArgs = []string{"mcp", "--help"}
 	case transcriptcapture.RuntimeOpenClaw:
 		candidates = append(candidates, strings.TrimSpace(os.Getenv("OPENCLAW_CLI_PATH")))
 		if path, err := exec.LookPath("openclaw"); err == nil {
@@ -1962,6 +2715,8 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 		probeArgs = []string{"mcp", "add", "--help"}
 	}
 	seen := map[string]bool{}
+	foundExistingCandidate := false
+	foundIncompatibleCandidate := false
 	probeTimeout := runtimeCLICapabilityProbeTimeout
 	if runtime == transcriptcapture.RuntimeOpenClaw {
 		probeTimeout = openClawCLIReadTimeout
@@ -1971,18 +2726,26 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 			continue
 		}
 		seen[candidate] = true
-		candidatePath := candidate
-		if runtime == transcriptcapture.RuntimeAntigravity {
-			absolute, absoluteErr := filepath.Abs(candidate)
-			if absoluteErr != nil {
-				continue
+		absolute, absoluteErr := filepath.Abs(candidate)
+		if absoluteErr != nil {
+			continue
+		}
+		candidatePath := filepath.Clean(absolute)
+		info, statErr := os.Stat(candidatePath)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		foundExistingCandidate = true
+		if err := validateRuntimeCLIPlatformBoundary(candidatePath); err != nil {
+			if errors.Is(err, errRuntimeCLIIncompatible) {
+				foundIncompatibleCandidate = true
 			}
-			candidatePath = filepath.Clean(absolute)
+			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 		cmd := exec.CommandContext(ctx, candidatePath, probeArgs...)
 		if runtime == transcriptcapture.RuntimeOpenClaw && environment != nil {
-			cmd = openClawCommandContext(ctx, candidate, environment, probeArgs...)
+			cmd = openClawCommandContext(ctx, candidatePath, environment, probeArgs...)
 		}
 		if runtime == transcriptcapture.RuntimeCopilot {
 			cancel()
@@ -1995,13 +2758,54 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 			}
 			continue
 		}
+		cleanup, isolateErr := isolateProviderCLIWorkingDirectory(cmd, runtime)
+		if isolateErr != nil {
+			cancel()
+			continue
+		}
+		var capabilityOutput *antigravityValidationOutput
+		if runtime == transcriptcapture.RuntimeCursor {
+			capabilityOutput = &antigravityValidationOutput{limit: antigravityPluginValidationOutputLimit}
+			cmd.Stdout = capabilityOutput
+			cmd.Stderr = capabilityOutput
+		}
 		err := cmd.Run()
+		cleanup()
 		cancel()
-		if err == nil {
+		if err == nil && (runtime != transcriptcapture.RuntimeCursor || strings.Contains(capabilityOutput.String(), "Manage MCP servers")) {
 			return candidatePath, nil
 		}
 	}
+	if foundIncompatibleCandidate {
+		return "", fmt.Errorf("%w: %s resolved to a Windows executable; install and run both Witself and the provider CLI inside the same Windows or WSL environment", errRuntimeCLIIncompatible, runtime)
+	}
+	if foundExistingCandidate {
+		return "", fmt.Errorf("%w: no %s executable passed its MCP capability probe", errRuntimeCLICapability, runtime)
+	}
 	return "", fmt.Errorf("no %s executable with MCP support was found", runtime)
+}
+
+func validateRuntimeCLIPlatformBoundary(path string) error {
+	return validateRuntimeCLIPlatformBoundaryForPlatform(runtimepkg.GOOS, path)
+}
+
+func validateRuntimeCLIPlatformBoundaryForPlatform(platform, path string) error {
+	if platform != "linux" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	var magic [2]byte
+	if _, err := io.ReadFull(file, magic[:]); err != nil {
+		return nil
+	}
+	if magic == [2]byte{'M', 'Z'} {
+		return errRuntimeCLIIncompatible
+	}
+	return nil
 }
 
 func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, location string) error {
@@ -2010,17 +2814,13 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 		if err := registerCursorMCP(serveArgs); err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		output, err := exec.CommandContext(ctx, runtimeCLI, "agent", "mcp", "enable", "witself").CombinedOutput()
+		output, err := runLegacyProviderCLI(runtimeCLI, 15*time.Second, "mcp", "enable", "witself")
 		if err != nil {
 			_ = unregisterCursorMCP()
 			return fmt.Errorf("approve Cursor MCP: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	var removeArgs, addArgs []string
 	switch runtime {
 	case transcriptcapture.RuntimeCodex:
@@ -2037,8 +2837,8 @@ func registerMCP(runtime, runtimeCLI, witselfExecutable, account, realm, agent, 
 	default:
 		return fmt.Errorf("unsupported runtime %q", runtime)
 	}
-	_ = exec.CommandContext(ctx, runtimeCLI, removeArgs...).Run()
-	output, err := exec.CommandContext(ctx, runtimeCLI, addArgs...).CombinedOutput()
+	_, _ = runLegacyProviderCLI(runtimeCLI, 15*time.Second, removeArgs...)
+	output, err := runLegacyProviderCLI(runtimeCLI, 15*time.Second, addArgs...)
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -2065,9 +2865,7 @@ func runtimeMCPServeArgs(runtime, witselfExecutable, account, realm, agent, loca
 func unregisterMCP(runtime, runtimeCLI string) error {
 	if runtime == transcriptcapture.RuntimeCursor {
 		if runtimeCLI != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			_, _ = exec.CommandContext(ctx, runtimeCLI, "agent", "mcp", "disable", "witself").CombinedOutput()
-			cancel()
+			_, _ = runLegacyProviderCLI(runtimeCLI, 15*time.Second, "mcp", "disable", "witself")
 		}
 		removeErr := unregisterCursorMCP()
 		if removeErr != nil {
@@ -2078,13 +2876,11 @@ func unregisterMCP(runtime, runtimeCLI string) error {
 	if runtime == transcriptcapture.RuntimeOpenClaw {
 		return unregisterOpenClawMCP(runtimeCLI, nil)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	args := []string{"mcp", "remove", "witself"}
 	if runtime == transcriptcapture.RuntimeClaudeCode || runtime == transcriptcapture.RuntimeGrokBuild {
 		args = []string{"mcp", "remove", "--scope", "user", "witself"}
 	}
-	output, err := exec.CommandContext(ctx, runtimeCLI, args...).CombinedOutput()
+	output, err := runLegacyProviderCLI(runtimeCLI, 15*time.Second, args...)
 	if err != nil {
 		if mcpRegistrationAlreadyMissing(output) {
 			return nil
@@ -2092,4 +2888,31 @@ func unregisterMCP(runtime, runtimeCLI string) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func runLegacyProviderCLI(runtimeCLI string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	cleanup, err := isolateProviderCLIWorkingDirectory(cmd, "provider")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	cmd.WaitDelay = genericProviderCLIWaitDelay
+	output := &antigravityValidationOutput{limit: genericProviderCLIOutputLimit}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return []byte(output.String()), fmt.Errorf("provider CLI timed out after %s", timeout)
+	}
+	if err != nil {
+		message := strings.TrimSpace(output.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return []byte(output.String()), errors.New(message)
+	}
+	return []byte(output.String()), nil
 }

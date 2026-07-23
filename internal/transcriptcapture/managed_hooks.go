@@ -23,13 +23,14 @@ const (
 // ManagedHooksOptions identifies the administrator-owned policy and runner
 // paths for one runtime.
 type ManagedHooksOptions struct {
-	Runtime    string
-	Mode       string
-	Executable string
-	Account    string
-	Realm      string
-	Agent      string
-	Location   string
+	Runtime     string
+	Mode        string
+	Executable  string
+	Account     string
+	Realm       string
+	Agent       string
+	Location    string
+	WitselfHome string
 
 	CodexRequirementsPath string
 	CodexManagedDir       string
@@ -97,6 +98,7 @@ func InstallManagedHooks(opts ManagedHooksOptions) (string, error) {
 	opts.Realm = strings.TrimSpace(opts.Realm)
 	opts.Agent = strings.TrimSpace(opts.Agent)
 	opts.Location = strings.TrimSpace(opts.Location)
+	opts.WitselfHome = strings.TrimSpace(opts.WitselfHome)
 	if !filepath.IsAbs(opts.Executable) {
 		return "", errors.New("managed hook executable must be an absolute path")
 	}
@@ -105,6 +107,9 @@ func InstallManagedHooks(opts ManagedHooksOptions) (string, error) {
 	}
 	if opts.Location != "" && !locationNamePattern.MatchString(opts.Location) {
 		return "", fmt.Errorf("invalid managed hook location %q", opts.Location)
+	}
+	if opts.WitselfHome != "" && (!filepath.IsAbs(opts.WitselfHome) || filepath.Clean(opts.WitselfHome) != opts.WitselfHome || strings.ContainsAny(opts.WitselfHome, "\x00\r\n")) {
+		return "", errors.New("managed hook WITSELF_HOME must be a clean absolute path")
 	}
 	info, err := os.Stat(opts.Executable)
 	if err != nil {
@@ -212,7 +217,7 @@ func installCodexManagedHooks(opts ManagedHooksOptions) (string, error) {
 	}
 
 	runnerPath := filepath.Join(managedDir, managedRunnerName)
-	fragment := codexManagedFragment(opts.Runtime, opts.Mode, opts.Account, opts.Realm, opts.Agent, opts.Location, managedDir, runnerPath, includeFeaturesTable, includeHooksTable)
+	fragment := codexManagedFragment(opts.Runtime, opts.Mode, opts.Account, opts.Realm, opts.Agent, opts.Location, opts.WitselfHome, managedDir, runnerPath, includeFeaturesTable, includeHooksTable)
 	combined := appendManagedFragment(base, fragment)
 	if _, err := parseRequirements(combined, opts.CodexRequirementsPath); err != nil {
 		return "", fmt.Errorf("validate merged Codex requirements: %w", err)
@@ -264,7 +269,7 @@ func removeCodexManagedHooks(opts ManagedHooksOptions) (string, error) {
 func installClaudeManagedHooks(opts ManagedHooksOptions) (string, error) {
 	runnerPath := filepath.Join(opts.ClaudeManagedDir, managedRunnerName)
 	hooks := map[string]any{}
-	command := shellQuote(runnerPath) + " " + hookBindingArgs(opts.Runtime, opts.Account, opts.Realm, opts.Agent, opts.Location)
+	command := shellQuote(runnerPath) + " " + hookBindingArgsWithWitselfHome(opts.Runtime, opts.Account, opts.Realm, opts.Agent, opts.Location, opts.WitselfHome)
 	addWitselfHandlers(hooks, opts.Runtime, opts.Mode, command)
 	root := map[string]any{
 		"$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -292,7 +297,7 @@ func removeClaudeManagedHooks(opts ManagedHooksOptions) (string, error) {
 	return opts.ClaudeSettingsPath, nil
 }
 
-func codexManagedFragment(runtimeName, mode, account, realm, agent, location, managedDir, runnerPath string, includeFeaturesTable, includeHooksTable bool) []byte {
+func codexManagedFragment(runtimeName, mode, account, realm, agent, location, witselfHome, managedDir, runnerPath string, includeFeaturesTable, includeHooksTable bool) []byte {
 	var out strings.Builder
 	out.WriteString(codexManagedBlockBegin)
 	out.WriteByte('\n')
@@ -311,7 +316,7 @@ func codexManagedFragment(runtimeName, mode, account, realm, agent, location, ma
 		}
 		fmt.Fprintf(&out, "[[hooks.%s.hooks]]\n", event)
 		out.WriteString("type = \"command\"\n")
-		command := shellQuote(runnerPath) + " " + hookBindingArgs(runtimeName, account, realm, agent, location)
+		command := shellQuote(runnerPath) + " " + hookBindingArgsWithWitselfHome(runtimeName, account, realm, agent, location, witselfHome)
 		fmt.Fprintf(&out, "command = %s\n", strconv.Quote(command))
 		out.WriteString("timeout = 10\n\n")
 	}

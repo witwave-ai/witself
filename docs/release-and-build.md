@@ -167,6 +167,8 @@ Required checks:
 - Markdown lint or formatting checks for docs.
 - `shellcheck` for install and release scripts.
 - `actionlint` for GitHub Actions workflows.
+- PSScriptAnalyzer for the native Windows installer and PowerShell smoke
+  harness, with only explicitly reviewed style-only rules excluded.
 - `hadolint` for Dockerfiles.
 - Docker image build smoke tests for every Dockerfile under `images/*`,
   including CLI/MCP and backend server images.
@@ -213,8 +215,14 @@ The implemented release action owns:
 - Verifying the Go toolchain from `go.mod`.
 - Running gofmt, vet, build, race tests, golangci-lint, the nested Pulumi module
   gates, and govulncheck against PostgreSQL-backed store tests.
+- Running SHA-verified pinned ShellCheck and actionlint binaries plus pinned
+  PSScriptAnalyzer on Windows, so release-script and workflow syntax are checked
+  by the same versions as normal CI.
 - Running native Windows x64 installer, platform-safety, managed-instruction,
-  Codex-hook, and Codex provider-contract gates before publication.
+  Codex-hook, Codex provider-contract, and credential-free Claude Code, Grok
+  Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot lifecycle gates
+  before publication. Cursor's native-Windows cell skips because Windows is
+  supported through WSL-as-Linux.
 - Building release archives for macOS, Linux, and Windows x64.
 - Building `witself`, `witself-server`, `witself-admin`, and `witself-infra`.
 - Generating SHA256 checksums.
@@ -239,9 +247,17 @@ The implemented release action owns:
   any historical release workflow completes.
 
 CI performs hermetic local-artifact installer smoke tests on native macOS,
-Linux, and Windows x64 runners. Broader smoke tests against artifacts from an
-actual published GitHub Release remain release-hardening targets; they are not
-silently implied by the current workflow.
+Linux, and Windows x64 runners. The provider matrix derives a CLI-only build
+from the GoReleaser configuration, installs that exact output through
+`install.sh` or `install.ps1`, and uses the resulting executable for the
+applicable Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and
+GitHub Copilot lifecycle contracts. Codex additionally crosses the registered
+MCP stdio boundary and invokes read-only `witself.self.show`; the other
+providers stop at exact adapter/configuration lifecycle validation. This is
+credential-free installer-to-provider contract evidence, not real-client or
+authenticated model acceptance. Smoke tests against artifacts from an actual
+published GitHub Release remain a separate post-publication check. See
+[provider-integration-certification.md](provider-integration-certification.md).
 
 Required workflow permissions:
 
@@ -559,7 +575,15 @@ Installer requirements:
 - Detect OS and architecture.
 - Download the matching GitHub Release artifact.
 - Verify SHA256 checksums before installation.
+- Inspect the complete archive before extraction and require exactly one regular
+  root entry whose name matches the selected release binary.
 - Verify signatures when the required signing metadata is available.
+- Serialize updates with a destination-scoped install lock.
+- Stage and self-test the candidate on the destination filesystem before
+  replacing the live command.
+- Preserve verified backups until both the installed command and its alias pass
+  their post-commit self-tests; roll both paths back on failure and retain
+  recovery state if rollback itself cannot complete safely.
 - Install to `/usr/local/bin` when writable.
 - Fall back to `$HOME/.local/bin` when a system install path is not writable.
 - Install `witself` by default and create the `ws` alias beside it.
@@ -589,15 +613,28 @@ The Windows installer has a deliberately narrower first slice:
 - Print `witself integrations` as the next client-integration discovery
   command.
 
-Windows x64 CI executes this installer from local checksummed release fixtures,
-including reinstall, checksum refusal, and failed-upgrade rollback. The same
-native matrix exercises the isolated Codex provider contract. Tag releases
-repeat all five native cells; the Windows release cell additionally builds the
-Witself CLI slice mechanically derived from the main GoReleaser configuration,
-then feeds its exact ZIP and checksum manifest through the PowerShell installer
-before publication can proceed. This evidence is contract coverage, not a
-claim that an authenticated Codex model has completed an end-to-end MCP
-invocation on Windows; that remains a separate real-client acceptance gate.
+macOS and Linux CI execute the shell installer against checksummed local release
+fixtures. The successful install path uses the exact native tarball and
+unmodified checksum set emitted by the CLI-only GoReleaser release pipeline;
+negative fixtures cover reinstall/alias repair, foreign-alias and checksum
+refusal, unexpected archive-member refusal, non-running staged-candidate
+refusal, post-commit rollback, and live-lock contention. Windows x64 CI executes
+the PowerShell installer against the exact native GoReleaser ZIP and checksum
+set plus equivalent negative fixtures, including reinstall, checksum and
+unexpected archive-member refusal, lock contention, and failed-upgrade/
+concurrent-change recovery. The same five-cell native matrix
+exercises the isolated Codex provider contract plus compiled-fake-CLI
+install/reinstall/uninstall and sibling-preservation lifecycles for Claude Code,
+Grok Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot. Tag releases
+repeat all five native cells; each cell builds the Witself CLI slice
+mechanically derived from the main GoReleaser configuration, feeds the exact
+native archive and unmodified checksum set through the platform installer, and
+runs every applicable provider lifecycle with the resulting installed command.
+Cursor's native-Windows lifecycle skips because its Windows support boundary is
+WSL. Only Codex crosses the additional MCP stdio tool-invocation boundary in
+this matrix. This evidence is contract coverage, not a claim that an
+authenticated provider model completed an end-to-end MCP invocation; that
+remains a separate real-client acceptance gate.
 
 ## Release Readiness Checklist
 
@@ -608,6 +645,9 @@ invocation on Windows; that remains a separate real-client acceptance gate.
 3. Verify the GitHub release, CLI/server GHCR manifests, OCI Helm chart, and
    Homebrew formula updates all carry `${VERSION}` and the tagged commit.
 4. Exercise the published CLI and server binaries before changing GitOps.
+   For client-integration releases, also run `witself integrations --verify`
+   in disposable provider profiles and distinguish that credential-free
+   topology check from any separately recorded real-client or model acceptance.
 5. Roll one intended canary cell by passing `${VERSION}` to
    `scripts/roll-cell.sh`; review, commit, and push only the two application
    version pins.

@@ -979,10 +979,10 @@ Expected behavior:
 
 ## 16. MCP Stdio For An Agent Runtime
 
-Install the current MCP integration for a local runtime. The first four
-runtimes below also receive transcript hooks; the phase-one OpenClaw,
-Antigravity, and GitHub Copilot adapters use managed instructions plus guided
-MCP fallback:
+Install the current MCP integration for a local runtime. On macOS and Linux,
+the first four runtimes below also receive transcript hooks; on native Windows,
+only Codex does. The phase-one OpenClaw, Antigravity, and GitHub Copilot
+adapters use managed instructions plus guided MCP fallback:
 
 ```sh
 witself install codex
@@ -992,8 +992,10 @@ witself install cursor
 witself install openclaw
 witself install antigravity
 witself install copilot
+witself integrations --verify
 witself install all --agent scott --location home --dry-run
 witself install all --agent scott --location home
+witself install all --agent scott --location home --json
 ```
 
 The installer reuses an existing binding or the only local agent credential.
@@ -1005,8 +1007,10 @@ pinned in both; an omitted location is left out of both commands.
 On macOS and Linux, administrator-managed hooks are the Codex and Claude Code
 default and do not move the user's identity, token lookup, or MCP registration
 into the administrator account. Native Windows Codex uses user-scoped hooks;
-Grok Build and Cursor also use their global user hook locations on supported
-platforms. Run the command normally; Witself performs narrow privilege
+native Windows Claude Code and Grok Build install MCP/routing without
+transcript hooks, and native Windows Cursor is WSL-only. Grok Build and Cursor
+use their global user hook locations on macOS and Linux. Run the command
+normally; Witself performs narrow privilege
 elevation only where supported and needed. On macOS or Linux, use
 `--user-hooks` for Codex or Claude where the system policy layer is unavailable.
 
@@ -1029,12 +1033,16 @@ witself uninstall antigravity
 witself uninstall copilot
 witself uninstall all --dry-run
 witself uninstall all
+witself uninstall all --json
 ```
 
-The command validates the token-bound agent, stores only account/realm/agent
-selectors and an optional token-file path under `~/.witself`, registers the
-`witself` stdio server with the runtime, and merges transcript hooks where the
-runtime has a validated hook contract. It
+The command validates the token-bound agent, stores its binding under
+`~/.witself`, registers the `witself` stdio server with the runtime, and merges
+transcript hooks where the runtime has a validated platform contract. For
+Codex, Claude Code, Grok Build, and Cursor, the record pins the exact provider
+CLI, configuration root and MCP path, Witself command/arguments, and
+`WITSELF_HOME`; foreign entries and later selector or binding drift fail closed.
+Every provider install/uninstall holds a provider-root whole-operation lock. It
 never embeds the token in the MCP registration. The installed server command is
 equivalent to `witself mcp serve --runtime` with `codex`, `claude-code`,
 `grok-build`, `cursor`, `openclaw`, `antigravity`, or `copilot`.
@@ -1044,15 +1052,14 @@ routing guidance. Atomic assertions go to Witself facts. Narrative remember
 requests go to Witself narrative memory by default; a provider-native memory is
 an independent destination used only when the user explicitly selects native
 memory or asks for both.
-Cursor's rule is
-`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
-`~/.cursor/rules/witself-memory-routing.mdc`), with `alwaysApply: true`
-frontmatter. The default managed rule is discovered from the workspace's ancestor
-chain; a custom `CURSOR_CONFIG_DIR` is effective for routing only when the
-selected Cursor installation also discovers its `rules` directory. Cursor MCP
+Cursor's rule is `~/.cursor/rules/witself-memory-routing.mdc`, with
+`alwaysApply: true` frontmatter. The managed rule is discovered from the
+workspace's ancestor chain. Current `cursor-agent` builds ignore
+`CURSOR_CONFIG_DIR` for MCP discovery, so Witself rejects that selector rather
+than recording an ineffective provider namespace. Cursor MCP
 keeps the standard dotted tool names. Installation idempotently merges the
 required `Mcp(witself:*)` allowlist permission into
-`$CURSOR_CONFIG_DIR/cli-config.json`; uninstall removes it only when the
+`~/.cursor/cli-config.json`; uninstall removes it only when the
 Witself integration record says the installer created it. Cursor Memories remain
 project-scoped; when a user explicitly includes native Cursor memory in broad
 recall, its coverage is reported as partial.

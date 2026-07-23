@@ -58,7 +58,7 @@ jobs:
         run: go build ./...
 
       - name: test
-        run: go test ./... -race
+        run: go test ./... -race -timeout=20m
 
       - name: golangci-lint
         run: |
@@ -111,6 +111,14 @@ jobs:
       - name: Test GHCR latest reconciliation
         run: bash scripts/test-promote-latest-images.sh
 
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pin and run ShellCheck and actionlint
+        run: bash scripts/test-ci-static-analysis.sh
+
   homebrew-formula:
     runs-on: macos-latest
     steps:
@@ -148,6 +156,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -160,14 +170,59 @@ jobs:
       - name: Build native Witself client
         run: go build ./cmd/witself
 
+      - name: Install GoReleaser for exact client artifact gate
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      - name: Derive CLI-only smoke config from release config
+        shell: bash
+        run: >-
+          scripts/render-goreleaser-witself-smoke-config.sh
+          "$RUNNER_TEMP/goreleaser-witself-smoke.yaml"
+          .goreleaser.yaml
+
+      - name: Build exact GoReleaser Unix archive and checksums
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          goreleaser release \
+            --config "$RUNNER_TEMP/goreleaser-witself-smoke.yaml" \
+            --snapshot \
+            --clean \
+            --skip=before,sign,sbom,docker \
+            --parallelism 1 \
+            --timeout 30m
+
+      - name: Build exact GoReleaser Windows archive
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'goreleaser-witself-smoke.yaml'
+          & goreleaser release --config $config --snapshot --clean '--skip=before,sign,sbom,docker' --parallelism 1 --timeout 30m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Universal installer artifact smoke
         if: runner.os != 'Windows'
+        env:
+          WITSELF_INSTALL_SMOKE_GORELEASER_DIST: ${{ github.workspace }}/dist
+          WITSELF_INSTALL_SMOKE_OUTPUT: ${{ runner.temp }}/witself-installed
         run: bash scripts/test-install-unix.sh
 
       - name: Windows binary installer smoke
         if: runner.os == 'Windows'
         shell: powershell
-        run: .\scripts\test-install-windows.ps1
+        run: >-
+          .\scripts\test-install-windows.ps1
+          -GoReleaserDist .\dist
+          -InstalledBinaryOutput "$env:RUNNER_TEMP\witself-installed.exe"
+
+      - name: PowerShell static analysis
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\test-powershell-static-analysis.ps1
 
       - name: Native platform safety primitives
         run: >-
@@ -194,7 +249,31 @@ jobs:
       - name: Codex provider installation contract
         run: >-
           go test ./cmd/witself
-          -run '^TestProviderIntegrationContractCodex'
+          -run '^(TestProviderIntegrationContractCodex|TestProviderIntegrationContractCodexRollbackRestoresPriorInstall)$'
+          -count=1
+
+      - name: Credential-free provider lifecycle contracts
+        run: >-
+          go test ./cmd/witself
+          -run '^TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot)$'
+          -count=1
+
+      - name: Installed release binary provider acceptance
+        if: runner.os != 'Windows'
+        env:
+          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}/witself-installed
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
+          -count=1
+
+      - name: Installed release binary provider acceptance
+        if: runner.os == 'Windows'
+        env:
+          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}\witself-installed.exe
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
           -count=1
 
   avatar-renderer-portability:

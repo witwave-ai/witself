@@ -120,7 +120,7 @@ Runtime-specific delivery is:
 - `--runtime cursor` returns the Cursor-specific policy plus the compact
   operational suffix. Cursor retains the standard dotted MCP names, including
   `witself.fact.set`, `witself.fact.get`, and `witself.fact.list`. Its managed
-  `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` ancestor rule has
+  `~/.cursor/rules/witself-memory-routing.mdc` ancestor rule has
   `alwaysApply: true` frontmatter and is normally discovered at
   `~/.cursor/rules` as an ancestor rule for workspaces beneath the user's home.
   Cursor Memories remain project-scoped advisory context. They are consulted
@@ -408,8 +408,10 @@ Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
 completed-batch settlement. `witself install
-codex|claude|grok|cursor|openclaw|antigravity|copilot` registers that stdio server;
-only the first four runtimes also install transcript hooks. Grok receives
+codex|claude|grok|cursor|openclaw|antigravity|copilot` registers that stdio
+server; on macOS and Linux the first four runtimes also install transcript
+hooks. Native Windows installs hooks only for Codex; Claude Code and Grok Build
+retain MCP/routing without them, and Cursor is WSL-only. Grok receives
 underscore-safe tool names because its MCP client rejects periods. The tool
 schemas and behavior are otherwise identical. The
 remainder of this catalog is the target surface and lands incrementally behind

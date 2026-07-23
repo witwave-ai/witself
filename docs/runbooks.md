@@ -43,6 +43,48 @@ The agent token is written to
 workload; `witself token revoke --token tok_ID --yes` kills it without touching
 anything else.
 
+## Inspect and install local AI integrations
+
+Inventory is read-only. The normal view separates provider detection, platform
+support, and persisted Witself state; `--verify` additionally checks each
+installed provider against its exact recorded binding:
+
+```sh
+witself integrations
+witself integrations --verify
+witself integrations --verify --json
+```
+
+Preview a bulk install before changing provider configuration, then use the
+literal `all` selector:
+
+```sh
+witself install all --agent my-agent --location home --dry-run
+witself install all --agent my-agent --location home
+witself install all --agent my-agent --location home --json
+```
+
+Do not substitute an unquoted `*`; the shell can expand it to filenames before
+Witself receives the command. Bulk install skips runtimes that are undetected or
+unsupported on the current platform, continues after an individual failure, and
+does not roll back earlier successful runtimes. On native Windows, Cursor is
+WSL-only; install both Cursor and Witself inside the same WSL distribution.
+Native Windows Claude Code and Grok Build install core MCP/routing without
+transcript hooks, while Windows Codex receives user-scoped hooks.
+
+After restarting each installed runtime, use `witself integrations --verify` to
+check the local topology. A healthy result proves exact local configuration,
+not that an authenticated provider model invoked a tool. End-to-end acceptance
+uses a dedicated provider QA account and disposable provider profile, never a
+personal profile. To remove every recorded integration while retaining Witself
+tokens and queued transcript events:
+
+```sh
+witself uninstall all --dry-run
+witself uninstall all
+witself uninstall all --json
+```
+
 ## List operators
 
 Every account is born with one root operator, `owner` — the identity your

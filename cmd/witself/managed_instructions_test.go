@@ -102,6 +102,40 @@ func TestManagedInstructionsLifecyclePreservesArbitraryFile(t *testing.T) {
 	}
 }
 
+func TestManagedInstructionsRefuseOversizeSnapshotWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "RUNTIME-RULES.md")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o640)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedInstructionsReadLimit + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testManagedInstructionsSpec(path)
+	if _, err := installManagedInstructions(spec); err == nil || !strings.Contains(err.Error(), "read limit") {
+		t.Fatalf("oversize install error = %v", err)
+	}
+	if _, err := removeManagedInstructions(spec); err == nil || !strings.Contains(err.Error(), "read limit") {
+		t.Fatalf("oversize remove error = %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || after.Size() != managedInstructionsReadLimit+1 ||
+		after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("oversize refusal changed file: before=%v after=%v", before, after)
+	}
+}
+
 func TestManagedInstructionsRemoveEmptyAndSnapshotRollback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rules", "witself.md")
 	spec := testManagedInstructionsSpec(path)

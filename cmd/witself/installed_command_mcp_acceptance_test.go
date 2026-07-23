@@ -21,14 +21,11 @@ import (
 	"time"
 )
 
-func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) {
-	root := t.TempDir()
-	witselfExecutable := buildInstalledCommandTestWitself(t, root)
-	provider := buildFakeProviderCLI(t, root)
-	provider.writeRegistry(t, map[string][]string{
-		"sibling": {"sibling-mcp", "serve"},
-	})
+const installedCommandAcceptanceBinaryEnv = "WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY"
 
+func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) {
+	clearProviderCLIPathOverridesForTest(t)
+	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	witselfHome := filepath.Join(home, ".witself")
 	codexHome := filepath.Join(home, ".codex")
@@ -42,8 +39,18 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("WITSELF_HOME", witselfHome)
 	t.Setenv("CODEX_HOME", codexHome)
+
+	witselfExecutable := buildInstalledCommandTestWitself(t, root)
+	// The input path is a test-runner concern only. Do not propagate it into
+	// the installed client or the MCP process that client registers.
+	t.Setenv(installedCommandAcceptanceBinaryEnv, "")
+	provider := buildFakeProviderCLI(t, root)
+	isolateProviderDiscoveryPATHForTest(t)
 	t.Setenv("CODEX_CLI_PATH", provider.Path)
 	t.Setenv(witselfExecutableTestEnv, "")
+	provider.writeRegistry(t, map[string][]string{
+		"sibling": {"sibling-mcp", "serve"},
+	})
 
 	const tokenValue = "synthetic-installed-command-token"
 	var selfRequests atomic.Int32
@@ -217,6 +224,27 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 
 func buildInstalledCommandTestWitself(t *testing.T, root string) string {
 	t.Helper()
+	if supplied := strings.TrimSpace(os.Getenv(installedCommandAcceptanceBinaryEnv)); supplied != "" {
+		path, err := filepath.Abs(supplied)
+		if err != nil {
+			t.Fatalf("resolve installed-command acceptance binary %q: %v", supplied, err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("inspect installed-command acceptance binary %q: %v", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("installed-command acceptance binary %q is not a regular file", path)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, path, "version")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("run installed-command acceptance binary %q: %v\n%s", path, err, output)
+		}
+		return path
+	}
+
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve cmd/witself source directory")

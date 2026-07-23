@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,8 @@ const (
 	antigravityMCPServerSuffixLength       = 16
 	antigravityPluginValidationOutputLimit = 64 * 1024
 	antigravityRuleCharacterLimit          = 12_000
+	antigravityManifestReadLimit           = 1024 * 1024
+	antigravityPluginFileReadLimit         = 1024 * 1024
 )
 
 var (
@@ -203,7 +206,7 @@ func cleanAntigravityInvocationPath(label, value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !integrationExecutableModeIsUsable(info) {
 		return "", fmt.Errorf("%s must resolve to an executable regular file", label)
 	}
 	return absolute, nil
@@ -568,6 +571,11 @@ func validateAntigravityPluginWithCLI(runtimeCLI string, bundle antigravityPlugi
 	ctx, cancel := context.WithTimeout(context.Background(), antigravityPluginValidationTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runtimeCLI, "plugin", "validate", source)
+	cleanup, err := isolateProviderCLIWorkingDirectory(cmd, "Antigravity")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	cmd.WaitDelay = antigravityPluginValidationWait
 	output := &antigravityValidationOutput{limit: antigravityPluginValidationOutputLimit}
 	cmd.Stdout = output
@@ -824,12 +832,21 @@ func restoreAntigravityUninstall(previous *transcriptcapture.Config) error {
 
 func rejectAntigravityManifestCollision(configRoot, pluginName string) error {
 	path := filepath.Join(configRoot, "import_manifest.json")
-	raw, err := os.ReadFile(path)
+	raw, err := readAntigravityBoundedRegularFile(
+		path,
+		"Antigravity import manifest",
+		antigravityManifestReadLimit,
+		0,
+		false,
+	)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("inspect Antigravity import manifest: %w", err)
+	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return fmt.Errorf("parse Antigravity import manifest %s: %w", path, err)
 	}
 	var root struct {
 		Imports []struct {
@@ -889,7 +906,7 @@ func readAntigravityBundleDirectory(path string) (antigravityPluginBundle, error
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return antigravityPluginBundle{}, errors.New("plugin root must be a real directory")
 	}
-	if info.Mode().Perm() != 0o700 {
+	if !integrationFileModeMatches(info.Mode(), 0o700) {
 		return antigravityPluginBundle{}, fmt.Errorf("plugin root permissions are %04o, want 0700", info.Mode().Perm())
 	}
 	expected := map[string]bool{"plugin.json": false, "rules": true}
@@ -911,7 +928,7 @@ func readAntigravityBundleDirectory(path string) (antigravityPluginBundle, error
 	if err != nil {
 		return antigravityPluginBundle{}, err
 	}
-	if !rulesInfo.IsDir() || rulesInfo.Mode()&os.ModeSymlink != 0 || rulesInfo.Mode().Perm() != 0o700 {
+	if !rulesInfo.IsDir() || rulesInfo.Mode()&os.ModeSymlink != 0 || !integrationFileModeMatches(rulesInfo.Mode(), 0o700) {
 		return antigravityPluginBundle{}, errors.New("plugin rules must be a real 0700 directory")
 	}
 	if err := verifyAntigravityDirectoryEntries(rulesPath, map[string]bool{"witself.md": false}); err != nil {
@@ -928,16 +945,78 @@ func readAntigravityBundleDirectory(path string) (antigravityPluginBundle, error
 		if err != nil {
 			return antigravityPluginBundle{}, err
 		}
-		if !fileInfo.Mode().IsRegular() || fileInfo.Mode()&os.ModeSymlink != 0 || fileInfo.Mode().Perm() != 0o600 {
+		if !fileInfo.Mode().IsRegular() || fileInfo.Mode()&os.ModeSymlink != 0 || !integrationFileModeMatches(fileInfo.Mode(), 0o600) {
 			return antigravityPluginBundle{}, fmt.Errorf("plugin file %s must be a real 0600 regular file", relativePath)
 		}
-		raw, err := os.ReadFile(filePath)
+		raw, err := readAntigravityBoundedRegularFile(
+			filePath,
+			"Antigravity plugin file "+relativePath,
+			antigravityPluginFileReadLimit,
+			0o600,
+			true,
+		)
 		if err != nil {
 			return antigravityPluginBundle{}, err
 		}
 		bundle.files[relativePath] = raw
 	}
 	return bundle, nil
+}
+
+func readAntigravityBoundedRegularFile(
+	path string,
+	displayName string,
+	limit int64,
+	expectedMode os.FileMode,
+	enforceMode bool,
+) ([]byte, error) {
+	linked, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !linked.Mode().IsRegular() || linked.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s must be a real regular file", displayName)
+	}
+	if enforceMode && !integrationFileModeMatches(linked.Mode(), expectedMode) {
+		return nil, fmt.Errorf("%s permissions are %04o, want %04o", displayName, linked.Mode().Perm(), expectedMode.Perm())
+	}
+	if linked.Size() > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", displayName, limit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !sameManagedInstructionsFileIdentity(opened, linked) {
+		if err == nil {
+			err = fmt.Errorf("%s identity changed while it was opened", displayName)
+		}
+		return nil, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", displayName, limit)
+	}
+	openedAfter, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	linkedAfter, err := os.Lstat(path)
+	if err != nil || linkedAfter.Mode()&os.ModeSymlink != 0 ||
+		!sameManagedInstructionsFileIdentity(opened, openedAfter) ||
+		!sameManagedInstructionsFileIdentity(openedAfter, linkedAfter) ||
+		int64(len(raw)) != openedAfter.Size() {
+		if err == nil {
+			err = fmt.Errorf("%s identity changed while it was read", displayName)
+		}
+		return nil, err
+	}
+	return raw, nil
 }
 
 func verifyAntigravityDirectoryEntries(path string, expected map[string]bool) error {

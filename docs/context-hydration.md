@@ -224,6 +224,10 @@ Current conformance is deliberately asymmetric:
 | Antigravity preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 installs a canonical shared MCP entry and a full-catalog always-on rules plugin; native hooks are deferred until their payload and transcript contract is conformantly validated |
 | GitHub Copilot preview | Guided fallback | Guided fallback | Guided through `self.show` | Phase 1 installs a `witself-managed-<24-hex>` user MCP entry and exact-owned global instruction file; transcript hooks are deferred until their payload contract is conformantly validated |
 
+This table describes runtimes where their hook contract is enabled. On native
+Windows, only Codex enables Witself transcript hooks; Claude Code and Grok Build
+use the guided MCP fallback without installed hooks, and Cursor is WSL-only.
+
 “Guided fallback” is not renamed automatic injection. It means the installed
 always-on routing rule and MCP server instructions tell the active agent to call
 `self.show`, inspect the checkpoints, use at most one non-blocking messaging or

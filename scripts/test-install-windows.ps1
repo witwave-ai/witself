@@ -1,7 +1,8 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$GoReleaserDist
+    [string]$GoReleaserDist,
+    [string]$InstalledBinaryOutput
 )
 
 Set-StrictMode -Version 2.0
@@ -24,6 +25,96 @@ function New-LocalRelease {
     Compress-Archive -LiteralPath (Join-Path $packageDir 'witself.exe') -DestinationPath $archive -Force
     $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath (Join-Path $releaseDir 'checksums.txt') -Value "$hash  $asset" -Encoding Ascii
+}
+
+function New-LocalReleaseWithExtraArchiveEntry {
+    param(
+        [string]$Root,
+        [string]$Version,
+        [string]$Binary
+    )
+    $plainVersion = $Version.TrimStart('v')
+    $tag = "v$plainVersion"
+    $asset = "witself_${plainVersion}_windows_amd64.zip"
+    $releaseDir = Join-Path $Root $tag
+    $packageDir = Join-Path $releaseDir 'package'
+    New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $packageDir 'witself.exe') -Force
+    Set-Content `
+        -LiteralPath (Join-Path $packageDir 'unexpected.txt') `
+        -Value 'unexpected archive member' `
+        -Encoding Ascii
+    $archive = Join-Path $releaseDir $asset
+    Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $archive -Force
+    $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath (Join-Path $releaseDir 'checksums.txt') -Value "$hash  $asset" -Encoding Ascii
+}
+
+function New-LocalReleaseWithNonRegularArchiveEntry {
+    param(
+        [string]$Root,
+        [string]$Version
+    )
+    $plainVersion = $Version.TrimStart('v')
+    $tag = "v$plainVersion"
+    $asset = "witself_${plainVersion}_windows_amd64.zip"
+    $releaseDir = Join-Path $Root $tag
+    New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+    $archivePath = Join-Path $releaseDir $asset
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::Open(
+        $archivePath,
+        [IO.Compression.ZipArchiveMode]::Create
+    )
+    try {
+        $entry = $archive.CreateEntry('witself.exe')
+        # A Unix FIFO entry has the requested root name but is not a regular
+        # executable. Expand-Archive may materialize it as an ordinary file,
+        # so the installer must reject the signed archive metadata first.
+        $entry.ExternalAttributes = 0x10000000
+        $stream = $entry.Open()
+        try {
+            $raw = [Text.Encoding]::ASCII.GetBytes('not a regular executable')
+            $stream.Write($raw, 0, $raw.Length)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath (Join-Path $releaseDir 'checksums.txt') -Value "$hash  $asset" -Encoding Ascii
+}
+
+function New-StampedWitselfBinary {
+    param(
+        [string]$RepositoryRoot,
+        [string]$Destination,
+        [string]$Version
+    )
+    $previousGoProxy = $env:GOPROXY
+    $previousGoSumDB = $env:GOSUMDB
+    $previousGoToolchain = $env:GOTOOLCHAIN
+    Push-Location $RepositoryRoot
+    try {
+        $env:GOPROXY = 'off'
+        $env:GOSUMDB = 'off'
+        $env:GOTOOLCHAIN = 'local'
+        $ldflags = @(
+            "-X github.com/witwave-ai/witself/internal/version.Version=$Version",
+            '-X github.com/witwave-ai/witself/internal/version.Commit=installer-smoke',
+            '-X github.com/witwave-ai/witself/internal/version.Date=synthetic'
+        ) -join ' '
+        & go build -trimpath -ldflags $ldflags -o $Destination ./cmd/witself
+        if ($LASTEXITCODE -ne 0) {
+            throw "offline go build for stamped installer fixture exited $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+        $env:GOPROXY = $previousGoProxy
+        $env:GOSUMDB = $previousGoSumDB
+        $env:GOTOOLCHAIN = $previousGoToolchain
+    }
 }
 
 function Invoke-Installer {
@@ -80,15 +171,15 @@ function Get-InstallerFunctionBody {
     if ($parseErrors.Count -ne 0) {
         throw "installer has PowerShell parse errors: $($parseErrors[0].Message)"
     }
-    $matches = @($ast.FindAll({
+    $definitions = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -eq $Name
     }, $true))
-    if ($matches.Count -ne 1) {
-        throw "installer function $Name resolved to $($matches.Count) definitions"
+    if ($definitions.Count -ne 1) {
+        throw "installer function $Name resolved to $($definitions.Count) definitions"
     }
-    $body = $matches[0].Body.Extent.Text
+    $body = $definitions[0].Body.Extent.Text
     return [scriptblock]::Create($body.Substring(1, $body.Length - 2))
 }
 
@@ -254,9 +345,13 @@ function Test-GoReleaserWindowsArchive {
     param(
         [string]$Installer,
         [string]$Dist,
-        [string]$TemporaryRoot
+        [string]$TemporaryRoot,
+        [string]$InstalledOutput
     )
     if ([string]::IsNullOrWhiteSpace($Dist)) {
+        if (-not [string]::IsNullOrWhiteSpace($InstalledOutput)) {
+            throw 'InstalledBinaryOutput requires GoReleaserDist so the output is proven to come from the release archive'
+        }
         return
     }
     $distRoot = [IO.Path]::GetFullPath($Dist)
@@ -276,6 +371,13 @@ function Test-GoReleaserWindowsArchive {
     if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
         throw "GoReleaser did not produce the expected Windows archive: $archivePath"
     }
+    $archiveContents = Join-Path $TemporaryRoot 'goreleaser-archive-contents'
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $archiveContents -Force
+    $archiveBinary = Join-Path $archiveContents 'witself.exe'
+    if (-not (Test-Path -LiteralPath $archiveBinary -PathType Leaf)) {
+        throw 'GoReleaser Windows archive does not contain witself.exe at its documented root'
+    }
+    $archiveBinaryHash = (Get-FileHash -LiteralPath $archiveBinary -Algorithm SHA256).Hash
 
     $fixtureRoot = Join-Path $TemporaryRoot 'goreleaser-release'
     $releaseDirectory = Join-Path $fixtureRoot "v$version"
@@ -294,8 +396,20 @@ function Test-GoReleaserWindowsArchive {
     }
     $primaryHash = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
     $aliasHash = (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash
-    if ($primaryHash -ne $aliasHash) {
-        throw 'GoReleaser archive smoke did not install one exact executable pair'
+    if ($primaryHash -ne $archiveBinaryHash -or $aliasHash -ne $archiveBinaryHash) {
+        throw 'GoReleaser archive smoke did not preserve the exact archived executable bytes'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($InstalledOutput)) {
+        $outputPath = [IO.Path]::GetFullPath($InstalledOutput)
+        $outputDirectory = Split-Path -Parent $outputPath
+        if (-not [string]::IsNullOrWhiteSpace($outputDirectory)) {
+            New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $primary -Destination $outputPath -Force
+        $outputHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
+        if ($outputHash -ne $primaryHash) {
+            throw 'copied Windows installer smoke output differs from the verified installed binary'
+        }
     }
 }
 
@@ -309,43 +423,23 @@ try {
     $fixtureRoot = Join-Path $temporaryRoot 'releases'
     $installDir = Join-Path $temporaryRoot 'installed'
     $goodBinary = Join-Path $temporaryRoot 'witself-good.exe'
-    $nativeBuild = Join-Path $repositoryRoot 'witself.exe'
-    if (-not (Test-Path -LiteralPath $nativeBuild -PathType Leaf)) {
-        throw "native fixture is missing: run 'go build ./cmd/witself' before this smoke"
-    }
-    Copy-Item -LiteralPath $nativeBuild -Destination $goodBinary
+    New-StampedWitselfBinary $repositoryRoot $goodBinary '9.9.9'
 
     $pathFixture = Initialize-TestUserPathFixture
     $rawPathBeforeGoReleaserSmoke = Get-TestRawUserPathState
-    Test-GoReleaserWindowsArchive $installer $GoReleaserDist $temporaryRoot
+    Test-GoReleaserWindowsArchive `
+        $installer `
+        $GoReleaserDist `
+        $temporaryRoot `
+        $InstalledBinaryOutput
     $rawPathAfterGoReleaserSmoke = Get-TestRawUserPathState
     if ($rawPathAfterGoReleaserSmoke.Value -ne $rawPathBeforeGoReleaserSmoke.Value -or
         $rawPathAfterGoReleaserSmoke.Kind -ne $rawPathBeforeGoReleaserSmoke.Kind) {
         throw 'exact GoReleaser archive smoke changed user PATH despite -NoPathUpdate'
     }
 
-    $alternateSource = Join-Path $temporaryRoot 'alternate-main.go'
     $alternateBinary = Join-Path $temporaryRoot 'witself-alternate.exe'
-    Set-Content `
-        -LiteralPath $alternateSource `
-        -Value "package main`nimport `"fmt`"`nfunc main() { fmt.Println(`"alternate installer fixture`") }`n" `
-        -Encoding Ascii
-    $previousGoProxy = $env:GOPROXY
-    $previousGoSumDB = $env:GOSUMDB
-    $previousGoToolchain = $env:GOTOOLCHAIN
-    try {
-        $env:GOPROXY = 'off'
-        $env:GOSUMDB = 'off'
-        $env:GOTOOLCHAIN = 'local'
-        & go build -o $alternateBinary $alternateSource
-        if ($LASTEXITCODE -ne 0) {
-            throw "offline go build for alternate installer fixture exited $LASTEXITCODE"
-        }
-    } finally {
-        $env:GOPROXY = $previousGoProxy
-        $env:GOSUMDB = $previousGoSumDB
-        $env:GOTOOLCHAIN = $previousGoToolchain
-    }
+    New-StampedWitselfBinary $repositoryRoot $alternateBinary '9.9.13'
 
     New-LocalRelease $fixtureRoot 'v9.9.9' $goodBinary
     New-LocalRelease $fixtureRoot 'v9.9.13' $alternateBinary
@@ -386,6 +480,26 @@ try {
     }
     $primaryBefore = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
     $aliasBefore = (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash
+
+    # Checksum success does not authorize arbitrary ZIP contents. The release
+    # archive contract is one regular root witself.exe and nothing else.
+    New-LocalReleaseWithExtraArchiveEntry $fixtureRoot 'v9.9.15' $goodBinary
+    if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.15' $true) -eq 0) {
+        throw 'installer accepted a release archive with an unexpected extra entry'
+    }
+    if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryBefore -or
+        (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash -ne $aliasBefore) {
+        throw 'archive-shape rejection changed the installed witself.exe or ws.exe bytes'
+    }
+
+    New-LocalReleaseWithNonRegularArchiveEntry $fixtureRoot 'v9.9.16'
+    if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.16' $true) -eq 0) {
+        throw 'installer accepted a non-regular release archive entry'
+    }
+    if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryBefore -or
+        (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash -ne $aliasBefore) {
+        throw 'non-regular archive rejection changed the installed witself.exe or ws.exe bytes'
+    }
 
     # Exercise the documented File.Replace 1177 namespace layout directly:
     # replacement remains staged, the old target is at backup, and the canonical
@@ -478,12 +592,37 @@ try {
         throw 'checksum rejection changed the installed witself.exe or ws.exe bytes'
     }
 
+    # A runnable, correctly checksummed binary is still rejected when its
+    # embedded version does not match the requested release tag.
+    New-LocalRelease $fixtureRoot 'v9.9.14' $goodBinary
+    if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.14' $true) -eq 0) {
+        throw 'installer accepted a checksummed runnable binary with the wrong version'
+    }
+    if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryBefore -or
+        (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash -ne $aliasBefore) {
+        throw 'version mismatch changed the installed witself.exe or ws.exe bytes'
+    }
+
     $badSource = Join-Path $temporaryRoot 'bad-main.go'
     $badBinary = Join-Path $temporaryRoot 'witself-bad.exe'
-    Set-Content `
-        -LiteralPath $badSource `
-        -Value "package main`nimport `"os`"`nfunc main() { os.Exit(23) }`n" `
-        -Encoding Ascii
+    Set-Content -LiteralPath $badSource -Encoding Ascii -Value @'
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    if marker := os.Getenv("WITSELF_TEST_POSTCOMMIT_COUNTER"); marker != "" {
+        if _, err := os.Stat(marker); err == nil {
+            os.Exit(23)
+        }
+        _ = os.WriteFile(marker, []byte("staged\n"), 0o600)
+    }
+    fmt.Println("witself 9.9.11 (commit installer-smoke, built synthetic)")
+}
+'@
     $previousGoProxy = $env:GOPROXY
     $previousGoSumDB = $env:GOSUMDB
     $previousGoToolchain = $env:GOTOOLCHAIN
@@ -501,8 +640,18 @@ try {
         $env:GOTOOLCHAIN = $previousGoToolchain
     }
     New-LocalRelease $fixtureRoot 'v9.9.11' $badBinary
-    if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.11' $true) -eq 0) {
-        throw 'installer accepted a binary that failed its self-test'
+    $postcommitCounter = Join-Path $temporaryRoot 'postcommit-counter'
+    $previousPostcommitCounter = $env:WITSELF_TEST_POSTCOMMIT_COUNTER
+    try {
+        $env:WITSELF_TEST_POSTCOMMIT_COUNTER = $postcommitCounter
+        if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.11' $true) -eq 0) {
+            throw 'installer accepted a binary that failed its post-commit self-test'
+        }
+    } finally {
+        $env:WITSELF_TEST_POSTCOMMIT_COUNTER = $previousPostcommitCounter
+    }
+    if (-not (Test-Path -LiteralPath $postcommitCounter -PathType Leaf)) {
+        throw 'post-commit rollback fixture did not pass its staged version check'
     }
     if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryBefore -or
         (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash -ne $aliasBefore) {
@@ -521,13 +670,23 @@ try {
     Set-Content -LiteralPath $concurrentSource -Encoding Ascii -Value @'
 package main
 
-import "os"
+import (
+    "fmt"
+    "os"
+)
 
 func main() {
-	if path := os.Getenv("WITSELF_TEST_CONCURRENT_ALIAS"); path != "" {
-		_ = os.WriteFile(path, []byte("concurrent user file\n"), 0o600)
-	}
-	os.Exit(24)
+    counter := os.Getenv("WITSELF_TEST_CONCURRENT_COUNTER")
+    if counter != "" {
+        if _, err := os.Stat(counter); err == nil {
+            if path := os.Getenv("WITSELF_TEST_CONCURRENT_ALIAS"); path != "" {
+                _ = os.WriteFile(path, []byte("concurrent user file\n"), 0o600)
+            }
+            os.Exit(24)
+        }
+        _ = os.WriteFile(counter, []byte("staged\n"), 0o600)
+    }
+    fmt.Println("witself 9.9.12 (commit installer-smoke, built synthetic)")
 }
 '@
     $previousGoProxy = $env:GOPROXY
@@ -548,13 +707,17 @@ func main() {
     }
     New-LocalRelease $fixtureRoot 'v9.9.12' $concurrentBinary
     $previousConcurrentAlias = $env:WITSELF_TEST_CONCURRENT_ALIAS
+    $previousConcurrentCounter = $env:WITSELF_TEST_CONCURRENT_COUNTER
+    $concurrentCounter = Join-Path $temporaryRoot 'concurrent-counter'
     try {
         $env:WITSELF_TEST_CONCURRENT_ALIAS = $alias
+        $env:WITSELF_TEST_CONCURRENT_COUNTER = $concurrentCounter
         if ((Invoke-Installer $installer $fixtureRoot $installDir 'v9.9.12' $true) -eq 0) {
             throw 'installer accepted a self-test that failed after a concurrent target edit'
         }
     } finally {
         $env:WITSELF_TEST_CONCURRENT_ALIAS = $previousConcurrentAlias
+        $env:WITSELF_TEST_CONCURRENT_COUNTER = $previousConcurrentCounter
     }
     if ((Get-Content -LiteralPath $alias -Raw) -ne "concurrent user file`n") {
         throw 'rollback overwrote the concurrently changed ws.exe target'

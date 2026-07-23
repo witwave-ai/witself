@@ -1360,6 +1360,105 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 	})
 }
 
+func TestAntigravityTransactionRecoveryUsesPersistedRootAfterSelectorDrift(t *testing.T) {
+	for _, operation := range []string{antigravityTransactionInstall, antigravityTransactionUninstall} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := setupAntigravityIntegrationFixture(t)
+			cfg := installAntigravityFixtureConfig(t, fixture)
+			if operation == antigravityTransactionUninstall {
+				if _, err := beginAntigravityTransaction(operation, &cfg, nil); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := beginAntigravityTransaction(operation, &cfg, &cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			driftHome := t.TempDir()
+			driftHome, err := filepath.EvalSymlinks(driftHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", driftHome)
+			t.Setenv("USERPROFILE", driftHome)
+
+			recoveryRoot, err := antigravityOperationLockRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recoveryRoot != cfg.RuntimeConfigRoot {
+				t.Fatalf("recovery root = %q, want persisted %q", recoveryRoot, cfg.RuntimeConfigRoot)
+			}
+			release, err := acquireProviderIntegrationOperationLock(transcriptcapture.RuntimeAntigravity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			if _, err := os.Lstat(filepath.Join(cfg.RuntimeConfigRoot, antigravityOperationLockFile)); err != nil {
+				t.Fatalf("persisted-root operation lock is missing: %v", err)
+			}
+			driftRoot := filepath.Join(driftHome, ".gemini", "config")
+			if _, err := os.Lstat(filepath.Join(driftRoot, antigravityOperationLockFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("selector-drift root received an operation lock: %v", err)
+			}
+
+			if err := recoverAntigravityTransaction(recoveryRoot); err != nil {
+				t.Fatalf("recover %s after selector drift: %v", operation, err)
+			}
+			if _, err := os.Lstat(antigravityTransactionPath(cfg.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("persisted-root journal remains after %s recovery: %v", operation, err)
+			}
+			installed, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity)
+			if err != nil || !equalAntigravityTransactionConfig(installed, cfg) {
+				t.Fatalf("recovered %s config = %#v, %v", operation, installed, err)
+			}
+		})
+	}
+}
+
+func TestAntigravityInstallStopsWhenRecoveryChangesLockRootAfterHOMEDrift(t *testing.T) {
+	fixture := setupAntigravityIntegrationFixture(t)
+	cfg := installAntigravityFixtureConfig(t, fixture)
+	bundle, err := verifiedAntigravitySourceBundle(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginAntigravityTransaction(antigravityTransactionInstall, nil, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeExactAntigravityBundleDirectory(cfg.RuntimePluginPath, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := convergeAntigravitySharedMCP(&cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	driftHome := t.TempDir()
+	driftHome, err = filepath.EvalSymlinks(driftHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", driftHome)
+	t.Setenv("USERPROFILE", driftHome)
+
+	_, stderr, code := captureIntegrationsCLI(t, func() int {
+		return installCmd(fixture.installArgs())
+	})
+	if code != 1 || !strings.Contains(stderr, "recovery changed the provider lock root") ||
+		!strings.Contains(stderr, "rerun install") {
+		t.Fatalf("install after root-changing recovery code=%d stderr=%q", code, stderr)
+	}
+	if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rolled-back first-install config remains: %v", err)
+	}
+	if _, err := os.Lstat(antigravityTransactionPath(cfg.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rolled-back first-install journal remains: %v", err)
+	}
+	driftRoot := filepath.Join(driftHome, ".gemini", "config")
+	if _, err := os.Lstat(filepath.Join(driftRoot, antigravityOperationLockFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("install mutated or locked the new selector root before rerun: %v", err)
+	}
+}
+
 func TestAntigravitySourceStageRecoversOwnedPartialScratchBeforeJournal(t *testing.T) {
 	fixture := setupAntigravityIntegrationFixture(t)
 	previous := installAntigravityFixtureConfig(t, fixture)
@@ -1453,6 +1552,44 @@ func TestAntigravityRecoveryRejectsMutatedJournalShape(t *testing.T) {
 	}
 	if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity); err != nil {
 		t.Fatalf("mutated journal changed the config: %v", err)
+	}
+}
+
+func TestAntigravityTransactionJournalRejectsUnknownFieldsAndCLITampering(t *testing.T) {
+	for _, variant := range []string{"unknown", "cli"} {
+		t.Run(variant, func(t *testing.T) {
+			fixture := setupAntigravityIntegrationFixture(t)
+			previous := installAntigravityFixtureConfig(t, fixture)
+			desired := previous
+			if _, err := beginAntigravityTransaction(antigravityTransactionInstall, &previous, &desired); err != nil {
+				t.Fatal(err)
+			}
+			path := antigravityTransactionPath(previous.RuntimeConfigRoot)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(raw, &document); err != nil {
+				t.Fatal(err)
+			}
+			if variant == "unknown" {
+				document["foreign"] = true
+			} else {
+				desiredDocument := document["desired"].(map[string]any)
+				desiredDocument["runtime_cli_command"] = filepath.Join(fixture.home, "foreign-agy")
+			}
+			raw, err = json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAntigravityTransactionJournal(previous.RuntimeConfigRoot); err == nil {
+				t.Fatalf("%s journal tampering was accepted", variant)
+			}
+		})
 	}
 }
 
@@ -1576,6 +1713,59 @@ func installAntigravityFixtureConfig(t *testing.T, fixture antigravityIntegratio
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func TestAntigravityLocalReadsAreBoundedAndStrict(t *testing.T) {
+	t.Run("oversized import manifest", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		if err := os.MkdirAll(fixture.configRoot(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(fixture.configRoot(), "import_manifest.json")
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(antigravityManifestReadLimit + 1); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectAntigravityManifestCollision(fixture.configRoot(), fixture.pluginName(t)); err == nil ||
+			!strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized manifest error = %v", err)
+		}
+	})
+
+	t.Run("duplicate import manifest keys", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		if err := os.MkdirAll(fixture.configRoot(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(fixture.configRoot(), "import_manifest.json")
+		if err := os.WriteFile(path, []byte(`{"imports":[],"imports":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectAntigravityManifestCollision(fixture.configRoot(), fixture.pluginName(t)); err == nil ||
+			!strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("duplicate manifest key error = %v", err)
+		}
+	})
+
+	t.Run("oversized owned plugin file", func(t *testing.T) {
+		fixture := setupAntigravityIntegrationFixture(t)
+		cfg := installAntigravityFixtureConfig(t, fixture)
+		path := filepath.Join(cfg.RuntimePluginPath, "plugin.json")
+		if err := os.Truncate(path, antigravityPluginFileReadLimit+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readAntigravityBundleDirectory(cfg.RuntimePluginPath); err == nil ||
+			!strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized plugin file error = %v", err)
+		}
+	})
 }
 
 func prepareAntigravityUpgrade(t *testing.T, fixture antigravityIntegrationFixture, previous transcriptcapture.Config) (transcriptcapture.Config, antigravityPluginBundle) {

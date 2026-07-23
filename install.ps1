@@ -93,6 +93,22 @@ function Get-LatestVersion {
     return [string]$latest.tag_name
 }
 
+function Assert-WitselfVersionOutput {
+    param(
+        [object[]]$Output,
+        [string]$ExpectedVersion,
+        [string]$Label
+    )
+    if ($Output.Count -ne 1) {
+        throw "$Label reported a version other than requested v$ExpectedVersion"
+    }
+    $actual = [string]$Output[0]
+    $escapedVersion = [regex]::Escape($ExpectedVersion)
+    if ($actual -notmatch "^witself $escapedVersion(?: \(commit [^`r`n]+, built [^`r`n]+\))?$") {
+        throw "$Label reported a version other than requested v$ExpectedVersion"
+    }
+}
+
 function Assert-ReplaceableTarget {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -101,6 +117,34 @@ function Assert-ReplaceableTarget {
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "refusing to replace non-regular install target: $Path"
+    }
+}
+
+function Assert-WitselfReleaseArchive {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entries = @($archive.Entries)
+        if ($entries.Count -ne 1) {
+            throw 'release archive must contain exactly one regular root entry named witself.exe'
+        }
+        $entry = $entries[0]
+        # ExternalAttributes is signed on older PowerShell/.NET combinations.
+        # Normalize it to an unsigned 32-bit value before inspecting both the
+        # Unix mode in the upper word and the DOS directory bit below.
+        $externalAttributes = ([int64]$entry.ExternalAttributes -band 4294967295)
+        $unixFileType = (($externalAttributes -shr 16) -band 0xF000)
+        $isDosDirectory = (($externalAttributes -band 0x10) -ne 0)
+        if ($entry.FullName -cne 'witself.exe' -or
+            $entry.Name -cne 'witself.exe' -or
+            ($unixFileType -ne 0 -and $unixFileType -ne 0x8000) -or
+            $isDosDirectory -or
+            $entry.Length -gt 268435456) {
+            throw 'release archive must contain exactly one regular root entry named witself.exe'
+        }
+    } finally {
+        $archive.Dispose()
     }
 }
 
@@ -448,6 +492,7 @@ try {
         }
         Write-Host 'Checksum verified.'
 
+        Assert-WitselfReleaseArchive $archivePath
         $extractRoot = Join-Path $temporaryRoot 'extract'
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
         $extracted = Join-Path $extractRoot 'witself.exe'
@@ -486,6 +531,12 @@ try {
         $aliasChanged = $false
         $preserveBackups = $false
         try {
+            $stagedVersionOutput = @(& $primaryStage version 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "staged witself.exe failed its version self-test with exit code $LASTEXITCODE"
+            }
+            Assert-WitselfVersionOutput $stagedVersionOutput $versionWithoutPrefix 'staged witself.exe'
+
             Install-StagedFile `
                 $primaryStage `
                 $destination `
@@ -515,9 +566,14 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 throw "installed witself.exe failed its version self-test with exit code $LASTEXITCODE"
             }
+            Assert-WitselfVersionOutput $versionOutput $versionWithoutPrefix 'installed witself.exe'
             $aliasOutput = @(& $alias version 2>&1)
             if ($LASTEXITCODE -ne 0) {
                 throw "installed ws.exe alias failed its version self-test with exit code $LASTEXITCODE"
+            }
+            Assert-WitselfVersionOutput $aliasOutput $versionWithoutPrefix 'installed ws.exe alias'
+            if ([string]::Join("`n", $aliasOutput) -ne [string]::Join("`n", $versionOutput)) {
+                throw 'installed ws.exe alias reported a different version from witself.exe'
             }
             $primaryInstalledHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
             $aliasInstalledHash = (Get-FileHash -LiteralPath $alias -Algorithm SHA256).Hash.ToLowerInvariant()

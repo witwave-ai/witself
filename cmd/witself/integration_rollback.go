@@ -138,6 +138,9 @@ func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previo
 		}
 		return registerCopilotMCP(runtimeCLI, *previous)
 	}
+	if isGenericProviderRuntime(runtimeName) {
+		return restoreGenericMCPBinding(runtimeCLI, previous, attempted)
+	}
 	if previous == nil {
 		return unregisterMCP(runtimeName, runtimeCLI)
 	}
@@ -260,7 +263,7 @@ func installUserRuntimeHooks(runtimeName, executable string, previous *transcrip
 	if agent == "" {
 		return errors.New("previous integration has no agent name")
 	}
-	if _, err := transcriptcapture.InstallHooks(
+	if _, err := transcriptcapture.InstallHooksWithWitselfHome(
 		runtimeName,
 		previous.CaptureMode,
 		executable,
@@ -268,6 +271,7 @@ func installUserRuntimeHooks(runtimeName, executable string, previous *transcrip
 		realm,
 		agent,
 		previous.Location.Name,
+		previous.MCPEnvironment["WITSELF_HOME"],
 	); err != nil {
 		return fmt.Errorf("restore user hooks: %w", err)
 	}
@@ -290,7 +294,7 @@ func installManagedRuntimeHooksBinding(runtimeName, executable string, previous 
 	if agent == "" {
 		return errors.New("previous integration has no agent name")
 	}
-	if _, err := installManagedRuntimeHooks(
+	if _, err := installManagedRuntimeHooksAtHome(
 		runtimeName,
 		previous.CaptureMode,
 		executable,
@@ -298,6 +302,7 @@ func installManagedRuntimeHooksBinding(runtimeName, executable string, previous 
 		realm,
 		agent,
 		previous.Location.Name,
+		previous.MCPEnvironment["WITSELF_HOME"],
 	); err != nil {
 		return fmt.Errorf("restore managed hooks: %w", err)
 	}
