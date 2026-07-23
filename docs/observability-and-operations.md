@@ -1,7 +1,7 @@
 # Witself Observability And Operations
 
 Status: draft. This document defines the observability and Kubernetes
-operations requirements for `witself-server`.
+operations requirements for `witself-server` and `witself-worker`.
 
 Implementation status (2026-07-16): the server now exports `witself_up`,
 bounded route-template HTTP request/in-flight/latency metrics, narrative-memory
@@ -15,6 +15,13 @@ principal kinds, and route templates. Tenant identifiers, concrete URL paths,
 memory or message content, vector/profile values, database metadata, and error
 text are never collected. Families not named in this implementation note are
 still pending rather than silently implied by the document.
+
+Worker implementation status (2026-07-23): `witself-worker` has private health
+and Prometheus listeners, process/job-loop gauges and counters, and value-free
+transcript-retention batch and item counters. It runs in a distinct Deployment
+with its own metrics Service and optional ServiceMonitor or PodMonitor. Worker
+labels are limited to process-defined job names, retention mode, and bounded
+result/count classes; tenant identifiers and stored content are never labels.
 
 Narrative-memory contract (accepted 2026-07-14): memory observability covers
 deterministic search, client-supplied vectors, curation queues/leases/conflicts,
@@ -496,7 +503,9 @@ podDisruptionBudget:
 
 The chart should support Prometheus Operator `ServiceMonitor` and `PodMonitor`
 resources when those CRDs are installed and the corresponding values are
-enabled. The chart should not require those CRDs for a basic install.
+enabled. The worker has a separate metrics Service and separate optional
+monitors so API and worker scrape selectors never overlap. The chart should not
+require those CRDs for a basic install.
 
 ## Alerts And Dashboards
 

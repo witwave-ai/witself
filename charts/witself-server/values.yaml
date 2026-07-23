@@ -1,14 +1,14 @@
 # Default values for the witself chart — production-safe by default: non-root,
 # read-only root filesystem, metrics on, default-deny NetworkPolicy.
 #
-# SCOPE NOTE: this chart deploys witself-server as it exists today — the API,
-# health, and metrics listeners, backend.kind, and the optional Postgres DSN
-# secret reference. Agent secrets use the client-custodied AVK model and need
-# no backend KMS or sealed-plane switch: the authorized client holds the AVK
-# and the server stores ciphertext only.
-# There is no migration Job; `witself-server serve` applies embedded forward
-# Goose migrations before becoming Ready. No manifest here renders config the
-# server would ignore.
+# SCOPE NOTE: this chart deploys the API and, when explicitly enabled, the
+# general-purpose background worker from the same versioned image. Agent
+# secrets use the client-custodied AVK model and need no backend KMS or
+# sealed-plane switch: the authorized client holds the AVK and the server
+# stores ciphertext only.
+# There is no migration Job; each database-backed process applies embedded
+# forward Goose migrations before becoming Ready. No manifest here renders
+# config the process would ignore.
 
 replicaCount: 1
 
@@ -68,22 +68,95 @@ avatar:
     # compatible code; the ConfigMap checksum then restarts all pods and reruns
     # digest backfill.
     enabled: false
-  styleRollout:
-    # Every replica may run this worker; the Postgres job row is the durable
-    # cross-replica fence. Each tick performs at most one bounded transaction.
+
+# General-purpose background worker. It is disabled in the portable defaults
+# because it requires a shared PostgreSQL database. Managed cells and
+# self-hosted installs with database.existingSecret configured can enable it
+# and scale replicaCount manually. PostgreSQL row locking coordinates replicas.
+worker:
+  enabled: false
+  replicaCount: 2
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  terminationGracePeriodSeconds: 30
+  health:
+    port: 8081
+  metrics:
+    port: 9090
+    path: /metrics
+    service:
+      enabled: true
+      annotations: {}
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      relabelings: []
+      metricRelabelings: []
+    podMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+  probes:
+    liveness:
+      enabled: true
+      path: /livez
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    startup:
+      enabled: true
+      path: /startupz
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 30
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  networkPolicy:
+    enabled: true
+    # Sources allowed to scrape the worker metrics port. Empty = allow from any.
+    metricsFrom: []
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  avatarStyleRollout:
     enabled: true
     batchSize: 100
     interval: 2s
     batchTimeout: 30s
-
-# Transcript retention is an explicit three-stage rollout:
-# disabled -> preview -> enforce. Enabling the worker still defaults to preview,
-# so deletion requires both enabled: true and mode: enforce.
-transcriptRetention:
-  enabled: false
-  mode: preview
-  batchSize: 100
-  interval: 5m
+  # Transcript retention is an explicit three-stage rollout:
+  # disabled -> preview -> enforce. Enabling the job still defaults to preview,
+  # so deletion requires both enabled: true and mode: enforce.
+  transcriptRetention:
+    enabled: false
+    mode: preview
+    batchSize: 100
+    interval: 5m
+    batchTimeout: 2m
 
 database:
   existingSecret:
@@ -180,7 +253,7 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}
-  # witself-server needs no Kubernetes API access.
+  # Neither witself-server nor witself-worker needs Kubernetes API access.
   automountServiceAccountToken: false
 
 podAnnotations: {}

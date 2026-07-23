@@ -949,6 +949,9 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 	assertMigrationTestColumn(t, st, "agent_avatar_profiles", "style_revision", true)
 	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
 	assertMigrationTestColumn(t, st, "accounts", "plan_policies", true)
+	assertMigrationTestTable(t, st, "transcript_retention_worker_lanes", true)
+	assertMigrationTestIndex(t, st, "accounts",
+		"accounts_transcript_retention_worker_lane_idx", true)
 	view, err := st.GetAvatar(ctx, Principal{Kind: PrincipalAgent,
 		ID: "agent_memory_owner", AccountID: "acc_memory_trigger",
 		RealmID: "realm_memory_trigger", AgentName: "owner"})
@@ -963,6 +966,15 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 		view.Active.LockedLayersSHA256 == "" {
 		t.Fatalf("backfilled avatar = %#v", view)
 	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 65)
+	assertMigrationTestTable(t, st, "transcript_retention_worker_lanes", false)
+	assertMigrationTestIndex(t, st, "accounts",
+		"accounts_transcript_retention_worker_lane_idx", false)
+	assertMigrationTestIndex(t, st, "memory_curation_run_inputs",
+		"memory_curation_run_inputs_by_transcript_cursor", true)
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}

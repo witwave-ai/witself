@@ -46,6 +46,23 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
+  - id: witself-worker
+    main: ./cmd/witself-worker
+    binary: witself-worker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
+
   - id: witself-admin
     main: ./cmd/witself-admin
     binary: witself-admin
@@ -105,6 +122,14 @@ archives:
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
+  - id: witself-worker
+    ids:
+      - witself-worker
+    formats:
+      - tar.gz
+    name_template: "witself-worker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - none*
   - id: witself-admin
@@ -191,6 +216,7 @@ dockers_v2:
   - id: witself-server
     ids:
       - witself-server
+      - witself-worker
     dockerfile: images/witself-server/Dockerfile
     images:
       - "ghcr.io/witwave-ai/images/witself-server"

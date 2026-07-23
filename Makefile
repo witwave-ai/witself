@@ -53,7 +53,7 @@ login: ## Exchange the dev bootstrap token for an operator token (saved to .dev/
 psql: ## Open psql against the dev database
 	docker compose exec postgres psql -U witself -d witself
 
-build: ## Build every ./cmd/... binary into ./bin (witself, witself-server, witself-control-plane, witself-admin)
+build: ## Build every ./cmd/... binary into ./bin, including the server and worker
 	@mkdir -p bin
 	go build -o bin/ ./cmd/...
 
@@ -93,7 +93,7 @@ check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lin
 	fi
 	go vet ./...
 	go build ./...
-	go test ./... -race
+	go test ./... -race -timeout=20m
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) check-infra
 	@echo "check: all gates green"

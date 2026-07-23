@@ -1,0 +1,20 @@
+{{- if .Values.worker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "witself-server.workerFullname" . }}
+  labels:
+    {{- include "witself-server.workerLabels" . | nindent 4 }}
+data:
+  WITSELF_HEALTH_ADDR: ":{{ .Values.worker.health.port }}"
+  WITSELF_METRICS_ADDR: ":{{ .Values.worker.metrics.port }}"
+  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: {{ .Values.worker.avatarStyleRollout.enabled | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.worker.avatarStyleRollout.batchSize | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: {{ .Values.worker.avatarStyleRollout.interval | quote }}
+  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: {{ .Values.worker.avatarStyleRollout.batchTimeout | quote }}
+  WITSELF_TRANSCRIPT_RETENTION_ENABLED: {{ .Values.worker.transcriptRetention.enabled | quote }}
+  WITSELF_TRANSCRIPT_RETENTION_MODE: {{ .Values.worker.transcriptRetention.mode | quote }}
+  WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE: {{ .Values.worker.transcriptRetention.batchSize | quote }}
+  WITSELF_TRANSCRIPT_RETENTION_INTERVAL: {{ .Values.worker.transcriptRetention.interval | quote }}
+  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: {{ .Values.worker.transcriptRetention.batchTimeout | quote }}
+{{- end }}

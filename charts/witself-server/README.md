@@ -1,8 +1,9 @@
 # witself Helm chart
 
-Deploys [`witself-server`](https://github.com/witwave-ai/witself) — the Witself
-backend — onto Kubernetes. One chart serves both self-hosted and cloud/managed
-deployments; the difference is values, not templates.
+Deploys [`witself-server`](https://github.com/witwave-ai/witself) and the
+separately scalable `witself-worker` background runtime onto Kubernetes. Both
+workloads use the same image. One chart serves both self-hosted and
+cloud/managed deployments; the difference is values, not templates.
 
 ```sh
 helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
@@ -13,33 +14,42 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 
 ## Scope
 
-This chart tracks what `witself-server` actually consumes today: the three
-listeners (API `:8080`, health `:8081`, metrics `:9090`), `backend.kind`, and an
-optional Postgres DSN from an existing Secret, and an optional first-operator
-bootstrap token mounted from an existing Secret. Agent secrets use the
-client-custodied AVK design in
+This chart tracks what the two runtimes consume today. `witself-server` owns the
+API `:8080`, health `:8081`, and metrics `:9090` listeners, `backend.kind`, and
+the API-only bootstrap, provisioning, and agent-email configuration.
+`witself-worker` runs with the explicit command
+`/usr/local/bin/witself-worker serve`, exposes health on `:8081` and metrics on
+`:9090`, and receives only the shared Postgres DSN plus its background-job
+configuration. Agent secrets use the client-custodied AVK design in
 [ADR 0003](../../docs/decisions/0003-client-custodied-agent-vault.md): this
 chart needs no sealed-plane feature flag, backend KMS setting, or decrypt-key
 Secret. The chart does not render a migration Job; when a database DSN is
-configured, `witself-server serve` applies its embedded forward Goose migrations
-before becoming Ready. Nothing here renders config the server would silently
-ignore.
+configured, each database-backed process applies its embedded forward Goose
+migrations under the shared migration lock before becoming Ready. Nothing here
+renders config either process would silently ignore.
 
 ## What it renders
 
 | Resource | When |
 |---|---|
-| Deployment, Service (API), ServiceAccount, ConfigMap | always |
-| Metrics Service | `metrics.enabled` and `metrics.service.enabled` (default on) |
-| ServiceMonitor / PodMonitor | `metrics.serviceMonitor.enabled` / `metrics.podMonitor.enabled` |
+| Server Deployment, Service (API), ServiceAccount, ConfigMap | always |
+| Server Metrics Service | `metrics.enabled` and `metrics.service.enabled` (default on) |
+| Server ServiceMonitor / PodMonitor | `metrics.serviceMonitor.enabled` / `metrics.podMonitor.enabled` |
+| Worker Deployment and ConfigMap | `worker.enabled` |
+| Worker Metrics Service | `worker.enabled` and `worker.metrics.service.enabled` |
+| Worker ServiceMonitor / PodMonitor | `worker.metrics.serviceMonitor.enabled` / `worker.metrics.podMonitor.enabled` |
 | Ingress | `ingress.enabled` |
 | HorizontalPodAutoscaler | `autoscaling.enabled` |
 | PodDisruptionBudget | `podDisruptionBudget.enabled` |
-| NetworkPolicy | `networkPolicy.enabled` (default on) |
+| Worker PodDisruptionBudget | `worker.enabled` and `worker.podDisruptionBudget.enabled` |
+| Server / worker NetworkPolicy | `networkPolicy.enabled` / `worker.networkPolicy.enabled` |
 | Helm test pod | `helm test` |
 
 Set `database.existingSecret.name` and `database.existingSecret.urlKey` to expose
-the referenced key as `WITSELF_DATABASE_URL` in the server container.
+the referenced key as `WITSELF_DATABASE_URL` in the server container. A
+non-empty `database.existingSecret.name` is required before
+`worker.enabled: true`; the same Secret key is then exposed in the worker
+container.
 
 Set `bootstrap.existingSecret.name` to mount a first-operator bootstrap token at
 `bootstrap.tokenFile` (default `/.witself/tokens/bootstrap.token`) and expose
@@ -84,13 +94,15 @@ environment variable. It remains exclusively in the isolated Cloudflare Email
 Worker secret. Changing any pilot value changes the ConfigMap checksum and
 restarts the server pods for fail-closed startup reconciliation.
 
-Large-realm avatar style propagation is enabled by default. The
-`avatar.styleRollout` values render
+Large-realm avatar style propagation belongs only to the general-purpose
+worker. The `worker.avatarStyleRollout` values render
 `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED`,
 `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` (1-1000),
 `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` (100ms-1h), and
-`WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` (server bound 100ms-5m). Every replica
-may run the worker; PostgreSQL job locking provides the shared fence.
+`WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` (100ms-5m) in the worker ConfigMap.
+Every worker replica may process jobs; PostgreSQL job locking provides the
+shared fence. The server ConfigMap always renders this job's enabled gate as
+`false`, including during mixed-version rolling overlap.
 
 Avatar payload compaction is disabled by default.
 `avatar.payloadCompaction.enabled` renders
@@ -103,18 +115,35 @@ avatar-bearing import/export during the brief old/new-writer convergence
 window; compatibility is data-safe, but the freeze avoids new legacy active
 rows that need later operator replacement.
 
-Transcript retention is disabled by default. `transcriptRetention` renders the
-enabled gate, `preview`/`enforce` mode, bounded batch size, and interval as
-`WITSELF_TRANSCRIPT_RETENTION_*`. Use three separate rollout states:
+Transcript retention is disabled by default.
+`worker.transcriptRetention` renders the enabled gate, `preview`/`enforce`
+mode, bounded batch size, interval, and per-batch timeout as
+`WITSELF_TRANSCRIPT_RETENTION_*` in the worker ConfigMap. Use three separate
+rollout states:
 
 1. `enabled: false`, `mode: preview` while compatible code and schema converge;
 2. `enabled: true`, `mode: preview` while value-free eligibility and hold
    counts are reviewed;
 3. `enabled: true`, `mode: enforce` only after the preview is accepted.
 
-The mode defaults to `preview`, so merely enabling the worker cannot delete
-transcripts. Changing these ConfigMap values changes the pod checksum and
-restarts the workers.
+The mode defaults to `preview`, so merely enabling the retention job cannot
+delete transcripts. Changing these values changes only the worker ConfigMap
+checksum and restarts worker pods; it does not restart API pods. The API
+ConfigMap always renders the legacy retention enabled gate as `false`.
+
+The public chart default keeps `worker.enabled: false` because it has no shared
+database Secret. After PostgreSQL is configured, enabling it starts the
+two-replica default; operators can deliberately override `worker.replicaCount`.
+No worker HPA is rendered yet, so scaling is manual. That baseline prevents one
+long-running job from blocking unrelated work. Worker rolling
+updates use `maxUnavailable: 0`, `maxSurge: 1`, and `minReadySeconds: 10`;
+the managed cell also enables a PDB and zonal spread. Work ownership remains a
+database concern, so rolling overlap and future manual scale-out do not cause
+two pods to own the same row.
+
+The old top-level `transcriptRetention` and `avatar.styleRollout` value paths
+are rejected by schema validation instead of being silently ignored. Move them
+under `worker` when enabling a released chart that contains this workload.
 
 Keep the separate control-plane plan-lifecycle feature gate disabled during
 the initial rolling cell deployment. Wait for the Deployment rollout to
@@ -145,6 +174,10 @@ ingress + TLS, and topology spread.
 - `automountServiceAccountToken: false` — the server needs no Kubernetes API.
 - Health and metrics are on their own ports and never exposed through the API
   Service or public ingress.
+- The worker has no API Service or Ingress and receives no
+  bootstrap/provision/agent-email environment. Its metrics Service and monitors
+  select only `app.kubernetes.io/name: witself-worker` plus
+  `app.kubernetes.io/component: worker`; they cannot select API pods.
 - Rolling upgrades default to `maxUnavailable: 0`, `maxSurge: 1`, and
   `minReadySeconds: 10`, so a replacement must remain ready before Kubernetes
   retires the previous pod.
@@ -160,8 +193,10 @@ ingress + TLS, and topology spread.
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
-`avatar.styleRollout.*`, `agentEmail.receivePilot.*`, `database.existingSecret.*`,
-`transcriptRetention.*`, `bootstrap.existingSecret.*`, `resources`,
+`worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
+`worker.transcriptRetention.*`, `worker.resources`,
+`worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,
+`database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,
 `lifecycle.preStopSleepSeconds`, and `terminationGracePeriodSeconds`.

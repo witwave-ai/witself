@@ -27,15 +27,7 @@ const (
 	defaultBootstrapTokenFile         = "/.witself/tokens/bootstrap.token"
 	factDeletionEnv                   = "WITSELF_FACT_DELETION_ENABLED"
 	factDeletionMinimumSchemaVersion  = 28
-	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
-	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
-	avatarStyleRolloutIntervalEnv     = "WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL"
-	avatarStyleRolloutBatchTimeoutEnv = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT"
 	avatarPayloadCompactionEnabledEnv = "WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED"
-	transcriptRetentionEnabledEnv     = "WITSELF_TRANSCRIPT_RETENTION_ENABLED"
-	transcriptRetentionModeEnv        = "WITSELF_TRANSCRIPT_RETENTION_MODE"
-	transcriptRetentionBatchSizeEnv   = "WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE"
-	transcriptRetentionIntervalEnv    = "WITSELF_TRANSCRIPT_RETENTION_INTERVAL"
 )
 
 func main() {
@@ -73,17 +65,7 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
-	avatarRolloutEnabled, avatarRolloutConfig, err := avatarStyleRolloutConfigFromEnv()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
-		return 1
-	}
 	avatarPayloadCompactionEnabled, err := avatarPayloadCompactionEnabledFromEnv()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
-		return 1
-	}
-	transcriptRetentionEnabled, transcriptRetentionConfig, err := transcriptRetentionConfigFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
@@ -98,8 +80,6 @@ func serve() int {
 	defer stop()
 
 	cfg := server.ConfigFromEnv()
-	var stopAvatarRolloutWorker func()
-	var stopTranscriptRetentionWorker func()
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
 			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
@@ -1474,62 +1454,6 @@ func serve() int {
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
 		cfg.Ready = st.Ping
-		if avatarRolloutEnabled {
-			workerCtx, cancelWorker := context.WithCancel(ctx)
-			workerDone := make(chan error, 1)
-			go func() {
-				workerDone <- st.RunAvatarStyleRolloutWorker(workerCtx, avatarRolloutConfig, func(err error) {
-					fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout: %v\n", err)
-				})
-			}()
-			stopAvatarRolloutWorker = func() {
-				cancelWorker()
-				if err := <-workerDone; err != nil {
-					fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout stopped: %v\n", err)
-				}
-			}
-			fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout worker enabled (batch %d, interval %s)\n",
-				avatarRolloutConfig.BatchSize, avatarRolloutConfig.Interval)
-		}
-		if transcriptRetentionEnabled {
-			workerCtx, cancelWorker := context.WithCancel(ctx)
-			workerDone := make(chan error, 1)
-			go func() {
-				workerDone <- st.RunTranscriptRetentionWorker(
-					workerCtx,
-					transcriptRetentionConfig,
-					func(result store.TranscriptRetentionBatchResult) {
-						if result.Scanned == 0 && result.Eligible == 0 && result.Deleted == 0 &&
-							result.DeferredEvidence == 0 &&
-							result.DeferredCuration == 0 &&
-							result.ReleasedCurationInputs == 0 &&
-							result.DeletedCurationCursors == 0 {
-							return
-						}
-						fmt.Fprintf(os.Stderr,
-							"witself-server: transcript retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible=%d eligible_scan_capped=%t deleted=%d deferred_evidence=%d deferred_curation=%d deferred_scan_capped=%t released_curation_inputs=%d deleted_curation_cursors=%d\n",
-							transcriptRetentionConfig.Mode, result.Scanned,
-							result.SkippedLocked, result.ScanCapped, result.Eligible,
-							result.EligibleScanCapped, result.Deleted, result.DeferredEvidence,
-							result.DeferredCuration, result.DeferredScanCapped,
-							result.ReleasedCurationInputs, result.DeletedCurationCursors)
-					},
-					func(err error) {
-						fmt.Fprintf(os.Stderr, "witself-server: transcript retention: %v\n", err)
-					},
-				)
-			}()
-			stopTranscriptRetentionWorker = func() {
-				cancelWorker()
-				if err := <-workerDone; err != nil {
-					fmt.Fprintf(os.Stderr, "witself-server: transcript retention stopped: %v\n", err)
-				}
-			}
-			fmt.Fprintf(os.Stderr,
-				"witself-server: transcript retention worker enabled (mode %s, batch %d, interval %s)\n",
-				transcriptRetentionConfig.Mode, transcriptRetentionConfig.BatchSize,
-				transcriptRetentionConfig.Interval)
-		}
 		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
 			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
@@ -1542,12 +1466,6 @@ func serve() int {
 	}
 
 	runErr := server.Run(ctx, cfg)
-	if stopAvatarRolloutWorker != nil {
-		stopAvatarRolloutWorker()
-	}
-	if stopTranscriptRetentionWorker != nil {
-		stopTranscriptRetentionWorker()
-	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", runErr)
 		return 1
@@ -1567,85 +1485,6 @@ func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
 			avatarPayloadCompactionEnabledEnv, err)
 	}
 	return enabled, nil
-}
-
-func transcriptRetentionConfigFromEnv() (bool, store.TranscriptRetentionWorkerConfig, error) {
-	enabled := false
-	if raw, ok := os.LookupEnv(transcriptRetentionEnabledEnv); ok {
-		parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.TranscriptRetentionWorkerConfig{},
-				fmt.Errorf("%s must be a boolean: %w", transcriptRetentionEnabledEnv, err)
-		}
-		enabled = parsed
-	}
-	cfg := store.DefaultTranscriptRetentionWorkerConfig()
-	if raw, ok := os.LookupEnv(transcriptRetentionModeEnv); ok {
-		cfg.Mode = store.TranscriptRetentionMode(strings.ToLower(strings.TrimSpace(raw)))
-	}
-	if raw, ok := os.LookupEnv(transcriptRetentionBatchSizeEnv); ok {
-		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.TranscriptRetentionWorkerConfig{},
-				fmt.Errorf("%s must be an integer: %w", transcriptRetentionBatchSizeEnv, err)
-		}
-		cfg.BatchSize = parsed
-	}
-	if raw, ok := os.LookupEnv(transcriptRetentionIntervalEnv); ok {
-		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.TranscriptRetentionWorkerConfig{},
-				fmt.Errorf("%s must be a duration: %w", transcriptRetentionIntervalEnv, err)
-		}
-		cfg.Interval = parsed
-	}
-	if err := cfg.Validate(); err != nil {
-		return false, store.TranscriptRetentionWorkerConfig{},
-			fmt.Errorf("%s/%s/%s transcript retention configuration: %w",
-				transcriptRetentionModeEnv, transcriptRetentionBatchSizeEnv,
-				transcriptRetentionIntervalEnv, err)
-	}
-	return enabled, cfg, nil
-}
-
-func avatarStyleRolloutConfigFromEnv() (bool, store.AvatarStyleRolloutWorkerConfig, error) {
-	enabled := true
-	if raw, ok := os.LookupEnv(avatarStyleRolloutEnabledEnv); ok {
-		parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a boolean: %w", avatarStyleRolloutEnabledEnv, err)
-		}
-		enabled = parsed
-	}
-	cfg := store.DefaultAvatarStyleRolloutWorkerConfig()
-	if raw, ok := os.LookupEnv(avatarStyleRolloutBatchSizeEnv); ok {
-		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be an integer: %w", avatarStyleRolloutBatchSizeEnv, err)
-		}
-		cfg.BatchSize = parsed
-	}
-	if raw, ok := os.LookupEnv(avatarStyleRolloutIntervalEnv); ok {
-		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a duration: %w", avatarStyleRolloutIntervalEnv, err)
-		}
-		cfg.Interval = parsed
-	}
-	if raw, ok := os.LookupEnv(avatarStyleRolloutBatchTimeoutEnv); ok {
-		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
-		if err != nil {
-			return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf("%s must be a duration: %w", avatarStyleRolloutBatchTimeoutEnv, err)
-		}
-		cfg.BatchTimeout = parsed
-	}
-	if err := cfg.Validate(); err != nil {
-		return false, store.AvatarStyleRolloutWorkerConfig{}, fmt.Errorf(
-			"%s/%s/%s avatar style rollout configuration: %w",
-			avatarStyleRolloutBatchSizeEnv, avatarStyleRolloutIntervalEnv,
-			avatarStyleRolloutBatchTimeoutEnv, err)
-	}
-	return enabled, cfg, nil
 }
 
 func factDeletionEnabledFromEnv() (bool, error) {

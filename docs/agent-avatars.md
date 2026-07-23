@@ -458,11 +458,12 @@ instead.
 
 Selecting a new realm style is immediate, while projecting that selection onto
 agent profiles is a durable bounded rollout. The publish transaction creates a
-`pending` job and fences any older `pending` or `running` job. Server replicas
-then reconcile at most `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` mismatched live
-profiles per transaction, no more often than
-`WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL`. Every replica may run the worker: the
-locked job row is the cross-replica fence. Profiles carry a selected-style
+`pending` job and fences any older `pending` or `running` job.
+`witself-worker` replicas then reconcile at most
+`WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` mismatched live profiles per
+transaction, no more often than `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL`.
+Every worker replica may run the job: the locked job row is the cross-replica
+fence. API replicas do not run it. Profiles carry a selected-style
 revision, and a concurrent expression index lets each batch read only older
 revisions. Rows leave that range transactionally, so restart, deletion, and
 concurrent profile changes cannot leave a cursor gap or force repeated scans of

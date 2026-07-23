@@ -10,10 +10,14 @@ import (
 const (
 	// TranscriptRetentionDaysPolicy is the cell-side policy key for a finite
 	// account transcript-retention window. Absence means indefinite retention.
-	TranscriptRetentionDaysPolicy       = "transcript_retention_days"
-	defaultTranscriptRetentionBatchSize = 100
-	maxTranscriptRetentionBatchSize     = 1000
-	defaultTranscriptRetentionInterval  = 5 * time.Minute
+	TranscriptRetentionDaysPolicy             = "transcript_retention_days"
+	defaultTranscriptRetentionBatchSize       = 100
+	maxTranscriptRetentionBatchSize           = 1000
+	defaultTranscriptRetentionInterval        = 5 * time.Minute
+	defaultTranscriptRetentionBatchTimeout    = 2 * time.Minute
+	minTranscriptRetentionBatchTimeout        = time.Second
+	maxTranscriptRetentionBatchTimeout        = 5 * time.Minute
+	defaultTranscriptRetentionWorkerLaneCount = 16
 )
 
 // TranscriptRetentionMode selects read-only preview or destructive
@@ -49,20 +53,25 @@ type TranscriptRetentionBatchResult struct {
 }
 
 // TranscriptRetentionWorkerConfig controls one cell worker's bounded batch
-// size, cadence, and preview/enforcement mode.
+// size, cadence, deadline, fixed durable lane set, and preview/enforcement mode.
 type TranscriptRetentionWorkerConfig struct {
-	BatchSize int
-	Interval  time.Duration
-	Mode      TranscriptRetentionMode
+	BatchSize    int
+	Interval     time.Duration
+	BatchTimeout time.Duration
+	LaneCount    int
+	Mode         TranscriptRetentionMode
 }
 
 // DefaultTranscriptRetentionWorkerConfig returns the conservative production
-// defaults: preview 100 conversations every five minutes.
+// defaults: preview 100 conversations every five minutes, with a two-minute
+// attempt deadline and the schema-fixed 16 durable lanes.
 func DefaultTranscriptRetentionWorkerConfig() TranscriptRetentionWorkerConfig {
 	return TranscriptRetentionWorkerConfig{
-		BatchSize: defaultTranscriptRetentionBatchSize,
-		Interval:  defaultTranscriptRetentionInterval,
-		Mode:      TranscriptRetentionModePreview,
+		BatchSize:    defaultTranscriptRetentionBatchSize,
+		Interval:     defaultTranscriptRetentionInterval,
+		BatchTimeout: defaultTranscriptRetentionBatchTimeout,
+		LaneCount:    defaultTranscriptRetentionWorkerLaneCount,
+		Mode:         TranscriptRetentionModePreview,
 	}
 }
 
@@ -73,6 +82,24 @@ func (c TranscriptRetentionWorkerConfig) Validate() error {
 	}
 	if c.Interval < time.Minute || c.Interval > 24*time.Hour {
 		return errors.New("transcript retention interval must be between 1 minute and 24 hours")
+	}
+	if c.BatchTimeout < minTranscriptRetentionBatchTimeout ||
+		c.BatchTimeout > maxTranscriptRetentionBatchTimeout {
+		return fmt.Errorf(
+			"transcript retention batch timeout must be between %s and %s",
+			minTranscriptRetentionBatchTimeout,
+			maxTranscriptRetentionBatchTimeout,
+		)
+	}
+	// Lane assignment is part of the durable schema and its expression index,
+	// not a per-pod concurrency knob. A different cardinality requires a staged
+	// migration so mixed configurations can never assign one account to two
+	// live lanes during a rolling deployment.
+	if c.LaneCount != defaultTranscriptRetentionWorkerLaneCount {
+		return fmt.Errorf(
+			"transcript retention worker lane count must be %d",
+			defaultTranscriptRetentionWorkerLaneCount,
+		)
 	}
 	switch c.Mode {
 	case TranscriptRetentionModePreview, TranscriptRetentionModeEnforce:
@@ -104,7 +131,7 @@ func (s *Store) ProcessTranscriptRetentionBatch(
 	ctx context.Context,
 	batchSize int,
 ) (TranscriptRetentionBatchResult, error) {
-	return s.processTranscriptRetentionBatch(ctx, batchSize, true, 0)
+	return s.processTranscriptRetentionBatch(ctx, batchSize, true, 0, 0)
 }
 
 // PreviewTranscriptRetentionBatch runs the same bounded eligibility, hold, and
@@ -115,7 +142,7 @@ func (s *Store) PreviewTranscriptRetentionBatch(
 	ctx context.Context,
 	batchSize int,
 ) (TranscriptRetentionBatchResult, error) {
-	return s.processTranscriptRetentionBatch(ctx, batchSize, false, 0)
+	return s.processTranscriptRetentionBatch(ctx, batchSize, false, 0, 0)
 }
 
 func (s *Store) processTranscriptRetentionBatch(
@@ -123,6 +150,7 @@ func (s *Store) processTranscriptRetentionBatch(
 	batchSize int,
 	enforce bool,
 	workerInterval time.Duration,
+	workerLaneCount int,
 ) (TranscriptRetentionBatchResult, error) {
 	if batchSize < 1 || batchSize > maxTranscriptRetentionBatchSize {
 		return TranscriptRetentionBatchResult{}, fmt.Errorf(
@@ -133,6 +161,13 @@ func (s *Store) processTranscriptRetentionBatch(
 	if workerInterval < 0 {
 		return TranscriptRetentionBatchResult{}, errors.New(
 			"transcript retention worker interval cannot be negative",
+		)
+	}
+	if workerLaneCount != 0 &&
+		workerLaneCount != defaultTranscriptRetentionWorkerLaneCount {
+		return TranscriptRetentionBatchResult{}, fmt.Errorf(
+			"transcript retention worker lane count must be 0 or %d",
+			defaultTranscriptRetentionWorkerLaneCount,
 		)
 	}
 	mode := TranscriptRetentionModePreview
@@ -147,25 +182,62 @@ func (s *Store) processTranscriptRetentionBatch(
 	var scanCapped bool
 	err := s.pool.QueryRow(ctx, `
 WITH sweep_state_presence AS MATERIALIZED (
-  SELECT EXISTS (
-    SELECT 1 FROM transcript_retention_sweep_state WHERE singleton
-  ) AS value
+  SELECT CASE
+    WHEN $5::integer = 0 THEN EXISTS (
+      SELECT 1 FROM transcript_retention_sweep_state WHERE singleton
+    )
+    ELSE
+      EXISTS (
+        SELECT 1 FROM transcript_retention_sweep_state WHERE singleton
+      )
+      AND (
+        SELECT count(*) = $5::integer
+          FROM transcript_retention_worker_lanes
+         WHERE mode = $4
+      )
+  END AS value
 ),
-sweep_state AS MATERIALIZED (
+legacy_sweep_state AS MATERIALIZED (
   SELECT
     CASE $4
       WHEN 'preview' THEN preview_account_cursor
       ELSE enforce_account_cursor
     END AS account_cursor,
     generation,
-    next_run_at
+    next_run_at,
+    NULL::smallint AS lane_id
     FROM transcript_retention_sweep_state
    WHERE singleton
+     AND $5::integer = 0
      AND (
        $3::bigint = 0
        OR next_run_at <= statement_timestamp()
      )
    FOR UPDATE SKIP LOCKED
+),
+worker_compatibility AS MATERIALIZED (
+  SELECT state.singleton
+    FROM transcript_retention_sweep_state state
+    CROSS JOIN sweep_state_presence presence
+   WHERE state.singleton
+     AND $5::integer > 0
+     AND presence.value
+   FOR SHARE OF state SKIP LOCKED
+),
+worker_sweep_state AS MATERIALIZED (
+  SELECT
+    lane.account_cursor,
+    lane.generation,
+    lane.next_run_at,
+    lane.lane_id
+    FROM transcript_retention_worker_lanes lane
+    CROSS JOIN worker_compatibility compatibility
+   WHERE lane.mode = $4
+     AND lane.lane_id < $5::integer
+     AND lane.next_run_at <= statement_timestamp()
+   ORDER BY lane.next_run_at, lane.lane_id
+   LIMIT 1
+   FOR UPDATE OF lane SKIP LOCKED
 ),
 account_page AS MATERIALIZED (
   SELECT page.id, page.segment
@@ -173,7 +245,7 @@ account_page AS MATERIALIZED (
       (
         SELECT a.id, 0 AS segment
           FROM accounts a
-          CROSS JOIN sweep_state sweep
+          CROSS JOIN legacy_sweep_state sweep
          WHERE a.plan_policies ? 'transcript_retention_days'
            AND a.id > sweep.account_cursor
          ORDER BY a.id
@@ -183,8 +255,32 @@ account_page AS MATERIALIZED (
       (
         SELECT a.id, 1 AS segment
           FROM accounts a
-          CROSS JOIN sweep_state sweep
+          CROSS JOIN legacy_sweep_state sweep
          WHERE a.plan_policies ? 'transcript_retention_days'
+           AND a.id <= sweep.account_cursor
+         ORDER BY a.id
+         LIMIT $1
+      )
+      UNION ALL
+      (
+        SELECT a.id, 0 AS segment
+          FROM accounts a
+          CROSS JOIN worker_sweep_state sweep
+         WHERE a.plan_policies ? 'transcript_retention_days'
+           AND get_byte(decode(md5(a.id), 'hex'), 0) % 16 =
+               sweep.lane_id
+           AND a.id > sweep.account_cursor
+         ORDER BY a.id
+         LIMIT $1
+      )
+      UNION ALL
+      (
+        SELECT a.id, 1 AS segment
+          FROM accounts a
+          CROSS JOIN worker_sweep_state sweep
+         WHERE a.plan_policies ? 'transcript_retention_days'
+           AND get_byte(decode(md5(a.id), 'hex'), 0) % 16 =
+               sweep.lane_id
            AND a.id <= sweep.account_cursor
          ORDER BY a.id
          LIMIT $1
@@ -398,7 +494,7 @@ advanced_account_scans AS (
         updated_at = EXCLUDED.updated_at
   RETURNING account_id
 ),
-advanced_sweep AS (
+advanced_legacy_sweep AS (
   UPDATE transcript_retention_sweep_state state
      SET preview_account_cursor = CASE
            WHEN $4 = 'preview' THEN COALESCE(
@@ -435,9 +531,41 @@ advanced_sweep AS (
            ELSE state.next_run_at
          END,
          updated_at = statement_timestamp()
-    FROM sweep_state locked
+    FROM legacy_sweep_state locked
    WHERE state.singleton
   RETURNING state.generation
+),
+advanced_worker_sweep AS (
+  UPDATE transcript_retention_worker_lanes state
+     SET account_cursor = COALESCE(
+           (
+             SELECT page.id
+               FROM account_page page
+              ORDER BY page.segment DESC, page.id DESC
+              LIMIT 1
+           ),
+           state.account_cursor
+         ),
+         generation = CASE
+           WHEN state.generation = 4611686018427387903 THEN 1
+           ELSE state.generation + 1
+         END,
+         next_run_at = CASE
+           WHEN $3::bigint > 0
+             THEN statement_timestamp() +
+                  ($3::bigint * interval '1 microsecond')
+           ELSE state.next_run_at
+         END,
+         updated_at = statement_timestamp()
+    FROM worker_sweep_state locked
+   WHERE state.mode = $4
+     AND state.lane_id = locked.lane_id
+  RETURNING state.generation
+),
+advanced_sweep AS MATERIALIZED (
+  SELECT generation FROM advanced_legacy_sweep
+  UNION ALL
+  SELECT generation FROM advanced_worker_sweep
 ),
 detached_curation_inputs AS (
   UPDATE memory_curation_run_inputs mci
@@ -504,7 +632,7 @@ SELECT
   (SELECT count(*) FROM advanced_account_scans),
   (SELECT count(*) FROM advanced_sweep),
   (SELECT value FROM sweep_state_presence)
-`, batchSize, enforce, workerInterval.Microseconds(), string(mode)).Scan(
+`, batchSize, enforce, workerInterval.Microseconds(), string(mode), workerLaneCount).Scan(
 		&result.Scanned,
 		&lockedCandidateCount,
 		&scanCapped,
@@ -523,13 +651,13 @@ SELECT
 	}
 	if advancedSweepCount != 1 {
 		if sweepStateExists {
-			// Another replica owns the singleton sweep row. SKIP LOCKED makes
-			// this invocation an immediate no-op instead of queueing a burst of
-			// duplicate-tick batches behind the winner.
+			// Another replica owns the legacy singleton or every due worker
+			// lane. SKIP LOCKED makes this invocation an immediate no-op
+			// instead of queueing behind the winner.
 			return TranscriptRetentionBatchResult{}, nil
 		}
 		return TranscriptRetentionBatchResult{}, errors.New(
-			"process transcript retention batch: sweep state is missing",
+			"process transcript retention batch: sweep state or worker lanes are missing",
 		)
 	}
 	if advancedAccountScanCount > int64(batchSize) {
@@ -544,11 +672,13 @@ SELECT
 	return result, nil
 }
 
-// RunTranscriptRetentionWorker attempts one bounded batch immediately and on
-// each local interval. The cell-local next-run fence admits at most one
-// successful worker batch per configured interval across staggered replicas
-// and restarts. Direct public preview/process calls intentionally bypass that
-// cadence fence for tests and explicit operator runs.
+// RunTranscriptRetentionWorker attempts one bounded non-empty lane batch
+// immediately and on each local interval. Empty due lanes are advanced within
+// the same bounded attempt so sparse lane assignment cannot hide useful work.
+// Each lane's durable next-run fence admits one batch per interval, while
+// FOR UPDATE SKIP LOCKED lets other replicas claim different lanes. Direct
+// public preview/process calls intentionally retain the legacy singleton path
+// and bypass worker-lane cadence for tests and explicit operator runs.
 func (s *Store) RunTranscriptRetentionWorker(
 	ctx context.Context,
 	cfg TranscriptRetentionWorkerConfig,
@@ -559,18 +689,7 @@ func (s *Store) RunTranscriptRetentionWorker(
 		return err
 	}
 	run := func() {
-		var result TranscriptRetentionBatchResult
-		var err error
-		switch cfg.Mode {
-		case TranscriptRetentionModePreview:
-			result, err = s.processTranscriptRetentionBatch(
-				ctx, cfg.BatchSize, false, cfg.Interval,
-			)
-		case TranscriptRetentionModeEnforce:
-			result, err = s.processTranscriptRetentionBatch(
-				ctx, cfg.BatchSize, true, cfg.Interval,
-			)
-		}
+		result, err := s.processTranscriptRetentionWorkerBatch(ctx, cfg)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) && onError != nil {
 				onError(err)
@@ -592,4 +711,33 @@ func (s *Store) RunTranscriptRetentionWorker(
 			run()
 		}
 	}
+}
+
+func (s *Store) processTranscriptRetentionWorkerBatch(
+	ctx context.Context,
+	cfg TranscriptRetentionWorkerConfig,
+) (TranscriptRetentionBatchResult, error) {
+	if err := cfg.Validate(); err != nil {
+		return TranscriptRetentionBatchResult{}, err
+	}
+	attemptCtx, cancelAttempt := context.WithTimeout(ctx, cfg.BatchTimeout)
+	defer cancelAttempt()
+	var result TranscriptRetentionBatchResult
+	for attempt := 0; attempt < cfg.LaneCount; attempt++ {
+		var err error
+		switch cfg.Mode {
+		case TranscriptRetentionModePreview:
+			result, err = s.processTranscriptRetentionBatch(
+				attemptCtx, cfg.BatchSize, false, cfg.Interval, cfg.LaneCount,
+			)
+		case TranscriptRetentionModeEnforce:
+			result, err = s.processTranscriptRetentionBatch(
+				attemptCtx, cfg.BatchSize, true, cfg.Interval, cfg.LaneCount,
+			)
+		}
+		if err != nil || result.Scanned > 0 {
+			return result, err
+		}
+	}
+	return TranscriptRetentionBatchResult{}, nil
 }

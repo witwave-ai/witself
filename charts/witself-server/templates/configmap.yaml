@@ -54,11 +54,8 @@ data:
 {{ end }}
 {{ end }}
   WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: {{ .Values.avatar.payloadCompaction.enabled | quote }}
-  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: {{ .Values.avatar.styleRollout.enabled | quote }}
-  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.avatar.styleRollout.batchSize | quote }}
-  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: {{ .Values.avatar.styleRollout.interval | quote }}
-  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: {{ .Values.avatar.styleRollout.batchTimeout | quote }}
-  WITSELF_TRANSCRIPT_RETENTION_ENABLED: {{ .Values.transcriptRetention.enabled | quote }}
-  WITSELF_TRANSCRIPT_RETENTION_MODE: {{ .Values.transcriptRetention.mode | quote }}
-  WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE: {{ .Values.transcriptRetention.batchSize | quote }}
-  WITSELF_TRANSCRIPT_RETENTION_INTERVAL: {{ .Values.transcriptRetention.interval | quote }}
+  # Background jobs run only in the separately scalable worker Deployment.
+  # Keep both legacy in-process loops explicitly disabled during mixed-version
+  # rolling overlap.
+  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"
+  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"
