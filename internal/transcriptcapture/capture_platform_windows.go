@@ -25,10 +25,10 @@ var windowsUntrustedWriteMask = windows.ACCESS_MASK(windows.GENERIC_WRITE) |
 
 // trustedPathIdentity maps the Unix owner-and-mode contract onto Windows file
 // identity and ACLs. Windows FileMode permission bits are synthesized, so the
-// path must instead have the current token user as owner and no effective
-// write-capable allow ACE for an untrusted principal. SYSTEM and local
-// Administrators are treated like Unix root. Any missing, malformed, or
-// unfamiliar security information fails closed.
+// path must instead have the current token user or a Windows root-equivalent
+// principal as owner and no effective write-capable allow ACE for an untrusted
+// principal. SYSTEM and local Administrators are treated like Unix root. Any
+// missing, malformed, or unfamiliar security information fails closed.
 func trustedPathIdentity(path string, info os.FileInfo) bool {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -74,7 +74,8 @@ func trustedPathIdentity(path string, info os.FileInfo) bool {
 		return false
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() || !owner.Equals(user.User.Sid) {
+	if err != nil || user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() ||
+		!trustedWindowsOwner(owner, user.User.Sid) {
 		return false
 	}
 	dacl, _, err := descriptor.DACL()
@@ -105,6 +106,12 @@ func trustedPathIdentity(path string, info os.FileInfo) bool {
 		}
 	}
 	return true
+}
+
+func trustedWindowsOwner(sid, currentUser *windows.SID) bool {
+	return sid.Equals(currentUser) ||
+		sid.IsWellKnown(windows.WinLocalSystemSid) ||
+		sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)
 }
 
 func trustedWindowsWriter(sid, currentUser *windows.SID) bool {
