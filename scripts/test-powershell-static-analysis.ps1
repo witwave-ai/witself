@@ -8,7 +8,10 @@ $ErrorActionPreference = 'Stop'
 $version = '1.25.0'
 $expectedSha256 = '14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("witself-pssa-" + [Guid]::NewGuid().ToString('N'))
-$packagePath = Join-Path $temporaryRoot 'PSScriptAnalyzer.nupkg'
+# Windows PowerShell 5.1's Expand-Archive accepts ZIP filenames only. The
+# release package is a ZIP-format NuGet archive, so preserve its bytes under a
+# compatible local extension before extraction.
+$packagePath = Join-Path $temporaryRoot 'PSScriptAnalyzer.zip'
 $moduleRoot = Join-Path $temporaryRoot 'module'
 
 try {
