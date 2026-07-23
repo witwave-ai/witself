@@ -24,14 +24,8 @@ func TestManagedInstructionExchangePrimitiveSwapsExactFiles(t *testing.T) {
 	if err := os.WriteFile(second, secondRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	firstBefore, err := os.Lstat(first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondBefore, err := os.Lstat(second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	firstBefore := managedInstructionTestFileIdentity(t, first)
+	secondBefore := managedInstructionTestFileIdentity(t, second)
 	if err := exchangeManagedInstructionFiles(first, second); err != nil {
 		t.Fatal(err)
 	}
@@ -98,10 +92,7 @@ func TestManagedInstructionNoReplacePrimitivePreservesExistingDestination(t *tes
 	if err := os.Remove(destination); err != nil {
 		t.Fatal(err)
 	}
-	sourceBefore, err := os.Lstat(source)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sourceBefore := managedInstructionTestFileIdentity(t, source)
 	if err := renameManagedInstructionFileNoReplace(source, destination); err != nil {
 		t.Fatal(err)
 	}
@@ -115,4 +106,24 @@ func TestManagedInstructionNoReplacePrimitivePreservesExistingDestination(t *tes
 	if !os.SameFile(sourceBefore, destinationAfter) {
 		t.Fatal("no-replace rename did not preserve source identity")
 	}
+}
+
+// Windows path-based FileInfo values load their file ID lazily when SameFile
+// is first called. Capture identity through an open handle so a later rename
+// cannot make the pre-mutation value reopen a rebound path.
+func managedInstructionTestFileIdentity(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	return info
 }
