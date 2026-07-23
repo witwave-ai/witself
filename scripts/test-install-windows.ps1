@@ -599,3 +599,7 @@ func main() {
         }
     }
 }
+
+# Expected negative installer cases leave LASTEXITCODE nonzero even after every
+# assertion and cleanup succeeds. Set the script process result explicitly.
+exit 0
